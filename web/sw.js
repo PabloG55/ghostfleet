@@ -381,10 +381,15 @@
 // first page, and saying so), updates the list instead of rebuilding it (a scrolled table or
 // code line stays scrolled) and loads older messages by scrolling up. A phone still on v76
 // can hold a reply back until the chat is reopened; it reads the daemon's new answers unchanged.
-const VERSION = 'ghostfleet-v77';
+// v78 is the desk: two panes from 1024px up with a mouse, the Mac grid's keys (a letter on
+// the session screen now types into the composer instead of pausing or killing), ⏎ sends
+// with a mouse and keyboard, and an image pasted or dropped into the conversation attaches. It adds
+// grid-search.js to the shell — a byte-for-byte copy of lib/grid-search.mjs, the desk's `/` matcher.
+// A desktop still on v77 keeps the phone column; a phone is unchanged either way.
+const VERSION = 'ghostfleet-v78';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js', './md.js',
+  './ansi.js', './md.js', './grid-search.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,

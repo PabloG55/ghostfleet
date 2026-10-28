@@ -49,7 +49,9 @@ body {
   -webkit-text-size-adjust: 100%;
   overscroll-behavior-y: contain;   /* no rubber-band reload while dragging a card */
 }
-#app {
+/* The left pane of two (html.duo, below) is a column of the same screen and owes the
+ * same insets, so it shares this rule rather than declaring them a second time. */
+#app, html.duo #side.shell {
   /* THE BOTTOM INSET IS FOR THE HOME INDICATOR, AND THE KEYBOARD COVERS THE HOME
    * INDICATOR. While the keyboard is up it is dead space stacked on top of it — reported
    * as "you are leaving too much space between the text box and the bottom". --kb-inset is
@@ -219,10 +221,10 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
  * min-height is its content, so without it the column grows past the viewport and the
  * page scrolls again, which is exactly the bug. */
-#app.shell > .scroll,
-#app.shell > .paneview > .pane-box,
-#app.shell > .cards,
-#app.shell > .chat {
+:is(#app, #side).shell > .scroll,
+:is(#app, #side).shell > .paneview > .pane-box,
+:is(#app, #side).shell > .cards,
+:is(#app, #side).shell > .chat {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
@@ -237,20 +239,60 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  *   Nothing on a desktop engine shows it, which is why it survived review and why the
  * suite now asks the question structurally instead: every inset on this path is 0 on
  * every desktop engine, so both the bug and the fix render identically there. */
-#app.shell > .cards { padding-bottom: 14px; }
-#app.shell > .paneview {
+:is(#app, #side).shell > .cards { padding-bottom: 14px; }
+:is(#app, #side).shell > .paneview {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
 /* Under the shell the box is a flex child, so its height is GIVEN to it. The measured
  * max-height (sizePaneBox) and the 68vh fallback are both off — they were standing in for
  * a layout that could not answer the question. */
-#app.shell > .paneview > .pane-box { max-height: none; }
+:is(#app, #side).shell > .paneview > .pane-box { max-height: none; }
 /* Everything that is not the scroller is a fixed band: the header and the confirm bar
  * above, the verbs or the composer below. That is what makes the card list scroll under a
  * header that stays put, instead of the whole page moving. */
-#app.shell > .sbar, #app.shell > .composer, #app.shell > .toast,
-#app.shell > .strip,
-#app.shell > .hdr, #app.shell > .confirm, #app.shell > .hint, #app.shell > .stale { flex: 0 0 auto; }
+:is(#app, #side).shell > .sbar, :is(#app, #side).shell > .composer, :is(#app, #side).shell > .toast,
+:is(#app, #side).shell > .strip,
+:is(#app, #side).shell > .hdr, :is(#app, #side).shell > .confirm, :is(#app, #side).shell > .hint, :is(#app, #side).shell > .stale { flex: 0 0 auto; }
+
+/* ── a wide window with a mouse: TWO PANES, the list beside the conversation ─────
+ * Reported from a desktop browser: the app was a phone column in the middle of a wide
+ * screen, so opening a session meant losing the list and backing out to see it again. A
+ * chat app's answer: the sessions on the left, the open conversation on the right, both
+ * on screen at once. The two panes are the SAME two screens the phone walks between —
+ * #side holds the Projects or grid screen exactly as the phone draws it, #app the session
+ * screen exactly as the phone draws it — so nothing here is a second design, only a
+ * second place to put the first one.
+ *   1024px (app.js DUO_MIN_PX, the one number both files read): wider than any phone held
+ * sideways (the largest is under 960), and the narrowest width at which the left pane at
+ * its floor (320px) still leaves the conversation the 46em the phone layout already caps
+ * itself at — so no conversation is ever drawn narrower on a desktop than on a phone.
+ *   AND A FINE POINTER (app.js DUO_QUERY): a tablet held sideways is that wide too, and it
+ * is a touch screen, which keeps the layout it had. app.js sets html.duo; no phone and no
+ * tablet ever gets it, and none of this applies to them. */
+#side { display: none; }
+html.duo { --side-w: clamp(320px, 30vw, 440px); }
+html.duo #side.shell {
+  display: flex; flex-direction: column; gap: 0; overflow: hidden;
+  position: fixed; top: 0; bottom: 0; left: 0; width: var(--side-w); margin: 0;
+  border-right: 1px solid var(--hair);
+}
+html.duo #app.shell { left: var(--side-w); right: 0; max-width: none; margin: 0; }
+/* One column in the list, whatever --side-w comes to: the left pane is a list to pick
+ * from, and two 21em tracks squeezed into 440px would be two unreadable cards. */
+html.duo #side .cards { grid-template-columns: minmax(0, 1fr); }
+/* A full-width bubble on a 1600px window is a line nobody can read to its end; the
+ * phone's 88% stays the rule, capped at a measure. */
+html.duo .chat .turn { max-width: min(88%, 52em); }
+/* The right pane with nothing open in it — one dim line saying what puts something there. */
+.duo-empty { margin: auto; color: var(--dim); text-align: center; padding: 1em; }
+/* An image dragged over the conversation: the whole pane is the target, and says so. */
+#app.drop-on > .chat, #app.drop-on > .paneview { outline: 2px dashed var(--cyan); outline-offset: -6px; }
+/* The grid's `/` search and the Ctrl-f chord speak in the confirm row, as at the desk
+ * (searchLine / jumpHint there): a yellow line, keys and all. */
+.confirm.search, .confirm.jump { color: var(--yellow); }
+/* While a search is up, the cards that do not match are dimmed in place — not hidden, so
+ * the numbering and the cursor's arithmetic stay the grid's. */
+.card.miss { opacity: .4; }
 
 /* ── header ─────────────────────────────────────────────────────────────── */
 /* ABSOLUTE, NOT A FLEX CHILD, AND THAT IS THE POINT. `.hdr` wraps on purpose — the counts
@@ -1028,7 +1070,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * also at the bottom, so the toast landed on top of the input and the newest message.
  * Reported as "dont blok the chat with toasts".
  *   The fix is structural rather than a bigger offset or a higher z-index: the toast is a
- * FLEX BAND in the shell column (see `#app.shell > .toast` above), so it participates in
+ * FLEX BAND in the shell column (see `:is(#app, #side).shell > .toast` above), so it participates in
  * layout, takes its own height, and the scroller above it shrinks by exactly that much.
  * Overlap stops being something to tune and becomes something that cannot happen. On the
  * chat screen it sits directly above the composer and pushes nothing over anything.
@@ -1110,8 +1152,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * yellow is the colour this client already uses for "wants you"; green for a live mic.
  *   Bands of the shell column, so they are sized to their content and never scroll —
  * the card list and the chat under them are what scrolls. */
-#app.shell > .jarvis-bar, #app.shell > .notify-bar,
-#app.shell > .ask, #app.shell > .talkband { flex: 0 0 auto; }
+:is(#app, #side).shell > .jarvis-bar, :is(#app, #side).shell > .notify-bar,
+:is(#app, #side).shell > .ask, :is(#app, #side).shell > .talkband { flex: 0 0 auto; }
 .jarvis-bar { display: flex; align-items: baseline; gap: .6em; width: 100%; text-align: left;
   margin: 4px 0 6px; padding: .55em .7em; background: transparent; border: 1px solid var(--cyan);
   border-radius: 6px; font-size: 14px; }

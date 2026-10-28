@@ -164,6 +164,7 @@ dismiss.
 | `preact.js` | **built.** The dependency chunk, split out so `screens.js` stays readable — npm ships preact pre-minified and inlining it would bury the screens in it |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
+| `grid-search.js` | the desk's `/` matcher — **a byte-for-byte copy** of `lib/grid-search.mjs`, which the suite holds identical. A copy and not an import, because a browser can only fetch `web/` and the desk must not need `web/` to start |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
@@ -246,8 +247,8 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 | `x` | long-press |
 | `,` settings · `Ctrl-p`/`Q` projects · `q` back | buttons in the footer bar, key letter included |
 
-The keyboard bindings are wired too — the same letters — so a desktop browser or a
-Bluetooth keyboard behaves like the TUI.
+With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
+desk's; see *On a desk* below for the whole map.
 
 **Two things are deliberately absent** (§7), and a substitute for either is the mistake:
 
@@ -259,6 +260,99 @@ Bluetooth keyboard behaves like the TUI.
 
 The settings sheet says both out loud, so the gap reads as a decision rather than as
 something half-built.
+
+## On a desk
+
+The same client in a desktop browser is a different shape and the same screens. Opened
+from a PC it used to be a phone column in the middle of a wide window: opening a session
+lost the list, the composer needed a click to send, an image could only come in through
+the file picker, and the keys were not the desk's.
+
+**Two panes from 1024px up, with a mouse or trackpad.** The list on the left — Projects, or the project's grid — and
+the open conversation on the right, both on screen at once. Each pane is drawn by exactly
+the code that draws it on a phone (`#side` gets the Preact screen, `#app` the session
+screen), so there is no second design to keep in step. 1024 is wider than any phone held
+sideways (the largest is under 960), and it is the narrowest width at which the left pane
+at its 320px floor still leaves the conversation the 46em the phone layout already caps
+itself at — no conversation is drawn narrower on a desktop than on a phone. The pointer is
+asked too (`(hover: hover) and (pointer: fine)`), because a tablet held sideways is that
+wide and is a touch screen: it keeps the card grid it had. Below the width, on every phone
+and on every touch screen, nothing changes. `DUO_QUERY` in `app.js` is the one place this
+is decided.
+
+**The composer.** With a mouse or trackpad (`(hover: hover) and (pointer: fine)` — a page
+cannot see a keyboard, only a pointer), `⏎` sends and `⇧⏎` is a new line. On a touch
+screen `⏎` stays the new line it has always been and `send` stays the button. `Esc` leaves
+the box, which is how the keys below come back.
+
+**Images.** `Ctrl-V` / `⌘V` of an image in the composer, or an image file dragged onto the
+conversation, goes through the photo picker's own path — `addPhotos` → `api.attach` — so
+it has the same 6 MB limit, the same ten-per-message cap and lands in the same attach
+directory. It shows as a tile before sending, with `×` to remove it. A non-image dropped
+there attaches nothing and says so; anywhere else on the page a dropped file is refused
+rather than letting the browser navigate to it and throw the draft away.
+
+### The keys: the Mac grid's, the same key doing the same thing
+
+Derived from the desk, not from memory of it: `bin/fleet-grid.mjs`'s Projects and grid
+handlers (with `/` search from #75) and `tmux/cf.tmux.conf`'s bindings inside a session —
+[`docs/SHORTCUTS.md`](../docs/SHORTCUTS.md) is the desk's own reference. Three rules sit
+over all of it:
+
+- **A text box owns the keyboard.** No key here fires while an input, textarea or select
+  has focus — `q` in a message is a letter. The composer keeps `⏎`, `⇧⏎` and `Esc`.
+- **A session is attached.** At the desk every key inside a session reaches the agent
+  except the few tmux binds; here the agent's input is the composer, so a letter pressed on
+  the session screen is typed into it. (The `p`/`P`/`x`/`r`/`l`/`s`/`q` this screen used
+  to take were this client's own, and did what the desk's same key never does.)
+- **`⌘` is the browser's.** The desk binds `Ctrl`, never `⌘`, so nothing here answers a
+  key with `⌘` held.
+
+Some keys a page can never have: `Ctrl-N`, `Ctrl-T` and `Ctrl-W` open a window, open a tab
+and close one before any page hears them, in an installed PWA too. Where the desk uses one,
+the table says so and offers no substitute.
+
+`test/helpers/desktop-check.mjs` presses every key in this table in a real Chrome — at
+1600×900 with a keyboard, and the composer's `⏎` again at 390×844 with touch — and fails
+if a key is added here without a row that presses it.
+
+<!-- desk-keys -->
+| desk key | where | what it does here |
+|---|---|---|
+| `j` · `k` · `h` · `l` · `↓` · `↑` · `→` · `←` | Projects, grid | move the cursor: a row down / up, a card right / left |
+| `H` · `J` · `K` · `L` | Projects, grid | reorder the selected project / card. Sent as `fleet_project_order` / `fleet_order`, which `fleet-serve` refuses by name today (`NOT_YET`: only the desk writes those files) — the refusal is shown |
+| `⏎` | Projects | open the project on its **master**, as the desk does, with its grid beside it |
+| `1-9` | Projects, grid | the project at that position (on its master) / the card at that position |
+| `Ctrl-s` | Projects | that project's grid, skipping master |
+| `s` | Projects, grid | schedule a message — to that project's master / to the selected session |
+| `,` | Projects, grid | settings |
+| `x` | Projects, grid | remove the project from the list / kill the session (or remove a free worktree), behind the desk's own question |
+| `y` · `any other key` | a question | yes / cancel. A refused worktree removal takes `f`, as at the desk |
+| `Esc` | a sheet | close it |
+| `⏎` | grid | open the selected card: a session on the right, a sub-lead's sub-grid, a name for a free worktree |
+| `/` | grid | find an agent: every key types into the query, the cursor on the first match, the rest dimmed |
+| `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
+| `n` · `N` | grid | the new-session picker. One picker for both: this client starts sessions with `fleet_spawn`, which has no resume-or-blank switch |
+| `w` | grid | new worktree |
+| `p` · `P` | grid | pause / resume the selected session |
+| `Q` · `Ctrl-p` | grid, session | Projects |
+| `q` · `` ` `` · `Ctrl-c` | grid | up: a sub-grid to the top grid, the top grid to the project's **master** (however the grid was reached). `Ctrl-c` only when nothing is selected — with a selection it stays copy |
+| `` ` `` | session | back: a worker to its grid, a master to Projects |
+| `⇧→` · `⇧←` | session | the next / previous session — master first, then the cards in grid order, wrapping at both ends (`fleet-cycle`) |
+| `Ctrl-s` | session | the grid |
+| `Ctrl-f` | everywhere | the jump chord, with tmux's own prompt at each step |
+| `Ctrl-f <p>` · `Ctrl-f <p> <s>` · `Ctrl-f <p> ⏎` · `Ctrl-f <p> m` · `Ctrl-f <p> s` · `Ctrl-f s <p>` · `Ctrl-f p` · `Ctrl-f Esc` | everywhere | project p, then: card s · its master · its master · its grid; `s` then a digit is that project's grid; `p` is Projects; `Esc` cancels |
+| `Ctrl-a` | session | tmux's prefix: the next key is read from its table |
+| `Ctrl-a g` · `Ctrl-a d` · `Ctrl-a s` · `Ctrl-a p` · `Ctrl-a f` · `Ctrl-a →` · `Ctrl-a ←` | session | back · back · the grid · Projects · the jump chord · next session · previous session |
+| `p` | session | any key tmux does not bind goes to the agent: typed into the composer, which keeps the focus |
+| `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
+| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them), and a terminal or editor in the browser is out of scope |
+| `t` · `Ctrl-x` · `Ctrl-a x` · `Ctrl-a <` · `Ctrl-a >` | grid, session | the stack — not in this client (§7: it exists to put sessions side by side; the two panes are as far as this goes) |
+| `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |
+| `Ctrl-c Ctrl-c` | Projects | quit — no meaning in a browser: a page cannot close its own tab |
+| `Ctrl-a Ctrl-a` | session | a literal `Ctrl-a` for the agent — no meaning in a browser: there is no terminal to send it to |
+| drag with the mouse | session | copy — the browser keeps it: its own selection already does this |
+<!-- /desk-keys -->
 
 ## Destructive verbs
 

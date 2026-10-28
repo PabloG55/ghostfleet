@@ -47,6 +47,8 @@
 <body>
 <!-- Everything below is built by app.js. The static shell is deliberately this small:
      it is what the service worker serves on a cold offline open, before any state. -->
+<!-- #side is the left pane of a wide window (app.css html.duo) and stays empty on a phone. -->
+<div id="side"></div>
 <div id="app" aria-live="polite"></div>
 <div id="sheet"></div>
 <script type="module" src="./app.js"></script>

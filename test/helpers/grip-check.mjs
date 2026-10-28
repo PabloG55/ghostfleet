@@ -191,11 +191,15 @@ try {
   is('a project card title lets the page scroll', true,
      await b.evaluate(() => getComputedStyle(document.querySelector('#app .card .c-top')).touchAction !== 'none'));
 
-  // The keyboard shortcut was the same path with a key on it: `x` on a project.
+  // THE KEY IS NOT THE GESTURE. `x` on Projects is the desk's own key (fleet-grid.mjs
+  // onKeyProjects), and a key is a decision in a way a resting thumb is not — so it asks the
+  // desk's question, while every gesture above still asks nothing. (It used to be refused
+  // too, as "the same path with a key on it"; the desk's keys are the contract now — see
+  // web/README.md, "On a desk".)
   await fresh();
   await b.evaluate(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); return null; });
   await sleep(500);
-  is('x on the Projects screen asks nothing', '', (await after()).confirm);
+  is("x on the Projects screen asks the desk's question", ` remove '${(await cardNames())[0]}' from projects?`, (await after()).confirm);
 
   // ...AND REMOVE IS STILL THERE, behind `⋯`, with the TUI's own question.
   await fresh();

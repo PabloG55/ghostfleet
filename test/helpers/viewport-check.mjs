@@ -1219,7 +1219,12 @@ try {
   await walk(320, 568);
   // #78 unpinned rotation, and a landscape tablet is where the card grid switches to more
   // than one track — a different layout, and so a different chance to overflow.
+  //   AS A TOUCH SCREEN, which a tablet is. `mobile: true` alone reports a fine pointer, so
+  // this walk was a 1024px window with a mouse — which is now the desk's two-pane layout
+  // (web/README.md, "On a desk"), not the tablet's. Touch is what keeps it the tablet.
+  await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await walk(1024, 768);
+  await call('Emulation.setTouchEmulationEnabled', { enabled: false });
   await bigText();
   await placeholderSweep();
   await loadingSkeletons();
