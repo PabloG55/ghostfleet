@@ -4592,6 +4592,40 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
      "$lgd0|$(jq -r '.items[]|"\(.id):\(.state):\(.closedBy // .source):\(.proof // .reason // .text)"' "$LG/lg-1.ledger" | paste -sd'|' -)|$(ls -A "$LG" | grep -c 'tmp' || true)"
   is "fleet-ledger: a name on another socket is not this session" "1" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
+  # WHAT THE SESSION HOLDS FOR THE PERSON (heldItems), and the status question that has the
+  # agent ask it (isStatusQuestion, statusNote). Each state paired with the one beside it that
+  # must NOT be held: a fresh open ask, a promise, a closed item, a week-old waiting one. And
+  # each status phrasing paired with a request that names a status and is work.
+  lh="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const H = 3600000, now = 100 * 24 * H
+    const it = (id, o) => ({ id, text: 'ask ' + id, at: now - 5 * H, source: 'user', state: 'open', ...o })
+    const l = { v: 1, seq: 9, items: [
+      it('1', { state: 'waiting', progress: { at: now - 2 * H, reason: 'waits on the person: a pick' } }),
+      it('2', { woke: now - 60000 }),                              // answered, not closed
+      it('3', {}),                                                 // open, untouched 5h
+      it('4', { at: now - 60000 }),                                // fresh: on the open list only
+      it('5', { progress: { at: now - H, reason: 'a worker is on it' } }),   // reported an hour ago
+      it('6', { source: 'promise' }),                              // the agent's own: never held
+      it('7', { state: 'done' }),
+      it('8', { state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H } }),  // past BAND_DAYS
+    ] }
+    const held = L.heldItems(l, now).map(i => i.id + ':' + i.state).join(',')
+    const yes = ['whats the status', 'status?', 'Status update please', 'any update?', \"what's left\", 'where are we?',
+                 'qué falta', '¿cómo vamos?', 'what do you need from me', 'hows it going']
+    const no = ['fix the status bar', 'the status file is torn', 'add a progress bar to the upload', 'update the README',
+                'remove the status chip', 'what is the capital of France', '[fleet] a worker finished: whats the status — no need to reply']
+    const note = L.statusNote(l, now)
+    console.log([held,
+      yes.filter(t => !L.isStatusQuestion(t)).join(';') || 'all-yes',
+      no.filter(t => L.isStatusQuestion(t)).join(';') || 'all-no',
+      L.promptNotes(l, 'whats the status', now).length, L.promptNotes(l, 'fix the status bar', now).length,
+      note.split('\n').filter(r => /^\d+ \(/.test(r)).map(r => r.split(' ')[0]).join(','),
+      /ASK the person about each one/.test(note), L.statusNote({ v: 1, seq: 0, items: [it('1', {})].map(i => ({ ...i, at: now })) }, now) === '',
+      L.requestText(note + ' and also fix it') === 'and also fix it',
+    ].join(' | '))" 2>&1)"
+  is "ledger: held for the person = waiting, answered, untouched 4h; a status question asks each, and a request naming a status does not; a quoted status note is not the person's words" \
+     "3:open,1:waiting,2:answered | all-yes | all-no | 2 | 1 | 3,1,2 | true | true | true" "$lh"
   is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"
   rm -rf "${LG:?}"
 else
@@ -13465,6 +13499,8 @@ else
 SV="$TMUX_TMPDIR/serve"; mkdir -p "$SV"
 mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
 cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$SV/"
+# ...and the mod's hooks, which fleet-serve reads each master's ledger through (/api/waiting).
+mkdir -p "$SV/mods/ghostfleet" && cp -R "$ROOT/mods/ghostfleet/hooks" "$SV/mods/ghostfleet/"
 : > "$SV/ran"
 for c in fleet-list fleet-send fleet-spawn fleet-worktrees fleet-inbox fleet-answer \
          fleet-pause fleet-resume fleet-rename fleet-project; do
@@ -13912,9 +13948,39 @@ printf 'busy-other\nfree-other\n' > "$SV/other/worktrees"
 printf 'busy-demo\n'  > "$SV/sessions.cf-demo"
 printf 'busy-other\n' > "$SV/sessions.cf-other"
 chmod +x "$SV/bin/fleet-grid.mjs"
+# WHAT THE MASTERS HOLD FOR THE OWNER (/api/waiting): each fleet's master's ledger, read beside its
+# status record. Planted around the probe and removed after it. Four records, each a way the
+# list goes wrong: demo's master holds a waiting item and a closed one; a worker on demo holds
+# a waiting item of its own (its asks reach the owner through the master, never twice); an OLDER
+# master record on demo points at a ledger whose item is the restarted session's, not this
+# one's; and other's master has a ledger with nothing held.
+svw_rec() {   # $1=id $2=sock $3=slot $4=ts
+  printf '{"session_id":"%s","sock":"%s","slot":"%s","status":"ready","ts":%s}\n' "$1" "$2" "$3" "$4" > "$SV/home/.claude/fleet/$1.json"
+}
+svw_now="$(date +%s)"
+svw_rec svw-master cf-demo master "$svw_now"
+svw_rec svw-old cf-demo master "$((svw_now - 600))"
+svw_rec svw-worker cf-demo w1 "$((svw_now + 5))"   # newer than the master: only the slot keeps it off
+svw_rec svw-other cf-other master "$svw_now"
+node -e '
+  const fs = require("fs"), d = process.argv[1], now = Date.now()
+  const w = (id, items) => fs.writeFileSync(`${d}/${id}.ledger`, JSON.stringify({ v: 1, seq: 9, items }))
+  const waiting = (id, text, reason) => ({ id, text, at: now - 3 * 3600e3, state: "waiting", source: "user", progress: { at: now - 2 * 3600e3, reason } })
+  w("svw-master", [waiting("7", "merge #12 or wait for the review", "waits on the person: pick merge now or wait"),
+                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" }])
+  w("svw-old", [waiting("1", "the old master ask", "waits on the person: x")])
+  w("svw-worker", [waiting("1", "the worker ask", "waits on the person: y")])
+  w("svw-other", [{ id: "1", text: "the fresh other ask", at: now - 60e3, state: "open", source: "user" }])
+' "$SV/home/.claude/fleet"
 if sv_start json; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" reads "$(sv_code r2)" > "$SV/probe.reads" 2>"$SV/probe.reads.err"
   is "the grid's JSON is served"              "200" "$(pf grid reads)"
+  is "the owner's list needs a live token"     "401" "$(pf waiting.noToken reads)"
+  is "...and is served with one"              "200" "$(pf waiting reads)"
+  is "a master's waiting item is on it, with what the master said it needs" "1" \
+     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="7"&&i[0].state==="waiting"&&i[0].text==="merge #12 or wait for the review"&&i[0].reason==="waits on the person: pick merge now or wait"&&i[0].since>i[0].at?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
+  is "...and a worker's, a closed one, a restarted master's and a fresh ask are not" "0" \
+     "$(pb waiting reads | grep -c 'worker ask\|done ask\|old master ask\|fresh other ask' || true)"
   # THE BUG A LONG-LIVED DAEMON GETS WRONG. fleet-grid.mjs derives `project` from
   # CLAUDE_FLEET_SCOPE and its free-worktree list from CLAUDE_FLEET_ROOT. A daemon that
   # inherits its own answers every project with the first one's name and the first one's
@@ -13993,6 +14059,7 @@ STUB
   is "...and --all did run"                   "1"   "$([ "$(grep -c 'fleet-inbox \[-s\] \[cf-demo\] \[--all\]' "$SV/ran" || true)" -ge 1 ] && echo 1 || echo 0)"
   is "the audit log is readable from here"    "200" "$(pf audit reads)"
   is "health reports the grid flag"           "1"   "$(pb health reads | grep -c '"grid_json":true' || true)"
+  rm -f "$SV/home/.claude/fleet"/svw-*.json "$SV/home/.claude/fleet"/svw-*.ledger
   serve_stop
 else
   skip "fleet-serve reads" "server did not come up: $SV_WHY"
@@ -16571,6 +16638,60 @@ else
   skip "undelivered push" "node missing"
 fi
 
+# ── what a master holds for the owner reaches the phone ──────────────────────
+# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner in state
+# `waiting`; fleet-serve reads them (heldScan) for /api/waiting and rings once when one is
+# NEW. Through the real exported functions against a real fleet dir, in both directions.
+group "push: a master's new waiting item rings once per project, and says nothing it should not"
+if command -v node >/dev/null 2>&1; then
+  WT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$WT/home/.claude/fleet"
+  out="$(HOME="$WT/home" node --input-type=module -e "
+    import fs from 'node:fs';
+    import { heldScan, waitingEvents, pushPayload, pushResolved } from '$ROOT/bin/fleet-serve.mjs';
+    const d = '$WT/home/.claude/fleet', now = Date.now();
+    const rec = (id, sock, slot, ts) => fs.writeFileSync(d + '/' + id + '.json', JSON.stringify({ session_id: id, sock, slot, status: 'ready', ts }));
+    const led = (id, items) => fs.writeFileSync(d + '/' + id + '.ledger', JSON.stringify({ v: 1, seq: 9, items }));
+    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'waiting', source: 'user', progress: { at: now - 3600e3, reason: 'waits on the person: a pick' } });
+    rec('ma', 'cf-acme-api', 'master', 1); rec('mw', 'cf-acme-web', 'master', 1); rec('wk', 'cf-acme-api', 'api-fix', 5);
+    led('ma', [W('1', 'the first ask')]); led('mw', []); led('wk', [W('1', 'a worker ask')]);
+    const list = [{ name: 'acme-api', profile: 'work', sock: 'cf-acme-api', cfg: '$WT/home/.claude' },
+                  { name: 'acme-web', profile: 'work', sock: 'cf-acme-web', cfg: '$WT/home/.claude' }];
+    const seen = new Map(), cache = new Map(), tick = () => waitingEvents(heldScan(list, Date.now(), cache), seen);
+    const out = [];
+    out.push(tick().length);                                              // first sight: a baseline
+    out.push(tick().length);                                              // nothing new: silent
+    // two new items in acme-api at once, one in acme-web: one event per project
+    led('ma', [W('1', 'the first ask'), W('2', 'a second ask'), W('3', 'a third ask')]);
+    led('mw', [W('1', 'a web ask')]);
+    const two = tick();
+    out.push(two.length + ':' + two.map(e => e.project + '/' + e.session).sort().join(','));
+    out.push(tick().length);
+    // the worker's own new item: not the owner's, so no bell
+    led('wk', [W('1', 'a worker ask'), W('2', 'another worker ask')]);
+    out.push(tick().length);
+    // answered (open again) then waiting again HAS newly entered waiting
+    led('mw', [{ ...W('1', 'a web ask'), state: 'open', woke: now }]);
+    out.push(tick().length);
+    led('mw', [W('1', 'a web ask')]);
+    out.push(tick().length);
+    // a restarted master: a NEW session whose first item is id 1 again
+    rec('ma2', 'cf-acme-api', 'master', 2); led('ma2', [W('1', 'the restarted ask')]);
+    out.push(tick().length);
+    const p = pushPayload(two, 'named'), a = pushPayload(two, 'anonymous');
+    out.push(p.kind + ':' + p.open + ':' + JSON.stringify(Object.keys(p).sort()));
+    out.push(JSON.stringify(p).includes('ask') ? 'TEXT' : 'no-text');
+    out.push(JSON.stringify(a.sessions || null) + ':' + a.open);
+    out.push(pushResolved(two[0], 'working') + ':' + pushResolved(two[0], 'ready'));
+    // a need-you in the same burst is not a 'waiting' push: no landing on the list
+    out.push(String(pushPayload([...two, { kind: 'needs-you', project: 'acme-api', session: 'api-fix', sock: 'cf-acme-api' }], 'named').open));
+    console.log(out.join(' | '))" 2>&1)"
+  is "baseline, silent, ONE per project, silent, no worker bell, answered then waiting again rings, a restarted master rings, the payload carries no text" \
+     '0 | 0 | 2:acme-api/master,acme-web/master | 0 | 0 | 0 | 1 | 1 | waiting:waiting:["at","kind","n","open","sessions","v"] | no-text | null:waiting | false:false | undefined' "$out"
+  rm -rf "${WT:?}"
+else
+  skip "waiting push" "node missing"
+fi
+
 group "push: a subject Apple accepts, and a refusal that says why"
 if command -v node >/dev/null 2>&1; then
   PS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PS/home"
@@ -17031,6 +17152,19 @@ if [ -d "$ROOT/web" ]; then
   # the pass removed, the pass returning "", the sha guard dropped (which is how the first
   # draft's "cabbage" row was caught proving nothing), the path rule widened, the line
   # number dropped, the URL rule removed and the spoken-slash rule removed.
+  # ── waiting on you: the card a held item draws, and the reply the ledger has to read ──
+  # test/helpers/waiting-check.mjs: web/app.js's waitingModel/replyText against
+  # mods/ghostfleet/hooks/ledger.js's addPrompt/heldItems — two files that never import each
+  # other and must agree on one thing, that a reply quoting an item wakes it. Watched red
+  # with the quote taken out of replyText (the item stayed waiting).
+  node "$ROOT/test/helpers/waiting-check.mjs" > "$PW/waiting" 2> "$PW/waiting.err"
+  is "waiting-check ran"              "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/waiting.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 11 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/waiting"
+
   node "$ROOT/test/helpers/speak-check.mjs" > "$PW/speak" 2> "$PW/speak.err"
   is "speak-check ran"                "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/speak.err" | tr '\n' ' ' | sed 's/ *$//')"

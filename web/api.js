@@ -343,6 +343,29 @@ async function rollup(project) {
   };
 }
 
+// ── what every master holds for the owner ───────────────────────────────
+// fleet-serve /api/waiting: each master's ledger items that wait on the owner, across every
+// project and profile. A daemon older than the list answers 404, which is "no section", not
+// a broken Projects screen — the same rule as the Jarvis band.
+//   The fixture stores AGES (`since_ago`, `at_ago`, seconds before now) rather than epochs,
+// so "waited 2h" stays 2h however long after the file was written the demo is run. A reply
+// sent in fixture mode turns its item `answered`, as the daemon's would once the master's
+// ledger read the message (ledger.js wakeWaiting); nothing closes it, since only a master can.
+export async function getWaiting() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/waiting'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  const j = await fixture('waiting.json');
+  const nowS = Math.floor(Date.now() / 1000);
+  const items = (j.items || []).map(({ since_ago, at_ago, ...i }) => {
+    const row = { ...i, since: nowS - (Number(since_ago) || 0), at: nowS - (Number(at_ago) || 0) };
+    const replied = overlay.replied.get(`${i.project}#${i.id}`);
+    return replied && row.state === 'waiting' ? { ...row, state: 'answered', since: replied } : row;
+  });
+  return { ...j, items };
+}
+
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
@@ -707,7 +730,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map(), replied: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start
@@ -758,6 +781,10 @@ function fixtureVerb(tool, a) {
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send': {
+      // A reply to a waiting item (app.js replyText) answers it, as the master's ledger would
+      // once it reads the message, queued behind a turn or not.
+      const re = /^Re your ledger item (\d+):/.exec(String(a.prompt || ''));
+      if (re && a.session === 'master' && a.project) overlay.replied.set(`${a.project}#${re[1]}`, Math.floor(Date.now() / 1000));
       // Held behind the prompt in its pane, as fleet-serve reports it: `queued: 'question'`.
       if (lastStatus.get(a.session) === 'need-you')
         return { ...ok(`fleet-send: → ${a.session} (queued #1 behind a question — it is waiting on an answer in its pane)`), queued: 'question' };

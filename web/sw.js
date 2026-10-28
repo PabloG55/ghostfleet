@@ -369,7 +369,10 @@
 // on v73 keeps hiding talk while Jarvis is off, and with it on goes on using /api/jarvis and
 // /api/jarvis/hear, which still answer — so it only gets talk back once it is RELAUNCHED
 // (swiped away, not resumed from the app switcher; CLAUDE.md, "an installed PWA").
-const VERSION = 'ghostfleet-v74';
+// v75 shows what every master holds for the owner ("waiting on you", at the top of Projects,
+// read from /api/waiting), answers one from a tap, and says what a `waiting` push is: a phone
+// still on v74 has no section and shows such a push as "a session has an answer".
+const VERSION = 'ghostfleet-v75';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -389,6 +392,7 @@ const SHELL = [
   './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
   './fixtures/pane-acme-api-master.json',
   './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
+  './fixtures/waiting.json',
 ];
 
 self.addEventListener('install', e => {
@@ -443,6 +447,13 @@ function pushText(d) {
   if (d.kind === 'account' && d.account && typeof d.account === 'object') return accountText(d.account);
   const n = d.n;
   const named = Array.isArray(d.sessions) ? d.sessions.filter(x => x && x.project && x.session) : [];
+  // A MASTER HOLDING AN ITEM FOR THE OWNER (fleet-serve waitingEvents): one event per project, so
+  // `n` counts projects. Named by project, because "master" is every fleet's lead's name.
+  if (d.kind === 'waiting') {
+    return n === 1
+      ? { title: named.length === 1 ? `${named[0].project} is waiting on you` : 'a master is waiting on you', body: 'open to answer it' }
+      : { title: `${n} projects are waiting on you`, body: named.length ? named.map(x => x.project).join(' · ') : 'open to answer them' };
+  }
   const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
   const verb = kind === 'needs-you' ? 'needs you' : kind === 'mixed' ? 'needs you' : 'has an answer';
   if (n === 1) {
@@ -495,7 +506,7 @@ self.addEventListener('push', e => {
     icon: './icons/icon-192.png',
     badge: './icons/icon-192.png',
     // WHICH SCREEN A TAP OPENS, from the payload's one-word enum (fleet-serve pushPayload).
-    data: { at: (d && d.at) || 0, open: d && d.open === 'jarvis' ? 'jarvis' : '' },
+    data: { at: (d && d.at) || 0, open: d && (d.open === 'jarvis' || d.open === 'waiting') ? d.open : '' },
   }));
 });
 
@@ -507,14 +518,16 @@ self.addEventListener('push', e => {
 // gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  const jarvis = !!(e.notification.data && e.notification.data.open === 'jarvis');
+  // ...AND A SECOND: an item a master is waiting on opens Projects, where the list is.
+  const open = e.notification.data && e.notification.data.open;
+  const to = open === 'jarvis' || open === 'waiting' ? open : '';
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) if ('focus' in c) {
-      if (jarvis) { try { c.postMessage({ open: 'jarvis' }); } catch {} }
+      if (to) { try { c.postMessage({ open: to }); } catch {} }
       return c.focus();
     }
-    return self.clients.openWindow(jarvis ? './#jarvis' : './');
+    return self.clients.openWindow(to ? `./#${to}` : './');
   })());
 });
 

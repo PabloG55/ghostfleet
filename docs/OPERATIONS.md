@@ -1082,6 +1082,24 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   the band leads with `judge failing: <why>` while anything is open, the record carries
   `ledger.judge_failing`, and `fleet-ledger list` ends with the last judge's status, failing
   or ok. The ledger is a nag, not a guard.
+- **Waiting on the person.** An item the judge reports `in-progress` because it waits on
+  the person ("waits on the person: their pick between A and B") leaves the open list and the
+  gate as `waiting`, and comes back when the person's message speaks to it. A master's
+  waiting items are what an unattended run ends up holding, so they leave the session two
+  ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
+  and profile it lists; workers' items reach the owner through their master) and the
+  Projects screen opens on a "waiting on you" list: the project, the ask, how long it has
+  waited, and what the master said it needs. Beside them, an item the owner answered that the
+  master has not closed yet, and a request nobody has touched in four hours. A tap replies
+  with an ordinary message to that master quoting the item, which wakes it; the owner never
+  closes one, and it leaves the list when the master closes or drops it. An item newly
+  waiting rings the phone once per project. **In the session:** a short status question
+  ("whats the status", "status?", "any update?", "qué falta", "cómo vamos") carries a second
+  note, `[ghostfleet ledger: waiting on the person]`, listing those same items with what the
+  agent last said about each and the instruction to ask the person each one. Before it, the
+  only trace a waiting item left in any prompt was nothing: the open-items note lists open
+  items, `/ledger` gave a count, and a status answer had whatever the model still remembered
+  of the turn that asked.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
   session, without a turn. `clear` closes every open item and keeps the history; `all` shows

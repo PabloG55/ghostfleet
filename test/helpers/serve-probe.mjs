@@ -224,6 +224,8 @@ if (phase === 'reads') {
   row('inbox', await a.api(base, 'GET', '/api/inbox?project=demo'));
   row('audit', await a.api(base, 'GET', '/api/audit?limit=5'));
   row('health', await a.api(base, 'GET', '/api/health'));
+  row('waiting', await a.api(base, 'GET', '/api/waiting'));
+  row('waiting.noToken', await request(base, 'GET', '/api/waiting'));
 }
 
 // ── Jarvis: the digest, the marker, a yes, and a voice ─────────────────────

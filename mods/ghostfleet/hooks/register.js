@@ -46,7 +46,7 @@ import {
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
-  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
+  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
   revisit, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked,
 } from './ledger.js'
 import {
@@ -1152,8 +1152,11 @@ async function onPromptSubmit($, e, next) {
     const file = await ledgerPath($)
     cur = file ? await readLedger($, file) : null
   }
-  const note = cur ? contextNote(cur, at) : ''
-  const r = await next(note ? { ...e, context: [...(e.context || []), note] } : e)
+  // A status question also carries what is held for the person (ledger.js statusNote):
+  // waiting items are on neither the open list nor contextNote, so without it the answer
+  // to "whats the status" was whatever the model remembered of the turn that asked.
+  const notes = cur ? promptNotes(cur, e.text, at) : []
+  const r = await next(notes.length ? { ...e, context: [...(e.context || []), ...notes] } : e)
   if (!ids.length) return r
   if (!r || r.drop !== undefined) {
     // It never entered: its items go, and the window goes back to the one before. An item it

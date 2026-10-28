@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "items": [
+    {
+      "project": "acme-api",
+      "profile": "work",
+      "session": "master",
+      "key": "fixture-acme-api:7",
+      "id": "7",
+      "text": "merge #12 now, or wait for the billing-svc review first?",
+      "state": "waiting",
+      "reason": "waits on the person: pick merge now or wait for the review",
+      "since_ago": 8100,
+      "at_ago": 9000
+    },
+    {
+      "project": "acme-web",
+      "profile": "work",
+      "session": "master",
+      "key": "fixture-acme-web:4",
+      "id": "4",
+      "text": "send the staging login for the checkout screenshots",
+      "state": "waiting",
+      "reason": "waits on the person: the staging login",
+      "since_ago": 2700,
+      "at_ago": 3600
+    },
+    {
+      "project": "toolbox",
+      "profile": "work",
+      "session": "master",
+      "key": "fixture-toolbox:11",
+      "id": "11",
+      "text": "rename the scratch config keys to the new prefix",
+      "state": "open",
+      "reason": "",
+      "since_ago": 18000,
+      "at_ago": 18000
+    }
+  ]
+}

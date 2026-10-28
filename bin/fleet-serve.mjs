@@ -44,7 +44,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
 import { promptSummary } from '../lib/permission-dialog.mjs';
-import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
+import { fleetDirs as scanDirs, scanStatus, masterRecords } from '../lib/fleet-scan.mjs';
 import * as jarvis from '../lib/jarvis.mjs';
 import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
@@ -1214,7 +1214,7 @@ function allowedHosts(c) {
 // travel are matched against NAME_OK first. The sender never opens a transcript — its
 // whole input is the status files the hook writes, and those hold a status word, not
 // prose.
-const PUSH_KINDS = new Set(['needs-you', 'answer', 'account']);
+const PUSH_KINDS = new Set(['needs-you', 'answer', 'account', 'waiting']);
 // Deliberately narrow, and deliberately NOT a sanitiser: a name that does not look like
 // a name is dropped rather than trimmed into one. Project names come from the projects
 // file (a space is legal in a folder name) and session names from fleet-rename, which
@@ -1392,6 +1392,10 @@ export function pushPayload(events, detail) {
   // anonymous mode too — it says which screen, not which project.
   let jm = null; try { jm = jarvis.readMarker(); } catch {}
   if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
+  // A push that is only about items a master holds for the owner opens the list of them (the
+  // Projects screen), wherever the app was left: the answer is a reply to the item, not
+  // whatever session happened to be on screen.
+  else if (events.length && events.every(e => e.kind === 'waiting')) out.open = 'waiting';
   // AN ACCOUNT NOTICE (fleet-accounts) is the one kind that is not about a session: which
   // profile moved to which login, or ran out until when. Same rule as the rest — every key
   // literal, every name through NAME_OK, numbers as numbers — so web/sw.js composes the
@@ -1578,6 +1582,87 @@ export function accountEvents(dirs, sizes) {
 }
 const accountSizes = new Map();
 
+// ── what each master holds for the owner: its ledger's waiting items ────────
+// mods/ghostfleet/hooks/ledger.js keeps a master's asks of the owner as items in state
+// `waiting`, and goes on with everything else; this is where they leave the session. One
+// reader for the list (/api/waiting) and the bell (waitingEvents), so the phone's list and
+// the push cannot disagree about what is waiting. MASTERS ONLY: a worker's asks reach the
+// owner through its master, and listing both would be the same ask twice.
+//   The ledger is read whole, through the mod's own parseLedger/heldItems, never a copy of
+// their rules here. A file is re-read only when its mtime or size moved: the push watcher
+// asks every few seconds and a master's ledger changes once a turn.
+//   Rows carry the ask's TEXT, which is why they travel only on the authenticated read
+// (/api/waiting, beside /api/session's transcript) and never into a push payload: the
+// event below names a project and a kind, and pushPayload() copies nothing else out.
+//   IMPORTED, NOT REQUIRED: the ledger's vocabulary is the mod's file, staged beside bin/ by
+// cf-sync and shipped in the package, and a copy of the daemon without it (an older runtime,
+// a hand-copied bin/) must still serve the phone everything else. So a failed import is the
+// one feature off and a line in serve.log saying why — and /api/waiting says it too, rather
+// than answering an empty list that would read as "nothing is waiting".
+let L = null, ledgerWhy = '';
+try { L = await import('../mods/ghostfleet/hooks/ledger.js'); }
+catch (e) { ledgerWhy = `the mod's ledger.js could not be loaded (${String(e && e.message || e).split('\n')[0]})`; }
+const ledgerCache = new Map();    // ledger path -> { st, l }
+export function heldScan(list, nowMs = Date.now(), cache = ledgerCache) {
+  const bySock = new Map(list.map(t => [t.sock, t]));
+  const rows = [], socks = new Set(), live = new Set();
+  if (!L) return { rows, socks };
+  const { ledgerFile, parseLedger, heldItems } = L;
+  for (const m of masterRecords(scanDirs(list))) {
+    const t = bySock.get(m.sock);
+    if (!t) continue;
+    socks.add(m.sock);
+    const file = ledgerFile(m.dir, m.sessionId);
+    const st = stampOf(file);
+    if (!st) continue;
+    live.add(file);
+    let hit = cache.get(file);
+    if (!hit || hit.st !== st) {
+      let text;
+      try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+      hit = { st, l: parseLedger(text) };
+      cache.set(file, hit);
+    }
+    for (const i of heldItems(hit.l, nowMs))
+      rows.push({ project: t.name, profile: t.profile, sock: m.sock, session: 'master', key: `${m.sessionId}:${i.id}`, ...i });
+  }
+  for (const f of [...cache.keys()]) if (!live.has(f)) cache.delete(f);
+  rows.sort((a, b) => a.since - b.since || a.project.localeCompare(b.project));
+  return { rows, socks };
+}
+// An item NEWLY waiting is the event, ONE per project however many entered at once (a turn
+// that asks three things is one thing to come and answer). The same baseline rule as every
+// other event here: the first sight of a master is what is already there, never a buzz, so
+// the daemon starting beside yesterday's items does not ring for them; they are on the list.
+// Keyed by the master's session and the item, so a restarted master (a new ledger whose ids
+// start again at 1) cannot hide its first item behind the old session's.
+//   An item that was answered and then waits again HAS newly entered waiting: it rings.
+export function waitingEvents({ rows, socks }, seen) {
+  const cur = new Map([...socks].map(s => [s, new Set()]));
+  const project = new Map();
+  for (const r of rows) {
+    if (r.state !== 'waiting' || !cur.has(r.sock)) continue;
+    cur.get(r.sock).add(r.key);
+    project.set(r.sock, r.project);
+  }
+  const events = [];
+  for (const [sock, keys] of cur) {
+    const before = seen.get(sock);
+    seen.set(sock, keys);
+    if (!before) continue;
+    if ([...keys].some(k => !before.has(k))) events.push({ kind: 'waiting', project: project.get(sock), session: 'master', sock });
+  }
+  for (const k of [...seen.keys()]) if (!cur.has(k)) seen.delete(k);
+  return events;
+}
+const waitingSeen = new Map();    // sock -> the waiting keys at the last scan
+// The projects the owner can see: Jarvis switched off takes its project off the phone
+// (/api/projects), and its master's items with it.
+function shownToPhone() {
+  const jHide = jarvis.enabled() ? null : jarvis.readMarkerFile();
+  return projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
+}
+
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
 // of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
@@ -1633,6 +1718,9 @@ export function pushResolved(ev, status) {
   // An account notice belongs to no session, so no status can answer it: only the phone
   // polling (readAt) or the hold expiring does.
   if (ev.kind === 'account') return false;
+  // Nor can a master's waiting item: the master is often working on other things while one
+  // waits, so its status says nothing about whether the owner has seen the item.
+  if (ev.kind === 'waiting') return false;
   if (status === undefined) return true;
   if (ev.undelivered) return status === 'working';
   return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
@@ -1673,14 +1761,14 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); pushHeld = []; return; }
+  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); waitingSeen.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
   const rows = scanFleet(), names = sockProjects();
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
   const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
-                 ...accountEvents(fleetDirs(), accountSizes)];
+                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
   if (!fresh.length && !pushHeld.length) return;
   // AT THE MAC: what would have been sent is held instead, and what was held goes when he
   // leaves (see holdStep). Read only when there is something to decide, and once per tick.
@@ -2288,6 +2376,19 @@ function agentCatalogue() {
     return send(res, 200, nudgeSettings(t, names));
   }
 
+  // ── what every master holds for the owner, across every project and profile ─
+  // The owner's list (web/app.js "waiting on you"): each master's waiting items, the ones the
+  // owner answered that it has not closed yet, and requests nobody has touched in hours. Read off
+  // the ledger files (heldScan); nothing here changes one. An item leaves when its master
+  // closes or drops it — the reply is a message (fleet_send), never a close by hand.
+  if (p === '/api/waiting' && req.method === 'GET') {
+    if (!L) return send(res, 503, { ok: false, text: ledgerWhy });
+    const { rows } = heldScan(shownToPhone());
+    return send(res, 200, { ok: true, at: now(), items: rows.map(r => ({
+      project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
+      text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000) })) });
+  }
+
   if (p === '/api/inbox' && req.method === 'GET') {
     const rp = resolveProject(url.searchParams.get('project') || '');
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
@@ -2815,6 +2916,7 @@ async function serve(argv) {
   }
   setInterval(sweep, 30000).unref();
   armPushWatch();
+  if (ledgerWhy) log(`  waiting on you: OFF — ${ledgerWhy}`);
   {
     const n = allSubs().length, pc = loadConfig().push;
     log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? (process.platform === 'darwin' ? `held while at the Mac (input within ${pc.at_mac_idle}s, unlocked) for up to ${pc.at_mac_hold}s` : 'at-the-Mac hold off (not macOS)') : 'at-the-Mac hold off'}`
