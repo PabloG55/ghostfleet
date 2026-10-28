@@ -678,7 +678,13 @@ function keepScreen(app, screen, liveChat, liveComposer) {
         && builtChat && screen.includes(builtChat) && liveChat && liveChat.parentNode === app
         && canCompare(liveChat))) return false;
   const parts = partsOf(screen, (n) => n === builtChat);
-  const draftSame = (S.draft || '') === screenMem.draft;
+  // THE BOX'S OWN TEXT, NOT THE DRAFT AS LAST REMEMBERED. screenMem.draft is written by a
+  // render, and renders wait while someone types — so after a send it still says '' from
+  // before the typing, S.draft is '' again, the two agree, and the kept box went on holding
+  // the message that had just gone. Measured on the send button with the box focused, and
+  // every ⏎ from a keyboard is that case. What the box holds is the thing to compare.
+  const onScreen = isLive(liveComposer) && typeof liveComposer.value === 'string' ? liveComposer.value : screenMem.draft;
+  const draftSame = (S.draft || '') === onScreen;
   const nodes = parts.map((p) => {
     if (p.node === builtChat) return liveChat;
     const isComposer = p.node.classList && p.node.classList.contains('composer');
@@ -690,7 +696,13 @@ function keepScreen(app, screen, liveChat, liveComposer) {
   chatNode = liveChat;
   // The composer kept is the composer on screen; the one just built was never attached.
   const ci = parts.findIndex((p) => p.node.classList && p.node.classList.contains('composer'));
-  if (ci >= 0 && nodes[ci] !== parts[ci].node) composerNode = liveComposer;
+  if (ci >= 0 && nodes[ci] !== parts[ci].node) {
+    composerNode = liveComposer;
+    // ...and so is its photo strip. composer() pointed photoStripNode at the strip it built,
+    // which is never attached when the old row is kept, so an image added while the box has
+    // the focus — a paste, always — was painted into a strip nobody can see.
+    try { const strip = nodes[ci].querySelector && nodes[ci].querySelector('.photos'); if (strip) photoStripNode = strip; } catch {}
+  }
   screenMem = { who: chatWho(), draft: S.draft || '',
                 parts: new Map(parts.filter((p) => p.node !== builtChat).map((p) => [p.key, { node: nodes[parts.indexOf(p)], sig: p.sig }])) };
   return true;

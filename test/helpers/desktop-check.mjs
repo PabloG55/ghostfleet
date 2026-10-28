@@ -611,6 +611,16 @@ try {
   is('...and sends nothing', false, await auditHas('fleet_send'));
   await onScreenKeyboard(false);
 
+  // The `send` button with the box still focused — how a thumb sends on a phone. Since #86
+  // kept the composer across renders, the box went on holding the message it had just sent.
+  await phoneSession();
+  await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
+  for (const ch of 'hello') await b.call('Input.insertText', { text: ch });
+  await b.evaluate(() => { document.querySelector('#app .composer button.go')?.click(); return null; });
+  is('phone: send with the box focused sends', true, await until(() => auditHas('fleet_send'), 3000));
+  await sleep(800);
+  is('...and empties the box', '', (await look()).draft);
+
   // A keyboard attached: the field is focused and NO on-screen keyboard comes up, so the
   // keys that arrive are a real keyboard's — the first ⏎ sends.
   await phoneSession();
