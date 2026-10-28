@@ -260,7 +260,7 @@ toggles or cycles the selected cell. The columns are:
 | column | what it toggles | values | source |
 |---|---|---|---|
 | **AUTO-NUDGE** | whether a worker that finishes/needs help wakes the master | `on` / `off` | README (the only one it mentions) |
-| **BUDGET LIMIT** | whether the budget governor (`fleet-governor`) can park workers once usage hits the ceiling | `enforced` / `ignored` | **[CODE] — not in the README at all.** This is the visual toggle for what the README only describes as touching the `governor-off` file by hand. |
+| **BUDGET LIMIT** | whether the budget governor (`fleet-governor`) can park workers once usage hits the ceiling — and, with several accounts (`fleet-accounts`), whether the accounts engine parks them when every account is spent | `enforced` / `ignored` | **[CODE] — not in the README at all.** This is the visual toggle for what the README only describes as touching the `governor-off` file by hand. |
 | **AGENT** | the project's **default agent** — what its master runs, and what a new session in it inherits | cycles through the agents actually **installed** | **[CODE]** — the 4th column of the projects file, which used to be reachable only by editing it by hand |
 
 `space` **cycles** on AGENT rather than toggling, because there are more than two and the

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 3d694201ab99
+// CLIENT-HASH: cab8655acfeb
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -391,7 +391,10 @@
 // pasted from iOS's own Paste menu. And a draft is the session's, kept until it is sent:
 // a phone still on v77 blanks the box whenever a chat is opened. With a keyboard, a chat
 // opens with the box focused.
-const VERSION = 'ghostfleet-v78';
+// v79 says what all-exhausted did to the workers: a project whose budget limit is ignored is
+// not parked by the accounts engine, so the push and the accounts line say they keep running.
+// A phone still on v78 says "workers paused" for those too.
+const VERSION = 'ghostfleet-v79';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -499,9 +502,12 @@ function accountText(a) {
   const at = (t) => { try { return new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
   if (a.event === 'exhausted') {
     const nl = Array.isArray(a.needs_login) && a.needs_login.length ? ` · needs /login: ${a.needs_login.join(', ')}` : '';
+    // A project whose budget limit is ignored is not parked (lib/accounts.mjs step 6).
+    const w = a.workers === 'running' ? 'workers keep running (budget ignored)'
+      : a.workers === 'mixed' ? 'workers paused, except where the budget is ignored' : 'workers paused';
     return a.until
-      ? { title: `all ${p} accounts exhausted`, body: `until ${at(a.until)} — workers paused, they resume then${nl}` }
-      : { title: `no ${p} account can run`, body: `workers paused${nl || ' · open ghostfleet at the desk'}` };
+      ? { title: `all ${p} accounts exhausted`, body: `until ${at(a.until)} — ${w}${a.workers === 'running' ? '' : ', they resume then'}${nl}` }
+      : { title: `no ${p} account can run`, body: `${w}${nl || ' · open ghostfleet at the desk'}` };
   }
   if (a.event === 'needs-login') {
     const who = a.account ? `${p}/${a.account}` : 'a Claude account';

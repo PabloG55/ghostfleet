@@ -1464,6 +1464,7 @@ export function pushPayload(events, detail) {
     if (a.limit === '5h' || a.limit === '7d') out.account.limit = a.limit;
     if (Number.isFinite(a.pct)) out.account.pct = Math.max(0, Math.min(100, Math.floor(a.pct)));
     if (Number.isFinite(a.until) && a.until > 0) out.account.until = Math.floor(a.until);
+    if (['paused', 'running', 'mixed'].includes(a.workers)) out.account.workers = a.workers;
     if (named) {
       for (const k of ['profile', 'from', 'to', 'account']) { const v = safeName(a[k]); if (v) out.account[k] = v; }
       const nl = (Array.isArray(a.needs_login) ? a.needs_login : []).map(safeName).filter(Boolean).slice(0, 4);

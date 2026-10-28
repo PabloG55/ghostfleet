@@ -517,6 +517,19 @@ earliest reset the profile moves to that account and the parked workers are resu
 are, as `fleet-resume` does it: the park is cleared and a prompt telling them to continue is typed
 into the session that is already running.
 
+**A project whose budget limit is `ignored`** (the grid's settings screen, or the web client's
+project sheet; on disk `<sock>.governor-off` in the fleet dir) is the exception: the accounts
+engine reads the same marker the governor does, and parks nothing there. Its workers keep running
+on what the active account has left until Claude itself refuses a turn — at which point that
+account is marked `OUT` until the reset Claude names, the profile fails over if anything has room,
+and a session left on Claude's limit message shows as at its limit like any other. The notice
+still comes, worded for what is true: that project's inbox row ends `budget ignored here, so
+workers keep running until Claude refuses them`, and the push and `list` say `workers keep
+running (budget ignored)` (or `workers paused, except where the budget is ignored` when the
+profile's fleets differ). The setting is read every tick, so switching a project to `ignored`
+mid-episode resumes the workers the engine parked there on the next one, and switching it back
+parks them again.
+
 **A login that stops working** — expired, revoked, or never refreshed — is seen three ways: Claude
 Code blanking the tokens in the stored login (what it does when a refresh is refused), a turn
 ending in `StopFailure` with `authentication_failed` (`fleet-accounts add` wires that hook into
@@ -538,7 +551,7 @@ active account and that account's 5h and 7d figures with time to reset (`main ·
 7d 42% (Sat)`), green while the figures are fresh, yellow when they are over 6 hours old (with
 how old) or the login in use is not saved, red when the account cannot run (`OUT until …`,
 `NEEDS-LOGIN`, `BLOCKED`, over the threshold) or every account is out (`all accounts exhausted
-until … — workers paused`). A tap opens every account of every profile the way `list` prints
+until … — workers paused`, or `workers keep running (budget ignored)`). A tap opens every account of every profile the way `list` prints
 them, with the threshold and any pin. It is `list`'s own data — `fleet-serve` serves
 `lib/accounts.mjs`'s `describe()`, which `list` prints from — for the profiles the daemon lists,
 read every 45 seconds and on reopening the app, and it carries account labels, figures, times and
