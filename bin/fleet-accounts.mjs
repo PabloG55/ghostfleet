@@ -43,10 +43,11 @@ const PROFILE_RE = /^[A-Za-z0-9_-]+$/;
 const prof = (p) => { if (!p || !PROFILE_RE.test(p)) die(`'${p || ''}' is not a profile name`, 2); return p === 'default' ? 'work' : p; };
 
 // The figure, when its window resets, and how long ago it was read: an inactive account's
-// figures are only as fresh as its last turn, and nothing here asks for newer ones.
+// figures are only as fresh as its last turn, and nothing here asks for newer ones. The words
+// are A.describe()'s, which is also what the phone is shown (/api/usage); this is only columns.
 function fmtWin(w, label) {
   if (!w) return `${label} —`.padEnd(44);
-  return `${label} ${String(Math.floor(w.pct)).padStart(3)}% (resets ${A.hhmm(w.resets)}, read ${A.ago(w.at)})`.padEnd(44);
+  return `${label} ${String(w.pct).padStart(3)}% (resets ${w.resets_at}, read ${w.read})`.padEnd(44);
 }
 function list(only) {
   const thr = A.threshold();
@@ -54,25 +55,15 @@ function list(only) {
   console.log(`accounts${X.enabled('accounts') ? '' : ' — DISABLED: ' + X.howToEnable('accounts')}; switch at ${thr}% of the 5h or 7d limit, spending the week that ends first`);
   if (!profs.length) { console.log('  no profile has an account yet — fleet-accounts add <profile> <name>'); return; }
   for (const p of profs) {
-    const st = A.load(p);
-    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${A.onUnsaved(st) ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : st.exhausted ? `  — ALL EXHAUSTED${st.exhausted.until ? ' until ' + A.hhmm(st.exhausted.until) : ''}, workers paused` : ''}`);
-    if (!st.order.length) { console.log('  (no accounts)'); continue; }
-    if (st.order.length < 2) console.log('  one account: nothing to fail over to yet — add another');
-    if (A.pinned(st)) console.log(`  on '${st.active}' by hand until ${A.hhmm(st.pin.until)} — the planner leaves it there unless it runs out`);
-    const w = Math.max(...st.order.map(n => n.length));
-    for (const n of st.order) {
-      const a = st.accounts[n] || {};
-      const over = A.overBy(a, thr);
-      let state = n === st.active ? 'active' : 'ready';
-      if (a.needs_login) state = 'NEEDS-LOGIN';
-      else if (a.blocked) state = 'BLOCKED';
-      else if (A.outNow(a)) state = `OUT until ${A.hhmm(a.out.until)} (hit its ${a.out.why}${a.out.said ? '' : ', no reset time given'})`;
-      else if (over) state = `exhausted until ${A.hhmm(over.resets)}`;
-      else if (n !== st.active && A.stale(a)) state = 'ready, stale (no planned move onto it)';
-      const u = a.usage || {};
-      console.log(`  ${n === st.active ? '*' : ' '} ${n.padEnd(w)}  ${fmtWin(u.five_hour, '5h')} ${fmtWin(u.seven_day, '7d')} ${state}${n === st.active && state !== 'active' ? ' (active)' : ''}`);
-      if (a.needs_login) console.log(`    ${a.needs_login.why} — run: ${A.loginCmd(p, n)}`);
-      if (a.blocked) console.log(`    ${a.blocked.why} — ${A.blockedFix(p, n)}`);
+    const d = A.describe(p, thr);
+    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${d.unsaved ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : d.exhausted ? `  — ALL EXHAUSTED${d.exhausted.until_at ? ' until ' + d.exhausted.until_at : ''}, workers paused` : ''}`);
+    if (!d.accounts.length) { console.log('  (no accounts)'); continue; }
+    if (d.accounts.length < 2) console.log('  one account: nothing to fail over to yet — add another');
+    if (d.pin) console.log(`  on '${d.pin.account}' by hand until ${d.pin.until_at} — the planner leaves it there unless it runs out`);
+    const w = Math.max(...d.accounts.map(a => a.name.length));
+    for (const a of d.accounts) {
+      console.log(`  ${a.active ? '*' : ' '} ${a.name.padEnd(w)}  ${fmtWin(a.five_hour, '5h')} ${fmtWin(a.seven_day, '7d')} ${a.state}${a.active && a.state !== 'active' ? ' (active)' : ''}`);
+      if (a.fix) console.log(`    ${a.fix}`);
     }
   }
 }

@@ -321,6 +321,12 @@ GET  /api/waiting                           -> { ok, at, items: [{ project, prof
                                                  state: waiting|replied|open, reason, at, since,
                                                  from?, was?, note? }] }   (from: carried from a stopped worker)
                                             each master's held ledger items; 503 without the mod's ledger.js
+GET  /api/usage                             -> { ok, at, enabled, off?, threshold, profiles: [{ profile, active,
+                                                 unsaved, exhausted?, pin?, accounts: [{ name, active, kind, state,
+                                                 stale, until, five_hour?, seven_day?, fix }] }] }
+                                            `fleet-accounts list` as data (lib/accounts.mjs describe()), for the
+                                            profiles this daemon lists; `off` and no profiles while the
+                                            experiment is off. Labels, figures and times only — read only
 GET  /api/jarvis                            -> { ok, present, project, profile, session, running,
                                                  status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
 POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }

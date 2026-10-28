@@ -1,0 +1,190 @@
+{
+  "ok": true,
+  "at": 1793109600,
+  "enabled": true,
+  "threshold": 97,
+  "profiles": [
+    {
+      "profile": "work",
+      "active": "main",
+      "accounts": [
+        {
+          "name": "main",
+          "active": true,
+          "kind": "active",
+          "state": "active",
+          "stale": false,
+          "until": 0,
+          "five_hour": {
+            "pct": 37,
+            "resets": 1793117400,
+            "at": 1793109420,
+            "resets_at": "16:10",
+            "read": "3m ago",
+            "left": "2h10m",
+            "day": "16:10"
+          },
+          "seven_day": {
+            "pct": 42,
+            "resets": 1793457000,
+            "at": 1793109420,
+            "resets_at": "Sat 14:30",
+            "read": "3m ago",
+            "left": "4d0h",
+            "day": "Sat"
+          },
+          "fix": ""
+        },
+        {
+          "name": "backup",
+          "active": false,
+          "kind": "stale",
+          "state": "ready, stale (no planned move onto it)",
+          "stale": true,
+          "until": 0,
+          "five_hour": {
+            "pct": 12,
+            "resets": 1793102400,
+            "at": 1793080800,
+            "resets_at": "12:00",
+            "read": "8h ago",
+            "left": "now",
+            "day": "12:00"
+          },
+          "seven_day": {
+            "pct": 20,
+            "resets": 1793368800,
+            "at": 1793080800,
+            "resets_at": "Fri 14:00",
+            "read": "8h ago",
+            "left": "3d0h",
+            "day": "Fri"
+          },
+          "fix": ""
+        },
+        {
+          "name": "spare",
+          "active": false,
+          "kind": "out",
+          "state": "OUT until 19:00 (hit its weekly limit)",
+          "stale": false,
+          "until": 1793127600,
+          "five_hour": {
+            "pct": 30,
+            "resets": 1793113200,
+            "at": 1793106000,
+            "resets_at": "15:00",
+            "read": "1h ago",
+            "left": "1h00m",
+            "day": "15:00"
+          },
+          "seven_day": {
+            "pct": 64,
+            "resets": 1793127600,
+            "at": 1793106000,
+            "resets_at": "19:00",
+            "read": "1h ago",
+            "left": "5h00m",
+            "day": "19:00"
+          },
+          "fix": ""
+        },
+        {
+          "name": "extra",
+          "active": false,
+          "kind": "needs-login",
+          "state": "NEEDS-LOGIN",
+          "stale": true,
+          "until": 0,
+          "five_hour": null,
+          "seven_day": null,
+          "fix": "its refresh token has expired — run: CLAUDE_CONFIG_DIR=~/.claude claude, /login as extra, then fleet-accounts add work extra"
+        },
+        {
+          "name": "old",
+          "active": false,
+          "kind": "blocked",
+          "state": "BLOCKED",
+          "stale": true,
+          "until": 0,
+          "five_hour": null,
+          "seven_day": null,
+          "fix": "its organization has disabled Claude subscription access for Claude Code — only an admin of that organization can turn it back on; once they have, CLAUDE_CONFIG_DIR=~/.claude claude, /login as old, then fleet-accounts add work old (or a turn on it that goes through clears this by itself)"
+        }
+      ],
+      "unsaved": false,
+      "exhausted": null,
+      "pin": {
+        "account": "main",
+        "until": 1793116020,
+        "until_at": "15:47"
+      }
+    },
+    {
+      "profile": "personal",
+      "active": "main",
+      "accounts": [
+        {
+          "name": "main",
+          "active": true,
+          "kind": "exhausted",
+          "state": "exhausted until 17:00",
+          "stale": false,
+          "until": 1793120400,
+          "five_hour": {
+            "pct": 99,
+            "resets": 1793120400,
+            "at": 1793109000,
+            "resets_at": "17:00",
+            "read": "10m ago",
+            "left": "3h00m",
+            "day": "17:00"
+          },
+          "seven_day": {
+            "pct": 71,
+            "resets": 1793628000,
+            "at": 1793109000,
+            "resets_at": "Mon 14:00",
+            "read": "10m ago",
+            "left": "6d0h",
+            "day": "Mon"
+          },
+          "fix": ""
+        },
+        {
+          "name": "backup",
+          "active": false,
+          "kind": "exhausted",
+          "state": "exhausted until Thu 14:00",
+          "stale": false,
+          "until": 1793282400,
+          "five_hour": {
+            "pct": 20,
+            "resets": 1793116800,
+            "at": 1793102400,
+            "resets_at": "16:00",
+            "read": "2h ago",
+            "left": "2h00m",
+            "day": "16:00"
+          },
+          "seven_day": {
+            "pct": 98,
+            "resets": 1793282400,
+            "at": 1793102400,
+            "resets_at": "Thu 14:00",
+            "read": "2h ago",
+            "left": "2d0h",
+            "day": "Thu"
+          },
+          "fix": ""
+        }
+      ],
+      "unsaved": false,
+      "exhausted": {
+        "until": 1793120400,
+        "until_at": "17:00"
+      },
+      "pin": null
+    }
+  ]
+}

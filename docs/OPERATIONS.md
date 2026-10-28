@@ -533,6 +533,18 @@ a push, and skipped. `list` shows it with the fix: only an admin of that organiz
 access back on. `use` refuses it. The mark clears by itself when a later reading on that login
 succeeds (a turn went through), or when you `/login` to it and `fleet-accounts add` it again.
 
+**On the phone and in the web client.** The top of Projects carries one line per profile: its
+active account and that account's 5h and 7d figures with time to reset (`main · 5h 37% (2h10m) ·
+7d 42% (Sat)`), green while the figures are fresh, yellow when they are over 6 hours old (with
+how old) or the login in use is not saved, red when the account cannot run (`OUT until …`,
+`NEEDS-LOGIN`, `BLOCKED`, over the threshold) or every account is out (`all accounts exhausted
+until … — workers paused`). A tap opens every account of every profile the way `list` prints
+them, with the threshold and any pin. It is `list`'s own data — `fleet-serve` serves
+`lib/accounts.mjs`'s `describe()`, which `list` prints from — for the profiles the daemon lists,
+read every 45 seconds and on reopening the app, and it carries account labels, figures, times and
+states only. With the experiment off the line says so and nothing else. Switching stays at the
+desk.
+
 **Where the logins are.** Claude Code keeps a config dir's login in the macOS Keychain (item
 `Claude Code-credentials-<hash of the config dir>`) or, on Linux, `<config dir>/.credentials.json`,
 and who it belongs to in `.claude.json`'s `oauthAccount`. ghostfleet keeps each *saved* account

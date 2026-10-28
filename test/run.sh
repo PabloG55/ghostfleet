@@ -14020,6 +14020,11 @@ if sv_start json; then
      "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="7"&&i[0].state==="waiting"&&i[0].text==="merge #12 or wait for the review"&&i[0].reason==="waits on the person: pick merge now or wait"&&i[0].since>i[0].at?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
   is "...and a worker's, a closed one, a restarted master's and a fresh ask are not" "0" \
      "$(pb waiting reads | grep -c 'worker ask\|done ask\|old master ask\|fresh other ask' || true)"
+  # The accounts line's source: behind the same token as everything else, and with this HOME's
+  # accounts experiment never switched on, the one sentence that says so and no profile.
+  is "the accounts usage needs a live token"   "401" "$(pf usage.noToken reads)"
+  is "...and is served with one, saying the experiment is off" "200 false 0" \
+     "$(pf usage reads) $(pb usage reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const u=JSON.parse(d);console.log(u.enabled+" "+u.profiles.length)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
   # THE BUG A LONG-LIVED DAEMON GETS WRONG. fleet-grid.mjs derives `project` from
   # CLAUDE_FLEET_SCOPE and its free-worktree list from CLAUDE_FLEET_ROOT. A daemon that
   # inherits its own answers every project with the first one's name and the first one's
@@ -16729,6 +16734,105 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "${WT:?}"
 else
   skip "waiting push" "node missing"
+fi
+
+# ── the Claude accounts reach the phone ──────────────────────────────────────
+# fleet-serve's /api/usage is `fleet-accounts list` as data (lib/accounts.mjs describe(), which
+# the CLI now prints from too), and web/app.js draws a line per profile at the top of Projects
+# with a sheet of every account behind it. Every state list can print is planted in one fake
+# HOME (test/helpers/usage-fixture.mjs), read at one fixed instant in UTC so a reset prints the
+# same time on every runner, and the payload is held up against what the CLI printed for the
+# SAME state — never against strings typed here, which would pass for a payload that drifted
+# from the desk along with them. Watched red on staging, where there is no usageReport and no
+# line: every row below failed, and usage-check's own rows failed one by one when it was handed
+# these payloads and staging's client.
+group "accounts on the phone: /api/usage says what fleet-accounts list says, and the line and sheet draw it"
+if command -v node >/dev/null 2>&1; then
+  UA="$(cd "$(mktemp -d "$TEST_RUNS.$$.usage.XXXXXX")" && pwd -P)"; mkdir -p "$UA/home"
+  UNOW=1793109600
+  uenv() { env -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_PROFILE \
+             TZ=UTC HOME="$UA/home" CLAUDE_FLEET_ACCOUNTS_CLOCK="$1" "${@:2}"; }
+  # the endpoint's own function, over the projects this HOME lists — what fleet-serve serves
+  urep() { uenv "$1" node --no-warnings --input-type=module -e "
+    import { usageReport } from '$ROOT/bin/fleet-serve.mjs'; import { projects } from '$ROOT/lib/projects.mjs';
+    process.stdout.write(JSON.stringify(usageReport(projects())))" 2>&1; }
+  node "$ROOT/test/helpers/usage-fixture.mjs" "$UA/home" "$UNOW"
+  uenv "$UNOW" node "$ROOT/bin/fleet-accounts.mjs" list > "$UA/list" 2>&1
+  urep "$UNOW" > "$UA/on.json"
+  # ...each account, found on its own line of `list`, must carry that line's state and both
+  # windows in the same words; a fix line (needs-login, blocked) must be one `list` printed.
+  uagree="$(node -e '
+    const fs = require("fs"), [list, json] = process.argv.slice(1).map(f => fs.readFileSync(f, "utf8"));
+    let u; try { u = JSON.parse(json); } catch { console.log("unparsed: " + json.slice(0, 160)); process.exit(); }
+    const lines = list.split("\n"), bad = []; let n = 0;
+    for (const p of u.profiles || []) {
+      const at = lines.findIndex(l => l.startsWith(p.profile + "  ("));
+      for (const a of p.accounts) {
+        n++;
+        const l = lines.slice(at + 1).find(x => new RegExp("^  [* ] " + a.name + " ").test(x)) || "";
+        const win = (w, lab) => w ? `${lab} ${String(w.pct).padStart(3)}% (resets ${w.resets_at}, read ${w.read})` : `${lab} —`;
+        for (const want of [win(a.five_hour, "5h"), win(a.seven_day, "7d"), " " + a.state + (a.active && a.state !== "active" ? " (active)" : "")])
+          if (!l.includes(want)) bad.push(`${p.profile}/${a.name}: ${JSON.stringify(want)}`);
+        if (a.fix && !lines.includes("    " + a.fix)) bad.push(`${p.profile}/${a.name}: fix`);
+        if ((l.slice(2, 3) === "*") !== a.active) bad.push(`${p.profile}/${a.name}: active`);
+      }
+    }
+    console.log(bad.length ? bad.join("; ") : `all ${n} agree`)' "$UA/list" "$UA/on.json")"
+  is "every account's state and both figures are the words fleet-accounts list printed on its line" "all 7 agree" "$uagree"
+  is "...for the profiles fleet-serve lists, and not one only a stray state file names" "work,personal" \
+     "$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).profiles.map(p => p.profile).join(",")) } catch { console.log("unparsed") }' "$UA/on.json")"
+  is "each state is told apart: fresh, stale, out, needs-login, blocked, over the line; the pin; all exhausted" \
+     "work:main=active,backup=stale,spare=out,extra=needs-login,old=blocked pin=main@15:47 | personal:main=exhausted,backup=exhausted exhausted=17:00" \
+     "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        console.log(u.profiles.map(p => `${p.profile}:${p.accounts.map(a => a.name + "=" + a.kind).join(",")}${p.pin ? ` pin=${p.pin.account}@${p.pin.until_at}` : ""}${p.exhausted ? ` exhausted=${p.exhausted.until_at}` : ""}`).join(" | ")) } catch { console.log("unparsed") }' "$UA/on.json")"
+  is "...and the line's short forms: 5h counts down, 7d names the day, a stale reading says how old" "2h10m Sat 8h ago 97" \
+     "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), w = u.profiles[0].accounts;
+        console.log(w[0].five_hour.left, w[0].seven_day.day, w[1].seven_day.read, u.threshold) } catch { console.log("unparsed") }' "$UA/on.json")"
+  # NOTHING BUT LABELS, FIGURES, TIMES AND STATES. The fixture gives every account an address,
+  # an organization and two tokens no real state file holds; a payload that copied the state
+  # through would carry them. And the keys are named in full, so a new field is a decision.
+  # Counted beside the accounts it was looked for in, so an error in place of the payload — no
+  # decoy in it either — reads as 0 of 0 and not as a pass.
+  is "it carries no address, organization, token, login id, home path or unlisted profile" "0 of 7 accounts" \
+     "$(grep -cE 'decoy|DECOY|Decoy|"id"|id-[0-9a-f]|hidden|'"$UA" "$UA/on.json" || true) of $(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).profiles.reduce((n, p) => n + p.accounts.length, 0)) } catch { console.log(0) }' "$UA/on.json") accounts"
+  is "...and no key beyond the ones named" \
+     "account,accounts,active,at,day,enabled,exhausted,five_hour,fix,kind,left,name,ok,pct,pin,profile,profiles,read,resets,resets_at,seven_day,stale,state,threshold,unsaved,until,until_at" \
+     "$(node -e 'try { const k = new Set(), walk = v => { if (v && typeof v === "object") for (const [x, y] of Object.entries(v)) { if (!Array.isArray(v)) k.add(x); walk(y) } };
+        walk(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log([...k].sort().join(",")) } catch { console.log("unparsed") }' "$UA/on.json")"
+  urep "$((UNOW + 23400))" > "$UA/later.json"
+  node "$ROOT/test/helpers/usage-fixture.mjs" "$UA/home" "$UNOW" off
+  urep "$UNOW" > "$UA/off.json"
+  is "with the experiment off: says so, and no profile at all" \
+     "false|accounts is experimental and disabled — enable with: fleet-experimental enable accounts|0" \
+     "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log([u.enabled, u.off, u.profiles.length].join("|")) } catch { console.log("unparsed") }' "$UA/off.json")"
+  node "$ROOT/test/helpers/usage-fixture.mjs" "$UA/home" "$UNOW"
+  rm -rf "${UA:?}/home/.claude/fleet" "${UA:?}/home/.claude-personal" "${UA:?}/home/.claude-side"
+  urep "$UNOW" > "$UA/none.json"
+  is "on, with no profile holding an account: on, and an empty list" "true|0" \
+     "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log([u.enabled, u.profiles.length].join("|")) } catch { console.log("unparsed") }' "$UA/none.json")"
+  # ── drawn: test/helpers/usage-check.mjs, headless Chrome at 390x844 and at 1280x800 ──
+  # The four payloads above, as the page's own fetch answers them. Watched red on staging (no
+  # line), and its overflow row watched red on this branch's first CSS, which cut "workers
+  # paused" off the personal line on a phone while an earlier version of the row passed.
+  printf '{"on":%s,"later":%s,"off":%s,"none":%s}\n' "$(cat "$UA/on.json")" "$(cat "$UA/later.json")" \
+    "$(cat "$UA/off.json")" "$(cat "$UA/none.json")" > "$UA/variants.json"
+  node "$ROOT/test/helpers/usage-check.mjs" "$UA/variants.json" > "$UA/out" 2> "$UA/err"
+  ucrc=$?
+  if grep -q 'no chrome' "$UA/out" 2>/dev/null; then
+    skip "the accounts line" "no chrome to draw it in"
+  else
+    is "usage-check ran"                "0" "$ucrc"
+    is "...without complaining"         ""  "$(head -2 "$UA/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(grep -c . "$UA/out")" -ge 40 ] && echo yes || echo "no: $(grep -c . "$UA/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      [ -n "$name" ] || continue
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$UA/out"
+  fi
+  rm -rf "${UA:?}"
+else
+  skip "accounts on the phone" "node missing"
 fi
 
 group "push: a subject Apple accepts, and a refusal that says why"
