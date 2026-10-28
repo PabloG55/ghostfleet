@@ -80,6 +80,7 @@ try {
       tileTitle: ((document.querySelector('#app .composer .photos .ph') || {}).title) || '',
       misses: document.querySelectorAll('#side .card.miss, #app .card.miss').length,
       toast: t('#app .toast') || t('#side .toast'),
+      lost: t('#app .hint.lost'),
     };
   });
   const audit = () => b.evaluate(async () => (await import(location.origin + '/api.js')).auditLog().map(r => r.tool));
@@ -669,6 +670,123 @@ try {
   s = await settle(x => x.tiles && /failed|ready/.test(x.tileTitle));
   is('iPhone: an image from the Paste menu attaches', 1, s.tiles);
   is('...through the picker\'s path', true, /attachments need a real fleet/.test(s.tileTitle));
+
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // DRAFTS: one per session, kept until it is sent
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // Reached BY TAP and by history.back(), never by a key this change added, so each row is
+  // red on staging for the draft and not for the way it got there.
+  const typeIn = async (text) => {
+    await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
+    await b.call('Input.insertText', { text });
+    await sleep(200);
+  };
+  const leaveBox = () => b.evaluate(() => { document.activeElement?.blur?.(); return null; });
+  // A reload that keeps storage — the page is opened again, as a relaunch opens it.
+  const reopen = async () => {
+    await b.call('Page.reload', {});
+    await sleep(800);
+    await until(() => b.evaluate(() => {
+      const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
+      if (e) e.click();
+      return !!document.querySelector('#app .composer textarea');
+    }), 10000);
+    await sleep(600);
+  };
+  const back = async () => { await b.evaluate(() => { history.back(); return null; }); await sleep(700); };
+
+  await toWorker();
+  await typeIn('draft one');
+  await leaveBox();
+  await tap('docs-pass'); await settle(x => x.session === 'docs-pass');
+  is('drafts: another chat has its own box', '', (await look()).draft);
+  await tap('api-fix');
+  is('drafts: back in the first chat, its draft is there', 'draft one', (await settle(x => x.session === 'api-fix' && x.draft)).draft);
+
+  await reopen();
+  s = await look();
+  is('drafts: after a reload, the same chat and its draft', ['api-fix', 'draft one'], [s.session, s.draft]);
+
+  await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
+  await press('Enter', { as: 'drafts ⏎' });
+  is('drafts: a send that succeeds', true, await until(() => auditHas('fleet_send'), 3000));
+  is('...empties the draft', '', (await look()).draft);
+  await reopen();
+  is('...and it stays gone after a reload', '', (await look()).draft);
+
+  // The page dying WHILE a send is in flight — the app swiped away mid-send on a slow link.
+  // The box has emptied, the send has not been answered: the draft must still be there.
+  await b.evaluate(() => { localStorage.setItem('gf.fixture.delay', '8000'); return null; });
+  await typeIn('sent on a slow link');
+  await press('Enter');
+  await sleep(300);
+  is('drafts: the box empties when send is pressed', '', (await look()).draft);
+  await b.evaluate(() => { localStorage.removeItem('gf.fixture.delay'); return null; });
+  await reopen();
+  is('...but a reload before the send is answered still has the draft', 'sent on a slow link', (await look()).draft);
+  await b.evaluate(() => { const t = document.querySelector('#app .composer textarea'); if (t) { t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); } return null; });
+
+  // A send the daemon refuses, as fleet-send refuses one to a worker whose task shipped.
+  await b.evaluate(() => { localStorage.setItem('gf.fixture.shipped', 'api-fix'); return null; });
+  await typeIn('this one will be refused');
+  await press('Enter');
+  s = await settle(x => x.toast);
+  is('drafts: a send that fails says why', true, /already finished a task that shipped/.test(s.toast));
+  is('...and keeps the draft in the box', 'this one will be refused', (await settle(x => x.draft)).draft);
+  await reopen();
+  is('...and after a reload', 'this one will be refused', (await look()).draft);
+  await b.evaluate(() => { localStorage.removeItem('gf.fixture.shipped'); return null; });
+
+  // Two projects, two sessions both called `master`: acme-api's, and the `jarvis` project's
+  // (the Jarvis band on Projects opens it — the one other master the fixtures have).
+  const toJarvis = async () => {
+    await settle(atProjects);
+    await b.evaluate(() => { document.querySelector('.jarvis-bar')?.click(); return null; });
+    await until(() => b.evaluate(() => !!document.querySelector('#app .composer textarea')), 8000);
+    await sleep(400);
+  };
+  const toAcmeMaster = async () => { await tap('acme-api'); await settle(onGrid); await tap('master'); await settle(x => x.session === 'master'); };
+  await fresh();
+  await toAcmeMaster();
+  await typeIn('for acme-api'); await leaveBox();
+  await back(); await back();
+  await toJarvis();
+  is("drafts: jarvis's master does not see acme-api's master's draft", '', (await look()).draft);
+  await typeIn('for jarvis'); await leaveBox();
+  await back();
+  await settle(atProjects);
+  await toAcmeMaster();
+  is("drafts: acme-api's master keeps its own", 'for acme-api', (await settle(x => x.draft)).draft);
+  await back(); await back();
+  await toJarvis();
+  is("drafts: ...and jarvis's master its own", 'for jarvis', (await settle(x => x.draft)).draft);
+  is('...stored apart, one entry each', 2, await b.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('gf.drafts') || '{}')).length));
+
+  // Photos go with their draft while the page lives, and a reload that drops them says so.
+  await fresh();
+  await toWorker();
+  await typeIn('see this');
+  await withFile('paste');
+  await settle(x => x.tiles);
+  await leaveBox();
+  await tap('docs-pass'); await settle(x => x.session === 'docs-pass');
+  is('drafts: a pasted photo stays with its own chat', 0, (await look()).tiles);
+  await tap('api-fix');
+  s = await settle(x => x.session === 'api-fix' && x.tiles);
+  is('drafts: ...and is still there on coming back', [1, 'see this'], [s.tiles, s.draft]);
+  await reopen();
+  s = await look();
+  is('drafts: after a reload the words are kept', 'see this', s.draft);
+  is('...and the dropped photo is SAID, not silently gone', true, /1 photo attached to this draft did not survive the reload/.test(s.lost));
+  await b.evaluate(() => { [...document.querySelectorAll('#app .hint.lost button')].pop()?.click(); return null; });
+  is('...until it has been read', '', (await settle(x => !x.lost)).lost);
+
+  // An iPhone, relaunched: the same store, at the phone's size with touch.
+  await phoneSession();
+  await typeIn('typed on the phone');
+  await reopen();
+  is('iPhone: a draft survives the app being relaunched', ['api-fix', 'typed on the phone'], [(await look()).session, (await look()).draft]);
 
   // ════════════════════════════════════════════════════════════════════════════════════
   // THE TABLE: every desk key in web/README.md has a row above

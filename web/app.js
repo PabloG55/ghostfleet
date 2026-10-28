@@ -117,6 +117,8 @@ function restore() {
   S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
   S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
   S.entry = j.entry === 'projects' && S.screen === 'session' ? 'projects' : '';
+  // ...and what was being typed there, which a relaunch used to throw away.
+  if (S.screen === 'session' && S.session) S.draft = draftGet(draftKey());
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
   S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
@@ -1830,7 +1832,7 @@ function openJarvis() {
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
   render(); refresh();
@@ -1957,6 +1959,7 @@ function jarvisScreen() {
   }
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
@@ -2439,7 +2442,7 @@ function openSession(name, opts = {}) {
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
   if (Number.isInteger(opts.depth)) setDepth(opts.depth); else pushNav();
@@ -2555,6 +2558,7 @@ function sessionScreen() {
   if (lead) out.push(el('div', { class: 'hint lead1', text: "the fleet's lead — no stop, reclaim, rename or pause" }));
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
@@ -2850,6 +2854,75 @@ function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_B
 // belongs to the session that picked it, not to whatever composer is on screen when its
 // bytes land — the same discipline readPane() keeps for a capture that arrives late.
 let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
+// ── a DRAFT PER SESSION, kept until it is sent ─────────────────────────────────────────
+// Typing in a chat, leaving it and coming back used to find the box empty, and so did a
+// reload or relaunching the installed app: the draft was one S.draft for the whole app,
+// and every way into a session blanked it. Now each session has its own, here.
+//   KEYED BY PROFILE, SOCKET AND SESSION. Every project has a session called `master`, so
+// a session name alone is two projects' drafts in one box; the socket is what the rest of
+// the fleet scopes a session by (CLAUDE.md: "a session's status must be scoped by its
+// fleet socket"), and the profile keeps two profiles' same-named projects apart.
+//   NOT THE OUTBOX. The outbox holds what has been SENT and not yet seen in the transcript;
+// a draft is what has not been sent at all. A failed send hands its words back to the box
+// (sendDraft), which writes them here like any other typing, so the two never hold the
+// same text twice.
+//   localStorage, mirrored from memory and wrapped like every other read here: in a
+// private window, or with site data blocked, the draft still lives for the page's life.
+//   PHOTOS stay with their draft for as long as the page lives (S.photos, keyed by
+// session, is never cleared by leaving a chat). They cannot survive a reload — a picked
+// File is not something a page can store — so the draft remembers how many it had, and a
+// reload that lost them says so above the composer instead of quietly sending less.
+const LS_DRAFTS = 'gf.drafts';
+const DRAFT_DAYS = 30;               // a draft nobody has touched in a month is let go
+const drafts = new Map();            // key -> { text, photos, at }
+const draftLost = new Map();         // key -> photos a reload dropped, until said and seen
+let draftsLoaded = false;
+export function draftKey(project = S.project, session = S.session) {
+  const p = (S.projects || []).find((x) => x && x.name === project);
+  const profile = (p && p.profile) || (S.grid && project === S.project && S.grid.profile) || '';
+  const sock = (p && p.socket) || `project:${project || ''}`;
+  return `${profile}\x1f${sock}\x1f${session || ''}`;
+}
+function loadDrafts() {
+  if (draftsLoaded) return;
+  draftsLoaded = true;
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_DRAFTS) || '{}') || {};
+    const old = Date.now() / 1000 - DRAFT_DAYS * 86400;
+    for (const [k, v] of Object.entries(o)) {
+      if (!v || typeof v.text !== 'string' || (v.at || 0) < old) continue;
+      drafts.set(k, v);
+      if (v.photos > 0) draftLost.set(k, v.photos);   // this page never had them
+    }
+  } catch {}
+}
+function persistDrafts() {
+  try { localStorage.setItem(LS_DRAFTS, JSON.stringify(Object.fromEntries(drafts))); } catch {}
+}
+export function draftGet(key = draftKey()) { loadDrafts(); const d = drafts.get(key); return d ? d.text : ''; }
+function draftPut(key, text, photos) {
+  loadDrafts();
+  if (!text && !photos) drafts.delete(key);
+  else drafts.set(key, { text: String(text || ''), photos: photos || 0, at: Math.floor(Date.now() / 1000) });
+  persistDrafts();
+}
+// The open session's draft, as the box holds it now.
+function saveDraft() { draftPut(draftKey(), S.draft || '', photosFor().length); }
+// A session's photo count changed (added, removed, sent) — wherever the screen is now.
+function savePhotosOf(project, session) {
+  const key = draftKey(project, session);
+  const here = project === S.project && session === S.session;
+  if (photosFor(photoKey(project, session)).length) draftLost.delete(key);
+  draftPut(key, here ? (S.draft || '') : draftGet(key), photosFor(photoKey(project, session)).length);
+}
+function lostPhotosHint() {
+  const key = draftKey(), n = draftLost.get(key);
+  if (!n) return null;
+  const ok = btn('ok', () => { draftLost.delete(key); draftPut(key, S.draft || '', photosFor().length); render(); });
+  return el('div', { class: 'hint lost', role: 'status' }, [
+    el('span', { text: `${n} photo${n > 1 ? 's' : ''} attached to this draft did not survive the reload — attach ${n > 1 ? 'them' : 'it'} again ` }), ok,
+  ]);
+}
 const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
 const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
 
@@ -3013,6 +3086,7 @@ function addPhotos(files, card, want = { project: S.project, session: S.session 
     S.photos.push(item);
     photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
   }
+  savePhotosOf(want.project, want.session);
   paintPhotos();
   // The caret back where it was, so the sentence carries on from the photo.
   if (take.length && here) focusComposerAt(at);
@@ -3038,6 +3112,8 @@ async function uploadPhoto(item, file, want, card) {
 
 function removePhoto(item) {
   S.photos = S.photos.filter((p) => p !== item);
+  const [project, session] = String(item.key).split(' ');
+  savePhotosOf(project, session);
   paintPhotos();
 }
 
@@ -3374,6 +3450,7 @@ function composer(card, opts = {}) {
     if (!isLive(box)) return;
     const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
+    saveDraft();
     const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : null;
     if (caret != null) S.caret = caret;
     // Every photo's place follows the edit (anchorAfterEdit).
@@ -3547,17 +3624,29 @@ async function sendDraft() {
   // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
   // as whatever synced them last. Counting occurrences needs no clock at all.
   const item = outboxAdd(text, S.project, S.session, { typed, photos: mine });
+  // THE BOX EMPTIES NOW; THE DRAFT IS KEPT UNTIL THE SEND IS KNOWN TO HAVE GONE. A reload,
+  // a relaunch or a dropped connection in between must find the words still there, so the
+  // stored draft is only cleared on success — and only if it still holds what was sent:
+  // anything typed while the send was in flight is a new draft and stays.
+  const key = draftKey(item.project, item.session);
   S.draft = ''; S.caret = null;
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
-  if (r) { outboxAcked(item, r); renderUnlessTyping(); return; }
+  if (r) {
+    if (draftGet(key) === typed) draftPut(key, '', photosFor(photoKey(item.project, item.session)).length);
+    // Came back to this chat mid-send: the box was refilled from the stored draft, which
+    // has just been sent.
+    if (S.project === item.project && S.session === item.session && S.draft === typed) { S.draft = ''; render(); }
+    outboxAcked(item, r); renderUnlessTyping(); return;
+  }
   outboxDrop(item);                              // doVerb already said why
   // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
   // daemon answers a send fleet-send could not deliver with ok:false, so this is the path
   // that runs when the mod refuses a prompt.
   if (mine.length) S.photos = [...mine, ...S.photos];
-  if (!S.draft) S.draft = typed;
+  if (S.project === item.project && S.session === item.session) { if (!S.draft) S.draft = typed; saveDraft(); }
+  else savePhotosOf(item.project, item.session);
   render();
 }
 // ── the outbox ────────────────────────────────────────────────────────────
@@ -3740,6 +3829,7 @@ export async function editOutbox(row, node) {
   }
   if (photos.length) adoptPhotos(photos, photoKey(), S.draft ? back.length + 1 : 0);
   S.draft = S.draft ? `${back}\n${S.draft}` : back;
+  saveDraft();
   const box = composerNode;
   if (isLive(box) && document.activeElement === box) {
     box.value = S.draft;

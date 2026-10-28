@@ -293,6 +293,17 @@ directory. It shows as a tile before sending, with `×` to remove it. A non-imag
 there attaches nothing and says so; anywhere else on the page a dropped file is refused
 rather than letting the browser navigate to it and throw the draft away.
 
+**Drafts, per session.** What is typed into a chat stays there — leave it, open another,
+reload, or swipe the installed app away and relaunch it, and the box comes back with it.
+One draft per session, keyed by profile, socket and session name, so two projects'
+`master` never share a box; kept in `localStorage` (`gf.drafts`), and in memory alone for
+the page's life where storage is blocked. A draft is cleared only when its send
+**succeeds**: a refused or failed send hands the words back and they stay. Photos attached
+to a draft go with it for as long as the page lives; a reload cannot keep a picked file,
+so a draft that had photos says how many were dropped, above the composer, until that has
+been read. This is not the outbox: the outbox holds what was sent and is not in the
+transcript yet, and a draft is what has not been sent at all.
+
 **Gestures are a finger's.** The phone's pointer gestures do not fire for a mouse, a pen or
 a desktop trackpad: there the keys and a plain click do the work, and a finger keeps every
 one of them. The gestures, and how each is gated:

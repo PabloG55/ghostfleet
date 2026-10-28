@@ -1215,3 +1215,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
       transition-duration: .001ms !important; scroll-behavior: auto !important; }
   .cards { scroll-snap-type: none; }
 }
+
+/* A reload kept a draft's words and not its photos: said above the composer, in the
+ * palette's warning yellow, with one button that says it has been read. */
+.hint.lost { display: flex; align-items: center; gap: .6em; color: var(--yellow); }
+.hint.lost button { flex: 0 0 auto; }

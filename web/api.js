@@ -48,6 +48,15 @@ import { setHome } from './grid.js';
 const LS = {
   base: 'gf.base',          // absent = ask this page's own origin; see pref()
   fixture: 'gf.fixture',    // which grid fixture the fixture backend serves
+  // Sessions the FIXTURE treats as having shipped their task, comma-separated. fleet-send
+  // refuses a send to one (bin/fleet-send, "a new task is a new session"), so this is how
+  // the fixture shows a send the daemon would refuse — the path a failed send takes in the
+  // client, which no fixture could reach while every fixture send succeeded.
+  shipped: 'gf.fixture.shipped',
+  // Milliseconds the fixture takes to answer a send — a slow tunnel. The client's promise
+  // that a draft outlives a send that has not been answered yet is only testable with a
+  // send that has not been answered yet.
+  delay: 'gf.fixture.delay',
 };
 
 // Verbs that take a second passkey assertion at the moment of action (§7).
@@ -768,6 +777,8 @@ export async function verb(tool, args, assertion = null) {
     if (!j.ok) throw Object.assign(new Error(j.text || `${tool} failed`), { body: j });
     return j;
   }
+  const wait = tool === 'fleet_send' ? (() => { try { return Number(localStorage.getItem(LS.delay)) || 0; } catch { return 0; } })() : 0;
+  if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, 30000)));
   const res = fixtureVerb(tool, args);
   record(tool, args, res.ok ? 'ok (fixture — recorded, not executed)' : `refused: ${res.text}`);
   if (!res.ok) throw Object.assign(new Error(res.text), { body: res });
@@ -829,6 +840,8 @@ function fixtureVerb(tool, a) {
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send': {
+      if ((() => { try { return String(localStorage.getItem(LS.shipped) || '').split(',').includes(a.session); } catch { return false; } })())
+        return { ok: false, text: `fleet-send: '${a.session}' already finished a task that shipped (fixture) — a new task is a new session: fleet-stop --reclaim ${a.session}, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway` };
       // A reply to a waiting item (app.js replyText) answers it, as the master's ledger would
       // once it reads the message, queued behind a turn or not.
       const re = /^Re your ledger item (\d+):/.exec(String(a.prompt || ''));
