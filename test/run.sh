@@ -16751,13 +16751,33 @@ if command -v node >/dev/null 2>&1; then
     node "$ROOT/test/helpers/push-probe.mjs" --port "$RP" --status 403 --body '{"reason":"BadJwtToken"}' \
       --sub "$PS/sub.json" --out "$PS/out.jsonl" > "$PS/probe.log" 2>&1 &
     PSP=$!; sv_reg "$PSP"
-    i=0; while [ "$i" -lt 50 ] && [ ! -s "$PS/sub.json" ]; do i=$((i+1)); sleep 0.1; done
-    node -e 'const fs=require("fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-      fs.writeFileSync(process.argv[2],JSON.stringify({bind:"127.0.0.1",port:1,rp_id:"localhost",origins:["http://localhost:1"],
-      clients:[{id:"phone",creds:[{id:"c"}],push:[{endpoint:s.endpoint,p256dh:s.keys.p256dh,auth:s.keys.auth}]}]}))' "$PS/sub.json" "$PS/serve.json"
-    out="$(GHOSTFLEET_SERVE_CONFIG="$PS/serve.json" GHOSTFLEET_SERVE_AUDIT="$PS/audit.jsonl" HOME="$PS/home" node "$ROOT/bin/fleet-serve.mjs" push --test 2>&1)"
-    is "a refused push is reported as refused"      "1" "$([ "$(grep -c 'HTTP 403' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
-    is "...WITH the service's reason"               "1" "$([ "$(grep -c 'BadJwtToken' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+    # THE RED ROW HAS TO CARRY WHAT WAS SAID. These two rows went red once on the macOS
+    # leg as `expected 1, got 0` and green on a re-run of the same commit, and nothing in
+    # the log could say which half failed: the old wait fell through after 5s whether or not
+    # the service had come up, and the assertion reduced fleet-serve's whole answer to a
+    # count. That run took 0.33s against a passing run's 0.36s, so it was not a wait that
+    # ran out — fleet-serve answered at full speed with something that was not a 403, and
+    # the row threw that answer away. So: the wait names its condition and stops the row
+    # rather than limping on, and a miss prints what fleet-serve answered and how many
+    # pushes the fake service saw — the two halves that tell "never delivered" from
+    # "delivered, then misreported".
+    if ! wait_for 20 "the fake push service to listen (it writes the subscription once it does)" '[ -s "$PS/sub.json" ]'; then
+      why="$WAIT_UNMET — probe said: $(tr '\n' ' ' < "$PS/probe.log" | cut -c1-200)"
+      bad "a refused push is reported as refused" "a fake push service to refuse it" "$why"
+      bad "...WITH the service's reason"          "a fake push service to refuse it" "$why"
+    else
+      node -e 'const fs=require("fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+        fs.writeFileSync(process.argv[2],JSON.stringify({bind:"127.0.0.1",port:1,rp_id:"localhost",origins:["http://localhost:1"],
+        clients:[{id:"phone",creds:[{id:"c"}],push:[{endpoint:s.endpoint,p256dh:s.keys.p256dh,auth:s.keys.auth}]}]}))' "$PS/sub.json" "$PS/serve.json"
+      out="$(GHOSTFLEET_SERVE_CONFIG="$PS/serve.json" GHOSTFLEET_SERVE_AUDIT="$PS/audit.jsonl" HOME="$PS/home" node "$ROOT/bin/fleet-serve.mjs" push --test 2>&1)"
+      # The probe appends its row BEFORE it answers, so by the time fleet-serve has a status
+      # the count is final — there is nothing left to wait for here.
+      # Past the settings summary, which is the same on every run: what is left is the
+      # per-client result and anything the daemon logged.
+      said="the service saw $(matches '"answered":403' "$PS/out.jsonl") push(es); fleet-serve said: $(grep -vE '^(detail|vapid|subject|debounce|quiet|at the Mac|scan|subscribed) ' <<< "$out" | tr '\n' ' ' | cut -c1-300)"
+      is "a refused push is reported as refused"      "HTTP 403"    "$(grep -m1 -o 'HTTP 403' <<< "$out" || echo "$said")"
+      is "...WITH the service's reason"               "BadJwtToken" "$(grep -m1 -o 'BadJwtToken' <<< "$out" || echo "$said")"
+    fi
     reap "$PSP"
   else
     skip "push refusal reason" "curl missing"
@@ -17287,6 +17307,9 @@ if [ -d "$ROOT/web" ]; then
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
     if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
       if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      # Something the helper recovered from (a boot the browser dropped and a second
+      # navigation brought up): printed so the rate stays visible, never counted.
+      if [ "$name" = '#NOTE' ]; then printf '  %s· %s%s\n' "$D" "$(vis "$want")" "$N"; continue; fi
       is "$name" "$want" "$got"
     done < "$VPO/out"
   fi
