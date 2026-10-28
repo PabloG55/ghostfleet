@@ -51,7 +51,9 @@ const CSS = read('app.css');
 // the tailnet as a hand-written file doing the same thing. The list is spelled out rather
 // than globbed for the reason the SHELL list is: a new file in web/ should have to be
 // thought about once, here, and `readdirSync` would silently adopt anything that appeared.
-const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js'];
+// term.js is the terminal screen, and xterm.js / xterm-fit.js are what it drives — vendored
+// from npm and pinned by digest (scripts/vendor-xterm.sh --check, in the suite).
+const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js', 'term.js', 'xterm.js', 'xterm-fit.js'];
 const JS = Object.fromEntries(JS_FILES.map(f => [f, read(f)]));
 
 // ── 1. nothing loads from off this machine ────────────────────────────────
@@ -329,7 +331,7 @@ is('the precache list is where it says it is', true, !!shellBlock);
 const shell = [...shellBlock.matchAll(/'(\.\/[^']*)'/g)].map(m => m[1].replace(/^\.\//, '')).filter(Boolean);
 is('every precached file exists', '', shell.filter(f => f && !exists(f)).join(','));
 const shipped = [
-  'index.html', 'app.css', ...JS_FILES.filter(f => f !== 'sw.js'), 'manifest.webmanifest',
+  'index.html', 'app.css', 'xterm.css', ...JS_FILES.filter(f => f !== 'sw.js'), 'manifest.webmanifest',
   ...fs.readdirSync(path.join(WEB, 'icons')).filter(f => f.endsWith('.png')).map(f => `icons/${f}`),
   ...fs.readdirSync(path.join(WEB, 'fixtures')).filter(f => f.endsWith('.json')).map(f => `fixtures/${f}`),
 ];
@@ -838,8 +840,13 @@ is('the settings rows skip the lead', true,
 // app is required to SAY they are absent rather than leave a gap.
 is('the stack is not rebuilt', 0, (APP.match(/renderStack|stackScreen/g) || []).length);
 is('...and is named as deliberately absent', true, /a phone has no side/.test(APP));
-is('no terminal or editor tab', 0, (APP.match(/fleet_tab|fleet-tab/g) || []).length);
-is('...and that is named too', true, /no local shell/.test(APP));
+// THE TERMINAL IS NO LONGER ONE OF THEM — the owner decided it was worth its surface — and
+// what replaced the absence is a rule about WHO names the shell: the server makes the tab
+// with bin/fleet-tab, so the client must never spell a tab name of its own. One that did
+// would be a second copy of the naming rule, and the one a phone could get wrong.
+is('the client never builds a tab name itself', 0, (APP.match(/['"]_(term|edit)-/g) || []).length);
+is('no editor tab', 0, (APP.match(/openEditor|editorScreen/g) || []).length);
+is('...and that is named as absent', true, /the Ctrl-n editor tab/.test(APP));
 is('the page bound is 20', 20, api.PAGE);
 
 // ── 5b. nothing runs before its declarations exist ────────────────────────

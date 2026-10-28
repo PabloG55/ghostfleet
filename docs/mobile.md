@@ -544,19 +544,24 @@ A client-side restriction is a suggestion.
 Physical constraints, not policy:
 
 - **The stack** (§6) — it exists to put sessions side by side, and a phone has no side.
-- **`Ctrl-t` terminal and `Ctrl-n` editor tabs** — these open a shell and neovim in the
-  session's folder. There is no local shell on the phone to open them in. Streaming a
-  remote shell is a much larger surface than the rest of this document combined and is
-  deliberately out of scope; the fleet verbs cover what those tabs are usually reached
-  for.
+- **The `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
+  (below) can run nvim in the project's folder, which covers what the tab is reached for.
 
-  **§7a does not reopen this, and the difference is the whole reason it is safe.** The pane
-  view is a periodic `capture-pane` — a photograph of a grid tmux already laid out, one
-  direction, no pty, no session of its own, nothing the phone can type into except the
-  verbs that were already server-side and audited. A terminal tab is an interactive shell:
-  a pty, a live byte stream both ways, and arbitrary command execution outside the verb
-  vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface, and
-  "we already show a terminal" is not an argument for the second.
+**The `Ctrl-t` terminal tab was the third, and the owner has since reopened it** — on purpose,
+with its own gates, and the argument that kept it out is the reason those gates exist rather
+than something that stopped being true. The pane view (§7a) is a periodic `capture-pane`:
+one direction, no session of its own, nothing to type into but the audited verbs. A terminal
+is an interactive shell — a live byte stream both ways and arbitrary commands outside the
+verb vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface.
+
+So the terminal is not a shell of its own: it is the project's fleet tab (`bin/fleet-tab`,
+`_term-<project>`), attached as a tmux control-mode client, so the desk sees the same session
+the phone types into. And it is everything a verb is plus four more (web/README.md, *The
+terminal*, and `bin/fleet-serve.mjs` TERMINAL): **off per device** until switched on in
+settings, which takes a passkey and is recorded on that device's enrolment; **a fresh passkey
+at every open**; a WebSocket that needs a configured **Origin** and a one-use ticket, on the
+address this daemon already binds; and an **idle close** after 15 minutes without a
+keystroke — the session token's own window. Nothing it prints reaches `serve.log`.
 
 ### The one place the phone shows LESS, and why the numbers did not move
 

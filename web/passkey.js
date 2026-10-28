@@ -418,6 +418,64 @@ export function describe(e) {
 // checkout (§12).
 export async function fresh(purpose) { return assert(purpose); }
 
+// ── A FRESH ASSERTION INSIDE THE TAP ────────────────────────────────────────
+// fresh() above fetches its challenge and THEN calls get() — the shape the unlock button
+// had before it was fixed, and on WebKit a get() made after a round trip has lost the tap's
+// activation and is refused without a sheet. The terminal opens from a tap and needs a
+// fresh assertion EVERY time, so it uses the unlock's fix instead: a challenge fetched
+// ahead of the tap (prepareFresh, called when a screen that offers the terminal is drawn)
+// and a get() made synchronously inside it (freshNow). Its own slot, not the lock screen's:
+// that one is released at unlock, and the two must never sign the same challenge.
+let fprep = null, fprepping = null;
+export function freshReady() { return !!fprep && fprep.exp - PREP_MARGIN_MS > Date.now(); }
+export function prepareFresh() {
+  if (freshReady()) return Promise.resolve(true);
+  if (fprepping) return fprepping;
+  fprepping = (async () => {
+    try {
+      const c = await challenge();
+      fprep = { challenge: c.challenge, rpId: c.rpId, exp: Date.now() + c.ttl * 1000 };
+      return true;
+    } finally { fprepping = null; }
+  })();
+  return fprepping;
+}
+// Returns a promise of the assertion — or rejects with name 'NotReady' WITHOUT touching the
+// sensor when no challenge is ready, so the caller can say "tap again" instead of spending
+// the tap on a sheet WebKit will refuse to show.
+export function freshNow(purpose) {
+  if (!available()) return Promise.reject(new Error(unavailableReason()));
+  if (!registered()) return Promise.reject(new Error('no passkey on this device yet'));
+  if (!freshReady()) {
+    prepareFresh().catch(() => {});
+    return Promise.reject(Object.assign(new Error('getting the passkey ready — tap again in a moment'), { name: 'NotReady' }));
+  }
+  const p = fprep;
+  fprep = null;                       // one tap, one challenge, whatever happens next
+  let got;
+  ceremonies++;
+  try {
+    got = navigator.credentials.get({
+      publicKey: {
+        challenge: p.challenge, rpId: p.rpId, timeout: 60_000, userVerification: 'required',
+        allowCredentials: [{ type: 'public-key', id: b64u.dec(localStorage.getItem(credKey())) }],
+      },
+    });
+  } catch (e) { ceremonies--; return Promise.reject(e); }
+  return (async () => {
+    try {
+      const cred = await got;
+      if (!cred) throw Object.assign(new Error('the passkey prompt was dismissed'), { name: 'NotAllowedError' });
+      return {
+        id: b64u.enc(cred.rawId), purpose,
+        client_data: b64u.enc(cred.response.clientDataJSON),
+        authenticator_data: b64u.enc(cred.response.authenticatorData),
+        signature: b64u.enc(cred.response.signature),
+      };
+    } finally { ceremonies--; prepareFresh().catch(() => {}); }
+  })();
+}
+
 // Fixture mode with no authenticator (or before a passkey exists) still has to be
 // usable, or the client cannot be reviewed at all. Clearly named, and refused outright
 // once a real server is configured — there the server rejects an unauthenticated

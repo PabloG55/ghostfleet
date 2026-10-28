@@ -753,6 +753,45 @@ export async function attach(project, session, file) {
   return j;
 }
 
+// ── the terminal (bin/fleet-serve.mjs TERMINAL) ───────────────────────────
+// Server mode only: a fixture fleet has no tmux to attach to, and a terminal that appeared
+// to open against one would be the one lie this screen cannot afford. Three requests and a
+// socket. The socket is opened HERE because this is the file that knows where the fleet is
+// — a ticket from /api/term/open is good for one upgrade within half a minute, and the
+// browser sends no Authorization on a WebSocket, which is why there is a ticket at all.
+export class TermRefused extends Error {}
+async function termCall(path, method, body, assertion) {
+  if ((await ready()).mode !== 'server') throw new TermRefused('the terminal needs the fleet server — fixtures have no shell to open');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + path, {
+      method, cache: 'no-store',
+      headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}),
+                 ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  // A 401 that asks for a PASSKEY is about the fresh assertion, not the session: the token
+  // is fine and clearing it would lock the app over a cancelled Face ID.
+  if (r.status === 401 && j.needs !== 'passkey') { clearToken(); throw new AuthError('the server refused the session'); }
+  if (!j.ok) throw Object.assign(new TermRefused(j.text || `HTTP ${r.status}`), { status: r.status, needs: j.needs || '' });
+  return j;
+}
+export const getTerm = () => termCall('/api/term', 'GET');
+export const termEnable = (on, assertion = null) => termCall('/api/term/enable', 'POST', { on: !!on }, assertion);
+export const termOpen = (project, size, assertion) => termCall('/api/term/open', 'POST', { project, ...size }, assertion);
+export function termSocket(ticket) {
+  const u = new URL(baseUrl() + '/api/term/ws');
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  u.searchParams.set('ticket', ticket);
+  const ws = new WebSocket(u.href);
+  ws.binaryType = 'arraybuffer';
+  return ws;
+}
+
 export async function verb(tool, args, assertion = null) {
   if ((await ready()).mode === 'server') {
     if (!haveToken()) throw new AuthError('no live session token');

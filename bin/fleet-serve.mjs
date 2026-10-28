@@ -50,6 +50,7 @@ import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 import * as A from '../lib/accounts.mjs';
 import * as X from '../lib/experimental.mjs';
+import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -107,6 +108,7 @@ const DEFAULTS = {
   session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
+  terminal_idle: 900,        // a web terminal with no KEYSTROKE for this long is closed — see TERMINAL below
   rate: { window: 60, read: 240, write: 30, auth: 10, challenge: 60 },
   push: null,                // filled from PUSH_DEFAULTS below — see the push section
   clients: [],
@@ -2777,6 +2779,8 @@ function agentCatalogue() {
   }
 
   // ── writes ────────────────────────────────────────────────────────────────
+  if (p === '/api/term' || p === '/api/term/enable' || p === '/api/term/open') return termRoutes(p, req, res, body, c, ip);
+
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
     const tool = typeof body.tool === 'string' ? body.tool : '';
@@ -2813,6 +2817,253 @@ function headerAssertion(req, c) {
        : { purpose: r.purpose };
 }
 
+// ── TERMINAL: a real shell from the web client, inside the fleet's own tmux ─────
+// Everything else this server does is a verb with a name and an audit row. A terminal is
+// not: it is a shell, which is every verb at once, so it gets every control the verbs have
+// plus three of its own, and each one answers a different question:
+//
+//   OFF PER DEVICE        is this device one the owner chose to give a shell to at all.
+//                         Recorded on the enrolled client — the device — with when and from
+//                         where it was switched on, and switching it ON takes a fresh
+//                         passkey. Off is the default and switching off needs nothing.
+//   A FRESH ASSERTION     is the owner holding the phone at the moment a shell opens — the
+//   PER OPEN              unlock does not count, by the same rule as a destructive verb (§7).
+//   A ONE-USE TICKET      a browser cannot put a bearer token on a WebSocket, so the open
+//                         request (token + assertion) mints a ticket that is good for one
+//                         upgrade within TERM_TICKET_TTL, for this client, this session.
+//   ORIGIN + HOST         the upgrade is refused unless Origin is one of the configured
+//                         origins. A WebSocket is not covered by CORS, so without this any
+//                         page the phone visits could try one.
+//   THE IDLE CLOSE        terminal_idle seconds with no keystroke closes it (default 900).
+//                         The SAME window as the session token's idle slide, on purpose: a
+//                         phone left unlocked on a table must not hold a shell open longer
+//                         than it holds the app. Keystrokes, not output — a build printing
+//                         to a terminal nobody is at is exactly the case to close. Closing
+//                         loses nothing: the tab is a tmux session and stays on the grid.
+//
+// And it is never a shell of its own: it attaches to a fleet TAB (bin/fleet-tab's
+// `_term-<project>`), so the desk sees the same session the phone is typing into.
+//
+// NOTHING A TERMINAL PRINTS IS LOGGED. serve.log gets one line when one opens and one when
+// it closes, with byte counts. Not the bytes, not tmux's stderr beyond its first line, and
+// not the ticket (it rides in the query string, and only the path is ever logged).
+const TERM_TICKET_TTL = 30;
+const TERM_MAX_PER_CLIENT = 4;
+const TERM_MAX_MESSAGE = 1 << 20;          // a 1 MB paste is plenty; a browser sends less
+const TERM_PING_MS = 30_000;               // a phone that slept leaves a socket nobody will close
+const tickets = new Map();                 // sha(ticket) -> { client, project, sock, session, cols, rows, exp }
+const terms = new Set();                   // the live bridges, for the per-client cap and shutdown
+const termOn = (cl) => !!(cl && !cl.revoked && cl.terminal && cl.terminal.on);
+const termIdle = (c = loadConfig()) => Math.max(10, Number(c.terminal_idle) || 900);
+const termSize = (n, lo, hi, dflt) => (Number.isInteger(n) && n >= lo && n <= hi ? n : dflt);
+
+// The tab itself: bin/fleet-tab, not a second copy of its naming rule. -d because this
+// call has no client of its own to move — and without it fleet-tab's switch-client would
+// grab whoever IS attached to the fleet at the desk and drop them into the new tab.
+function openTermTab(t) {
+  return new Promise((resolve) => {
+    execFile(path.join(BIN, 'fleet-tab'), ['term', t.sock, t.path, t.name, '-f', TMUX_CONF, '-d'],
+      { encoding: 'utf8', timeout: 15000, env: { ...process.env, TMUX: '' } }, (err, stdout, stderr) => {
+        const name = String(stdout || '').trim().split('\n').pop() || '';
+        if (err || !/^_term-/.test(name)) return resolve({ error: `could not open the terminal tab: ${(stderr || err?.message || 'fleet-tab said nothing').trim().split('\n')[0]}` });
+        // THE LAST TO TYPE DECIDES THE SIZE, on this tab only. The fleet's servers run
+        // `window-size largest` so a stack pane never crops a session open full screen at
+        // the desk — but a phone sharing a tab with a 200-column desk client would then be
+        // handed a 200-column shell at 40 columns of screen. A tab is no agent's pane and
+        // in no stack, so here the usual shared-terminal rule is the right one.
+        execFile('tmux', ['-L', t.sock, 'set-option', '-w', '-t', name, 'window-size', 'latest'],
+          { timeout: 5000, env: { ...process.env, TMUX: '' } }, () => resolve({ name }));
+      });
+  });
+}
+
+async function termRoutes(p, req, res, body, c, ip) {
+  const cl = req.client;
+  if (p === '/api/term' && req.method === 'GET')
+    return send(res, 200, { ok: true, enabled: termOn(cl), since: cl.terminal?.on ? cl.terminal.at : null, idle: termIdle(c) });
+
+  if (p === '/api/term/enable') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const on = body.on === true;
+    // ON is a grant and takes a fresh passkey; OFF only ever takes something away.
+    let assertion = null;
+    if (on) {
+      assertion = headerAssertion(req, c);
+      if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'turning the terminal on needs a fresh passkey assertion in X-Fleet-Assertion' });
+      if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
+    }
+    const fresh = loadConfig({ force: true });
+    const me = fresh.clients.find(x => x.id === cl.id);
+    if (!me) return send(res, 401, { ok: false, needs: 'passkey', text: 'this client is no longer enrolled' });
+    me.terminal = on ? { on: true, at: now(), ip } : { on: false, at: now(), ip };
+    saveConfig(fresh);
+    auditAppend({ ts: now(), client: cl.id, ip, verb: on ? 'terminal_enable' : 'terminal_disable', project: null,
+                  subject: cl.id, args: {}, confirmed: on ? `passkey:${assertion.purpose || 'unnamed'}` : null,
+                  result: 'ran', output: '' });
+    log(`terminal ${on ? 'ENABLED' : 'disabled'} for '${cl.id}' from ${ip}`);
+    if (!on) for (const b of terms) if (b.client === cl.id) b.end(4003, 'the terminal was switched off for this device');
+    return send(res, 200, { ok: true, enabled: on });
+  }
+
+  if (p === '/api/term/open') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    // ORDER IS DELIBERATE: the device check first, so a disabled device is told what to do
+    // about it rather than asked for a fingerprint it cannot use.
+    if (!termOn(cl)) return send(res, 403, { ok: false, needs: 'enable', text: 'the terminal is off for this device — switch it on in settings (it asks for the passkey)' });
+    const assertion = headerAssertion(req, c);
+    if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'opening a terminal needs a fresh passkey assertion in X-Fleet-Assertion — every time, not only at unlock' });
+    if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
+    const rp = resolveProject(typeof body.project === 'string' ? body.project : '');
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    let mine = 0;
+    for (const b of terms) if (b.client === cl.id) mine++;
+    if (mine >= TERM_MAX_PER_CLIENT) return send(res, 429, { ok: false, text: `this device already has ${mine} terminals open — close one first` });
+    const tab = await openTermTab(rp.t);
+    if (tab.error) return send(res, 502, { ok: false, text: tab.error });
+    const ticket = rand(32);
+    tickets.set(sha256(ticket), { client: cl.id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
+      cols: termSize(body.cols, 2, 500, 80), rows: termSize(body.rows, 1, 300, 24), exp: now() + TERM_TICKET_TTL });
+    for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
+    auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
+                  confirmed: `passkey:${assertion.purpose || 'unnamed'}`, result: 'ran', output: '' });
+    inboxRow(rp.t, tab.name, `terminal opened · from ${cl.id}@${ip}`);
+    return send(res, 200, { ok: true, project: rp.t.name, session: tab.name, ticket, ttl: TERM_TICKET_TTL, idle: termIdle(c) });
+  }
+  return send(res, 405, { ok: false, text: `${req.method} is not how ${p} is asked` });
+}
+
+// The upgrade. Every refusal is a plain HTTP answer on the raw socket, before any 101: a
+// browser reports a refused WebSocket as nothing more than a close, so the status is for
+// the log and for the suite, which reads it.
+function termUpgrade(req, sock) {
+  const ip = (sock.remoteAddress || '').replace(/^::ffff:/, '');
+  let pathname = '';
+  const refuse = (status, why) => {
+    log(`${ip} WS ${pathname || '?'} -> ${status} (${why})`);
+    const body = `${why}\n`;
+    try { sock.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status] || ''}\r\ncontent-type: text/plain; charset=utf-8\r\n` +
+                   `content-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`); } catch {}
+  };
+  sock.on('error', () => {});
+  let url;
+  try { url = new URL(req.url, 'http://x'); pathname = url.pathname; } catch { return refuse(400, 'bad request line'); }
+  if (pathname !== '/api/term/ws') return refuse(404, 'no WebSocket here');
+  let c;
+  try { c = loadConfig(); } catch (e) { return refuse(500, 'config unreadable'); }
+  const hosts = allowedHosts(c);
+  if (req.headers.host && hosts.size && !hosts.has(req.headers.host)) return refuse(403, `unexpected Host '${req.headers.host}'`);
+  // REQUIRED, not merely checked when present (POSTs check it only when present): every
+  // browser sends Origin on a WebSocket, so a missing one is not a browser of ours.
+  const origin = req.headers.origin || '';
+  if (!origin || !(c.origins || []).includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured`);
+  if (!rateOk('write', ip, { setHeader() {} })) return refuse(429, 'rate limited');
+  if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !req.headers['sec-websocket-key'])
+    return refuse(400, 'not a WebSocket upgrade');
+  const raw = url.searchParams.get('ticket') || '';
+  const k = sha256(raw), t = raw && tickets.get(k);
+  if (t) tickets.delete(k);                                  // single use, spent even on a refusal below
+  if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again (it asks for the passkey)');
+  const cl = clientById(t.client);
+  if (!termOn(cl)) return refuse(403, 'the terminal is off for this device');
+  sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+             `Sec-WebSocket-Accept: ${wsAccept(req.headers['sec-websocket-key'])}\r\n\r\n`);
+  sock.setNoDelay(true);
+  termBridge(sock, t, ip);
+}
+
+function termBridge(sock, t, ip) {
+  const born = Date.now();
+  let lastInput = Date.now(), lastPong = Date.now(), bytesIn = 0, bytesOut = 0, closed = false, ready = false;
+  let cc = null;
+  const reader = new FrameReader(TERM_MAX_MESSAGE);
+  const write = (op, data) => {
+    if (closed || sock.destroyed) return;
+    if (op === OP.binary) bytesOut += data.length;
+    // BACKPRESSURE: a phone on a weak link reads slower than `cat bigfile` writes. Stop
+    // reading tmux until the socket drains rather than buffering the difference here.
+    if (!sock.write(wsFrame(op, data)) && cc && !cc.exited) {
+      cc.proc.stdout.pause();
+      sock.once('drain', () => { try { cc.proc.stdout.resume(); } catch {} });
+    }
+  };
+  const ctl = (o) => write(OP.text, JSON.stringify(o));
+  const b = {
+    client: t.client, project: t.project, session: t.session,
+    end(code, why) {
+      if (closed) return;
+      ctl({ t: 'closed', code, why });
+      const r = Buffer.from(why || '', 'utf8').subarray(0, 120);
+      const p = Buffer.alloc(2 + r.length); p.writeUInt16BE(code, 0); r.copy(p, 2);
+      write(OP.close, p);
+      closed = true;
+      try { sock.end(); } catch {}
+      setTimeout(() => { try { sock.destroy(); } catch {} }, 2000).unref();
+      if (cc) cc.close();
+      clearInterval(tick);
+      terms.delete(b);
+      log(`terminal closed: '${t.client}' ${t.project}/${t.session} after ${Math.round((Date.now() - born) / 1000)}s ` +
+          `(in ${bytesIn} B, out ${bytesOut} B) — ${why}`);
+    },
+  };
+  terms.add(b);
+  log(`terminal open: '${t.client}' ${t.project}/${t.session} from ${ip} (${t.cols}x${t.rows})`);
+  cc = new ControlClient({
+    sockArgs: ['-L', t.sock], session: t.session,
+    onOutput: (bytes) => write(OP.binary, bytes),
+    onExit: (why) => b.end(1000, /exit|ended|detached/i.test(why) ? 'the shell exited' : `tmux: ${why}`),
+  });
+  ctl({ t: 'hello', project: t.project, session: t.session, idle: termIdle() });
+  (async () => {
+    await cc.resize(t.cols, t.rows);
+    const st = parseState((await cc.command(`display-message -p "${STATE_FORMAT}"`))[0]);
+    if (!st) throw new Error('tmux did not describe the pane');
+    const visible = await cc.command(`capture-pane -p -e -t ${st.pane}`);
+    const normal = st.alt ? await cc.command(`capture-pane -p -e -a -q -t ${st.pane}`) : null;
+    cc.follow(st.pane);
+    write(OP.binary, repaint(st, visible, normal));
+    ready = true;
+    ctl({ t: 'ready', pane: st.pane });
+  })().catch((e) => b.end(1011, `could not attach: ${String(e.message || e).slice(0, 100)}`));
+
+  sock.on('data', (chunk) => {
+    for (const m of reader.push(chunk)) {
+      if (m.error) return b.end(m.code, m.error);
+      if (m.op === OP.close) return b.end(1000, 'closed by the browser');
+      if (m.op === OP.ping) { write(OP.pong, m.data); continue; }
+      if (m.op === OP.pong) { lastPong = Date.now(); continue; }
+      if (m.op === OP.binary) {
+        // A KEYSTROKE, which is the only thing that counts as somebody being there.
+        lastInput = Date.now(); bytesIn += m.data.length;
+        if (ready) cc.send(m.data);
+        continue;
+      }
+      let o = null;
+      try { o = JSON.parse(m.data.toString('utf8')); } catch {}
+      if (o && o.t === 'resize') {
+        const cols = termSize(o.cols, 2, 500, 0), rows = termSize(o.rows, 1, 300, 0);
+        if (cols && rows) cc.resize(cols, rows).catch(() => {});
+      }
+    }
+  });
+  // 'end' as well as 'close': an HTTP server's sockets are half-open (allowHalfOpen), so a
+  // peer that just goes away — a phone put to sleep — delivers its FIN as 'end' and the
+  // socket never closes by itself. Measured: without this the tmux client stayed attached
+  // until something else ended it.
+  sock.on('end', () => b.end(1006, 'the connection dropped'));
+  sock.on('close', () => b.end(1006, 'the connection dropped'));
+  sock.on('error', () => b.end(1006, 'the connection failed'));
+  const tick = setInterval(() => {
+    const idle = termIdle();
+    if (Date.now() - lastInput > idle * 1000) return b.end(4000, `idle for ${idle >= 120 ? `${Math.round(idle / 60)} minutes` : `${idle}s`} — closed; the tab is still open on the desk`);
+    // Revoked, or switched off from another device, since it opened.
+    if (!termOn(clientById(t.client))) return b.end(4003, 'the terminal was switched off for this device');
+    if (Date.now() - lastPong > TERM_PING_MS * 2 + 5000) return b.end(1001, 'the browser stopped answering');
+    write(OP.ping, Buffer.alloc(0));
+  }, Math.min(TERM_PING_MS, Math.max(1000, termIdle() * 250)));
+  tick.unref?.();
+  return b;
+}
+
 let awakeHeld = false;
 // Resolved ONCE, at startup, and reported there. bin/fleet-serve.mjs runs from wherever
 // it was staged, so WEB is the runtime's web/ when the runtime is what is running — but
@@ -2830,7 +3081,16 @@ function requestHandler(req, res) {
   res.setHeader('x-frame-options', 'DENY');
   // Self-contained client, no third-party anything: the strictest policy that still works
   // is the correct one for a page that can spawn processes.
-  res.setHeader('content-security-policy', "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  //   TWO NAMED EXCEPTIONS, both for the terminal and neither for script. style-src allows
+  // inline styles because xterm.js's renderer writes its cell metrics and palette into
+  // <style> elements it creates at runtime — refused, it draws rows of zero height. Script
+  // stays 'self' and nothing else, which is the half of a CSP that stops an injection from
+  // running. connect-src names this host's ws:/wss: because CSP2 browsers do not count a
+  // WebSocket to the same host as 'self'; the Host was checked against allowedHosts below
+  // before any of this is used, and a request it fails never reaches a page.
+  const wsHost = /^[A-Za-z0-9.:[\]-]+$/.test(req.headers.host || '') ? req.headers.host : '';
+  res.setHeader('content-security-policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   res.on('finish', () => {
     if (req.url !== '/healthz') log(`${ip} ${req.method} ${(req.url || '').split('?')[0]} -> ${res.statusCode} ${Date.now() - t0}ms${req.client ? ` [${req.client.id}]` : ''}`);
   });
@@ -2970,6 +3230,9 @@ async function serve(argv) {
   server.keepAliveTimeout = 65000;
   server.maxConnections = 64;
   server.on('clientError', (e, sock) => { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} });
+  // The web terminal's WebSocket (TERMINAL, above). Nothing else here upgrades, and a
+  // request that asks to anywhere else is refused by termUpgrade on its path.
+  server.on('upgrade', termUpgrade);
 
   await new Promise((resolve) => {
     server.once('error', (e) => {
@@ -3026,6 +3289,9 @@ async function serve(argv) {
     if (stopping) { log(`${sig} again — exiting now`); process.exit(1); }
     stopping = true;
     persistSessions();                    // the last few seconds of slide, before anything else
+    // An upgraded socket is no longer the server's to drain, so close() would wait on it
+    // for the whole grace. Say goodbye to each terminal; the tabs stay open in tmux.
+    for (const t of [...terms]) t.end(1001, 'fleet-serve is restarting — open the terminal again');
     log(`${sig} — draining, then stopping`);
     server.close(() => { log('stopped'); process.exit(0); });
     server.closeIdleConnections?.();

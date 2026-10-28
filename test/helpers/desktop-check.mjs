@@ -391,6 +391,16 @@ try {
   is('session Ctrl-a →: the next session', 'api-fix', (await settle(x => x.session !== 'master')).session);
   await toWorker(); await press('a', { ctrl: true }); await press('ArrowLeft', { as: 'Ctrl-a ←' });
   is('session Ctrl-a ←: the previous one', 'master', (await settle(x => x.session === 'master')).session);
+  // Ctrl-a t is the desk's terminal tab. Here it opens the terminal screen in the right pane —
+  // and in fixture mode, where there is no tmux to attach to, says so instead of pretending.
+  // The terminal itself is test/helpers/term-check.mjs, against a real fleet-serve.
+  await toWorker(); await press('a', { ctrl: true }); await press('t', { as: 'Ctrl-a t' });
+  is('session Ctrl-a t: the terminal screen, in the right pane', true,
+     await until(() => b.evaluate(() => !!document.querySelector('#app .term-screen') && !!document.querySelector('#side .cards')), 3000));
+  is('...which with fixtures says there is no shell to open', true,
+     await until(() => b.evaluate(() => /needs the fleet server/.test((document.querySelector('#app .term-screen .term-msg') || {}).textContent || '')), 3000));
+  await press('`');
+  is('...and ` goes back to the session it came from', 'api-fix', (await settle(x => x.session === 'api-fix')).session);
 
   // Everything else goes to the agent — here, the composer.
   await toWorker(); await press('p');

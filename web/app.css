@@ -1230,3 +1230,35 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * palette's warning yellow, with one button that says it has been read. */
 .hint.lost { display: flex; align-items: center; gap: .6em; color: var(--yellow); }
 .hint.lost button { flex: 0 0 auto; }
+
+/* ── the terminal (app.js "the terminal", web/term.js) ───────────────────────
+ * ONE NODE, kept across renders, filling the shell column: the bar, a line of words for
+ * every state that is not a shell yet, the terminal itself, and — on touch only — the key
+ * row. The row is the column's LAST band, so while the on-screen keyboard is up (app.js
+ * lays #app out to the visible area then) it sits directly on top of the keyboard. */
+:is(#app).shell > .term-screen {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px;
+}
+#app.shell:has(> .term-screen) { max-width: none; }
+.term-screen > .term-msg { color: var(--dim); padding: .6em .2em; line-height: 1.4; }
+.term-screen > .term-act { display: flex; gap: 8px; flex-wrap: wrap; }
+.term-screen > .term-host {
+  flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden;
+  background: var(--bg); border: 1px solid var(--hair); border-radius: 6px; padding: 4px;
+}
+/* xterm sizes itself to its own element; it must not size the column back. */
+.term-screen > .term-host .xterm { height: 100%; }
+.term-screen > .term-keys {
+  display: flex; gap: 3px; flex: 0 0 auto; overflow-x: auto; overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.term-screen > .term-keys::-webkit-scrollbar { display: none; }
+/* ALL ELEVEN ON ONE ROW AT 390pt: equal shares of the width, shrinking to the label. A row
+ * that scrolls sideways hides the keys at its end — measured, `~ / -` were off screen at
+ * the first cut's 2.6em minimum. 40px tall is the thumb's target, not the label's. */
+.term-screen > .term-keys button.tk {
+  flex: 1 1 0; min-width: 0; min-height: 40px; padding: 0 1px; font-size: 13px;
+  -webkit-user-select: none; user-select: none; touch-action: manipulation;
+}
+.term-screen > .term-keys button.tk.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+.term-screen [hidden] { display: none !important; }

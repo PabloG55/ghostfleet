@@ -1302,7 +1302,8 @@ try {
       keyLetters: bs.filter(b => /^[⏎a-zA-Z,] /.test(b.textContent.trim())).length,
     };
   });
-  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,more,settings,projects',
+  // `terminal` is the project's terminal tab (the desk's Ctrl-t), which has no TUI letter.
+  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,terminal,more,settings,projects',
      (sheetRows.labels || []).join(','));
   is('...every row at least 44px tall', 0, sheetRows.short);
   is('...with at least 8px between them', true, sheetRows.minGap === null || sheetRows.minGap >= 8);

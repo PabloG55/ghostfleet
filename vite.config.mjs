@@ -68,23 +68,13 @@ const clientModulesStayExternal = {
 
 export default {
   plugins: [
-    // Rewrites every install layout's path back to the flat one, so the same commit builds
-    // to the same bytes wherever its node_modules sits. Two layouts get there:
-    //   - pnpm's content-addressed store: `node_modules/.pnpm/preact@10.29.8/node_modules/`
-    //   - a node_modules that is a SYMLINK to another checkout's, which is what a worktree
-    //     gets: vite follows the link and labels the region by the path RELATIVE TO ROOT,
-    //     so it reads `../acme-api/node_modules/preact/…` — one comment line per module,
-    //     and the main checkout's directory name written into a file that ships. Measured:
-    //     identical code, three differing lines, and the suite's rebuild check red in
-    //     every worktree.
-    // Anchored on vite's own `//#region` lines, so it can only ever touch a comment it
-    // emitted, never code.
+    // Rewrites pnpm's content-addressed path back to the flat one, so an npm build and a
+    // pnpm build of the same commit are byte-identical. Output-only: it touches comments
+    // vite emits, never code.
     {
       name: 'normalise-node-modules-paths',
       renderChunk(code) {
-        const out = code.replace(
-          /^(\/\/#region )(?:[^\n]*?\/)?node_modules\/(?:\.pnpm\/[^/\n]+\/node_modules\/)?/gm,
-          '$1node_modules/');
+        const out = code.replace(/node_modules\/\.pnpm\/[^/]+\/node_modules\//g, 'node_modules/');
         return out === code ? null : { code: out, map: null };
       },
     },clientModulesStayExternal],
@@ -141,9 +131,7 @@ export default {
         // BUILT BYTES MUST NOT DEPEND ON WHERE node_modules LIVES. vite labels each region
         // of the bundle with the source file's path, and that path is the INSTALL layout:
         // npm writes `node_modules/preact/…` and pnpm writes
-        // `node_modules/.pnpm/preact@10.29.8/node_modules/preact/…`, and a worktree whose
-        // node_modules links to another checkout's writes `../<that checkout>/node_modules/…`.
-        // The code is identical —
+        // `node_modules/.pnpm/preact@10.29.8/node_modules/preact/…`. The code is identical —
         // measured, the only difference between an npm build and a pnpm build of the same
         // commit is six comment lines — but the bytes are not, so the committed output and
         // its CLIENT-HASH pin would flip according to which manager the last person used,

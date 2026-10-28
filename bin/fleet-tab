@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-tab term|edit <socket> <cwd> [from-session] [-f <tmux-conf>]
+# fleet-tab term|edit <socket> <cwd> [from-session] [-f <tmux-conf>] [-d]
 # fleet-tab back    <socket> <session> [client-tty]     ` from inside a tab
 # fleet-tab name    term|edit <from-session>            what that tab will be called
 # fleet-tab restamp <socket> <tab>                      re-point a tab at its origin's name
@@ -53,11 +53,16 @@ fi
 # -f <conf>: the tmux config to start the server WITH. Only matters when this call is
 # the one that creates it — opening a tab on a project you have never entered otherwise
 # brings up a bare tmux with none of the fleet's bindings, so ` would not come back.
-CONF=""
+# -d: make (or reuse) the tab and print its name, but move NO client to it. The web
+# client's terminal opens a tab from fleet-serve, which has no tmux client of its own — and
+# a switch-client with no -c moves whichever client tmux thinks is current, which is the
+# person at the desk. They would be yanked into a shell somebody opened from a phone.
+CONF=""; DETACHED=""
 shift 4 2>/dev/null || shift $#
 while [ $# -gt 0 ]; do
   case "$1" in
     -f) CONF="${2:-}"; shift 2 ;;
+    -d) DETACHED=1; shift ;;
     *)  shift ;;
   esac
 done
@@ -215,6 +220,8 @@ fi
 # SANITISED — a tab off `api.2` is `_term-api_2`, and stripping the prefix would send you
 # back to a session called `api_2` that does not exist.
 stamp
+
+[ -n "$DETACHED" ] && { echo "$NAME"; exit 0; }
 
 # Same server, so this is a direct switch — instant, no detach, control plane never
 # involved, exactly how fleet-cycle moves between sessions. With no client attached
