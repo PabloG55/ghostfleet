@@ -286,6 +286,12 @@ attached (below). With only the on-screen keyboard, `⏎` stays the new line it 
 been and `send` stays the button. `Esc` leaves the box, which is how the keys below come
 back.
 
+**A chat opens ready to type in — with a keyboard.** Opening a chat focuses its composer,
+the caret at the end of any draft it holds, when a keyboard is known by the same evidence
+as `⏎`-to-send: a desk's pointer, or a key from a real keyboard on an iPhone or iPad. A
+touch-only phone is never focused — that would raise the on-screen keyboard over the
+conversation on every open. Once per open: a poll never takes the focus back.
+
 **Images.** `Ctrl-V` / `⌘V` of an image in the composer, or an image file dragged onto the
 conversation, goes through the photo picker's own path — `addPhotos` → `api.attach` — so
 it has the same 6 MB limit, the same ten-per-message cap and lands in the same attach
@@ -354,7 +360,11 @@ handlers (with `/` search from #75) and `tmux/cf.tmux.conf`'s bindings inside a 
 over all of it:
 
 - **A text box owns the keyboard.** No key here fires while an input, textarea or select
-  has focus — `q` in a message is a letter. The composer keeps `⏎`, `⇧⏎` and `Esc`.
+  has focus — `q` in a message is a letter. The composer keeps `⏎`, `⇧⏎` and `Esc` — and,
+  in a session, lets through exactly the keys tmux answers before the agent at the desk:
+  `` ` ``, `⇧←`/`⇧→`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and `Ctrl-a`'s table. With the desk's
+  two costs: a literal `` ` `` cannot be typed into a message, and `⇧←`/`⇧→` move between
+  sessions rather than selecting text.
 - **A session is attached.** At the desk every key inside a session reaches the agent
   except the few tmux binds; here the agent's input is the composer, so a letter pressed on
   the session screen is typed into it. (The `p`/`P`/`x`/`r`/`l`/`s`/`q` this screen used
@@ -401,6 +411,7 @@ added here without a row that presses it.
 | `Ctrl-a g` · `Ctrl-a d` · `Ctrl-a s` · `Ctrl-a p` · `Ctrl-a f` · `Ctrl-a →` · `Ctrl-a ←` | session | back · back · the grid · Projects · the jump chord · next session · previous session |
 | `p` | session | any key tmux does not bind goes to the agent: typed into the composer, which keeps the focus |
 | `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
+| `` ` `` · `⇧←` · `⇧→` · `Ctrl-s` · `Ctrl-p` · `Ctrl-f` · `Ctrl-a` | composer, focused | the same as in the session row above: tmux answers these before the agent at the desk, so they act from inside the box; every other key is text |
 | `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them), and a terminal or editor in the browser is out of scope |
 | `t` · `Ctrl-x` · `Ctrl-a x` · `Ctrl-a <` · `Ctrl-a >` | grid, session | the stack — not in this client (§7: it exists to put sessions side by side; the two panes are as far as this goes) |
 | `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |

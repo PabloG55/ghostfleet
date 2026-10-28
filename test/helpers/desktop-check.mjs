@@ -82,6 +82,8 @@ try {
       sheet: t('#sheet h2'),
       draft: (document.querySelector('#app .composer textarea') || {}).value ?? null,
       typing: !!a && a.tagName === 'TEXTAREA',
+      caret: a && a.tagName === 'TEXTAREA' ? [a.selectionStart, a.value.length] : null,
+      bubbles: document.querySelectorAll('#app .chat .turn').length,
       tiles: document.querySelectorAll('#app .composer .photos .ph').length,
       tileTitle: ((document.querySelector('#app .composer .photos .ph') || {}).title) || '',
       misses: document.querySelectorAll('#side .card.miss, #app .card.miss').length,
@@ -398,12 +400,13 @@ try {
   // ════════════════════════════════════════════════════════════════════════════════════
   await toWorker();
   await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
-  await keys('q', '`', 'x', 'j');
+  // Letters a grid key would act on, typed as letters: q, x, j, a digit, a comma.
+  await keys('q', 'x', 'j', '2', ',');
   s = await look();
-  is('composer: no key fires while typing', 'q`xj', s.draft);
+  is('composer: no grid key fires while typing', 'qxj2,', s.draft);
   is('...and the screen did not move', 'api-fix', s.session);
   await press('Enter', { shift: true, as: '⇧⏎' });
-  is('composer ⇧⏎: a new line', 'q`xj\n', (await look()).draft);
+  is('composer ⇧⏎: a new line', 'qxj2,\n', (await look()).draft);
   is('...and nothing was sent', false, await auditHas('fleet_send'));
   await keys('o', 'k');
   await press('Enter', { as: 'composer ⏎' });
@@ -793,6 +796,47 @@ try {
   await typeIn('typed on the phone');
   await reopen();
   is('iPhone: a draft survives the app being relaunched', ['api-fix', 'typed on the phone'], [(await look()).session, (await look()).draft]);
+
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // A CHAT OPENS READY TO TYPE IN — with a keyboard, and only then
+  // ════════════════════════════════════════════════════════════════════════════════════
+  await toWorker();
+  s = await look();
+  is('focus: opening a chat on a desktop focuses its composer', true, s.typing);
+  is('...and its messages are drawn all the same', true, (await settle(x => x.bubbles > 0)).bubbles > 0);
+  await typeIn('half a thought');
+  await leaveBox();
+  await tap('docs-pass'); await settle(x => x.session === 'docs-pass');
+  await tap('api-fix');
+  s = await settle(x => x.session === 'api-fix' && x.typing);
+  is('focus: a chat with a saved draft opens with the caret at its end', [14, 14], s.caret);
+  // From inside the focused box, the keys tmux answers before the agent does at the desk.
+  await press('`', { as: 'composer `' });
+  s = await settle(x => !x.session);
+  is('focus: ` from the focused composer goes back, as at the desk', true, onGrid(s));
+  await tap('api-fix');
+  is('...and is not typed into the draft', 'half a thought', (await settle(x => x.session === 'api-fix' && x.draft)).draft);
+  await toWorker();
+  await press('ArrowRight', { shift: true, as: 'composer ⇧→' });
+  is('focus: ⇧→ from the focused composer steps to the next session', 'docs-pass', (await settle(x => x.session && x.session !== 'api-fix')).session);
+  is('...which opens focused too', true, (await look()).typing);
+  await toWorker();
+  await press('s', { ctrl: true, as: 'composer Ctrl-s' });
+  is('focus: Ctrl-s from the focused composer goes to the grid', true, onGrid(await settle(x => !x.session)));
+  await toWorker();
+  await press('f', { ctrl: true }); await press('p');
+  is('focus: Ctrl-f p from the focused composer goes to Projects', true, atProjects(await settle(atProjects)));
+
+  // A phone with only its on-screen keyboard: never focused, or the keyboard would rise
+  // over the conversation on every open.
+  await phoneSession();
+  is('focus: a touch-only phone opens a chat unfocused', false, (await look()).typing);
+  // ...and an iPhone that has shown it has a keyboard: focused, like a desk.
+  await phoneGrid();
+  await press('Escape');                   // a key from nowhere: a real keyboard
+  await tap('api-fix'); await settle(x => x.session === 'api-fix'); await slid();
+  is('focus: an iPhone with a keyboard attached opens a chat focused', true, (await settle(x => x.typing)).typing);
 
   // ════════════════════════════════════════════════════════════════════════════════════
   // THE TABLE: every desk key in web/README.md has a row above

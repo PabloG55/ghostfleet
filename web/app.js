@@ -543,7 +543,29 @@ function render() {
 }
 // Everything app.js still draws with el() — the lock screen and the session screen — into
 // #app. One body for both layouts: two panes put this same column on the right.
+// ── A CHAT OPENS READY TO TYPE IN — WITH A KEYBOARD ─────────────────────────────────────
+// Opening a session focused nothing, so the first key a person at a desk pressed went
+// nowhere (or, since the desk's keys, into the composer by way of typeIntoComposer — one
+// key late to feel like a box that was ready). So a chat that has just been opened takes
+// the focus, the caret after any draft it is holding.
+//   ONLY WITH A KEYBOARD, by the same evidence ⏎-to-send uses (enterSends): a fine pointer
+// that hovers, or a key from a real keyboard on an iPhone or iPad. On a touch-only phone a
+// focused box raises the on-screen keyboard over the conversation the person opened to
+// read — every time, on every chat — so there nothing is focused, as before.
+//   Once per open, not per render: the poll redraws, and a box that grabbed the focus back
+// each time would steal it from the search field of a sheet, or from a reader who had
+// deliberately left the box with Esc.
+let focusOnOpen = false;
+function focusIfOpened() {
+  if (!focusOnOpen || S.screen !== 'session' || S.sheet || S.locked) return;
+  focusOnOpen = false;
+  if (enterSends()) focusComposerAt(null);     // null: the end of the draft
+}
 function paintElScreen(app) {
+  paintElScreenBody(app);
+  focusIfOpened();
+}
+function paintElScreenBody(app) {
   if (preactUp) { screensUI.unmount(app); preactUp = false; screenMem = null; }
   // What is on screen now, before the build below re-points these at nodes it has not yet
   // decided to use (keepScreen()).
@@ -1834,6 +1856,7 @@ function openJarvis() {
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
   S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
+  focusOnOpen = true;
   pushNav();
   render(); refresh();
 }
@@ -2435,6 +2458,7 @@ function openSession(name, opts = {}) {
   if (!name) return;
   S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
   S.entry = opts.entry || ''; S.srch = null; S.wantCard = 0;
+  focusOnOpen = true;
   // The open session is the selected card, so the list beside it (two panes) marks it.
   const at = items().findIndex(i => i.card && i.card.name === name);
   if (at >= 0) S.sel = at;
@@ -3591,7 +3615,16 @@ function wireDrop() {
       if (!carriesFiles(e.dataTransfer) || !here()) return;
       e.preventDefault();
       const files = imagesOf(e.dataTransfer);
-      if (!files.length) { toast('only images attach — the same as the photo picker', 'bad'); renderUnlessTyping(); return; }
+      // DRAWN NOW, not when the typing stops: a drop is the mouse, not the keyboard, and on a
+      // desk the box usually holds the focus (a chat opens focused there) — waiting for it to
+      // blur would leave the refusal unsaid. The focus goes back where it was.
+      if (!files.length) {
+        const had = typingNow(), at = isLive(composerNode) && Number.isInteger(composerNode.selectionStart) ? composerNode.selectionStart : null;
+        toast('only images attach — the same as the photo picker', 'bad');
+        render();
+        if (had) focusComposerAt(at);
+        return;
+      }
       const box = composerNode;
       const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
         ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
@@ -6223,13 +6256,30 @@ async function sheetSettings() {
 // Some Ctrl keys cannot be had at all — Ctrl-n, Ctrl-t and Ctrl-w open, open and close a
 // tab before any page hears them, installed PWA or not — and the README table says which.
 const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+// THE KEYS TMUX TAKES EVEN WHILE YOU TYPE TO THE AGENT. At the desk a session is attached
+// and every key goes to the agent — except the ones tmux/cf.tmux.conf binds with -n, which
+// tmux answers first: ` (back), ⇧← / ⇧→ (the next session), Ctrl-s, Ctrl-p, Ctrl-f, and
+// Ctrl-a's prefix table. The composer is the agent's input here, so from inside it those
+// same keys act, and nothing else does — including the desk's two costs: a literal ` cannot
+// be typed into a message (the desk documents the same), and ⇧←/⇧→ move between sessions
+// rather than selecting text. A chord or a prefix already started takes its next key whole.
+// Only the composer, and only a session's: an input in a sheet is never a session.
+function deskKeyFromComposer(e) {
+  if (S.screen !== 'session' || !insideComposer(e.target)) return false;
+  if (S.jump || S.prefix) return true;
+  const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
+  if (e.metaKey || e.altKey) return false;
+  if (e.ctrlKey) return lk === 's' || lk === 'p' || lk === 'f' || lk === 'a';
+  if (k === '`') return true;
+  return !!e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight');
+}
 const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
 function onKey(e) {
   if (S.sheet) {                       // a form owns the keyboard while it is open
     if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
     return;
   }
-  if (typingIn(e.target)) return;
+  if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
   const k = e.key;
   if (S.locked || !k || e.metaKey) return;
   // A modifier on its own is not a key: the chord arrives with the next event.

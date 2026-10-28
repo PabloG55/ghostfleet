@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 93201f6dd7b3
+// CLIENT-HASH: 2a72c25cec3f
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -389,7 +389,8 @@
 // A desktop still on v77 keeps the phone column. On the phone a finger keeps every
 // gesture; what v78 adds there is an attached keyboard (the keys, ⏎ to send) and an image
 // pasted from iOS's own Paste menu. And a draft is the session's, kept until it is sent:
-// a phone still on v77 blanks the box whenever a chat is opened.
+// a phone still on v77 blanks the box whenever a chat is opened. With a keyboard, a chat
+// opens with the box focused.
 const VERSION = 'ghostfleet-v78';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
