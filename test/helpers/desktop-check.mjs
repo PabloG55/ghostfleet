@@ -41,7 +41,13 @@ let b = null, srv = null;
 try {
   srv = await serveDir(WEB);
   try {
-    b = await launch({ width: 1600, height: 900, scale: 1, mobile: false });
+    // A DESK HAS A MOUSE, AND A CI RUNNER HAS NO POINTING DEVICE AT ALL. Linux headless
+    // Chrome on a runner reports (pointer: none) and no hover, so the two panes — which ask
+    // for a fine pointer that hovers — never appeared there and twenty rows went red on a
+    // client that was right. Declared here instead of detected: the desk this file tests is
+    // one with a mouse. Touch emulation, where a row turns it on, still overrides it.
+    b = await launch({ width: 1600, height: 900, scale: 1, mobile: false,
+      args: ['--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2'] });
   } catch (e) {
     if (/no chrome/i.test(String(e && e.message))) { skipGroup('the desktop client', 'no chrome to press keys in'); done(0); }
     throw e;
