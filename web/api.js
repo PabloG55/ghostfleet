@@ -291,17 +291,50 @@ function record(tool, args, result) {
 // ── plumbing ──────────────────────────────────────────────────────────────
 export class AuthError extends Error {}
 export class OfflineError extends Error {}
+// THE DAEMON SAID WAIT, and every read from here waits with it. Its read bucket counts per
+// client and per address, not per path, so a 429 on the grid is a 429 on the transcript too —
+// and a client that went on asking spent a bucket it had just been told was empty. Measured
+// in the daemon's log: one phone, 399 reads in under three minutes from polls that had piled
+// up behind slow answers, then nineteen 429s in two seconds. So `Retry-After` is honoured for
+// ALL reads, by refusing them here without a request, and the pollers ask heldFor() when to
+// come back rather than finding out by asking.
+export class RateLimitedError extends Error {}
+let holdUntil = 0;
+export function heldFor() { return Math.max(0, holdUntil - Date.now()); }
+function hold(r) {
+  const s = Number(r && r.headers && r.headers.get && r.headers.get('Retry-After'));
+  // A missing or unreadable header still means "not now": five seconds, the old poll.
+  const ms = Math.min(Math.max(Number.isFinite(s) && s > 0 ? s * 1000 : 5000, 1000), 120000);
+  holdUntil = Math.max(holdUntil, Date.now() + ms);
+}
+function held(pathAndQuery, local = false) {
+  const ms = heldFor();
+  const e = new RateLimitedError(`the Mac asked this device to slow down — trying again in ${Math.ceil(ms / 1000)} s`);
+  // `local`: refused here, without asking — the daemon has already been heard once.
+  e.status = 429; e.retryAfter = ms; e.path = pathAndQuery; e.local = local;
+  return e;
+}
 
-async function get(pathAndQuery) {
+// `etag` makes it a conditional read: a 304 comes back as { notModified: true } and the
+// caller keeps what it has. `signal` lets a poller drop a read it no longer wants.
+async function get(pathAndQuery, { etag = '', signal } = {}) {
+  if (heldFor() > 0) throw held(pathAndQuery, true);
   const url = baseUrl() + pathAndQuery;
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if (etag) headers['If-None-Match'] = etag;
   let r;
   try {
-    r = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' });
+    r = await fetch(url, { headers, cache: 'no-store', signal });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
+  if (r.status === 304) return { notModified: true };
+  if (r.status === 429) { hold(r); throw held(pathAndQuery); }
   if (!r.ok) { const e = new Error(`${pathAndQuery} → HTTP ${r.status}`); e.status = r.status; throw e; }
-  return r.json();
+  const j = await r.json();
+  const tag = r.headers && r.headers.get && r.headers.get('ETag');
+  if (tag && j && typeof j === 'object' && !Array.isArray(j)) j.etag = tag;
+  return j;
 }
 
 // The fixture backend. Same shapes, same pagination, no server: the screens cannot tell
@@ -428,11 +461,13 @@ export async function getSettings(project) {
 // down a tunnel on cellular — it is a performance decision, not a security control, and
 // the content itself is served unredacted.
 export const PAGE = 20;
-export async function getSession(project, session, before = null) {
+// `opts` is get()'s: { etag, signal }. Only the newest page is polled, so only it is worth
+// asking conditionally; a page reached with `before` is fetched once, when asked for.
+export async function getSession(project, session, before = null, opts = {}) {
   if ((await ready()).mode === 'server') {
     const q = `/api/session?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}` +
               `&limit=${PAGE}` + (before ? `&before=${encodeURIComponent(before)}` : '');
-    return get(q);
+    return get(q, opts);
   }
   // Fixture mode paginates locally over the whole file, so the client walks the same
   // cursor path it will walk against the server.

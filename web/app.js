@@ -150,7 +150,31 @@ function fitCards() {
 }
 
 // ── loading ───────────────────────────────────────────────────────────────
-async function refresh() {
+// ONE REFRESH AT A TIME FOR ONE SCREEN. Every caller — the 5 s poll, conversation mode's
+// 1.5 s one, a resume, a verb landing — used to start its own, and each is three reads in a
+// row. Against a daemon that answered in 8-26 s that stacked: a new refresh every interval
+// while the last ones still waited, then the whole backlog answering at once — measured in
+// the daemon's log as one phone's 399 reads in under three minutes, the rate limit, and
+// nineteen 429s in two seconds. So a call while one is running for the SAME screen is folded
+// into it plus one more after, which is what "refresh" means to every caller: what they want
+// is an answer from after they asked. A DIFFERENT screen does not wait behind the old one —
+// opening a session must not queue behind a slow read of the last — and what the old one
+// brings back is checked against where the app is before it is used (readChat, chatLanded).
+let refreshing = null, refreshKey = '', refreshAgain = false;
+const screenKey = () => [S.screen, S.project, S.sub, S.session, S.view, S.jarvisMode].join('\x1f');
+function refresh() {
+  const key = screenKey();
+  if (refreshing && refreshKey === key) { refreshAgain = true; return refreshing; }
+  refreshKey = key; refreshAgain = false;
+  const run = (async () => {
+    try { await refreshOnce(); }
+    finally { if (refreshing === run) refreshing = null; }
+    if (refreshAgain && !refreshing && screenKey() === key) { refreshAgain = false; return refresh(); }
+  })();
+  refreshing = run;
+  return run;
+}
+async function refreshOnce() {
   // Once per unlock, and only ever a no-op after that: a rotated push endpoint is
   // invisible from the phone (push simply stops), so the check rides along with the poll
   // that is already running rather than waiting for someone to open the settings sheet.
@@ -226,12 +250,12 @@ async function refresh() {
       // nothing is the kind of waste that is invisible until it is a phone bill.
       // ...and while a spoken turn is owed an answer, whatever was paged in: the answer is
       // looked for in the newest page, and conversation mode cannot wait on a frozen one.
+      //   ...AND ONCE "LOAD MORE" HAS BEEN PRESSED, STILL. That used to stop the re-read for
+      // good, for the reason above — and a reply that arrived after it never appeared until the
+      // chat was left and reopened. The newest page is laid on top of the older ones now
+      // (mergeNewest), so nothing paged in is thrown away and nothing new is missed.
       const owed = !!(S.talk && S.talk.phase === 'waiting');
-      if ((S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) || owed) {
-        const seq = ++sessSeq;
-        const fresh = await api.getSession(S.project, S.session);
-        S.sess = { ...fresh, pages: 1, seq };
-      }
+      if (S.view !== 'pane' || owed) await readChat();
       // Whatever the transcript and the queue now say decides whether each bubble in the
       // outbox is still telling the truth.
       reconcileOutbox();
@@ -241,6 +265,14 @@ async function refresh() {
     save();
   } catch (e) {
     if (e instanceof api.AuthError) return lock();
+    // TOLD TO WAIT is not offline and not broken: say it once, when the daemon says it, and
+    // not again for every read the hold then refuses without asking.
+    if (e instanceof api.RateLimitedError) {
+      if (!S.stale) S.stale = lastFetchedAt();
+      if (!e.local) toast(e.message);
+      renderUnlessTyping();
+      return;
+    }
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -409,13 +441,13 @@ function render() {
   if (!S.locked && PREACT_SCREENS.has(S.screen)) {
     if (!preactUp) {
       app.textContent = '';
-      paneBoxNode = paneNode = paneGeomNode = null;
+      paneBoxNode = paneNode = paneGeomNode = chatNode = null;
       composerNode = null;
       preactUp = true;
     }
     screensUI.mount(app, S.screen, S.screen === 'grid' ? gridProps() : projectsProps());
     renderSheet();
-    syncPanePoll();
+    syncPanePoll(); syncChatPoll();
     return;
   }
   // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
@@ -423,13 +455,15 @@ function render() {
   // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
   // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
   // there to be removed.
-  if (preactUp) { screensUI.unmount(app); preactUp = false; }
-  app.textContent = '';
+  if (preactUp) { screensUI.unmount(app); preactUp = false; screenMem = null; }
+  // What is on screen now, before the build below re-points these at nodes it has not yet
+  // decided to use (keepScreen()).
+  const liveChat = chatNode, liveComposer = composerNode;
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
-  paneBoxNode = paneNode = paneGeomNode = null;
+  paneBoxNode = paneNode = paneGeomNode = chatNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
-  if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
+  if (S.locked) { app.textContent = ''; screenMem = null; app.append(lockScreen()); renderSheet(); syncPanePoll(); syncChatPoll(); return; }
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
@@ -450,12 +484,133 @@ function render() {
     const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
     if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
   }
+  if (keepScreen(app, screen, liveChat, liveComposer)) {
+    renderSheet();
+    syncPanePoll(); syncChatPoll();
+    return;
+  }
+  app.textContent = '';
   app.append(...screen);
+  rememberScreen(screen);
   renderSheet();
   // Every state change that matters to the pane's timer — the screen, the view, a sheet,
   // a confirmation, the lock — has already been applied by the time we get here, which is
   // why this is the single place that starts and stops it.
-  syncPanePoll();
+  syncPanePoll(); syncChatPoll();
+}
+
+// ── an open chat is UPDATED, not rebuilt ─────────────────────────────────────
+// "A wide table snaps back to its start every time I scroll it sideways" — on the phone and
+// in a desktop browser. render() emptied #app and built the session screen from nothing on
+// every poll, and a new element starts at scrollLeft 0: every table and code block in the
+// conversation (each scrolls sideways in its own box, md.js) went back to its first column
+// every five seconds, and a selection in a bubble went with the node it was in.
+//   So in the chat view the screen is built as before, and then COMPARED, not appended:
+//   · a poll that brought nothing new changes no DOM at all — every part of the new build
+//     reads the same as the part on screen, and the build is dropped;
+//   · otherwise each part that reads the same KEEPS ITS NODE, and only what differs is put
+//     in. Inside the message list that is per message, keyed by msgKey() (arrived() tags
+//     it), so a new message is an insertion and every bubble above it — its scroll offsets,
+//     its selection, its open <details> — is the element it was.
+//   · the list's own node is never replaced or moved, so its scrollTop is never lost either;
+//     restoreScroll() then follows the end only for a reader who was at it.
+// "Reads the same" is the part's HTML with the entrance animation's class and delay left
+// out (they are what the same message carries for its first quarter-second), plus the draft
+// for the composer, whose text lives in a property the HTML does not show.
+//   Not in the pane view: paneView() hands out nodes the pane's own poll paints into, and the
+// pane has its own in-place repaint (paintPane).
+let screenMem = null;          // { who, draft, parts: Map(key -> { node, sig }) } of #app
+let chatMem = null;            // { node, parts } of the message list
+const ANIM = new Set(['enter', 'sent', 'settle']);
+const chatWho = () => `${S.project}\x1f${S.session}\x1f${S.jarvisMode ? 'j' : ''}`;
+function baseClass(n) {
+  return String((n.getAttribute && n.getAttribute('class')) || '').split(/\s+/).filter((c) => c && !ANIM.has(c)).join(' ');
+}
+function sigOf(n) {
+  if (!n || n.nodeType !== 1) return String(n && n.textContent);
+  const cls = n.getAttribute('class'), st = n.getAttribute('style');
+  if (cls != null) n.setAttribute('class', baseClass(n));
+  if (st != null) { const rest = st.replace(/--gf-in:[^;]*;?\s*/g, '').trim(); if (rest) n.setAttribute('style', rest); else n.removeAttribute('style'); }
+  const h = n.outerHTML;
+  if (cls != null) n.setAttribute('class', cls);
+  if (st != null) n.setAttribute('style', st);
+  return h;
+}
+// Keys for a run of sibling parts: a message's own (arrived()), else its tag and class. The
+// n-th repeat of a key is `key#n`, so two messages in one second are two keys.
+function partsOf(nodes, skip) {
+  const seen = new Map();
+  return nodes.filter(Boolean).map((n) => {
+    const k0 = n.__gfk || `${n.nodeName}.${baseClass(n)}`;
+    const i = seen.get(k0) || 0; seen.set(k0, i + 1);
+    return { key: i ? `${k0}#${i}` : k0, node: n, sig: skip && skip(n) ? '' : sigOf(n) };
+  });
+}
+// Put `nodes` under `parent` in this order, touching only what is out of place. A kept node
+// already in sequence is never moved: moving it would detach it, and that is a reset too.
+function place(parent, nodes) {
+  const want = new Set(nodes);
+  for (const c of Array.from(parent.childNodes)) if (!want.has(c)) parent.removeChild(c);
+  let cur = parent.firstChild;
+  for (const n of nodes) {
+    if (n === cur) { cur = cur.nextSibling; continue; }
+    parent.insertBefore(n, cur);
+  }
+}
+const sameKids = (parent, nodes) => parent.childNodes.length === nodes.length && nodes.every((n, i) => parent.childNodes[i] === n);
+function rememberScreen(screen) {
+  const chat = S.screen === 'session' && S.view === 'chat' && isLive(chatNode) && canCompare(chatNode) ? chatNode : null;
+  if (!chat) { screenMem = chatMem = null; return; }
+  screenMem = { who: chatWho(), draft: S.draft || '',
+                parts: new Map(partsOf(screen, (n) => n === chat).map((p) => [p.key, p])) };
+  chatMem = { node: chat, parts: new Map(partsOf(Array.from(chat.childNodes)).map((p) => [p.key, p])) };
+}
+// ONLY WHERE THE DOM CAN SAY WHAT IT HOLDS. Every comparison here is of outerHTML, and a
+// DOM without it (the suite's stub) would hand back `undefined` for every part — all equal,
+// so every old node kept: a composer still holding a message that was just sent. There the
+// screen is rebuilt, as it always was.
+const canCompare = (n) => !!n && typeof n.outerHTML === 'string';
+// The message list: `live` is on screen, `built` is the list just drawn for the same chat.
+function syncChat(live, built) {
+  const prev = chatMem && chatMem.node === live ? chatMem.parts : new Map();
+  const parts = partsOf(Array.from(built.childNodes));
+  const nodes = parts.map((p) => { const h = prev.get(p.key); return h && h.sig === p.sig && h.node.parentNode === live ? h.node : p.node; });
+  const busy = built.getAttribute('aria-busy');
+  if (busy == null) { if (live.getAttribute('aria-busy') != null) live.removeAttribute('aria-busy'); }
+  else if (live.getAttribute('aria-busy') !== busy) live.setAttribute('aria-busy', busy);
+  const changed = !sameKids(live, nodes);
+  if (changed) place(live, nodes);
+  chatMem = { node: live, parts: new Map(parts.map((p, i) => [p.key, { node: nodes[i], sig: p.sig }])) };
+  // Follow the end for a reader who was at it, hold the place of one who was not (and the
+  // place "load older" asked to keep) — the list's node is the same, so this only moves it
+  // when something new arrived at the bottom of a reader who was watching the bottom.
+  if (changed) restoreScroll('chat', live);
+  return changed;
+}
+// The whole screen. False sends render() down its old path: another screen, another chat,
+// the pane view, or no list on screen to keep.
+function keepScreen(app, screen, liveChat, liveComposer) {
+  const builtChat = chatNode;
+  if (!(S.screen === 'session' && S.view === 'chat' && screenMem && screenMem.who === chatWho()
+        && builtChat && screen.includes(builtChat) && liveChat && liveChat.parentNode === app
+        && canCompare(liveChat))) return false;
+  const parts = partsOf(screen, (n) => n === builtChat);
+  const draftSame = (S.draft || '') === screenMem.draft;
+  const nodes = parts.map((p) => {
+    if (p.node === builtChat) return liveChat;
+    const isComposer = p.node.classList && p.node.classList.contains('composer');
+    const h = screenMem.parts.get(p.key);
+    return h && h.sig === p.sig && h.node.parentNode === app && (!isComposer || draftSame) ? h.node : p.node;
+  });
+  syncChat(liveChat, builtChat);
+  if (!sameKids(app, nodes)) place(app, nodes);
+  chatNode = liveChat;
+  // The composer kept is the composer on screen; the one just built was never attached.
+  const ci = parts.findIndex((p) => p.node.classList && p.node.classList.contains('composer'));
+  if (ci >= 0 && nodes[ci] !== parts[ci].node) composerNode = liveComposer;
+  screenMem = { who: chatWho(), draft: S.draft || '',
+                parts: new Map(parts.filter((p) => p.node !== builtChat).map((p) => [p.key, { node: nodes[parts.indexOf(p)], sig: p.sig }])) };
+  return true;
 }
 
 // header() USED TO LIVE HERE AND IS GONE. It drew the one-line header for the two screens
@@ -2314,6 +2469,16 @@ function stepSession(delta) {
 
 function chatView(card) {
   const wrap = wireSessionSwipe(el('div', { class: 'chat' }));
+  // Set HERE and not at the end: two of the returns below are early (nothing loaded yet, no
+  // messages yet), and a list the patch and keepScreen() cannot find is one they cannot fill.
+  //   ...and its scroll is watched from here for the same reason. The list drawn while the
+  // conversation loads is now the list that gets FILLED (keepScreen keeps it), so a list
+  // with no listener would never record the reader scrolling up — measured: scrolled up to
+  // 589, and the next message threw them to the end at 1408. The restore is deferred to the
+  // next frame, so the content appended below is there by the time it measures.
+  chatNode = wrap;
+  watchScroll('chat', wrap);
+  try { wrap.addEventListener('scroll', () => nearTop(wrap)); } catch {}
   const s = S.sess;
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
@@ -2323,7 +2488,18 @@ function chatView(card) {
     ]));
   }
   // A session opened afresh draws its history as history: forget what the last visit drew.
-  if (!s) { drawn.who = ''; wrap.setAttribute('aria-busy', 'true'); wrap.append(...skeletonChat()); return wrap; }
+  // NOT AN EMPTY LIST, AND NOT A SILENT ONE WHEN IT IS STUCK. While the first page is on its
+  // way the skeleton IS the loading state, in shape and without words (v70: the phone waits in
+  // skeletons, never in a "reading…" line). Once a read has FAILED, one line says so — why,
+  // and that it is being asked again — because a skeleton that never resolves is exactly the
+  // "it does not load until I send" this was reported as.
+  if (!s) {
+    drawn.who = ''; wrap.setAttribute('aria-busy', 'true');
+    if (chatLoad.key === chatKey() && chatLoad.tries > 0)
+      wrap.append(el('div', { class: 'loading', role: 'status', text: `could not load the conversation — ${chatLoad.why} · retrying` }));
+    wrap.append(...skeletonChat());
+    return wrap;
+  }
   // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
   // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
   // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
@@ -2333,29 +2509,19 @@ function chatView(card) {
     wrap.append(el('div', { class: 'hint empty', text: 'No messages yet — send one below' }));
     return wrap;
   }
-  // Older messages load at the TOP, where they belong in this order — the button is the
-  // ceiling of the conversation, not a footer.
+  // OLDER MESSAGES LOAD BY THEMSELVES, at the TOP, where they belong in this order: scrolling
+  // up to the ceiling of the conversation asks for the page above it (nearTop, loadOlder).
+  // What the ceiling says is the state of that, quietly: older ones on their way, the start
+  // of the conversation, or — only when a fetch failed — the old button, to ask again.
   if (s.next_before) {
-    wrap.append(el('div', { class: 'row l' }, [
-      btn(`load ${api.PAGE} older`, async () => {
-        // Hold the reader's place: a page prepended above them would otherwise throw them
-        // to the top of a conversation they were reading the middle of.
-        //   MEASURED BEFORE THE AWAIT, armed after it. A 5s poll landing mid-fetch rebuilds
-        // this list and leaves `wrap` detached, and a detached node measures a scrollHeight
-        // of 0 — which would record a distance-from-the-end of 0, and 0 from the end IS the
-        // end, the one place this must never send anybody.
-        const held = measureFromEnd('chat', wrap);
-        try {
-          const older = await api.getSession(S.project, S.session, s.next_before);
-          S.sess = { ...older, messages: [...(older.messages || []), ...(s.messages || [])],
-                     next_before: older.next_before, pages: (s.pages || 1) + 1 };
-        } catch (e) { toast(String(e.message || e), 'bad'); }
-        holdScrollFromEnd('chat', held);
-        render();
-      }),
+    const here = olderFor === chatKey();
+    if (here && olderBusy) wrap.append(el('div', { class: 'meta l older', role: 'status', text: 'loading older messages…' }));
+    else if (here && olderErr) wrap.append(el('div', { class: 'row l older' }, [
+      el('span', { class: 'meta', text: `older messages did not load — ${olderErr}` }),
+      btn(`load ${api.PAGE} older`, () => { olderErr = ''; loadOlder(); }),
     ]));
   } else if (s.total) {
-    wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
+    wrap.append(el('div', { class: 'meta l start', text: 'start of conversation' }));
   }
   for (const m of (s.messages || [])) {
     // EVENTS ARE CARDS, NOT BUBBLES. A compaction and a run of tool calls used to arrive as
@@ -2397,7 +2563,6 @@ function chatView(card) {
   // fetched, and `working` is the same verdict the grid card shows — no second signal, no
   // second endpoint, and nothing for the two to disagree about.
   if (card && card.status === 'working') wrap.append(thinking());
-  watchScroll('chat', wrap);
   return wrap;
 }
 // NOT A MESSAGE, AND DELIBERATELY NOT BUILT BY turn(). It looks like an agent bubble
@@ -2770,6 +2935,7 @@ function arrived(node, m, key) {
   const who = `${S.project} ${S.session} ${S.jarvisMode ? 'j' : ''}`;
   if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() });
   if (!key) return node;
+  node.__gfk = key;                  // what keepScreen() matches this bubble by on the next render
   if (drawn.keys.has(key)) {
     drawn.past = true;
     const mv = drawn.moving.get(key);
@@ -3448,7 +3614,7 @@ const PFS_DEFAULT = 11;         // px: small, and still readable on a phone held
 const PFS_MIN = 6, PFS_MAX = 28;
 const PANE_HISTORY = 200;       // rows of scrollback the `history` toggle asks for
 
-let paneBoxNode = null, paneNode = null, paneGeomNode = null;
+let paneBoxNode = null, paneNode = null, paneGeomNode = null, chatNode = null;
 
 // ── where the reader had scrolled to ────────────────────────────────────────
 // KEPT OUTSIDE THE NODES, BECAUSE THE NODES DO NOT SURVIVE. refresh()'s 5s poll ends in
@@ -3591,6 +3757,9 @@ function reapplyScroll(key, box, want, left, n) {
 function restoreScroll(key, box, prepare) {
   const s = SCROLLERS[key]; if (!s || !box) return;
   const go = () => {
+    // A list built and then not used (keepScreen kept the one on screen) is detached by the
+    // time this runs, and writing its 0 back would overwrite where the reader really is.
+    if (box.isConnected === false) return;
     try {
       if (prepare) prepare(box);
       const m = scrollMem.get(key);
@@ -4013,6 +4182,13 @@ let composerNode = null;
 
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
 let paneTimer = null, paneTimerMs = 0, paneBusy = false;
+// The chat's poll, declared here for the same reason (see "the chat's own poll" below).
+const CHAT_POLL_LIVE_MS = 2000, CHAT_POLL_IDLE_MS = 5000, CHAT_SUPERSEDE_MS = 3000;
+const CHAT_FIRST_GIVEUP_MS = 8000, CHAT_GIVEUP_MS = 30000, CHAT_RETRY_MAX_MS = 15000;
+let chatTimer = null, chatDue = 0, chatRead = null, chatErr = '', hiddenAt = 0;
+let chatLoad = { key: '', tries: 0, why: '' };   // the first page of the open chat, until it lands
+const OLDER_NEAR_PX = 240;
+let olderFor = '', olderBusy = false, olderErr = '';   // the older-page fetch of chat `olderFor`
 
 const panePeriod = () => (S.pscroll ? PANE_POLL_HISTORY_MS : PANE_POLL_MS);
 // Paused for a sheet or a confirmation for the same reason refresh() is: those are forms
@@ -4076,6 +4252,263 @@ function paintPane() {
   pre.innerHTML = r.html;
   if ((scrollMem.get('pane') || {}).atEnd) writeScroll('pane', box, box.scrollHeight);
   if (paneGeomNode) paneGeomNode.textContent = `${r.cols}×${r.rows}`;
+}
+
+// ── older messages, by scrolling up ─────────────────────────────────────────
+// "Today the conversation needs a 'load more' press." Now the reader scrolling to within
+// OLDER_NEAR_PX of the top is the press: the page above is fetched, prepended, and the message
+// they were looking at stays exactly where it was on screen. One fetch at a time; none once
+// fleet-read says there is nothing before (next_before null), which is drawn as the start of
+// the conversation; and after a failure none until the button drawn in its place is pressed,
+// because retrying on every scroll event would be a retry loop at the speed of a thumb.
+//   ANCHORED ON THE MESSAGE, NOT ON THE DISTANCE FROM THE END. The button held "how far from
+// the bottom", which is the same thing only while nothing arrives at the bottom — and the
+// chat's poll now runs during the fetch, so a reply landing below would have moved the reader
+// by its height. Where the DOM can measure (getBoundingClientRect with a top), the topmost
+// message on screen is the anchor and the list is shifted by exactly how far it moved; where
+// it cannot, the old distance-from-end hold is the fallback. Either way the reader's place is
+// written back through rememberScroll, so the poll's own restore keeps it rather than undoing it.
+function nearTop(box) {
+  if (box.isConnected === false || olderBusy || (olderErr && olderFor === chatKey())) return;
+  const s = S.sess;
+  if (!s || !s.next_before || s.of !== chatKey()) return;
+  if (!(numOf(box.scrollHeight) > numOf(box.clientHeight)) || numOf(box.scrollTop) > OLDER_NEAR_PX) return;
+  loadOlder();
+}
+function anchorOf(box) {
+  try {
+    const top = box.getBoundingClientRect().top;
+    if (typeof top !== 'number') return null;
+    for (const n of Array.from(box.childNodes)) {
+      const r = n.getBoundingClientRect && n.getBoundingClientRect();
+      if (n.__gfk && r && typeof r.top === 'number' && r.bottom > top) return { node: n, top: r.top };
+    }
+  } catch {}
+  return null;
+}
+async function loadOlder() {
+  const s = S.sess, key = chatKey();
+  if (!s || !s.next_before || olderBusy || s.of !== key) return;
+  const live = isLive(chatNode) ? chatNode : null;
+  const want = { project: S.project, session: S.session };
+  olderFor = key; olderBusy = true; olderErr = '';
+  // MEASURED BEFORE THE AWAIT, armed after it — a poll landing mid-fetch must not spend it.
+  const held = live ? measureFromEnd('chat', live) : null;
+  const anchor = live ? anchorOf(live) : null;
+  paintChat();
+  holdAnchor(anchor);                       // the "loading older" line went in above it
+  let landed = false;
+  try {
+    const older = await api.getSession(want.project, want.session, s.next_before);
+    // Another session by now: these are its older messages, not this one's.
+    if (S.project !== want.project || S.session !== want.session) return;
+    // ...and the poll may have landed while this was in flight. The older page goes under
+    // what was on screen when it was asked for, and whatever is on screen NOW goes back on
+    // top — rebuilding from `s` alone dropped a reply that arrived meanwhile.
+    const cur = S.sess && S.sess.of === key ? S.sess : s;
+    const base = { ...cur, messages: [...(older.messages || []), ...(s.messages || [])],
+                   next_before: older.next_before, pages: (s.pages || 1) + 1 };
+    S.sess = mergeNewest(base, cur);
+    if (held != null) holdScrollFromEnd('chat', held);
+    landed = true;
+  } catch (e) {
+    if (e instanceof api.AuthError) { olderBusy = false; lock(); return; }
+    olderErr = String((e && e.message) || e);
+  } finally { if (olderFor === key) olderBusy = false; }
+  paintChat();
+  holdAnchor(anchor);
+}
+// The anchor, where it can be measured: the same element (keepScreen kept it) moved down by
+// exactly the height of what was put above it, so the list moves down by the same amount.
+function holdAnchor(anchor) {
+  const box = isLive(chatNode) ? chatNode : null;
+  if (!box || !anchor || !isLive(anchor.node) || anchor.node.parentNode !== box) return;
+  const d = anchor.node.getBoundingClientRect().top - anchor.top;
+  if (d) box.scrollTop = numOf(box.scrollTop) + d;
+  rememberScroll('chat', box);             // the reader's place now, which supersedes the hold
+}
+
+// ── the chat's own poll ───────────────────────────────────────────────────
+// AN OPEN CHAT CONVERGES TO THE TRANSCRIPT WITHOUT BEING REOPENED, and this is the one place
+// that makes it so. Reported as "the reply is not there until I leave the chat and open it
+// again", and there was more than one way to get there:
+//   · TYPING STOPPED IT. The 5 s poll is held while the composer has focus, because a
+//     render() under the keyboard closes it (pollPaused) — and the transcript was read only
+//     by that poll, so a reply waited for the owner to stop typing their next message.
+//   · OVERLAP. Nothing stopped a second read starting while the first was still out, and
+//     whichever answered LAST was drawn. A read asked before the reply was written, and slow
+//     to answer, put the screen back to how it was before the reply: there, then gone.
+//   · "LOAD MORE" FROZE IT for good (see refresh()).
+// So the transcript has a poll of its own, beside the pane's, and it is not held by typing or
+// by an open sheet: what it brings back is drawn into the chat list alone (patchChat), which
+// leaves the composer, its focus and its keyboard where they were. One read at a time; a read
+// that answers after a newer one has landed is dropped by its sequence number; a resume, a
+// pageshow or a focus asks again at once; and it never stops while the chat is on screen —
+// every 2 s while an answer is owed, every 5 s while the session is idle, so a reply that
+// lands long after anyone was expecting it still appears.
+//   Conditional, too: the daemon tags each page (ETag) and a page that has not changed comes
+// back as a bodyless 304, so a poll of an idle session costs the tunnel almost nothing.
+const chatPollWanted = () =>
+  !document.hidden && !S.locked && S.screen === 'session' && S.view === 'chat' && !!S.session;
+const chatKey = () => `${S.project}\x1f${S.session}`;
+// LIVE while there is something to wait for: a message of ours the transcript has not shown,
+// a session that is working, or conversation mode owed an answer. Idle otherwise.
+function chatPeriod() {
+  // NOTHING ON SCREEN YET: the first page is retried on its own clock, quickly at first and
+  // backing off — 1, 2, 4, 8, then every 15 s — and never stops while the chat is open.
+  if (!chatHas()) return Math.min(1000 * 2 ** Math.max(0, chatLoad.tries - 1), CHAT_RETRY_MAX_MS);
+  const c = cardOf(S.session);
+  const live = S.outbox.some(outHere) || (c && (c.status === 'working' || c.status === 'starting'))
+            || (S.talk && S.talk.phase === 'waiting');
+  return live ? CHAT_POLL_LIVE_MS : CHAT_POLL_IDLE_MS;
+}
+function stopChatPoll() { if (chatTimer) { clearTimeout(chatTimer); chatTimer = null; chatDue = 0; } }
+// A chain of timeouts rather than an interval, so the next read is timed from the end of the
+// last one — a read slower than the period can never have another started behind it — and
+// so a hold from the daemon (Retry-After) moves the next read rather than being met by it.
+function armChatPoll(ms = chatPeriod()) {
+  stopChatPoll();
+  if (!chatPollWanted()) return;
+  const wait = Math.max(ms, api.heldFor());
+  chatDue = Date.now() + wait;
+  chatTimer = setTimeout(() => {
+    chatTimer = null; chatDue = 0;
+    if (!chatPollWanted()) return;
+    // Re-armed NOW, not when the read settles: a read that never answers would otherwise be
+    // the last thing this timer ever did. A tick that finds a read still out joins it (no
+    // second request), and the one that finds it out too long gives up on it (readChat).
+    readChat();
+    armChatPoll();
+  }, wait);
+}
+// Idempotent, and called from render() like syncPanePoll(). It also brings a waiting read
+// FORWARD when the cadence has just become live — a message sent while the idle timer was
+// set should not wait out the idle period.
+//   Armed even while a read is out: the tick then joins that read instead of starting one,
+// and re-arms when it lands — so there is never a moment with nothing scheduled.
+function syncChatPoll() {
+  if (!chatPollWanted()) return stopChatPoll();
+  const period = chatPeriod();
+  if (chatTimer && chatDue <= Date.now() + period) return;
+  armChatPoll(period);
+}
+// Read the newest page. Joins a read already out for the same chat, unless `fresh` and that
+// read is one not worth waiting for: started before the app last went to the background (it
+// carries what the transcript held then, if its socket survived at all), or out longer than
+// CHAT_SUPERSEDE_MS. Then it is dropped and a new one asked — the drop is an abort, and the
+// sequence check in chatLanded() is what makes it safe if the old one answers anyway.
+//   Never throws: a locked token locks, a hold waits, anything else is said once.
+//   And a read that has not answered at all is given up on — CHAT_FIRST_GIVEUP_MS while the
+// chat is still empty, CHAT_GIVEUP_MS after — and asked again, so a socket that died under
+// it (an iOS resume does that) cannot hold the chat, and every refresh() waiting on it,
+// forever. Asking again costs the Mac nothing: the daemon joins a second ask for the same
+// page to the read already running (fleet-serve, sessionMessages).
+const chatHas = () => !!(S.sess && S.sess.of === chatKey());
+function chatFailed(why) {
+  if (chatHas()) return false;
+  chatLoad.tries++; chatLoad.why = why;
+  paintChat();
+  return true;
+}
+function readChat({ fresh = false } = {}) {
+  const key = chatKey();
+  if (chatLoad.key !== key) chatLoad = { key, tries: 0, why: '' };
+  if (chatRead && chatRead.key === key) {
+    const age = Date.now() - chatRead.at;
+    const stale = chatRead.at < hiddenAt || age > CHAT_SUPERSEDE_MS;
+    const dead = age > (chatHas() ? CHAT_GIVEUP_MS : CHAT_FIRST_GIVEUP_MS);
+    if (!dead && (!fresh || !stale)) return chatRead.p;
+    if (dead) chatFailed('the Mac has not answered yet');
+  }
+  if (chatRead && chatRead.ctl) { try { chatRead.ctl.abort(); } catch {} }
+  const want = { project: S.project, session: S.session, key };
+  const cur = S.sess && S.sess.of === key ? S.sess : null;
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const me = { key, seq: ++sessSeq, ctl, at: Date.now(), p: null };
+  chatRead = me;
+  me.p = (async () => {
+    try {
+      const r = await api.getSession(want.project, want.session, null,
+        { etag: (cur && cur.etag) || '', signal: ctl ? ctl.signal : undefined });
+      return chatLanded(want, me.seq, r);
+    } catch (e) {
+      if (ctl && ctl.signal.aborted) return false;          // we let it go
+      if (e instanceof api.AuthError) { lock(); return false; }
+      // Before the first page, every failure is said IN the chat, where the conversation
+      // should be, and the poll retries it (chatPeriod). After it, a hold or a dropped
+      // connection is refresh()'s to say, and anything else is said once.
+      if (e instanceof api.RateLimitedError) { chatFailed('the Mac asked this device to slow down'); return false; }
+      if (e instanceof api.OfflineError) { chatFailed('the Mac is not answering'); return false; }
+      const msg = String((e && e.message) || e);
+      if (chatFailed(msg)) return false;
+      if (msg !== chatErr) { chatErr = msg; toast(msg, 'bad'); paintChat(); }
+      return false;
+    } finally { if (chatRead === me) chatRead = null; }
+  })();
+  return me.p;
+}
+// Where a page lands, and the three ways it is turned away: the screen is somewhere else now;
+// a read started AFTER this one has already been drawn; or it is a 304, which changes nothing
+// but does count as a snapshot taken now (reconcileOutbox reads S.sess.seq for that).
+function chatLanded(want, seq, r) {
+  if (S.screen !== 'session' || S.project !== want.project || S.session !== want.session) return false;
+  const cur = S.sess && S.sess.of === want.key ? S.sess : null;
+  if (cur && (cur.seq || 0) > seq) return false;
+  chatErr = ''; chatLoad = { key: want.key, tries: 0, why: '' };
+  const before = outboxSig();
+  if (r && r.notModified) {
+    if (!cur) return false;
+    cur.seq = seq;
+    afterChat(outboxSig() !== before);
+    return false;
+  }
+  S.sess = { ...mergeNewest(cur, r), of: want.key, seq };
+  afterChat(true);
+  return true;
+}
+const outboxSig = () => S.outbox.map(o => `${o.id}:${o.state}`).join(',');
+function afterChat(changed) {
+  const before = outboxSig();
+  reconcileOutbox();
+  talkAfterRefresh();
+  if (changed || outboxSig() !== before) paintChat();
+}
+// THE NEWEST PAGE, ON TOP OF WHATEVER WAS PAGED IN ABOVE IT. Joined where the new page's first
+// message sits in what is already held; everything before that point is the reader's paged-in
+// history and is kept. No overlap means more arrived than a page holds, and then the newest
+// page alone is the truth — a gap drawn as if it were continuous would be worse.
+const pageKey = (m) => `${m && m.role}|${m && m.ts}|${String((m && m.text) || '').slice(0, 200)}`;
+export function mergeNewest(cur, fresh) {
+  const ms = (fresh && fresh.messages) || [];
+  if (!cur || (cur.pages || 1) <= 1 || !ms.length) return { ...fresh, pages: 1 };
+  const old = cur.messages || [], k = pageKey(ms[0]);
+  let at = -1;
+  for (let i = old.length - 1; i >= 0; i--) if (pageKey(old[i]) === k) { at = i; break; }
+  if (at < 0) return { ...fresh, pages: 1 };
+  return { ...fresh, messages: [...old.slice(0, at), ...ms], next_before: cur.next_before, pages: cur.pages };
+}
+// Drawn as a whole screen when nothing is in the way, and as the chat list alone when the
+// owner is typing or has a sheet open — the render those would lose is deferred, as
+// renderUnlessTyping() defers it, and spent by the next poll that may.
+function paintChat() {
+  if (S.screen !== 'session') return;
+  if (!pollPaused()) { render(); return; }
+  renderDeferred = true;
+  patchChat();
+}
+function patchChat() {
+  const live = chatNode, box = composerNode;
+  if (S.view !== 'chat' || !isLive(live) || !live.parentNode) return;
+  const built = chatView(cardOf(S.session));   // re-points chatNode at the list it built
+  if (!canCompare(live)) { try { live.parentNode.replaceChild(built, live); } catch { chatNode = live; } return; }
+  chatNode = live; composerNode = box;
+  syncChat(live, built);
+}
+// Coming back: a resume, a page restored from the back-forward cache, or the window taking
+// focus. Asked at once, and the timer re-armed from now.
+function resumeChat(fresh) {
+  if (!chatPollWanted()) return;
+  readChat({ fresh }).finally(() => armChatPoll());
 }
 
 // ── back, and why there are no URLs ─────────────────────────────────────────
@@ -5522,7 +5955,8 @@ document.addEventListener('visibilitychange', () => {
     // sheet, not the owner leaving, so coming back from it is not a resume and arms nothing
     // — otherwise a dismissed sheet would re-try itself forever.
     hidByCeremony = pk.busy();
-    stopPanePoll();
+    hiddenAt = Date.now();
+    stopPanePoll(); stopChatPoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
     if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
@@ -5533,11 +5967,21 @@ document.addEventListener('visibilitychange', () => {
   usageSoon();   // a resume reads the accounts again on the next poll
   hidByCeremony = false;
   if (act === 'lock') { if (S.locked) tryAutoUnlock(); else lock(); }
-  else if (act === 'refresh') refresh().then(() => { if (!S.locked) pk.release(); });
-  syncPanePoll();
+  else if (act === 'refresh') {
+    // The chat first, and FRESH: whatever read was out when the app left is from before, and
+    // refresh() below joins this one rather than that one.
+    resumeChat(true);
+    refresh().then(() => { if (!S.locked) pk.release(); });
+  }
+  syncPanePoll(); syncChatPoll();
 });
 // A desk window taking focus back is a resume that hides nothing (usageSoon).
 addEventListener('focus', usageSoon);
+// A page restored from the back-forward cache gets no visibilitychange of its own on every
+// engine, and a desktop window brought to the front gets only `focus`. Both ask again; a
+// focus joins a read that is already out unless that read has been out too long to wait for.
+addEventListener('pageshow', (e) => { if (e && e.persisted) resumeChat(true); });
+addEventListener('focus', () => resumeChat(true));
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
 // until something re-navigates — and the first re-navigation runs the OLD app.js while the
 // new one installs behind it, so it takes TWO cold opens to pick up a fix. Measured: a

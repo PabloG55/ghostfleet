@@ -53,7 +53,7 @@ export function request(base, method, path, { body, headers = {}, contentType } 
         res.on('end', () => {
           const text = Buffer.concat(parts).toString('utf8');
           let json = null; try { json = JSON.parse(text); } catch {}
-          resolve({ status: res.statusCode, json, text });
+          resolve({ status: res.statusCode, json, text, headers: res.headers });
         });
       });
     req.on('error', reject);

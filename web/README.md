@@ -300,7 +300,11 @@ through, so the button being absent is a courtesy and not the control.
 GET  /api/projects                          -> { home, projects: [ … ], agents, jarvis_enabled, speak }
 GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 GET  /api/session?project=&session=&limit=20[&before=<ts>]
-                                            -> { session, total, messages: [{ts,role,text}], next_before, note? }
+                                            -> { session, total, messages: [{ts,role,text}], next_before, note?,
+                                                 stamp, queue? }   with an ETag; If-None-Match that
+                                            matches -> 304, no body. The open chat polls it this way.
+                                            Any read can be a 429 with Retry-After: the client then
+                                            holds EVERY read until it has passed (api.js heldFor)
 GET  /api/pane?project=&session=[&scrollback=0..2000]
                                             -> { ok, project, session, scrollback, at, pane: "<SGR text>" }
 GET  /api/checkouts?project=<name>          -> { roots, checkouts }

@@ -974,6 +974,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * puts in every cell: a cell ignores max-width, a block inside it does not, so a column is
  * its content's width up to 16em and wraps beyond that. `break-word` wraps a long word only
  * when it must, and a LINK may break anywhere, because a URL is one 70-character word. */
+/* The first page of a chat, until it lands: one line in words above the skeleton. */
+.chat .loading { color: var(--dim); font-size: .85em; text-align: center; padding: .6em 1em 0; }
 .chat .bub .md-table {
   margin: 0; min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
