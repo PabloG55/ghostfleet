@@ -995,6 +995,17 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   it. Every close records who made it: `closedBy` is `agent`, `judge`, or `person` (`hand`
   in a file written before this). Old ledgers need no migration: their items are closable
   by the tools as they are.
+- **A brief from the lead is done only with proof.** An item whose source is `fleet` (a
+  prompt `fleet-send` delivered) is closed as `done` by `ledger_close` with its proof, or by
+  the person by hand, and never by the judge. The judge reads a turn's prose, not its work:
+  measured on one fleet, 40% of all closed items were judge-closed with no proof, and in one
+  weekend every "done" across 23 workers was, with nothing merged. A brief the judge reads
+  as done stays **open**, carries `answered: { at, turnId, reason }`, and shows as
+  `[answered, no proof]` in `/ledger` and `fleet-ledger list`; the judge may still keep it
+  open, report it in progress, or hold it waiting. The person's own messages and the
+  agent's promises are judged exactly as before. Not retroactive: items closed before this
+  keep their state. An item a stopped worker's ledger carried to its lead is `fleet` too (see
+  below), and needs proof the same way.
 - **The judge, as backup.** At the end of each answered main-loop turn, after the agent's
   own closes, a small-model call (`haiku` by default) for every ten items **still open**,
   newest first, reads them and the turn's text (all of its blocks, cut from the middle past
@@ -1006,7 +1017,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   in `/ledger`, and is judged again on later turns. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. **A turn in which the agent closed items and left nothing
-  open makes no call at all**, promise wording or not; otherwise the call is made only when
+  open makes no call at all**, promise wording or not (a brief the judge read as answered is
+  still open, so it is judged again each turn until it is closed with proof); otherwise the
+  call is made only when
   something is open or the answer reads like a promise, so a quiet session costs nothing.
   Measured on haiku, one call for 46 items needed 1,737 tokens of reply and was cut off at
   700 before its closing brace; a call of ten takes at most ~600, and each may now use
@@ -1052,6 +1065,18 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   `judge.held` (`gate-turn`, `waiting`, `workers`, `cooldown`)
   with the ids it held back. An item the turn simply never mentioned is still re-prompted
   once.
+  **The proof nudge.** A brief the judge reads as answered is never named by the re-prompt
+  above; the same re-prompt instead asks for its proof ("a brief from the lead reads as
+  answered, but a brief counts as done only with proof: close it with `ledger_close` and a PR
+  number, commit or file path, or say what is still missing"). It is bounded the same way and
+  in the data: a brief carries `proofAskedAt` once asked and is **never asked again**, however
+  many later turns the judge reads it as answered, across reloads too. The holds above apply
+  to it (the nudge's own turn is a gate turn, so its end is never re-prompted; nor is one
+  inside the five-minute cooldown, which the nudge shares with the re-prompt), so a worker
+  that already ended its turn is woken at most once per brief. One that answers the nudge
+  in prose keeps the brief open as `[answered, no proof]`, for the lead to see. A nudge held
+  back is not spent: the next turn the judge reads the brief as answered may ask. Not sent
+  when `CLAUDE_FLEET_LEDGER_GATE=off`.
 - **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
   asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`,
   the band leads with `judge failing: <why>` while anything is open, the record carries
@@ -1072,7 +1097,10 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   what it was there, and its last progress or reason; `fleet-ledger master` shows that
   beside it. It is listed and in the lead's prompt note like any other open item, but never
   re-prompted at a turn's end: the lead's turn was not asked it. The lead finishes it,
-  re-dispatches it, or drops it with a reason, with the ordinary tools. Done, dropped and
+  re-dispatches it, or drops it with a reason, with the ordinary tools. A carried item is
+  `fleet`, so it is **done only with proof** like any brief, whatever it was in the worker:
+  the lead's judge reading it as done leaves it open as `[answered, no proof]`, and the proof
+  nudge never names it (it is never re-prompted). Done, dropped and
   stale items stay behind. In the worker's file each carried item becomes `carried`, with
   the lead's id, so a second stop never carries it twice. Not retroactive: ledgers of
   workers stopped before this are left as they are.
@@ -1097,7 +1125,7 @@ the grid card and the phone can show it. None of them draws it yet.
 | switch | default | effect |
 |---|---|---|
 | `CLAUDE_FLEET_LEDGER=off` | on | the whole feature: no file, no record field, no `/ledger`, no model call, no re-prompt |
-| `CLAUDE_FLEET_LEDGER_GATE=off` | on | record, judge and show; never re-prompt |
+| `CLAUDE_FLEET_LEDGER_GATE=off` | on | record, judge and show; never re-prompt, nor ask a brief for its proof |
 | `CLAUDE_FLEET_LEDGER_PROMISES=show\|gate\|off` | `show` | `gate` lets an open promise be re-prompted once too; `off` stops extracting them |
 | `CLAUDE_FLEET_LEDGER_MODEL` | `haiku` | the judge's model (an alias or a full id) |
 

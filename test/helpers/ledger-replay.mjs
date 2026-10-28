@@ -55,4 +55,7 @@ console.log(`done-but-stale promise: ${landed ? landed.state : 'none'}`)
 const video = l.items.find(i => i.text.includes('release screenshots'))
 console.log(`waiting on the person: ${video ? video.state : 'none'}`)
 console.log(`bare answers made items ${l.items.filter(i => i.text === 'ok go with 2' || i.text === '24.1').length}`)
+// A brief from the lead the judge read as done stays open until the agent proves it (the
+// ledger.js before that rule closed all four as judge-done).
+console.log(`briefs answered, no proof ${l.items.filter(i => i.source === 'fleet' && i.state === 'open' && i.answered).length}`)
 console.log(`open now ${L.openItems(l, end).length}`)
