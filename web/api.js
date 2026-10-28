@@ -14,6 +14,7 @@
 //                                               -> { session, rows?, cols?, at, pane: "<SGR text>" }
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
+//   GET  /api/usage                             -> { enabled, off?, threshold, profiles: [ accounts.mjs describe() ] }
 //   POST /api/verb   { tool, args }             -> { ok, text }        (Bearer token required)
 //   GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 //   POST /api/auth/register { code, … }         -> { token, expires_at }
@@ -364,6 +365,18 @@ export async function getWaiting() {
     return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
   });
   return { ...j, items };
+}
+
+// ── the Claude accounts each profile runs on ───────────────────────────────
+// fleet-serve /api/usage: `fleet-accounts list`'s data for the profiles the daemon lists. A
+// daemon older than the line answers 404, which is "no line", like the two above. The fixture
+// is the payload as served, its times already in words, so it reads the same whenever it runs.
+export async function getUsage() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/usage'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  return fixture('usage.json');
 }
 
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in

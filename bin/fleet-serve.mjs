@@ -48,6 +48,8 @@ import { fleetDirs as scanDirs, scanStatus, masterRecords } from '../lib/fleet-s
 import * as jarvis from '../lib/jarvis.mjs';
 import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
+import * as A from '../lib/accounts.mjs';
+import * as X from '../lib/experimental.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1663,6 +1665,20 @@ function shownToPhone() {
   return projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
 }
 
+// ── the Claude accounts each listed profile runs on (fleet-accounts) ─────────
+// What `fleet-accounts list` says, for the profiles this daemon already shows the phone and no
+// other: A.describe() is the list's own words for each account, so the phone cannot word one
+// differently from the desk. With the experiment off, that sentence and nothing else — no
+// state file is read. Labels, figures, times and states only; describe() picks each field by
+// name, and a login, an address or an organization is never one of them.
+export function usageReport(list = shownToPhone(), now = A.nowS()) {
+  const thr = A.threshold();
+  if (!X.enabled('accounts')) return { ok: true, at: now, enabled: false, off: X.disabledWhy('accounts', 'accounts'), threshold: thr, profiles: [] };
+  const shown = new Set(list.map(t => (t.profile === 'default' ? 'work' : t.profile)));
+  return { ok: true, at: now, enabled: true, threshold: thr,
+           profiles: A.profiles().filter(p => shown.has(p)).map(p => A.describe(p, thr, now)) };
+}
+
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
 // of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
@@ -2390,6 +2406,10 @@ function agentCatalogue() {
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
       ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) })) });
   }
+
+  // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
+  // switching an account stays at the desk.
+  if (p === '/api/usage' && req.method === 'GET') return send(res, 200, usageReport());
 
   if (p === '/api/inbox' && req.method === 'GET') {
     const rp = resolveProject(url.searchParams.get('project') || '');

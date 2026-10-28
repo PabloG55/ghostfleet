@@ -65,6 +65,7 @@ const S = {
   pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
   talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
   waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
+  usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
   wantWaiting: false,   // a "waiting on you" notification was tapped; land on Projects once unlocked
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
@@ -184,6 +185,8 @@ async function refresh() {
         S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
         api.getWaiting().then((j) => { S.waiting = j && Array.isArray(j.items) ? j.items : null; },
                               (e) => { if (e instanceof api.AuthError) throw e; }),
+        // THE ACCOUNTS LINE, on its own slower clock (readUsage), and allowed to fail like the rest.
+        readUsage(),
       ]);
     }
     else if (S.screen === 'grid') {
@@ -648,6 +651,7 @@ function projectsProps() {
     // An empty list is a real answer and gets the first-run path; a null one has not been
     // answered yet and gets the wait.
     cards: S.projects == null ? skeletonCards(4) : [
+      ...usageCards(),
       ...waitingCards(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
@@ -759,6 +763,92 @@ function sheetReply(row) {
     el('p', { text: 'sent to the master as a message quoting this item; it leaves the list when the master closes it.' }),
     el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', closeSheet)]),
   ]));
+}
+
+// ── the Claude accounts (fleet-accounts) ──────────────────────────────────
+// WHICH LOGIN EACH PROFILE IS SPENDING, at the top of Projects: one line per profile, its
+// active account and that account's 5h and 7d figures, from /api/usage — which is
+// `fleet-accounts list`'s own data (lib/accounts.mjs describe()), so every word below that
+// names a state is the desk's word, not one invented here. A tap opens every account of every
+// profile, laid out as `list` lays them out. Read only: switching stays at the desk.
+//   THE HUE IS THE FIXED PALETTE: green while the active account runs on figures read in the
+// last six hours, yellow when they are older than that (stale) or the login in use is not a
+// saved one, red when it cannot run — out, over the line, needs a login, blocked, or every
+// account exhausted — and grey for the experiment switched off, which is said and nothing else.
+//   POLLED GENTLY, on its own clock: the Projects poll runs every few seconds and the figures
+// only move when a turn lands, so this asks every USAGE_POLL_MS and on a resume, never per tick.
+const USAGE_POLL_MS = 45000;
+const USAGE_RED = new Set(['out', 'exhausted', 'needs-login', 'blocked']);
+const USAGE_FLOOR_MS = 10000;
+let usageAt = 0, usageBusy = false, usageWanted = false;
+function readUsage() {
+  const since = Date.now() - usageAt;
+  if (usageBusy || (since < USAGE_POLL_MS && !(usageWanted && since >= USAGE_FLOOR_MS))) return null;
+  usageBusy = true; usageWanted = false;
+  // Stamped either way, so a daemon that refuses it is asked again in 45s and not in 5.
+  return api.getUsage().then((j) => { S.usage = j; },
+                              (e) => { if (e instanceof api.AuthError) throw e; })
+    .finally(() => { usageBusy = false; usageAt = Date.now(); });
+}
+// A resume, or a desk window taking focus back (which hides nothing, so no visibilitychange):
+// due on the next poll — but never sooner than USAGE_FLOOR_MS after the last read, so a window
+// clicked in and out of is not a burst. A FLAG, not an earlier stamp: the first version moved
+// the stamp back on each call, so the second of five focuses in a row read the stamp the first
+// had already moved, and the line was read 5s after the read before it.
+function usageSoon() { usageWanted = true; }
+export function usageWin(w, label, short = false) {
+  if (!w) return `${label} —`;
+  return short ? `${label} ${w.pct}% (${label === '5h' ? w.left : w.day})` : `${label} ${w.pct}% (resets ${w.resets_at}, read ${w.read})`;
+}
+const usageHue = (a) => (USAGE_RED.has(a.kind) ? 'red' : a.kind === 'stale' ? 'yellow' : a.active ? (a.stale ? 'yellow' : 'green') : 'grey');
+// The line, as data: [{ profile, text, color }] — the profile named only when there are two.
+export function usageLines(u) {
+  if (!u) return [];
+  if (!u.enabled) return [{ profile: '', text: u.off || 'accounts are off', color: 'grey' }];
+  const ps = u.profiles || [];
+  if (!ps.length) return [{ profile: '', text: 'accounts: no profile has an account yet', color: 'grey' }];
+  return ps.map((p) => {
+    const profile = ps.length > 1 ? p.profile : '';
+    if (p.exhausted) return { profile, text: `all accounts exhausted${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''} — workers paused`, color: 'red' };
+    if (p.unsaved) return { profile, text: 'on a login that is not saved — failover paused', color: 'yellow' };
+    const a = (p.accounts || []).find((x) => x.active);
+    if (!a) return { profile, text: 'no account is active', color: 'grey' };
+    if (a.kind !== 'active') return { profile, text: `${a.name} · ${a.state}`, color: usageHue(a) };
+    const read = a.stale ? ` · read ${(a.seven_day || a.five_hour || {}).read || 'never'}` : '';
+    return { profile, text: `${a.name} · ${usageWin(a.five_hour, '5h', true)} · ${usageWin(a.seven_day, '7d', true)}${read}`, color: usageHue(a) };
+  });
+}
+function usageCards() {
+  const lines = usageLines(S.usage);
+  if (!lines.length) return [];
+  const kids = lines.map((l) => el('div', { class: `u-line u-${l.color}` }, [
+    l.profile ? el('span', { class: 'u-prof', text: l.profile }) : null, el('span', { class: 'u-text', text: l.text })]));
+  // Off is a sentence with nothing behind it, so it is not a control.
+  if (!S.usage.enabled) return [el('div', { class: 'usage' }, kids)];
+  return [el('button', { class: 'usage', type: 'button', 'aria-label': 'Claude accounts: open every account', onclick: sheetUsage }, kids)];
+}
+function sheetUsage() {
+  const u = S.usage;
+  if (!u || !u.enabled) return;
+  const kids = [el('p', { text: `switch at ${u.threshold}% of the 5h or 7d limit, spending the week that ends first` })];
+  if (!(u.profiles || []).length) kids.push(el('p', { text: 'no profile has an account yet — fleet-accounts add <profile> <name>' }));
+  for (const p of u.profiles || []) {
+    kids.push(el('h3', { class: 'u-prof', text: p.profile + (p.unsaved ? ' — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)'
+      : p.exhausted ? ` — ALL EXHAUSTED${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''}, workers paused` : '') }));
+    if (!p.accounts.length) { kids.push(el('p', { text: '(no accounts)' })); continue; }
+    if (p.accounts.length < 2) kids.push(el('p', { text: 'one account: nothing to fail over to yet — add another' }));
+    if (p.pin) kids.push(el('p', { class: 'u-pin', text: `on '${p.pin.account}' by hand until ${p.pin.until_at} — the planner leaves it there unless it runs out` }));
+    for (const a of p.accounts) kids.push(el('div', { class: `u-acct u-${usageHue(a)}` }, [
+      el('div', { class: 'u-head' }, [el('span', { class: 'u-name', text: `${a.active ? '* ' : ''}${a.name}` }),
+        el('span', { class: 'u-state', text: a.state + (a.active && a.state !== 'active' ? ' (active)' : '') })]),
+      el('div', { class: 'u-win', text: usageWin(a.five_hour, '5h') }),
+      el('div', { class: 'u-win', text: usageWin(a.seven_day, '7d') }),
+      a.fix ? el('p', { class: 'u-fix', text: a.fix }) : null,
+    ]));
+  }
+  kids.push(el('p', { text: 'read only — an account is switched at the desk: fleet-accounts use <profile> <name>' }));
+  kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
+  openSheet(sheet('accounts', 'fleet-accounts list', kids), false);
 }
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
@@ -5440,11 +5530,14 @@ document.addEventListener('visibilitychange', () => {
   }
   const act = onVisibleAction();
   if (!hidByCeremony && act !== 'wait') pk.arm();
+  usageSoon();   // a resume reads the accounts again on the next poll
   hidByCeremony = false;
   if (act === 'lock') { if (S.locked) tryAutoUnlock(); else lock(); }
   else if (act === 'refresh') refresh().then(() => { if (!S.locked) pk.release(); });
   syncPanePoll();
 });
+// A desk window taking focus back is a resume that hides nothing (usageSoon).
+addEventListener('focus', usageSoon);
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
 // until something re-navigates — and the first re-navigation runs the OLD app.js while the
 // new one installs behind it, so it takes TWO cold opens to pick up a fix. Measured: a

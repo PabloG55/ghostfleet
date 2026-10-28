@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cfd9eb57a48f
+// CLIENT-HASH: 3122829b3859
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -372,7 +372,9 @@
 // v75 shows what every master holds for the owner ("waiting on you", at the top of Projects,
 // read from /api/waiting), answers one from a tap, and says what a `waiting` push is: a phone
 // still on v74 has no section and shows such a push as "a session has an answer".
-const VERSION = 'ghostfleet-v75';
+// v76 draws the Claude accounts line at the top of Projects, and the sheet of every account
+// behind it (read from /api/usage): a phone still on v75 shows neither until it is relaunched.
+const VERSION = 'ghostfleet-v76';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -393,6 +395,7 @@ const SHELL = [
   './fixtures/pane-acme-api-master.json',
   './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
   './fixtures/waiting.json',
+  './fixtures/usage.json',
 ];
 
 self.addEventListener('install', e => {

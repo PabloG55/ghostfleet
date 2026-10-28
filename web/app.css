@@ -399,6 +399,29 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * land on it settled on the first one and scrolled the top heading out of view. */
 .cards > .sect { grid-column: 1 / -1; color: var(--dim); font-size: 12px; margin: 2px 2px -4px;
                  scroll-snap-align: start; }
+/* THE ACCOUNTS LINE (app.js usageCards): the list's full width, a line per profile, in the
+ * card's type. Its hue is the state's, from the palette above and nothing else. A long line
+ * WRAPS beside its profile's name rather than ending in an ellipsis: the first version cut
+ * "all accounts exhausted until 17:00 — workers paused" at 17:00 on a phone, and the words it
+ * dropped were the ones that say what the owner has lost. */
+.cards > .usage { grid-column: 1 / -1; display: block; width: 100%; text-align: left; font: inherit;
+                  font-size: 13px; background: none; border: 1px solid var(--hair); border-radius: 8px;
+                  padding: 6px 10px; margin: 0; color: var(--fg); scroll-snap-align: start; }
+button.usage { cursor: pointer; }
+.usage .u-line { display: flex; gap: .6em; min-width: 0; }
+.usage .u-prof { color: var(--dim); flex: none; }
+.usage .u-text { min-width: 0; overflow-wrap: anywhere; }
+.u-green .u-text, .u-green .u-state { color: var(--green); }
+.u-yellow .u-text, .u-yellow .u-state { color: var(--yellow); }
+.u-red .u-text, .u-red .u-state { color: var(--red); }
+.u-grey .u-text, .u-grey .u-state { color: var(--grey); }
+/* The sheet: an account per block, as `fleet-accounts list` prints them, wrapped not cut. */
+.sheet h3.u-prof { font: inherit; font-weight: 700; color: var(--white); margin: 1em 0 .2em; overflow-wrap: anywhere; }
+.sheet .u-acct { padding: .45em 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
+.sheet .u-head { display: flex; flex-wrap: wrap; gap: .2em .8em; }
+.sheet .u-name { color: var(--white); }
+.sheet .u-win { color: var(--fg); font-size: 13px; }
+.sheet .u-acct p.u-fix { margin: .3em 0 0; font-size: 12px; }
 /* The selection is still marked the way the TUI marks it — reverse video on the title
  * line plus brightness — because that is what `sel` means at the desk. NO font-weight on
  * a card rule: the reason is historical box-art geometry, but the assertion that forbids
