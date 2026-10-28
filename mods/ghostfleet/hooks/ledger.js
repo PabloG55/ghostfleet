@@ -11,6 +11,7 @@
 //            | waiting (a judged turn said it waits on the PERSON: off the open list and the
 //            gate until they speak to it, see waitsOnPersonNote)
 //            | expired (stale or waiting, and untouched for EXPIRE_DAYS: retired, not open)
+//            | carried (its session was stopped and the item went to its lead, see carryItems)
 //            stale and waiting are DORMANT: not open, but a turn that mentions one has it
 //            judged again (revisit), so work that finished later still closes it
 //   source   user     typed at the prompt (or the phone's bridge), idle or mid-turn
@@ -27,6 +28,8 @@
 //   prompt   the number of the prompt that made it (ledger.prompt counts them); `window` is
 //            the first prompt of the latest one, and only items from `window` on are gated.
 //            An item from before this field existed has none, and is never gated again
+//   carried  { from, sessionId, id, state, source, at, note }: on a LEAD's item, the worker it
+//            came from when that worker was stopped, and what the item was there
 //   closedBy agent (ledger_close / ledger_drop, with `proof` or `reason`) | judge |
 //            person (/ledger close, fleet-ledger close; `hand` in a file written before)
 
@@ -873,6 +876,49 @@ export function closeByHand(ledger, id, nowMs) {
   }
 }
 
+// A RETIRED WORKER'S UNFINISHED ITEMS GO TO ITS LEAD. fleet-stop kills the session and clears
+// every file the fleet keeps about it except this one, so whatever it still owed sat in a
+// ledger nobody would open again: measured on one fleet, 117 unfinished items across 280
+// worker ledgers, 100 of them over a day old, while the lead the person talks to saw none.
+// Each open, waiting or not-done item (`stale` is a promise nobody took up, and `expired` is
+// already retired) becomes an open item of the lead's, `[<worker>] <ask>`, keeping where it
+// came from and its last word (`carried`); the lead finishes it, re-dispatches it or drops it
+// with the ordinary tools. In the worker's file it is `carried`, with the lead's id, so a
+// second stop finds nothing to carry and the measurement above stops counting it.
+//   Dated NOW, not when it was asked: an item 12 days old would be past BAND_DAYS on arrival,
+// off the lead's open list and its note, which is where it already was. And no `prompt`: the
+// gate re-prompts only items of the lead's own latest prompt window, and a stop between two of
+// its turns is not something that turn was asked.
+export const CARRIED = new Set(['open', 'waiting', 'not-done'])
+export function carryItems(worker, lead, { from, sessionId = '', to = 'master', nowMs }) {
+  const sid = String(sessionId)
+  const already = new Set(lead.items.filter(i => i.carried && i.carried.sessionId === sid).map(i => i.carried.id))
+  const owed = worker.items.filter(i => CARRIED.has(i.state) && !already.has(i.id))
+  if (!owed.length) return null
+  let next = lead
+  const moved = new Map()
+  for (const i of owed) {
+    const note = (i.progress && i.progress.reason) || i.reason || ''
+    // Always `fleet`, a worker's promise too: as a promise it would be the lead's own word
+    // ("(you said you would)"), go stale on the lead's turns and close over PROMISE_CAP.
+    next = addItem(next, { text: excerpt(`[${from}] ${i.text}`), at: nowMs, source: 'fleet', asIs: true })
+    const it = next.items[next.items.length - 1]
+    const carried = { from, sessionId: sid, id: i.id, state: i.state, source: i.source, at: i.at, ...(note ? { note: excerpt(note) } : {}) }
+    next = { ...next, items: next.items.map(x => (x === it ? { ...x, carried } : x)) }
+    moved.set(i.id, it.id)
+  }
+  return { lead: next, worker: markCarried(worker, moved, { to, nowMs }), ids: [...moved.values()] }
+}
+// The worker's side: each item in `moved` (its id -> the lead's) is `carried`, and says where.
+export function markCarried(worker, moved, { to, nowMs }) {
+  return {
+    ...worker,
+    items: worker.items.map(i => (moved.has(i.id) && CARRIED.has(i.state)
+      ? { ...i, state: 'carried', closedAt: nowMs, closedBy: 'fleet-stop', carriedTo: { session: to, id: moved.get(i.id) }, reason: `carried to ${to} as ${moved.get(i.id)}` }
+      : i)),
+  }
+}
+
 // `clear` closes every open item by hand; the history stays in the file.
 export const clearOpen = (ledger, nowMs) => ({
   ...ledger,
@@ -900,7 +946,9 @@ export function listing(ledger, nowMs, { all = false } = {}) {
     const said = i.proof || i.reason
     const why = said || by ? `  (${by}${said ? excerpt(said, 80) : ''})`.replace(': )', ')') : ''
     const working = i.state === 'open' && i.progress ? `  [in progress${i.progress.reason ? `: ${excerpt(i.progress.reason, 60)}` : ''}]` : ''
-    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${why}`
+    const c = i.state === 'open' && i.carried
+    const came = c ? `  [${c.from} stopped; it was ${c.state}${c.note ? `: ${excerpt(c.note, 60)}` : ''}]` : ''
+    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${came}${why}`
   })
   return [...out, ...waits, ...judged].join('\n')
 }

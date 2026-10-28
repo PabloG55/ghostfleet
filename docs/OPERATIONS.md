@@ -1062,6 +1062,26 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   session, without a turn. `clear` closes every open item and keeps the history; `all` shows
   who closed each and the proof or reason. Items older than 7 days drop off the band and
   the gate; the file keeps the newest 200.
+- **A stopped worker's unfinished items go to its lead.** `fleet-stop` (with or without
+  `--reclaim`, and the MCP `fleet_stop`, which runs it) hands each item still `open`,
+  `waiting` or `not-done` to the lead's ledger: its sub-lead's when it has one, else
+  `master`'s, on the same socket and in that fleet's own directory (another profile is
+  another directory, so the dir is resolved from the socket, not from whoever ran the stop).
+  Each arrives as an open item `[<worker>] <ask>`, dated at the stop so a two-week-old ask
+  lands inside the band, with `carried: { from, state, note }` holding where it came from,
+  what it was there, and its last progress or reason; `fleet-ledger master` shows that
+  beside it. It is listed and in the lead's prompt note like any other open item, but never
+  re-prompted at a turn's end: the lead's turn was not asked it. The lead finishes it,
+  re-dispatches it, or drops it with a reason, with the ordinary tools. Done, dropped and
+  stale items stay behind. In the worker's file each carried item becomes `carried`, with
+  the lead's id, so a second stop never carries it twice. Not retroactive: ledgers of
+  workers stopped before this are left as they are.
+  When the lead cannot take them, the stop still completes and says so, naming the
+  `fleet-ledger --session <id> all` that reads them where they stayed (the worker's own
+  ledger, which a stop never deletes): the lead has no status record on that socket; it
+  keeps no ledger (codex, an older Claude, `CLAUDE_FLEET_LEDGER=off`; none is created for
+  it, since nobody would read it); its file is not readable JSON (never written over); or
+  it changed under all five tries of the write.
 
 **The file is not a `*.json`.** `<session_id>.ledger` holds JSON, but eight readers glob
 `<fleet dir>/*.json` as status records (fleet-list, the governor, the grid, fleet-read,
