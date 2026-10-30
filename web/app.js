@@ -5404,7 +5404,10 @@ function resumeSession(name) {
 async function wakeSession(name) {
   if (!name) return;
   const r = await doVerb('fleet_wake', { project: S.project, session: name });
-  if (r && r.ok === false) return;          // doVerb has already surfaced the reason
+  // NULL IS THE FAILURE. doVerb answers a refused verb by toasting its reason and returning
+  // null, never {ok:false} — so `r && r.ok === false` let every failed wake through to open a
+  // session that was not there. reopenSession below already read it this way.
+  if (!r || r.ok === false) return;         // doVerb has already surfaced the reason
   openSession(name);
 }
 

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 325790cb4f81
+// CLIENT-HASH: 494321ff0ba3
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -399,7 +399,9 @@
 // by and opens in the right pane at a desk, and a tapped "waiting on you" notification opens
 // it. A phone still on v79 goes on drawing the whole list at the top of Projects until it is
 // relaunched.
-const VERSION = 'ghostfleet-v80';
+// v81 stops at a failed wake: the tap used to open the session whatever the wake answered, so
+// a wake that failed showed its reason and then an empty pane. A phone still on v80 does that.
+const VERSION = 'ghostfleet-v81';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

@@ -14630,6 +14630,24 @@ else
     kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
     is "...and one the mod started stays a quiet success" "200 true" "$(jq -r '"\(.status) \(.ok)"' <<< "$out" 2>/dev/null)"
     is "...with no failure in its text"          "0"     "$(grep -c 'did not reach' <<< "$out" || true)"
+
+    # ── a wake that did not wake is NOT a success either ─────────────────────
+    # The send's bug in another verb: fleet-hibernate exits 1 for a wake that failed, and the
+    # daemon answered 200 ok:true with the failure as the text — a green toast reading
+    # FAILED, after which the phone opened the session. Through the real fleet-hibernate,
+    # both ways: a name that is neither asleep nor running, and one that is already awake.
+    hw_verb() { node --input-type=module -e "
+      import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+      const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+      const e = await a.enroll('$PNBASE', process.argv[1]);
+      if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+      const r = await a.verb('$PNBASE', 'fleet_wake', { project: 'demo', session: process.argv[2] });
+      console.log(JSON.stringify({ status: r.status, ok: r.json.ok, text: r.json.text }));" "$1" "$2"; }
+    out="$(hw_verb "$(pn_cli enroll phone-wake1 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" billing-svc)"
+    is "a wake that failed is not ok"            "400 false" "$(jq -r '"\(.status) \(.ok)"' <<< "$out" 2>/dev/null || echo "$out")"
+    is "...and says why"                         "yes" "$(grep -q 'not asleep' <<< "$out" && echo yes || echo no)"
+    out="$(hw_verb "$(pn_cli enroll phone-wake2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" dlg)"
+    is "...while a wake of a session already up is" "200 true" "$(jq -r '"\(.status) \(.ok)"' <<< "$out" 2>/dev/null || echo "$out")"
   else
     skip "a send held behind a question (serve)" "jq missing"
   fi
@@ -18590,6 +18608,10 @@ fi
 # scoping ever breaks, a suite run becomes a fleet-wide outage, so it is asserted first and
 # in both directions: the run's own socket IS found, and a socket outside the run is NOT.
 group "hibernation refuses before it acts"
+# A session these rows create is seconds old, and the governor's grace for a session that has
+# just come back would veto every one of them. Off here; its own rows are in
+# "a wake stays up, or says it did not".
+export CLAUDE_FLEET_WAKE_GRACE=0
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   HIB="$(mktemp -d "$TEST_RUNS.$$.hib.XXXXXX")"
   export CLAUDE_FLEET_DIR="$HIB/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
@@ -18754,6 +18776,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
 else
   skip "hibernation refuses before it acts" "tmux or jq missing"
 fi
+unset CLAUDE_FLEET_WAKE_GRACE
 
 # ── 4a10c10. a session sleeps, and comes back ────────────────────────────────
 # The round trip, and the reason it can run in a suite at all: everything here happens on a
@@ -18766,6 +18789,10 @@ fi
 # prints the agent's own ready marker and then waits, so the wake path's poll — the thing that
 # decides whether a wake worked — is exercised for real.
 group "a session sleeps and comes back"
+# A session these rows create is seconds old, and the governor's grace for a session that has
+# just come back would veto every one of them. Off here; its own rows are in
+# "a wake stays up, or says it did not".
+export CLAUDE_FLEET_WAKE_GRACE=0
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   HW="$(mktemp -d "$TEST_RUNS.$$.hibw.XXXXXX")"
   export CLAUDE_FLEET_DIR="$HW/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
@@ -18837,6 +18864,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
 else
   skip "a session sleeps and comes back" "tmux or jq missing"
 fi
+unset CLAUDE_FLEET_WAKE_GRACE
 
 # ── 4a10c10b. Jarvis never sleeps ────────────────────────────────────────────
 # The owner's rule, a rule and not a setting: Jarvis's master is never hibernated, parked
@@ -19182,6 +19210,10 @@ fi
 # test/helpers/live-session.sh writes for its pid — the same file, same fields, that a real
 # agent writes about itself. Everything is on this run's own sockets and config dir.
 group "hibernation reads the live conversation"
+# A session these rows create is seconds old, and the governor's grace for a session that has
+# just come back would veto every one of them. Off here; its own rows are in
+# "a wake stays up, or says it did not".
+export CLAUDE_FLEET_WAKE_GRACE=0
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # RESOLVED, because /tmp is a symlink to /private/tmp and a pane reports the resolved path:
   # a trust record or a project directory keyed by the typed one is never found.
@@ -19290,6 +19322,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
 else
   skip "hibernation reads the live conversation" "tmux or jq missing"
 fi
+unset CLAUDE_FLEET_WAKE_GRACE
 
 # ── 4a10c12b. hibernation follows a conversation sent to the background ─────
 # ← (into Claude Code's agent view) hands the conversation to a NEW id, run by a bg process
@@ -19700,6 +19733,191 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$WK"
 else
   skip "a wake that worked must not report failure" "tmux or jq missing"
+fi
+
+# ── 4a10c13b. a wake stays up, or says it did not ───────────────────────────
+# "sometimes the wake up doesn't work and I have to wake up the agent again, like it wakes up
+# and closes." Three causes, each measured before anything was changed:
+#   THE GOVERNOR SLEPT IT AGAIN. Its idle clock is the last prompt a person typed, and a wake
+# types nothing — so a session idle 48h+ before its wake was still idle 48h+ after it, and the
+# next --pressure tick (one a minute while swap is high) took it straight back down. On a live
+# fleet every double wake in the phone's audit log was a wake that had reported "is awake
+# (2s)", followed 24-52s later by the governor's "slept <that session>"; its logs held eight
+# sessions slept twice inside a few minutes.
+#   THE AGENT EXITED ON ITS FIRST LINE. `claude --resume <id>` with no transcript for that id
+# under its config dir prints "No conversation found with session ID: <id>" and exits 1 in
+# under a second — measured on 2.1.312, before any login is asked for. The transcript can be
+# missing because it is under ANOTHER profile (a project moved between profiles keeps markers
+# whose conversations sit in the old config dir, and the old socket no longer names a profile
+# at all) or because it is gone. agent-here takes a pane that dies inside five seconds down
+# with it, so the wake polled a pane that no longer existed for its whole timeout, then said
+# only that it "did not come back".
+#   AND NOTHING ASKED WHETHER A READY SESSION STAYED UP. The first prompt was the success.
+#
+# Every row drives the real bin/fleet-hibernate against a stub agent-here on a socket under
+# this run's TMUX_TMPDIR, with a fake HOME so the profiles it walks are this group's own.
+group "a wake stays up, or says it did not"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WS="$(mktemp -d "$TEST_RUNS.$$.wakestay.XXXXXX")"; WS="$(cd "$WS" && pwd -P)"
+  mkdir -p "$WS/bin" "$WS/wt" "$WS/home"
+  export CLAUDE_FLEET_DIR="$WS/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$WS/home/.claude-main"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  wsyn()   { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  wsup()   { tmux -L cf-acme-api has-session -t "=$1" 2>/dev/null && echo 1 || echo 0; }
+  wsmark() { [ -f "$CLAUDE_FLEET_DIR/cf-acme-api.$1.asleep" ] && echo 1 || echo 0; }
+  wsh()    { HOME="$WS/home" PATH="$WS/bin:$PATH" "$ROOT/bin/fleet-hibernate" -s cf-acme-api "$@"; }
+  ws_asleep() {   # slot id -> the marker sleep_one writes, with no session behind it
+    tmux -L cf-acme-api kill-session -t "=$1" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\n' 0 "$2" "$WS/wt" 100 > "$CLAUDE_FLEET_DIR/cf-acme-api.$1.asleep"
+  }
+  ws_agent() { printf '#!/bin/sh\n%s\n' "$1" > "$WS/bin/agent-here"; chmod +x "$WS/bin/agent-here"; }
+  WS_READY='echo "  ctx:3%  auto mode on"'
+  WSID=22222222-3333-4444-5555-666666666666
+  WSENC="$(printf '%s' "$WS/wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  # A server of this name left by an earlier group would host the woken panes with ITS
+  # environment — another HOME — and the scrub row would be reading somebody else's pane.
+  tmux -L cf-acme-api kill-server 2>/dev/null
+
+  # ── an agent that exits on its first line ──
+  # The real binary's words for a resume id it cannot find, and a path under HOME so the
+  # scrub is exercised too: the reason goes to a phone, and HOME is the part of it that says
+  # whose machine this is.
+  ws_asleep billing-svc conv-billing-1
+  ws_agent 'echo "claude-here: resuming $CLAUDE_FLEET_RESUME in $HOME/acme-api"; echo "No conversation found with session ID: $CLAUDE_FLEET_RESUME"; exit 1'
+  t0=$SECONDS; out="$(wsh --wake billing-svc --timeout 20 2>&1)"; rc=$?; took=$((SECONDS - t0))
+  is "wake: an agent that exits at once is a FAILED wake"   "1"   "$rc"
+  is "...said in so many words"                             "yes" "$(wsyn grep -q 'FAILED' <<< "$out")"
+  is "...with the agent's own last lines"                   "yes" "$(wsyn grep -q 'No conversation found' <<< "$out")"
+  is "...HOME written as ~, never spelled out"              "yes no" \
+     "$(wsyn grep -qF '~/acme-api' <<< "$out") $(wsyn grep -qF "$WS/home" <<< "$out")"
+  is "...as soon as the pane died, not at the timeout"      "yes" "$([ "$took" -lt 10 ] && echo yes || echo "no: ${took}s")"
+  is "...the marker kept, so it can be woken again"         "1"   "$(wsmark billing-svc)"
+  is "...and no dead pane left under its name"              "0"   "$(wsup billing-svc)"
+
+  # ── ready, and gone two seconds later ──
+  # Long enough that the poll, once a second, has certainly SEEN the prompt — so this is a
+  # wake that was ready and then died, not one that died before it was ready.
+  ws_asleep billing-svc conv-billing-1
+  ws_agent "$WS_READY"'; sleep 2; echo "API Error: could not load the conversation"; exit 1'
+  out="$(wsh --wake billing-svc --timeout 20 2>&1)"; rc=$?
+  is "wake: a session that dies inside the settle window FAILED" "1"   "$rc"
+  is "...said in so many words"                             "yes" "$(wsyn grep -q 'FAILED' <<< "$out")"
+  is "...with why"                                          "yes" "$(wsyn grep -q 'could not load the conversation' <<< "$out")"
+  is "...the marker kept"                                   "1"   "$(wsmark billing-svc)"
+  is "...and no session left behind it"                     "0"   "$(wsup billing-svc)"
+  # the other direction, through the same path: one that stays up is a success
+  ws_agent "$WS_READY"'; exec sleep 600'
+  out="$(wsh --wake billing-svc --timeout 20 2>&1)"; rc=$?
+  is "wake: a session that stays up is awake"              "0"   "$rc"
+  is "...said so"                                           "yes" "$(wsyn grep -q 'is awake' <<< "$out")"
+  is "...the marker consumed"                               "0"   "$(wsmark billing-svc)"
+  # The settle window holds a dead pane on screen so its last lines can be read; a session
+  # left with that on would keep a crashed agent's corpse as a pane nobody can act on.
+  is "...and the pane is not left holding on exit"         "off" \
+     "$(tmux -L cf-acme-api display-message -p -t billing-svc '#{remain-on-exit}' 2>/dev/null)"
+
+  # ── a second tap on a session that is already awake ──
+  # The phone sends a wake twice often enough to be in its audit log (two in the same
+  # second), and the one that lands after the first has finished found no marker and said
+  # "is not asleep" — exit 1, a failure toast over a session that had just woken.
+  out="$(wsh --wake billing-svc --timeout 5 2>&1)"; rc=$?
+  is "wake: a session already awake is not a failed wake"   "0"   "$rc"
+  is "...and says it is awake"                              "yes" "$(wsyn grep -q 'already awake' <<< "$out")"
+  out="$(wsh --wake toolbox --timeout 5 2>&1)"; rc=$?
+  is "...while a name neither asleep nor running still fails" "1" "$rc"
+
+  # ── two taps at once ──
+  ws_asleep billing-svc conv-billing-1
+  ws_agent 'sleep 2; '"$WS_READY"'; exec sleep 600'
+  ( wsh --wake billing-svc --timeout 20 > "$WS/w1" 2>&1; echo $? > "$WS/r1" ) & wsp1=$!
+  ( wsh --wake billing-svc --timeout 20 > "$WS/w2" 2>&1; echo $? > "$WS/r2" ) & wsp2=$!
+  wait "$wsp1" "$wsp2"
+  is "wake: two at once both report the one wake"           "0 0" "$(cat "$WS/r1" 2>/dev/null) $(cat "$WS/r2" 2>/dev/null)"
+  is "...which is one session"                              "1" \
+     "$(tmux -L cf-acme-api list-sessions -F '#{session_name}' 2>/dev/null | grep -cx 'billing-svc' || true)"
+
+  # ── the conversation is under another profile ──
+  # The stub behaves as the real agent does: it resumes only what is under ITS config dir.
+  ws_resumer='f="$CLAUDE_CONFIG_DIR/projects/$(printf %s "$PWD" | sed "s/[^A-Za-z0-9]/-/g")/$CLAUDE_FLEET_RESUME.jsonl"; if [ -n "$CLAUDE_FLEET_RESUME" ] && [ ! -f "$f" ]; then echo "No conversation found with session ID: $CLAUDE_FLEET_RESUME"; exit 1; fi; '"$WS_READY"'; exec sleep 600'
+  mkdir -p "$WS/home/.claude-other/projects/$WSENC"
+  printf '{"type":"user","message":{"content":"list the acme-api routes"}}\n' > "$WS/home/.claude-other/projects/$WSENC/$WSID.jsonl"
+  ws_asleep billing-svc "$WSID"
+  ws_agent "$ws_resumer"
+  out="$(wsh --wake billing-svc --timeout 10 2>&1)"; rc=$?
+  is "wake: a conversation under another profile wakes"    "0"   "$rc"
+  is "...resumed under that profile's config dir"          "$WS/home/.claude-other" \
+     "$(tmux -L cf-acme-api show-environment -t billing-svc CLAUDE_CONFIG_DIR 2>/dev/null | cut -d= -f2-)"
+  is "...and it says which"                                 "yes" "$(wsyn grep -q 'claude-other' <<< "$out")"
+
+  # ── the conversation is gone from every profile ──
+  rm -rf "$WS/home/.claude-other"
+  ws_asleep billing-svc "$WSID"
+  out="$(wsh --wake billing-svc --timeout 10 2>&1)"; rc=$?
+  is "wake: a conversation gone everywhere falls back to the folder's own" "0" "$rc"
+  is "...and says so, naming the id it could not find"     "yes" \
+     "$(wsyn grep -q "$WSID.*gone" <<< "$out")"
+
+  # ── the governor does not take a session it just watched come back ──
+  # The fixture is a session the plan would sleep on every other count: a record, the pane's
+  # own note, a trusted folder, and a last prompt 100 hours old.
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  WSTR="$WS/old.jsonl"
+  printf '{"type":"user","message":{"content":"list the acme-api routes"}}\n' > "$WSTR"
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$WSTR" 2>/dev/null
+  mkdir -p "$CLAUDE_CONFIG_DIR/projects/$WSENC"; cp -p "$WSTR" "$CLAUDE_CONFIG_DIR/projects/$WSENC/$WSID.jsonl"
+  jq -n --arg d "$WS/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  jq -n --arg tr "$WSTR" --arg cwd "$WS/wt" --arg id "$WSID" \
+    '{session_id:$id, sock:"cf-acme-api", slot:"billing-svc", cwd:$cwd, folder:"billing-svc",
+      branch:"main", status:"ready", transcript:$tr, ts:0}' > "$CLAUDE_FLEET_DIR/billing-svc.json"
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  ws_asleep billing-svc "$WSID"
+  out="$(wsh --wake billing-svc --timeout 10 2>&1)"
+  is "grace: the session wakes"                            "1"   "$(wsup billing-svc)"
+  HOME="$WS/home" "$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$WSID" "$WS/wt" "$WSTR" >/dev/null
+  out="$(CLAUDE_FLEET_WAKE_GRACE=1800 wsh --pressure 2>&1)"
+  is "grace: the governor's next tick leaves it up"        "1"   "$(wsup billing-svc)"
+  is "...with no marker written"                           "0"   "$(wsmark billing-svc)"
+  is "...and the plan says why"                            "yes" \
+     "$(wsyn grep -q 'just woken' <<< "$(CLAUDE_FLEET_WAKE_GRACE=1800 wsh --json 2>/dev/null | jq -r '.[] | select(.slot=="billing-svc") | .why')")"
+  # A name is a person asking, and is not held off by the grace.
+  CLAUDE_FLEET_WAKE_GRACE=1800 wsh --apply billing-svc >/dev/null 2>&1
+  is "grace: ...while naming it still sleeps it"           "0"   "$(wsup billing-svc)"
+  # The other direction: past its grace the same session is slept as before, so nothing
+  # else in this fixture is what kept it up.
+  wsh --wake billing-svc --timeout 10 >/dev/null 2>&1
+  HOME="$WS/home" "$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$WSID" "$WS/wt" "$WSTR" >/dev/null
+  CLAUDE_FLEET_WAKE_GRACE=0 wsh --pressure >/dev/null 2>&1
+  is "grace: ...and once it is over the governor sleeps it" "0"  "$(wsup billing-svc)"
+
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$WS"
+else
+  skip "a wake stays up, or says it did not" "tmux or jq missing"
+fi
+
+# ── 4a10c13c. the phone opens a woken session only when it woke ─────────────
+# doVerb answers a verb the daemon refused by toasting the reason and returning NULL, and
+# wakeSession tested `r && r.ok === false` — false for null — so every failed wake went on to
+# open a session that was not there: the reason, then an empty pane. The client's own function,
+# cut out of web/app.js and run against a doVerb that answers each way.
+group "the phone opens a woken session only when it woke"
+if command -v node >/dev/null 2>&1; then
+  WJ="$(mktemp -d "$TEST_RUNS.$$.wakejs.XXXXXX")"
+  { echo "const S = { project: 'acme-api' }; const opened = [];"
+    echo "const answer = JSON.parse(process.argv[2]);"
+    echo "async function doVerb() { return answer; }"
+    echo "function openSession(n) { opened.push(n); }"
+    sed -n '/^async function wakeSession(name) {/,/^}/p' "$ROOT/web/app.js"
+    echo "await wakeSession('billing-svc'); console.log(opened.length);"
+  } > "$WJ/wake.mjs"
+  is "wakeSession is in the client"             "yes" "$(grep -q 'doVerb(.fleet_wake' "$WJ/wake.mjs" && echo yes || echo no)"
+  is "a wake doVerb refused (null) opens nothing" "0" "$(node "$WJ/wake.mjs" null 2>&1)"
+  is "...nor one answered ok:false"             "0"   "$(node "$WJ/wake.mjs" '{"ok":false}' 2>&1)"
+  is "...and one that woke opens the session"   "1"   "$(node "$WJ/wake.mjs" '{"ok":true,"text":"awake"}' 2>&1)"
+  rm -rf "$WJ"
+else
+  skip "the phone opens a woken session only when it woke" "node missing"
 fi
 
 # ── 4a10c14. a hibernated session has to show somewhere ──────────────────────
