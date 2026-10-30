@@ -74,6 +74,20 @@ const b64u = {
   },
 };
 
+// WHICH DEVICE THIS IS, for the words on the lock screen. The client was written for the
+// phone, so it said "enrol this phone" and "unlock with Face ID" on the Mac as well, once
+// the Mac could open it at http://localhost. A desktop Mac reports `MacIntel`; an iPad
+// reports the same string and gives itself away with its touch points, so it stays on the
+// phone's words with every other device. The words are all this decides: the ceremony is
+// the same platform-authenticator one everywhere.
+export function device() {
+  const n = typeof navigator === 'undefined' ? {} : navigator;
+  const plat = n.platform || (n.userAgentData && n.userAgentData.platform) || '';
+  const mac = /^(MacIntel|macOS)$/.test(plat) && !(n.maxTouchPoints > 1);
+  return mac ? { noun: 'this Mac', sensor: 'Touch ID', enrol: 'In a terminal on this Mac: fleet-serve enroll mac' }
+             : { noun: 'this phone', sensor: 'Face ID', enrol: 'On the Mac: fleet-serve enroll <client-id>' };
+}
+
 export function available() {
   return typeof window !== 'undefined' && !!window.PublicKeyCredential && window.isSecureContext === true;
 }
@@ -402,7 +416,7 @@ export function describe(e) {
   const name = (e && e.name) || '';
   const msg = String((e && e.message) || e || '');
   if (name === 'NotAllowedError' || name === 'AbortError')
-    return 'Face ID did not finish — it was cancelled, timed out, or the system refused to show it. Tap unlock to try again.';
+    return `${device().sensor} did not finish — it was cancelled, timed out, or the system refused to show it. Tap unlock to try again.`;
   if (name === 'NotReady') return msg;
   if (name === 'InvalidStateError' || name === 'SecurityError')
     return `this passkey cannot be used here (${msg}). Tap unlock to try again, or re-enrol in settings.`;

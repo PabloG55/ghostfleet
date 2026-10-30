@@ -53,6 +53,8 @@ These need no terminal:
   ghostfleet <project> --plain   print that project's sessions once, and exit
   ghostfleet update              update to the latest release (git or npm) and reinstall;
                                    ghostfleet update --help for its flags
+  ghostfleet web                 open the web client on this Mac (http://localhost:<port>);
+                                   it starts nothing — fleet-serve has to be running
   ghostfleet --sync-check        one line if the runtime is behind its source repo
   ghostfleet --update-check      one line if npm has a newer release
   ghostfleet -h | --help         this
@@ -186,6 +188,8 @@ if [ "${1:-}" = "--update-check" ]; then npm_status; exit 0; fi
 # phone daemon, offer to restart the sessions. Its own file, so it can be run and tested
 # without the control plane's requirements (tmux, the awake inhibitor) in front of it.
 if [ "${1:-}" = update ]; then shift; exec "$BIN_DIR/fleet-update" "$@"; fi
+# `ghostfleet web`: the web client on this Mac, at http://localhost:<port> (bin/fleet-web).
+if [ "${1:-}" = web ]; then shift; exec "$BIN_DIR/fleet-web" "$@"; fi
 
 command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }

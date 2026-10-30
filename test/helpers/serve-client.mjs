@@ -45,7 +45,8 @@ export function request(base, method, path, { body, headers = {}, contentType } 
     const bytes = Buffer.isBuffer(body) ? body : null;
     const data = bytes || (body === undefined ? null : Buffer.from(JSON.stringify(body)));
     const ctype = bytes ? (contentType || 'application/octet-stream') : 'application/json';
-    const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method,
+    // URL keeps an IPv6 literal's brackets in .hostname, and a lookup of '[::1]' finds nothing.
+    const req = http.request({ hostname: u.hostname.replace(/^\[|\]$/g, ''), port: u.port, path: u.pathname + u.search, method,
       headers: { ...(data ? { 'content-type': ctype, 'content-length': data.length } : {}), ...headers } },
       (res) => {
         const parts = [];
@@ -63,8 +64,12 @@ export function request(base, method, path, { body, headers = {}, contentType } 
 }
 
 export class Authenticator {
-  constructor({ rpId, origin, credIdBytes = 16 } = {}) {
+  // `host`: the Host header to send, for a listener that answers to a name rather than to
+  // the address it is reached at — fleet-serve's localhost one is 127.0.0.1 answering to
+  // `localhost:<port>`, and `localhost` itself can resolve to ::1 first.
+  constructor({ rpId, origin, credIdBytes = 16, host = null } = {}) {
     this.rpId = rpId; this.origin = origin;
+    this.host = host;
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
     this.pub = publicKey; this.priv = privateKey;
     this.credId = crypto.randomBytes(credIdBytes);
@@ -116,12 +121,12 @@ export class Authenticator {
   // register handler for why the contract's code-free version is a hole).
   async enroll(base, code) {
     this._base = base;
-    const ch = await request(base, 'GET', '/api/auth/challenge');
+    const ch = await request(base, 'GET', '/api/auth/challenge', { headers: this.hostHeader() });
     if (ch.status !== 200) return ch;
     const cd = this.clientData('webauthn.create', ch.json.challenge);
     const ad = this.authData({ attested: true });
     const att = cbor(new Map([['fmt', 'none'], ['attStmt', new Map()], ['authData', ad]]));
-    const r = await request(base, 'POST', '/api/auth/register', { body: {
+    const r = await request(base, 'POST', '/api/auth/register', { headers: this.hostHeader(), body: {
       code, id: this.credentialId, client_data: b64u(cd), attestation: b64u(att) } });
     if (r.status === 200) { this.token = r.json.token; this.clientId = r.json.client_id; }
     return r;
@@ -130,7 +135,7 @@ export class Authenticator {
   // One assertion, as web/passkey.js builds it. `where` picks what it is for: 'assert'
   // posts it to mint a token; 'header' returns it for X-Fleet-Assertion on a verb.
   async signChallenge({ purpose = 'open', tamper = {} } = {}) {
-    const ch = await request(this._base, 'GET', '/api/auth/challenge');
+    const ch = await request(this._base, 'GET', '/api/auth/challenge', { headers: this.hostHeader() });
     const challenge = tamper.challenge ?? ch.json?.challenge;
     const cd = this.clientData('webauthn.get', challenge);
     const ad = this.authData({ flags: tamper.flags });
@@ -141,13 +146,14 @@ export class Authenticator {
   async assert(base, { purpose = 'open', tamper = {} } = {}) {
     this._base = base;
     const a = await this.signChallenge({ purpose, tamper });
-    const r = await request(base, 'POST', '/api/auth/assert', { body: a });
+    const r = await request(base, 'POST', '/api/auth/assert', { body: a, headers: this.hostHeader() });
     if (r.status === 200) this.token = r.json.token;
     return r;
   }
   async fresh(base, purpose) { this._base = base; return this.signChallenge({ purpose }); }
 
-  headers({ auth = true } = {}) { return auth && this.token ? { authorization: `Bearer ${this.token}` } : {}; }
+  hostHeader() { return this.host ? { host: this.host } : {}; }
+  headers({ auth = true } = {}) { return { ...this.hostHeader(), ...(auth && this.token ? { authorization: `Bearer ${this.token}` } : {}) }; }
   api(base, method, path, body, opts = {}) { this._base = base; return request(base, method, path, { body, ...opts, headers: { ...this.headers(), ...(opts.headers || {}) } }); }
   // POST /api/verb, with the fresh assertion in the header for a destructive tool.
   async verb(base, tool, args, assertion = null) {

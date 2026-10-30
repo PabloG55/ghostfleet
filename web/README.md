@@ -567,7 +567,9 @@ fleet-serve enroll phone      # prints e.g.  GP7CX-ZRDR5  — 15 minutes, one us
 ```
 
 The lock screen offers **enrol this phone** whenever the client is in server mode with no
-credential for that origin, and the sheet behind it takes the code. Case and the hyphen do
+credential for that origin, and the sheet behind it takes the code. On a desktop Mac, which
+opens the client at `http://localhost:<port>`, the same button reads **enrol this Mac**, and
+unlock says Touch ID (`passkey.js device()`). Case and the hyphen do
 not matter (the client normalises exactly as the server does), and the sheet asks
 `/api/auth/challenge` whether a window is even open *before* spending a Face ID prompt on
 a refusal. When the server does refuse, **its own sentence is what you see** — "no
