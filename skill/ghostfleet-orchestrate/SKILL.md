@@ -210,6 +210,10 @@ Every worker AND you drink from **one usage pool**, so wide fan-out drains it N�
 faster and everyone stalls at the ceiling together. A **governor** runs alongside
 the fleet (a dumb non-Claude loop) and auto-parks the newest workers as usage
 climbs, resuming them when the window resets — you'll see those in `fleet-inbox`.
+A turn a resume prompt started is filed **RESUMED**, not DONE, unless it made a commit,
+moved a pushed branch, ran a PR command or closed a ledger item. It doesn't wake you,
+and every RESUMED row folds into one line (`3 workers RESUMED nothing new — …`). A DONE
+after a resume means that worker produced something.
 Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 
 - **`fleet-pause <session>`** — reliably interrupt a worker and mark it OFF (zero

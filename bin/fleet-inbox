@@ -4,8 +4,10 @@
 # The lead's ATTENTION feed. Workers can't push into a busy lead, and having the
 # lead poll every sibling (fleet-read × N) burns the shared budget. So instead,
 # events that actually need the lead are collected passively — the event hook
-# appends a worker's "need-you" (permission / limit / a real question) and the
-# budget governor appends "parked"/"resumed" — into <sock>.inbox. ONE call here
+# appends a worker's "need-you" (permission / limit / a real question), its "done", and
+# "resumed" for a turn a resume prompt started that produced nothing; the budget
+# governor appends "parked"/"resumed" — into <sock>.inbox. Every "resumed" row in view
+# is folded into one line (fold_resumed). ONE call here
 # drains what's new since you last looked, so you learn who needs you without
 # polling anyone.
 #
@@ -153,6 +155,39 @@ fmt() {
   done
 }
 
+# ── RESUMES FOLD INTO ONE LINE ─────────────────────────────────────────────────
+# A park and its resume are bookkeeping, not results, and a night of budget parks used to
+# leave a lead a column of rows to read past: the governor's `resumed` for each un-park, and
+# a DONE for every turn a resume prompt started, each opened to find "nothing to pick up".
+# The hook now files that turn as `resumed` unless it made something (hooks/fleet-event.sh,
+# RESUME_TAG), and here every `resumed` row in view becomes ONE line where the last of them
+# was: "4 workers  RESUMED  nothing new — acme-api, toolbox, …". A worker whose DONE comes
+# after its last resume is left out of it, because that DONE is its news. Annotated rows
+# in, annotated rows out, so fmt draws the line like any other.
+fold_resumed() {
+  awk -F'' '
+    { row[NR] = $0; ev[NR] = $4; ss[NR] = $3 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (ev[i] == "resumed") { at[ss[i]] = i; cnt[ss[i]]++; lastr = i }
+        else if (ev[i] == "done") delete at[ss[i]]
+      }
+      k = 0; for (s in at) { k++; one = s }
+      for (i = 1; i <= NR; i++) {
+        if (ev[i] != "resumed") { print row[i]; continue }
+        if (i != lastr || k == 0) continue
+        split(row[i], f, "")
+        if (k == 1) { who = one; d = "nothing new" (cnt[one] > 1 ? " (resumed " cnt[one] " times)" : "") }
+        else {
+          who = k " workers"; d = ""
+          for (j = 1; j <= NR; j++) if (ev[j] == "resumed" && at[ss[j]] == j) d = d (d == "" ? "" : ", ") ss[j]
+          d = "nothing new — " d
+        }
+        printf "%s\037%s\037%s\037resumed\037\037%s\n", f[1], f[2], who, d
+      }
+    }'
+}
+
 # The pending ones, first thing on every call — and the command that answers each.
 pinned() {
   local rows n who
@@ -230,7 +265,7 @@ if [ "$MODE" = all ]; then
   pinned
   n="$(wc -l < "$INBOX" | tr -d ' ')"
   echo "inbox — all ($n):"
-  fmt <<< "$ANN"
+  fold_resumed <<< "$ANN" | fmt
   reclaim_hints
   exit 0
 fi
@@ -247,6 +282,6 @@ if [ "$total" -le "$seen" ]; then
   exit 0
 fi
 echo "inbox — $((total - seen)) new:"
-awk -F'\037' -v from="$((seen + 1))" '$1 + 0 >= from' <<< "$ANN" | fmt
+awk -F'\037' -v from="$((seen + 1))" '$1 + 0 >= from' <<< "$ANN" | fold_resumed | fmt
 printf '%s\n' "$total" > "$SEEN" 2>/dev/null || true
 reclaim_hints
