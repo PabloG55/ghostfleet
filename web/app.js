@@ -1053,6 +1053,8 @@ function queueProps() {
   return {
     scope: `— queue · ${rows.length}`,
     mode: modeSpec(),
+    // What a tap on the screen offers to leave it: the gesture, ` and q are not on screen.
+    onBack: () => back(),
     stale: S.stale,
     confirm: null,
     // The same cards, in the same order, with the same tap as on Projects before: the

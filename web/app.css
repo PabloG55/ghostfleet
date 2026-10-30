@@ -742,7 +742,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * they are the same size on every phone because what they need to be is TAPPABLE, not
  * proportional to somebody's reading preference. Fixed px here caps the row at about
  * 190px whatever the text does. */
-.sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
+.hdr > .back, .sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
 /* THE VIEW TOGGLE DOES NOT SHRINK. It was `flex: 0 1 auto`, so once the bar stopped
  * wrapping the toggle became a thing that could give way — measured at 320 with a tailnet
  * hostname in the chip it was squeezed from 101px to 46px, which clips `chat`/`pane` to

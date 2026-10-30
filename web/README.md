@@ -404,7 +404,7 @@ added here without a row that presses it.
 | `q` · `` ` `` · `Ctrl-c` | grid | up: a sub-grid to the top grid, the top grid to the project's **master** (however the grid was reached). `Ctrl-c` only when nothing is selected — with a selection it stays copy |
 | `` ` `` | session | back: a worker to its grid, a master to Projects |
 | `j` · `k` · `↓` · `↑` · `⏎` | queue | move the cursor through what the masters hold for you / answer the item under it |
-| `q` · `` ` `` | queue | back to Projects |
+| `q` · `` ` `` | queue | back to Projects, as the `‹` in its top bar does |
 | `⇧→` · `⇧←` | session | the next / previous session — master first, then the cards in grid order, wrapping at both ends (`fleet-cycle`) |
 | `Ctrl-s` | session | the grid |
 | `Ctrl-f` | everywhere | the jump chord, with tmux's own prompt at each step |

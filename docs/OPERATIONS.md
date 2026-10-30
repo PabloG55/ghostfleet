@@ -1116,7 +1116,7 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   carries one `queue · n ›` row (red while any item waits on the owner, grey when every item
   is answered or untouched, absent when nothing is held), and the row opens the queue: the
   project, the ask, how long it has waited, and what the master said it needs. At a desk the
-  queue opens in the right pane beside Projects; a tapped "waiting on you" notification opens it. Beside them, an item the owner replied to that
+  queue opens in the right pane beside Projects; its `‹`, the same back control a conversation has, returns to Projects; a tapped "waiting on you" notification opens it. Beside them, an item the owner replied to that
   the master has not closed yet, and a request nobody has touched in four hours, but never one
   that is only `[answered, no proof]`: the owner's phone messages reach a master as `fleet`
   items, so each one answered in prose stays open for its proof, and what it still owes is the

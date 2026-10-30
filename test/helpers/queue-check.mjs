@@ -193,6 +193,19 @@ try {
     await sleep(300);
   }
   const PHONE = { w: 390, h: 844, touch: true };
+  // THE TOP BAR'S FIRST CONTROL, measured against the column it is drawn in: the queue's
+  // `.hdr` and a conversation's `.sbar` both open the column (#app, the one column or the
+  // right pane). What a reader sees of a back control — the glyph, the size, the type, the
+  // corner — is what is compared, so a lookalike drawn some other way would show.
+  const lead = (bar) => b.evaluate((q) => {
+    const n = document.querySelector(q), app = document.getElementById('app');
+    if (!n || !app) return null;
+    const r = n.getBoundingClientRect(), a = app.getBoundingClientRect(), cs = getComputedStyle(n);
+    return { tag: n.tagName, text: n.textContent.trim(), font: cs.fontSize, pad: cs.padding,
+             w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.left - a.left), y: Math.round(r.top - a.top) };
+  }, `#app > ${bar} > :first-child`);
+  const same = (a, c) => !!a && !!c && a.tag === c.tag && a.text === c.text && a.font === c.font && a.pad === c.pad
+    && Math.abs(a.w - c.w) <= 1 && Math.abs(a.h - c.h) <= 1 && Math.abs(a.x - c.x) <= 2 && Math.abs(a.y - c.y) <= 4;
   // EACH STEP STANDS ALONE. Against a client without the queue, back from Projects leaves the
   // page and the browser drops the target; a run that died there would never say which of
   // the rows after it are red. So a step that throws is one red row, and the next one runs.
@@ -254,6 +267,31 @@ try {
 
   });
 
+  // A WAY BACK THAT CAN BE SEEN. The gesture, ` and q all went back from the queue, and none
+  // of them is on the screen: an owner who opened the queue with a tap had nothing to tap to
+  // leave it. The conversation's `‹` is the back control this client already draws, so the
+  // queue draws that one, in that corner, and it calls the same back().
+  await step('phone: the back control', async () => {
+    await fresh(PHONE);
+    await slid();
+    await tapAt(await centre('.card[data-idx="0"]'));
+    await settle(x => /acme-api/.test(x.main));
+    await slid();
+    await tapAt(await centre('#app .card'));
+    s = await settle(x => x.session);
+    const conv = await lead('.sbar');
+    await fresh(PHONE);
+    await tapAt(await centre('.queue-row'));
+    s = await settle(x => /queue/.test(x.main));
+    const q = await lead('.hdr');
+    is("phone: the queue's top bar opens with a ‹", '‹', q && q.text);
+    is("...the conversation's own back control, in the same corner", true, same(q, conv));
+    if (!same(q, conv)) is('...(measured)', conv, q);
+    await tapAt(await centre('#app > .hdr > :first-child'));
+    s = await settle(x => /projects/.test(x.main));
+    is('a tap on it lands on Projects, the row still there', ['— projects', 1], [s.main, s.rows]);
+  });
+
   // A TAPPED NOTIFICATION. sw.js posts {open:'waiting'} to a window that is open, and opens
   // a cold one on #waiting; both are delivered here the way sw.js delivers them.
   await step('phone: a notification', async () => {
@@ -300,6 +338,26 @@ try {
     s = await settle(x => x.empty);
     is('` goes back from the queue: the right pane is empty again, Projects still beside it', ['— queue · 2', true, '— projects'], [before, s.empty, s.side]);
 
+  });
+
+  // ...and in the right pane, where a conversation opened from Projects draws its own `‹`.
+  await step('desk: the back control', async () => {
+    await fresh();
+    await press('Enter');
+    s = await settle(x => x.session);
+    const conv = await lead('.sbar');
+    // left by its own ‹: the composer has the keyboard, so a typed Q would be a letter in it
+    await clickAt(await centre('#app > .sbar > :first-child'));
+    await settle(x => x.empty);
+    await clickAt(await centre('#side .queue-row'));
+    s = await settle(x => /queue/.test(x.main));
+    const q = await lead('.hdr');
+    is("desk: the queue's top bar in the right pane opens with a ‹", '‹', q && q.text);
+    is("...the conversation's own back control, in the same corner", true, same(q, conv));
+    if (!same(q, conv)) is('...(measured)', conv, q);
+    await clickAt(await centre('#app > .hdr > :first-child'));
+    s = await settle(x => x.empty);
+    is('a click on it lands on Projects: the right pane empty, Projects beside it', ['', true, '— projects'], [s.main, s.empty, s.side]);
   });
 
   // ⏎ ON THE ROW, with the keyboard's focus on it — and the project cursor where it was.

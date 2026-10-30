@@ -126,10 +126,14 @@ function Icon({ name }) {
 // screens now agree instead of one having a footer and the other a header button.
 //   The verbs did not go away and neither did the gestures: both are in the sheet, which
 // names what it is acting on before it offers anything destructive.
-function Header({ scope, mode, stale, counts, onMore }) {
+function Header({ scope, mode, stale, counts, onMore, onBack }) {
   return (
     <Fragment>
       <div class="hdr">
+        {/* THE CONVERSATION'S BACK, NOT A SECOND ONE: the same `‹` button app.js's btn()
+            draws first in a session's .sbar, in the same corner, calling the same back(). A
+            screen one level down gets it; Projects and a project's grid hand no onBack. */}
+        {onBack ? <Btn label="‹" cls="back" onClick={onBack} /> : null}
         <span class="name">ghostfleet</span>
         <span class="scope">{scope}</span>
         <span class={'mode ' + mode.kind} title={mode.detail || null}>{mode.text}</span>
@@ -249,10 +253,10 @@ function CardList({ nodes, listRef }) {
 // its position on screen, and the one place it must never be is over a control ("dont blok
 // the chat with toasts"). Two copies of this order is one screen where that is true and one
 // where it is true until somebody appends something.
-function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, listRef, toast }) {
+function CardScreen({ scope, mode, stale, counts, onMore, onBack, band, confirm, cards, listRef, toast }) {
   return (
     <Fragment>
-      <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} />
+      <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} onBack={onBack} />
       {band}
       <ConfirmBar confirm={confirm} />
       <CardList nodes={cards} listRef={listRef} />
