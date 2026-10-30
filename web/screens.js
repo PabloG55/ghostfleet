@@ -84,6 +84,37 @@ function ProfileTabs({ tabs, onTab }) {
 		}, t.name))
 	});
 }
+function FindField({ find }) {
+	if (!find) return null;
+	return /* @__PURE__ */ u("div", {
+		class: "find",
+		children: [
+			/* @__PURE__ */ u("input", {
+				type: "search",
+				value: find.q,
+				placeholder: "find a project",
+				"aria-label": "find a project",
+				enterkeyhint: "search",
+				autocomplete: "off",
+				autocapitalize: "off",
+				autocorrect: "off",
+				spellcheck: false,
+				onInput: (e) => find.onInput(e.currentTarget.value),
+				onKeyDown: find.onKey
+			}),
+			/* @__PURE__ */ u("span", {
+				class: "count",
+				children: find.count
+			}),
+			find.q ? /* @__PURE__ */ u("button", {
+				class: "clear",
+				onClick: find.onClear,
+				"aria-label": "clear the search",
+				children: "×"
+			}) : null
+		]
+	});
+}
 function CountStrip({ strip }) {
 	if (!strip || !strip.length) return null;
 	return /* @__PURE__ */ u("div", {
@@ -215,6 +246,7 @@ function ProjectsScreen(p) {
 	return /* @__PURE__ */ u(CardScreen, {
 		...p,
 		band: /* @__PURE__ */ u(S, { children: [
+			/* @__PURE__ */ u(FindField, { find: p.find }),
 			/* @__PURE__ */ u(NotifyBar, { notify: p.notify }),
 			/* @__PURE__ */ u(JarvisBar, { jarvis: p.jarvis }),
 			/* @__PURE__ */ u(ProfileTabs, {

@@ -10883,6 +10883,123 @@ else
   skip "Projects screen tab keys" "tmux or node missing"
 fi
 
+# ── `/` finds a project on the Projects screen ───────────────────────────────
+# The grid's search (4a12), on the screen one level up: the same two steps, the same keys,
+# the same matcher (lib/grid-search.mjs). A project answers to its name AND to its folder's
+# name — billing-svc lives in acme-billing here, so `acme` finds three projects and the
+# third only by its folder. Driven through the real TUI and read through sgr-at.mjs for the
+# reasons 4a12 gives. HOME is the temp dir, so every status read on the cards (fleet dirs,
+# schedules, the Jarvis marker) lands in an empty directory and never in a real fleet.
+group "Projects search: / finds a project (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PS="$(mktemp -d)"; mkdir -p "$PS/acme-api" "$PS/acme-web" "$PS/toolbox" "$PS/acme-billing" "$PS/scratch"
+  printf 'acme-api\t%s\twork\nacme-web\t%s\twork\ntoolbox\t%s\twork\nbilling-svc\t%s\twork\nscratch\t%s\tpersonal\n' \
+    "$PS/acme-api" "$PS/acme-web" "$PS/toolbox" "$PS/acme-billing" "$PS/scratch" > "$PS/projects"
+  cp "$PS/projects" "$PS/projects.orig"
+  psframe() { tmux -L cfpsrch capture-pane -p -t d 2>/dev/null; }
+  psattr()  { node "$ROOT/test/helpers/sgr-at.mjs" "$@" <<< "$(tmux -L cfpsrch capture-pane -e -p -t d 2>/dev/null)"; }
+  pswait() {
+    local i=0
+    until grep -qF -- "$1" <<< "$(psframe)"; do
+      [ "$i" -lt 150 ] || { echo "projects never showed: $1" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  psgone() {
+    local i=0
+    while grep -qF -- "$1" <<< "$(psframe)"; do
+      [ "$i" -lt 150 ] || { echo "projects never cleared: $1" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  # STDERR STAYS ON THE PANE: the screen measures its width there, and with it sent to
+  # /dev/null every run is drawn at the 80-column fallback whatever -x says.
+  psstart() {         # $1 = width
+    tmux -L cfpsrch kill-session -t '=d' 2>/dev/null; : > "$PS/choice"
+    tmux -L cfpsrch -f /dev/null new-session -d -s d -x "${1:-120}" -y 40 \
+      "HOME='$PS' CLAUDE_FLEET_PROJECTS='$PS/projects' node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PS/choice'" 2>/dev/null
+    pswait '─ 5 scratch ─'
+  }
+  pskey()  { tmux -L cfpsrch send-keys -t d "$@" 2>/dev/null; }
+  pstype() { tmux -L cfpsrch send-keys -t d -l "$1" 2>/dev/null; }
+  psdone() {
+    local i=0
+    while tmux -L cfpsrch has-session -t '=d' 2>/dev/null; do
+      [ "$i" -lt 150 ] || { echo "projects never exited" >&2; break; }; sleep 0.1; i=$((i+1)); done
+    tr '\037' '|' < "$PS/choice"
+  }
+
+  psstart 120
+  is "the hint bar advertises / find"                    "yes" "$(grep -qF '/ find' <<< "$(psframe)" && echo yes || echo no)"
+  # the cursor starts OFF the first match, so following it is something the screen did
+  pskey l; i=0; until [ "$(psattr '─ 2 acme-web')" = bold+rev ] || [ "$i" -ge 150 ]; do sleep 0.1; i=$((i+1)); done
+  pskey /; pswait "type part of a project's name"
+  # WAIT ON THE PROMPT'S OWN WORDS: `/acme` is also in every card's path (~/acme-api)
+  pstype acme; pswait '3 matches'
+  is "/ + part of a name: the prompt says what matched"  "1" "$(grep -cF '/acme  3 matches' <<< "$(psframe)" || true)"
+  is "...the cursor is on the first match"               "bold+rev" "$(psattr '─ 1 acme-api')"
+  is "...a project matching by name is marked"           "bold"     "$(psattr '─ 2 acme-web')"
+  is "...a project matching only by its folder is too"   "bold"     "$(psattr '─ 4 billing-svc')"
+  is "...with the folder's matched letters reversed"     "bold+rev" "$(psattr 'acme-billing' 0)"
+  is "...and the rest of the folder not"                 "bold"     "$(psattr 'acme-billing' 5)"
+  is "...a project that does not match is dimmed"        "dim"      "$(psattr '─ 3 toolbox')"
+  is "...in place: the numbering does not move"          "1 1" \
+     "$(grep -cF '3 matches' <<< "$(psframe)" || true) $(grep -cF '─ 5 scratch ─' <<< "$(psframe)" || true)"
+
+  pskey Enter; pswait '1 of 3'
+  is "⏎ locks the search on the first match"             "bold+rev" "$(psattr '─ 1 acme-api')"
+  pskey n; pswait '2 of 3'
+  is "n moves to the next match"                         "bold+rev" "$(psattr '─ 2 acme-web')"
+  pskey n; pswait '3 of 3'
+  is "...and to the one found by its folder"             "bold+rev" "$(psattr '─ 4 billing-svc')"
+  pskey n; pswait '1 of 3'
+  is "n wraps from the last match to the first"          "bold+rev" "$(psattr '─ 1 acme-api')"
+  pskey N; pswait '3 of 3'
+  is "N wraps from the first match to the last"          "bold+rev" "$(psattr '─ 4 billing-svc')"
+  # LOCKED, the screen's verbs are inert: x would ask to remove, s would schedule
+  pskey x; pskey s; pswait '3 of 3'
+  # the prompt still up AND no verb's prompt: on a screen that obeyed the keys, either fails
+  is "locked: x / s do nothing to the project"           "1 0" \
+     "$(grep -cF '3 of 3' <<< "$(psframe)" || true) $(grep -cE 'from projects\?|schedule a message' <<< "$(psframe)" || true)"
+  pskey Enter
+  is "⏎ on the locked search opens the selected project" "project|billing-svc" "$(psdone)"
+
+  # TYPING owns every letter — the screen's verbs and the digits included. One key per
+  # write, for the reason 4a12 gives: a run typed in one write is one token no binding takes.
+  psstart 120
+  pskey /; pswait "type part of a project's name"
+  # x is a letter here — and toolbox has one, so it is a match, and the cursor goes there
+  pskey x; pswait '/x  1 match'; pskey s; pswait "no project matches 'xs'"; pskey 5; pswait "no project matches 'xs5'"
+  is "typed letters and digits go into the query"        "1 0" \
+     "$(grep -cF "no project matches 'xs5'" <<< "$(psframe)" || true) $(grep -cE 'from projects\?|schedule a message' <<< "$(psframe)" || true)"
+  is "...a digit did not open its project"               "" "$(cat "$PS/choice")"
+  is "no match: the cursor stays on the last match"      "bold+rev" "$(psattr '─ 3 toolbox')"
+  pskey BSpace; pskey BSpace; pskey BSpace; pswait "type part of a project's name"
+  pstype API; pswait '/API  1 match'
+  is "case-insensitive (Backspace edited the query)"     "bold+rev" "$(psattr '─ 1 acme-api')"
+  # ↓ during the search still moves the cursor; waited on THE CURSOR, since the prompt
+  # does not change and a wait on it would let Esc race the arrow
+  pskey Down; i=0; until [ "$(psattr '─ 4 billing-svc')" = bold+rev ] || [ "$i" -ge 150 ]; do sleep 0.1; i=$((i+1)); done
+  psup="$(grep -cF '/API' <<< "$(psframe)" || true)"
+  pskey Escape; psgone '/API'
+  is "Esc clears the prompt"                             "1 0"      "$psup $(grep -cF '/API' <<< "$(psframe)" || true)"
+  is "...and the frame is drawn normally again"          "plain"    "$(psattr '─ 1 acme-api')"
+  is "...with the cursor left where the search put it"   "bold+rev" "$(psattr '─ 4 billing-svc')"
+  pskey Enter
+  is "after Esc, ⏎ opens the project under the cursor"   "project|billing-svc" "$(psdone)"
+
+  # 80 columns: two cards to a row, and the prompt still one line
+  psstart 80
+  pskey /; pstype scr; pswait '/scr  1 match'; pskey Enter; pswait '1 of 1'
+  is "80 cols: the prompt fits on its row"               "1" "$(grep -cE '^ /scr  1 of 1 .*esc clear *$' <<< "$(psframe)" || true)"
+  is "80 cols: the match is selected"                    "bold+rev" "$(psattr '─ 5 scratch')"
+  pskey q; psgone '1 of 1'
+  is "q clears a locked search, as on the grid"          "plain"    "$(psattr '─ 1 acme-api')"
+  pskey 2
+  is "the digits still open their project afterwards"    "project|acme-web" "$(psdone)"
+  is "no typed or locked key changed the projects file"  "" "$(cmp "$PS/projects" "$PS/projects.orig" 2>&1)"
+
+  tmux -L cfpsrch kill-server 2>/dev/null; rm -rf "$PS"
+else
+  skip "Projects search" "tmux or node missing"
+fi
+
 # THE FIRST PROJECT IS REGISTERED THROUGH THIS SCREEN, and on a fresh account it took 7
 # keystrokes — 5 of them arrowing down a home directory to a folder whose full path the
 # reader could have typed in one go. `/` + the path + ⏎ + s is four, none of them an arrow.
@@ -18431,6 +18548,9 @@ if [ -d "$ROOT/web" ]; then
   # focus lost to the 5s poll, no way back from the queue, the queue drawn in neither pane,
   # no cursor keys on it, the row red for any item, and a notification landing on Projects. The rows staging passes unbroken are
   # #81's own promises (the numbers, the cursor, Projects' keys), which must hold either way.
+  # Finding a project (`/` at the desk, the field on a phone) leaves the row alone: it is not
+  # counted and not dimmed, and it stays above the cards. Watched red against a copy that
+  # dims it with the misses, and one that counts it as a match.
   QUE="$(mktemp -d "$TEST_RUNS.$$.queue.XXXXXX")"
   node "$ROOT/test/helpers/queue-check.mjs" > "$QUE/out" 2> "$QUE/err"
   querc=$?

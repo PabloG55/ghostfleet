@@ -46,6 +46,7 @@ control plane).
 | key | does |
 | --- | --- |
 | `↑↓←→` / `hjkl` | move |
+| `/` | **find a project** — type part of its name or its folder's name; matches are highlighted, the rest dimmed, the cursor on the first. `⏎` keeps the search, then `n` / `N` step through the matches and `⏎` opens one. `Esc` clears it |
 | `⏎` | open that project's **Master Claude** |
 | `Ctrl-s` | skip master, go **straight to that project's grid** |
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
@@ -239,6 +240,7 @@ holding an assertion. [UPSTREAM]
 | `↑↓` / `k j` | move selection | README |
 | `←→` / `h l` | move selection (column) | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected project in the list (persisted to the file) | README |
+| `/` | **find a project** — the grid's `/`, one screen up: every printable key types into the query (`x`, `s` and the digits included), matched against each project's name and its folder's name, case-insensitive. Matching cards are drawn bold with the matched letters reversed; the rest are dimmed in place; the cursor jumps to the first. `⏎` locks it — then `n` / `N` next / previous (wrapping), `⏎` opens, `/` or `⌫` edits again, `q` / `` ` `` clear it. `Esc` (or `Ctrl-C`, which then does not arm the quit) clears it from either step. Matching lives in `lib/grid-search.mjs` | [CODE] |
 | `⏎` | enters that project's **Master Claude** | README |
 | `Ctrl-x` | the **stack** screen, from anywhere — Projects, master, the grid, or inside a session. (It was `Ctrl-t` everywhere until tabs took that key; the Projects screen kept its own copy of the binding, which is why it lagged behind the others for a while) |
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab at the selected project's root**, without booting its master first — you often want a shell in a repo, not a Claude session in it. Opens the project's tmux server if it has never been entered |

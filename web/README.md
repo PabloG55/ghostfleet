@@ -247,6 +247,7 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 | `⇧hjkl` reorder | drag a card **by its title line** (the grip — the rest of the card still scrolls) |
 | `p` / `P` | swipe ← pause · swipe → resume |
 | `x` | long-press |
+| `/` find a project | the **find a project** field at the top of Projects: matches are lit and the rest dimmed in place as you type, the count sits in the field, `×` clears it. Always drawn, so nothing moves when you use it, and never focused for you, so the keyboard only comes up when you tap it |
 | `,` settings · `Ctrl-p`/`Q` projects · `q` back | buttons in the footer bar, key letter included |
 
 With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
@@ -397,8 +398,8 @@ added here without a row that presses it.
 | `y` · `any other key` | a question | yes / cancel. A refused worktree removal takes `f`, as at the desk |
 | `Esc` | a sheet | close it |
 | `⏎` | grid | open the selected card: a session on the right, a sub-lead's sub-grid, a name for a free worktree |
-| `/` | grid | find an agent: every key types into the query, the cursor on the first match, the rest dimmed |
-| `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
+| `/` | Projects, grid | find a project (by its name or its folder's) / an agent: every key types into the query, the cursor on the first match, the rest dimmed. On Projects a project the profile tab hides is not found. A touch screen gets the field instead |
+| `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | Projects, grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
 | `n` · `N` | grid | the new-session picker. One picker for both: this client starts sessions with `fleet_spawn`, which has no resume-or-blank switch |
 | `w` | grid | new worktree |
 | `p` · `P` | grid | pause / resume the selected session |

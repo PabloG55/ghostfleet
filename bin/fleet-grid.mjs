@@ -2698,17 +2698,19 @@ function jumpHint() {
 // dim prose, the keys themselves bright. ONE ROW, ALWAYS: a line that wraps pushes the
 // whole grid down and reflows it under the cursor you are steering, so the hint drops to
 // its short form before it would wrap, and the query is clipped before the hint goes.
-function searchLine() {
+// The Projects screen asks the same question about projects (see pSrch), so the line is
+// drawn from what it is handed: one wording for both screens, with the noun swapped.
+function searchLine() { return searchLineOf(srchQ, srchTyping, srchMatches(), sel, 'agent'); }
+function searchLineOf(srchQ, srchTyping, m, sel, noun) {
   const k = s => `${C.reset}${C.bold}${s}${C.dim}`;
-  const m = srchMatches();
   const q = clip(srchQ, Math.max(8, W() - 52));
   const lead = ` ${C.yellow}${C.bold}/${C.reset}${C.bold}${q}${C.reset}${srchTyping ? `${C.rev} ${C.unrev}` : ' '} `;
   const leadW = 2 + vis(q) + 2;
   const fits = (plain) => leadW + vis(plain) <= W() - 1;
   if (!srchQ)
-    return lead + `${C.dim}type part of an agent's name · ${k('esc')} cancel${C.reset}`;
+    return lead + `${C.dim}type part of ${noun === 'agent' ? 'an agent' : `a ${noun}`}'s name · ${k('esc')} cancel${C.reset}`;
   if (!m.length)
-    return lead + `${C.yellow}no agent matches '${q}'${C.reset}`;
+    return lead + `${C.yellow}no ${noun} matches '${q}'${C.reset}`;
   const n = `${m.length} match${m.length === 1 ? '' : 'es'}`;
   if (srchTyping)
     return lead + `${C.dim}${n} · ${k('⏎')} keep · ${k('esc')} clear${C.reset}`;
@@ -3391,12 +3393,21 @@ const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 
 const SELECT = (() => { const i = process.argv.indexOf('--select'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
 const PROJECTS_CFG = process.env.CLAUDE_FLEET_PROJECTS || path.join(HOME, '.config', 'ghostfleet', 'projects');
 
-function boxCard(title, rows, color, sel) {
+// `hl` is the Projects search's look, the grid's cardLines' in every respect: null with no
+// search up, otherwise { q, hit, title: [from, to), row1: [from, to) } — the spans of
+// `title` and of rows[1] that the query may be marked in (either can be absent). Offsets
+// are into those strings as passed; a clipped title just loses the part past the clip.
+function boxCard(title, rows, color, sel, hl = null) {
   const t = clip(`─ ${title} `, CW);
-  const top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
+  let top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
   const body = [0, 1, 2].map(i => `│ ${padEndV(rows[i] || '', CW - 2)} │`);
   const bot = `╰${'─'.repeat(CW)}╯`;
-  const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${color}${s}${C.reset}`;
+  const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${srchWrap(color, hl)}${s}${C.reset}`;
+  if (hl?.hit) {
+    // ╭ and '─ ' come before the title; '│ ' before a row
+    if (hl.title) top = srchMark(top, 3 + hl.title[0], Math.min(1 + t.length, 3 + hl.title[1]), hl.q, sel);
+    if (hl.row1 && hl.row1[1] <= CW - 2) body[1] = srchMark(body[1], 2 + hl.row1[0], 2 + hl.row1[1], hl.q, false);
+  }
   return [wrap(top, true), wrap(body[0]), wrap(body[1]), wrap(body[2]), wrap(bot)];
 }
 // ── the Projects banner ──────────────────────────────────────────────────────
@@ -3544,6 +3555,55 @@ let pSettings = false;       // settings page open (per-project toggles)
 let pSetSel = 0;             // selected row (project) on the settings page
 let pSetCol = 0;             // selected column (which setting) on the settings page
 let pSetMsg = '';            // what the last experimental toggle answered, shown on its row
+// ── `/` FINDS A PROJECT — the grid's search (srchQ above), one screen up ─────────────
+// Same two steps and the same keys: `/` opens the prompt and every printable key is query
+// (x, s and the digits included — a digit typed into a name must not open project 3); ⏎
+// locks it onto a match, and only then are n / N next / previous and ⏎ opens. Esc clears.
+// A project answers to the name its card shows AND to its folder's name, which is what you
+// type at a shell — both through lib/grid-search.mjs, as the grid's label and session name.
+let pSrchQ = null;           // null = no search; otherwise the query ('' just after `/`)
+let pSrchTyping = false;     // true = keys type into the query; false = locked, n/N/⏎ act
+const pCardOf = (it) => it?.project ? { label: it.project.name, name: path.basename(it.project.path) } : null;
+function pSrchMatches() { return pSrchQ ? matchIndices(pItems, pSrchQ, pCardOf) : []; }
+function pSrchFirst() { const m = pSrchMatches(); if (m.length) pSel = m[0]; }
+// One key while a search is up — the grid's searchKey, on this screen's cursor and open.
+// Returns a choice to finish with, or null.
+function pSearchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const shorter = () => [...pSrchQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { pSrchQ = null; return null; }
+  if (key === '\x1b[A') { pMove('up'); return null; }
+  if (key === '\x1b[B') { pMove('down'); return null; }
+  if (key === '\x1b[C') { pMove('right'); return null; }
+  if (key === '\x1b[D') { pMove('left'); return null; }
+  if (pSrchTyping) {
+    if (key === '\r' || key === '\n') { if (pSrchMatches().length) pSrchTyping = false; return null; }
+    if (bs) { if (!pSrchQ) pSrchQ = null; else { pSrchQ = shorter(); pSrchFirst(); } return null; }
+    if (key.startsWith('\x1b')) return null;
+    const t = [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { pSrchQ += t; pSrchFirst(); }
+    return null;
+  }
+  // LOCKED. q and ` clear it, as on the grid — this screen has no q of its own, but a key
+  // that clears a search on one screen and does nothing one screen up is two rules to learn.
+  // Everything that is not a search key is inert.
+  if (key === 'q' || key === '\x60') { pSrchQ = null; return null; }
+  if (key === '/') { pSrchTyping = true; return null; }
+  if (bs) { pSrchTyping = true; pSrchQ = shorter(); pSrchFirst(); return null; }
+  if (key === '\r' || key === '\n') {
+    pSrchQ = null;
+    const it = pItems[pSel];
+    return it?.add ? 'addproject' : it?.project ? `project${US}${it.project.name}` : null;
+  }
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(pSrchMatches(), pSel, ch === 'n' ? 1 : -1); if (i >= 0) pSel = i; }
+    else if (ch === 'k') pMove('up');
+    else if (ch === 'j') pMove('down');
+    else if (ch === 'l') pMove('right');
+    else if (ch === 'h') pMove('left');
+  }
+  return null;
+}
 
 // ── worker → master auto-nudge (notify-lead) per-project settings ───────────
 // The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
@@ -3875,8 +3935,10 @@ function pRender() {
       ?? ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
+    : pSrchQ != null ? searchLineOf(pSrchQ, pSrchTyping, pSrchMatches(), pSel, 'project') + '\x1b[K\n'
     : (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
+  const hits = new Set(pSrchMatches());
   for (let i = 0; i < pItems.length; i += nc) {
     const row = pItems.slice(i, i + nc);
     const lines = row.map((it, j) => {
@@ -3920,7 +3982,15 @@ function pRender() {
         : (live && live !== want)
         ? `${it.project.profile} · ${live}→${want}`
         : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
-      return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
+      const num = i + j < 9 ? `${i + j + 1} ` : '';
+      const shown = it.project.path.replace(HOME, '~'), folder = path.basename(it.project.path);
+      // The folder is marked only where it says something the title does not.
+      const hl = pSrchQ == null ? null : {
+        q: pSrchQ, hit: hits.has(i + j),
+        title: [num.length, num.length + it.project.name.length],
+        row1: folder !== it.project.name && shown.endsWith(folder) ? [shown.length - folder.length, shown.length] : null,
+      };
+      return boxCard(`${num}${it.project.name}`, [who, shown, line], color, sel, hl);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
@@ -3929,7 +3999,7 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · Ctrl-f jump · Ctrl-s sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · / find · ⇧hjkl reorder · ⏎/1-9 open · Ctrl-f jump · Ctrl-s sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
@@ -4051,6 +4121,9 @@ function onKeyProjects(key) {
     else pConfirmRemove = null;
     pRender(); return;
   }
+  // The search comes BEFORE the chord and the quit, as on the grid: while `/` is up every
+  // key is the search's, and ⌃C clears it rather than arming a quit.
+  if (pSrchQ != null) { pQuitArmed = 0; const c = pSearchKey(key); if (c) return finish(c); pRender(); return; }
   // Fully exiting to the shell (this is the ONLY screen whose quit does that)
   // now takes ⌃C twice, so a single stray key can't drop the whole fleet UI.
   // First ⌃C arms + shows a hint; a second within QUIT_WINDOW quits.
@@ -4119,6 +4192,7 @@ function onKeyProjects(key) {
     const it = pItems[pSel] || pItems.find(x => x.project);
     if (it?.project) return finish(`tabfor${US}${it.project.name}${US}${key === '\x14' ? 'term' : 'edit'}`);
   }
+  else if (key === '/') { pSrchQ = ''; pSrchTyping = true; }
   else if (key === ',') { pSettings = true; pSetSel = 0; pSetMsg = ''; }   // open the settings page
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];

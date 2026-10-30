@@ -243,6 +243,99 @@ try {
   await press('y');
   is('...and y removes it (fleet_project_remove)', true, await until(() => auditHas('fleet_project_remove'), 3000));
 
+  // ── `/` on Projects: the grid's search, one screen up (fleet-grid.mjs pSearchKey) ─────
+  // The fixture's projects in order: acme-api, acme-web, toolbox, billing-svc, scratch (the
+  // last on the `personal` tab). A desk has the keys and the prompt row; the phone's field
+  // (below) is not drawn here.
+  await fresh();
+  is('Projects at a desk: no search field, the keys instead', 0, await b.evaluate(() => document.querySelectorAll('.find').length));
+  await press('l');                                   // the cursor starts OFF the match
+  await press('/', { as: '/' });
+  s = await settle(x => x.confirm);
+  is('Projects /: opens the search prompt', ['/▏', "type part of a project's name · esc cancel"], [s.confirm, s.keys]);
+  await keys('x', 's', '3');                          // the screen's verbs and a digit: all query
+  s = await look();
+  is('Projects / typing: x, s and digits type, not act', ['/xs3▏', "no project matches 'xs3'", ''], [s.confirm, s.keys, s.session]);
+  await keys('Backspace', 'Backspace', 'Backspace', 'A', 'C', 'M', 'E');
+  s = await look();
+  is('Projects /: case-insensitive, the cursor on the first match', ['/ACME▏', 'acme-api'], [s.confirm, s.sel]);
+  is('...the rest dimmed in place', 4, s.misses);     // toolbox, billing-svc, scratch, + new
+  await press('Enter');
+  is('Projects / ⏎: locks the search', true, /^1 of 2 · n next · N prev/.test((await look()).keys));
+  await press('n');
+  is('Projects / n: the next match', 'acme-web', (await look()).sel);
+  await press('n');
+  is('Projects / n: wraps to the first', 'acme-api', (await look()).sel);
+  await press('N', { shift: true });
+  is('Projects / N: wraps to the last', 'acme-web', (await look()).sel);
+  await press('x');
+  is('Projects / x (locked): inert', '/ACME', (await look()).confirm);
+  await press('Escape');
+  s = await settle(x => !x.confirm);
+  is('Projects / Esc: clears it, the cursor left on the match', ['', 0, 'acme-web'], [s.confirm, s.misses, s.sel]);
+  await keys('/', 'b', 'i', 'l', 'l', 'Enter', 'Enter');
+  s = await settle(x => x.session);
+  is('Projects / ⏎ ⏎: opens the match on its master', ['master', true], [s.session, /billing-svc/.test(s.side)]);
+  // The profile tab still applies: on `work`, scratch (a personal project) is not there to find
+  await fresh();
+  await b.evaluate(() => { const t = [...document.querySelectorAll('.seg.tabs button')].find(x => x.textContent.trim() === 'work'); if (t) t.click(); return null; });
+  await keys('/', 's', 'c', 'r');
+  is('Projects /: a project the profile tab hides is not found', "no project matches 'scr'", (await look()).keys);
+
+  // ── the phone's search field ────────────────────────────────────────────────────────
+  // Always drawn on a touch screen, never focused for it (focus is the on-screen keyboard),
+  // and nothing on screen moves as it is typed into: the list's top is measured before and
+  // after, and the cards are dimmed in place rather than filtered out.
+  await fresh(390, 844, true);
+  const field = () => b.evaluate(() => {
+    const f = document.querySelector('#app .find input'), l = document.querySelector('#app > .cards');
+    return f ? { value: f.value, focused: document.activeElement === f, count: ((document.querySelector('#app .find .count') || {}).textContent || '').trim(),
+                 top: Math.round(l ? l.getBoundingClientRect().top : -1), h: Math.round(f.getBoundingClientRect().height) } : null;
+  });
+  let f0 = await field();
+  is('phone Projects: a search field is drawn', true, !!f0);
+  // 'no field' rather than false when there is none, so a client without one is red here too
+  is('...and it does not take the focus (no keyboard until it is tapped)', false, f0 ? f0.focused : 'no field');
+  await sleep(5600);                                  // one 5s poll and its render
+  is('...not after a poll either', false, (await field())?.focused ?? 'no field');
+  // A REAL TAP, through the touch path, at the field's centre
+  const fxy = await b.evaluate(() => { const r = document.querySelector('#app .find input')?.getBoundingClientRect(); return r ? [r.x + r.width / 2, r.y + r.height / 2] : null; });
+  if (fxy) {
+    for (const type of ['touchStart', 'touchEnd'])
+      await b.call('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x: fxy[0], y: fxy[1] }] });
+    await sleep(300);
+  }
+  is('phone: a tap on the field focuses it', true, !!(await field())?.focused);
+  for (const ch of 'web') await b.call('Input.insertText', { text: ch });
+  await sleep(300);
+  let f1 = await field();
+  s = await look();
+  is('phone: typing highlights the match, the cursor on it', ['web', '1 match', 'acme-web'], [f1?.value, f1?.count, s.sel]);
+  // acme-api, toolbox, billing-svc, scratch and `+ new project` dimmed; all five projects still drawn
+  is('...the rest dimmed in place, none hidden', [5, 5], [s.misses, await b.evaluate(() => document.querySelectorAll('#app .card[data-idx] .c-name').length - 1)]);
+  is('...and nothing moved: the list starts where it did', true,
+     f0 && f1 && f0.top === f1.top && f0.h === f1.h ? true : [f0?.top, f1?.top, f0?.h, f1?.h]);
+  is('...no prompt row pushed in above it', ['', true], [s.confirm, !!f1]);
+  await sleep(5600);
+  f1 = await field();
+  is('phone: a poll keeps the field, its text and its focus', ['web', true], [f1?.value, f1?.focused]);
+  for (const ch of 'zz') await b.call('Input.insertText', { text: ch });
+  await sleep(300);
+  f1 = await field();
+  is('phone: no match says so, in the field', ['webzz', 'no project matches', f0?.top], [f1?.value, f1?.count, f1?.top]);
+  await b.evaluate(() => { document.querySelector('#app .find .clear')?.click(); return null; });
+  await sleep(300);
+  f1 = await field();
+  s = await look();
+  is('phone: × clears it, nothing dimmed', ['', '', 0, f0?.top], [f1?.value, f1?.count, s.misses, f1?.top]);
+  await b.evaluate(() => { const i = document.querySelector('#app .find input'); if (i) i.focus(); return null; });
+  for (const ch of 'bill') await b.call('Input.insertText', { text: ch });
+  await sleep(300);
+  const lit = (await look()).sel;
+  await tap('billing-svc');
+  is('phone: the match is lit, and a tap on it opens that project', ['billing-svc', true],
+     [lit, /billing-svc/.test((await settle(x => /billing-svc/.test(x.list) || x.session)).list)]);
+
   // ════════════════════════════════════════════════════════════════════════════════════
   // Ctrl-f, THE JUMP CHORD (tmux/cf.tmux.conf cfjump tables)
   // ════════════════════════════════════════════════════════════════════════════════════

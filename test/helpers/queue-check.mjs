@@ -161,7 +161,7 @@ try {
     await sleep(200);
     return true;
   };
-  const VK = { Enter: 13, Escape: 27, ArrowUp: 38, ArrowDown: 40, '`': 192 };
+  const VK = { Enter: 13, Escape: 27, ArrowUp: 38, ArrowDown: 40, '`': 192, '/': 191 };
   async function press(key, { shift = false } = {}) {
     const one = key.length === 1;
     const vk = VK[key] || (one ? key.toUpperCase().charCodeAt(0) : 0);
@@ -407,6 +407,37 @@ try {
     await b.evaluate(() => { navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { open: 'waiting' } })); return null; });
     s = await settle(x => /queue/.test(x.main));
     is('desk: a tapped notification opens the queue on the right', ['— queue · 2', '— projects'], [s.main, s.side]);
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // FINDING A PROJECT LEAVES THE ROW ALONE. The row is not a project: a search neither
+  // counts it nor dims it, and it stays above the cards — the one line saying something
+  // waits on the owner must not go grey because the owner typed a project's name.
+  // ════════════════════════════════════════════════════════════════════════════════════
+  const rowBySearch = () => b.evaluate(() => {
+    const r = document.querySelector('.queue-row'), c = document.querySelector('.card[data-idx]');
+    if (!r) return 'no row';
+    return { lit: !r.classList.contains('miss') && getComputedStyle(r).opacity === '1',
+             above: !!c && r.getBoundingClientRect().bottom <= c.getBoundingClientRect().top,
+             dimmed: document.querySelectorAll('.card.miss').length };
+  });
+  await step('desk: / with a queue held', async () => {
+    await fresh();
+    await press('/');
+    for (const k of 'acme') await press(k);
+    const keys = await b.evaluate(() => ((document.querySelector('#side .confirm .keys') || {}).textContent || '').trim());
+    // acme-api and acme-web match; toolbox, billing-svc, scratch and `+ new project` dim
+    is('desk: / acme counts the two projects, not the row', true, /^2 matches/.test(keys) || keys);
+    is('...and the row stays above them, lit', { lit: true, above: true, dimmed: 4 }, await rowBySearch());
+  });
+  await step('phone: the field with a queue held', async () => {
+    await fresh(PHONE);
+    await tapAt(await centre('#app .find input'));
+    for (const ch of 'web') await b.call('Input.insertText', { text: ch });
+    await sleep(300);
+    const count = await b.evaluate(() => ((document.querySelector('#app .find .count') || {}).textContent || '').trim());
+    is('phone: web counts one project, not the row', '1 match', count);
+    is('...and the row stays above them, lit', { lit: true, above: true, dimmed: 5 }, await rowBySearch());
   });
 } finally {
   try { if (b) await b.close(); } catch {}
