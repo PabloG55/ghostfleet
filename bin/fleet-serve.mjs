@@ -1495,7 +1495,7 @@ function sockProjects() {
   return m;
 }
 // The hook's status files are the whole input: {sock, slot, status, ts, …}. Only those
-// four fields are read. There is no transcript in a status file and this never opens one.
+// four fields are read, and `turn` — a resume turn's verdict — when the record has one. There is no transcript in a status file and this never opens one.
 //
 // NEWEST PER (sock, slot), which is not tidiness — it is the difference between a bell
 // and a phone that buzzes every thirty seconds forever. Status files are keyed by SESSION
@@ -1537,20 +1537,27 @@ let pushLastSent = 0;
 // not tear them, and one MISSED buzz in the case where something else does is much
 // cheaper than a phantom one — a bell that rings for nothing is a bell you learn to
 // ignore, and §9's whole argument is that these have to be rare and true.
-function pushEvents(rows) {
+export function pushEvents(rows) {
   const names = sockProjects(), events = [], seen = new Set();
   for (const r of rows) {
     const key = `${r.sock}/${r.slot}`;
     seen.add(key);
     const known = pushState.has(key);
     const prev = pushState.get(key);
+    // A RESUME TURN IS NOT AN ANSWER UNLESS IT MADE ONE. Every park and resume ends in a
+    // turn, and a worker with nothing to pick up says so and stops: that was a buzz per
+    // resume. The hook files the turn's verdict in the record (hooks/fleet-event.sh,
+    // RESUME_TAG) — but the mod writes `ready` from inside Claude Code and can land before
+    // the hook's Stop has judged the turn, so a `ready` still marked `resume` is not decided
+    // yet: the old status is kept, and the next scan, which sees the verdict, decides.
+    if (known && prev === 'working' && r.status === 'ready' && r.turn === 'resume') continue;
     pushState.set(key, r.status);
     if (!known || prev === r.status) continue;
     const project = names.get(r.sock) || r.sock.replace(/^cf-/, '');
     if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot, sock: r.sock });
     // working -> ready is a turn that ENDED. `idle` (SessionStart) is not an answer, and
     // ready -> ready is the same session sitting where it was.
-    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
+    else if (r.status === 'ready' && prev === 'working' && r.turn !== 'resumed') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
   }
   for (const k of [...pushState.keys()]) if (!seen.has(k)) pushState.delete(k);
   return events;

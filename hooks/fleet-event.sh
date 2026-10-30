@@ -86,7 +86,7 @@ fi
 # one outcome nothing else on disk records.
 if [ "$EVENT" = "SessionEnd" ]; then
   [ -f "$FLEET_DIR/$SESSION.json" ] && _dbg "SessionEnd $SESSION reason=$(printf '%s' "$input" | jq -r '.reason // "?"' 2>/dev/null) job=${CLAUDE_JOB_DIR##*/} tmux=${TMUX_PANE:-} — record removed"
-  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" 2>/dev/null
+  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" "$FLEET_DIR/$SESSION.resume" 2>/dev/null
   exit 0
 fi
 
@@ -214,6 +214,65 @@ if [ -n "${CLAUDE_JOB_DIR:-}" ] && [ -z "${TMUX:-}" ]; then
 fi
 now="$(date +%s)"
 
+# ── A TURN STARTED BY A RESUME IS NOT NEWS UNLESS IT MADE SOME ──────────────────
+# Every park and resume ends in a turn: the resume prompt says "continue", the worker looks,
+# usually finds nothing to pick up, and Stops. Each Stop was a DONE row and a lead nudge, so
+# a night of budget parks left a lead reading a column of DONEs to find the three that had
+# a result in them; an idle worker whose job had finished days earlier produced one per
+# resume. So a resume prompt carries RESUME_TAG at its start (lib/accounts.mjs,
+# bin/fleet-resume), and the submit that starts a turn with it writes a baseline beside the
+# record: when, the transcript line the turn begins at, HEAD, and the remote-tracking refs of
+# the branch checked out. The Stop compares. A turn that made a commit, moved a pushed
+# branch, ran a PR verb, or closed a ledger item is a DONE as before; one that did none of
+# those is RESUMED — its own row, no lead nudge, no phone push, folded by fleet-inbox.
+#   THE TAG IS IN THE WORDS, not in a marker file beside them, because a file is consumed by
+# whichever prompt arrives next — a human typing first, or a prompt the queue delivers late
+# — while the words arrive with the one prompt they belong to, by every delivery path.
+#   Any other prompt that reaches the session during the turn makes it an ordinary one:
+# somebody asked for something, and a DONE is what they are waiting for.
+RESUME_TAG='[fleet] resume:'
+_resf="$FLEET_DIR/$SESSION.resume"
+_resume_refs() {                      # the remote-tracking refs of the branch in $CWD, one line
+  local b
+  b="$(git -C "${CWD:-.}" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  case "$b" in ''|HEAD) return 0 ;; esac
+  git -C "$CWD" --no-optional-locks for-each-ref --format='%(objectname) %(refname)' refs/remotes 2>/dev/null \
+    | awk -v b="/$b" 'length($2) > length(b) && substr($2, length($2) - length(b) + 1) == b { printf "%s ", $0 }'
+}
+_resume_mark() {                      # the baseline a resume turn is judged against
+  local tl=0
+  [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+  case "$tl" in ''|*[!0-9]*) tl=0 ;; esac
+  printf '%s\x1f%s\x1f%s\x1f%s\n' "$now" "$tl" \
+    "$(git -C "${CWD:-.}" --no-optional-locks rev-parse -q --verify HEAD 2>/dev/null)" "$(_resume_refs)" \
+    > "$_resf" 2>/dev/null
+}
+# 0 when the turn since the baseline made something a lead would want to look at. A baseline
+# that cannot be read says yes: hiding a real result is the failure that costs, a DONE too
+# many is the one this replaces.
+_resume_produced() {
+  local at="" line="" head="" refs=""
+  IFS=$'\x1f' read -r at line head refs < "$_resf" 2>/dev/null || return 0
+  case "$at" in ''|*[!0-9]*) return 0 ;; esac
+  case "$line" in ''|*[!0-9]*) line=0 ;; esac
+  [ "$(git -C "${CWD:-.}" --no-optional-locks rev-parse -q --verify HEAD 2>/dev/null)" = "$head" ] || return 0
+  [ "$(_resume_refs)" = "$refs" ] || return 0
+  # A PR opened or edited moves no local ref, so it is read from the turn's own tool calls.
+  # awk reads the file itself: no pipe for an early match to break (CLAUDE.md, pipefail).
+  if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && awk -v from="$(( line + 1 ))" '
+       NR >= from && /"tool_use"/ && /gh pr (create|edit|ready|merge|comment|review)|(create|update|merge)_pull_request/ { f = 1; exit }
+       END { exit !f }' "$TRANSCRIPT" 2>/dev/null; then
+    return 0
+  fi
+  # An answer to a real ask: an item of the mod's ledger closed by the agent (or its judge)
+  # since the turn began. A drop is not an answer; a hand close is somebody else's.
+  [ -f "$FLEET_DIR/$SESSION.ledger" ] && [ "$(jq --argjson t "$(( at * 1000 ))" \
+    '[.items[]? | select((.closedAt // 0) >= $t and (.closedBy == "agent" or .closedBy == "judge")
+                         and (.state == "done" or .state == "not-done"))] | length' \
+    "$FLEET_DIR/$SESSION.ledger" 2>/dev/null || echo 0)" != 0 ] && return 0
+  return 1
+}
+
 # --- a prompt typed into a RUNNING turn is the next task, not a replacement ----
 # Claude Code folds a message submitted mid-turn into the turn in progress, and the agent
 # reads it as a change of direction: task A is dropped for task B and nothing says so.
@@ -282,6 +341,12 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
       # fleet-send --now: pasted into the turn ON PURPOSE. Say nothing, once.
       _nowf="$FLEET_DIR/${SOCK:-_}.${SLOT:-_}.now"
       if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$_nowf" ]; then rm -f "$_nowf"; _mid=0; fi
+      # A resume prompt starts a resume turn; folded into a turn already running it changes
+      # nothing. Anything else is somebody asking, and the turn is theirs (see RESUME_TAG).
+      case "$_prompt" in
+        "$RESUME_TAG"*) [ "$_mid" = 0 ] && _resume_mark ;;
+        *)              rm -f "$_resf" 2>/dev/null ;;
+      esac
       if [ "$_mid" = 1 ]; then
         jq -n --arg t "$_t_line" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit",
           additionalContext: ("[fleet] This message arrived while you were still working on: \"" + $t + "\". It is QUEUED WORK, not a replacement: add it to your task list, finish the task in hand, then do this one — unless this message itself says to stop or switch (stop, instead, drop that, first do). Your closing report lists every task you received this turn with its state.")}}' 2>/dev/null
@@ -315,6 +380,18 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
   fi
 fi
 [ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
+
+# The resume turn's verdict, decided once, before the record is written: `resume` while it
+# runs, `resumed` on a Stop that produced nothing. The record carries it so fleet-serve's
+# phone push can tell the two turns apart; the inbox block below uses it for the row.
+TURN=""
+if [ -f "$_resf" ]; then
+  case "$EVENT" in
+    Stop)        _resume_produced || TURN=resumed; rm -f "$_resf" 2>/dev/null ;;
+    StopFailure) rm -f "$_resf" 2>/dev/null ;;
+    *)           TURN=resume ;;
+  esac
+fi
 
 case "$EVENT" in
   UserPromptSubmit) status="working"                       # any new prompt un-parks the session
@@ -389,10 +466,11 @@ if jq -n \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
-  --argjson mod "$_mod" --arg failure "$FAILURE" --arg fmsg "$FAILURE_MSG" \
+  --argjson mod "$_mod" --arg failure "$FAILURE" --arg fmsg "$FAILURE_MSG" --arg turn "$TURN" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
-   + (if $from != "" then {continued_from:$from} else {} end) + $mod
+   + (if $from != "" then {continued_from:$from} else {} end)
+   + (if $turn != "" then {turn:$turn} else {} end) + $mod
    + (if $failure != "" then {failure:({error:$failure, at:$ts} + (if $fmsg != "" then {message:$fmsg} else {} end))} else {} end)' \
   >"$tmp" 2>/dev/null
 then
@@ -747,6 +825,8 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   fi
   ev=""; detail=""
   if   [ "$status" = "need-you" ]; then ev="need-you"; detail="$NEED_DETAIL"
+  elif [ "$EVENT" = "Stop" ] && [ "$TURN" = resumed ]; then
+                                        ev="resumed";   detail="nothing new · ${folder}${branch:+ · $branch}"
   elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
   fi
   if [ -n "$ev" ]; then
@@ -805,6 +885,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       || [ -f "$_pm.notify-lead" ] \
       || [ -f "$HOME/.config/ghostfleet/notify-lead" ]; then _push=1
     fi
+    # A resume that produced nothing is in the inbox for whoever reads it, and wakes nobody:
+    # waking a lead to read "nothing new" is the noise the row exists to fold away.
+    [ "$ev" = resumed ] && _push=0
     if [ "$_push" = 1 ] && [ "$ev" = need-you ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
       _needyou_nudge
@@ -896,7 +979,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
         fi
       fi
-    elif [ "$j_batch" -gt 0 ]; then
+    elif [ "$j_batch" -gt 0 ] && [ "$TURN" != resumed ]; then
       # ONE SLEEPER PER JARVIS, armed by the first finish after a quiet spell. When it wakes it
       # nudges only if nothing else woke Jarvis in the meantime — a need-you already made it
       # look, and that look read the whole digest.

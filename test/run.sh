@@ -13238,6 +13238,177 @@ is "...and the marker is gone"  "0" "$([ -f "$FR/fleet/cf-x.plan.parked" ] && ec
 is "wrong dir -> refuses to claim success" "1" "$(rout "$FR/nope" | grep -c 'was not parked' || true)"
 rm -rf "$FR"
 
+# ── a resume turn that made nothing is RESUMED, not DONE ──────────────────────
+# Every park and resume ends in a turn: the resume prompt says "continue", the worker looks,
+# finds nothing to pick up and Stops — and each Stop was a DONE row and a lead nudge. Measured:
+# an idle worker whose job had finished days earlier produced a DONE on each of several
+# resumes, and a lead after a night of pauses had to open every DONE to find the three real
+# ones. Both directions on purpose: a resume turn that made nothing must go quiet, and one that
+# pushed a commit, opened a PR or closed a ledger item must stay a DONE that wakes the lead —
+# a fix that silenced every resume turn would pass the first half and hide real work.
+group "a resume turn that made nothing is RESUMED, not DONE"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  RS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$RS/bin" "$RS/home" "$RS/fleet" "$RS/cfg" "$RS/rbin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$RS" > "$RS/bin/fleet-send"
+  chmod +x "$RS/bin/fleet-send"
+  : > "$RS/fleet/cfres.notify-lead"
+  # A worktree with a branch already pushed, so "moved a pushed branch" has a ref to move.
+  git init -q --bare "$RS/origin.git" 2>/dev/null
+  git init -q -b toolbox "$RS/toolbox" 2>/dev/null
+  git -C "$RS/toolbox" config user.email t@t; git -C "$RS/toolbox" config user.name t
+  : > "$RS/toolbox/f"; git -C "$RS/toolbox" add f; git -C "$RS/toolbox" commit -qm init 2>/dev/null
+  git -C "$RS/toolbox" remote add origin "$RS/origin.git"
+  git -C "$RS/toolbox" push -q -u origin toolbox 2>/dev/null
+  # The lead's pane shows an EMPTY composer, so a nudge has nothing to wait for: when none
+  # arrives it is because none was sent.
+  rule="$(printf '─%.0s' $(seq 1 40))"
+  printf '%s\n❯ \n%s\n' "$rule" "$rule" > "$RS/empty.txt"
+  tmux -L cfres kill-server 2>/dev/null
+  tmux -L cfres new-session -d -s master -x 100 -y 20 "clear; cat '$RS/empty.txt'; sleep 300" 2>/dev/null
+  tmux -L cfres new-session -d -s toolbox -x 100 -y 20 'sleep 300' 2>/dev/null
+  wait_for 5 "the lead's composer to draw" 'pane_has cfres "❯" master' || true
+  T="$RS/t.jsonl"; : > "$T"
+  rsfire() {                                    # $1 = event, $2 = prompt
+    jq -nc --arg e "$1" --arg c "$RS/toolbox" --arg t "$T" --arg p "${2:-}" \
+      '{hook_event_name:$e, session_id:"rs-toolbox", cwd:$c, transcript_path:$t}
+       + (if $p != "" then {prompt:$p} else {} end)' \
+    | env -u TMUX -u TMUX_PANE HOME="$RS/home" CLAUDE_CONFIG_DIR="$RS/cfg" CLAUDE_FLEET_SOCK=cfres \
+        CLAUDE_FLEET_SLOT=toolbox CLAUDE_FLEET_DIR="$RS/fleet" CLAUDE_FLEET_NOTIFIER=off \
+        CLAUDE_FLEET_NOTIFY_DEBOUNCE=0 PATH="$RS/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rs_turn() { jq -r '.turn // ""' "$RS/fleet/rs-toolbox.json" 2>/dev/null; }
+  rs_last() { tail -1 "$RS/fleet/cfres.inbox" 2>/dev/null | cut -f3; }
+  rs_nudged() { grep -c 'A worker finished' "$RS/sent.log" 2>/dev/null || true; }
+  RESUME='[fleet] resume: Every Claude account on this profile had run out, so ghostfleet paused you; it has now moved the profile to an account with room. Continue what you were working on.'
+  : > "$RS/sent.log"
+
+  # ── 1. a resume turn that makes nothing ──
+  rsfire UserPromptSubmit "$RESUME"
+  is "a resume turn is marked while it runs"           "resume"  "$(rs_turn)"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"nothing to pick up"}]}}' >> "$T"
+  rsfire Stop
+  is "...its Stop is filed RESUMED, not DONE"          "resumed" "$(rs_last)"
+  is "...the record carries the verdict for the phone" "resumed" "$(rs_turn)"
+  sleep 1
+  is "...and wakes no lead"                            "0"       "$(rs_nudged)"
+
+  # ── 2. a resume turn that commits and pushes ──
+  : > "$RS/sent.log"
+  rsfire UserPromptSubmit "$RESUME"
+  printf 'x\n' > "$RS/toolbox/f"; git -C "$RS/toolbox" commit -qam work 2>/dev/null
+  git -C "$RS/toolbox" push -q 2>/dev/null
+  rsfire Stop
+  is "a resume turn that pushed a commit is a DONE"    "done"    "$(rs_last)"
+  is "...with no resume verdict on the record"         ""        "$(rs_turn)"
+  wait_for 5 "the DONE's nudge" '[ "$(rs_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead"                        "1"       "$(rs_nudged)"
+
+  # ── 3. an ordinary task turn, as it always was ──
+  : > "$RS/sent.log"
+  rsfire UserPromptSubmit "fix the flaky test in billing-svc"
+  is "an ordinary turn carries no resume mark"         ""        "$(rs_turn)"
+  rsfire Stop
+  is "an ordinary turn's Stop is a DONE"               "done"    "$(rs_last)"
+  wait_for 5 "the ordinary DONE's nudge" '[ "$(rs_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead"                        "1"       "$(rs_nudged)"
+
+  # ── 2b. a commit made earlier, pushed by the resume turn ──
+  printf 'y\n' > "$RS/toolbox/f"; git -C "$RS/toolbox" commit -qam earlier 2>/dev/null
+  rsfire UserPromptSubmit "$RESUME"
+  git -C "$RS/toolbox" push -q 2>/dev/null
+  rsfire Stop
+  is "a resume turn that only pushed is a DONE"        "done"    "$(rs_last)"
+
+  # ── 4. the other things a resume turn can produce ──
+  rsfire UserPromptSubmit "$RESUME"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"gh pr create --base staging --fill"}}]}}' >> "$T"
+  rsfire Stop
+  is "a resume turn that opened a PR is a DONE"        "done"    "$(rs_last)"
+  rsfire UserPromptSubmit "$RESUME"
+  jq -nc --argjson at "$(( $(date +%s) * 1000 + 5 ))" \
+    '{items:[{id:"1", state:"done", closedAt:$at, closedBy:"agent", text:"report the PR"}]}' > "$RS/fleet/rs-toolbox.ledger"
+  rsfire Stop
+  is "a resume turn that closed a ledger item is a DONE" "done"  "$(rs_last)"
+  jq -nc --argjson at "$(( ($(date +%s) - 100) * 1000 ))" \
+    '{items:[{id:"1", state:"done", closedAt:$at, closedBy:"agent", text:"report the PR"}]}' > "$RS/fleet/rs-toolbox.ledger"
+  rsfire UserPromptSubmit "$RESUME"
+  rsfire Stop
+  is "...a ledger item closed BEFORE the turn is not" "resumed"  "$(rs_last)"
+  rm -f "$RS/fleet/rs-toolbox.ledger"
+  rsfire UserPromptSubmit "$RESUME"
+  rsfire UserPromptSubmit "and also tell me which branch you are on"
+  rsfire Stop
+  is "a real prompt inside a resume turn makes it a DONE" "done" "$(rs_last)"
+
+  # ── 5. the senders put the tag on ──
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/rsent.log"\n' "$RS" > "$RS/rbin/fleet-send"
+  chmod +x "$RS/rbin/fleet-send"; cp "$ROOT/bin/fleet-resume" "$RS/rbin/fleet-resume"
+  env -u TMUX CLAUDE_FLEET_DIR="$RS/fleet" "$RS/rbin/fleet-resume" -s cfres toolbox "carry on" >/dev/null 2>&1
+  is "fleet-resume's prompt carries the resume tag"    "1" "$(grep -c -- '-s cfres toolbox \[fleet\] resume: carry on' "$RS/rsent.log" 2>/dev/null || true)"
+  # The hook's tag and the accounts engine's are one string, and the engine's prompts are
+  # nudges to the ledger, so a worker cannot close one and read as having answered an ask.
+  is "the accounts engine tags both prompts with the hook's tag, and the ledger records neither" "yes yes yes" \
+     "$(node --input-type=module -e "
+        import { RESUME_TAG, RESUME_PROMPT, IGNORED_PROMPT } from '$ROOT/lib/accounts.mjs';
+        import { isNudge } from '$ROOT/mods/ghostfleet/hooks/ledger.js';
+        const hook = process.argv[1];
+        console.log([RESUME_TAG === hook, RESUME_PROMPT.startsWith(hook) && IGNORED_PROMPT.startsWith(hook),
+                     isNudge(RESUME_PROMPT) && isNudge(IGNORED_PROMPT)].map(b => (b ? 'yes' : 'no')).join(' '))" \
+        "$(sed -n "s/^RESUME_TAG='\(.*\)'$/\1/p" "$ROOT/hooks/fleet-event.sh")" 2>&1)"
+
+  # ── 6. fleet-inbox folds the resumes into one line ──
+  # The server goes first: fleet-inbox's footer asks every live session whether its task
+  # shipped, and this group's sessions are not the question.
+  tmux -L cfres kill-server 2>/dev/null
+  rsin() { env -u TMUX HOME="$RS/home" CLAUDE_FLEET_DIR="$RS/fleet" "$ROOT/bin/fleet-inbox" -s cfres "$@" 2>&1; }
+  NOW="$(date +%s)"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$((NOW-50))" acme-api resumed "governor: budget 80% — window recovered" \
+    "$((NOW-40))" toolbox resumed "nothing new · toolbox · toolbox" \
+    "$((NOW-30))" scratch resumed "governor: machine recovered" \
+    "$((NOW-20))" scratch done "scratch · scratch" \
+    "$((NOW-10))" billing-svc resumed "nothing new · billing-svc" > "$RS/fleet/cfres.inbox"
+  rm -f "$RS/fleet/cfres.inbox.seen"
+  RSIN="$(rsin)"
+  is "every resume folds into one RESUMED line"        "1" "$(grep -c 'RESUMED' <<< "$RSIN" || true)"
+  is "...naming the workers with nothing new"          "1" "$(grep -cF '3 workers' <<< "$RSIN" || true)"
+  is "...in the order they last resumed"               "1" "$(grep -cF 'nothing new — acme-api, toolbox, billing-svc' <<< "$RSIN" || true)"
+  is "...leaving out one whose DONE came after"        "1" "$(grep -c 'scratch .*DONE' <<< "$RSIN" || true)"
+  is "...and the DONE is still its own row"            "0" "$(grep -c 'RESUMED.*scratch' <<< "$RSIN" || true)"
+  is "--all folds the same way"                        "1" "$(rsin --all | grep -c 'RESUMED' || true)"
+  printf '%s\t%s\t%s\t%s\n' "$NOW" acme-api resumed "governor: budget 80% — window recovered" > "$RS/fleet/cfres.inbox"
+  rm -f "$RS/fleet/cfres.inbox.seen"
+  is "one worker's resume is named, not counted"       "1" \
+     "$(rsin | grep -c 'acme-api .*RESUMED *nothing new$' || true)"
+
+  # ── 7. the phone's push: no buzz for a resume that made nothing ──
+  # The status files as the hook writes them, read by the scan the daemon runs and judged by
+  # its own pushEvents. Step 3 is the mod's `ready` landing before the hook's verdict.
+  mkdir -p "$RS/scan"
+  cat > "$RS/push.mjs" <<'JS'
+import fs from 'node:fs';
+const [root, dir] = process.argv.slice(2);
+const { scanStatus } = await import(root + '/lib/fleet-scan.mjs');
+const { pushEvents } = await import(root + '/bin/fleet-serve.mjs');
+const rec = (slot, status, turn, ts) => fs.writeFileSync(`${dir}/id-${slot}.json`,
+  JSON.stringify({ session_id: `id-${slot}`, sock: 'cf-acme-api', slot, status, ts, ...(turn ? { turn } : {}) }));
+const steps = [
+  () => { rec('toolbox', 'working', '', 1); rec('scratch', 'working', 'resume', 1); rec('acme-api', 'working', 'resume', 1); },
+  () => { rec('toolbox', 'working', '', 2); },
+  () => { rec('scratch', 'ready', 'resume', 3); rec('acme-api', 'ready', 'resume', 3); },
+  () => { rec('toolbox', 'ready', '', 4); rec('scratch', 'ready', '', 4); rec('acme-api', 'ready', 'resumed', 4); },
+];
+console.log(steps.map(f => { f(); return pushEvents(scanStatus([dir])).map(e => e.session).sort().join(',') || '-'; }).join(' '));
+JS
+  is "an answer is pushed for a real turn and a resume that produced, never for one that did not" "- - - scratch,toolbox" \
+     "$(HOME="$RS/home" node "$RS/push.mjs" "$ROOT" "$RS/scan" 2>&1)"
+
+  tmux -L cfres kill-server 2>/dev/null
+  rm -rf "$RS"
+else
+  skip "a resume turn that made nothing is RESUMED, not DONE" "tmux, jq or git missing"
+fi
+
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 # The mode has to survive a relaunch. An env var only applies to the process you
 # launched with it, so a persisted marker is the difference between "set it once" and
