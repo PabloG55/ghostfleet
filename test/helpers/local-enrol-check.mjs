@@ -116,25 +116,33 @@ try {
 
   // A COLD OPEN: no session, the passkey on the device. The way in is Touch ID, not the
   // enrolment sheet again, and it signs in against the same listener.
+  //   THE LOCK SCREEN CANNOT BE WATCHED FOR. The app makes its one automatic attempt on open,
+  // and a virtual authenticator answers it before the first poll: on both CI runners the
+  // page was already unlocked when it was first read, and "locked again" went red on a
+  // client that was right. So the cold open is proved by what it cost: the session the page
+  // held is gone, the authenticator signed one more time, and the page holds a NEW token.
+  const signs = async () => ((await b.call('WebAuthn.getCredentials', { authenticatorId })).credentials || [])
+    .reduce((n, x) => n + (x.signCount || 0), 0);
+  const tokens = () => b.evaluate(() => Object.keys(sessionStorage).sort().map(k => sessionStorage.getItem(k)).join('|'));
+  const before = { signs: await signs(), tok: await tokens() };
   await b.evaluate(() => { sessionStorage.clear(); });
   await b.call('Page.reload', {});
-  await until(async () => (await page()).locked, 5000);
-  const relocked = (await page()).locked;
-  is('a cold open is locked again', true, relocked);
-  // The app makes its one automatic attempt on open, so the button usually reads
-  // "unlocking…" by the time it can be read. The sensor's name is asked of the function the
-  // button is labelled from, in this page, under this platform.
-  is('...and the sensor it names is Touch ID', 'Touch ID', await b.evaluate(async () =>
-    (await import('./passkey.js')).device().sensor));
-  let in2 = await until(async () => !(await page()).locked, 3000);
+  // The app may make its one automatic attempt on open; otherwise the button is the way.
+  let in2 = await until(async () => !(await page()).locked && (await tokens()) !== '', 3000);
   if (!in2) {
     const p = await page();
     const unlockLabel = p.buttons.find(x => /^unlock with /.test(x));
     if (unlockLabel) await click(unlockLabel);
-    in2 = await until(async () => !(await page()).locked);
+    in2 = await until(async () => !(await page()).locked && (await tokens()) !== '');
   }
   const p2 = await page();
+  is('a cold open asks the passkey again', true, (await signs()) > before.signs || `signCount ${before.signs} -> ${await signs()}`);
+  is('...and is let in on a new token', true, ((await tokens()) !== '' && (await tokens()) !== before.tok) || 'same or no token');
   is('...and the passkey unlocks it', true, in2 || p2.err || p2.buttons.join(', '));
+  // The sensor the unlock button names, asked of the function the label is built from:
+  // the button usually reads "unlocking…" by the time it could be read, for the reason above.
+  is('...and the sensor it names is Touch ID', 'Touch ID', await b.evaluate(async () =>
+    (await import('./passkey.js')).device().sensor));
   const cfg2 = JSON.parse(fs.readFileSync(process.env.GHOSTFLEET_SERVE_CONFIG, 'utf8'));
   is('...without enrolling a second one', 1, ((cfg2.clients || []).find(x => x.id === clientId)?.creds || []).length);
 } finally {
