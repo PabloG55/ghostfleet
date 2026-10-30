@@ -876,7 +876,9 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
     return { status: 409, json: { ok: false, changed: true,
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
   if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true, status: tool === 'fleet_send' });
+  // fleet_wake asks for the exit status too: see `unwoken` below.
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true,
+                                               status: tool === 'fleet_send' || tool === 'fleet_wake' });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
   // non-zero when the prompt never reached the session — the mod refused to submit it, the
@@ -887,7 +889,13 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   if (undelivered) text = undeliveredText(args.session, text);
   if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
     return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
-  const refused = undelivered || (typeof out !== 'string' && out.isError === true);
+  // A WAKE THAT DID NOT WAKE IS A FAILURE, for the send's reason. fleet-hibernate exits 1
+  // with "FAILED — '<session>' exited…" and the pane's last lines when the session it started
+  // died, and that status was dropped here too: 200, ok:true, a green toast carrying the word
+  // FAILED, and the phone went on to open a session that was not there.
+  const unwoken = tool === 'fleet_wake' && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (unwoken) text = text.replace(/^fleet-hibernate: (FAILED — )?/gm, '');
+  const refused = undelivered || unwoken || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -910,7 +918,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
                   confirmed: v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
-                  result: undelivered ? 'not delivered' : refused ? 'refused' : 'ran',
+                  result: undelivered ? 'not delivered' : unwoken ? 'failed' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
   }

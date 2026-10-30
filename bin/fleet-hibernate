@@ -4,7 +4,9 @@
 #     fleet-hibernate                 what WOULD sleep. A dry run, and the default on purpose
 #     fleet-hibernate --apply         actually sleep them (refuses unless switched on)
 #     fleet-hibernate --apply NAME    sleep that one session — the only way a lead is slept
-#     fleet-hibernate --wake <slot>   wake one back up, by resume-by-id
+#     fleet-hibernate --wake <slot>   wake one back up, by resume-by-id; a success only once
+#                                     it is still up --settle N seconds (default 5) after its
+#                                     first prompt, else FAILED with the pane's last lines
 #     fleet-hibernate --pressure      governor mode: oldest-idle first until pressure clears
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
 #     fleet-hibernate --json          the same plan, machine-readable
@@ -66,6 +68,11 @@ case "${FLEET_DIR:-}" in
 esac
 IDLE_HOURS="${CLAUDE_FLEET_HIBERNATE_HOURS:-48}"
 MODE=plan; ONLY_SOCK=""; WAKE_SLOT=""; NAMED=""; JSON=no; WAKE_TIMEOUT="${CLAUDE_FLEET_WAKE_TIMEOUT:-300}"
+# How long a woken session must stay up after its first prompt before the wake is called a
+# success, and how long a session that has just started is left alone by the rules. Both are
+# explained where they are used (wake_one, veto_for).
+WAKE_SETTLE="${CLAUDE_FLEET_WAKE_SETTLE:-5}"
+WAKE_GRACE="${CLAUDE_FLEET_WAKE_GRACE:-1800}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,11 +85,12 @@ while [ $# -gt 0 ]; do
     --wake)       MODE=wake; WAKE_SLOT="${2:?--wake needs a session name}"; shift 2 ;;
     --idle-hours) IDLE_HOURS="${2:?}"; shift 2 ;;
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
+    --settle)     WAKE_SETTLE="${2:?}"; shift 2 ;;
     --json)       JSON=yes; shift ;;
     --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
     --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,15p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,21p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
@@ -654,7 +662,7 @@ BG_VETO='its conversation is running in a background process:'
 # Returns a reason, or nothing when the session may sleep. Every entry is a way for
 # hibernation to destroy something rather than defer it.
 veto_for() {
-  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" live="$8" age_h
+  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" live="$8" created="${9:-}" age_h up
   # The tab check leads: a `_`-prefixed session is an editor or terminal pane, it never had
   # a conversation, and reporting it as "no recorded conversation id" is true but useless —
   # on a real fleet that was two thirds of the list, every row saying the same wrong thing.
@@ -712,16 +720,33 @@ veto_for() {
   [ -n "$idle" ] || { printf 'no transcript to date it by'; return; }
   awk -v i="$idle" -v t="$IDLE_HOURS" 'BEGIN{exit !(i < t)}' \
     && { printf 'idle %.1fh, under the %sh threshold' "$idle" "$IDLE_HOURS"; return; }
+  # ── A SESSION THAT HAS JUST COME BACK IS NOT TAKEN STRAIGHT BACK DOWN ───────
+  # The idle clock is the last prompt a person typed, and waking types nothing: a session idle
+  # 50h before its wake is idle 50h a second after it. So the governor, which runs --pressure
+  # once a minute for as long as swap is high, slept it again on its next tick. Measured on a
+  # live fleet: every double wake in the phone's audit log was a wake that had reported
+  # "is awake (2s)" and was followed 24-52s later by "slept" for that same session — from the
+  # owner's side, "it wakes up and closes".
+  #   The pane's own start time, not a marker the wake writes: a session reopened by hand or
+  # by fleet-restart has been brought back by somebody just the same, and tmux already knows
+  # when every session started. LAST in the list, so a session another veto keeps up still
+  # reports that veto, and this one only ever speaks for a session that would otherwise go.
+  #   A NAME IS NOT A RULE. `--apply NAME` is a person asking for this session, now.
+  if [ -z "$NAMED" ] && [ -n "$created" ]; then
+    up=$(( $(now) - created ))
+    [ "$up" -lt "$WAKE_GRACE" ] \
+      && { printf 'just woken or reopened (%sm ago) — not slept again for %sm' "$((up / 60))" "$((WAKE_GRACE / 60))"; return; }
+  fi
   printf ''
 }
 
 # ── the plan ──────────────────────────────────────────────────────────────────
 PLAN=""
 build_plan() {
-  local sock slot st ts id cwd tr idle why live _rs
+  local sock slot created st ts id cwd tr idle why live _rs
   while IFS= read -r sock; do
     [ -n "$sock" ] || continue
-    while IFS= read -r slot; do
+    while IFS=$'\t' read -r slot created; do
       [ -n "$slot" ] || continue
       [ -z "$NAMED" ] || [ "$slot" = "$NAMED" ] || continue
       st="$(field_for "$sock" "$slot" 5)"; ts="$(field_for "$sock" "$slot" 3)"
@@ -762,7 +787,7 @@ build_plan() {
       # and dated — is the newest conversation, never a dead predecessor.
       follow_continued "$id" "$tr"; id="$FOLLOW_ID"; tr="$FOLLOW_TR"
       idle="$(idle_hours "$tr")"
-      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live")"
+      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live" "$created")"
       # ── \x1f, NOT A TAB, and this row is exactly why CLAUDE.md says so ──────
       # Three of these seven columns are optional: a session with no transcript has no idle,
       # one that never registered has no id and no cwd. Tab is IFS-whitespace, so three
@@ -772,7 +797,9 @@ build_plan() {
       # it, and would have read as "this session may sleep".
       PLAN="$PLAN$sock$slot${st:-unknown}${idle:-}${id}${cwd}${why}
 "
-    done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
+    # A TAB between the two, and nothing else will do: tmux <= 3.5 escapes \x1f in -F output
+    # (CLAUDE.md), and a session name cannot hold a tab.
+    done < <(tmux -L "$sock" list-sessions -F '#{session_name}	#{session_created}' 2>/dev/null)
   done < <(sockets)
 }
 
@@ -794,34 +821,126 @@ sleep_one() {
 # replaying a large transcript — used to be indistinguishable from a wake that worked, so
 # this polls for the agent's own ready line and reports the stall with the pane's last line
 # rather than returning 0 and leaving a blank card.
+#   AND A PROMPT IS NOT THE FINISH LINE. "It wakes up and closes": a wake was called a success
+# the moment a prompt was drawn, so an agent that drew one and fell over a second later was
+# reported awake, and the card the owner opened was gone. Success is now a session that is
+# still up WAKE_SETTLE seconds after its first prompt; a pane that dies before that, or before
+# it ever got one, is a FAILED wake, said at once with what the pane said last.
+
+# What a pane said last, fit to be shown to somebody. The reason a wake failed is on the pane,
+# and the pane is going to a phone: its last few lines with something on them, as one line,
+# $HOME written as ~, each one capped — what lib/permission-dialog.mjs's scrubLine does to a
+# need-you, for the same reasons.
+pane_tail() {   # pane text -> "line | line | line"
+  printf '%s\n' "$1" | tr -d '\000-\010\013-\037\177' \
+    | grep -vE '^[[:space:]]*$|^[[:space:]]*(─|━|╌){3,}|^Pane is dead' | tail -n 3 \
+    | awk -v h="$HOME" '
+        function scrub(s,   i, n, r) {
+          if (h == "" || h == "/") return s
+          r = ""
+          while ((i = index(s, h)) > 0) {
+            n = substr(s, i + length(h), 1)
+            # the home itself, not a sibling that starts with the same letters
+            if (n == "" || n == "/" || n == " " || n == "\x27" || n == "\"") r = r substr(s, 1, i - 1) "~"
+            else r = r substr(s, 1, i - 1 + length(h))
+            s = substr(s, i + length(h))
+          }
+          return r s
+        }
+        { $0 = scrub($0); gsub(/[[:space:]]+/, " "); sub(/^ /, ""); sub(/ $/, "")
+          if (length($0) > 160) $0 = substr($0, 1, 159) "…"
+          out = out (out == "" ? "" : " | ") $0 }
+        END { print (out == "" ? "(the pane printed nothing)" : out) }'
+}
+tilde() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+
+# up | dead:<exit status> | gone. A woken pane is held on exit (remain-on-exit, below) so that
+# a dead one is still there to be read; `has-session` alone would call that one up.
+#   EXISTENCE BY `=`, THE READ BY A BARE TARGET. A bare target to a session that has gone
+# resolves by prefix, and would answer for `billing-svc-2`.
+pane_state() {   # sock slot
+  local d
+  tmux -L "$1" has-session -t "=$2" 2>/dev/null || { echo gone; return; }
+  d="$(tmux -L "$1" display-message -p -t "$2" '#{pane_dead}:#{pane_dead_status}' 2>/dev/null)"
+  case "$d" in 1:*) echo "dead:${d#1:}" ;; *) echo up ;; esac
+}
+
+wake_failed() {   # sock slot state pane waited ready_at
+  local sock="$1" slot="$2" state="$3" pane="$4" waited="$5" ready_at="$6" how
+  if [ "$state" = exited ]; then
+    how="showed its prompt, then its agent exited"
+  elif [ -n "$ready_at" ]; then
+    how="showed its prompt, then exited $((waited - ready_at))s later"
+  else
+    how="exited ${waited}s after it started, before it showed a prompt"
+  fi
+  case "$state" in dead:?*) how="$how (exit status ${state#dead:})" ;; esac
+  # READ AGAIN, AS A TRANSCRIPT RATHER THAN A SCREEN, while there is still a pane to read.
+  # -S: tmux scrolls a dead pane to write "Pane is dead", and for an agent that printed three
+  # lines and quit, the first of them — measured on 3.7b — goes up into history and out of a
+  # plain capture. -J: a detached pane is 80 columns, so a long error is two lines on screen,
+  # and a path wrapped across them is a path nothing downstream can recognise.
+  tmux -L "$sock" has-session -t "=$slot" 2>/dev/null \
+    && pane="$(tmux -L "$sock" capture-pane -p -J -S -40 -t "$slot" 2>/dev/null)"
+  # The dead pane, or agent-here's "has exited" hold, is not a session anybody can use; the
+  # asleep card is the way back, and it only works with nothing of that name in the way.
+  tmux -L "$sock" kill-session -t "=$slot" 2>/dev/null
+  rm -f "${FLEET_DIR:?}/$sock.$slot.exited" 2>/dev/null
+  echo "fleet-hibernate: FAILED — '$slot' $how. It is still asleep, so it can be woken again. Its last lines: $(pane_tail "$pane")" >&2
+}
+
+# ── ONE WAKE PER SESSION AT A TIME ───────────────────────────────────────────
+# The phone's audit log has the same wake twice in the same second. Two wakes at once both
+# found the marker; one started the session and the other either failed on the name being
+# taken, or found it "already running", called the marker stale and deleted it — the way home,
+# taken out from under a wake that was still deciding whether it worked. The second request now
+# waits for the first and reports what it decided.
 wake_one() {
+  local sock="$1" slot="$2" rc holder w=0
+  local lock="${FLEET_DIR:?}/$sock.$slot.waking"
+  mkdir -p "${FLEET_DIR:?}" 2>/dev/null
+  if ! ( set -C; printf '%s\n' "$$" > "$lock" ) 2>/dev/null; then
+    holder="$(cat "$lock" 2>/dev/null)"
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      while [ -f "$lock" ] && kill -0 "$holder" 2>/dev/null && [ "$w" -lt $((WAKE_TIMEOUT + WAKE_SETTLE + 10)) ]; do
+        sleep 1; w=$((w + 1))
+      done
+      if [ "$(pane_state "$sock" "$slot")" = up ] && [ ! -f "${FLEET_DIR:?}/$sock.$slot.asleep" ]; then
+        echo "fleet-hibernate: '$slot' is awake — woken by a request already in flight"
+        return 0
+      fi
+      echo "fleet-hibernate: FAILED — '$slot' was already being woken by another request, and that wake did not bring it back" >&2
+      return 1
+    fi
+    # A lock whose holder is gone: that wake was killed part-way. Take it over.
+    rm -f "$lock" 2>/dev/null
+    ( set -C; printf '%s\n' "$$" > "$lock" ) 2>/dev/null \
+      || { echo "fleet-hibernate: FAILED — could not take the wake lock $lock" >&2; return 1; }
+  fi
+  _wake_one "$sock" "$slot"; rc=$?
+  rm -f "$lock" 2>/dev/null
+  return "$rc"
+}
+
+_wake_one() {
   # Two statements, not one: `local` expands its whole command line BEFORE it assigns any
   # of it, so `local a="$1" b="$a/x"` reads the OUTER a — unset here, which under `set -u`
   # aborted the wake with "sock: unbound variable" at the moment somebody tapped the card.
   local sock="$1" slot="$2" id="" cwd=""
   local marker="${FLEET_DIR:?}/$sock.$slot.asleep"
-  [ -f "$marker" ] || { echo "fleet-hibernate: '$slot' is not asleep on $sock" >&2; return 1; }
+  if [ ! -f "$marker" ]; then
+    # A WAKE OF A SESSION THAT IS AWAKE HAS NOTHING LEFT TO DO, which is success. The second
+    # of two taps lands after the first has finished, and "is not asleep" with exit 1 put a
+    # failure on the phone over the session the first tap had just brought back.
+    if [ "$(pane_state "$sock" "$slot")" = up ]; then
+      echo "fleet-hibernate: '$slot' is already awake on $sock"
+      return 0
+    fi
+    echo "fleet-hibernate: '$slot' is not asleep on $sock" >&2
+    return 1
+  fi
   IFS=$'\t' read -r _ id cwd _ < "$marker"
   [ -n "$cwd" ] || cwd="$HOME"
-  # ── A MARKER CAN NAME A CONVERSATION THAT HAS SINCE MOVED ON ─────────────────
-  # One written before sleeping followed hand-offs recorded the predecessor, and a wake by it
-  # opened a conversation two days older than the one the card had been showing. The marker
-  # is not rewritten here: it is the way home if this wake fails.
-  local mtr="" c
-  if is_uuid "$id"; then
-    while IFS= read -r c; do
-      [ -n "$c" ] || continue
-      [ -f "$(proj_dir "$c" "$cwd")/$id.jsonl" ] && { mtr="$(proj_dir "$c" "$cwd")/$id.jsonl"; break; }
-    done < <(cfg_dirs)
-    # A cwd recorded under another spelling of the path (a symlink, a moved checkout) still
-    # has its transcript somewhere under a projects dir, named by the id.
-    [ -n "$mtr" ] || mtr="$(cfg_dirs | while IFS= read -r c; do [ -n "$c" ] && ls "$c"/projects/*/"$id.jsonl" 2>/dev/null; done | head -1)"
-    follow_continued "$id" "$mtr"
-    if [ "$FOLLOW_ID" != "$id" ]; then
-      echo "fleet-hibernate: '$slot' was asleep on $id, which was continued in $FOLLOW_ID — resuming that"
-      id="$FOLLOW_ID"
-    fi
-  fi
   # ── A SESSION OF THAT NAME IS ALREADY THERE ─────────────────────────────────
   # "could not start a pane" was this: new-session refuses a name that exists. A marker
   # outlives the sleep whenever the session comes back some other way — reopened by hand
@@ -830,14 +949,19 @@ wake_one() {
   # hand. The card then reads asleep over a live session, and the tap that should open it
   # tries to start a second one and fails. The session is up, which is what a wake is for:
   # clear the marker and succeed, so the caller goes on to open it.
-  if tmux -L "$sock" has-session -t "=$slot" 2>/dev/null; then
-    rm -f "$marker" 2>/dev/null
-    echo "fleet-hibernate: '$slot' is already running on $sock — its asleep marker was stale, cleared"
-    return 0
-  fi
+  #   A DEAD PANE UNDER THE NAME IS NOT THAT. It is what a wake leaves when it was killed
+  # part-way through its settle window; it is cleared and the wake goes ahead.
+  case "$(pane_state "$sock" "$slot")" in
+    up)
+      rm -f "$marker" 2>/dev/null
+      echo "fleet-hibernate: '$slot' is already running on $sock — its asleep marker was stale, cleared"
+      return 0 ;;
+    dead:*) tmux -L "$sock" kill-session -t "=$slot" 2>/dev/null ;;
+  esac
   rm -f "${FLEET_DIR:?}/$sock.$slot.parked" 2>/dev/null
-  # CLAUDE_FLEET_WAKING tells agent-here that THIS start is the wake, so it leaves the marker
-  # to the poll below — which keeps it when the wake does not come back.
+  # agent-here clears a leftover one as it starts, but the poll below can look before it has
+  # — and would read last time's exit as this wake failing.
+  rm -f "${FLEET_DIR:?}/$sock.$slot.exited" 2>/dev/null
   # THE FLEET'S PROFILE, SAID OUT LOUD. This launch passed neither the config dir nor the
   # fleet dir, so a woken session ran on whatever the server's global env said — and that is
   # whoever started the server, which for a fleet started from another profile's session is
@@ -845,7 +969,7 @@ wake_one() {
   # this new-session starts one, and the client's env becomes its global env: the fleet's,
   # here, not the caller's. A socket no project owns keeps the old behaviour.
   local err fe_cfg="" fe_dir="" fe_prof="" fe_out=""
-  local -a fe_e=() fe_env=()
+  local -a fe_e=() fe_env=() cfg_e=()
   if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
      && fe_out="$(node "$FLEET_ENV" of "$sock" 2>/dev/null)" && [ -n "$fe_out" ]; then
     IFS=$'\x1f' read -r fe_cfg fe_dir fe_prof _ <<< "$fe_out"
@@ -854,31 +978,100 @@ wake_one() {
       fe_env=(CLAUDE_CONFIG_DIR="$fe_cfg" CLAUDE_FLEET_DIR="$fe_dir" CLAUDE_FLEET_PROFILE="$fe_prof")
     fi
   fi
+  # ── WHICH CONFIG DIR THE CONVERSATION IS ACTUALLY IN ────────────────────────
+  # `claude --resume <id>` looks under ITS config dir and nowhere else; an id it cannot find
+  # there prints "No conversation found with session ID" and exits 1 inside a second, which
+  # takes the pane down with it. A project moved to another profile keeps its asleep markers,
+  # and their conversations are still in the profile it left — while the socket now names the
+  # new one, or (the socket it had before) none at all, and then the launch got whatever
+  # config dir the caller happened to have. So the transcript is looked for under the config
+  # dir this launch would use first, then every profile, and the session is started under the
+  # one it is found in. That is fleet-open's rule as well: a transcript only resumes under its
+  # own config dir, whichever fleet runs it.
+  local launch_cfg="${fe_cfg:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}" mtr="" c tr_cfg
+  if is_uuid "$id"; then
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      [ -f "$(proj_dir "$c" "$cwd")/$id.jsonl" ] && { mtr="$(proj_dir "$c" "$cwd")/$id.jsonl"; break; }
+    done < <(printf '%s\n' "$launch_cfg"; cfg_dirs)
+    # A cwd recorded under another spelling of the path (a symlink, a moved checkout) still
+    # has its transcript somewhere under a projects dir, named by the id.
+    [ -n "$mtr" ] || mtr="$( { printf '%s\n' "$launch_cfg"; cfg_dirs; } | while IFS= read -r c; do [ -n "$c" ] && ls "$c"/projects/*/"$id.jsonl" 2>/dev/null; done | head -1)"
+    # ── A MARKER CAN NAME A CONVERSATION THAT HAS SINCE MOVED ON ───────────────
+    # One written before sleeping followed hand-offs recorded the predecessor, and a wake by
+    # it opened a conversation two days older than the one the card had been showing. The
+    # marker is not rewritten here: it is the way home if this wake fails.
+    follow_continued "$id" "$mtr"
+    if [ "$FOLLOW_ID" != "$id" ]; then
+      echo "fleet-hibernate: '$slot' was asleep on $id, which was continued in $FOLLOW_ID — resuming that"
+      id="$FOLLOW_ID"; mtr="$FOLLOW_TR"
+    fi
+    if [ -n "$mtr" ]; then
+      tr_cfg="${mtr%/projects/*}"
+      if [ "$tr_cfg" != "$launch_cfg" ]; then
+        echo "fleet-hibernate: '$slot''s conversation is under $(tilde "$tr_cfg"), not $(tilde "$launch_cfg") — resuming it from there"
+        launch_cfg="$tr_cfg"
+      fi
+      # Pinned whether or not it moved: with no profile named for the socket, the session
+      # would otherwise get the server's global config dir, which is not the one just checked.
+      cfg_e=(-e "CLAUDE_CONFIG_DIR=$launch_cfg")
+    else
+      # ── GONE FROM EVERY PROFILE ─────────────────────────────────────────────
+      # Resuming the id can only print "No conversation found" and close. Without an id the
+      # launcher picks this slot's own conversation, else the newest in the folder that no
+      # other session holds, else a fresh one (claude-here) — which is a different thing
+      # from what the card held, so it is said rather than done quietly.
+      echo "fleet-hibernate: '$slot' was asleep on $id, whose transcript is gone from every profile — waking it on this folder's own conversation instead"
+      id=""
+    fi
+  fi
+  # CLAUDE_FLEET_WAKING tells agent-here that THIS start is the wake, so it leaves the marker
+  # to the poll below — which keeps it when the wake does not come back.
+  #   HELD ON EXIT FOR THE LENGTH OF THE WAKE. agent-here lets a pane whose agent dies inside
+  # five seconds close, and with it went the only record of why. remain-on-exit keeps the dead
+  # pane readable until the poll has read it; it is set in the same command list as the
+  # new-session, which tmux runs to the end before it handles the child's exit, so there is no
+  # window in which the pane can die unheld. Unset once the wake has settled.
   err="$(env ${fe_env[@]+"${fe_env[@]}"} tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
-    ${fe_e[@]+"${fe_e[@]}"} \
+    ${fe_e[@]+"${fe_e[@]}"} ${cfg_e[@]+"${cfg_e[@]}"} \
     -e "CLAUDE_FLEET_SOCK=$sock" -e "CLAUDE_FLEET_RESUME=$id" -e "CLAUDE_FLEET_WAKING=1" \
-    "exec agent-here \"$slot\"" 2>&1)" \
+    "exec agent-here \"$slot\"" \; set-option -w -t "$slot" remain-on-exit on 2>&1)" \
     || { echo "fleet-hibernate: could not start a pane for '$slot': $err" >&2; return 1; }
   [ -n "$fe_dir" ] && node "$FLEET_ENV" heal "$sock" 2>/dev/null | sed 's/^/fleet-hibernate: /' >&2
-  local waited=0 pane=""
-  while [ "$waited" -lt "$WAKE_TIMEOUT" ]; do
+  local waited=0 pane="" state ready_at=""
+  while :; do
+    state="$(pane_state "$sock" "$slot")"
     # A BARE TARGET for the capture, an `=` target for the kill. `=name` is exact-match
     # SESSION syntax; capture-pane resolves a PANE and will not take it — the session exists,
     # the capture answers "can't find pane", and the poll then times out on a wake that
     # actually worked. Same rule the rest of the repo's status readers follow.
-    pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)"
+    [ "$state" = gone ] || pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)"
+    case "$state" in
+      gone|dead:*) wake_failed "$sock" "$slot" "$state" "$pane" "$waited" "$ready_at"; return 1 ;;
+    esac
+    # An agent that ran past agent-here's five seconds is not let close: agent-here holds the
+    # pane with "this session has exited" and writes this marker. Up, and not awake.
+    if [ -f "${FLEET_DIR:?}/$sock.$slot.exited" ]; then
+      wake_failed "$sock" "$slot" exited "$pane" "$waited" "$ready_at"; return 1
+    fi
     # THE MARKER HAS TO COVER BOTH MODES. The first version looked for "auto mode on", and
     # a session woken in manual mode draws "⏸ manual mode on" — ready, at a prompt, and
     # invisible to the check, so the wake would have timed out on a session that was already
     # waiting for input. Matched on the part that does not vary.
-    if is_ready "$pane"; then
+    [ -z "$ready_at" ] && is_ready "$pane" && ready_at="$waited"
+    if [ -n "$ready_at" ] && [ $((waited - ready_at)) -ge "$WAKE_SETTLE" ]; then
       rm -f "$marker" 2>/dev/null
-      echo "fleet-hibernate: '$slot' is awake (${waited}s)"
+      tmux -L "$sock" set-option -w -u -t "$slot" remain-on-exit 2>/dev/null
+      echo "fleet-hibernate: '$slot' is awake (${ready_at}s, and still up ${WAKE_SETTLE}s later)"
       return 0
     fi
-    if grep -qiE 'do you trust|is this a project you' <<< "$pane"; then
-      echo "fleet-hibernate: '$slot' stalled on the folder-trust dialog — trust it once by hand, then wake again" >&2
-      return 1
+    if [ -z "$ready_at" ]; then
+      if grep -qiE 'do you trust|is this a project you' <<< "$pane"; then
+        tmux -L "$sock" set-option -w -u -t "$slot" remain-on-exit 2>/dev/null
+        echo "fleet-hibernate: '$slot' stalled on the folder-trust dialog — trust it once by hand, then wake again" >&2
+        return 1
+      fi
+      [ "$waited" -lt "$WAKE_TIMEOUT" ] || break
     fi
     sleep 1; waited=$((waited+1))
   done
@@ -887,15 +1080,12 @@ wake_one() {
   # lose the way home. That is right when nothing came back and wrong when something did: the
   # grid would draw "asleep — tap to wake" over a session that is running and waiting for
   # input, and the next tap would try to start a second one under the same name.
-  #   So the question on timeout is not "did the poll succeed" but "is it alive". If the pane
-  # is there, the wake worked and only the detector was late — clear the marker and say so.
-  # If the pane is gone, keep the marker: that is the case it exists for.
-  if tmux -L "$sock" has-session -t "=$slot" 2>/dev/null; then
-    rm -f "$marker" 2>/dev/null
-    echo "fleet-hibernate: '$slot' is running but never showed a prompt in ${WAKE_TIMEOUT}s — cleared the asleep marker anyway, because a live session behind an asleep card is worse than a slow one. Last line: $(tail -1 <<< "$pane" | cut -c1-80)" >&2
-    return 1
-  fi
-  echo "fleet-hibernate: '$slot' did not come back in ${WAKE_TIMEOUT}s and its pane is gone — marker kept so it can be woken again" >&2
+  #   So the question on timeout is not "did the poll succeed" but "is it alive". The loop
+  # above has already answered for a pane that died; this one is there, and only the detector
+  # was late — clear the marker and say so.
+  rm -f "$marker" 2>/dev/null
+  tmux -L "$sock" set-option -w -u -t "$slot" remain-on-exit 2>/dev/null
+  echo "fleet-hibernate: '$slot' is running but never showed a prompt in ${WAKE_TIMEOUT}s — cleared the asleep marker anyway, because a live session behind an asleep card is worse than a slow one. Last line: $(pane_tail "$pane")" >&2
   return 1
 }
 
