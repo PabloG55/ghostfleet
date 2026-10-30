@@ -391,8 +391,21 @@ opens `http://localhost:<port>` in the default browser. It starts nothing; if `f
 is not running, it says so and prints the command that starts it.
 
 `fleet-serve` listens on **`127.0.0.1`** on the same port, beside its tailnet address.
-Nothing about the tailnet listener changes, and the phone sees no difference. If the second
-socket cannot bind, the daemon logs it and goes on serving the tailnet. Two configurations
+Nothing about the tailnet listener changes, and the phone sees no difference.
+
+**The two listeners are independent.** Either one can be unavailable while the other serves.
+- **The tailnet address is gone** (tailscaled down, or the machine moved to another
+  tailnet): the daemon serves localhost and logs once that the tailnet listener is off, with
+  the `fleet-serve init` line that fixes it.
+- **127.0.0.1:<port> is held by something else:** the reverse. The tailnet serves, and the
+  log says localhost is off, once.
+
+A listener that is down is retried every 30 s. The retries are silent, and one more line
+says when it comes up. The daemon exits only when neither can listen, and then names both
+reasons. A configured address that policy refuses (a wildcard, a LAN or a public address)
+is still fatal at startup, as it always was.
+
+Two configurations
 have no second listener, and both are reported at startup and by `fleet-serve check`:
 - a config that is already `--bind 127.0.0.1` for `localhost`, where the configured
   listener is the Mac's own door;

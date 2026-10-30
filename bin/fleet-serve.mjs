@@ -3224,9 +3224,12 @@ export function localPlan(addrs, rp_id) {
     return { on: false, why: `the configured bind is ${LOCAL_BIND} itself (for '${rp_id}'), and one socket cannot be two relying parties without trusting the Host header` };
   return { on: true };
 }
-async function listenLocal(addrs, port, c, tune) {
+// `quiet`: a retry. It says nothing when it fails again, so a socket held for an hour is
+// one line in the log and not 120.
+let localErr = '';                          // why the last localhost attempt failed
+async function listenLocal(addrs, port, c, tune, { quiet = false } = {}) {
   const plan = localPlan(addrs, c.rp_id);
-  if (!plan.on) { log(`  localhost: not a second listener — ${plan.why}`); return null; }
+  if (!plan.on) { if (!quiet) log(`  localhost: not a second listener — ${plan.why}`); return null; }
   const ls = Object.freeze({ local: true, bind: LOCAL_BIND, port });
   const srv = tune(http.createServer((req, res) => { req.ls = ls; requestHandler(req, res); }), ls);
   const err = await new Promise((resolve) => {
@@ -3234,7 +3237,8 @@ async function listenLocal(addrs, port, c, tune) {
     srv.listen(port, LOCAL_BIND, () => resolve(null));
   });
   if (err) {
-    log(`  localhost: NOT listening on ${LOCAL_BIND}:${port} (${err.code || err.message}) — the tailnet listener is unaffected`);
+    localErr = err.code || err.message;
+    if (!quiet) log(`  localhost: NOT listening on ${LOCAL_BIND}:${port} (${localErr}) — the other listener is unaffected; retrying quietly, and saying so only when it comes up`);
     return null;
   }
   log(`  localhost: also listening on ${LOCAL_BIND}:${port} · rp_id ${LOCAL_RP} · origin http://${LOCAL_RP}:${port} — its own passkeys, sessions and origin; nothing crosses to the tailnet listener`);
@@ -3269,7 +3273,13 @@ async function serve(argv) {
     `  config: ${CONFIG}`,
   ]);
   const b = await assertBindable(bind);
-  if (!b.ok) die([
+  // A REFUSAL BY POLICY STAYS FATAL: a wildcard, a LAN or a public address is a config that
+  // would publish this endpoint, and serving localhost beside it would make that easy to
+  // miss. An address that is simply NOT HERE (the tailnet went away, or the machine moved
+  // to another one) is not that. It is the moment the Mac's own door matters most, so it
+  // is handled below, by the listeners, and is not an exit.
+  const policy = (b.addrs || []).some(a => !BINDABLE.has(a.kind));
+  if (policy) die([
     `refusing to bind '${bind}':`,
     ...b.why.map(w => `  - ${w}`),
     'only loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are allowed — the two',
@@ -3278,7 +3288,7 @@ async function serve(argv) {
     'addresses this machine has:',
     ...localAddrs().map(a => `  - ${a.address}  (${a.iface}, ${a.kind})`),
   ]);
-  const kind = b.addrs[0].kind;
+  const kind = b.addrs ? b.addrs[0].kind : classifyAddr(bind).kind === 'name' ? 'tailnet' : classifyAddr(bind).kind;
 
   // §11.1: Funnel is the one setting that would undo all of §5, so it is asserted rather
   // than remembered — and reported as UNVERIFIED, not as a pass, when the CLI is absent.
@@ -3309,28 +3319,74 @@ async function serve(argv) {
     return srv;
   };
   const onConfigured = (req, res) => { req.ls = null; requestHandler(req, res); };
-  const server = tune(c.tls
+  const makeServer = () => tune(c.tls
     ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, onConfigured)
     : http.createServer(onConfigured), null);
-
-  await new Promise((resolve) => {
-    server.once('error', (e) => {
-      if (e.code === 'EADDRNOTAVAIL') die([`${bind} is not an address on this machine right now.`,
-        kind === 'tailnet' ? '  is tailscaled up and signed in?  tailscale status' : '']);
-      if (e.code === 'EADDRINUSE') die([`port ${port} is already in use on ${bind} — another fleet-serve?`]);
-      die([`listen failed: ${e.message}`]);
-    });
-    server.listen(port, bind, resolve);
-  });
-
+  const lit = net.isIPv6(bind) ? `[${bind}]` : bind;
   listening = { bind, port };
-  log(`fleet-serve ${VERSION} listening on ${net.isIPv6(bind) ? `[${bind}]` : bind}:${port} (${kind}${c.tls ? ', tls' : ''})`);
+
+  // TWO INDEPENDENT LISTENERS. Either may be unavailable; the daemon exits only when
+  // NEITHER can listen. Measured on the owner's Mac: the machine moved to another tailnet,
+  // its configured 100.x address went away, fleet-serve refused to start, and launchd
+  // restarted it every few seconds, thousands of times, while the one door that did not
+  // need the tailnet stayed shut with it. So a configured bind that is absent or taken is
+  // logged ONCE, retried quietly, and announced once more when it comes up.
+  let server = null;                         // the configured listener, once it is up
+  const tryConfigured = async () => {
+    const bb = await assertBindable(bind);
+    // assertBindable's own hint is dropped: fixHint below says the same thing, once.
+    if (!bb.ok) return bb.why.map(w => w.replace(/ — is tailscaled running.*$/, '')).join('; ');
+    const srv = makeServer();
+    const err = await new Promise((resolve) => {
+      srv.once('error', resolve);
+      srv.listen(port, bind, () => resolve(null));
+    });
+    if (!err) { server = srv; return null; }
+    return err.code === 'EADDRNOTAVAIL' ? `${bind} is not an address on this machine right now`
+         : err.code === 'EADDRINUSE' ? `port ${port} is already in use on ${bind} — another fleet-serve?`
+         : `listen failed: ${err.message}`;
+  };
+  const fixHint = kind === 'tailnet'
+    ? `is tailscaled up, and signed in to the tailnet this config names? \`tailscale ip -4\` should list ${bind}; if the machine moved tailnets: fleet-serve init --bind "$(tailscale ip -4)" --rp-id <name>.ts.net`
+    : `check what holds ${lit}:${port}, or re-run: fleet-serve init --bind <addr>`;
+  const why = await tryConfigured();
+  if (!why) log(`fleet-serve ${VERSION} listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''})`);
   log(`  config ${CONFIG} · audit ${AUDIT} · rp_id ${c.rp_id} · origins ${c.origins.join(' ')}`);
 
   // THE MAC'S OWN DOOR: 127.0.0.1, same port, plain http, rp_id localhost (see scopeOf).
   // Best effort, deliberately: the configured listener is the phone's, and nothing about
   // this one may stop it serving — so a refusal here is a log line, not an exit.
-  const localSrv = await listenLocal(b.addrs, port, c, tune);
+  let localSrv = await listenLocal(b.addrs, port, c, tune);
+  if (why && !localSrv) die([
+    'nothing can listen, so there is nothing to serve:',
+    `  - the configured listener on ${lit}:${port}: ${why}`,
+    `    ${fixHint}`,
+    `  - localhost: ${localPlan(b.addrs, c.rp_id).on ? `${LOCAL_BIND}:${port} could not be bound (${localErr})` : localPlan(b.addrs, c.rp_id).why}`,
+  ]);
+  // One retry loop per listener that is down. Silent while it keeps failing; one line when
+  // it comes up. Unref'd: a retry must never be the thing that keeps a stopping daemon up.
+  const every = Math.max(50, Number(process.env.GHOSTFLEET_SERVE_RETRY_MS) || 30000);
+  const keepTrying = (attempt, upLine) => {
+    const t0 = Date.now();
+    let busy = false;
+    const t = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try { if (await attempt()) { clearInterval(t); log(upLine(Math.round((Date.now() - t0) / 1000))); } }
+      catch (e) { log(`  retry: ${e.message}`); }
+      finally { busy = false; }
+    }, every);
+    t.unref?.();
+  };
+  const everyText = every >= 1000 ? `${Math.round(every / 1000)}s` : `${every}ms`;
+  if (why) {
+    log(`fleet-serve ${VERSION}: the tailnet listener is OFF — ${why}. ${fixHint}. Serving localhost only; retrying ${lit}:${port} every ${everyText}, and saying so only when it comes up.`);
+    keepTrying(async () => !(await tryConfigured()),
+      (s) => `fleet-serve: the tailnet listener is UP — listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''}), after ${s}s off`);
+  }
+  if (!localSrv && localPlan(b.addrs, c.rp_id).on)
+    keepTrying(async () => !!(localSrv = await listenLocal(b.addrs, port, c, tune, { quiet: true })),
+      (s) => `  localhost: UP after ${s}s off`);
   if (!f.checked) log(`  funnel: UNVERIFIED — ${f.why}. Assert it by hand: tailscale funnel status`);
   else log('  funnel: off (asserted)');
   webPresent = (() => { try { return fs.statSync(WEB).isDirectory(); } catch { return false; } })();
@@ -3377,11 +3433,10 @@ async function serve(argv) {
     // for the whole grace. Say goodbye to each terminal; the tabs stay open in tmux.
     for (const t of [...terms]) t.end(1001, 'fleet-serve is restarting — open the terminal again');
     log(`${sig} — draining, then stopping`);
-    let open = localSrv ? 2 : 1;
+    const live = [server, localSrv].filter(Boolean);
+    let open = live.length;
     const closed = () => { if (--open === 0) { log('stopped'); process.exit(0); } };
-    server.close(closed);
-    server.closeIdleConnections?.();
-    if (localSrv) { localSrv.close(closed); localSrv.closeIdleConnections?.(); }
+    for (const srv of live) { srv.close(closed); srv.closeIdleConnections?.(); }
     setTimeout(() => { log('grace expired with a request still open — cutting it off'); process.exit(0); }, 15000).unref();
   });
 }

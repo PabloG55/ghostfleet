@@ -14881,13 +14881,15 @@ LH_SERVE() { printf '%s' "$LH/rt/bin/fleet-serve.mjs"; }
 lh_cli() { [ $# -gt 0 ] || return 2; HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= node "$(LH_SERVE)" "$@"; }
 lh_init() {                        # $1 = bind, $2 = port, $3 = rp_id, $4 = origin
   rm -f "$LH/serve.json" "$LH/serve-sessions.json"
-  lh_cli init --bind "$1" --port "$2" --rp-id "$3" --origin "$4" >/dev/null 2>&1
-  node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$LH/serve.json"
+  # init with ::1 and then the bind written in: `init` refuses an address this machine does
+  # not have, and a vanished tailnet address is one of the configs under test.
+  lh_cli init --bind ::1 --port "$2" --rp-id "$3" --origin "$4" >/dev/null 2>&1
+  node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.bind=process.argv[2];c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$LH/serve.json" "$1"
 }
 LH_PID=""
 lh_start() {                       # $1 = log name, $2 = the healthz URL that means "up"
   HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
-    node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.$1" 2>&1 &
+    GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.$1" 2>&1 &
   LH_PID=$!
   SERVE_PIDS="$SERVE_PIDS $LH_PID"
   sv_reg "$LH_PID"
@@ -14948,23 +14950,94 @@ else
     fi
   fi
 
+  # Something else holding an address:port, for as long as a row needs it taken.
+  lh_squat() {                     # $1 = address, $2 = port; sets LH_SQ
+    node -e 'require("net").createServer().listen(+process.argv[2],process.argv[1],()=>console.log("up"));setTimeout(()=>process.exit(0),30000)' "$1" "$2" > "$LH/squat.out" 2>&1 &
+    LH_SQ=$!; sv_reg "$LH_SQ"
+    i=0; while [ "$i" -lt 40 ] && ! grep -q up "$LH/squat.out" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  }
+  lh_until() {                     # $1 = log, $2 = fixed string; up to 5s
+    i=0; while [ "$i" -lt 50 ] && ! grep -qF -- "$2" "$1" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  }
+
   # THE PHONE MUST NOT DEPEND ON THE SECOND SOCKET. 127.0.0.1:<port> taken by something
-  # else: the tailnet listener comes up anyway, and the log says the localhost one did not.
-  # Watched red with listenLocal's error path made fatal: the daemon exited and the tailnet
-  # never answered.
+  # else: the tailnet listener comes up anyway, the log says the localhost one did not, and
+  # it comes up by itself once the port is free. Watched red with listenLocal's error path
+  # made fatal (the daemon exited and the tailnet never answered), and with no retry for it.
   LHPORT2="$(free_port)"
   lh_init ::1 "$LHPORT2" "$LH_TAILHOST" "$LH_TAILORIGIN"
-  node -e 'require("net").createServer().listen(+process.argv[1],"127.0.0.1",()=>console.log("up"));setTimeout(()=>process.exit(0),20000)' "$LHPORT2" > "$LH/squat.out" 2>&1 &
-  squat=$!; sv_reg "$squat"
-  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$LH/squat.out" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  lh_squat 127.0.0.1 "$LHPORT2"
   if lh_start squatted "http://[::1]:$LHPORT2/healthz"; then
     is "a taken 127.0.0.1 does not stop the tailnet listener" "200" \
        "$(curl -s -g -o /dev/null -w '%{http_code}' -H "Host: $LH_TAILHOST" "http://[::1]:$LHPORT2/api/auth/challenge")"
     is "...and the log says localhost is not listening" "1" \
        "$([ "$(grep -c "localhost: NOT listening on 127.0.0.1:$LHPORT2 (EADDRINUSE)" "$LH/log.squatted" || true)" -ge 1 ] && echo 1 || echo 0)"
+    sleep 1                        # ten retries at 100ms, every one of them refused
+    is "...once, however many retries it takes" "1" "$(grep -c 'localhost: NOT listening' "$LH/log.squatted" || true)"
+    reap "$LH_SQ"
+    lh_until "$LH/log.squatted" "localhost: UP after"
+    is "a freed 127.0.0.1 is taken up without a restart" "200" \
+       "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$LHPORT2" "http://127.0.0.1:$LHPORT2/")"
     lh_stop
   fi
-  reap "$squat"
+  reap "$LH_SQ"
+
+  # THE REVERSE, AND THE CASE IT WAS FOR. The machine moved to another tailnet, so the
+  # configured 100.x address is not on it any more: fleet-serve used to refuse to start, and
+  # launchd restarted it every few seconds, thousands of times, with localhost shut too.
+  # Now localhost serves, the log says the tailnet listener is off ONCE with what to run,
+  # and the daemon stays up, because not exiting is what stops the crash loop. 100.64.99.99
+  # is in Tailscale's range and on no interface here. Watched red on the previous commit:
+  # the daemon exited with "refusing to bind".
+  LHPORT6="$(free_port)"
+  lh_init 100.64.99.99 "$LHPORT6" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start notailnet "http://127.0.0.1:$LHPORT6/healthz"; then
+    is "an absent tailnet bind still serves localhost" "200" \
+       "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$LHPORT6" "http://127.0.0.1:$LHPORT6/")"
+    sleep 1
+    is "...and the log says the tailnet listener is off, once" "1" \
+       "$(grep -c 'the tailnet listener is OFF' "$LH/log.notailnet" || true)"
+    is "...saying why"                    "1" \
+       "$([ "$(grep -c 'OFF — 100.64.99.99 is not on any interface of this machine' "$LH/log.notailnet" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and what to run"               "1" \
+       "$([ "$(grep -c 'fleet-serve init --bind "$(tailscale ip -4)"' "$LH/log.notailnet" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and it is still running"       "yes" "$(kill -0 "$LH_PID" 2>/dev/null && echo yes || echo no)"
+    lh_stop
+  fi
+
+  # ...and a configured listener that comes back is taken up, said once. ::1 stands in
+  # again, held by a squatter and then released. Watched red with the retry removed.
+  LHPORT7="$(free_port)"
+  lh_init ::1 "$LHPORT7" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  lh_squat ::1 "$LHPORT7"
+  if lh_start tailback "http://127.0.0.1:$LHPORT7/healthz"; then
+    sleep 1
+    is "a taken tailnet bind is off, once"  "1" "$(grep -c 'the tailnet listener is OFF' "$LH/log.tailback" || true)"
+    reap "$LH_SQ"
+    lh_until "$LH/log.tailback" "the tailnet listener is UP"
+    is "...comes up when it is free"        "200" \
+       "$(curl -s -g -o /dev/null -w '%{http_code}' -H "Host: $LH_TAILHOST" "http://[::1]:$LHPORT7/api/auth/challenge")"
+    is "...and says so once"                "1" "$(grep -c 'the tailnet listener is UP' "$LH/log.tailback" || true)"
+    lh_stop
+  fi
+  reap "$LH_SQ"
+
+  # ONLY WHEN NEITHER CAN LISTEN does it exit, non-zero, naming both. Watched red on the
+  # previous commit, which exited for the tailnet alone and never said a word about localhost.
+  LHPORT8="$(free_port)"
+  lh_init 100.64.99.99 "$LHPORT8" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  lh_squat 127.0.0.1 "$LHPORT8"
+  HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
+    GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.neither" 2>&1 &
+  lhn=$!
+  SERVE_PIDS="$SERVE_PIDS $lhn"; sv_reg "$lhn"
+  i=0; while [ "$i" -lt 100 ] && kill -0 "$lhn" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  if kill -0 "$lhn" 2>/dev/null; then lhrc="still running after 10s"; reap "$lhn"; else wait "$lhn"; lhrc=$?; fi
+  is "neither listener: it exits non-zero"  "1" "$lhrc"
+  is "...saying nothing can listen"         "1" "$(grep -c 'nothing can listen, so there is nothing to serve' "$LH/log.neither" || true)"
+  is "...naming the tailnet's reason"       "1" "$(grep -c '  - the configured listener on 100.64.99.99:'"$LHPORT8"': 100.64.99.99 is not on any interface' "$LH/log.neither" || true)"
+  is "...and localhost's"                   "1" "$(grep -c "  - localhost: 127.0.0.1:$LHPORT8 could not be bound (EADDRINUSE)" "$LH/log.neither" || true)"
+  reap "$LH_SQ"
 
   # THE TWO SHAPES WITH ONE SOCKET, said out loud rather than guessed around. A loopback
   # config for localhost is already the Mac's door; a loopback bind for ANOTHER name (a
