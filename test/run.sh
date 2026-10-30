@@ -17761,6 +17761,34 @@ if [ -d "$ROOT/web" ]; then
   fi
   rm -rf "$DSK"
 
+  # ── what the masters hold for the owner: its own page, one row on Projects ────
+  # #81 drew every held item at the top of Projects, and on the owner's phone that grew to a
+  # screen and more, pushing the projects below the fold. Projects now keeps one row,
+  # `queue · n ›`, red only while an item waits on the owner, and the list is a page of its
+  # own — the right pane at a desk, one level under Projects on a phone, and where a tapped
+  # notification lands. Driven with touch at 390x844 and a mouse and keys at 1600x900.
+  # Watched red two ways: against staging's client (24 rows: the list still on Projects),
+  # and against copies of this one broken on purpose for the rows staging passes or cannot
+  # reach — a row drawn with nothing held, ⏎ on the row taken as Projects' ⏎, the row's
+  # focus lost to the 5s poll, no way back from the queue, the queue drawn in neither pane,
+  # no cursor keys on it, the row red for any item, and a notification landing on Projects. The rows staging passes unbroken are
+  # #81's own promises (the numbers, the cursor, Projects' keys), which must hold either way.
+  QUE="$(mktemp -d "$TEST_RUNS.$$.queue.XXXXXX")"
+  node "$ROOT/test/helpers/queue-check.mjs" > "$QUE/out" 2> "$QUE/err"
+  querc=$?
+  if grep -q 'no chrome' "$QUE/out" 2>/dev/null; then
+    skip "the queue" "no chrome to tap in"
+  else
+    is "queue-check ran"                "0" "$querc"
+    is "...without complaining"         ""  "$(head -2 "$QUE/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$QUE/out")" -ge 35 ] && echo yes || echo "no: $(wc -l < "$QUE/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$QUE/out"
+  fi
+  rm -rf "$QUE"
+
   # ── the owner's music keeps playing until they ask the app to speak ──────────
   # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
   # every first tap anywhere, and set a non-mixable 'playback' session, resumed an

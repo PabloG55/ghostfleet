@@ -450,6 +450,16 @@ html.duo .chat .turn { max-width: min(88%, 52em); }
                   font-size: 13px; background: none; border: 1px solid var(--hair); border-radius: 8px;
                   padding: 6px 10px; margin: 0; color: var(--fg); scroll-snap-align: start; }
 button.usage { cursor: pointer; }
+/* THE QUEUE'S LINE ON PROJECTS (app.js queueRow): one row the list's full width, where the
+ * list itself used to be. Red while anything waits on the owner; the TUI's grey when every
+ * item is answered or untouched. The palette's own tokens, nothing new. */
+.cards > .queue-row { grid-column: 1 / -1; display: flex; align-items: baseline; gap: .6em; width: 100%;
+                      text-align: left; font: inherit; font-size: 14px; background: none; cursor: pointer;
+                      border: 1px solid var(--hair); border-radius: 8px; padding: 8px 10px; margin: 0;
+                      color: var(--dim); scroll-snap-align: start; }
+.queue-row .qt { flex: 1 1 auto; min-width: 0; }
+.queue-row .qgo { flex: none; }
+.cards > .queue-row.hot { border-color: var(--red); color: var(--red); font-weight: 700; }
 .usage .u-line { display: flex; gap: .6em; min-width: 0; }
 .usage .u-prof { color: var(--dim); flex: none; }
 .usage .u-text { min-width: 0; overflow-wrap: anywhere; }
@@ -732,7 +742,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * they are the same size on every phone because what they need to be is TAPPABLE, not
  * proportional to somebody's reading preference. Fixed px here caps the row at about
  * 190px whatever the text does. */
-.sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
+.hdr > .back, .sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
 /* THE VIEW TOGGLE DOES NOT SHRINK. It was `flex: 0 1 auto`, so once the bar stopped
  * wrapping the toggle became a thing that could give way — measured at 320 with a tailnet
  * hostname in the chip it was squeezed from 101px to 46px, which clips `chat`/`pane` to

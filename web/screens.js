@@ -31,10 +31,15 @@ function Icon({ name }) {
 		children: ds.map((d, i) => /* @__PURE__ */ u("path", { d }, i))
 	});
 }
-function Header({ scope, mode, stale, counts, onMore }) {
+function Header({ scope, mode, stale, counts, onMore, onBack }) {
 	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
 		class: "hdr",
 		children: [
+			onBack ? /* @__PURE__ */ u(Btn, {
+				label: "‹",
+				cls: "back",
+				onClick: onBack
+			}) : null,
 			/* @__PURE__ */ u("span", {
 				class: "name",
 				children: "ghostfleet"
@@ -134,14 +139,15 @@ function CardList({ nodes, listRef }) {
 		ref: box
 	});
 }
-function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, listRef, toast }) {
+function CardScreen({ scope, mode, stale, counts, onMore, onBack, band, confirm, cards, listRef, toast }) {
 	return /* @__PURE__ */ u(S, { children: [
 		/* @__PURE__ */ u(Header, {
 			scope,
 			mode,
 			stale,
 			counts,
-			onMore
+			onMore,
+			onBack
 		}),
 		band,
 		/* @__PURE__ */ u(ConfirmBar, { confirm }),
@@ -224,9 +230,16 @@ function GridScreen(p) {
 		band: /* @__PURE__ */ u(CountStrip, { strip: p.strip })
 	});
 }
+function QueueScreen(p) {
+	return /* @__PURE__ */ u(CardScreen, {
+		...p,
+		band: null
+	});
+}
 var SCREENS = {
 	projects: ProjectsScreen,
-	grid: GridScreen
+	grid: GridScreen,
+	queue: QueueScreen
 };
 function mount(container, screen, props) {
 	const S = SCREENS[screen];

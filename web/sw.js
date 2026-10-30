@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cab8655acfeb
+// CLIENT-HASH: 325790cb4f81
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -394,7 +394,12 @@
 // v79 says what all-exhausted did to the workers: a project whose budget limit is ignored is
 // not parked by the accounts engine, so the push and the accounts line say they keep running.
 // A phone still on v78 says "workers paused" for those too.
-const VERSION = 'ghostfleet-v79';
+// v80 moves what the masters hold for the owner off Projects onto a queue screen of its own:
+// Projects keeps one `queue · n ›` row, the queue carries the conversation's `‹` to leave it
+// by and opens in the right pane at a desk, and a tapped "waiting on you" notification opens
+// it. A phone still on v79 goes on drawing the whole list at the top of Projects until it is
+// relaunched.
+const VERSION = 'ghostfleet-v80';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -544,7 +549,7 @@ self.addEventListener('push', e => {
 // gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  // ...AND A SECOND: an item a master is waiting on opens Projects, where the list is.
+  // ...AND A SECOND: an item a master is waiting on opens the queue, where the list is.
   const open = e.notification.data && e.notification.data.open;
   const to = open === 'jarvis' || open === 'waiting' ? open : '';
   e.waitUntil((async () => {

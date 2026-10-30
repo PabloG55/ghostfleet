@@ -937,11 +937,16 @@ fixtureOverride = null;
 await reopenProjects();
 is('the shipped fleet is back', true, await until(() => shows('acme-api') && shows('scratch'), 4000));
 
-// ── WAITING ON YOU, on the screen every row above measured ────────────────
+// ── WAITING ON YOU: one row on Projects, the list on its own screen ────────
 // The shipped waiting.json is empty, so the rows above run on the Projects screen they
-// were written for. These put two held items on it and ask the same questions again:
-// the projects keep their numbers, the cursor never lands on an item, a tap on a project
+// were written for. These put two held items on it and ask #81's questions again — the
+// projects keep their numbers, the cursor never lands on what is held, a tap on a project
 // still opens it, and a tap on an item opens its answer sheet rather than a project.
+//   UPDATED when the list moved to the queue screen. #81's rows read the items and their
+// heading off Projects ('waiting on you · 1|projects', 'acme-api,toolbox' as cards there);
+// Projects now carries one `queue · 2 ›` row and no item cards, so those rows read the
+// row on Projects and the cards on the queue it opens. The numbering, cursor and
+// tap-a-project rows are unchanged, and still read Projects.
 fixtureOverride = { 'waiting.json': { ok: true, items: [
   { project: 'acme-api', profile: 'work', session: 'master', key: 'k:7', id: '7', text: 'merge #12 now, or wait for the review?',
     state: 'waiting', reason: 'waits on the person: pick one', since_ago: 7200, at_ago: 9000 },
@@ -949,12 +954,13 @@ fixtureOverride = { 'waiting.json': { ok: true, items: [
     state: 'replied', reason: '', since_ago: 60, at_ago: 20000 },
 ] } };
 const held = () => app.all(n => n.className.split(/\s+/).includes('card') && isWaiting(n));
+const qRow = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('queue-row'));
 // tapCard() is declared further down; a `const` read before its line is a ReferenceError.
 const press = (n) => { if (!n) return false;
   (n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
   (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
   return true; };
-await reopenProjects(() => held().length === 2);
+await reopenProjects(() => !!qRow());
 // Looked up on every call: leaving Projects and coming back builds a NEW `.cards` (the
 // screen's key changes), and a node kept from before is a detached list still holding the
 // old children. Measured: it went on reading 'waiting on you · 1|projects' after the
@@ -963,25 +969,32 @@ const heads = () => {
   const list = app.find(n => n.className.split(/\s+/).includes('cards'));
   return list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : [];
 };
-is('waiting items are drawn, under their heading, above the projects', 'waiting on you · 1|projects', heads().join('|'));
-is('...the waiting one first, then the one the owner replied to', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
-is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
+const scopeNow = () => { const n = app.find(x => x.className === 'scope'); return n ? n.textContent.trim() : ''; };
+is('held items are ONE row on Projects, and no cards or heading there', 'queue · 2 ›/0/',
+   `${qRow() ? qRow().textContent.replace(/\s+/g, ' ').trim() : ''}/${held().length}/${heads().join('|')}`);
+is('...red, because one of them waits on the owner', true, !!qRow() && qRow().className.split(/\s+/).includes('hot'));
 is('the projects keep the numbers they had', '1,2,3,4,5',
    [numberOf('acme-api'), numberOf('acme-web'), numberOf('toolbox'), numberOf('billing-svc'), numberOf('scratch')].join(','));
-is('...and the cursor is on a project, never on an item', true,
-   held().every(c => !c.className.split(/\s+/).includes('sel')) && cardEls().some(c => c.className.split(/\s+/).includes('sel')));
-press(held()[0]);
-is('a tap on an item opens its answer sheet', true,
-   await until(() => /answer/.test(sheetHost.textContent) && /acme-api · master · #7/.test(sheetHost.textContent), 2000));
-is('...on this screen, not a project', true, !!btnWith(/add project/) || !!cardNamed('scratch'));
-click(sheetHost.find(n => n.tag === 'button' && /esc back/.test(n.textContent)));
-await tick(5);
+is('...and the cursor is on a project', true, cardEls().some(c => c.className.split(/\s+/).includes('sel')));
 is('a tap on a project still opens the project', true, press(cardNamed('acme-api')) && await until(() => !btnWith(/add project/) && !cardNamed('scratch'), 4000));
 swipeBack();
 await until(() => !!cardNamed('scratch'), 4000);
+click(qRow());
+is('a tap on the row opens the queue', true, await until(() => held().length === 2, 4000));
+is('...titled with its count, and nothing but the items on it', '— queue · 2/false', `${scopeNow()}/${!!cardNamed('scratch')}`);
+is('...the waiting one first, then the one the owner replied to', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
+is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
+press(held()[0]);
+is('a tap on an item opens its answer sheet', true,
+   await until(() => /answer/.test(sheetHost.textContent) && /acme-api · master · #7/.test(sheetHost.textContent), 2000));
+is('...on the queue, not a project', '— queue · 2', scopeNow());
+click(sheetHost.find(n => n.tag === 'button' && /esc back/.test(n.textContent)));
+await tick(5);
+swipeBack();
+is('back from the queue is Projects', true, await until(() => !!cardNamed('scratch') && !!qRow(), 4000));
 fixtureOverride = null;
-await reopenProjects(() => held().length === 0);
-is('...and with none held, no heading is drawn', '', heads().join('|'));
+await reopenProjects(() => !qRow());
+is('...and with none held, no row is drawn', 'false/', `${!!qRow()}/${heads().join('|')}`);
 
 // ── which CLI a project's master runs ────────────────────────────────────
 // "the master cant be selected as open code or codex add that pls". The column has been
