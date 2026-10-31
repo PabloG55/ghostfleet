@@ -51,6 +51,7 @@ import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 import * as A from '../lib/accounts.mjs';
 import * as X from '../lib/experimental.mjs';
 import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
+import * as P from '../lib/peers.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,6 +64,10 @@ const CONFIG = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(CFG_HOME, 'serve
 // another process, and a file both processes write is a file one of them clobbers.
 const SESSIONS = path.join(path.dirname(CONFIG), 'serve-sessions.json');
 const AUDIT = process.env.GHOSTFLEET_SERVE_AUDIT || path.join(CFG_HOME, 'serve-audit.jsonl');
+// The paired hosts (lib/peers.mjs): beside serve.json and 0600 like it, and a file of its own
+// for the reason SESSIONS is — `pair`, `unpair` and `relabel` rewrite it from a terminal.
+const PEERS = P.peersFile(CONFIG);
+const PEERS_SEEN = P.seenFile(CONFIG);
 const VERSION = '1.0.0';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -945,6 +950,9 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
 
   if (v.write) {
     auditAppend({ ts: now(), client: client.id, ip, verb: tool, project: args.project || null, subject,
+                  // A PAIRED HOST ACTED: which host, and which of its clients — the host from
+                  // this side's own record of the pairing, the client from its signature.
+                  ...(client.pair ? { via: 'pair', origin_host: client.pair.label, origin_client: client.onBehalf || 'host' } : {}),
                   args: Object.fromEntries(Object.entries(args).map(([k, val]) =>
                     [k, typeof val === 'string' ? val.slice(0, 500) : val])),
                   // §7 again: the log says what the fingerprint was FOR, not merely that
@@ -1951,7 +1959,9 @@ function armPushWatch() {
   }, every).unref();
 }
 
-const OPEN = new Set(['/api/auth/challenge', '/api/auth/register', '/api/auth/assert']);
+// /api/pair/accept is the fourth: the host that printed a pairing code has no token for the
+// host typing it in, and the code is what authorises it — the same shape as register.
+const OPEN = new Set(['/api/auth/challenge', '/api/auth/register', '/api/auth/assert', '/api/pair/accept']);
 
 function serveStatic(req, res, pathname) {
   // The app shell is unauthenticated on purpose: the passkey prompt lives inside it, so
@@ -2187,6 +2197,272 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
   return dropped;
 }
 
+// ── PAIRED HOSTS: one web client, several machines (lib/peers.mjs) ───────────
+// The phone logs in to ONE host — its passkey cannot work anywhere else — and that host
+// answers for its peers by proxying, signed with the credential the two exchanged at
+// pairing. Each control below answers its own question:
+//
+//   THE SIGNATURE       is this request from the host we paired with, made just now, once
+//   THE SCOPE           is this something a paired host may ask for at all (PAIR_READS,
+//                       PAIR_VERBS): never a passkey verb (a passkey is bound to the host it
+//                       was made on, so the remote could not check one), never the terminal,
+//                       never a photo, never another hop onwards
+//   THE ON-BEHALF NAME  which person on the home host asked. Taken ONLY from a signed
+//                       request; the host half of the identity comes from this host's own
+//                       record of the pairing, never from anything the request says
+//   BOTH AUDIT LOGS     the home host records that it forwarded, the remote that it ran, and
+//                       each row names the originating host and client
+//   THE RATE LIMITS     the home host's buckets saw the phone's request before it was
+//                       forwarded; the remote's see the forwarded one, per address AND per
+//                       `<host>/<client>`, so a paired host is not a way around either
+//
+// A machine with no peers is untouched by all of it: no field is added to any payload,
+// and an address without an `@` is this host's, exactly as before.
+const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue and usage to read; send, wake, park and resume to act';
+export const TERM_REMOTE_WHY = 'the terminal never crosses machines: a shell is opened only by the host it runs on — open that host\'s own app for one';
+const pairNonces = new Map();       // "<pid>:<nonce>" -> expiry: the replay table for signed requests
+const peerLive = new Map();         // key -> { online, why, at, down_until }: what the last call found
+const peerCache = new Map();        // key -> { at, json }: the last good /api/projects, for a slow answer
+let peerSeen = null, peerSeenTimer = null;
+function peers() {
+  try { return P.loadPeers(PEERS); }
+  catch (e) { log(`peers: ${e.message}`); return { self: '', open: null, peers: [] }; }
+}
+function seenAt(key) { if (!peerSeen) peerSeen = P.loadSeen(PEERS_SEEN); return Number(peerSeen[key]) || 0; }
+function markPeer(peer, ok, why = '') {
+  const t = now();
+  const prev = peerLive.get(peer.key) || {};
+  peerLive.set(peer.key, { online: ok, why: ok ? '' : why, at: t, down_until: ok ? 0 : t + 10 });
+  if (ok !== prev.online && prev.at) log(`peer ${peer.label}: ${ok ? 'back online' : `offline — ${why}`}`);
+  if (!ok) return;
+  if (!peerSeen) peerSeen = P.loadSeen(PEERS_SEEN);
+  peerSeen[peer.key] = t;
+  // A poll every few seconds is a heartbeat; the file only has to be right to the minute.
+  if (!peerSeenTimer) { peerSeenTimer = setTimeout(() => { peerSeenTimer = null; P.saveSeen(PEERS_SEEN, peerSeen); }, 5000); peerSeenTimer.unref?.(); }
+}
+// The rows behind every host label the client draws: this host first, then each peer with
+// whether the last call reached it and when one last did. `online: null` is "not asked yet".
+function hostRows(v = peers()) {
+  return [{ key: '', label: P.selfLabel(v), self: true, online: true },
+    ...v.peers.map(p => {
+      const l = peerLive.get(p.key);
+      const seen = seenAt(p.key) || p.created || 0;
+      return { key: p.key, label: p.label, self: false, online: l ? l.online : null,
+               last_seen: seen, last_seen_ago: A.ago(seen), ...(l && !l.online ? { why: l.why } : {}) };
+    })];
+}
+// A request that came back with the remote's own "who are you?" is a pairing the OTHER side
+// has dropped — not an outage, and the fix is different, so it is told apart here.
+const unpairedThere = (r) => r.status === 401 && r.json && r.json.needs === 'pairing';
+async function callPeer(peer, opts, { fan = false } = {}) {
+  // A fan-out read skips a peer that just failed, for a few seconds: the Projects poll is
+  // every few seconds, and asking a sleeping laptop each time would put its timeout in
+  // front of every answer the awake host gives. A tap (fan=false) always asks.
+  const l = peerLive.get(peer.key);
+  if (fan && l && !l.online && l.down_until > now()) return { status: 0, error: l.why || 'offline' };
+  let r;
+  try { r = await P.peerRequest(peer, opts); } catch (e) { r = { status: 0, error: e.message }; }
+  if (!r.status) markPeer(peer, false, r.error || 'no answer');
+  else if (unpairedThere(r)) markPeer(peer, false, `it no longer accepts this pairing — unpair it here: fleet-serve unpair ${peer.key}`);
+  else markPeer(peer, true);
+  return r;
+}
+async function fanOut(pathq, req, timeout = 8000) {
+  const v = peers();
+  if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
+  return Promise.all(v.peers.map(async (peer) => ({ peer, r: await callPeer(peer, { pathq, onBehalf: req.client.id, timeout }, { fan: true }) })));
+}
+const addrOf = (name, peer) => (peer ? P.joinAddr(name, peer.key) : name);
+// /api/projects with every peer's projects after this host's. This host's rows keep their
+// index (the digit on a card is what `Ctrl-f <p>` counts at the desk), so the peers'
+// rows only ever come after them.
+async function mergeProjects(local, fan, v) {
+  if (!fan) return local;
+  const self = P.selfLabel(v);
+  const rows = local.projects.map(r => ({ ...r, host: self, host_key: '' }));
+  for (const { peer, r } of fan) {
+    let j = r.status === 200 && r.json && Array.isArray(r.json.projects) ? r.json : null;
+    if (j) peerCache.set(peer.key, { at: now(), json: j });
+    // SLOW IS NOT GONE. A peer that timed out answering a full rollup a minute after it
+    // last answered one is a busy machine, and its projects stay on screen from that answer.
+    else if (r.error && /no answer in/.test(r.error)) { const hit = peerCache.get(peer.key); if (hit && now() - hit.at < 60) j = hit.json; }
+    if (!j) continue;
+    for (const x of j.projects) rows.push({ ...x, name: addrOf(x.name, peer), host: peer.label, host_key: peer.key, home: j.home || '' });
+  }
+  return { ...local, projects: rows, hosts: hostRows(v) };
+}
+function mergeWaiting(local, fan) {
+  if (!fan) return local;
+  const items = (local.items || []).map(i => ({ ...i, host: P.selfLabel(peers()) }));
+  for (const { peer, r } of fan)
+    if (r.status === 200 && r.json && Array.isArray(r.json.items))
+      for (const i of r.json.items) items.push({ ...i, project: addrOf(i.project, peer), host: peer.label });
+  return { ...local, ok: true, items };
+}
+function mergeUsage(local, fan) {
+  if (!fan) return local;
+  const self = P.selfLabel(peers());
+  const profiles = (local.profiles || []).map(p => ({ ...p, profile: `${self} · ${p.profile}` }));
+  let enabled = !!local.enabled;
+  for (const { peer, r } of fan)
+    if (r.status === 200 && r.json && r.json.enabled) {
+      enabled = true;
+      for (const p of r.json.profiles || []) profiles.push({ ...p, profile: `${peer.label} · ${p.profile}` });
+    }
+  return { ...local, enabled, profiles };
+}
+
+// A SIGNED REQUEST FROM A PAIRED HOST, before anything else reads it. Returns {body} or
+// answers the request itself and returns null.
+async function pairAuth(req, res, p, url, ip) {
+  let raw;
+  try { raw = req.method === 'POST' ? await readBody(req, undefined, { raw: true }) : Buffer.alloc(0); }
+  catch (e) { send(res, e.tooBig ? 413 : 400, { ok: false, text: e.message }); try { req.resume(); } catch {} return null; }
+  const v = peers();
+  const r = P.verifySigned(v, req, url.pathname + url.search, raw, pairNonces);
+  if (r.error) {
+    log(`pair: refused a signed request from ${ip}: ${r.error}`);
+    send(res, 401, { ok: false, needs: 'pairing', text: r.error });
+    return null;
+  }
+  let body = {};
+  if (raw.length) { try { body = JSON.parse(raw.toString('utf8')); } catch { send(res, 400, { ok: false, text: 'body is not JSON' }); return null; } }
+  const inScope = (req.method === 'GET' && PAIR_READS.has(p)) || (req.method === 'POST' && (p === '/api/verb' || p === '/api/pair/revoke'));
+  if (!inScope) { send(res, 403, { ok: false, text: `${req.method} ${p} is not something a paired host may ask for — the pairing covers ${PAIR_SCOPE_WORDS}` }); return null; }
+  if (p === '/api/verb' && !PAIR_VERBS.has(body.tool)) {
+    send(res, 403, { ok: false, text: `${String(body.tool || 'that')} does not cross machines — the pairing covers ${PAIR_SCOPE_WORDS}. Do it from this host's own app` });
+    return null;
+  }
+  // ONE HOP. A paired host asks about this host's own projects, by their bare names; an
+  // address naming yet another host is refused rather than forwarded, so no chain of
+  // pairings can be walked and two hosts can never bounce one request between them.
+  const named = url.searchParams.get('project') || (body.args && body.args.project) || '';
+  if (P.splitAddr(named)) { send(res, 403, { ok: false, text: 'a paired host asks about this host\'s own projects; a request is never forwarded a second time' }); return null; }
+  req.client = { id: `${r.peer.label}/${r.onBehalf || 'host'}`, pair: r.peer, onBehalf: r.onBehalf || '' };
+  req.session = { exp: now(), purpose: 'pair' };
+  markPeer(r.peer, true);
+  if (!rateOk(req.method === 'POST' ? 'write' : 'read', `id:${req.client.id}`, res)) { send(res, 429, { ok: false, text: 'rate limited' }); return null; }
+  return { body };
+}
+
+// THE OTHER HALF OF `fleet-serve pair`: the host that printed the code receives the joiner's
+// half of the credential and answers with its own. Unauthenticated like /api/auth/register,
+// and gated the same way: a window opened from this host's terminal AND the code it printed.
+async function pairAccept(req, res, body, ip) {
+  if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+  if (!req.socket.encrypted && !['127.0.0.1', '::1'].includes(ip))
+    return send(res, 403, { ok: false, text: 'pairing over plain http is refused except on loopback — pair with this host\'s https origin' });
+  let v;
+  try { v = P.loadPeers(PEERS, { force: true }); } catch (e) { return send(res, 500, { ok: false, text: e.message }); }
+  if (!v.open || !(v.open.exp > now()))
+    return send(res, 403, { ok: false, text: 'no pairing is open here. On this host: fleet-serve pair — it prints a one-time code' });
+  if (typeof body.code !== 'string' || !sameSecret(sha256(normCode(body.code)), v.open.code_sha256))
+    return send(res, 403, { ok: false, text: 'wrong or missing pairing code' });
+  const bad = !/^[A-Za-z0-9_-]{16,64}$/.test(String(body.id || '')) ? "'id' is not a pairing id"
+    : !P.LABEL_OK.test(String(body.label || '')) ? "'label' must be 1-24 letters, digits, space, dot, dash or underscore"
+    : (typeof body.secret !== 'string' || body.secret.length < 32 || body.secret.length > 128) ? "'secret' is missing or the wrong size"
+    : P.urlProblem(body.url);
+  if (bad) return send(res, 400, { ok: false, text: bad });
+  const url = P.originOf(body.url);
+  const dup = v.peers.find(x => x.id === body.id || x.url === url);
+  if (dup) return send(res, 409, { ok: false, text: `already paired with ${dup.label} (${dup.url}) — unpair it first: fleet-serve unpair ${dup.key}` });
+  const key = P.keyFor(body.label, new Set(v.peers.map(x => x.key)));
+  const mine = P.rand(32);
+  v.peers.push({ id: body.id, key, label: body.label, url, out: body.secret, in: mine, created: now() });
+  v.open = null;
+  P.savePeers(PEERS, v);
+  markPeer(v.peers[v.peers.length - 1], true);
+  auditAppend({ ts: now(), client: `${body.label}/cli`, ip, verb: 'pair', subject: key, result: 'ran',
+                output: `paired with '${body.label}' at ${url}; its projects appear here as <name>@${key}` });
+  log(`paired with '${body.label}' at ${url} (key ${key}) from ${ip}`);
+  return send(res, 200, { ok: true, label: P.selfLabel(v), secret: mine });
+}
+
+// UNPAIR: tell the other side if it answers, and forget it here whether or not it does — a
+// pairing the owner revoked must not survive because the other machine was asleep.
+export async function unpairPeer(peer, who, ip) {
+  let told = false, why = '', r;
+  try { r = await P.peerRequest(peer, { method: 'POST', pathq: '/api/pair/revoke', body: {}, onBehalf: who.replace(/^.*\//, '') || 'host', timeout: 4000 }); }
+  catch (e) { r = { status: 0, error: e.message }; }
+  if (r.status === 200) told = true;
+  else if (unpairedThere(r)) { told = true; why = 'it had already forgotten this host'; }
+  else why = r.error || (r.json && r.json.text) || `HTTP ${r.status}`;
+  const v = P.loadPeers(PEERS, { force: true });
+  v.peers = v.peers.filter(x => x.id !== peer.id);
+  P.savePeers(PEERS, v);
+  peerLive.delete(peer.key); peerCache.delete(peer.key);
+  auditAppend({ ts: now(), client: who, ip, verb: 'unpair', subject: peer.key, result: 'ran',
+                output: `unpaired '${peer.label}' here; ${told ? 'and there' : `NOT there (${why}) — it will refuse this host's signature anyway, since the credential is gone from this side`}` });
+  return { told, why };
+}
+
+// What the HOME host does with a request that names a peer's project: refuse it here when
+// it is out of scope (so the refusal is immediate and says why), or forward it signed.
+async function proxyRemote(req, res, p, url, body, ip) {
+  const named = url.searchParams.get('project') ?? (p === '/api/verb' ? (body?.args?.project ?? (TOOLS_ALLOWED[body?.tool]?.noProject ? body?.args?.name : undefined))
+    : (p === '/api/attach' || p.startsWith('/api/term')) ? body?.project : undefined);
+  const addr = P.splitAddr(named || '');
+  if (!addr) return false;
+  const v = peers();
+  const peer = v.peers.find(x => x.key === addr.key);
+  if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
+  if (p.startsWith('/api/term')) { send(res, 403, { ok: false, remote: true, text: TERM_REMOTE_WHY }); return true; }
+  // 400, NOT 403, for everything refused below. web/api.js reads a 401 or a 403 on a read or
+  // a verb as "this session is dead" and locks the app — a refusal about WHERE a project is
+  // must not log the owner out of the machine he is on. (The terminal's 403 above is read by
+  // its own caller, which tells a refusal from a dead session.)
+  if (p === '/api/attach') { send(res, 400, { ok: false, remote: true, text: `a photo does not cross machines yet — send it from ${peer.label}'s own app` }); return true; }
+  const verbOk = p === '/api/verb' && req.method === 'POST' && PAIR_VERBS.has(body.tool);
+  if (!(req.method === 'GET' && PAIR_READS.has(p)) && !verbOk) {
+    const what = p === '/api/verb' ? String(body.tool || 'that') : `${req.method} ${p}`;
+    const pk = p === '/api/verb' && TOOLS_ALLOWED[body.tool]?.passkey ? ' (it needs a passkey, and a passkey only works on the host it was made on)' : '';
+    send(res, 400, { ok: false, remote: true, text: `${what} does not cross to ${peer.label}${pk} — what crosses: ${PAIR_SCOPE_WORDS}. Do it from ${peer.label}'s own app` });
+    return true;
+  }
+  let pathq = p, out = null;
+  if (req.method === 'GET') { const q = new URLSearchParams(url.searchParams); q.set('project', addr.project); pathq = `${p}?${q}`; }
+  else out = { ...body, args: { ...(body.args || {}), project: addr.project } };
+  const headers = req.headers['if-none-match'] ? { 'if-none-match': String(req.headers['if-none-match']) } : {};
+  const r = await callPeer(peer, { method: req.method, pathq, body: out, onBehalf: req.client.id, headers,
+                                   timeout: p === '/api/verb' ? 15 * 60 * 1000 : 15000 });
+  if (p === '/api/verb') {
+    const args = Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
+                  via: 'proxy', host: peer.label, args: { ...args, project: named },
+                  result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
+                  output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
+  }
+  if (!r.status) {
+    const seen = seenAt(peer.key) || peer.created;
+    send(res, 502, { ok: false, offline: true, host: peer.label, last_seen: seen,
+                     text: `${peer.label} is offline (${r.error}) · last seen ${A.ago(seen)}` });
+    return true;
+  }
+  if (unpairedThere(r)) {
+    send(res, 502, { ok: false, host: peer.label, text: `${peer.label} no longer accepts this host's pairing (${r.json.text}). Unpair it here: fleet-serve unpair ${peer.key}` });
+    return true;
+  }
+  // ...and the same rule for the remote's own 401/403, whatever caused it: it is about this
+  // host's standing there, never about the phone's session here, so it must not arrive as
+  // the status that makes the phone throw its token away.
+  if (r.status === 401 || r.status === 403) {
+    send(res, 502, { ok: false, host: peer.label, text: `${peer.label} refused it: ${String((r.json && (r.json.text || r.json.error)) || `HTTP ${r.status}`).slice(0, 300)}` });
+    return true;
+  }
+  if (r.status === 304) { res.writeHead(304, { ...(r.headers.etag ? { ETag: r.headers.etag } : {}), 'cache-control': 'no-store' }); res.end(); return true; }
+  let j = r.json;
+  // The payload says which project it is about; on this side that is the ADDRESS, so a
+  // screen that keys anything off it keys off the same string it asked with.
+  if (j && typeof j === 'object' && !Array.isArray(j)) {
+    j = { ...j, host: peer.label, host_key: peer.key };
+    if (j.project === addr.project) j.project = named;
+  }
+  send(res, r.status, j ?? { ok: false, text: String(r.text || '').slice(0, 300) }, r.headers.etag ? { ETag: r.headers.etag } : {});
+  return true;
+}
+
 async function api(req, res, url, ip) {
   let c;
   try { c = loadConfig(); } catch (e) { return send(res, 500, { ok: false, text: `config unreadable: ${e.message}` }); }
@@ -2210,7 +2486,22 @@ async function api(req, res, url, ip) {
   } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
 
-  if (!OPEN.has(p)) {
+  let pairBody = null;
+  if (!OPEN.has(p) && req.headers['x-fleet-pair'] !== undefined) {
+    // A PAIRED HOST, signing rather than holding a token (see PAIRED HOSTS above). Its body
+    // is read here, before any route, because the signature covers the bytes.
+    const pa = await pairAuth(req, res, p, url, ip);
+    if (!pa) return;
+    pairBody = pa.body;
+  } else if (!OPEN.has(p)) {
+    // AN IDENTITY HEADER WITHOUT A SIGNATURE IS A FORGERY, whoever sends it. The on-behalf
+    // name is honoured only inside a paired host's signed request; on a phone's own token it
+    // would be a way to write somebody else's name into the audit log, so it is refused
+    // outright rather than ignored — ignoring it would leave the attempt unrecorded.
+    if (req.headers['x-fleet-on-behalf'] !== undefined) {
+      log(`refused an unsigned on-behalf header from ${ip}`);
+      return send(res, 403, { ok: false, text: 'X-Fleet-On-Behalf is only honoured inside a paired host\'s signed request — an identity header on its own is refused' });
+    }
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
     // only because a passkey signed a challenge, and it dies after session_ttl unused.
@@ -2236,8 +2527,8 @@ async function api(req, res, url, ip) {
   // the attachment route alone gets a cap sized for an unconverted phone photo, because
   // that is the one request that legitimately carries one. Keyed on the path because this
   // is the only point where the body is read and the path is already known.
-  let body;
-  try {
+  let body = pairBody;
+  if (body === null) try {
     body = req.method === 'POST'
       ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : HEAR_PATHS.has(p) ? HEAR_BODY_CAP : undefined,
                        { raw: HEAR_PATHS.has(p) }) : {};
@@ -2348,6 +2639,50 @@ async function api(req, res, url, ip) {
     return send(res, 200, { ok: true });
   }
 
+  // ── paired hosts (PAIRED HOSTS, above) ────────────────────────────────────
+  if (p === '/api/pair/accept') return pairAccept(req, res, body, ip);
+  // The other side unpaired: forget it here too. Only a signed request reaches this — the
+  // scope check in pairAuth lets nothing else through — and it can only remove its OWN pair.
+  if (p === '/api/pair/revoke') {
+    if (!req.client.pair) return send(res, 403, { ok: false, text: 'only a paired host revokes its own pairing — from here, use /api/pairs/unpair' });
+    const v = P.loadPeers(PEERS, { force: true });
+    const was = v.peers.find(x => x.id === req.client.pair.id);
+    v.peers = v.peers.filter(x => x.id !== req.client.pair.id);
+    P.savePeers(PEERS, v);
+    if (was) { peerLive.delete(was.key); peerCache.delete(was.key); }
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: 'unpair', subject: was ? was.key : '-', result: 'ran',
+                  output: `'${req.client.pair.label}' unpaired this host from its side` });
+    log(`'${req.client.pair.label}' unpaired from its side (${ip})`);
+    return send(res, 200, { ok: true });
+  }
+  // What the phone's settings sheet lists and what it can do about it: see the hosts, unpair
+  // one, rename one (or this host). A paired host's own requests never reach these.
+  if (p === '/api/pairs' || p.startsWith('/api/pairs/')) {
+    if (req.client.pair) return send(res, 403, { ok: false, text: 'a paired host does not manage pairings' });
+    if (p === '/api/pairs' && req.method === 'GET') return send(res, 200, { ok: true, hosts: hostRows() });
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const v = P.loadPeers(PEERS, { force: true });
+    const self = body.host === '' || body.host === 'self';
+    const peer = self ? null : P.findPeer(v, body.host);
+    if (!self && !peer) return send(res, 404, { ok: false, text: `no paired host '${String(body.host || '').slice(0, 40)}'` });
+    if (p === '/api/pairs/unpair') {
+      if (self) return send(res, 400, { ok: false, text: 'this host is not paired with itself' });
+      const r = await unpairPeer(peer, req.client.id, ip);
+      return send(res, 200, { ok: true, told: r.told, text: r.told ? `unpaired ${peer.label}, here and there` : `unpaired ${peer.label} here; it did not answer (${r.why}), and its signature no longer works on this host` });
+    }
+    if (p === '/api/pairs/label') {
+      const label = String(body.label || '').trim();
+      if (!P.LABEL_OK.test(label)) return send(res, 400, { ok: false, text: 'a label is 1-24 letters, digits, space, dot, dash or underscore' });
+      if (self) v.self = label; else peer.label = label;
+      P.savePeers(PEERS, v);
+      auditAppend({ ts: now(), client: req.client.id, ip, verb: 'relabel', subject: self ? 'self' : peer.key, result: 'ran', output: `now '${label}'` });
+      return send(res, 200, { ok: true, hosts: hostRows(v) });
+    }
+    return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
+  }
+  // A project address with an `@` is a peer's: forwarded, or refused here with the reason.
+  if (!req.client.pair && await proxyRemote(req, res, p, url, body, ip)) return;
+
 // WHICH AGENTS THE PHONE MAY OFFER, asked of the machine rather than listed here. The
 // names come from `fleet-agent list`, the presence from `fleet-agent installed`, and the
 // warning from `fleet-agent caveat` — so a fourth agent appears in the picker, with its
@@ -2387,6 +2722,8 @@ function agentCatalogue() {
     // the Projects screen would be the summary line lying at a glance, which is the one
     // place docs/mobile.md says it must not.
     const rollup = url.searchParams.get('rollup') !== '0' && gridSupportsJson();
+    // Asked of every peer at the same moment this host counts its own, not after.
+    const fan = fanOut(`/api/projects${rollup ? '' : '?rollup=0'}`, req);
     // JARVIS SWITCHED OFF IS GONE FROM THE PHONE, its own project included: that project is
     // Jarvis's home, and a card for it would be a way to start its master with the contract
     // and none of the switch. `jarvis_enabled` is how the client learns the switch — from
@@ -2415,7 +2752,7 @@ function agentCatalogue() {
         parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() });
+    return send(res, 200, await mergeProjects({ home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() }, await fan, peers()));
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
@@ -2511,18 +2848,22 @@ function agentCatalogue() {
   // the ledger files (heldScan); nothing here changes one. An item leaves when its master
   // closes or drops it — the reply is a message (fleet_send), never a close by hand.
   if (p === '/api/waiting' && req.method === 'GET') {
-    if (!L) return send(res, 503, { ok: false, text: ledgerWhy });
+    const fan = fanOut('/api/waiting', req, 5000);
+    if (!L && !peers().peers.length) return send(res, 503, { ok: false, text: ledgerWhy });
     const { rows } = heldScan(shownToPhone());
-    return send(res, 200, { ok: true, at: now(), items: rows.map(r => ({
+    return send(res, 200, mergeWaiting({ ok: true, at: now(), items: rows.map(r => ({
       project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
       text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
-      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) })) });
+      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) })) }, await fan));
   }
 
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
   // switching an account stays at the desk.
-  if (p === '/api/usage' && req.method === 'GET') return send(res, 200, usageReport());
+  if (p === '/api/usage' && req.method === 'GET') {
+    const fan = fanOut('/api/usage', req, 5000);
+    return send(res, 200, mergeUsage(usageReport(), await fan));
+  }
 
   if (p === '/api/inbox' && req.method === 'GET') {
     const rp = resolveProject(url.searchParams.get('project') || '');
@@ -3464,6 +3805,13 @@ const USAGE = `fleet-serve — the fleet's HTTP endpoint, for the phone (docs/mo
   fleet-serve push [--detail named|anonymous] [--test]
                                            who is subscribed, what a lock screen shows,
                                            and one real notification to prove it arrives
+  fleet-serve pair [--as LABEL]            open a one-time pairing with another machine (prints a code)
+  fleet-serve pair <URL> <CODE> [--as LABEL] [--label LABEL] [--url THIS-URL]
+                                           pair with the machine that printed the code: each
+                                           then shows the other's projects in its web client
+  fleet-serve pairs                        the paired machines, and when each was last heard from
+  fleet-serve unpair <host>                revoke a pairing, on both machines if the other answers
+  fleet-serve relabel <host|self> <LABEL>  rename how a machine is shown here
   fleet-serve check                        preflight: bind, funnel, config — no listen
   fleet-serve check-bind <addr>            classify one address and exit
 
@@ -3663,6 +4011,94 @@ async function main() {
       let o; try { o = JSON.parse(l); } catch { console.log(`?? ${l}`); continue; }
       console.log(`${new Date((o.ts || 0) * 1000).toISOString().slice(0, 19).replace('T', ' ')}  ${String(o.client || '-').padEnd(12)} ${String(o.verb || '-').padEnd(12)} ${String(o.subject || '-').padEnd(16)} ${o.result || '-'}${o.confirmed ? ' ' + o.confirmed : ''}`);
     }
+    return;
+  }
+
+  // ── pairing: one web client for several machines (PAIRED HOSTS, above) ──────
+  // `pair` with nothing after it OPENS a window here and prints a code; `pair <url> <code>`
+  // on the other machine JOINS it. One explicit act on each machine, and nothing ever pairs
+  // by being reachable.
+  if (cmd === 'pair') {
+    const c = loadConfig();
+    const v = P.loadPeers(PEERS, { force: true });
+    const as = flag('--as');
+    if (as !== null) {
+      if (!P.LABEL_OK.test(as)) { console.error('fleet-serve: --as takes 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+      v.self = as;
+    }
+    const target = argv[1] && !argv[1].startsWith('-') ? argv[1] : null;
+    if (!target) {
+      const code = enrolCode();
+      v.open = { code_sha256: sha256(normCode(code)), exp: now() + P.PAIR_TTL };
+      P.savePeers(PEERS, v);
+      console.log(`pairing open on '${P.selfLabel(v)}' — ${Math.round(P.PAIR_TTL / 60)} minutes, one use.`);
+      console.log(`\n    code:  ${code}\n`);
+      console.log('On the other machine:');
+      console.log(`    fleet-serve pair ${(c.origins || ['<this host\'s https origin>'])[0]} ${code}`);
+      console.log(`The other machine will show this one as '${P.selfLabel(v)}' (rename it here with --as, or there with relabel).`);
+      return;
+    }
+    const code = argv[2];
+    if (!code || code.startsWith('-')) { console.error('fleet-serve: pair <url> <code> — the code `fleet-serve pair` printed on the other machine'); process.exitCode = 2; return; }
+    const bad = P.urlProblem(target);
+    if (bad) { console.error(`fleet-serve: ${bad}`); process.exitCode = 1; return; }
+    const mine = flag('--url') || (c.origins || [])[0];
+    const badMine = mine ? P.urlProblem(mine) : 'this host has no origin configured (fleet-serve init), so the other machine could not call it back';
+    if (badMine) { console.error(`fleet-serve: this host's own URL — ${badMine}. Pass --url <this host's https origin>`); process.exitCode = 1; return; }
+    const label = flag('--label');
+    if (label !== null && !P.LABEL_OK.test(label)) { console.error('fleet-serve: --label takes 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+    const id = P.rand(18), secret = P.rand(32);
+    const r = await P.request(P.originOf(target), { method: 'POST', pathq: '/api/pair/accept', timeout: 15000,
+      body: { code, id, label: P.selfLabel(v), url: P.originOf(mine), secret } });
+    if (r.status !== 200 || !r.json || typeof r.json.secret !== 'string' || !P.LABEL_OK.test(String(r.json.label || ''))) {
+      console.error(`fleet-serve: ${P.originOf(target)} did not pair: ${(r.json && r.json.text) || r.error || `HTTP ${r.status}`}`);
+      process.exitCode = 1; return;
+    }
+    const name = label || r.json.label;
+    const key = P.keyFor(name, new Set(v.peers.map(x => x.key)));
+    v.peers.push({ id, key, label: name, url: P.originOf(target), out: r.json.secret, in: secret, created: now() });
+    P.savePeers(PEERS, v);
+    auditAppend({ ts: now(), client: 'cli', ip: 'cli', verb: 'pair', subject: key, result: 'ran',
+                  output: `paired with '${name}' at ${P.originOf(target)}; its projects appear here as <name>@${key}` });
+    console.log(`fleet-serve: paired with '${name}' (${P.originOf(target)}).`);
+    console.log(`  its projects appear in this web client as <name>@${key}, under tabs '${name} · <profile>';`);
+    console.log(`  it shows this machine as '${P.selfLabel(v)}'. A running daemon picks this up on its next request.`);
+    return;
+  }
+
+  if (cmd === 'pairs') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const seen = P.loadSeen(PEERS_SEEN);
+    console.log(`this machine: '${P.selfLabel(v)}'`);
+    if (v.open && v.open.exp > now()) console.log(`pairing open (${v.open.exp - now()}s left)`);
+    if (!v.peers.length) { console.log('(no paired machines — fleet-serve pair)'); return; }
+    console.log(`${'HOST'.padEnd(12)} ${'LABEL'.padEnd(18)} ${'URL'.padEnd(36)} LAST SEEN`);
+    for (const x of v.peers) console.log(`${x.key.padEnd(12)} ${x.label.padEnd(18)} ${x.url.padEnd(36)} ${A.ago(Number(seen[x.key]) || x.created)}`);
+    return;
+  }
+
+  if (cmd === 'unpair') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const peer = P.findPeer(v, argv[1]);
+    if (!peer) { console.error(`fleet-serve: no paired host '${argv[1] || ''}' (see: fleet-serve pairs)`); process.exitCode = 1; return; }
+    const r = await unpairPeer(peer, 'cli', 'cli');
+    console.log(r.told ? `fleet-serve: unpaired '${peer.label}' — here and there${r.why ? ` (${r.why})` : ''}.`
+      : `fleet-serve: unpaired '${peer.label}' here. It did not answer (${r.why}); its signature no longer works on this machine, and it will see the pairing refused the next time it calls.`);
+    return;
+  }
+
+  if (cmd === 'relabel') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const label = argv[2];
+    if (!label || !P.LABEL_OK.test(label)) { console.error('fleet-serve: relabel <host|self> <label> — 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+    if (argv[1] === 'self') v.self = label;
+    else {
+      const peer = P.findPeer(v, argv[1]);
+      if (!peer) { console.error(`fleet-serve: no paired host '${argv[1] || ''}' (see: fleet-serve pairs)`); process.exitCode = 1; return; }
+      peer.label = label;
+    }
+    P.savePeers(PEERS, v);
+    console.log(`fleet-serve: ${argv[1] === 'self' ? 'this machine' : `'${argv[1]}'`} is now shown as '${label}' here (its address does not change).`);
     return;
   }
 

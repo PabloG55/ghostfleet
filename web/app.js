@@ -35,6 +35,7 @@ const S = {
   session: null,        // the card opened on the session screen
   projects: null,       // last /api/projects payload
   profile: 'all',       // the projects screen's tab: 'all' | a profile name (see PROFILES)
+  hosts: null,          // /api/projects' `hosts` once another machine is paired; null = this one alone
   grid: null,           // last §4 payload
   sub: '',              // '' = the top grid; else the sub-lead whose sub-grid is open
   sess: null,           // last /api/session payload  { messages, next_before, … }
@@ -107,7 +108,7 @@ function save() {
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
       session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
-      projects: S.projects, grid: S.grid, sub: S.sub,
+      projects: S.projects, hosts: S.hosts, grid: S.grid, sub: S.sub,
     }));
   } catch {}
 }
@@ -115,6 +116,7 @@ function restore() {
   let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { return; }
   if (!j) return;
   S.projects = j.projects || null; S.grid = j.grid || null;
+  S.hosts = Array.isArray(j.hosts) ? j.hosts : null;
   S.project = j.project || null; S.screen = j.screen || 'projects';
   S.session = j.session || null;
   // the sub-grid you were in; the next grid read falls back to the top if it has gone
@@ -209,6 +211,9 @@ async function refreshOnce() {
       // tell that apart from a machine with one agent installed.
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
+      // Another machine paired: the hosts it answers for, online or not (PAIRED HOSTS in
+      // fleet-serve). Absent is one machine, and every screen draws exactly as before.
+      S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null;
       // JARVIS IS EXPERIMENTAL and the Mac says whether it is on. Off is GONE: no band, no
       // Jarvis screen, no talking to Jarvis — and no /api/jarvis request, which would only
       // 404. Talking to a session stays (talkShown). A daemon
@@ -791,6 +796,14 @@ function modeSpec() {
         : '\u26a0 fixtures',
   };
 }
+// The grid's `[profile:project]`, with the machine in front of the profile once there are
+// two — `[vm · work:toolbox]` — and the project by its name, not its address.
+function gridScope() {
+  const prof = (S.grid && S.grid.profile) || '';
+  if (!isRemote(S.project) && !S.hosts) return `${prof}:${S.project || ''}`;
+  const host = isRemote(S.project) ? hostLabelOf(S.project) : ((S.hosts || []).find(h => h.self) || {}).label || '';
+  return `${[host, prof].filter(Boolean).join(' · ')}:${G.bareName(S.project || '')}`;
+}
 function modeChip() {
   const m = modeSpec();
   return el('span', { class: 'mode ' + m.kind, text: m.text, title: m.detail });
@@ -817,6 +830,27 @@ const PROFILE_ALL = 'all';
 // text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
 // nobody anticipated gets its own tab rather than disappearing.
 const profileOf = (p) => (p && p.profile) || 'work';
+// ONE CLIENT, SEVERAL MACHINES. Once a second fleet-serve is paired, a profile name is not
+// enough to say which tab a project belongs in — both machines can have a `work` — so the
+// tab carries the host: `laptop · work`, `vm · work`. Each row already carries its host
+// (the daemon stamps it), and with one machine there is no host to carry and the tab is the
+// profile, exactly as before. profileOf stays the bare profile: the demo rule below is
+// about the profile, wherever it runs.
+//   NO-BREAK SPACES around the dot, for two reasons that are both about the button: a tab
+// never wraps between its machine and its profile, and a short label (`vm`) is not read as
+// a key letter by btn()'s `^(\S+) (.+)$` — which would draw `vm` in bold like the `p` of
+// `p pause`, as if it were a key to press.
+const tabOf = (p) => (S.hosts && p && p.host ? `${p.host}\u00a0·\u00a0${profileOf(p)}` : profileOf(p));
+// The machine a project ADDRESS names, by its label; '' for this one.
+function hostLabelOf(name) {
+  const k = G.hostKeyOf(name);
+  if (!k) return '';
+  const h = (S.hosts || []).find(x => x.key === k);
+  return h ? h.label : k;
+}
+const isRemote = (name) => !!G.hostKeyOf(name);
+// How a sentence names a project: `acme-api`, or `acme-api on vm` when it is the vm's.
+const said = (name) => (isRemote(name) ? `${G.bareName(name)} on ${hostLabelOf(name)}` : String(name || ''));
 
 // ── the demo fleet, and when it is in the way ─────────────────────────────
 // "hide the demo account from the real phone."
@@ -867,7 +901,7 @@ export function demoHidden(projects) {
 // this count exists to prevent, arriving from the other side.
 export function tabNeed(projects, name) {
   return shownProjects(projects)
-    .filter(({ p }) => name === PROFILE_ALL || profileOf(p) === name)
+    .filter(({ p }) => name === PROFILE_ALL || tabOf(p) === name)
     .reduce((n, { p }) => n + (((p.sessions || {}).need) || 0), 0);
 }
 export function shownProjects(projects) {
@@ -879,7 +913,7 @@ export function profileTabs(projects) {
   // Built from what is DRAWN, so a hidden demo takes its tab with it. Leaving the tab
   // would answer "hide the demo" with the word `demo` still on screen, one tap from the
   // thing that was meant to be gone.
-  for (const { p } of shownProjects(projects)) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
+  for (const { p } of shownProjects(projects)) { const k = tabOf(p); if (!seen.includes(k)) seen.push(k); }
   return seen;                     // in the projects file's own order, which is the address order
 }
 // Every entry carries the index it has in the WHOLE list, because that index is the name.
@@ -889,7 +923,7 @@ export function profileTabs(projects) {
 function visibleProjects() {
   const rows = shownProjects(S.projects || []);
   if (S.profile === PROFILE_ALL) return rows;
-  const mine = rows.filter(({ p }) => profileOf(p) === S.profile);
+  const mine = rows.filter(({ p }) => tabOf(p) === S.profile);
   // The fallback is why this cannot leak the demo back: a stored `demo` tab survives in
   // S.profile until the next load clamps it (see restore), and while it does, `mine` is
   // empty — so this returns the SHOWN rows rather than the raw list. Returning `all` here
@@ -970,6 +1004,7 @@ function projectsProps() {
         dim(i, cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
         }, i))),
+      ...offlineHostCards(),
       dim(projects.length, cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
       }, projects.length)),
@@ -989,12 +1024,34 @@ function projectsProps() {
       // the projects screen schedules a message to THAT project's master
       { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
       { label: 'settings', onClick: () => sheetSettings() },
-      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+      // Registering and removing a project is the desk's job on the machine it is on.
+      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p && isRemote(p.name)) { toast(`${said(p.name)}: remove it on ${hostLabelOf(p.name)} itself`, 'bad'); render(); } else if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
     ], PROJECTS_HINT),
     toast: S.toast,
   };
 }
 const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
+
+// A PAIRED MACHINE THAT DOES NOT ANSWER IS STILL ON THE LIST. Its projects cannot be listed —
+// nobody is there to count them — but leaving it out would make a sleeping laptop look like a
+// laptop with no projects, which is the silence this client must never offer as an answer.
+// So it is one card, under every tab: the machine, the word offline, and when it last spoke.
+// The age is worked out here from the epoch, so it keeps moving while the poll fails.
+export function offlineHostModel(h, nowS = Math.floor(Date.now() / 1000)) {
+  const seen = Number(h.last_seen) || 0;
+  // The whole sentence in the chip — `offline · last seen 3h0m ago` — where a project's chip
+  // says what it is doing; a chip saying `offline` beside a line saying it again reads twice.
+  return { kind: 'host', selected: false, color: 'grey', num: null,
+           title: h.label, statusLabel: `offline · last seen ${seen ? `${G.humanAge(Math.max(0, nowS - seen))} ago` : 'never'}`,
+           where: '', path: '', when: '', msg: h.why ? `not answering: ${h.why}` : '', one: true,
+           placeholder: '', agent: '', pr: '', lead: false, exited: false };
+}
+function offlineHostCards() {
+  return (S.hosts || []).filter(h => !h.self && h.online === false).map(h => {
+    const m = offlineHostModel(h);
+    return cardEl(m, { tap: () => toast(`${h.label} is ${m.statusLabel} — its projects come back when it answers`, 'bad') }, -1);
+  });
+}
 
 // ── finding a project on a phone ──────────────────────────────────────────
 // The desk's `/` needs a key nobody has on a phone, so a touch screen gets a FIELD instead:
@@ -1071,9 +1128,10 @@ export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
   const need = needOf(row.reason);
   return {
     kind: 'waiting', selected: false, num: null, color: look.color,
-    title: row.project, statusLabel: look.label,
+    title: G.bareName(row.project), statusLabel: look.label,
     when: G.humanAge(Math.max(0, nowS - (Number(row.since) || nowS))),
-    where: `master · #${row.id}`, path: '',
+    // the machine, once there are two (the daemon stamps `host` on every merged item)
+    where: `${row.host ? `${row.host} · ` : ''}master · #${row.id}`, path: '',
     msg: `“${row.text}”`, one: true,
     need: row.state === 'replied' ? 'you replied — the master has not closed it yet'
         : need ? `needs: ${need}`
@@ -1154,13 +1212,13 @@ function sheetReply(row) {
     closeSheet();
     const item = outboxAdd(text, row.project, 'master', { typed });
     const r = await doVerb('fleet_send', { project: row.project, session: 'master', prompt: text }, { quiet: true });
-    if (r) { outboxAcked(item, r); row.draft = ''; toast(`sent to ${row.project}'s master`, 'good'); renderUnlessTyping(); return; }
+    if (r) { outboxAcked(item, r); row.draft = ''; toast(`sent to ${said(row.project)}'s master`, 'good'); renderUnlessTyping(); return; }
     outboxDrop(item);
     row.draft = typed;
     render();
   };
   const need = needOf(row.reason);
-  openSheet(sheet('answer', `→ ${row.project} · master · #${row.id}`, [
+  openSheet(sheet('answer', `→ ${said(row.project)} · master · #${row.id}`, [
     el('p', { class: 'q', text: `“${row.text}”` }),
     need ? el('p', { text: `needs: ${need}` }) : null,
     field('reply', t),
@@ -1340,7 +1398,7 @@ function gridProps() {
   const counts = G.countsFrom(g.cards || []);
   const sel = its[S.sel] || {};
   return {
-    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` + (S.sub ? ` › ${S.sub}` : ''),
+    scope: `[${gridScope()}]` + (S.sub ? ` › ${S.sub}` : ''),
     mode: modeSpec(),
     stale: S.stale,
     // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
@@ -1402,20 +1460,21 @@ function gridProps() {
     // 844 points, 21% of the screen, and the card list got 536 — three of nine sessions.
     // The verbs are the same verbs with the same words, reached from the `⋯` in the header,
     // which is the control the session screen has had since #7.
-    onMore: () => sheetMore('actions', `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`, [
+    onMore: () => sheetMore('actions', `[${gridScope()}]`, [
       { label: 'open', cls: 'go',
         onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
       { label: 'new', onClick: () => sheetPicker() },
       { label: 'worktrees', onClick: () => sheetWorktree() },
       // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin.
-      { label: 'terminal', onClick: () => openTerminal() },
+      // ABSENT for another machine's project, and the sheet's last line says why (below).
+      isRemote(S.project) ? null : { label: 'terminal', onClick: () => openTerminal() },
       // Only when there is something for it to act on — see sheetMore on why a disabled
       // row earns a line in a footer and not in a sheet.
       sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
                : { label: 'more', cls: 'off', onClick: () => {} },
       { label: 'settings', onClick: () => sheetSettings() },
       { label: 'projects', onClick: () => toProjects() },
-    ], GRID_HINT),
+    ].filter(Boolean), GRID_HINT, isRemote(S.project) ? TERM_REMOTE : ''),
     toast: S.toast,
   };
 }
@@ -2690,7 +2749,8 @@ function sessionScreen() {
         // The folder earns its place only when it says something the two names either side
         // of it do not. A lead sits in the main checkout, which is usually named after the
         // project — printing both gave "acme-api · acme-api".
-        el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
+        // the project by its name and, when it is another machine's, that machine after it
+        el('span', { class: 'scope', text: ` ${said(S.project || '')}${c && c.folder && c.folder !== S.session && c.folder !== G.bareName(S.project) ? ' · ' + c.folder : ''}` }),
         // WHICH FLEET, ON THE DETAIL LINE RATHER THAN AS ITS OWN CONTROL. It was a
         // top-row flex item and the row could not hold five of them: measured at 390px,
         // back 27 + name 150 + chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a
@@ -2740,11 +2800,17 @@ const termWord = {
   asking: 'waiting for the passkey…',
   opening: 'opening the terminal…',
 };
+// fleet-serve's TERM_REMOTE_WHY, in the client's own words and one line: the shell is a
+// thing the host it runs on opens, never one proxied through a second machine.
+const TERM_REMOTE = 'no terminal for another machine\'s project — a shell is opened only on the machine it runs on';
 function termTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
 // The tap. Everything the passkey needs happens BEFORE the first await, so WebKit still
 // counts this as the tap (passkey.js freshNow). Then the screen, then the rest.
 function openTerminal(project = S.project) {
   if (!project) return;
+  // Another machine's project has no terminal from here, by decision — and Ctrl-t is a key,
+  // so this guard is for the key as much as for any button that forgot to hide.
+  if (isRemote(project)) { toast(TERM_REMOTE, 'bad'); render(); return; }
   const asking = api.mode() === 'server' && S.termOn === true && pk.available() && pk.registered()
     ? pk.freshNow(`terminal ${project}`) : null;
   if (S.screen !== 'term') S.termBack = { screen: S.screen, session: S.session, view: S.view, entry: S.entry, sub: S.sub };
@@ -3372,6 +3438,9 @@ export function pickInput() {
 // the tap took it (then the blur recorded it in S.caret), and with neither the photo goes
 // at the end, which is where a caret in a box nobody touched is anyway.
 function openPicker() {
+  // fleet-serve refuses a photo for another machine's session (it does not cross yet); said
+  // at the tap, before a picker opens and an upload goes nowhere.
+  if (isRemote(S.project)) { toast(`a photo does not cross machines yet — send it from ${hostLabelOf(S.project)}'s own app`, 'bad'); render(); return; }
   const box = composerNode;
   const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
     ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
@@ -4209,13 +4278,16 @@ function focusComposerAt(pos = null) {
 //   THE GESTURES COME WITH IT. They were a permanent three-line band saying what a swipe
 // and a long-press do; here they are one line at the bottom of the sheet you open when you
 // want to know what you can do, which is the moment they are worth reading.
-function sheetMore(title, sub, verbs, hint) {
+// `note`: one line of its own above the hint — what a missing row would otherwise leave
+// unexplained (another machine's project has no terminal, and says so).
+function sheetMore(title, sub, verbs, hint, note = '') {
   const go = (fn) => () => { closeSheet(); fn(); };
   const rows = (verbs || [])
     .filter(v => v.cls !== 'off')
     .map(v => btn(v.label, go(v.onClick), v.cls || ''));
   openSheet(sheet(title, sub, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
+    note ? el('p', { class: 'gest term-why', text: note }) : null,
     hint ? el('p', { class: 'gest', text: hint }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
   ].filter(Boolean)), false);
@@ -4243,7 +4315,7 @@ function sheetActions(name = S.session) {
     btn('l label', go(() => sheetLabel(name))),
     // The PROJECT's terminal, not this worker's worktree: one shell per project is what the
     // passkey and the per-device switch are guarding, and it is the tab the grid shows.
-    btn('terminal', go(() => openTerminal())),
+    isRemote(S.project) ? null : btn('terminal', go(() => openTerminal())),
     lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
     lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
@@ -4254,6 +4326,7 @@ function sheetActions(name = S.session) {
   openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself. Interrupting its turn is fine: it stays on" }) : null,
+    isRemote(S.project) ? el('p', { class: 'gest term-why', text: TERM_REMOTE }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
   ].filter(Boolean)), false);
 }
@@ -5907,7 +5980,7 @@ async function sheetPicker() {
     ]));
   }
   if (!(data.checkouts || []).length) {
-    list.append(el('p', { class: 'warn', text: 'no git checkouts found. looked in: ' + (data.roots || []).map(G.homeTilde).join(', ') }));
+    list.append(el('p', { class: 'warn', text: 'no git checkouts found. looked in: ' + (data.roots || []).map(r => G.homeTilde(r)).join(', ') }));
     list.append(el('p', { text: 'fix: put one path per line in ~/.config/ghostfleet/checkouts' }));
   }
   openSheet(sheet('new session', `pick a checkout under ~/${S.project || ''}`, [list, el('div', { class: 'row' }, [btn('esc back', closeSheet)])]), false);
@@ -6341,7 +6414,9 @@ async function sheetSettings() {
     // worked at creation time would not have answered the request.
     kids.push(el('p', { text: "agent: which coding CLI this project's master runs — " + NEXT_MASTER }));
     const rows = el('div', { class: 'rows' });
-    for (const p of S.projects || []) {
+    // This machine's projects only: these settings are files on the machine that runs the
+    // fleet, and a paired host's are set there (the pairing covers reading and messaging).
+    for (const p of (S.projects || []).filter(x => !isRemote(x.name))) {
       rows.append(el('div', { class: 'srow' }, [
         el('div', { class: 'nm', text: p.name }),
         // Labelled with what it IS, not with a verb: the row is a state readout first.
@@ -6409,6 +6484,34 @@ async function sheetSettings() {
     pk.prepareFresh().catch(() => {});
     api.getTerm().then((j) => { S.termOn = !!j.enabled; show(S.termOn); },
                        (e) => { line.textContent = `could not ask: ${String((e && e.message) || e)}`; });
+  }
+
+  // ── the machines this one answers for (fleet-serve pair) ───────────────────
+  // Listed only once one is paired: pairing is begun at a terminal on each machine, never
+  // from here, so a sheet with nothing paired has nothing to show. Unpair revokes at once,
+  // on both machines if the other answers and on this one regardless — and takes a second
+  // tap, because the way back is a terminal on each side. A label is how a tab names the
+  // machine; renaming it never moves an address.
+  if (S.hosts) {
+    kids.push(el('h2', { text: 'machines' }));
+    kids.push(el('p', { text: 'one app for every paired machine: this one answers for the others. Pair another with fleet-serve pair on each.' }));
+    const rows = el('div', { class: 'rows hosts' });
+    for (const h of S.hosts) {
+      const state = h.self ? 'this machine' : h.online === false ? offlineHostModel(h).statusLabel : h.online ? 'online' : 'not asked yet';
+      const name = input(h.label, { 'aria-label': `label for ${h.label}`, maxlength: '24' });
+      const relabel = btn('rename', async () => {
+        try { await api.relabelHost(h.self ? 'self' : h.key, name.value.trim()); toast(`now '${name.value.trim()}'`, 'good'); closeSheet(); refresh(); }
+        catch (e) { toast(String((e && e.message) || e), 'bad'); render(); }
+      });
+      let armed = false;
+      const unpair = h.self ? null : btn('unpair', async () => {
+        if (!armed) { armed = true; unpair.textContent = `unpair ${h.label}? tap again`; return; }
+        try { const r = await api.unpairHost(h.key); toast(r.text || `unpaired ${h.label}`, r.told ? 'good' : 'bad'); closeSheet(); refresh(); }
+        catch (e) { toast(String((e && e.message) || e), 'bad'); render(); }
+      }, 'danger');
+      rows.append(el('div', { class: 'srow' }, [el('div', { class: 'nm', text: `${h.label} · ${state}` }), name, relabel, unpair].filter(Boolean)));
+    }
+    kids.push(rows);
   }
 
   kids.push(el('h2', { text: 'connection' }));

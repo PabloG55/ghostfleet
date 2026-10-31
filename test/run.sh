@@ -17864,6 +17864,57 @@ else
   skip "Jarvis experimental switch" "tmux or node missing"
 fi
 
+# ── one web client, several machines: two fleet-serves, paired ───────────────
+# The owner runs a fleet on a laptop and on an always-on VM, and each was an app of its own
+# with a passkey of its own. Now `fleet-serve pair` joins two daemons once, and the one the
+# phone opened answers for the other by proxying, signed with the pairing credential. Two
+# real daemons on loopback, each with its own HOME, config, audit log, port and stubbed fleet
+# commands; the helper pairs them, lists both from either, sends to and wakes a remote
+# session, merges the queue, refuses what does not cross (a passkey verb, the terminal, a
+# read outside the scope, a forged or replayed or reflected signature, an unsigned identity
+# header, a second hop), takes one host down and sees it listed offline, and unpairs from
+# each side. Watched red against staging's daemon (52 rows: no pair, no proxy, no merge),
+# and the rows staging passes — the ones about a machine on its own, and the refusals that
+# a daemon with no pairing gives for nothing — against copies of this one broken on purpose
+# (listed in the PR).
+group "fleet-serve: two machines, paired — proxied, scoped, audited on both, unpaired on both"
+if command -v node >/dev/null 2>&1; then
+  PRC="$(mktemp -d "$TEST_RUNS.$$.pair.XXXXXX")"
+  node "$ROOT/test/helpers/pair-check.mjs" > "$PRC/out" 2> "$PRC/err"
+  prcrc=$?
+  is "pair-check ran"                 "0" "$prcrc"
+  is "...without complaining"         ""  "$(head -2 "$PRC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PRC/out")" -ge 75 ] && echo yes || echo "no: $(wc -l < "$PRC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PRC/out"
+  rm -rf "$PRC"
+else
+  skip "two paired machines" "node missing"
+fi
+
+# ...and what the phone and the desk DRAW of it, in fixture mode at 390x844 with touch and
+# 1600x900 with a mouse: tabs that carry the machine, a host on every row, the queue merged,
+# a machine that is down as a card saying since when, no terminal for another machine's
+# project (with the line that says why), and unpair from settings. Watched red against
+# staging's client (28 rows), and the one-machine rows against a copy that always prefixes.
+group "phone client: one app for every paired machine"
+PDC="$(mktemp -d "$TEST_RUNS.$$.paired.XXXXXX")"
+node "$ROOT/test/helpers/paired-check.mjs" > "$PDC/out" 2> "$PDC/err"
+pdcrc=$?
+if grep -q 'no chrome' "$PDC/out" 2>/dev/null; then
+  skip "the paired client" "no chrome to look in"
+else
+  is "paired-check ran"               "0" "$pdcrc"
+  is "...without complaining"         ""  "$(head -2 "$PDC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    is "$name" "$want" "$got"
+  done < "$PDC/out"
+fi
+rm -rf "$PDC"
+
 # THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
 # notification could ever reach it; a subscription is now one of the steps, both ways.
 group "fleet-phone says notifications: not set up, until a subscription exists"

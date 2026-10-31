@@ -43,7 +43,7 @@
 // file. Anything added here has to be added there too, and the server is the half that
 // matters.
 
-import { setHome } from './grid.js';
+import { setHome, bareName } from './grid.js';
 
 const LS = {
   base: 'gf.base',          // absent = ask this page's own origin; see pref()
@@ -57,6 +57,11 @@ const LS = {
   // that a draft outlives a send that has not been answered yet is only testable with a
   // send that has not been answered yet.
   delay: 'gf.fixture.delay',
+  // A second machine paired with this one, as fixtures: '' (one machine, the default), 'online'
+  // (the vm answering, its projects listed after this one's) or 'offline' (the vm asleep).
+  // The only way to see the paired screens without two fleet-serves — and the way the suite
+  // looks at them.
+  paired: 'gf.fixture.paired',
 };
 
 // Verbs that take a second passkey assertion at the moment of action (§7).
@@ -373,7 +378,26 @@ export async function getProjects() {
   const projects = [];
   for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
     agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent });
-  return { ...j, projects };
+  const pr = await pairedFixture();
+  if (!pr) return { ...j, projects };
+  // fleet-serve's mergeProjects, as fixtures: this machine's rows keep their places and gain
+  // a host; the peer's come after, addressed `<name>@<key>`; and a peer that is down is in
+  // `hosts` as offline with no rows of its own.
+  const nowS = Math.floor(Date.now() / 1000);
+  const rows = projects.map(p => ({ ...p, host: pr.label, host_key: '' }));
+  if (pr.mode === 'online')
+    for (const p of pr.j.projects) rows.push({ ...p, name: `${p.name}@${pr.j.peer.key}`, host: pr.j.peer.label, host_key: pr.j.peer.key, home: pr.j.home });
+  return { ...j, projects: rows, hosts: [
+    { key: '', label: pr.label, self: true, online: true },
+    { key: pr.j.peer.key, label: pr.peerLabel, self: false, online: pr.mode === 'online',
+      last_seen: nowS - (pr.mode === 'online' ? 4 : pr.j.peer.last_seen_ago) }] };
+}
+async function pairedFixture() {
+  let mode = '';
+  try { mode = localStorage.getItem(LS.paired) || ''; } catch {}
+  if ((mode !== 'online' && mode !== 'offline') || overlay.unpaired) return null;
+  const j = await fixture('paired.json');
+  return { mode, j, label: overlay.relabel.get('self') || j.self, peerLabel: overlay.relabel.get(j.peer.key) || j.peer.label };
 }
 async function rollup(project) {
   let g; try { g = await getGrid(project); } catch { return { need: 0, working: 0, parked: 0, total: 0 }; }
@@ -401,7 +425,10 @@ export async function getWaiting() {
   }
   const j = await fixture('waiting.json');
   const nowS = Math.floor(Date.now() / 1000);
-  const items = (j.items || []).map(({ since_ago, at_ago, ...i }) => {
+  const pr = await pairedFixture();
+  const peerItems = pr && pr.mode === 'online'
+    ? pr.j.waiting.map(i => ({ ...i, project: `${i.project}@${pr.j.peer.key}`, host: pr.peerLabel })) : [];
+  const items = [...(j.items || []).map(i => (pr ? { ...i, host: pr.label } : i)), ...peerItems].map(({ since_ago, at_ago, ...i }) => {
     const row = { ...i, since: nowS - (Number(since_ago) || 0), at: nowS - (Number(at_ago) || 0) };
     const replied = overlay.replied.get(`${i.project}#${i.id}`);
     return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
@@ -418,7 +445,11 @@ export async function getUsage() {
     try { return await get('/api/usage'); }
     catch (e) { if (e && e.status === 404) return null; throw e; }
   }
-  return fixture('usage.json');
+  const u = await fixture('usage.json');
+  // fleet-serve's mergeUsage, as fixtures: once a machine is paired every profile line says
+  // whose it is. (The fixture vm's accounts are off, so it adds no line of its own.)
+  const pr = await pairedFixture();
+  return pr ? { ...u, profiles: (u.profiles || []).map(p => ({ ...p, profile: `${pr.label} · ${p.profile}` })) } : u;
 }
 
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
@@ -438,8 +469,11 @@ export async function getGrid(project, sub = '') {
   // otherwise the first fixture for that project. A project with no fixture gets the
   // empty one rather than the wrong fleet's cards, which would be a lie with a name on
   // it — the same reason fleet-read refuses to fall back to another session's transcript.
-  const use = (chosen && chosen.project === project) ? chosen
-            : FIXTURES.find(f => f.project === project)
+  // Another machine's project (`acme-api@vm`) is drawn from the fixture of the same NAME:
+  // the fixtures are one sample fleet, and the address is the only thing that differs.
+  const bare = bareName(project);
+  const use = (chosen && chosen.project === bare) ? chosen
+            : FIXTURES.find(f => f.project === bare)
             || FIXTURES.find(f => f.file === 'grid-empty.json');
   const g = await fixture(use.file);
   // The project you opened is the project the header names, even when the payload came
@@ -481,7 +515,7 @@ export async function getSession(project, session, before = null, opts = {}) {
   // Fixture mode paginates locally over the whole file, so the client walks the same
   // cursor path it will walk against the server.
   let all;
-  try { all = await fixture(`session-${project}-${session}.json`); }
+  try { all = await fixture(`session-${bareName(project)}-${session}.json`); }
   catch {
     // fleet-read's own answer for a session that exists but has not taken a turn. Not
     // an empty screen: "no messages" and "no transcript yet" are different facts.
@@ -522,7 +556,7 @@ export async function getPane(project, session, scrollback = 0) {
   // Fixture mode carries a REAL capture — one of a working session mid-turn, one of a
   // live permission dialog — because the thing being checked is a renderer, and a
   // hand-written escape sequence would only prove it can parse what I thought to write.
-  try { return await fixture(`pane-${project}-${session}.json`); }
+  try { return await fixture(`pane-${bareName(project)}-${session}.json`); }
   catch {
     return { session, pane: '', rows: 0, cols: 0,
              note: `no pane captured for '${session}' in fixture mode.` };
@@ -792,6 +826,35 @@ export function termSocket(ticket) {
   return ws;
 }
 
+// ── the machines this one answers for (fleet-serve pair) ─────────────────────
+// Unpair and rename, from the settings sheet. Neither is a verb: they change this daemon's
+// pairing file rather than a fleet, and a paired host can ask for neither.
+async function postPairs(path, body) {
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + path, { method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server refused the session'); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  if (!j.ok) throw new Error(j.text || `HTTP ${r.status}`);
+  return j;
+}
+export async function unpairHost(host) {
+  if ((await ready()).mode === 'server') return postPairs('/api/pairs/unpair', { host });
+  overlay.unpaired = true;
+  record('unpair', { host }, 'ok (fixture — recorded, not executed)');
+  return { ok: true, told: true, text: `fixture: unpaired ${host}, nothing ran` };
+}
+export async function relabelHost(host, label) {
+  if ((await ready()).mode === 'server') return postPairs('/api/pairs/label', { host, label });
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,23}$/.test(String(label || ''))) throw new Error('a label is 1-24 letters, digits, space, dot, dash or underscore');
+  overlay.relabel.set(host, label);
+  return { ok: true };
+}
+
 export async function verb(tool, args, assertion = null) {
   if ((await ready()).mode === 'server') {
     if (!haveToken()) throw new AuthError('no live session token');
@@ -828,7 +891,8 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map(), replied: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
+                  unpaired: false, relabel: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start

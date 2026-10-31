@@ -430,6 +430,64 @@ second assertion on destructive verbs, the Origin check and the `Host` allowlist
 keeps DNS rebinding out) are all that stand between those processes and an endpoint that
 runs code as you. So localhost gets a different rp_id, and nothing else is relaxed.
 
+### Several machines, one app: `fleet-serve pair`
+
+Someone with a fleet on a laptop and another on an always-on VM had two home-screen apps and
+two passkeys, because each `fleet-serve` is its own app. Tailscale connects the devices but
+merges nothing. Pairing merges them: open the app from either machine and it shows both.
+
+```
+laptop$ fleet-serve pair --as laptop          # opens a 5-minute, one-use window, prints a code
+vm$     fleet-serve pair https://<laptop>.ts.net ABCDE-FGHJK --as vm
+```
+
+**The phone still logs in to one machine.** A passkey belongs to the rp_id it was made for,
+and WebAuthn does not work across origins, so the client never talks to the other machine
+directly. The machine it opened (the *home host*) answers for the other one by proxying,
+server to server, signed with a credential the two exchanged once, at pairing.
+
+- **Addresses.** The other machine's projects are `<name>@<host>` (`acme-api@vm`). A project
+  name cannot contain `@`, so a bare name always means this machine. Every address that
+  existed before pairing keeps its meaning, the card digits included. This machine's
+  projects come first.
+- **What the screens show.** Each tab carries its machine (`laptop · work`, `vm · work`),
+  and so does every project row, every queue item and every account line. A machine that does
+  not answer is still listed, as one card reading `offline · last seen 3h0m ago`. It is never
+  left out. With one machine, nothing on any screen changes.
+- **What crosses:** the projects list, grids, a conversation (read and send), the pane, the
+  queue, usage, and wake, park and resume. Search covers both machines, because it searches
+  the merged list.
+- **What does not cross:** the web terminal (a shell is opened only by the machine it runs
+  on; for another machine's project the control is absent, with one line saying why), any
+  passkey verb (a passkey only verifies on the machine it was made on), photos, and
+  project settings. Each is refused on the home host, by name.
+
+**The credential.** Pairing leaves two secrets on each side, one per direction. Each side
+signs with the secret it uses to call the other, and checks the other's requests with the
+second one, so a signature cannot be replayed back to the machine that made it. Both are
+in `serve-peers.json` beside `serve.json`, at 0600. After pairing, the secret itself is
+never sent again. Every proxied request carries an HMAC over its method, path and query,
+body digest, timestamp, a single-use nonce, and the client it acts for. So there is nothing
+in a URL or a log that could be used to make another request. Pairing over plain `http://`
+is refused unless both ends are loopback.
+
+**Identity.** The remote machine takes its *host* half of an identity (`laptop/phone`) from
+its own record of the pairing. The *client* half comes from the signed request. An
+`X-Fleet-On-Behalf` header that is not inside a valid signature is refused outright, so a
+phone's own token cannot use it to write someone else's name into the audit log.
+
+**Limits and the record.** The phone's request passes the home host's rate limits and
+per-client caps before it is forwarded. The forwarded request passes the remote's limits,
+per address and per `<host>/<client>`. Every proxied action is written to **both** audit
+logs: the home host records that it forwarded it (`via: proxy`, `host: vm`), and the remote
+records that it ran it (`via: pair`, `origin_host`, `origin_client`).
+
+**Unpair** with `fleet-serve unpair <host>` or from the settings sheet's *machines* list.
+It revokes on both machines if the other answers, and on this one regardless, so the other
+machine's signature stops working here at once. `fleet-serve pairs` lists the paired
+machines and when each was last heard from. `fleet-serve relabel <host|self> <label>`
+renames how a machine is shown here. Its address does not change.
+
 ## 6. Client: a PWA, and the reason is the repo
 
 The client is a **Progressive Web App**, served by `fleet-serve`, installed to the home
