@@ -2963,7 +2963,8 @@ async function termRoutes(p, req, res, body, c, ip) {
     const tab = await openTermTab(rp.t);
     if (tab.error) return send(res, 502, { ok: false, text: tab.error });
     const ticket = rand(32);
-    tickets.set(sha256(ticket), { client: cl.id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
+    // Tagged with the listener that minted it: termUpgrade spends it only on that one.
+    tickets.set(sha256(ticket), { client: cl.id, rp_id: scopeOf(c, req.ls).rp_id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
       cols: termSize(body.cols, 2, 500, 80), rows: termSize(body.rows, 1, 300, 24), exp: now() + TERM_TICKET_TTL });
     for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
@@ -2992,12 +2993,15 @@ function termUpgrade(req, sock) {
   if (pathname !== '/api/term/ws') return refuse(404, 'no WebSocket here');
   let c;
   try { c = loadConfig(); } catch (e) { return refuse(500, 'config unreadable'); }
-  const hosts = allowedHosts(c);
+  // THIS LISTENER'S Host and origins (scopeOf): the socket the upgrade arrived on stamped
+  // req.ls before this ran, and nothing the client sends can move it.
+  const scope = scopeOf(c, req.ls);
+  const hosts = allowedHosts(c, req.ls);
   if (req.headers.host && hosts.size && !hosts.has(req.headers.host)) return refuse(403, `unexpected Host '${req.headers.host}'`);
   // REQUIRED, not merely checked when present (POSTs check it only when present): every
   // browser sends Origin on a WebSocket, so a missing one is not a browser of ours.
   const origin = req.headers.origin || '';
-  if (!origin || !(c.origins || []).includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured`);
+  if (!origin || !scope.origins.includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured for this listener`);
   if (!rateOk('write', ip, { setHeader() {} })) return refuse(429, 'rate limited');
   if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !req.headers['sec-websocket-key'])
     return refuse(400, 'not a WebSocket upgrade');
@@ -3005,6 +3009,10 @@ function termUpgrade(req, sock) {
   const k = sha256(raw), t = raw && tickets.get(k);
   if (t) tickets.delete(k);                                  // single use, spent even on a refusal below
   if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again (it asks for the passkey)');
+  // A ticket is the listener's that minted it, as a session token is: one minted on the
+  // tailnet is not a way in at localhost, nor the reverse. Spent above all the same.
+  if (rpOfRow(c, t) !== scope.rp_id)
+    return refuse(403, `that ticket was minted on the other listener ('${rpOfRow(c, t)}'), not this one ('${scope.rp_id}') — open the terminal again here`);
   const cl = clientById(t.client);
   if (!termOn(cl)) return refuse(403, 'the terminal is off for this device');
   sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +

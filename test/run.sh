@@ -14872,13 +14872,17 @@ LH_TAILORIGIN="https://box.example.ts.net"
 LH=""
 # ITS OWN RUNTIME COPY, with the client in it. $SV's copy has no web/ on purpose (the
 # no-client group above asserts the notice), and the browser rows need the real web/.
+# Its own HOME too, holding one project whose fleet the web terminal opens its tab in (its
+# own tmux server, inside this run's namespace), and tmux/ for the config that tab is made with.
 lh_rt() {
   LH="$SV/lh"; mkdir -p "$LH"
   [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/app.js" ] && return 0
-  mkdir -p "$LH/rt" && cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$LH/rt/"
+  mkdir -p "$LH/rt" "$LH/proj" "$LH/home/.config/ghostfleet" "$LH/home/.claude/fleet"
+  printf 'lhterm\t%s\twork\n' "$LH/proj" > "$LH/home/.config/ghostfleet/projects"
+  cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$ROOT/tmux" "$LH/rt/"
 }
 LH_SERVE() { printf '%s' "$LH/rt/bin/fleet-serve.mjs"; }
-lh_cli() { [ $# -gt 0 ] || return 2; HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= node "$(LH_SERVE)" "$@"; }
+lh_cli() { [ $# -gt 0 ] || return 2; HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= node "$(LH_SERVE)" "$@"; }
 lh_init() {                        # $1 = bind, $2 = port, $3 = rp_id, $4 = origin
   rm -f "$LH/serve.json" "$LH/serve-sessions.json"
   # init with ::1 and then the bind written in: `init` refuses an address this machine does
@@ -14888,8 +14892,8 @@ lh_init() {                        # $1 = bind, $2 = port, $3 = rp_id, $4 = orig
 }
 LH_PID=""
 lh_start() {                       # $1 = log name, $2 = the healthz URL that means "up"
-  HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
-    GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.$1" 2>&1 &
+  HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
+    SHELL=/bin/sh ENV= PS1='$ ' GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.$1" 2>&1 &
   LH_PID=$!
   SERVE_PIDS="$SERVE_PIDS $LH_PID"
   sv_reg "$LH_PID"
@@ -14920,7 +14924,7 @@ else
   if lh_start dual "http://[::1]:$LHPORT/healthz"; then
     is "the startup log names the localhost listener" "1" \
        "$([ "$(grep -c "localhost: also listening on 127.0.0.1:$LHPORT" "$LH/log.dual" || true)" -ge 1 ] && echo 1 || echo 0)"
-    HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" LH_TOKENS="$LH/tokens" \
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" LH_TOKENS="$LH/tokens" \
       node "$ROOT/test/helpers/serve-local.mjs" "$(LH_SERVE)" "$LHPORT" "$LH_TAILHOST" "$LH_TAILORIGIN" \
       > "$LH/probe" 2> "$LH/probe.err"
     is "serve-local ran"                 "" "$(head -2 "$LH/probe.err" | tr '\n' ' ' | sed 's/ *$//')"
@@ -15027,7 +15031,7 @@ else
   LHPORT8="$(free_port)"
   lh_init 100.64.99.99 "$LHPORT8" "$LH_TAILHOST" "$LH_TAILORIGIN"
   lh_squat 127.0.0.1 "$LHPORT8"
-  HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
+  HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
     GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.neither" 2>&1 &
   lhn=$!
   SERVE_PIDS="$SERVE_PIDS $lhn"; sv_reg "$lhn"
@@ -15053,6 +15057,38 @@ else
   fi
 fi
 
+# ── the web terminal is judged by the listener it arrives on ───────────────────
+# The terminal's WebSocket (#89) is an upgrade, not a request through api(), so it has its
+# own Origin and Host gates and its own ticket store. All three now read the scope of the
+# socket the upgrade arrived on. The localhost origin is accepted only on 127.0.0.1 and the
+# tailnet's only on the tailnet listener, and a ticket minted by /api/term/open on one does
+# not upgrade on the other. term-local.mjs runs each rule beside its mirror, against the same
+# two-listener daemon as above and a real tab on this group's own fleet. WATCHED RED on the
+# rebase before this change, where termUpgrade read the config's origins and an unscoped
+# Host list: the localhost listener refused its own Host (403) on every upgrade, so neither
+# mirror passed, and the tailnet listener took a localhost ticket.
+group "fleet-serve: the web terminal is judged by the listener it arrives on"
+# needs: free_port answers in digits
+if [ -z "${SV:-}" ] || [ "$lh_v6" != yes ] || ! command -v tmux >/dev/null 2>&1; then
+  skip "web terminal per listener" "needs node, tmux and a bindable ::1"
+else
+  lh_rt
+  LHPORT9="$(free_port)"
+  lh_init ::1 "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start term "http://[::1]:$LHPORT9/healthz"; then
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" \
+      node "$ROOT/test/helpers/term-local.mjs" "$(LH_SERVE)" "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN" lhterm \
+      > "$LH/term" 2> "$LH/term.err"
+    is "term-local ran"                  "" "$(head -2 "$LH/term.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$LH/term"
+    lh_stop
+  fi
+  tmux -L cf-lhterm kill-server 2>/dev/null
+fi
+
 # ── `ghostfleet web`: open it, start nothing ────────────────────────────────────
 # The opener is a shim on PATH that writes down what it was asked to open (`open` on macOS,
 # `xdg-open` on Linux), so nothing here reaches a real browser. Both directions: a running
@@ -15068,7 +15104,7 @@ else
   for o in open xdg-open; do
     printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/opened"\n' "$LH" > "$LH/shim/$o"; chmod +x "$LH/shim/$o"
   done
-  lh_web() { HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" PATH="$LH/shim:$PATH" "$ROOT/bin/ghostfleet" web "$@"; }
+  lh_web() { HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" PATH="$LH/shim:$PATH" "$ROOT/bin/ghostfleet" web "$@"; }
   LHPORT4="$(free_port)"
   lh_init ::1 "$LHPORT4" "$LH_TAILHOST" "$LH_TAILORIGIN"
   : > "$LH/opened"
@@ -15084,7 +15120,7 @@ else
     is "...and exits 0"                           "0" "$rc"
     is "--print prints the URL instead"           "http://localhost:$LHPORT4" "$(lh_web --print 2>&1)"
     is "fleet-web is the same command"            "http://localhost:$LHPORT4" \
-       "$(HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" "$ROOT/bin/fleet-web" --print 2>&1)"
+       "$(HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" "$ROOT/bin/fleet-web" --print 2>&1)"
     lh_stop
   fi
   # A daemon from before the localhost listener: up on its bind, nothing on 127.0.0.1. Not
@@ -15102,7 +15138,7 @@ else
   is "a tunnel's loopback bind says it has no localhost" "1" \
      "$([ "$(lh_web 2>&1 | grep -c 'does not also serve localhost')" -ge 1 ] && echo 1 || echo 0)"
   is "an unset config points at fleet-phone"     "1" \
-     "$([ "$(HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/nope.json" "$ROOT/bin/ghostfleet" web 2>&1 | grep -c 'fleet-phone')" -ge 1 ] && echo 1 || echo 0)"
+     "$([ "$(HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/nope.json" "$ROOT/bin/ghostfleet" web 2>&1 | grep -c 'fleet-phone')" -ge 1 ] && echo 1 || echo 0)"
 fi
 
 # ── the Mac enrols its own passkey, in a browser, at localhost ─────────────────
@@ -15121,7 +15157,7 @@ else
   LHPORT5="$(free_port)"
   lh_init ::1 "$LHPORT5" "$LH_TAILHOST" "$LH_TAILORIGIN"
   if lh_start browser "http://[::1]:$LHPORT5/healthz"; then
-    HOME="$SV/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" \
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" \
       node "$ROOT/test/helpers/local-enrol-check.mjs" "$(LH_SERVE)" "$LHPORT5" mac > "$LH/enrol" 2> "$LH/enrol.err"
     lerc=$?
     if grep -q '^#SKIP' "$LH/enrol" 2>/dev/null; then
