@@ -10078,6 +10078,177 @@ else
   skip "stack screen" "tmux or node not available"
 fi
 
+# A FLEET BIGGER THAN THE WINDOW. The list used to be windowed in ITEMS while a project
+# header draws TWO lines (a blank, then its name) and a session one, so with a dozen
+# projects the frame came out taller than the terminal and scrolled: the title, the count
+# and the message slot went off the top and the screen started mid-list with no name. The
+# group above runs one project at 30 rows, which never gets near that. So: twelve projects,
+# forty sessions, a 20-row pane, and the cursor walked from the first session to the last
+# with the pane READ at every step — the failure is a property of where the cursor is, and
+# a check at the two ends would have passed the middle that broke.
+group "stack screen in a small window (real TUI, keys sent)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/fleet"
+  PROJS=(acme-api acme-web toolbox billing-svc scratch docs-site cli-tools data-jobs mobile-app infra-ops search-svc ops-bot)
+  : > "$T/.config/ghostfleet/projects"
+  k=0
+  for i in "${!PROJS[@]}"; do
+    p="${PROJS[$i]}"; mkdir -p "$T/repo-$p"
+    printf '%s\t%s/repo-%s\twork\n' "$p" "$T" "$p" >> "$T/.config/ghostfleet/projects"
+    tmux -L "cf-$p" kill-server 2>/dev/null
+    tmux -L "cf-$p" new-session -d -s master "sleep 300" 2>/dev/null
+    # three workers on the first four projects, two on the rest: 12 + 28 = 40 sessions.
+    # Every worker name is unique across the fleet, so a click can be checked by NAME.
+    for _ in $(seq 1 $([ "$i" -lt 4 ] && echo 3 || echo 2)); do
+      k=$((k+1)); tmux -L "cf-$p" new-session -d -s "$(printf 'task-%02d' "$k")" "sleep 300" 2>/dev/null
+    done
+  done
+  ROWS=20
+  # STDERR STAYS ON THE PANE. The screen measures the terminal through stderr — that is the
+  # tty when the launcher runs it — and a run with stderr in a file draws a 24-row frame
+  # into whatever pane it is in, which is the bug this group exists to catch, made by the
+  # harness. So a crash is read off the pane, where its trace lands when node exits.
+  sstart() {
+    tmux -L cfstksm kill-server 2>/dev/null
+    tmux -L cfstksm new-session -d -x 100 -y "$ROWS" \
+      -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+      -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen stack > '$T/out'; sleep 30" 2>/dev/null
+    # tmux holds a lone Escape for escape-time before passing it on, longer than key()
+    # waits for a frame to change; the screen's own ESC timing is what is under test.
+    tmux -L cfstksm set -s escape-time 0 2>/dev/null
+    local n=0
+    until grep -q 'task-01' <<< "$(tmux -L cfstksm capture-pane -p 2>/dev/null)" || [ "$n" -ge 40 ]; do
+      sleep 0.25; n=$((n+1)); done
+  }
+  # A key is read once the pane has STOPPED CHANGING, not after a fixed sleep: the 2.5s poll
+  # walks forty sessions synchronously, and a capture taken while it blocks the loop reads
+  # the frame from before the key — a stale frame, not a wrong one.
+  # A frame that is still the same 0.6s later is the one the key produced — two equal
+  # captures alone are not, since the poll can hold the loop for longer than one gap.
+  pane()  { tmux -L cfstksm capture-pane -p 2>/dev/null; }
+  key()   { tmux -L cfstksm send-keys "$@" 2>/dev/null; settle; }
+  settle() {
+    local a b n=0 same=0; sleep 0.15; a="$(pane)"
+    while [ "$n" -lt 40 ] && [ "$same" -lt 4 ]; do
+      sleep 0.15; b="$(pane)"; if [ "$a" = "$b" ]; then same=$((same+1)); else same=0; a="$b"; fi; n=$((n+1))
+    done
+  }
+  # A step of the walk is a key that MOVES the cursor, so it waits for exactly that, and a
+  # cursor that never moves is reported where it stuck rather than as a later stale read.
+  step()  {
+    local was now n=0; was="$(cur "$(pane)")"
+    tmux -L cfstksm send-keys "$1" 2>/dev/null
+    while [ "$n" -lt 30 ]; do sleep 0.1; now="$(cur "$(pane)")"; [ -n "$now" ] && [ "$now" != "$was" ] && return; n=$((n+1)); done
+  }
+  scount() { local n; n="$(grep -c "$1" "$T/fleet/stack.tsv" 2>/dev/null)" || true; printf '%s' "${n:-0}"; }
+  # What a frame must have wherever the cursor is: the title on the FIRST row, the footer
+  # on the LAST, and the cursor mark somewhere between. Row numbers, not presence — a
+  # frame that scrolled by one still contains a title until it scrolls by two.
+  frame_ok() {
+    local s="$1" h; h="$(printf '%s\n' "$s" | sed -n 1p)"
+    grep -q 'stack' <<< "$h" || { echo "title missing: $h"; return; }
+    grep -q 'back' <<< "$(printf '%s\n' "$s" | sed -n "${ROWS}p")" || { echo "footer missing"; return; }
+    grep -q '▸' <<< "$s" || { echo "cursor missing"; return; }
+    echo ok
+  }
+  # The cursor row of the frame, as a name: the session the ▸ is on.
+  cur() { printf '%s\n' "$1" | grep '▸' | head -1 | grep -oE 'master|task-[0-9]+' | head -1; }
+
+  rm -f "$T/fleet/stack.tsv"; sstart
+  first="$(pane)"
+  is "the screen came up with the fleet in it" "ok" "$(frame_ok "$first")"
+  is "...and says there is more below"   "1" "$(grep -cE '↓ [0-9]+ more' <<< "$first" || true)"
+  # Walk every session, first to last. 39 steps from the first lands on the 40th.
+  bad_at=""; seen=""
+  for step in $(seq 1 39); do
+    step j; s="$(pane)"; r="$(frame_ok "$s")"
+    [ "$r" = ok ] || { bad_at="step $step: $r"; break; }
+    seen="$seen $(cur "$s")"
+  done
+  is "title, footer and cursor at every position" "" "$bad_at"
+  last="$(pane)"
+  is "...the walk reached the last session" "task-28" "$(cur "$last")"
+  is "...which says there is more above"     "1" "$(grep -cE '↑ [0-9]+ more' <<< "$last" || true)"
+  is "...and nothing below"                  "0" "$(grep -cE '↓ [0-9]+ more' <<< "$last" || true)"
+  # AND BACK: the window has to follow the cursor up, not only down.
+  for _ in $(seq 1 39); do step k; done
+  is "...and back to the top in frame" "ok" "$(frame_ok "$(pane)")"
+  is "...on the first session"         "master" "$(cur "$(pane)")"
+
+  # A CLICK AFTER SCROLLING. Scroll to the bottom, read a worker's row off the PANE, click
+  # it, and name the member that landed in stack.tsv: a hit-test that still believes the
+  # window starts at the top would stack a different session, and only the name says so.
+  for _ in $(seq 1 39); do step j; done
+  s="$(pane)"; R="$(printf '%s\n' "$s" | grep -n 'task-27' | head -1 | cut -d: -f1)"
+  is "task-27 is drawn after scrolling" "yes" "$([ -n "$R" ] && echo yes || echo no)"
+  tmux -L cfstksm send-keys -l -- "$(printf '\033[<0;5;%sM' "${R:-1}")" 2>/dev/null
+  # Waits for the EFFECT, as step() does: under a loaded machine the poll can hold the
+  # loop past any fixed sleep, and a read before the click lands is not a wrong click.
+  n=0; until [ "$(scount .)" != 0 ] || [ "$n" -ge 30 ]; do sleep 0.1; n=$((n+1)); done; settle
+  is "a click on it stacks it"             "1" "$(scount "^cf-ops-bot	task-27$")"
+  is "...and nothing else"                 "1" "$(scount .)"
+  is "...and the cursor followed the click" "task-27" "$(cur "$(pane)")"
+
+  # `/` FINDS: typing narrows the list to what matches, by project or by session name.
+  # billing-svc has a master and three workers; nothing else contains `bill` (`bil` would
+  # also find mobile-app, which is a correct answer and the wrong fixture).
+  key /; key -l bill
+  s="$(pane)"
+  is "/bill narrows to billing-svc's sessions" "4" "$(grep -cE '\[[ ✓]\]' <<< "$s" || true)"
+  is "...under its own header"              "1" "$(grep -c 'billing-svc' <<< "$s" || true)"
+  is "...with the title still on top"       "ok" "$(frame_ok "$s")"
+  # space toggles under the cursor even while typing — a session name has no space in it.
+  key Space
+  is "space toggles the match under the cursor" "1" "$(scount "^cf-billing-svc	master$")"
+  key Enter; key n
+  is "⏎ locks, n steps to the next match"  "task-10" "$(cur "$(pane)")"
+  key N
+  is "...and N steps back"                  "master" "$(cur "$(pane)")"
+  key -l task-1
+  # LOCKED, letters are not typed: t/a/s/k are inert, and the list is still billing-svc's.
+  is "locked, letters do not type"          "4" "$(grep -cE '\[[ ✓]\]' <<< "$(pane)" || true)"
+  key /; key BSpace; key BSpace; key BSpace; key BSpace; key -l task-0
+  # task-01 .. task-09 is nine sessions across three projects. Every row drawn has to be
+  # one of them — counted rows that were the wrong ones would pass a count — and the
+  # prompt has to say nine, since a long list may draw fewer than it found.
+  s="$(pane)"
+  is "editing the query re-narrows it"      "0" \
+     "$(grep -E '\[[ ✓]\]' <<< "$s" | grep -vcE 'task-0[1-9]' || true)"
+  is "...to all nine"                       "1" "$(grep -c '9 matches' <<< "$s" || true)"
+  is "...and the frame still fits"          "ok" "$(frame_ok "$(pane)")"
+  key Escape
+  s="$(pane)"
+  # Nine matches fit this window with nothing past either edge; the whole fleet does not.
+  # So the marker coming BACK is what says the list did, and row 3 losing its prompt is
+  # what says the search went with it.
+  is "esc clears it and the list is back"   "1" "$(grep -cE '↓ [0-9]+ more' <<< "$s" || true)"
+  is "...and the prompt is gone"            "0" "$(printf '%s\n' "$s" | sed -n 3p | grep -c '/' || true)"
+  is "...without leaving the screen"        "" "$(cat "$T/out" 2>/dev/null)"
+
+  # RESIZE: a shorter window redraws within the new height, and a taller one fills it.
+  # Waited for, up to 2s, because a poll in progress can hold the loop past any fixed
+  # sleep. What this proves is that the frame is RIGHT after a resize, not which path drew
+  # it: the 2.5s poll redraws too, and with the resize handler deleted these rows still
+  # pass. The handler's own effect is latency, measured by hand rather than asserted —
+  # 7 of 8 frames correct 0.3s after a resize with it, 2 of 8 without — since a bound
+  # tight enough to tell them apart is one a loaded runner would trip.
+  resized() { local n=0; until [ "$(frame_ok "$(pane)")" = ok ] || [ "$n" -ge 20 ]; do sleep 0.1; n=$((n+1)); done; frame_ok "$(pane)"; }
+  ROWS=12; tmux -L cfstksm resize-window -x 100 -y 12 2>/dev/null
+  is "a 12-row resize redraws in 12 rows"   "ok" "$(resized)"
+  ROWS=30; tmux -L cfstksm resize-window -x 100 -y 30 2>/dev/null
+  is "...and a 30-row one in 30"            "ok" "$(resized)"
+  key q; sleep 0.5
+  is "q still backs out"                    "back" "$(cat "$T/out" 2>/dev/null)"
+  is "no crash anywhere in the run"         "0" \
+     "$(grep -cE 'ReferenceError|TypeError|is not defined' <<< "$(pane)" || true)"
+  tmux -L cfstksm kill-server 2>/dev/null
+  for p in "${PROJS[@]}"; do tmux -L "cf-$p" kill-server 2>/dev/null; done
+  rm -rf "$T"
+else
+  skip "stack screen in a small window" "tmux or node not available"
+fi
+
 # Panes cannot cross tmux servers, so the stack is nested attaches. The contract that
 # matters most: LEAVING must detach those clients and never kill a session. Driven
 # through real servers because "attach in a pane that dies leaves the session running"
