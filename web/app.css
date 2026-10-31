@@ -247,6 +247,12 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  *   BUILT FROM THE GROUND, NOT A NEW HEX — white at 3% is the card's own background, and
  * the bar is white at 7% over it. The palette does not gain colours (see .card above). */
 .card.skel { pointer-events: none; }
+/* AS TALL AS THE CARD IT STANDS FOR. Three bars made an 81px placeholder for a card that
+ * lands at 120-140 (title, meta, two lines of message), so when the list arrived every card
+ * below the first moved and whatever had been under a finger aimed at the placeholder was
+ * something else — on Projects, the Jarvis bar, which a tap OPENS. The fill below the bars
+ * is where the message will be. */
+.cards > .card.skel { min-height: 120px; }
 .skel-bar {
   height: .85em; border-radius: 3px; margin: .35em 0;
   background: rgba(255, 255, 255, .07);
@@ -690,6 +696,11 @@ button.go:active:not(:disabled) { background: color-mix(in srgb, var(--cyan) 82%
   border-radius: 20px 20px 0 0;
   padding: calc(env(safe-area-inset-top) + 1em) 16px calc(env(safe-area-inset-bottom) + 1em);
   overscroll-behavior: contain;
+  /* ON THE SHEET, NOT ON ITS <p>s. The rule was `.sheet p`, and the voice section's note is a
+   * <div>: at 53px in a wide sans (Linux's) "Accessibility" alone was 335px in a 288px column,
+   * and the whole sheet panned. Inherited, every run of prose in any sheet breaks a word it
+   * cannot fit; controls keep their own nowrap. */
+  overflow-wrap: anywhere;
 }
 /* The grabber says "this came up from below, and it goes back down". Decoration only — the
  * sheet is dismissed the ways it always was. */
@@ -1112,7 +1123,7 @@ html.duo .sheet::before { display: none; }
    * the smaller of the two is the real ceiling. They were 160 and `8em` of a 15px font
    * = 120, which meant the documented constant had been dead for everything above 120px
    * — a growing box that stops for a reason nobody had written down. */
-  padding: .55em .9em; max-height: 120px; line-height: 1.35;
+  padding: .55em .7em; max-height: 120px; line-height: 1.35;
 }
 .composer textarea::placeholder { color: var(--dim); }
 /* 14px, the same as `.sbar button` and for the same reason. This is the number that keeps
@@ -1121,7 +1132,7 @@ html.duo .sheet::before { display: none; }
 .composer button { padding: .5em .7em; font-size: 14px; }
 /* Pills, the box's own shape, and as tall as the box is at one line — so the row reads as one
  * control rather than a field with things stuck to it. */
-.composer > button { min-height: 40px; border-radius: var(--pill); padding: .5em .95em; }
+.composer > button { min-height: 40px; border-radius: var(--pill); padding: .5em .6em; }
 .composer > button.cam { min-width: 40px; padding: 0 .7em; }
 .composer button.go { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 600; }
 @media (hover: hover) and (pointer: fine) { .composer button.go:hover:not(:disabled) { background: color-mix(in srgb, var(--green) 86%, #fff); } }
@@ -1540,7 +1551,17 @@ html.duo .sheet::before { display: none; }
 /* The picker: the grid's cards under a heading per project (and per machine), each marked
  * with whether it is in the stack. */
 :is(#app).shell > .pick-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-.pick-list > .sect.pick-host { color: var(--white); font-weight: 700; margin-top: 12px; }
+.pick-list > .sect.pick-host { color: var(--white); font-weight: 700; margin-top: 4px; }
+/* A PICKER IS A LIST TO SCAN, so it is denser than the grid it draws from: tighter rows,
+ * tighter cards, headings close to what they head. It is also where a second machine's
+ * sessions land — under the first machine's whole list — and at a desk 1600x900 the
+ * looser grid spacing put the other machine's first row past the bottom of the window. */
+:is(#app).shell > .pick-list { gap: 8px; }
+.pick-list > .sect { margin: 4px 4px 0; }
+.pick-list .card.pickrow { padding: 8px 12px; }
+.pick-list .card.pickrow::before { top: 10px; bottom: 10px; }
+.pick-list .card.pickrow .c-meta { margin-top: 4px; }
+.pick-list .card.pickrow .c-msg { margin-top: 4px; }
 .pick-list > .sect.pick-proj { color: var(--white); }
 .card.pickrow.stacked { border-color: color-mix(in srgb, var(--green) 60%, transparent);
                          background: color-mix(in srgb, var(--green) 6%, transparent); }
