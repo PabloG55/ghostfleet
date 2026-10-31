@@ -26,134 +26,88 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  test:
-    strategy:
-      # Not fail-fast: the two legs are the point. macOS is where this is developed
-      # and Linux is where the macOS-only guards (stat -f, date -r, osascript,
-      # caffeinate) are actually proven — cancelling one because the other went red
-      # would throw away exactly the half that was telling us something new.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      # Not a skip: the ^N assertion still runs and still proves what it is for.
-      # bin/fleet-tab defaults the editor to nvim and correctly REFUSES when it is
-      # absent, which is what neither runner image has — so the grid emits no choice
-      # and the test reads empty. CLAUDE_FLEET_EDITOR is the product's own documented
-      # override for exactly this, and vi is on both images. Checked in both
-      # directions on a Mac with tmux 3.7b: with the editor missing the assertion is
-      # red with an empty `got`, matching CI exactly; with this set it is green.
-      CLAUDE_FLEET_EDITOR: vi
+  # ── the suite, as shards ────────────────────────────────────────────────────
+  # suite-shard.yml runs one platform's suite as N parallel slices. One call per platform, so
+  # that each platform's verdict below can need its own shards and nothing else.
+  shards-ubuntu:
+    name: shards (ubuntu-latest)
+    uses: ./.github/workflows/suite-shard.yml
+    with:
+      os: ubuntu-latest
 
-    # A hung tmux server would otherwise sit on the runner's 6-hour default; this fails
-    # it in a readable amount of time instead. The bound has to sit well above a GREEN
-    # run, not just above the suite's local time: the hosted macOS leg grew to ~19m30s
-    # while ubuntu took ~15m, and at 20 a passing run was cancelled on the clock (both
-    # legs, and then macOS alone after one more feature's rows). A cancel reads as red
-    # on the branch and says nothing about the code, so 30 keeps a hang readable while
-    # leaving a green run room to finish. If macOS approaches this too, the fix is the
-    # suite's settle time, not another bump.
-    #   It did, and 45 is that bump with the measurement behind it. A GREEN macOS run of
-    # staging (40523117350) spent 28.4 min in the suite alone across 278 groups, so with the
-    # ~1.5 min of setup the job finished at about 29.5 of 30 — and a PR run that reached 277
-    # of those groups in 29.1 min was cancelled on the clock with every row it had run
-    # green. A bound a green run can hit is a flake one level up: red on the branch, nothing
-    # wrong in the code. No single group is the cause (the slowest are 165s and 130s, and both
-    # are doing work, not waiting), so there is no settle time to cut that buys back 50%
-    # headroom. What this bound exists for — a hang — is also narrower than it was: every CDP
-    # call in lib/browser.mjs now fails on its own after 60s, and the two silent macOS hangs
-    # were cancelled with a Chrome and a node still alive, inside fleet-look. 45 leaves a green run ~50% room and still makes a tmux hang readable.
-    timeout-minutes: 45
+  shards-macos:
+    name: shards (macos-latest)
+    uses: ./.github/workflows/suite-shard.yml
+    with:
+      os: macos-latest
 
+  # ── the checks branch protection requires ───────────────────────────────────
+  # Protection requires `test (ubuntu-latest)` and `test (macos-latest)`, the names the old
+  # one-job-per-platform matrix reported. These two jobs carry those names and stand for their
+  # platform's shards; protection is unchanged.
+  #   if: always(), AND THAT IS LOAD-BEARING. Without it a failed shard SKIPS the job that
+  # needs it, and GitHub counts a skipped required check as passed — a red shard would merge.
+  # With it the job always runs and test/helpers/shard-verdict.sh decides: red unless the
+  # shards' result is `success` (so failure, cancelled and skipped are all red) and every
+  # shard's record shows the groups the plan gave it, each run exactly once. It lists each
+  # shard's own conclusion first, so a red here names the shard to open.
+  #   actions: read is for that listing only (the run's own jobs); the verdict does not
+  # depend on it.
+  test-ubuntu:
+    name: test (ubuntu-latest)
+    needs: shards-ubuntu
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          # ONE PARENT, NOT A WHOLE HISTORY. A push run compares this commit against the
-          # staging it was merged ONTO, which is its first parent, because origin/staging
-          # moves: protection is deliberately not `strict`, two PRs land a minute apart as
-          # a matter of routine, and a run that fetches the branch after the next merge
-          # reads somebody else's newer client. 8ee5980 was told its v33 was below v34 by
-          # a run testing 8ee5980. Depth 1 has no parent to read, and depth 2 is the
-          # whole of the fix — the ancestry that a full clone would buy is not needed,
-          # only the commit this one sits on.
-          fetch-depth: 2
-
-      # THE CLONE ABOVE IS SHALLOW and fetches only the ref under test — no fetch-depth is
-      # set, so it is depth 1 and there is no `origin/staging` in it at all. Measured against a
-      # real `git clone --depth=1 --single-branch`: `git rev-parse origin/staging` fails, and so
-      # does every comparison built on it.
-      #   test/helpers/sw-version.mjs needs it, because the thing it checks is ORDER: this
-      # branch's client VERSION against the one already on main. #83 took v17, #81 was
-      # numbered v16 before it and merged after, main went backwards, and #84 existed only to
-      # put it back. The pin in pwa-check cannot see that — a version bumped DOWNWARDS still
-      # matches its own bytes.
-      #   ONE REF, ONE COMMIT DEEP. That is all the check reads (main's web/sw.js and whether
-      # HEAD is already contained in it), and it keeps this step at a few hundred milliseconds
-      # instead of unshallowing the whole history.
-      #   `|| true` and NOT a hard failure here, deliberately: if the ref does not arrive, the
-      # helper is the thing that refuses — on a pull_request run it FAILS, in a readable
-      # sentence, rather than skipping. A guard that silently no-ops in CI reads as covered
-      # and is worse than no guard. Letting the fetch kill the job would replace that sentence
-      # with a git error, and on the push-to-main leg there is nothing to compare anyway.
-      - name: Fetch staging, for the client-version ordering check
-        run: git fetch --depth=1 origin +refs/heads/staging:refs/remotes/origin/staging || true
-
-      # tmux is on neither runner image; jq is on both today, and that is not a
-      # promise. Both are installed rather than assumed. No npm step: the suite has
-      # no dependencies and the repo has no lockfile.
-      #   ffmpeg too, because fleet-shots RECORDS a flow and the recording is the feature:
-      # without an encoder the recorded-run groups skip, and a skip that only names a
-      # missing tool is refused by the suite's own skip rule. Neither image ships it.
-      # --no-install-recommends keeps the apt side to the codecs it needs.
-      #   neovim too, because the editor tab's drag-to-copy is only proven by a real nvim
-      # taking a real drag. The two legs differ on purpose: apt's is 0.9, which has no
-      # getregion and runs lib/nvim-copy-on-select.lua's yank fallback, and Homebrew's is
-      # current. CLAUDE_FLEET_EDITOR above still says vi, so nothing else starts using it.
-      - name: Install tmux, jq, ffmpeg and neovim (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg neovim
-
-      - name: Install tmux, jq, ffmpeg and neovim (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          for p in tmux jq ffmpeg neovim; do
-            brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
-          done
-
-      # package.json says node >=18. The runner images ship one, but which one drifts,
-      # and a suite that fails because an image moved should not read as a code bug.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # continue-on-error: no record at all is the verdict's to report, by shard, not a
+      # download error's.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: groups-run-ubuntu-latest-*
+          path: ${{ runner.temp }}/ran
+      - name: Every shard passed, and together they ran every group once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.shards-ubuntu.result }}
+        run: test/helpers/shard-verdict.sh ubuntu-latest "$RESULT" "$RUNNER_TEMP/ran"
 
-      # A platform difference in the suite shows up as a red assertion that never
-      # mentions the platform. These four lines are what makes such a leg diagnosable.
-      #
-      # `tmux -V` earned its place: this leg opened with 125 failures that were not about
-      # Linux at all. Ubuntu 24.04's apt tmux is 3.4 and Homebrew's is 3.7b, and tmux
-      # <= 3.5 vis-escapes command output, which broke every `-F` record ghostfleet
-      # parsed. Put tmux 3.4 on a Mac's PATH and the same suite fails the same way. So
-      # read this line FIRST when a leg is red and the other one is green — and do not
-      # "fix" a red leg by installing a newer tmux here: a stock distro tmux is the
-      # thing being tested.
-      - name: Versions
-        run: |
-          bash --version | head -1
-          node --version
-          tmux -V
-          jq --version
-          ffmpeg -hide_banner -version | head -1
-          nvim --version | head -1
-
-      # No isolation needed beyond what the suite already does: it puts every tmux
-      # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers
-      # of runs that died before their teardown (test/run.sh §0), which is why two
-      # runs can share a machine. A CI runner is the easy case of that.
-      - name: ./test/run.sh
-        run: ./test/run.sh
+  test-macos:
+    name: test (macos-latest)
+    needs: shards-macos
+    if: always()
+    # The verdict reads records and a job list; it does not need a Mac, and a Mac runner is
+    # the scarce one (five at a time on this plan, and four are already the shards).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # continue-on-error: no record at all is the verdict's to report, by shard, not a
+      # download error's.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: groups-run-macos-latest-*
+          path: ${{ runner.temp }}/ran
+      - name: Every shard passed, and together they ran every group once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.shards-macos.result }}
+        run: test/helpers/shard-verdict.sh macos-latest "$RESULT" "$RUNNER_TEMP/ran"
 
   # ── the half CI cannot do, said honestly ────────────────────────────────────
   # The job above proves the COMMIT. The thing that actually broke was not the commit:
@@ -172,13 +126,13 @@ jobs:
   # A job summary rather than a PR comment, deliberately: this fires on push to main, where
   # the pull request is already closed — a comment would arrive after the fact on a thread
   # nobody is reading, notify every participant about a chore on someone else's laptop, and
-  # need `pull-requests: write` on a workflow that currently needs no permissions at all.
+  # need `pull-requests: write` on a workflow that otherwise only ever reads.
   # The summary is attached to the run you are already looking at when you check the merge.
   #
-  # needs: test, so a red suite produces no reminder — being told to deploy a commit whose
-  # suite just failed is the one thing this must not say. It is also why this is a separate
-  # job and not a step in the matrix: as a step it would run once per OS leg and write the
-  # same paragraph twice.
+  # needs: both platforms' verdicts, so a red suite produces no reminder — being told to
+  # deploy a commit whose suite just failed is the one thing this must not say. It is also why
+  # this is a separate job and not a step in a shard: there it would run once per shard and
+  # write the same paragraph eight times.
   #
   # ON STAGING TOO, since `main` became publishable-only. Day-to-day merges land on
   # `staging`, so that is the push that leaves a runtime stale; a reminder that fired
@@ -187,7 +141,7 @@ jobs:
   # attention. The branch is named in the summary so the two cannot be confused.
   sync-reminder:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging')
-    needs: test
+    needs: [test-ubuntu, test-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Remind that the runtime is a separate thing

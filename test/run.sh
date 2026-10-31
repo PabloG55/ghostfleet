@@ -3,6 +3,7 @@
 #
 #     ./test/run.sh            everything
 #     ./test/run.sh agent      only groups whose name matches "agent"
+#     ./test/run.sh --shard 2/4   the second quarter of the groups, balanced by measured time
 #
 # Safe to run while a sibling worktree is running it: every tmux server a run
 # starts lives under that run's own $TMUX_TMPDIR (§0), so two runs cannot meet
@@ -26,6 +27,36 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIX="$ROOT/test/fixtures"
 FILTER="${1:-}"
+
+# ── --shard i/N: one of N runs that together are the whole suite ─────────────
+# CI ran the suite as one 36-minute step on each platform. The groups are independent by
+# construction — that is what the filter below already relies on — so N runners can each take
+# a slice, and the slowest slice is the wall time. Which slice is test/helpers/shard-plan.mjs's
+# answer: whole groups, never split; a `# needs:` provider in the same shard as everything that
+# needs it; groups that only parse together kept together; packed by test/shard-times.tsv so
+# the slices finish together rather than holding the same number of groups.
+#   NOT A FILTER, AND IT DOES NOT TAKE ONE. A shard selects groups by number and goes through
+# the same extract a filter does, so it gets the same refusals: an unmet need, an extract that
+# does not parse. Mixing in a substring would make "the union of the shards is the suite" a
+# statement about the filter instead of the file.
+CF_IDX=""
+if [ "$FILTER" = "--shard" ]; then
+  FILTER=""
+  if [ -z "${CF_ONLY:-}" ]; then
+    case "${2:-}" in
+      [1-9]*/[1-9]*) ;;
+      *) printf 'usage: ./test/run.sh --shard <i>/<N>   (1 <= i <= N), not "%s"\n' "${2:-}" >&2; exit 2 ;;
+    esac
+    if [ "$#" -ne 2 ]; then
+      printf 'a shard is a slice of the WHOLE suite and takes no filter: ./test/run.sh --shard %s\n' "$2" >&2; exit 2
+    fi
+    command -v node >/dev/null 2>&1 || { printf 'a shard is planned by test/helpers/shard-plan.mjs, and node is missing\n' >&2; exit 2; }
+    CF_IDX="$(node "$ROOT/test/helpers/shard-plan.mjs" pick "${2%%/*}" "${2#*/}")" || exit 2
+    # An empty shard (more shards than units) is still a run: the preamble and the summary.
+    CF_IDX="${CF_IDX:-0}"
+    printf 'shard %s: %s groups\n' "$2" "$(grep -c '[1-9]' <<< "$CF_IDX")"
+  fi
+fi
 
 # ── a filter SKIPS the groups it does not name ───────────────────────────────
 # `FILTER` used to gate PRINTING only: every group still ran, so a worker who wanted to
@@ -58,19 +89,22 @@ cf_only() {                        # $CF_F = filters, one per line;  $1 = source
   # group name can hold anything a shell word can, so there is no safe single-character
   # separator to squeeze them onto one line with.
   awk -v root="$ROOT" '
-    BEGIN { nf = split(ENVIRON["CF_F"], F, "\n"); for (i = 1; i <= nf; i++) if (F[i] == "") { delete F[i] } }
+    BEGIN { nf = split(ENVIRON["CF_F"], F, "\n"); for (i = 1; i <= nf; i++) if (F[i] == "") { delete F[i] }
+            # A shard: group NUMBERS, one per line, instead of names to match.
+            ni = split(ENVIRON["CF_IDX"], IX, "\n"); for (i = 1; i <= ni; i++) if (IX[i] != "") { idx = 1; WANT[IX[i] + 0] = 1 } }
     { line[NR] = $0 }
-    /^printf / && index($0, "passed") && index($0, "failed") && !epi { epi = NR }
-    /^group "/ { n++; start[n] = NR; nm = $0; sub(/^group "/, "", nm); sub(/".*$/, "", nm); name[n] = nm }
+    /^# ── epilogue/ && !epi { epi = NR }
+    /^group "/ && !epi { n++; start[n] = NR; nm = $0; sub(/^group "/, "", nm); sub(/".*$/, "", nm); name[n] = nm }
     /^# needs: / && n > 0 { r = $0; sub(/^# needs: /, "", r); need[n] = need[n] (need[n] == "" ? "" : "\n") r }
     END {
       if (!epi || !n) { print "cannot segment this file" > "/dev/stderr"; exit 4 }
       for (i = 1; i <= n; i++) {
         last[i] = (i < n ? start[i+1] - 1 : epi - 1)
-        for (f in F) if (index(name[i], F[f]) > 0) keep[i] = 1
+        if (idx) { if (i in WANT) keep[i] = 1 }
+        else for (f in F) if (index(name[i], F[f]) > 0) keep[i] = 1
         if (keep[i]) kept++
       }
-      if (!kept) { printf("no group matches %s\n", filt) > "/dev/stderr"; exit 2 }
+      if (!kept && !idx) { printf("no group matches %s\n", filt) > "/dev/stderr"; exit 2 }
       for (i = 1; i <= n; i++) {
         if (!keep[i] || need[i] == "") continue
         nn = split(need[i], N, "\n")
@@ -97,10 +131,10 @@ cf_only() {                        # $CF_F = filters, one per line;  $1 = source
       for (k = epi; k <= NR; k++) print line[k]
     }' "$1" > "$2"
 }
-if [ -n "$FILTER" ] && [ -z "${CF_ONLY:-}" ]; then
-  CF_F=""; for cf_a in "$@"; do CF_F="$CF_F$cf_a
+if { [ -n "$FILTER" ] || [ -n "$CF_IDX" ]; } && [ -z "${CF_ONLY:-}" ]; then
+  CF_F=""; [ -n "$CF_IDX" ] || for cf_a in "$@"; do CF_F="$CF_F$cf_a
 "; done
-  export CF_F
+  export CF_F CF_IDX
   # Under the same prefix the dead-run sweep already reaps, and keyed on this pid, so a
   # filtered run does not leave a copy of the suite in /tmp for every invocation.
   CF_DIR="$(mktemp -d "/tmp/ghostfleet-test.$$.onlyXXXXXX")"
@@ -123,6 +157,9 @@ if [ -n "$FILTER" ] && [ -z "${CF_ONLY:-}" ]; then
   [ "$cf_rc" -eq 0 ] && CF_ONLY=1 exec bash "$CF_DIR/run.sh"
   rm -rf "$CF_DIR"; exit "$cf_rc"
 fi
+# cf_only's input only. The extract inherits it, and a nested run (§4c1o) that did too would
+# read it as a shard and ignore the filter it was given.
+unset CF_IDX
 PASS=0; FAIL=0; SKIP=0; NA=0; GROUP=""
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
 # OUR OWN wire separator, and it is the file's, not one group's. It was defined inside
@@ -162,7 +199,11 @@ US=$'\x1f'
 # and this is about what the harness CAPTURES.
 unset FORCE_COLOR CLICOLOR_FORCE
 
-group() { GROUP="$1"; case "$GROUP" in *"$FILTER"*) printf '\n%s%s%s\n' "$D" "$GROUP" "$N" ;; esac; }
+# $CF_RAN: where this run records the groups it reached, `<seconds>\t<name>`, then `#end` from
+# the epilogue. That is what CI's coverage check reads — the groups that RAN, not the plan —
+# and the gaps between the stamps are the timing table's next refresh.
+group() { GROUP="$1"; case "$GROUP" in *"$FILTER"*) printf '\n%s%s%s\n' "$D" "$GROUP" "$N" ;; esac
+          [ -z "${CF_RAN:-}" ] || printf '%s\t%s\n' "$SECONDS" "$GROUP" >> "$CF_RAN"; }
 # ── a skip may only blame the ENVIRONMENT ────────────────────────────────────
 # A skip exits 0, so a group that skips has tested nothing and said nothing about it.
 # That is right when the machine genuinely lacks tmux or a browser, and it is a hole
@@ -504,6 +545,20 @@ sweep_orphan_serves "$ROOT"
 # measures against, so it can say "this run left nothing" without claiming anybody else's.
 SV_BEFORE=" $(pgrep -f 'fleet-serve' 2>/dev/null | tr '\n' ' ')"
 
+# jsm <js regex> <file> — 1 if any line of the file matches, the JS dialect's answer to
+# `matches`. THE FILE'S, NOT ONE GROUP'S: it was defined in `pane detectors at stack width` and
+# called by two later groups, which ran green only because they ran after it. Lifted out on
+# their own — as a shard does — every `(js)` row read an empty answer and went red.
+# String(), not a bare number. console.log() runs a NON-string argument through
+# util.inspect, which colourises when colour is on — and every fleet session has
+# FORCE_COLOR=3 in its environment, so this returned "\033[33m1\033[39m" and the
+# comparison failed. It passed wherever colour happened to be off: the same
+# "a test can pass because of where it ran" trap CLAUDE.md already warns about.
+jsm() { node -e '
+  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
+  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
+' "$1" "$2"; }
+
 # Proven, not asserted: every other group now rests on this, so it goes first and
 # goes red on its own rather than being taken on trust. Both directions on the
 # sweep especially — it deletes directories and kills servers, and the direction
@@ -627,6 +682,94 @@ for r in "no detector declared" "server did not come up: nothing in the log" \
   is "the subject: $r" "no" "$(grep -qE "$SKIP_ENV" <<< "$r" && echo yes || echo no)"
 done
 
+# ── the shards are the suite ─────────────────────────────────────────────────
+# CI runs this file as N slices per platform (`--shard i/N`), and a slice that quietly lost a
+# group is the cheapest hole there is to open: every shard green, the required check green,
+# and a group nobody ran. So the planner is proven here on a suite small enough to work out
+# by hand — a need, a block two groups share, LPT's ties — and the coverage check is shown
+# going red for each way a slice can come up short. The real file's plan is checked too; the
+# runtime half (the groups each CI shard RECORDED) is the workflow's aggregator job.
+group "the shards are the suite: every group in exactly one"
+if command -v node >/dev/null 2>&1; then
+  SH="$(mktemp -d "$TEST_RUNS.$$.shard.XXXXXX")"
+  SHP() { CF_SUITE="$SH/run.sh" CF_TIMES="$SH/times.tsv" node "$ROOT/test/helpers/shard-plan.mjs" "$@"; }
+  # Written line by line, NOT as a heredoc: its `group` lines would sit at column 0 of THIS
+  # file, and column 0 is exactly what cf_only and the planner segment on. A heredoc here made
+  # the mini-suite's marker the real suite's epilogue, and a one-group filter ran everything.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'group "alpha"' 'true' \
+    'group "provider of things"' 'X=1' \
+    'group "beta, which needs it"' '# needs: provider of things' 'echo "$X"' \
+    'group "gamma opens a block"' 'if true; then' \
+    'group "delta closes it"' 'fi' \
+    'group "epsilon"' 'true' \
+    '# ── epilogue' > "$SH/run.sh"
+  printf '# seconds<TAB>group\n100\talpha\n110\tprovider of things\n50\tbeta, which needs it\n60\tgamma opens a block\n60\tdelta closes it\n5\tepsilon\n' > "$SH/times.tsv"
+  # By hand: units {provider,beta}160 {gamma,delta}120 {alpha}100 {epsilon}5. Longest first
+  # onto the lighter shard, ties to the lower: 160→1, 120→2, 100→2, 5→1. The times are chosen
+  # so that EITHER join left out moves a group: without the need, provider (110) and beta (50)
+  # land apart; without the block, gamma and delta do. Both watched going red that way.
+  is "shard 1 of 2 keeps a need with its provider"  "2 3 6" "$(SHP pick 1 2 | paste -sd' ' -)"
+  is "...and shard 2 keeps a block whole"           "1 4 5" "$(SHP pick 2 2 | paste -sd' ' -)"
+  is "...and that plan checks out"            "0" "$(SHP check 2 >/dev/null 2>&1; echo $?)"
+  is "one shard is the whole suite"           "1 2 3 4 5 6" "$(SHP pick 1 1 | paste -sd' ' -)"
+  is "more shards than units leaves one empty, not an error" "0|" "$(SHP check 5 >/dev/null 2>&1; echo $?)|$(SHP pick 5 5)"
+  # The other direction: a need that names no group must refuse the PLAN, not just one shard.
+  sed 's/# needs: provider of things/# needs: a group nobody wrote/' "$SH/run.sh" > "$SH/bad.sh"
+  is "a need nobody provides refuses the plan" "4" "$(CF_SUITE="$SH/bad.sh" CF_TIMES="$SH/times.tsv" node "$ROOT/test/helpers/shard-plan.mjs" check 2 >/dev/null 2>&1; echo $?)"
+
+  # cover: what the shards RECORDED against the plan. Green first, then each way to be short.
+  printf '0\tprovider of things\n2\tbeta, which needs it\n4\tepsilon\n9\t#end\n' > "$SH/r1"
+  printf '0\talpha\n1\tgamma opens a block\n2\tdelta closes it\n7\t#end\n' > "$SH/r2"
+  is "the records cover the plan"             "0" "$(SHP cover 2 "$SH/r1" "$SH/r2" >/dev/null 2>&1; echo $?)"
+  printf '0\tprovider of things\n2\tbeta, which needs it\n9\t#end\n' > "$SH/short"
+  is "a shard that dropped a group is red, and says which" "1|1" \
+     "$(SHP cover 2 "$SH/short" "$SH/r2" >/dev/null 2>&1; echo $?)|$(SHP cover 2 "$SH/short" "$SH/r2" 2>&1 | grep -c 'did not run "epsilon"')"
+  # Twice in its OWN shard: in another shard it would also be "ran a group the plan gives
+  # another shard", and that row would hide whether the count is checked at all.
+  printf '0\talpha\n1\tgamma opens a block\n2\tdelta closes it\n3\talpha\n7\t#end\n' > "$SH/dup"
+  is "a group run twice is red"               "1" "$(SHP cover 2 "$SH/r1" "$SH/dup" >/dev/null 2>&1; echo $?)"
+  printf '0\tprovider of things\n2\tbeta, which needs it\n4\tepsilon\n' > "$SH/noend"
+  is "a shard that never reached the summary is red" "1" "$(SHP cover 2 "$SH/noend" "$SH/r2" >/dev/null 2>&1; echo $?)"
+  is "a shard with no record at all is red"   "1" "$(SHP cover 2 "$SH/r1" >/dev/null 2>&1; echo $?)"
+  # The timing table's refresh reads the same records: the gap to the next group is the time.
+  is "the records time their groups"          "2	beta, which needs it" "$(SHP times "$SH/r1" "$SH/r2" | grep -m1 beta)"
+
+  # The real file: every group in exactly one of CI's shards, each extract parsing.
+  is "this suite's 4-shard plan is a partition that runs" "0" \
+     "$(node "$ROOT/test/helpers/shard-plan.mjs" check 4 >/dev/null 2>&1; echo $?)"
+  # The required check itself: test.yml's `test (<os>)` jobs run shard-verdict.sh, so it is
+  # what turns a red shard into a red PR. Fed records built from the real plan — what four
+  # shards that ran their slices would have written — and every result GitHub can hand it.
+  SHV="$SH/ran"; shnames="$(node "$ROOT/test/helpers/shard-plan.mjs" names)"
+  for i in 1 2 3 4; do
+    mkdir -p "$SHV/groups-run-ubuntu-latest-$i-of-4"
+    { node "$ROOT/test/helpers/shard-plan.mjs" pick "$i" 4 | while read -r gn; do
+        printf '%s\t%s\n' "$gn" "$(sed -n "${gn}p" <<< "$shnames")"; done
+      printf '999\t#end\n'; } > "$SHV/groups-run-ubuntu-latest-$i-of-4/groups-run.txt"
+  done
+  shv() { env -u GH_TOKEN -u GITHUB_STEP_SUMMARY "$ROOT/test/helpers/shard-verdict.sh" ubuntu-latest "$1" "$SHV" >/dev/null 2>&1; echo $?; }
+  is "the verdict: four shards that passed and ran their slices" "0" "$(shv success)"
+  is "...a failed shard is red"               "1" "$(shv failure)"
+  is "...a cancelled one is red"              "1" "$(shv cancelled)"
+  is "...and so is a skipped one, which protection would count as passed" "1" "$(shv skipped)"
+  mv "$SHV/groups-run-ubuntu-latest-3-of-4" "$SH/away"
+  is "...a green result with a shard's record missing is red" "1" "$(shv success)"
+  mv "$SH/away" "$SHV/groups-run-ubuntu-latest-3-of-4"
+  sed -i.bak '1d' "$SHV/groups-run-ubuntu-latest-2-of-4/groups-run.txt"
+  is "...and so is one that skipped a group"  "1" "$(shv success)"
+
+  # And the flag refuses what it cannot mean. -u CF_ONLY: inside a filtered or sharded run the
+  # mark is set, and a nested run that inherited it would skip this very parsing and run ALL.
+  shr() { env -u CF_ONLY -u CF_F -u CF_RAN "$ROOT/test/run.sh" "$@" >/dev/null 2>&1; echo $?; }
+  is "--shard refuses a slice past the end"  "2" "$(shr --shard 5/4)"
+  is "--shard refuses a filter beside it"     "2" "$(shr --shard 1/4 agent)"
+  is "--shard refuses what is not i/N"        "2" "$(shr --shard four)"
+  rm -rf "${SH:?}"
+else
+  skip "the shards are the suite" "node missing"
+fi
+
 group "the harness captures plain bytes"
 if command -v node >/dev/null 2>&1; then
   ESC="$(printf '\033')"
@@ -700,15 +843,6 @@ is "claude: silent on a 130-col IDLE pane"            "0" "$(matches "$cre" "$FI
 # grep ERE and JS are different dialects and the two spellings are maintained
 # separately, so run the JS one over the same fixtures rather than trusting they agree.
 jsre="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
-# String(), not a bare number. console.log() runs a NON-string argument through
-# util.inspect, which colourises when colour is on — and every fleet session has
-# FORCE_COLOR=3 in its environment, so this returned "\033[33m1\033[39m" and the
-# comparison failed. It passed wherever colour happened to be off: the same
-# "a test can pass because of where it ran" trap CLAUDE.md already warns about.
-jsm() { node -e '
-  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
-  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
-' "$1" "$2"; }
 is "claude(js): matches the 56-col BUSY pane" "1" "$(jsm "$jsre" "$FIX/claude-busy-narrow.txt")"
 is "claude(js): silent on the 56-col IDLE pane" "0" "$(jsm "$jsre" "$FIX/claude-idle-narrow.txt")"
 
@@ -3019,6 +3153,10 @@ group "fleet-review asks a DIFFERENT model, or says it cannot"
 #   All of it runs under --dry-run against stub binaries. A group that actually called a
 # reviewer would cost usage on every suite run and could not assert on the output anyway.
 fr() { "$ROOT/bin/fleet-review" "$@" 2>&1; }
+# Its own `fa`, not the one `agent capabilities are declared` leaves behind. Borrowed, this
+# group only worked after that one — and on its own the three "declares none" rows below read
+# a missing command's empty output as the empty answer they expect, and passed.
+fa() { "$ROOT/bin/fleet-agent" "$@"; }
 is "codex declares a review"        "review" "$(fa field codex review)"
 # BOTH DIRECTIONS, and the empty ones matter more: they are what the refusal reads, and a
 # field that quietly gained a value would turn a refusal into a spend.
@@ -9811,7 +9949,8 @@ elif command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command
   snbefore="$(cd "$SNH" && find . -type f | sort)"
   # -u CF_ONLY: this run may itself be a filtered one, and a nested run that inherits the
   # mark takes itself for already filtered and runs everything.
-  ( cd "$ROOT" && env -u CF_ONLY -u CF_F HOME="$SNH" TMUX="$sntmux" TMUX_PANE=%0 SUITE_NESTED=1 \
+  # -u CF_RAN too: its groups would land in THIS run's record and read as run twice.
+  ( cd "$ROOT" && env -u CF_ONLY -u CF_F -u CF_RAN HOME="$SNH" TMUX="$sntmux" TMUX_PANE=%0 SUITE_NESTED=1 \
       CLAUDE_FLEET_DIR="$SNH/.claude/fleet" CLAUDE_CONFIG_DIR="$SNH/.claude" \
       CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix \
       "$ROOT/test/run.sh" "a need-you anywhere wakes Jarvis at once; finished work never does" \
@@ -10261,9 +10400,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # it, and name the member that landed in stack.tsv: a hit-test that still believes the
   # window starts at the top would stack a different session, and only the name says so.
   for _ in $(seq 1 39); do step j; done
-  s="$(pane)"; R="$(printf '%s\n' "$s" | grep -n 'task-27' | head -1 | cut -d: -f1)"
-  is "task-27 is drawn after scrolling" "yes" "$([ -n "$R" ] && echo yes || echo no)"
-  tmux -L cfstksm send-keys -l -- "$(printf '\033[<0;5;%sM' "${R:-1}")" 2>/dev/null
+  # Not `R`: that is the suite's red, and overwriting it here painted every later failure
+  # "16✘" and printed the summary's "7 failed" as "167 failed".
+  s="$(pane)"; t27row="$(printf '%s\n' "$s" | grep -n 'task-27' | head -1 | cut -d: -f1)"
+  is "task-27 is drawn after scrolling" "yes" "$([ -n "$t27row" ] && echo yes || echo no)"
+  tmux -L cfstksm send-keys -l -- "$(printf '\033[<0;5;%sM' "${t27row:-1}")" 2>/dev/null
   # Waits for the EFFECT, as step() does: under a loaded machine the poll can hold the
   # loop past any fixed sleep, and a read before the click lands is not a wrong click.
   n=0; until [ "$(scount .)" != 0 ] || [ "$n" -ge 30 ]; do sleep 0.1; n=$((n+1)); done; settle
@@ -18505,11 +18646,13 @@ if [ -d "$ROOT/web" ]; then
   done < "$PW/md"
   rm -rf "$PW"
 
-  # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
-  # a RUNTIME asset — fleet-serve serves it from ~/.local/libexec/ghostfleet, not from
-  # the repo. Left out of that list, the PWA 404s in the browser while every file in the
-  # repo is perfectly correct: the same "the file on disk was current, the process was
-  # not" trap CLAUDE.md records for a stale MCP server, and just as invisible from here.
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the page never scrolls sideways, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
   # ── the page never scrolls sideways, measured in a real engine ─────────────
   # docs/mobile.md has said since #48 that ONE region scrolls and the page never moves
   # sideways. It was a rule somebody had to keep, and on an iPhone at v11 it was not being
@@ -18556,6 +18699,12 @@ if [ -d "$ROOT/web" ]; then
   # machine with no Chrome, where they skip: the client must not say it is reading.
   is "the phone waits in skeletons, never in a 'reading…' line" "" \
      "$(grep -noE "'(reading the transcript|capturing the pane|asking the Mac about Jarvis)[^']*'" "$ROOT/web/app.js" | paste -sd' ' -)"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the card's title is a tap target, in a real browser"
+if [ -d "$ROOT/web" ]; then
 
   # ── the card's title is a tap target, not a dead zone ─────────────────────
   # wire() set `dragging` on any press of the grip and pointerup then returned without ever
@@ -18585,6 +18734,12 @@ if [ -d "$ROOT/web" ]; then
     done < "$GRP/out"
   fi
   rm -rf "$GRP"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the client on a desk, in a real browser"
+if [ -d "$ROOT/web" ]; then
 
   # ── the client on a desk: two panes, the Mac grid's keys, Enter, paste and drop ─
   # A desktop browser got a phone column in the middle of the window, a composer that needed
@@ -18616,6 +18771,12 @@ if [ -d "$ROOT/web" ]; then
     done < "$DSK/out"
   fi
   rm -rf "$DSK"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the queue page, in a real browser"
+if [ -d "$ROOT/web" ]; then
 
   # ── what the masters hold for the owner: its own page, one row on Projects ────
   # #81 drew every held item at the top of Projects, and on the owner's phone that grew to a
@@ -18647,6 +18808,12 @@ if [ -d "$ROOT/web" ]; then
     done < "$QUE/out"
   fi
   rm -rf "$QUE"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the owner's music keeps playing, in a real browser"
+if [ -d "$ROOT/web" ]; then
 
   # ── the owner's music keeps playing until they ask the app to speak ──────────
   # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
@@ -18678,6 +18845,12 @@ if [ -d "$ROOT/web" ]; then
     done < "$AUD/out"
   fi
   rm -rf "${AUD:?}"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the suite makes no sound"
+if [ -d "$ROOT/web" ]; then
 
   # ── the suite makes no sound ─────────────────────────────────────────────────
   # A run that drove the phone's voice read its replies aloud through the owner's speakers.
@@ -18696,6 +18869,12 @@ if [ -d "$ROOT/web" ]; then
     grep -q -- ' -o ' <<< "$l" || noisy="$noisy run.sh:say-aloud"
   done <<< "$(grep -E '^[[:space:]]*(if .*&& )?say |&& say |; say ' "$ROOT/test/run.sh" | grep -v '^[[:space:]]*#' | grep -v 'is "')"
   is "no browser, say or player in the suite makes a sound" "" "${noisy# }"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: barge-in, in a real browser"
+if [ -d "$ROOT/web" ]; then
 
   # ── barge-in: the owner can talk over the answer, the answer cannot ─────────
   # Conversation mode keeps the mic open while it reads an answer, so the owner can cut in
@@ -18723,7 +18902,18 @@ if [ -d "$ROOT/web" ]; then
     done < "$BGC/out"
   fi
   rm -rf "$BGC"
+else
+  skip "phone client" "web/ not present"
+fi
 
+group "phone client: web/ ships, parses, and is what its source builds"
+if [ -d "$ROOT/web" ]; then
+
+  # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
+  # a RUNTIME asset — fleet-serve serves it from ~/.local/libexec/ghostfleet, not from
+  # the repo. Left out of that list, the PWA 404s in the browser while every file in the
+  # repo is perfectly correct: the same "the file on disk was current, the process was
+  # not" trap CLAUDE.md records for a stale MCP server, and just as invisible from here.
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
   is "...and npm ships it"                 "yes" \
@@ -22419,6 +22609,8 @@ fi
 # backup; with failedOn() reduced to accountAt the grace row read backup and null; with
 # usable() not asking outNow the not-before-the-reset row went back to backup at once.
 group "accounts: never switch to an account that is out of usage"
+# Runs on the planner's px, fresh, rd, prec and its clock (T, H): one setup, two groups.
+# needs: accounts planner: spend the allowance that expires first
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.out.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
   PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
@@ -23489,6 +23681,12 @@ else
   skip "a run leaves no fleet-serve" "node missing"
 fi
 
+# ── epilogue: the summary every run prints, filtered, sharded or whole ───────
+# A MARKER, NOT THE FIRST SUMMARY printf. cf_only used to take that printf as the end of the
+# last group, which made the n/a list below part of whichever group happened to be last — so
+# a filtered run without that group counted its n/a rows and never named them. A group
+# written below this line is not a group: cf_only and shard-plan.mjs both stop here.
+[ -n "${CF_RAN:-}" ] && printf '%s\t#end\n' "$SECONDS" >> "$CF_RAN"
 # NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
 # from one nobody wrote, unless the run says which rows they were.
 if [ "$NA" -gt 0 ] && [ -s "${NA_LOG:-/dev/null}" ]; then

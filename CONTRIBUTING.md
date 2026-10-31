@@ -99,7 +99,16 @@ Run the suite first:
 
 ```bash
 ./test/run.sh          # no dependencies, a couple of seconds
+./test/run.sh 'some group'      # only the groups whose names contain that
+./test/run.sh --shard 2/4       # one of CI's four slices of the whole suite
 ```
+
+CI runs the suite as four shards per platform. A shard is made of whole groups, balanced by
+`test/shard-times.tsv`, and `test (ubuntu-latest)` / `test (macos-latest)` only go green
+once every shard has passed and their records show each group ran exactly once. A new group
+needs nothing from you: it is charged the table's median until the table is refreshed
+(`node test/helpers/shard-plan.mjs times` over a run's `groups-run-*` artifacts). If a group
+needs another one's setup, declare it with `# needs:` and the two will share a shard.
 
 Then three things that are unusual enough to state:
 
