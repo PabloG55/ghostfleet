@@ -530,6 +530,20 @@ sweep_orphan_serves "$ROOT"
 # measures against, so it can say "this run left nothing" without claiming anybody else's.
 SV_BEFORE=" $(pgrep -f 'fleet-serve' 2>/dev/null | tr '\n' ' ')"
 
+# jsm <js regex> <file> — 1 if any line of the file matches, the JS dialect's answer to
+# `matches`. THE FILE'S, NOT ONE GROUP'S: it was defined in `pane detectors at stack width` and
+# called by two later groups, which ran green only because they ran after it. Lifted out on
+# their own — as a shard does — every `(js)` row read an empty answer and went red.
+# String(), not a bare number. console.log() runs a NON-string argument through
+# util.inspect, which colourises when colour is on — and every fleet session has
+# FORCE_COLOR=3 in its environment, so this returned "\033[33m1\033[39m" and the
+# comparison failed. It passed wherever colour happened to be off: the same
+# "a test can pass because of where it ran" trap CLAUDE.md already warns about.
+jsm() { node -e '
+  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
+  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
+' "$1" "$2"; }
+
 # Proven, not asserted: every other group now rests on this, so it goes first and
 # goes red on its own rather than being taken on trust. Both directions on the
 # sweep especially — it deletes directories and kills servers, and the direction
@@ -814,15 +828,6 @@ is "claude: silent on a 130-col IDLE pane"            "0" "$(matches "$cre" "$FI
 # grep ERE and JS are different dialects and the two spellings are maintained
 # separately, so run the JS one over the same fixtures rather than trusting they agree.
 jsre="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
-# String(), not a bare number. console.log() runs a NON-string argument through
-# util.inspect, which colourises when colour is on — and every fleet session has
-# FORCE_COLOR=3 in its environment, so this returned "\033[33m1\033[39m" and the
-# comparison failed. It passed wherever colour happened to be off: the same
-# "a test can pass because of where it ran" trap CLAUDE.md already warns about.
-jsm() { node -e '
-  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
-  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
-' "$1" "$2"; }
 is "claude(js): matches the 56-col BUSY pane" "1" "$(jsm "$jsre" "$FIX/claude-busy-narrow.txt")"
 is "claude(js): silent on the 56-col IDLE pane" "0" "$(jsm "$jsre" "$FIX/claude-idle-narrow.txt")"
 
@@ -3133,6 +3138,10 @@ group "fleet-review asks a DIFFERENT model, or says it cannot"
 #   All of it runs under --dry-run against stub binaries. A group that actually called a
 # reviewer would cost usage on every suite run and could not assert on the output anyway.
 fr() { "$ROOT/bin/fleet-review" "$@" 2>&1; }
+# Its own `fa`, not the one `agent capabilities are declared` leaves behind. Borrowed, this
+# group only worked after that one — and on its own the three "declares none" rows below read
+# a missing command's empty output as the empty answer they expect, and passed.
+fa() { "$ROOT/bin/fleet-agent" "$@"; }
 is "codex declares a review"        "review" "$(fa field codex review)"
 # BOTH DIRECTIONS, and the empty ones matter more: they are what the refusal reads, and a
 # field that quietly gained a value would turn a refusal into a spend.
@@ -10310,9 +10319,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # it, and name the member that landed in stack.tsv: a hit-test that still believes the
   # window starts at the top would stack a different session, and only the name says so.
   for _ in $(seq 1 39); do step j; done
-  s="$(pane)"; R="$(printf '%s\n' "$s" | grep -n 'task-27' | head -1 | cut -d: -f1)"
-  is "task-27 is drawn after scrolling" "yes" "$([ -n "$R" ] && echo yes || echo no)"
-  tmux -L cfstksm send-keys -l -- "$(printf '\033[<0;5;%sM' "${R:-1}")" 2>/dev/null
+  # Not `R`: that is the suite's red, and overwriting it here painted every later failure
+  # "16✘" and printed the summary's "7 failed" as "167 failed".
+  s="$(pane)"; t27row="$(printf '%s\n' "$s" | grep -n 'task-27' | head -1 | cut -d: -f1)"
+  is "task-27 is drawn after scrolling" "yes" "$([ -n "$t27row" ] && echo yes || echo no)"
+  tmux -L cfstksm send-keys -l -- "$(printf '\033[<0;5;%sM' "${t27row:-1}")" 2>/dev/null
   # Waits for the EFFECT, as step() does: under a loaded machine the poll can hold the
   # loop past any fixed sleep, and a read before the click lands is not a wrong click.
   n=0; until [ "$(scount .)" != 0 ] || [ "$n" -ge 30 ]; do sleep 0.1; n=$((n+1)); done; settle
@@ -22459,6 +22470,8 @@ fi
 # backup; with failedOn() reduced to accountAt the grace row read backup and null; with
 # usable() not asking outNow the not-before-the-reset row went back to backup at once.
 group "accounts: never switch to an account that is out of usage"
+# Runs on the planner's px, fresh, rd, prec and its clock (T, H): one setup, two groups.
+# needs: accounts planner: spend the allowance that expires first
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.out.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
   PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
