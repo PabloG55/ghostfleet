@@ -169,6 +169,25 @@ function ProfileTabs({ tabs, onTab }) {
   );
 }
 
+// ── the phone's project search ────────────────────────────────────────────────────────
+// Everything it says and does arrives from app.js's findSpec(), which says why it is always
+// drawn and never focused for you. What lives here is only the box: an input, the count
+// and a clear button laid over its right end, so neither changes the row's height or the
+// input's width as they come and go.
+function FindField({ find }) {
+  if (!find) return null;
+  return (
+    <div class="find">
+      <input type="search" value={find.q} placeholder="find a project"
+             aria-label="find a project" enterkeyhint="search"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false}
+             onInput={(e) => find.onInput(e.currentTarget.value)} onKeyDown={find.onKey} />
+      <span class="count">{find.count}</span>
+      {find.q ? <button class="clear" onClick={find.onClear} aria-label="clear the search">×</button> : null}
+    </div>
+  );
+}
+
 // ── the count strip ───────────────────────────────────────────────────────────────────
 // The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED: a
 // strip where every tile is lit says nothing, and the question this app exists to answer is
@@ -303,6 +322,7 @@ function NotifyBar({ notify }) {
 
 function ProjectsScreen(p) {
   return <CardScreen {...p} band={<Fragment>
+    <FindField find={p.find} />
     <NotifyBar notify={p.notify} />
     <JarvisBar jarvis={p.jarvis} />
     <ProfileTabs tabs={p.tabs} onTab={p.onTab} />

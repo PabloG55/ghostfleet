@@ -902,6 +902,7 @@ function setProfile(name) {
   // is on screen — otherwise `⏎ open` and `x remove` act on a card nobody can see.
   const vis = visibleProjects();
   S.sel = vis.length ? vis[0].i : 0;
+  if (S.srch) srchFirst();           // a search follows the tab: its first match on THIS tab
   save();
   render();
 }
@@ -922,6 +923,10 @@ function projectsProps() {
   // the file already applies on the grid screen, for the same reason.
   const shown = shownProjects(projects);
   if (shown.length && !shown.some(v => v.i === S.sel) && S.sel !== projects.length) S.sel = shown[0].i;
+  // A `/` search dims what it does not match, in place — the grid's dimUnmatched, so the
+  // numbering and the order never move under the reader.
+  const hits = S.srch && S.srch.q ? new Set(srchMatches()) : null;
+  const dim = (i, node) => { if (hits && node && node.classList) node.classList.toggle('miss', !hits.has(i)); return node; };
   return {
     scope: '— projects',
     mode: modeSpec(),
@@ -941,6 +946,7 @@ function projectsProps() {
       need: tabNeed(projects, name),
     })) : null,
     onTab: setProfile,
+    find: findSpec(),
     jarvis: jarvisBarSpec(),
     notify: notifySpec(),
     confirm: confirmSpec(),
@@ -961,12 +967,12 @@ function projectsProps() {
       ...queueRow(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
-        cardEl(G.projectModel(p, i, i === S.sel), {
+        dim(i, cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
-        }, i)),
-      cardEl(G.addProjectModel(S.sel === projects.length), {
+        }, i))),
+      dim(projects.length, cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
-      }, projects.length),
+      }, projects.length)),
     ],
     // THE SCROLL MEMORY STAYS HERE, and it is still the same one call that does both
     // halves. It fires once, when Preact creates the list, rather than on every render —
@@ -989,6 +995,52 @@ function projectsProps() {
   };
 }
 const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
+
+// ── finding a project on a phone ──────────────────────────────────────────
+// The desk's `/` needs a key nobody has on a phone, so a touch screen gets a FIELD instead:
+// the same search (S.srch, srchMatches, the same dimming and the cursor on the first match),
+// typed into a box. Two rules from the owner shape it:
+//   IT IS ALWAYS THERE. A box that appears when you start searching pushes the list down
+// under the thumb that is reaching for it; one that is always drawn, at its own fixed
+// height, never moves anything. The count sits INSIDE it for the same reason.
+//   IT IS NEVER FOCUSED FOR YOU. Focus is what raises the on-screen keyboard, which covers
+// half the list, so nothing here calls focus() — only the reader's own tap does (and `/`
+// on a keyboard attached to a tablet, which is a reader asking for it).
+//   A mouse does not get it: a desk has `/` and the prompt row, as on the grid.
+function projectField() { return !finePointer(); }
+function findSpec() {
+  if (!projectField()) return null;
+  const q = (S.srch && S.srch.q) || '';
+  const n = q ? srchMatches().length : 0;
+  return {
+    q,
+    count: !q ? '' : n ? `${n} match${n === 1 ? '' : 'es'}` : 'no project matches',
+    onInput: (v) => {
+      if (!v) S.srch = null;
+      else { S.srch = { q: v, typing: true }; srchFirst(); }
+      render();
+      revealSel();
+    },
+    // ⏎ on the phone's keyboard puts it away and keeps the search; a tap on a lit card opens
+    // it, as a tap always does. Esc (a tablet's keyboard) clears, as at the desk.
+    onKey: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); try { e.target.blur(); } catch {} }
+      else if (e.key === 'Escape') { e.preventDefault(); S.srch = null; render(); try { e.target.blur(); } catch {} }
+    },
+    onClear: () => { S.srch = null; render(); },
+  };
+}
+function focusProjectField() {
+  try { const f = document.querySelector('#app .find input, #side .find input'); if (f) f.focus(); } catch {}
+}
+// The first match may be below the fold; bring it into view only if it is not already —
+// `nearest` scrolls not at all when the card is on screen, so typing never jolts the list.
+function revealSel() {
+  try {
+    const c = document.querySelector('#app .cards .card.sel, #side .cards .card.sel');
+    if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' });
+  } catch {}
+}
 
 // ── waiting on you: the queue ─────────────────────────────────────────────
 // WHAT EVERY MASTER IS HOLDING FOR THE OWNER, on a screen of its own: one card per ledger item a
@@ -5471,7 +5523,7 @@ function markSel() {
 // that check can no longer see. One spelling, two renderers.
 function confirmSpec() {
   const c = S.confirm;
-  if (!c) return S.jump ? jumpSpec() : (S.srch && S.screen === 'grid') ? searchSpec() : null;
+  if (!c) return S.jump ? jumpSpec() : (S.srch && (S.screen === 'grid' || (S.screen === 'projects' && !projectField()))) ? searchSpec() : null;
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
@@ -5520,17 +5572,31 @@ function jumpSpec() {
     : "jump → project? 1-9  ·  s + digit = that project's grid  ·  p = projects  ·  esc";
   return { cls: 'jump', q, keys: '', buttons: [] };
 }
-// The `/` prompt, in the row the desk's searchLine() uses, with its wording.
+// The `/` prompt, in the row the desk's searchLine() uses, with its wording — on Projects
+// the desk says "project" where the grid says "agent" (fleet-grid.mjs searchLineOf).
 function searchSpec() {
   const { q, typing } = S.srch;
   const m = srchMatches();
-  const keys = !q ? "type part of an agent's name · esc cancel"
-    : !m.length ? `no agent matches '${q}'`
+  const what = S.screen === 'projects' ? 'project' : 'agent';
+  const keys = !q ? `type part of ${what === 'agent' ? 'an agent' : 'a project'}'s name · esc cancel`
+    : !m.length ? `no ${what} matches '${q}'`
     : typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · ⏎ keep · esc clear`
     : `${m.indexOf(S.sel) >= 0 ? `${m.indexOf(S.sel) + 1} of ${m.length}` : `${m.length} match${m.length === 1 ? '' : 'es'}`} · n next · N prev · ⏎ open · / edit · esc clear`;
   return { cls: 'search', q: '/' + q + (typing ? '▏' : ''), keys, buttons: [] };
 }
-function srchMatches() { return S.srch && S.srch.q ? matchIndices(items(), S.srch.q, it => it.card) : []; }
+function srchMatches() {
+  if (!S.srch || !S.srch.q) return [];
+  return S.screen === 'projects' ? matchIndices(projectList(), S.srch.q, projectCard()) : matchIndices(items(), S.srch.q, it => it.card);
+}
+// PROJECTS, as the desk's pItems: every project at its GLOBAL index (the index the digits
+// and S.sel use), then `+ new project`. A project answers to the name its card shows and to
+// its folder's name — the desk's pCardOf — and one the profile tab hides answers to nothing:
+// a match nobody can see is a cursor that disappears.
+function projectList() { return [...(S.projects || []).map(p => ({ project: p })), { add: true }]; }
+function projectCard() {
+  const shown = new Set(visibleProjects().map(v => v.p));
+  return (it) => it.project && shown.has(it.project) ? { label: it.project.name, name: G.basename(it.project.path || '') } : null;
+}
 // The cursor follows the first match on every keystroke — and stays put when nothing
 // matches, because the card you were on is a better place to be left than the top.
 function srchFirst() { const m = srchMatches(); if (m.length) S.sel = m[0]; }
@@ -6607,7 +6673,7 @@ function onKey(e) {
   }
   // The search comes BEFORE the chord, as at the desk: while `/` is typing, every key is a
   // letter of the query, and a Ctrl key is dropped rather than obeyed.
-  if (S.screen === 'grid' && S.srch) { if (searchKey(e, k, lk, ctrl)) e.preventDefault(); return; }
+  if ((S.screen === 'grid' || S.screen === 'projects') && S.srch) { if (searchKey(e, k, lk, ctrl)) e.preventDefault(); return; }
   if (S.jump) { e.preventDefault(); jumpKey(k, lk, ctrl); return; }
   let used;
   if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
@@ -6791,8 +6857,9 @@ function gridBack() {
 // move in both. Returns whether the key was taken.
 function searchKey(e, k, lk, ctrl) {
   const s = S.srch;
+  const onProj = S.screen === 'projects';
   const nc = gridCols(), n = items().length;
-  const move = d => { const i = S.sel + d; if (i >= 0 && i < n) S.sel = i; };
+  const move = onProj ? stepProject : d => { const i = S.sel + d; if (i >= 0 && i < n) S.sel = i; };
   const shorter = () => [...s.q].slice(0, -1).join('');
   if (k === 'Escape' || (ctrl && lk === 'c' && !hasSelection())) S.srch = null;
   else if (k === 'ArrowUp') move(-nc);
@@ -6809,7 +6876,7 @@ function searchKey(e, k, lk, ctrl) {
     if (k === 'q' || k === '`') S.srch = null;
     else if (k === '/') s.typing = true;
     else if (k === 'Backspace') { s.typing = true; s.q = shorter(); srchFirst(); }
-    else if (k === 'Enter') { S.srch = null; openItem(items()[S.sel]); return true; }
+    else if (k === 'Enter') { S.srch = null; if (onProj) openProjectItem(projectList()[S.sel]); else openItem(items()[S.sel]); return true; }
     else if (k === 'n' || k === 'N') { const i = stepMatch(srchMatches(), S.sel, k === 'n' ? 1 : -1); if (i >= 0) S.sel = i; }
     else if (k === 'k') move(-nc);
     else if (k === 'j') move(nc);
@@ -6831,20 +6898,7 @@ function projectsKey(e, k, lk, ctrl) {
     if (lk === 's') { if (it.project) toGridOf(it.project.name); return true; }
     return false;
   }
-  // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. The digit is an address — `5` opens
-  // project 5 the way `Ctrl-f 5` does at the desk — so it counts the unfiltered list.
-  // Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
-  // j/k onto a card the profile tab hides is a cursor that disappears.
-  const move = d => {
-    let n = S.sel + d;
-    if (visibleProjects().length !== projects.length) {
-      const stops = [...visibleProjects().map(v => v.i), projects.length];
-      const at = stops.indexOf(S.sel);
-      n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
-      if (n == null) return;
-    }
-    if (n >= 0 && n < list.length) { S.sel = n; render(); }
-  };
+  const move = d => { if (stepProject(d)) render(); };
   const nc = gridCols();
   switch (k) {
     case 'ArrowUp': case 'k': move(-nc); break;
@@ -6853,8 +6907,8 @@ function projectsKey(e, k, lk, ctrl) {
     case 'ArrowRight': case 'l': move(1); break;
     case 'H': case 'K': if (it.project) reorderProject(it.project.name, k === 'H' ? -1 : -nc); break;
     case 'L': case 'J': if (it.project) reorderProject(it.project.name, k === 'L' ? 1 : nc); break;
-    // ⏎ enters the project's MASTER, as at the desk; on `+ new project` it adds one.
-    case 'Enter': if (it.add) sheetAddProject(); else if (it.project) enterMaster(it.project.name); break;
+    case '/': if (projectField()) focusProjectField(); else { S.srch = { q: '', typing: true }; render(); } break;
+    case 'Enter': openProjectItem(it); break;
     case 's': case 'S': if (it.project) sheetSchedule('master', it.project.name); break;
     // The desk's `x`, with the desk's question. Only the KEY: a long-press on a project
     // card still asks nothing (see wire()), because a resting thumb is not a decision.
@@ -6890,6 +6944,29 @@ function queueKey(e, k, lk, ctrl) {
     default: return false;
   }
   return true;
+}
+// ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. The digit is an address — `5` opens
+// project 5 the way `Ctrl-f 5` does at the desk — so it counts the unfiltered list.
+// Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
+// j/k onto a card the profile tab hides is a cursor that disappears. Moves S.sel and says
+// whether it did; the caller renders. Shared by the plain keys and the `/` search's.
+function stepProject(d) {
+  const projects = S.projects || [];
+  let n = S.sel + d;
+  if (visibleProjects().length !== projects.length) {
+    const stops = [...visibleProjects().map(v => v.i), projects.length];
+    const at = stops.indexOf(S.sel);
+    n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
+    if (n == null) return false;
+  }
+  if (n >= 0 && n <= projects.length) { S.sel = n; return true; }
+  return false;
+}
+// ⏎ enters the project's MASTER, as at the desk; on `+ new project` it adds one. The same
+// from a search as without one.
+function openProjectItem(it) {
+  if (it && it.add) sheetAddProject();
+  else if (it && it.project) enterMaster(it.project.name);
 }
 // ⇧hjkl on Projects: the desk's reorderProject. The daemon refuses fleet_project_order by
 // name today (fleet-serve NOT_YET — the order file is written only by the desk's Projects
