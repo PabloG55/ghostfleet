@@ -258,6 +258,7 @@
 67	phone client: the page never scrolls sideways, in a real browser
 45	phone client: the card's title is a tap target, in a real browser
 233	phone client: the client on a desk, in a real browser
+150	phone client: the stack, in a real browser
 44	phone client: the queue page, in a real browser
 13	phone client: the owner's music keeps playing, in a real browser
 3	phone client: the suite makes no sound

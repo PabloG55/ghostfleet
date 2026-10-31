@@ -540,8 +540,11 @@ they are already cards. Screens map one to one: Projects → grid → session. K
 touch: `1-9`/`⏎` → tap, `⇧hjkl` → drag to reorder, `p`/`P` → swipe, `x` → long-press with
 the same `y = yes` confirmation.
 
-**The stack has no phone equivalent** and does not need one. It exists to put four
-sessions side by side; a phone has no side, and at `nc = 1` that is just the card list.
+**The stack** was the one screen with no phone equivalent, because it exists to put four
+sessions side by side and a phone has no side. The owner has since asked for it on the web
+anyway, and it takes the shape each window allows: side-by-side columns at a desk, and on a
+phone one conversation at a time, a swipe apart, with `2/4` in the bar (web/README.md, *The
+stack*).
 
 The one screen that is **not** a mirror of a TUI screen is the session screen, because the
 TUI has no such screen: `⏎` on a card *attaches to the pane*. §7a is what that means on a
@@ -643,13 +646,16 @@ and becomes about *proving who is doing it, and leaving a record*:
 Enforcement is **server-side on the tool name**, never on which buttons the client draws.
 A client-side restriction is a suggestion.
 
-### The two things that cannot transfer
+### The thing that cannot transfer
 
-Physical constraints, not policy:
-
-- **The stack** (§6) — it exists to put sessions side by side, and a phone has no side.
 - **The `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
   (below) can run nvim in the project's folder, which covers what the tab is reached for.
+
+**The stack was the second, and the owner has since asked for it** — several agents, across
+projects, on screen at once — so it is on the web as columns at a desk and as a swipe between
+conversations on a phone (§6, and web/README.md *The stack*). "A phone has no side" is still
+true; what changed is that one conversation at a time, a swipe apart, turned out to be the
+phone's way of having several.
 
 **The `Ctrl-t` terminal tab was the third, and the owner has since reopened it** — on purpose,
 with its own gates, and the argument that kept it out is the reason those gates exist rather

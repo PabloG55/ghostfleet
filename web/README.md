@@ -253,16 +253,14 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
 desk's; see *On a desk* below for the whole map.
 
-**Two things are deliberately absent** (§7), and a substitute for either is the mistake:
+**One thing is deliberately absent** (§7), and a substitute for it is the mistake:
 
-- **the stack** — it exists to put four sessions side by side, and a phone has no side.
-  At `nc = 1` that is this card list.
 - **the `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
   (below) can run nvim instead, in the project's.
 
-The settings sheet says both out loud, so the gap reads as a decision rather than as
-something half-built. The **terminal** was a third, until the owner decided it was worth its
-surface; it is here now, with gates of its own — see *The terminal*.
+The settings sheet says so out loud, so the gap reads as a decision rather than as
+something half-built. The **terminal** and the **stack** were the other two, until the owner
+decided each was worth its surface; both are here now — see *The terminal* and *The stack*.
 
 ## On a desk
 
@@ -379,6 +377,9 @@ Some keys a page can never have: `Ctrl-N`, `Ctrl-T` and `Ctrl-W` open a window, 
 and close one before any page hears them, in an installed PWA too. Where the desk uses one,
 the table says so and offers no substitute.
 
+The stack's keys — `t`, `Ctrl-x`, `Ctrl-a x`, `Ctrl-a <` / `>` and the picker's — have a
+table of their own under *The stack*, held to the same rule by `stack-check.mjs`.
+
 `test/helpers/desktop-check.mjs` presses every key in this table in a real Chrome at
 1600×900, checks the gestures with a real mouse there and with touch at 390×844, drives the
 phone with an emulated on-screen keyboard and with an attached one, and fails if a key is
@@ -419,7 +420,6 @@ added here without a row that presses it.
 | `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
 | `` ` `` · `⇧←` · `⇧→` · `Ctrl-s` · `Ctrl-p` · `Ctrl-f` · `Ctrl-a` | composer, focused | the same as in the session row above: tmux answers these before the agent at the desk, so they act from inside the box; every other key is text |
 | `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them). The terminal is `Ctrl-a t` here, the desk's other spelling of it; the editor is not in this client |
-| `t` · `Ctrl-x` · `Ctrl-a x` · `Ctrl-a <` · `Ctrl-a >` | grid, session | the stack — not in this client (§7: it exists to put sessions side by side; the two panes are as far as this goes) |
 | `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |
 | `Ctrl-c Ctrl-c` | Projects | quit — no meaning in a browser: a page cannot close its own tab |
 | `Ctrl-a Ctrl-a` | session | a literal `Ctrl-a` for the agent — no meaning in a browser: there is no terminal to send it to |
@@ -651,6 +651,66 @@ included — except the ones the browser keeps for itself. **`⇧Esc` leaves it*
 cannot tell ⇧Esc from Esc, so taking it costs the shell nothing); so does a click outside it.
 Then the desk's keys are back: `` ` `` or `q` returns to where it was opened from, `⏎` goes
 back in.
+
+## The stack
+
+**Several sessions, across projects, on screen at once** — the desk's stack screen
+(`bin/fleet-grid.mjs`, `t` / `Ctrl-x`) on this client.
+
+**The picker** lists every session of every project Projects is showing, grouped by project,
+and by machine first once another one is paired (`<host>` above its projects, as the profile
+tabs group them). Space, a click or a tap adds a session or takes it out; `⏎` (or `open`)
+opens them together. At a desk `/` finds one with the grid's own matcher (`grid-search.js`)
+and narrows the list to what matches, as the desk's picker does; a phone gets a field
+instead. **The selection is this device's** (`gf.stack` in localStorage — a private window
+starts empty and works), and it survives a reload, in its order, with each column's draft.
+
+Reach it with `Ctrl-x` (anywhere), `t` on a grid, `Ctrl-a x` in a session or the stack, or
+`stack` behind the `⋯` on Projects and on a grid — the phone's way in.
+
+**At a desk** the stack is the right pane, cut into **side-by-side columns, at most four**:
+the first four of the selection, and one chip in the bar for each of the rest — click a chip
+and that session takes the focused column's place. Each column is a whole conversation:
+its own list, its own composer, its own draft (#87), `⏎` to send, `⇧⏎` for a new line, paste
+and drop. One column has the focus at a time (a cyan rule along its top): a click anywhere
+in a column gives it the focus *before* the click lands, so every button in a column acts
+on that column, and the keys below act on the focused one. `×` takes a column out of the
+stack. A column on another machine works like any other, and — as #99 decided for every
+remote session — it has no terminal control.
+
+**On a phone** the stack is one conversation at a time: swipe ← / → for the next and
+previous (touch only, like the chat's swipe; it stops at the ends), or `◂` / `▸` in the bar,
+which also carries the agent's name and where it is in the stack (`2/4`).
+
+**The read rate.** One open chat reads its transcript every 2 s while something is owed and
+every 5 s otherwise. Four of those independently, plus a grid read per column, is the shape
+that once drew a burst of 429s from one phone — so the stack shares. The focused column keeps
+the chat's own poll; the others are read by **one** poller, one read at a time, never two
+starts less than a second apart; and the grids every column's status comes from are read
+once per 5 s tick for the focused column's project plus **one** other in turn. With four
+columns all working that is at most 30 + 60 + 24 = **114 reads a minute**, against the
+daemon's **240 per device** (`rate.read` in `fleet-serve`) — measured by `stack-check.mjs`
+against a fake daemon that counts. On a phone only the conversation on screen is read.
+
+<!-- stack-keys -->
+| key | where | what it does |
+|---|---|---|
+| `Ctrl-x` | Projects, grid, session, queue, stack | the stack picker (in a box, only while nothing in it is selected — with a selection it stays cut) |
+| `t` | grid | the stack picker, as at the desk |
+| `Ctrl-a x` | session, stack | the stack picker |
+| `j` · `k` · `↓` · `↑` | picker | move the cursor |
+| `space` | picker, finding too | add or remove the session under the cursor — never typed into a search |
+| `⏎` | picker | open the stack; while finding, keep the search (then `⏎` opens) |
+| `/` · `n` · `N` · `⌫` | picker | find: every key types into the query and the list narrows to the matches; then `n` / `N` step, `⌫` or `/` edit again |
+| `Esc` · `q` | picker | back — to the stack if it was opened from there. `Esc` clears a search first |
+| `c` | picker | clear the whole stack |
+| `⇧←` · `⇧→` | stack, also from a focused box | the focus to the previous / next column, wrapping at both ends — the desk stack's ring |
+| `Ctrl-a ←` · `Ctrl-a →` | stack | the same |
+| `Ctrl-a <` · `Ctrl-a >` | stack | move the focused column one place, wrapping — and so past the fourth, which swaps the next hidden one in |
+| `` ` `` | stack | back out of the stack, to where it was opened from |
+| `p` | stack | any key the stack does not bind is typed into the focused column's box |
+| `⇧⏎` | a column's box | a new line; `⏎` sends to that column's session |
+<!-- /stack-keys -->
 
 ## The pane
 
