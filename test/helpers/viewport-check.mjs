@@ -937,7 +937,7 @@ async function loadingSkeletons() {
   await shot('chat-loading-390');
   is('loading chat: skeleton bubbles stand where the messages will', true, held.n >= 4 || `${held.n} bubbles`);
   is('...alternating agent left, owner right', 'la,ru,la,ru,la', held.sides);
-  is("...with the agent bubble's own corners", '4px/16px', held.radius);
+  is("...with the agent bubble's own corners", '6px/18px', held.radius);
   is('...each a bubble with bars in it, not an empty sliver', true, held.bars);
   is('...and no loading text anywhere on the screen', false, held.text);
   is('...nor any words in the chat at all', '', held.words);
@@ -1002,6 +1002,12 @@ async function loadingSkeletons() {
 // sheet — it is scrollable by eight pixels, which is a finger's worth of pan on a screen
 // that should not need one. Re-measure and restate it when the sheet gains content; do not
 // delete the row to make it quiet.
+//   RESTATED: THERE IS NO CEILING ANY MORE. The redesign set the sheet's prose and buttons in
+// the UI face instead of the terminal's, and a proportional face is narrower at every size.
+// Measured at 320px, same sheet, same fixtures: the monospace client needed 328 at 38, 380
+// at 44 and 457 at 53; this one needs 320 at all three. 53px is iOS's largest accessibility
+// size (AX5), so the sheet now fits at every text size a phone can ask for, and the row
+// pins THAT — a sheet that starts needing a pan again goes red here.
 async function sheetCeiling() {
   await viewport(320, 568);
   await fresh();
@@ -1017,14 +1023,14 @@ async function sheetCeiling() {
                scrolls: sh ? getComputedStyle(sh).overflowX : '', page: d.scrollWidth - d.clientWidth };
     });
   };
-  for (const fs of [16, 24, 30]) {
+  for (const fs of [16, 24, 30, 38]) {
     const m = await at(fs);
     is(`320px/${fs} the settings sheet fits without panning`, true, m.need != null && m.need <= m.box + 1);
   }
-  // ...and past the ceiling, the promise that is left.
-  const big = await at(38);
-  is('320px/38 the settings sheet is past its ceiling, as documented', true, big.need > big.box + 1);
-  is('...and takes the overflow itself', 'auto', big.scrolls);
+  // ...through the largest size there is, and the promise that stands behind it.
+  const big = await at(53);
+  is('320px/53 (AX5) the settings sheet still fits without panning', true, big.need != null && big.need <= big.box + 1);
+  is('...and would take any overflow itself', 'auto', big.scrolls);
   is('...rather than handing it to the page', 0, big.page);
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
 }
