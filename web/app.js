@@ -7,12 +7,12 @@
 // keyboard bindings are wired too, because a keyboard is how this gets driven for a
 // screenshot and how it behaves on a desktop browser.
 //
-// Two things are deliberately missing and are not to be substituted (§7): the STACK
-// (it exists to put sessions side by side, and a phone has no side — at nc = 1 it is
-// this list) and the Ctrl-n editor tab. The settings sheet says so out loud rather than
-// leaving a hole where a key used to be. The TERMINAL was the third, until the owner
-// decided it was worth its surface: it is here now, off per device and behind a passkey
-// at every open (see "the terminal" below, and fleet-serve's TERMINAL for the gates).
+// One thing is deliberately missing and is not to be substituted (§7): the Ctrl-n editor
+// tab. The settings sheet says so out loud rather than leaving a hole where a key used to
+// be. The TERMINAL and the STACK were the second and third, until the owner decided each was
+// worth its surface: the terminal is here, off per device and behind a passkey at every open
+// (see "the terminal" below, and fleet-serve's TERMINAL for the gates), and so is the stack
+// — side-by-side columns at a desk, a swipe apart on a phone (see "the stack").
 
 import * as G from './grid.js';
 import * as api from './api.js';
@@ -80,6 +80,14 @@ const S = {
   termOn: null,         // /api/term's answer for THIS device: may it open a terminal. null = not asked
   termBack: null,       // where the terminal screen was opened from, which is where back goes
   termSt: { state: 'checking', why: '' },   // what the terminal screen says (see termState)
+  // THE STACK (see "the stack"): what is in it, which column has the focus, the picker's own
+  // state, and where back goes from either screen.
+  stackSel: [],         // [{ project, session }] in column order — this device's, in localStorage
+  stackAt: 0,           // the focused member: an index into stackSel
+  pick: null,           // the picker: { cur: column key, q: null | query, typing, msg }
+  stackBack: null,      // the screen the picker or the stack was opened from
+  pickBack: '',         // 'stack' when the picker was opened from the stack itself
+  fromStack: false,     // the session screen was opened from a column: back is the stack
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -107,12 +115,13 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
+      session: S.screen === 'stack' ? null : S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
       projects: S.projects, hosts: S.hosts, grid: S.grid, sub: S.sub,
     }));
   } catch {}
 }
 function restore() {
+  loadStack();
   let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { return; }
   if (!j) return;
   S.projects = j.projects || null; S.grid = j.grid || null;
@@ -138,12 +147,16 @@ function restore() {
   // A CLAMP, not a trust. Half-written state is how the screen above happened, and the
   // rule is simple enough to state: you cannot be on a screen whose subject is missing.
   if (S.screen === 'session' && !S.session) S.screen = S.project ? 'grid' : 'projects';
+  // The stack reopens as it was left — the picker, or the columns if there is a stack to show.
+  if (S.screen === 'stack' && !S.stackSel.length) S.screen = 'stackpick';
+  if (S.screen === 'stackpick') S.pick = { cur: '', q: null, typing: false, msg: '' };
+  if (S.screen === 'stack' || S.screen === 'stackpick') { S.project = null; S.session = null; }
   if (S.screen === 'grid' && !S.project) S.screen = 'projects';
   S.stale = j.at || 0;
   // ...and give the back gesture the trail it would have had if you had walked here. A
   // cold open is at the root of its own history, so without this the first swipe out of a
   // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue') ? 1 : 0);
+  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : 0);
 }
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
@@ -248,6 +261,15 @@ async function refreshOnce() {
         S.wantCard = 0;
         if (it && it.card) { S.sel = items().indexOf(it); save(); openItem(it); return; }
       }
+    }
+    else if (S.screen === 'stackpick') {
+      await refreshPicker();
+      // Two panes: the Projects list beside the picker is read by its own request.
+      if (wideNow()) { const j = await api.getProjects(); S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+    }
+    else if (S.screen === 'stack') {
+      if (!S.projects) { const j = await api.getProjects(); S.projects = j.projects; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+      await refreshStack();
     }
     else if (S.screen === 'term') {
       // The grid beside it (two panes), and nothing of the terminal's own: its bytes arrive
@@ -399,10 +421,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'term']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'term', 'stack', 'stackpick']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, session: 2, term: 3 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, stackpick: 2, stack: 2, session: 2, term: 3 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -486,9 +508,11 @@ function renderDuo(app, side) {
   navFrom = S.screen;
   // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
   const queue = S.screen === 'queue';
-  const left = (S.screen === 'projects' || queue || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
+  // The stack spans projects, so the list beside it is Projects too.
+  const stacky = S.screen === 'stack' || S.screen === 'stackpick';
+  const left = (S.screen === 'projects' || queue || stacky || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
   // The terminal is a right-pane screen like a session: its project's grid stays beside it.
-  const inSession = S.screen === 'session' || S.screen === 'term';
+  const inSession = S.screen === 'session' || S.screen === 'term' || stacky;
   const props = left === 'grid' ? gridProps() : projectsProps();
   // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
   // session's; drawn in both, a `y` would read as answering two questions.
@@ -515,6 +539,10 @@ function renderDuo(app, side) {
 function render() {
   // Leaving the terminal's screen, by any route, closes its socket; the tab stays in tmux.
   if (TS && S.screen !== 'term') disposeTerm();
+  // ...and leaving the stack by one that did not go through leaveStackState (Ctrl-f, a card
+  // in the list beside it, Ctrl-p): the open chat is not a column any more. Its draft is in
+  // the stored drafts already; its transcript is read again on the way back.
+  if (S.screen !== 'stack' && stackActiveKey) { stackActiveKey = ''; chatSK = 'chat'; stopStackPoll(); }
   if (slideNav()) return;
   const app = document.getElementById('app');
   const side = sideNode();
@@ -589,7 +617,7 @@ function mountPreact(app, screen, props) {
 // deliberately left the box with Esc.
 let focusOnOpen = false;
 function focusIfOpened() {
-  if (!focusOnOpen || S.screen !== 'session' || S.sheet || S.locked) return;
+  if (!focusOnOpen || !chatScreen() || S.sheet || S.locked) return;
   focusOnOpen = false;
   if (enterSends()) focusComposerAt(null);     // null: the end of the draft
 }
@@ -608,6 +636,9 @@ function paintElScreenBody(app) {
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.textContent = ''; screenMem = null; app.append(lockScreen()); renderSheet(); syncPanePoll(); syncChatPoll(); return; }
   if (S.screen === 'term') { paintTerm(app); return; }
+  if (S.screen === 'stackpick') { pickRoot = pickRoot && pickRoot.bar.parentNode === app ? pickRoot : null; stackRoot = null; paintPicker(app); syncPanePoll(); syncChatPoll(); stopStackPoll(); return; }
+  if (S.screen === 'stack') { pickRoot = null; paintStack(app); syncPanePoll(); syncChatPoll(); syncStackPoll(); return; }
+  pickRoot = null; stackRoot = null;
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
@@ -728,7 +759,7 @@ function syncChat(live, built) {
   // Follow the end for a reader who was at it, hold the place of one who was not (and the
   // place "load older" asked to keep) — the list's node is the same, so this only moves it
   // when something new arrived at the bottom of a reader who was watching the bottom.
-  if (changed) restoreScroll('chat', live);
+  if (changed) restoreScroll(chatSK, live);
   return changed;
 }
 // The whole screen. False sends render() down its old path: another screen, another chat,
@@ -1023,6 +1054,8 @@ function projectsProps() {
       { label: 'open', cls: 'go', onClick: () => openProject((projects[S.sel] || {}).name) },
       // the projects screen schedules a message to THAT project's master
       { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      // Several sessions, from any project, on screen at once — the desk's Ctrl-x.
+      { label: 'stack', onClick: () => openStackPicker() },
       { label: 'settings', onClick: () => sheetSettings() },
       // Registering and removing a project is the desk's job on the machine it is on.
       { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p && isRemote(p.name)) { toast(`${said(p.name)}: remove it on ${hostLabelOf(p.name)} itself`, 'bad'); render(); } else if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
@@ -1321,7 +1354,7 @@ function sheetUsage() {
 // gesture retracing grid → session screens you have already left, and leaving the stack
 // alone would make the first back-gesture from Projects exit the app.
 function toProjects() {
-  S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
+  S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null; S.fromStack = false; S.pick = null;
   stopSpeaking(); S.jarvisMode = false; talkStop('');
   S.entry = ''; S.srch = null; S.wantCard = 0;
   setDepth(0);
@@ -1465,6 +1498,7 @@ function gridProps() {
         onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
       { label: 'new', onClick: () => sheetPicker() },
       { label: 'worktrees', onClick: () => sheetWorktree() },
+      { label: 'stack', onClick: () => openStackPicker() },
       // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin.
       // ABSENT for another machine's project, and the sheet's last line says why (below).
       isRemote(S.project) ? null : { label: 'terminal', onClick: () => openTerminal() },
@@ -2647,7 +2681,7 @@ export function encodeWav(frames, rate) {
 // `opts.entry` is how it was entered; see S.entry.
 function openSession(name, opts = {}) {
   if (!name) return;
-  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
+  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop(''); S.fromStack = false;
   S.entry = opts.entry || ''; S.srch = null; S.wantCard = 0;
   focusOnOpen = true;
   // The open session is the selected card, so the list beside it (two panes) marks it.
@@ -2683,9 +2717,9 @@ function enterMaster(name) {
 function toGridOf(name, want = 0) {
   if (!name) return;
   if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
-  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  if (S.screen === 'session' || S.screen === 'stack') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
   S.project = name; S.screen = 'grid'; S.sub = ''; S.jarvisMode = false; S.entry = ''; S.srch = null;
-  S.wantCard = want;
+  S.wantCard = want; S.fromStack = false; S.pick = null;
   setDepth(1);
   render(); refresh();
 }
@@ -2777,6 +2811,799 @@ function sessionScreen() {
   out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
+}
+
+// ── the stack: several sessions on screen at once, across projects ─────────────────
+// The desk's stack screen (bin/fleet-grid.mjs sRender, bin/fleet-stack) on this client: a
+// PICKER that lists every session of every project shown on Projects — grouped by machine
+// once another one is paired, then by project — where space, a click or a tap toggles one,
+// `/` finds one with the desk's own matcher, and ⏎ opens them together. Then:
+//   · ON A DESK (two panes), the stack is the right pane, cut into side-by-side columns —
+//     at most STACK_COLS, the FIRST that many of the selection, and a chip for each of the
+//     rest that swaps it in for the focused column. Each column is a whole conversation:
+//     its own list, its own composer, its own draft, ⏎ to send, paste and drop.
+//   · ON A PHONE, one conversation at a time and a swipe to the next (touch only, as the
+//     chat's swipe always was), with `2/4` and the agent's name in the bar.
+//
+// ONE CHAT IS OPEN AND THE REST ARE DRAWN. Everything this file knows about "the chat" —
+// S.session, S.sess, S.draft, the outbox, the composer's listeners, the poll, the scroll
+// memory — is about ONE conversation, and rewriting all of it as N would be rewriting the
+// client. So the stack keeps a CONTEXT per column (ctxOf) and the FOCUSED one is the open
+// chat, with every existing path working on it unchanged: ⏎ sends from it, paste lands in
+// it, its own poll reads it. The other columns are drawn by swapping their context in for
+// exactly as long as a synchronous build takes (withCol) — and a click, a tap or a focus
+// anywhere in a column makes it the focused one FIRST (pointerdown, before the click lands),
+// so a button in a column always acts on that column.
+//
+// THE READ RATE. One open chat polls its transcript every 2 s while something is owed and
+// every 5 s otherwise (chatPeriod); four of them doing that independently, plus a grid read
+// per column, is the shape that already drew a burst of 429s from one phone (api.js, "THE
+// DAEMON SAID WAIT"). So the stack shares: the focused column keeps its own poll, and
+// EVERYTHING ELSE — the other columns' transcripts and the grids every column's status comes
+// from (one project per STACK_GRID_MS, the focused column's and the others in turn) — is read
+// by ONE poller, one read at a time, never two starts closer than STACK_GAP_MS. With four
+// columns all working the ceiling is 30 (focused) + 60 (the rest, held by the gap) = 90 reads
+// a minute against the daemon's 240 per device (fleet-serve `rate.read`).
+//   The grids are the poller's and not the 5 s refresh's because that one holds while a box
+// has the focus (pollPaused) — and at a desk a column's box nearly always has it, so the
+// columns' statuses would freeze for as long as anyone was typing.
+// On a phone only the conversation on screen is read; the others are read when swiped to.
+const LS_STACK = 'gf.stack';      // { members: [{ project, session }], at } — this device's stack
+const STACK_COLS = 4;             // side by side at a desk; the rest wait behind a chip
+const STACK_GAP_MS = 1000;        // the stack poller's floor between two reads it starts
+const STACK_GIVEUP_MS = 30000;    // ...and how long one may take before it is dropped
+const STACK_GRID_MS = 5000;       // a grid read for the columns' statuses, one project at a time
+const PICK_GRIDS_PER_TICK = 3;    // the picker re-reads this many projects' grids per tick
+const stackCtx = new Map();       // column key -> its context (ctxOf)
+const stackGrids = new Map();     // project -> its last grid, shared by the picker and the stack
+let stackActiveKey = '';          // the column whose state is in S right now ('' = none)
+let stackRoot = null, pickRoot = null;
+let stackRR = 0, pickRR = 0;      // round-robin cursors for the grid reads (above)
+const colKey = (project, session) => `${project}\x1f${session}`;
+
+// Per device, and allowed to be missing or broken: the stack is a convenience, not state
+// anyone else reads, so a private window or a full quota starts empty and works.
+function loadStack() {
+  try {
+    const j = JSON.parse(localStorage.getItem(LS_STACK) || 'null');
+    if (j && Array.isArray(j.members)) {
+      S.stackSel = j.members
+        .filter(m => m && typeof m.project === 'string' && typeof m.session === 'string' && m.project && m.session)
+        .map(m => ({ project: m.project, session: m.session }));
+      S.stackAt = Number.isInteger(j.at) ? j.at : 0;
+    }
+  } catch {}
+  S.stackAt = Math.max(0, Math.min(S.stackAt, S.stackSel.length - 1));
+}
+function saveStack() {
+  try { localStorage.setItem(LS_STACK, JSON.stringify({ members: S.stackSel, at: S.stackAt })); } catch {}
+}
+const inStack = (project, session) => S.stackSel.some(m => m.project === project && m.session === session);
+function stackToggle(project, session) {
+  if (inStack(project, session)) {
+    const at = S.stackSel.findIndex(m => m.project === project && m.session === session);
+    S.stackSel.splice(at, 1);
+    if (S.stackAt > at || S.stackAt >= S.stackSel.length) S.stackAt = Math.max(0, S.stackAt - 1);
+  } else S.stackSel.push({ project, session });
+  saveStack();
+}
+
+// ── a column's context ──────────────────────────────────────────────────────────────────
+function ctxOf(m) {
+  const key = colKey(m.project, m.session);
+  let c = stackCtx.get(key);
+  if (!c) {
+    c = { key, project: m.project, session: m.session, sess: null, draft: draftGet(draftKey(m.project, m.session)),
+          caret: null, chatMem: null, chatLoad: { key, tries: 0, why: '' },
+          drawn: { who: '', keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() },
+          // the column on screen: its root, its bar, its list and its composer row, kept across
+          // renders exactly as keepScreen keeps the session screen's (paintCol)
+          root: null, bar: null, barSig: '', chat: null, comp: null, compSig: '', box: null, strip: null,
+          due: 0, busy: false };
+    stackCtx.set(key, c);
+  }
+  return c;
+}
+const stackActive = () => stackCtx.get(stackActiveKey) || null;
+const cardFor = (c) => ((stackGrids.get(c.project) || {}).cards || []).find(x => x.name === c.session) || null;
+// The open chat's half of S and of this file, into a column and back out of one.
+function stashInto(c) {
+  c.sess = S.sess; c.draft = S.draft; c.caret = S.caret;
+  c.chatMem = chatMem; c.chatLoad = chatLoad; c.drawn = { ...drawn };
+}
+function loadFrom(c) {
+  S.project = c.project; S.session = c.session; S.sess = c.sess; S.draft = c.draft; S.caret = c.caret;
+  S.grid = stackGrids.get(c.project) || null; S.sub = ''; S.view = 'chat';
+  chatMem = c.chatMem; chatLoad = c.chatLoad; Object.assign(drawn, c.drawn);
+  chatNode = c.chat; composerNode = c.box; photoStripNode = c.strip;
+  chatSK = 'chat:' + c.key;
+}
+// Run `fn` with column `c` as the open chat, synchronously, and put the focused one back.
+function withCol(c, fn) {
+  const a = stackActive();
+  if (a === c) return fn();
+  if (a) stashInto(a);
+  loadFrom(c);
+  try { return fn(); }
+  finally { stashInto(c); if (a) loadFrom(a); }
+}
+
+// ── which columns are on screen ────────────────────────────────────────────────────────
+// A desk shows the first STACK_COLS of the selection; a phone shows the focused one.
+function stackShown() {
+  const ms = S.stackSel;
+  if (!ms.length) return [];
+  if (!wideNow()) return [ctxOf(ms[Math.min(S.stackAt, ms.length - 1)])];
+  return ms.slice(0, STACK_COLS).map(ctxOf);
+}
+function stackProjects() {
+  const a = stackActive();
+  const ps = [...new Set(stackShown().map(c => c.project))];
+  return a ? [a.project, ...ps.filter(p => p !== a.project)] : ps;
+}
+
+// ── moving the focus ───────────────────────────────────────────────────────────────────
+// Makes member `i` the open chat. Cheap on purpose — it runs on every pointerdown in a
+// column — so a column that is already focused costs nothing, and a switch moves the
+// classes and the globals rather than redrawing (the render it asks for is deferred while
+// the owner types, like every other).
+function stackFocus(i, { draw = true } = {}) {
+  const ms = S.stackSel;
+  if (!ms.length) return;
+  i = Math.max(0, Math.min(i, ms.length - 1));
+  const c = ctxOf(ms[i]);
+  S.stackAt = i; saveStack();
+  if (stackActiveKey === c.key) return;
+  const a = stackActive();
+  if (a) stashInto(a);
+  stackActiveKey = c.key;
+  loadFrom(c);
+  for (const x of stackCtx.values()) if (x.root) try { x.root.classList.toggle('on', x === c); } catch {}
+  // The focused column's poll takes over from the stack poller's — at once if nothing has
+  // been drawn for it yet.
+  stopChatPoll();
+  if (!chatHas()) readChat(); else syncChatPoll();
+  if (draw) renderUnlessTyping();
+}
+// ⇧← / ⇧→: the desk stack's focus ring, which wraps (`select-pane -t :.+` / `:.-`).
+function stackCycle(d) {
+  const n = wideNow() ? Math.min(S.stackSel.length, STACK_COLS) : S.stackSel.length;
+  if (n < 2) return;
+  const at = Math.min(S.stackAt, n - 1);
+  stackFocus((at + d + n) % n);
+  if (enterSends()) focusComposerAt(null);
+}
+// A swipe: STOPS AT THE ENDS, as the chat's swipe to the next session does, for the same
+// reason (stepSession) — a flick at the last one must not silently show the first.
+function stackStep(d) {
+  const to = S.stackAt + d;
+  if (to < 0 || to >= S.stackSel.length) return;
+  stackFocus(to, { draw: false });
+  render();
+}
+// Ctrl-a < / Ctrl-a >: the desk's move, which ROTATES — pushed off one end, a column comes
+// back at the other (bin/fleet-stack swap_plan) — over the whole selection, so moving the
+// last column shown to the right is also how the next hidden one comes in.
+function stackMove(d) {
+  const ms = S.stackSel, n = ms.length;
+  if (n < 2) return;
+  const at = Math.min(S.stackAt, n - 1);
+  const [it] = ms.splice(at, 1);
+  const to = d > 0 ? (at === n - 1 ? 0 : at + 1) : (at === 0 ? n - 1 : at - 1);
+  ms.splice(to, 0, it);
+  S.stackAt = to;
+  if (wideNow() && to >= STACK_COLS) {
+    // Pushed past the last column: it is hidden now, and the focus stays on screen.
+    S.stackAt = STACK_COLS - 1;
+    stackActiveKey = '';
+    stackFocus(S.stackAt, { draw: false });
+  }
+  saveStack();
+  render();
+}
+// A hidden member's chip: it takes the focused column's place, and the focused one goes
+// to where the chip's member was — a swap, so nothing else on screen moves.
+function stackSwapIn(j) {
+  const ms = S.stackSel, at = Math.min(S.stackAt, ms.length - 1);
+  if (j === at || !ms[j]) return;
+  [ms[at], ms[j]] = [ms[j], ms[at]];
+  stackActiveKey = '';
+  stackFocus(at, { draw: false });
+  saveStack();
+  render();
+}
+function stackClose(c) {
+  stackToggle(c.project, c.session);
+  if (c.root && c.root.parentNode) try { c.root.parentNode.removeChild(c.root); } catch {}
+  stackCtx.delete(c.key);
+  if (stackActiveKey === c.key) stackActiveKey = '';
+  if (!S.stackSel.length) { leaveStack(); return; }
+  stackFocus(S.stackAt, { draw: false });
+  render(); refresh();
+}
+
+// ── in and out ─────────────────────────────────────────────────────────────────────────
+// Where back goes from the picker or the stack: the screen the picker was opened from.
+function stackOrigin() {
+  if (S.screen === 'stack' || S.screen === 'stackpick') return S.stackBack || { screen: 'projects' };
+  return { screen: S.screen === 'session' || S.screen === 'grid' || S.screen === 'queue' ? S.screen : 'projects',
+           project: S.project, sub: S.sub, session: S.session, entry: S.entry, view: S.view };
+}
+function openStackPicker() {
+  if (S.screen === 'stackpick') return;
+  if (S.screen === 'stack') { S.pickBack = 'stack'; leaveStackState(); }
+  else {
+    S.stackBack = stackOrigin(); S.pickBack = '';
+    talkStop(''); stopSpeaking(); S.jarvisMode = false;
+  }
+  S.screen = 'stackpick'; S.srch = null; S.confirm = null;
+  S.pick = { cur: S.pick && S.pick.cur || '', q: null, typing: false, msg: '' };
+  scrollMem.delete('pick');
+  pushNav();
+  render(); refresh();
+}
+function openStack() {
+  if (!S.stackSel.length) { S.pick = { ...(S.pick || {}), msg: 'the stack is empty — press space on a session first' }; render(); return; }
+  const fromPick = S.screen === 'stackpick';
+  if (!fromPick) { S.stackBack = stackOrigin(); talkStop(''); stopSpeaking(); S.jarvisMode = false; }
+  S.screen = 'stack'; S.pick = null; S.confirm = null; S.pane = null; S.paneErr = '';
+  S.pickBack = '';
+  // Every column re-reads its stored draft: a session screen may have changed it since.
+  for (const m of S.stackSel) { const c = ctxOf(m); if (c.key !== stackActiveKey) c.draft = draftGet(draftKey(c.project, c.session)); }
+  stackActiveKey = '';
+  stackFocus(S.stackAt, { draw: false });
+  focusOnOpen = true;
+  if (!fromPick) pushNav();
+  render(); refresh();
+}
+// Leaving the stack's screen by any route: the focused column's state goes back into its
+// context, so coming back finds the conversation (and the half-typed message) where it was.
+function leaveStackState() {
+  const a = stackActive();
+  if (a) stashInto(a);
+  stackActiveKey = '';
+  chatSK = 'chat';
+  stopStackPoll();
+}
+// Back out of the stack (or a picker opened from outside it) to where it was opened from.
+function leaveStack() {
+  leaveStackState();
+  const b = S.stackBack || { screen: 'projects' };
+  S.stackBack = null; S.pick = null; S.pickBack = '';
+  S.sess = null; S.pane = null; S.paneErr = ''; S.view = b.view === 'pane' ? 'pane' : DEFAULT_VIEW;
+  S.project = b.project || null; S.sub = b.sub || ''; S.entry = b.entry || '';
+  if (b.screen === 'session' && b.session) { S.screen = 'session'; S.session = b.session; S.draft = draftGet(draftKey()); S.grid = null; }
+  else if (b.screen === 'grid' && b.project) { S.screen = 'grid'; S.session = null; S.grid = null; }
+  else if (b.screen === 'queue') { S.screen = 'queue'; S.session = null; }
+  else { S.screen = 'projects'; S.session = null; }
+}
+// The pane from inside a column ("open the pane" on a blocked session): the session screen,
+// one level down, and back from it is the stack again.
+function openFromStack(view) {
+  const a = stackActive();
+  if (!a) return;
+  leaveStackState();
+  S.fromStack = true;
+  S.screen = 'session'; S.project = a.project; S.session = a.session; S.sess = null;
+  S.grid = stackGrids.get(a.project) || null; S.entry = '';
+  S.view = view; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.draft = draftGet(draftKey()); scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+
+// ── the picker's list ──────────────────────────────────────────────────────────────────
+// Every session of every project Projects is showing, from each project's grid. A project
+// whose rollup says it has nothing running is not read at all.
+function pickProjects() {
+  return visibleProjects().map(({ p }) => p).filter(p => !p.sessions || (p.sessions.total || 0) > 0);
+}
+function pickItems() {
+  const out = [];
+  let host = null;
+  for (const p of pickProjects()) {
+    const g = stackGrids.get(p.name);
+    const cards = ((g && g.cards) || []).filter(c => !c.lost);
+    if (g && !cards.length) continue;
+    // BY MACHINE, THEN BY PROJECT, once there is more than one machine — the tab's grouping
+    // (tabOf), so the picker and Projects agree about where a project lives.
+    if (S.hosts && p.host !== host) { host = p.host || ''; out.push({ header: 'host', text: host }); }
+    out.push({ header: 'project', text: G.bareName(p.name), project: p.name, profile: profileOf(p) });
+    if (!g) { out.push({ waiting: true, project: p.name }); continue; }
+    for (const c of cards) out.push({ project: p.name, card: c, key: colKey(p.name, c.name) });
+  }
+  return out;
+}
+// The rows the list shows: all of them, or — while a search matches something — the
+// matches and the headers above them. A query that matches nothing leaves the whole list
+// up, as the desk does, and the prompt says so.
+function pickMatches(list) {
+  const q = S.pick && S.pick.q;
+  return q ? matchIndices(list, q, it => it.card ? { label: G.bareName(it.project), name: it.card.label || it.card.name } : null) : [];
+}
+function pickView(list) {
+  const m = pickMatches(list);
+  if (!m.length) return list.map((_, i) => i);
+  const keep = new Set(m), view = [];
+  let hp = -1, hh = -1;
+  list.forEach((it, i) => {
+    if (it.header === 'host') { hh = i; hp = -1; return; }
+    if (it.header === 'project') { hp = i; return; }
+    if (!keep.has(i)) return;
+    if (hh >= 0) { view.push(hh); hh = -1; }
+    if (hp >= 0) { view.push(hp); hp = -1; }
+    view.push(i);
+  });
+  return view;
+}
+// The cursor is a SESSION, not a position (the desk's sBuild): a session that starts or
+// stops above it must not walk it onto something else between two polls.
+function pickCursor(list, view) {
+  const rows = view.filter(i => list[i].card);
+  if (!rows.length) return -1;
+  const at = list.findIndex(it => it.key && it.key === (S.pick && S.pick.cur));
+  if (at >= 0 && rows.includes(at)) return at;
+  const m = pickMatches(list);
+  const first = m.length ? m[0] : rows[0];
+  if (S.pick) S.pick.cur = list[first].key;
+  return first;
+}
+function pickMove(d) {
+  const list = pickItems(), view = pickView(list);
+  const rows = view.filter(i => list[i].card);
+  const at = rows.indexOf(pickCursor(list, view));
+  const to = rows[at + d];
+  if (to != null) S.pick.cur = list[to].key;
+}
+function pickToggleCur() {
+  const list = pickItems(), i = pickCursor(list, pickView(list)), it = list[i];
+  if (it && it.card) stackToggle(it.project, it.card.name);
+}
+function pickStepMatch(d) {
+  const list = pickItems(), m = pickMatches(list);
+  const i = stepMatch(m, pickCursor(list, pickView(list)), d);
+  if (i >= 0) S.pick.cur = list[i].key;
+}
+
+// ── drawing the picker ─────────────────────────────────────────────────────────────────
+// Its own column, kept across polls: the list is rebuilt only when what it says changed, so
+// a 5 s tick that brought nothing new leaves every card — and the list's scroll — alone.
+function paintPicker(app) {
+  if (!pickRoot || pickRoot.bar.parentNode !== app) {
+    app.textContent = ''; screenMem = null;
+    pickRoot = { bar: el('div', { class: 'sbar' }), barSig: '', find: null, line: el('div', { class: 'confirm search' }),
+                 list: el('div', { class: 'cards pick-list' }), sig: '' };
+    watchScroll('pick', pickRoot.list);
+    app.append(pickRoot.bar, pickRoot.line, pickRoot.list);
+  }
+  const P = pickRoot;
+  const list = pickItems(), view = pickView(list), cur = pickCursor(list, view);
+  const n = S.stackSel.length;
+  // ── the bar: back, what this is, and the button that opens it ──
+  const barSig = `${n}`;
+  if (P.barSig !== barSig) {
+    P.barSig = barSig;
+    P.bar.textContent = '';
+    P.bar.append(
+      btn('‹', () => back()),
+      el('div', { class: 'who' }, [
+        el('span', { class: 'nm', text: 'stack' }),
+        el('span', { class: 'st' }, [el('span', { class: 'scope', text: n ? `${n} stacked` : 'several sessions on screen at once, across projects' })]),
+      ]),
+      btn(n ? `open ${n}` : 'open', () => openStack(), 'go'),
+    );
+  }
+  // ── the find field (touch) — the desk's `/` answers keys instead ──
+  const touch = !finePointer();
+  if (touch && !P.find) {
+    const inp = el('input', { type: 'search', placeholder: 'find a session or project', 'aria-label': 'find a session or project',
+                              enterkeyhint: 'search', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' });
+    inp.addEventListener('input', () => { S.pick.q = inp.value || null; S.pick.typing = false; S.pick.cur = ''; render(); });
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); try { inp.blur(); } catch {} }
+      else if (e.key === 'Escape') { e.preventDefault(); inp.value = ''; S.pick.q = null; render(); try { inp.blur(); } catch {} }
+    });
+    P.find = el('div', { class: 'find' }, [inp]);
+    app.insertBefore(P.find, P.line);
+  }
+  // ── the one line under it: the search, or what space and ⏎ do ──
+  const m = pickMatches(list);
+  const q = S.pick.q;
+  let line;
+  if (S.pick.msg) line = S.pick.msg;
+  else if (q != null && !touch) {
+    const at = m.indexOf(cur);
+    line = `/${q}${S.pick.typing ? '▏' : ''}  ` + (!q ? 'type part of a session or project name · esc cancel'
+      : !m.length ? `nothing matches '${q}'`
+      : S.pick.typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · space add · ⏎ keep · esc clear`
+      : `${at >= 0 ? `${at + 1} of ${m.length}` : `${m.length} matches`} · n/N next/prev · space add · ⏎ open the stack · / edit · esc clear`);
+  } else if (q && touch) line = m.length ? `${m.length} match${m.length === 1 ? '' : 'es'} — tap to add or remove` : `nothing matches '${q}'`;
+  else line = touch ? 'tap a session to add or remove it · open shows them together'
+    : '↑↓/jk move · / find · space or click add/remove · ⏎ open the stack · c clear · esc back';
+  if (P.line.textContent !== line) P.line.textContent = line;
+  // The search speaks in the confirm row's yellow, as the grid's does; otherwise a hint.
+  const cls = (q != null && !touch) || S.pick.msg ? 'confirm search' : 'hint';
+  if (P.line.className !== cls) P.line.className = cls;
+  // ── the list ──
+  const sig = JSON.stringify([view.map(i => { const it = list[i]; return it.card ? [it.key, it.card.status, it.card.label, inStack(it.project, it.card.name), i === cur] : [it.header || 'w', it.text || it.project]; }), q]);
+  if (P.sig !== sig) {
+    P.sig = sig;
+    // ROW BY ROW, NOT THE LIST. Each project's grid arrives on its own, and rebuilding every
+    // card when one more project landed replaced the node under a finger between its
+    // pointerdown and its pointerup — the tap was lost. A row whose model reads the same
+    // keeps its node; only what changed is new.
+    const was = P.rows || new Map(), now = new Map();
+    const keep = (key, sig2, make) => {
+      const h = was.get(key);
+      const node = h && h.sig === sig2 ? h.node : make();
+      now.set(key, { sig: sig2, node });
+      return node;
+    };
+    const nodes = [];
+    if (!S.projects) nodes.push(...skeletonCards(3));
+    else if (!list.length) nodes.push(keep('none', '', () => el('div', { class: 'sect', text: 'no live sessions in any project' })));
+    for (const i of view) {
+      const it = list[i];
+      if (it.header === 'host') { nodes.push(keep('h:' + it.text, '', () => el('div', { class: 'sect pick-host', text: it.text }))); continue; }
+      if (it.header === 'project') {
+        const t = it.text + (it.profile && it.profile !== 'work' ? ` · ${it.profile}` : '');
+        nodes.push(keep('p:' + it.project, t, () => el('div', { class: 'sect pick-proj', text: t })));
+        continue;
+      }
+      if (it.waiting) { nodes.push(keep('w:' + it.project, '', () => skeletonCards(1)[0])); continue; }
+      const on = inStack(it.project, it.card.name);
+      const mdl = { ...G.cardModel(it.card, i === cur, -1), num: null };
+      nodes.push(keep('c:' + it.key, JSON.stringify([mdl, on]), () => {
+        const node = cardEl(mdl, { tap: () => { S.pick.cur = it.key; S.pick.msg = ''; stackToggle(it.project, it.card.name); render(); } }, -1);
+        node.classList.add('pickrow');
+        node.classList.toggle('stacked', on);
+        node.dataset.key = it.key;
+        node.setAttribute('aria-pressed', on ? 'true' : 'false');
+        const top = node.querySelector && node.querySelector('.c-top');
+        if (top) top.insertBefore(el('span', { class: 'chip ' + (on ? 'lead' : 'tag'), text: on ? '✓ stacked' : '+ add' }), top.firstChild);
+        return node;
+      }));
+    }
+    P.rows = now;
+    if (!sameKids(P.list, nodes)) place(P.list, nodes);
+  }
+  renderSheet();
+}
+
+// ── drawing the stack ──────────────────────────────────────────────────────────────────
+// The bar across the top, then one column per conversation on screen. Every node is KEPT
+// across renders and only what changed is replaced — the column's bar by its signature, its
+// list message by message (syncChat), its composer while the box still holds the draft — so a
+// poll that brought nothing changes no DOM, a focused box keeps its focus and its keyboard,
+// and every list keeps its scroll.
+function paintStack(app) {
+  if (!stackRoot || stackRoot.head.parentNode !== app) {
+    app.textContent = ''; screenMem = null;
+    stackRoot = { head: el('div', { class: 'sbar stack-bar' }), headSig: '', toast: null, cols: el('div', { class: 'stack' }) };
+    app.append(stackRoot.head, stackRoot.cols);
+  }
+  const R = stackRoot;
+  const shown = stackShown();
+  const wide = wideNow();
+  if (wide && S.stackAt >= shown.length) stackFocus(shown.length - 1, { draw: false });
+  // Reopened on the stack (a reload, a relaunch): nothing is focused yet, so the column the
+  // stack was left on is.
+  if (!stackActive() && shown.length) { stackFocus(S.stackAt, { draw: false }); focusOnOpen = true; }
+  const a = stackActive();
+  // ── the bar ──
+  const hidden = wide ? S.stackSel.slice(STACK_COLS) : [];
+  const ac = a ? cardFor(a) : null;
+  const am = ac && G.STATUS[ac.status];
+  const headSig = JSON.stringify([wide, S.stackSel.length, S.stackAt, hidden.map(m => colKey(m.project, m.session)),
+    a && a.key, ac && [ac.status, ac.label], modeSpec().text]);
+  if (R.headSig !== headSig) {
+    R.headSig = headSig;
+    R.head.textContent = '';
+    if (wide) {
+      R.head.append(...[
+        btn('‹', () => back()),
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: 'stack' }),
+          el('span', { class: 'st' }, [el('span', { class: 'scope', text: `${S.stackSel.length} stacked · ⇧← ⇧→ focus · Ctrl-a < > move` }), modeChip()]),
+        ]),
+        hidden.length ? el('div', { class: 'seg stack-hidden', 'aria-label': `${hidden.length} more stacked, not shown` },
+          hidden.map((m, j) => {
+            const b = btn(`${G.bareName(m.session)}`, () => stackSwapIn(STACK_COLS + j));
+            b.setAttribute('title', `show ${m.session} (${said(m.project)}) in place of the focused column`);
+            return b;
+          })) : null,
+        btn('+', () => openStackPicker()),
+      ].filter(Boolean));
+      R.head.lastChild.setAttribute('aria-label', 'pick sessions for the stack');
+    } else {
+      // ONE CONVERSATION ON SCREEN: its name is the bar's, with where it is in the stack.
+      const nm = (ac && ac.label) || (a && a.session) || '';
+      R.head.append(
+        btn('‹', () => back()),
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: nm }),
+          el('span', { class: 'st' }, [
+            am ? el('span', { style: `color:${G.COLORS[am.color]}`, text: am.label }) : null,
+            el('span', { class: 'scope', text: ` ${a ? said(a.project) : ''}` }),
+          ]),
+        ]),
+        el('div', { class: 'seg stack-pos' }, [
+          btn('◂', () => stackStep(-1)),
+          el('span', { class: 'pos', 'aria-label': 'position in the stack', text: `${Math.min(S.stackAt, S.stackSel.length - 1) + 1}/${S.stackSel.length}` }),
+          btn('▸', () => stackStep(1)),
+        ]),
+        btn('×', () => { if (a) stackClose(a); }),
+        btn('+', () => openStackPicker()),
+      );
+    }
+  }
+  // ── one toast, above the columns ──
+  if (R.toast && R.toast.parentNode) R.toast.parentNode.removeChild(R.toast);
+  R.toast = null;
+  if (S.toast) {
+    const t = S.toast, act = t.action;
+    R.toast = act ? el('div', { class: ('toast act ' + (t.kind || '')).trim() }, [el('span', { text: t.text }), btn(act.label, () => { S.toast = null; act.fn(); })])
+                  : el('div', { class: ('toast ' + (t.kind || '')).trim(), text: t.text });
+    app.insertBefore(R.toast, R.cols);
+  }
+  // ── the columns ──
+  for (const c of shown) paintCol(c, wide);
+  if (a) { chatNode = a.chat; composerNode = a.box; photoStripNode = a.strip; }
+  const roots = shown.map(c => c.root);
+  if (!sameKids(R.cols, roots)) place(R.cols, roots);
+  R.cols.classList.toggle('one', !wide);
+  renderSheet();
+}
+// One column: its bar, its conversation and its composer, with column `c` as the open chat.
+function paintCol(c, wide) {
+  const on = c.key === stackActiveKey;
+  if (!c.root) {
+    c.root = el('div', { class: 'scol' });
+    c.root.dataset.key = c.key;
+    // FOCUS FIRST, THEN THE CLICK. pointerdown runs before the click it starts and before
+    // the focus it moves, so whatever was pressed in this column acts on this column.
+    const focusMe = () => { const i = S.stackSel.findIndex(m => colKey(m.project, m.session) === c.key); if (i >= 0) stackFocus(i); };
+    c.root.addEventListener('pointerdown', focusMe, true);
+    c.root.addEventListener('focusin', focusMe, true);
+  }
+  c.root.classList.toggle('on', on);
+  withCol(c, () => {
+    const card = cardFor(c);
+    // ── its bar (a desk only: on a phone the stack's bar is this column's) ──
+    const meta = card && G.STATUS[card.status];
+    const barSig = wide ? JSON.stringify([card && card.label, card && card.status, c.project, S.hosts && S.hosts.length]) : '';
+    if (!wide) { if (c.bar && c.bar.parentNode) c.bar.parentNode.removeChild(c.bar); c.bar = null; c.barSig = ''; }
+    else if (c.barSig !== barSig || !c.bar) {
+      c.barSig = barSig;
+      const bar = el('div', { class: 'sbar scol-bar' }, [
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: (card && card.label) || c.session }),
+          el('span', { class: 'st' }, [
+            meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
+            el('span', { class: 'scope', text: ` ${said(c.project)}` }),
+          ]),
+        ]),
+        btn('×', () => stackClose(c)),
+      ]);
+      bar.lastChild.setAttribute('aria-label', `close ${c.session}`);
+      bar.lastChild.setAttribute('title', 'take this conversation out of the stack');
+      if (c.bar && c.bar.parentNode === c.root) c.root.replaceChild(bar, c.bar);
+      c.bar = bar;
+    }
+    const gone = !card && stackGrids.has(c.project)
+      ? el('div', { class: 'hint', text: `'${c.session}' is not on ${said(c.project)}'s grid any more.` }) : null;
+    // ── its conversation ──
+    const built = chatView(card);
+    if (c.chat && isLive(c.chat) && canCompare(c.chat)) { syncChat(c.chat, built); chatNode = c.chat; }
+    else c.chat = built;
+    // ── its composer: kept while the box on screen still holds this column's draft ──
+    const row = composer(card, {});
+    const sig = sigOf(row);
+    const liveText = c.box && isLive(c.box) ? c.box.value : null;
+    if (c.comp && isLive(c.comp) && c.compSig === sig && liveText === (S.draft || '')) {
+      composerNode = c.box;
+      try { const strip = c.comp.querySelector && c.comp.querySelector('.photos'); if (strip) photoStripNode = strip; } catch {}
+    } else {
+      c.comp = row; c.compSig = sig; c.box = composerNode;
+    }
+    c.strip = photoStripNode;
+    const kids = [c.bar, gone, c.chat, c.comp].filter(Boolean);
+    if (!sameKids(c.root, kids)) place(c.root, kids);
+  });
+}
+// A column's list, redrawn after a read the stack poller made for it — into its own node,
+// message by message, touching nothing else on screen (the patchChat of a column).
+//   The whole column, by paintCol, which keeps every node that reads the same: the bar is
+// replaced only if its status changed, and the box only if it no longer holds the draft — so
+// a focused box being typed into is never touched.
+function patchCol(c) {
+  if (S.screen !== 'stack' || !c.root || !isLive(c.root) || !c.chat || !isLive(c.chat)) { if (S.screen === 'stack' && !pollPaused()) render(); return; }
+  paintCol(c, wideNow());
+  const a = stackActive();
+  if (a) { chatNode = a.chat; composerNode = a.box; photoStripNode = a.strip; }
+}
+
+// ── the stack's own poll, for the columns that are not focused ─────────────────────────
+// One read at a time, the most overdue first, never two starts closer than STACK_GAP_MS —
+// see the read rate at the top of this section. Conditional like the chat's own (ETag), so
+// an idle column costs the tunnel a 304.
+let stackTimer = null, stackLastAt = 0, stackGridDue = 0;
+const stackPollWanted = () => !document.hidden && !S.locked && S.screen === 'stack';
+function stopStackPoll() { if (stackTimer) { clearTimeout(stackTimer); stackTimer = null; } }
+function colPeriod(c) {
+  if (!c.sess) return Math.min(1000 * 2 ** Math.max(0, c.chatLoad.tries - 1), CHAT_RETRY_MAX_MS);
+  const card = cardFor(c);
+  const live = S.outbox.some(o => o.project === c.project && o.session === c.session)
+            || (card && (card.status === 'working' || card.status === 'starting'));
+  return live ? CHAT_POLL_LIVE_MS : CHAT_POLL_IDLE_MS;
+}
+function syncStackPoll() {
+  if (!stackPollWanted()) return stopStackPoll();
+  if (!stackTimer) armStackPoll(0);
+}
+function armStackPoll(ms) {
+  stopStackPoll();
+  if (!stackPollWanted()) return;
+  stackTimer = setTimeout(stackTick, Math.max(ms, api.heldFor()));
+}
+async function stackTick() {
+  stackTimer = null;
+  if (!stackPollWanted()) return;
+  const now = Date.now();
+  // The most overdue of: each column that is not focused, and the next grid.
+  const others = stackShown().filter(c => c.key !== stackActiveKey);
+  const col = others.length ? others.reduce((x, c) => (c.due < x.due ? c : x)) : null;
+  const gridFirst = !col || stackGridDue <= col.due;
+  const due = gridFirst ? stackGridDue : col.due;
+  if (due > now) return armStackPoll(due - now);
+  const gap = stackLastAt + STACK_GAP_MS - now;
+  if (gap > 0) return armStackPoll(gap);
+  stackLastAt = now;
+  if (gridFirst) { await stackGridRead(); stackGridDue = Date.now() + STACK_GRID_MS; }
+  else { await stackRead(col); col.due = Date.now() + colPeriod(col); }
+  armStackPoll(STACK_GAP_MS);
+}
+// One project's grid: the focused column's every other time, the rest in turn. What it says
+// is drawn into the column bars and lists that changed, never into a composer.
+async function stackGridRead() {
+  const ps = stackProjects();
+  if (!ps.length) return;
+  const p = (stackRR++ % 2 === 0 || ps.length === 1) ? ps[0] : ps[1 + (Math.floor(stackRR / 2) % (ps.length - 1))];
+  try {
+    const g = await api.getGrid(p);
+    const was = JSON.stringify(((stackGrids.get(p) || {}).cards || []).map(c => [c.name, c.status, c.label]));
+    stackGrids.set(p, g);
+    if (S.screen !== 'stack') return;
+    const a = stackActive();
+    if (a && a.project === p) S.grid = g;
+    if (JSON.stringify((g.cards || []).map(c => [c.name, c.status, c.label])) === was) return;
+    // A status changed: the whole screen if nobody is typing, else just the lists.
+    if (!pollPaused()) render();
+    else for (const c of stackShown()) if (c.project === p) patchCol(c);
+  } catch (e) {
+    if (e instanceof api.AuthError) lock();
+  }
+}
+async function stackRead(c) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const giveUp = setTimeout(() => { try { ctl && ctl.abort(); } catch {} }, STACK_GIVEUP_MS);
+  const seq = ++sessSeq;
+  try {
+    const r = await api.getSession(c.project, c.session, null, { etag: (c.sess && c.sess.etag) || '', signal: ctl ? ctl.signal : undefined });
+    // Focused meanwhile: its own poll owns it now, and has (or will have) newer.
+    if (c.key === stackActiveKey || !stackCtx.has(c.key)) return;
+    c.chatLoad = { key: c.key, tries: 0, why: '' };
+    if (r && r.notModified) { if (c.sess) c.sess.seq = seq; return; }
+    c.sess = { ...mergeNewest(c.sess, r), of: c.key, seq };
+    withCol(c, () => reconcileOutbox());
+    patchCol(c);
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock(); return; }
+    if (e instanceof api.RateLimitedError) return;           // the hold moves the next tick
+    if (c.sess || c.key === stackActiveKey) return;
+    const why = ctl && ctl.signal.aborted ? 'the Mac has not answered yet'
+      : e instanceof api.OfflineError ? 'the Mac is not answering' : String((e && e.message) || e);
+    c.chatLoad = { key: c.key, tries: c.chatLoad.tries + 1, why };
+    patchCol(c);
+  } finally { clearTimeout(giveUp); }
+}
+// What refresh() reads for the stack: only a grid no column has had yet, so a first open has a
+// status for every column. After that the grids are the stack poller's (stackGridRead).
+async function refreshStack() {
+  const missing = stackProjects().filter(p => !stackGrids.has(p));
+  await Promise.all(missing.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); })));
+  const a = stackActive();
+  if (a) S.grid = stackGrids.get(a.project) || null;
+  if (a && !chatHas()) await readChat();
+  reconcileOutbox();
+}
+// ...and for the picker: the projects list if there is none yet, every grid on the way in,
+// then a few at a time.
+async function refreshPicker() {
+  if (!S.projects) { const j = await api.getProjects(); S.projects = j.projects; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+  const ps = pickProjects().map(p => p.name);
+  const missing = ps.filter(p => !stackGrids.has(p));
+  let want = missing;
+  if (!missing.length && ps.length) {
+    want = [];
+    for (let k = 0; k < Math.min(PICK_GRIDS_PER_TICK, ps.length); k++) want.push(ps[(pickRR++) % ps.length]);
+  }
+  await Promise.all(want.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); }, (e) => { if (e instanceof api.AuthError) throw e; })));
+}
+
+// ── the keys ───────────────────────────────────────────────────────────────────────────
+// The picker is the desk's onKeyStack: ↑↓/jk move, space toggles, ⏎ opens, `/` finds (every
+// printable key but space types into the query; ⏎ keeps it, then n/N step), c clears the
+// whole stack, Esc / q / ` go back.
+function pickKey(e, k, lk, ctrl) {
+  const P = S.pick;
+  P.msg = '';
+  if (ctrl) {
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'c' && P.q == null) { back(); return true; }
+    return false;
+  }
+  const enter = k === 'Enter';
+  if (P.q != null) {
+    const shorter = () => [...P.q].slice(0, -1).join('');
+    if (k === 'Escape') { P.q = null; render(); return true; }
+    if (k === 'ArrowUp') { pickMove(-1); render(); return true; }
+    if (k === 'ArrowDown') { pickMove(1); render(); return true; }
+    if (k === ' ') { pickToggleCur(); render(); return true; }
+    if (P.typing) {
+      if (enter) { if (pickMatches(pickItems()).length) P.typing = false; render(); return true; }
+      if (k === 'Backspace') { if (!P.q) P.q = null; else { P.q = shorter(); P.cur = ''; } render(); return true; }
+      if (k.length === 1) { P.q += k; P.cur = ''; render(); return true; }
+      return false;
+    }
+    if (k === 'q' || k === '`') { P.q = null; render(); return true; }
+    if (k === '/') { P.typing = true; render(); return true; }
+    if (k === 'Backspace') { P.typing = true; P.q = shorter(); P.cur = ''; render(); return true; }
+    if (enter) { openStack(); return true; }
+    if (k === 'n' || k === 'N') { pickStepMatch(k === 'n' ? 1 : -1); render(); return true; }
+    if (k === 'j') { pickMove(1); render(); return true; }
+    if (k === 'k') { pickMove(-1); render(); return true; }
+    return true;                      // inert while a search is kept, as at the desk
+  }
+  if (k === 'Escape' || k === 'q' || k === '`') { back(); return true; }
+  if (k === 'ArrowUp' || k === 'k') { pickMove(-1); render(); return true; }
+  if (k === 'ArrowDown' || k === 'j') { pickMove(1); render(); return true; }
+  if (k === '/') { P.q = ''; P.typing = true; render(); return true; }
+  if (k === ' ') { pickToggleCur(); render(); return true; }
+  if (k === 'c' || k === 'C') { S.stackSel = []; S.stackAt = 0; saveStack(); render(); return true; }
+  if (enter) { openStack(); return true; }
+  return false;
+}
+// The stack: ⇧←/⇧→ move the focus round the columns, Ctrl-a < / > move the focused column,
+// Ctrl-a x (or Ctrl-x) is the picker, ` and Ctrl-a g/d go back, and every other key goes to
+// the focused column's agent — typed into its composer, as on the session screen.
+function stackKey(e, k, lk, ctrl) {
+  if (S.prefix) {
+    S.prefix = false;
+    if (ctrl) return lk === 'a';
+    if (k === '<' || k === '{') stackMove(-1);
+    else if (k === '>' || k === '}') stackMove(1);
+    else if (lk === 'x') openStackPicker();
+    else if (lk === 'g' || lk === 'd') back();
+    else if (lk === 'p') toProjects();
+    else if (lk === 'f') startJump();
+    else if (k === 'ArrowRight') stackCycle(1);
+    else if (k === 'ArrowLeft') stackCycle(-1);
+    return true;
+  }
+  if (ctrl) {
+    if (lk === 'a') { S.prefix = true; return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  if (k === '`') { back(); return true; }
+  if (e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) { stackCycle(k === 'ArrowRight' ? 1 : -1); return true; }
+  if (k.length === 1 && !e.altKey) return typeIntoComposer(k);
+  if (k === 'Enter') { focusComposerAt(null); return true; }
+  return false;
 }
 
 // ── the terminal: a fleet tab, on this screen ─────────────────────────────────
@@ -2946,6 +3773,7 @@ function paintTerm(app = document.getElementById('app')) {
 }
 
 function setView(v) {
+  if (S.screen === 'stack') { if (v === 'pane') openFromStack('pane'); return; }
   if (S.view === v) return;
   S.view = v;
   render();
@@ -2997,7 +3825,9 @@ function wireSessionSwipe(node) {
     // Mostly horizontal, and far enough to be deliberate — the same two tests wire() makes
     // for a card swipe, with the same constants, so the two gestures feel like one gesture.
     if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
-    stepSession(dx < 0 ? 1 : -1);
+    // In the stack the next conversation is the next in the STACK, not the next on the grid.
+    if (S.screen === 'stack') stackStep(dx < 0 ? 1 : -1);
+    else stepSession(dx < 0 ? 1 : -1);
   });
   return node;
 }
@@ -3024,7 +3854,7 @@ function chatView(card) {
   // 589, and the next message threw them to the end at 1408. The restore is deferred to the
   // next frame, so the content appended below is there by the time it measures.
   chatNode = wrap;
-  watchScroll('chat', wrap);
+  watchScroll(chatSK, wrap);
   try { wrap.addEventListener('scroll', () => nearTop(wrap)); } catch {}
   const s = S.sess;
   if (card && card.status === 'need-you') {
@@ -3814,6 +4644,15 @@ function composer(card, opts = {}) {
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
   composerNode = box;      // pollPaused() compares document.activeElement against this
+  // WHOSE BOX THIS IS. With a stack on screen there are several composers and one open chat
+  // (S.project/S.session — the focused column); a box that belongs to another column must
+  // not write ITS text or caret into the focused one's draft. Its blur is the case that
+  // happens: clicking into the next column focuses that column first (stackFocus, on the
+  // pointerdown) and blurs this box after, so its caret would land in the new column.
+  // Asked only while a stack is open: one chat on screen has one box, and its owner moving
+  // under it (Jarvis learning its project) must not strand what is being typed.
+  const who = chatKey();
+  const mine = () => isLive(box) && (S.screen !== 'stack' || chatKey() === who);
   // The draft lives in state, not in the DOM: render() rebuilds this element every poll,
   // and a half-typed message must survive that. That saves the TEXT and not the caret:
   // the element the keyboard is attached to is gone, and a mobile browser lowers the
@@ -3832,7 +4671,7 @@ function composer(card, opts = {}) {
   // still reach the app's state at all, so the guard is on the property and not on the
   // trigger — which is also the only half of this a desktop engine can be made to prove.
   box.addEventListener('input', () => {
-    if (!isLive(box)) return;
+    if (!mine()) return;
     const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
     saveDraft();
@@ -3843,7 +4682,7 @@ function composer(card, opts = {}) {
   });
   // Where the caret was when the box let go — the camera tap is what usually takes it, and
   // that is the place the photo keeps (openPicker).
-  box.addEventListener('blur', () => { if (isLive(box) && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
+  box.addEventListener('blur', () => { if (mine() && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
   // THE THREE KEYS THE BOX KEEPS. Everything else typed here is text; the window's key
   // handler ignores a focused text box entirely (onKey), so `q` is a letter in a message
   // and never a way out of the screen.
@@ -3856,7 +4695,7 @@ function composer(card, opts = {}) {
   // would ship half a word.
   box.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); try { box.blur(); } catch {} return; }
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends()) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends() && mine()) {
       e.preventDefault();
       sendDraft();
     }
@@ -3868,7 +4707,7 @@ function composer(card, opts = {}) {
   // it (a copy from Finder carries both) is not pasted as text.
   box.addEventListener('paste', (e) => {
     const files = imagesOf(e.clipboardData);
-    if (!files.length) return;
+    if (!files.length || !mine()) return;
     e.preventDefault();
     const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : String(S.draft || '').length;
     addPhotos(files, cardOf(S.session), { project: S.project, session: S.session, caret });
@@ -3963,7 +4802,7 @@ const carriesFiles = (dt) => !!dt && [...(dt.types || [])].includes('Files');
 //   replace the whole app with a picture and throw the draft away.
 function wireDrop() {
   const app = document.getElementById('app');
-  const here = () => S.screen === 'session' && !S.locked && !S.sheet;
+  const here = () => chatScreen() && !S.locked && !S.sheet;
   try {
     addEventListener('dragover', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
     addEventListener('drop', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
@@ -4027,7 +4866,7 @@ async function sendDraft() {
   // anything typed while the send was in flight is a new draft and stays.
   const key = draftKey(item.project, item.session);
   S.draft = ''; S.caret = null;
-  scrollMem.delete('chat');          // a message you just sent belongs on screen
+  scrollMem.delete(chatSK);          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
   if (r) {
@@ -4405,10 +5244,17 @@ const SCROLLERS = {
   projects: { end: false, slack: 24 },
   grid:     { end: false, slack: 24 },
 };
+// A STACKED COLUMN IS A CHAT OF ITS OWN, and it scrolls on its own: `chat:<project><US><session>`
+// is a chat's rules under that column's own memory, so wheeling one column records nothing
+// about the column beside it (see "the stack").
+const scrollerOf = (key) => SCROLLERS[key] || SCROLLERS[String(key || '').split(':')[0]];
+// The memory the chat being drawn writes to: the one chat of the session screen, or the
+// stacked column swapped in (withCol).
+let chatSK = 'chat';
 const numOf = v => Number(v) || 0;
 
 function rememberScroll(key, box) {
-  const s = SCROLLERS[key]; if (!s || !box) return;
+  const s = scrollerOf(key); if (!s || !box) return;
   const h = numOf(box.scrollHeight), top = numOf(box.scrollTop), ch = numOf(box.clientHeight);
   // A NODE THAT IS NOT IN THE DOCUMENT MEASURES ZERO, AND ZERO READS AS "AT THE END".
   // Measured in Chrome 151: tear a box that was scrolled to 400 out of the page and it
@@ -4512,7 +5358,7 @@ function reapplyScroll(key, box, want, left, n) {
 }
 
 function restoreScroll(key, box, prepare) {
-  const s = SCROLLERS[key]; if (!s || !box) return;
+  const s = scrollerOf(key); if (!s || !box) return;
   const go = () => {
     // A list built and then not used (keepScreen kept the one on screen) is detached by the
     // time this runs, and writing its 0 back would overwrite where the reader really is.
@@ -5027,6 +5873,8 @@ function paintPane() {
 // written back through rememberScroll, so the poll's own restore keeps it rather than undoing it.
 function nearTop(box) {
   if (box.isConnected === false || olderBusy || (olderErr && olderFor === chatKey())) return;
+  // A stacked column that is not focused is drawn, not open: its older page waits for a click.
+  if (S.screen === 'stack' && box !== chatNode) return;
   const s = S.sess;
   if (!s || !s.next_before || s.of !== chatKey()) return;
   if (!(numOf(box.scrollHeight) > numOf(box.clientHeight)) || numOf(box.scrollTop) > OLDER_NEAR_PX) return;
@@ -5050,7 +5898,7 @@ async function loadOlder() {
   const want = { project: S.project, session: S.session };
   olderFor = key; olderBusy = true; olderErr = '';
   // MEASURED BEFORE THE AWAIT, armed after it — a poll landing mid-fetch must not spend it.
-  const held = live ? measureFromEnd('chat', live) : null;
+  const held = live ? measureFromEnd(chatSK, live) : null;
   const anchor = live ? anchorOf(live) : null;
   paintChat();
   holdAnchor(anchor);                       // the "loading older" line went in above it
@@ -5066,7 +5914,7 @@ async function loadOlder() {
     const base = { ...cur, messages: [...(older.messages || []), ...(s.messages || [])],
                    next_before: older.next_before, pages: (s.pages || 1) + 1 };
     S.sess = mergeNewest(base, cur);
-    if (held != null) holdScrollFromEnd('chat', held);
+    if (held != null) holdScrollFromEnd(chatSK, held);
     landed = true;
   } catch (e) {
     if (e instanceof api.AuthError) { olderBusy = false; lock(); return; }
@@ -5082,7 +5930,7 @@ function holdAnchor(anchor) {
   if (!box || !anchor || !isLive(anchor.node) || anchor.node.parentNode !== box) return;
   const d = anchor.node.getBoundingClientRect().top - anchor.top;
   if (d) box.scrollTop = numOf(box.scrollTop) + d;
-  rememberScroll('chat', box);             // the reader's place now, which supersedes the hold
+  rememberScroll(chatSK, box);             // the reader's place now, which supersedes the hold
 }
 
 // ── the chat's own poll ───────────────────────────────────────────────────
@@ -5105,8 +5953,10 @@ function holdAnchor(anchor) {
 // lands long after anyone was expecting it still appears.
 //   Conditional, too: the daemon tags each page (ETag) and a page that has not changed comes
 // back as a bodyless 304, so a poll of an idle session costs the tunnel almost nothing.
+// THE SCREENS WITH AN OPEN CHAT: the session screen, and the stack, whose focused column is one.
+const chatScreen = () => S.screen === 'session' || (S.screen === 'stack' && !!stackActiveKey);
 const chatPollWanted = () =>
-  !document.hidden && !S.locked && S.screen === 'session' && S.view === 'chat' && !!S.session;
+  !document.hidden && !S.locked && chatScreen() && S.view === 'chat' && !!S.session;
 const chatKey = () => `${S.project}\x1f${S.session}`;
 // LIVE while there is something to wait for: a message of ours the transcript has not shown,
 // a session that is working, or conversation mode owed an answer. Idle otherwise.
@@ -5208,7 +6058,7 @@ function readChat({ fresh = false } = {}) {
 // a read started AFTER this one has already been drawn; or it is a 304, which changes nothing
 // but does count as a snapshot taken now (reconcileOutbox reads S.sess.seq for that).
 function chatLanded(want, seq, r) {
-  if (S.screen !== 'session' || S.project !== want.project || S.session !== want.session) return false;
+  if (!chatScreen() || S.project !== want.project || S.session !== want.session) return false;
   const cur = S.sess && S.sess.of === want.key ? S.sess : null;
   if (cur && (cur.seq || 0) > seq) return false;
   chatErr = ''; chatLoad = { key: want.key, tries: 0, why: '' };
@@ -5248,12 +6098,13 @@ export function mergeNewest(cur, fresh) {
 // owner is typing or has a sheet open — the render those would lose is deferred, as
 // renderUnlessTyping() defers it, and spent by the next poll that may.
 function paintChat() {
-  if (S.screen !== 'session') return;
+  if (!chatScreen()) return;
   if (!pollPaused()) { render(); return; }
   renderDeferred = true;
   patchChat();
 }
 function patchChat() {
+  if (S.screen === 'stack') { const c = stackActive(); if (c) patchCol(c); return; }
   const live = chatNode, box = composerNode;
   if (S.view !== 'chat' || !isLive(live) || !live.parentNode) return;
   const built = chatView(cardOf(S.session));   // re-points chatNode at the list it built
@@ -5309,8 +6160,18 @@ function setDepth(d) {
 function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
+  // THE STACK: a picker opened from the stack goes back to it, and a session opened from a
+  // column (its pane) goes back to the column; otherwise out to where the stack was opened from.
+  if (S.screen === 'stackpick' && S.pickBack === 'stack' && S.stackSel.length) {
+    S.screen = 'stack'; S.pick = null; S.pickBack = ''; stackActiveKey = ''; stackFocus(S.stackAt, { draw: false });
+  }
+  else if (S.screen === 'session' && S.fromStack && S.stackSel.length) {
+    talkStop(''); stopSpeaking(); S.fromStack = false; S.pane = null; S.paneErr = '';
+    S.screen = 'stack'; stackActiveKey = ''; stackFocus(S.stackAt, { draw: false });
+  }
+  else if (S.screen === 'stackpick' || S.screen === 'stack') leaveStack();
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
-  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  else if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   // A master entered the desk's way is one level under Projects, like Jarvis.
   else if (S.screen === 'session' && S.entry === 'projects') { talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
@@ -6597,7 +7458,6 @@ async function sheetSettings() {
   kids.push(ul);
 
   kids.push(el('div', { class: 'absent' }, [el('div', { text: 'not here, on purpose (§7):' }),
-    el('div', { text: '· the stack — it exists to put sessions side by side, and a phone has no side. At nc = 1 that is the card list.' }),
     el('div', { text: '· the Ctrl-n editor tab — it opens neovim in the session\'s folder. The terminal above can run nvim instead, in the project\'s.' })]));
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
@@ -6733,10 +7593,15 @@ const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''
 // rather than selecting text. A chord or a prefix already started takes its next key whole.
 // Only the composer, and only a session's: an input in a sheet is never a session.
 function deskKeyFromComposer(e) {
-  if (S.screen !== 'session' || !insideComposer(e.target)) return false;
+  if ((S.screen !== 'session' && S.screen !== 'stack') || !insideComposer(e.target)) return false;
   if (S.jump || S.prefix) return true;
   const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
   if (e.metaKey || e.altKey) return false;
+  // Ctrl-x is the stack at the desk, and cut on Linux and Windows: it is the stack's only
+  // while nothing in the box is selected, so cutting a selection still cuts.
+  const t = e.target, sel = t && Number.isInteger(t.selectionStart) && t.selectionStart !== t.selectionEnd;
+  if (e.ctrlKey && lk === 'x') return !sel;
+  if (e.ctrlKey && S.screen === 'stack') return lk === 'p' || lk === 'f' || lk === 'a';
   if (e.ctrlKey) return lk === 's' || lk === 'p' || lk === 'f' || lk === 'a';
   if (k === '`') return true;
   return !!e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight');
@@ -6780,6 +7645,8 @@ function onKey(e) {
   if (S.jump) { e.preventDefault(); jumpKey(k, lk, ctrl); return; }
   let used;
   if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
+  else if (S.screen === 'stack') used = stackKey(e, k, lk, ctrl);
+  else if (S.screen === 'stackpick') used = pickKey(e, k, lk, ctrl);
   else if (S.screen === 'term') used = termKey(e, k, lk, ctrl);
   else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
   else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
@@ -6831,6 +7698,7 @@ function sessionKey(e, k, lk, ctrl) {
     else if (lk === 'p') toProjects();
     else if (lk === 'f') startJump();
     else if (lk === 't' && !S.jarvisMode) openTerminal();
+    else if (lk === 'x') openStackPicker();
     else if (k === 'ArrowRight' && !S.jarvisMode) cycleSession(1);
     else if (k === 'ArrowLeft' && !S.jarvisMode) cycleSession(-1);
     return true;
@@ -6840,6 +7708,7 @@ function sessionKey(e, k, lk, ctrl) {
     if (lk === 'f') { startJump(); return true; }
     if (lk === 's') { toGridOf(S.project); return true; }
     if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
     return false;                          // the rest are the browser's (copy, find-in-page …)
   }
   if (k === '`') { sessionBack(); return true; }
@@ -6900,6 +7769,7 @@ function gridKey(e, k, lk, ctrl) {
     // Ctrl-c is back at the desk. Here it is also copy, and copy wins whenever something
     // is selected to copy.
     if (lk === 'c' && !hasSelection()) { gridBack(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
     return false;
   }
   // HOW MANY COLUMNS ARE ACTUALLY ON SCREEN, asked of the browser rather than computed
@@ -6923,6 +7793,8 @@ function gridKey(e, k, lk, ctrl) {
     case 'Enter': openItem(it); break;
     // The web has one way to start a session (fleet_spawn), so n and N open the same picker.
     case 'n': case 'N': if (S.sub) sub(); else sheetPicker(); break;
+    // t = the sTack, as at the desk (s/S and n/N were taken).
+    case 't': case 'T': openStackPicker(); break;
     case 'w': case 'W': if (S.sub) sub(); else sheetWorktree(); break;
     case 's': case 'S': if (it.card) sheetSchedule(it.card.name); break;
     case 'p': if (it.card) pauseSession(it.card.name); break;
@@ -6999,6 +7871,7 @@ function projectsKey(e, k, lk, ctrl) {
     if (lk === 'f') { startJump(); return true; }
     // Ctrl-s: straight to that project's grid, skipping master.
     if (lk === 's') { if (it.project) toGridOf(it.project.name); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
     return false;
   }
   const move = d => { if (stepProject(d)) render(); };
@@ -7035,6 +7908,7 @@ function queueKey(e, k, lk, ctrl) {
   if (ctrl) {
     if (lk === 'f') { startJump(); return true; }
     if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
     return false;
   }
   const move = (d) => { const n = S.qsel + d; if (n >= 0 && n < rows.length) { S.qsel = n; render(); } };
@@ -7139,7 +8013,7 @@ document.addEventListener('visibilitychange', () => {
     // — otherwise a dismissed sheet would re-try itself forever.
     hidByCeremony = pk.busy();
     hiddenAt = Date.now();
-    stopPanePoll(); stopChatPoll();
+    stopPanePoll(); stopChatPoll(); stopStackPoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
     if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
@@ -7154,6 +8028,7 @@ document.addEventListener('visibilitychange', () => {
     // The chat first, and FRESH: whatever read was out when the app left is from before, and
     // refresh() below joins this one rather than that one.
     resumeChat(true);
+    syncStackPoll();             // the stack's other columns, on their own clock (see "the stack")
     refresh().then(() => { if (!S.locked) pk.release(); });
   }
   syncPanePoll(); syncChatPoll();

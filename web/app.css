@@ -1285,3 +1285,37 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   color: var(--dim); font-size: 12px; white-space: nowrap; pointer-events: none; }
 .find .clear { position: absolute; right: 0; top: 0; bottom: 0; width: 2.6em; padding: 0;
   border: 0; background: transparent; color: var(--dim); font-size: 18px; }
+
+/* ── the stack (app.js "the stack") ──────────────────────────────────────────────────
+ * Several conversations at once. At a desk the right pane is cut into columns, each the
+ * session screen's own three bands — a bar, the list, the composer — so nothing here is a
+ * second design: a column is a narrow session screen, and the one with the focus says so
+ * with the same cyan the view switch already uses for "this one". On a phone `.one` holds a
+ * single column and the stack's bar carries its name and `2/4`.
+ *   No new colours: the hairline between columns, cyan for the focus, the TUI's dim. */
+:is(#app).shell > .stack { flex: 1 1 auto; min-height: 0; display: flex; gap: 0; }
+.stack > .scol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--hair); padding: 0 6px; }
+.stack > .scol:first-child { border-left: 0; padding-left: 0; }
+.stack > .scol:last-child { padding-right: 0; }
+.stack.one > .scol { padding: 0; }
+.scol > .chat { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 0 6px; }
+.scol > .sbar, .scol > .composer, .scol > .hint { flex: 0 0 auto; }
+.scol > .sbar { padding-top: .35em; }
+/* THE FOCUSED COLUMN: a rule along its top and its name in cyan. Only one column at a time
+ * takes keys, ⏎ and a paste, and a desk with four composers must say which. */
+.stack:not(.one) > .scol.on { box-shadow: inset 0 2px 0 var(--cyan); }
+.stack:not(.one) > .scol.on > .sbar .nm { color: var(--cyan); }
+.stack:not(.one) > .scol:not(.on) > .composer { opacity: .7; }
+:is(#app).shell > .stack-bar { flex: 0 0 auto; }
+.stack-bar > .seg { flex: 0 1 auto; flex-wrap: nowrap; overflow: hidden; }
+.stack-bar > .stack-hidden button { font-size: 13px; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-bar > .stack-pos { flex: 0 0 auto; align-items: center; }
+.stack-bar > .stack-pos .pos { padding: 0 .5em; color: var(--white); font-variant-numeric: tabular-nums; font-size: 13px; }
+/* The picker: the grid's cards under a heading per project (and per machine), each marked
+ * with whether it is in the stack. */
+:is(#app).shell > .pick-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.pick-list > .sect.pick-host { color: var(--white); font-weight: 700; margin-top: 8px; }
+.pick-list > .sect.pick-proj { color: var(--white); }
+.card.pickrow.stacked { border-color: var(--green); }

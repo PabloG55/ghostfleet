@@ -836,10 +836,13 @@ is('resume is not guarded', true, /function resumeSession\(name\) \{\s*\n?\s*if 
 // rows left unfiltered. A regex that matches somewhere else is a test that cannot fail.
 is('the settings rows skip the lead', true,
    /S\.grid\.cards\) \|\| \[\]\)\.filter\(c => !c\.lead\)/.test(APP));
-// The two things §7 says cannot transfer. A substitute for either is the mistake; the
-// app is required to SAY they are absent rather than leave a gap.
-is('the stack is not rebuilt', 0, (APP.match(/renderStack|stackScreen/g) || []).length);
-is('...and is named as deliberately absent', true, /a phone has no side/.test(APP));
+// The things §7 said cannot transfer. A substitute for one is the mistake; the app is
+// required to SAY it is absent rather than leave a gap.
+// THE STACK IS NO LONGER ONE OF THEM — the owner decided several agents on screen at once was
+// worth it on the web too: columns at a desk, a swipe apart on a phone (test/helpers/
+// stack-check.mjs drives it). So the app must not go on calling it absent.
+is('the stack is no longer named absent', false, /a phone has no side/.test(APP));
+is('...it is here: a picker and its columns', true, /function paintPicker\(/.test(APP) && /function paintStack\(/.test(APP));
 // THE TERMINAL IS NO LONGER ONE OF THEM — the owner decided it was worth its surface — and
 // what replaced the absence is a rule about WHO names the shell: the server makes the tab
 // with bin/fleet-tab, so the client must never spell a tab name of its own. One that did
@@ -1033,9 +1036,9 @@ is('...and the measurement is its argument', true,
 // anybody. Where the DOM can measure a message, the anchor on it supersedes this hold
 // (holdAnchor); the hold is what is left where it cannot.
 is('...measured before the fetch', true,
-   /const held = live \? measureFromEnd\('chat', live\) : null;[^]{0,600}?const older = await api\.getSession/.test(APP));
+   /const held = live \? measureFromEnd\(chatSK, live\) : null;[^]{0,600}?const older = await api\.getSession/.test(APP));
 is('...and armed after it, next to the render that spends it', true,
-   /const older = await api\.getSession[^]{0,1200}?holdScrollFromEnd\('chat', held\);[^]{0,500}?paintChat\(\);/.test(APP));
+   /const older = await api\.getSession[^]{0,1200}?holdScrollFromEnd\(chatSK, held\);[^]{0,500}?paintChat\(\);/.test(APP));
 
 // A tap on a card lands on the CHAT, and that is a change of mind with a reason: #45 made
 // it the pane because a message list could not show a command, and the person using the app
@@ -1050,8 +1053,10 @@ is('...and the pane is one tap away', true, /btn\('pane', \(\) => setView\('pane
 is('a blocked session is called out in the chat', true, /card\.status === 'need-you'/.test(APP));
 is('...with a way to the pane from there', true, /btn\('open the pane', \(\) => setView\('pane'\)\)/.test(APP));
 // The chat's scroll is remembered the way the pane's is, or every poll throws the reader —
-// through the same helper now, and so are both card lists.
-is('the chat is watched', true, /watchScroll\('chat', wrap\)/.test(APP));
+// through the same helper now, and so are both card lists. Under the chat's key: `chat` on the
+// session screen, `chat:<column>` for each column of the stack (chatSK), so two columns never
+// share one reader's place.
+is('the chat is watched', true, /watchScroll\(chatSK, wrap\)/.test(APP) && /let chatSK = 'chat';/.test(APP));
 is('...and so is the projects list', true, /watchScroll\('projects', list\)/.test(APP));
 is('...and the grid\'s', true, /watchScroll\('grid', list\)/.test(APP));
 // Attaching the listener and restoring the position are two halves of one thing, and a

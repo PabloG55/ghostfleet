@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: d7f3daaa55cc
+// CLIENT-HASH: 6cd892af6d82
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -410,7 +410,9 @@
 // keeps the phone's words. A Mac still on v82 says "this phone" and "Face ID".
 // v84 finds a project by typing its name: a field at the top of Projects on a phone, `/` at
 // a desk, both through the grid's matcher. A phone still on v83 has no field.
-const VERSION = 'ghostfleet-v85';
+// v86 adds the stack: several sessions, across projects, on screen at once — side by side at
+// a desk, a swipe apart on a phone. A phone still on v85 has no `stack` behind its ⋯.
+const VERSION = 'ghostfleet-v86';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

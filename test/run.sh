@@ -18933,6 +18933,38 @@ else
   skip "phone client" "web/ not present"
 fi
 
+group "phone client: the stack, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
+  # ── the desk's stack on the web: several sessions, across projects, at once ──────
+  # The grid's stack screen had no web equivalent: one conversation at a time. The helper
+  # drives the picker (grouped by machine and project, space / click / tap, `/` with the
+  # desk's matcher, kept per device), the columns at 1600x900 (each composer sending to its
+  # own session, drafts and paste per column, the ⇧←/⇧→ ring, Ctrl-a < >, ×, a fifth and
+  # sixth behind chips), a column on a paired machine, the phone's swipe at 390x844 with
+  # touch, and — against a fake fleet-serve that counts — four live chats inside the
+  # daemon's per-device read limit. Watched red against staging's client (every row it
+  # reaches) and against 24 copies of this one broken on purpose, one fault each, until
+  # every row had been red at least once.
+  STK="$(mktemp -d "$TEST_RUNS.$$.stack.XXXXXX")"
+  node "$ROOT/test/helpers/stack-check.mjs" > "$STK/out" 2> "$STK/err"
+  stkrc=$?
+  if grep -q 'no chrome' "$STK/out" 2>/dev/null; then
+    skip "the stack" "no chrome to press keys in"
+  else
+    is "stack-check ran"                "0" "$stkrc"
+    is "...without complaining"         ""  "$(head -2 "$STK/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$STK/out")" -ge 80 ] && echo yes || echo "no: $(wc -l < "$STK/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$STK/out"
+  fi
+  rm -rf "$STK"
+else
+  skip "phone client" "web/ not present"
+fi
+
 group "phone client: the queue page, in a real browser"
 if [ -d "$ROOT/web" ]; then
 
