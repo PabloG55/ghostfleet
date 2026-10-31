@@ -1143,12 +1143,27 @@ function findSpec() {
 function focusProjectField() {
   try { const f = document.querySelector('#app .find input, #side .find input'); if (f) f.focus(); } catch {}
 }
-// The first match may be below the fold; bring it into view only if it is not already —
-// `nearest` scrolls not at all when the card is on screen, so typing never jolts the list.
+// The first match may be below the fold; bring it into view only if it is not already, so
+// typing never jolts a list whose match is on screen.
+//   THE LIST SCROLLS, AND NOTHING ELSE DOES. scrollIntoView() scrolls every scrollable
+// ancestor it takes to show the card — on a phone with the keyboard up that includes the
+// page and the visual viewport, which slides the field (and the caret in it) out from under
+// the thumb that is typing. Setting the list's own scrollTop moves only the cards: the field
+// keeps the focus and its place, and the keyboard stays exactly as it was.
+//   ...MEASURED AGAINST WHAT IS VISIBLE, which with the keyboard up is the visual viewport,
+// not the list's box: the bottom of the list is behind the keyboard, and a card "in view"
+// there is a card nobody can see.
 function revealSel() {
   try {
     const c = document.querySelector('#app .cards .card.sel, #side .cards .card.sel');
-    if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' });
+    const l = c && c.closest('.cards');
+    if (!l) return;
+    const a = l.getBoundingClientRect(), r = c.getBoundingClientRect();
+    const vv = typeof visualViewport !== 'undefined' && visualViewport;
+    const bottom = Math.min(a.bottom, vv ? vv.offsetTop + vv.height : innerHeight);
+    if (r.top < a.top) l.scrollTop -= a.top - r.top;
+    // the card's top line when it is taller than the room: its name is what is looked for
+    else if (r.bottom > bottom) l.scrollTop += Math.min(r.bottom - bottom, r.top - a.top);
   } catch {}
 }
 
@@ -6627,13 +6642,26 @@ function foundSessions(q) {
 // A query that starts before the grids are known reads them NOW rather than at the next
 // 5 s poll — the first letter typed is when someone wants the answer. One read at a time;
 // a project already in the cache is the poll's to re-read (refreshOnce).
+//   THE ANSWER CAN ARRIVE AFTER THE LAST KEY. A query typed faster than a grid read — or
+// committed as one word, which is how a phone's predictive text types — matched nothing
+// when it was typed, so the cursor stayed where it was and every reveal had already run.
+// When the read lands the session rows appear under every project, below the fold on a
+// phone, and the count said `1 match` over a screen with no match on it. So the read's
+// return does what a keystroke does: the cursor to the first match (only if it is not on
+// one already — a cursor the reader moved onto a match stays), and that match into view.
 let foundReading = null;
 function readFoundSoon() {
   if (foundReading || S.screen !== 'projects' || !S.srch || !S.srch.q) return;
   const miss = foundProjects().map(p => p.name).filter(n => !stackGrids.has(n));
   if (!miss.length) return;
   foundReading = Promise.all(miss.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); }, () => {})))
-    .finally(() => { foundReading = null; if (S.screen === 'projects' && S.srch && S.srch.q) render(); });
+    .finally(() => {
+      foundReading = null;
+      if (S.screen !== 'projects' || !S.srch || !S.srch.q) return;
+      if (!srchMatches().includes(S.sel)) srchFirst();
+      render();
+      revealSel();
+    });
 }
 // The card a found session draws as: the grid's own card, with its PROJECT (and, once there
 // are two machines, its machine) leading the line that says where it is — the same session

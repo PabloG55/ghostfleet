@@ -286,6 +286,32 @@ try {
     await b.evaluate(() => { document.querySelector('#app .find .clear')?.click(); return null; });
     await sleep(300);
 
+    // A SESSION-ONLY QUERY: no project matches `docs`, so its one match is below five dimmed
+    // projects and `+ add project` — off an 844px screen unless the list is brought to it.
+    // A FRESH PAGE, AND THE WORD IN ONE INSERTION, the way iOS predictive text commits it: no
+    // grid is cached yet, so the match exists only once the read the query started comes back,
+    // after the last keystroke — and the reveal has to follow that read, not the keystroke.
+    await fresh(390, 844, true);
+    await tap('#app .find input');
+    await b.call('Input.insertText', { text: 'docs' });
+    s = await settle(x => x.found.length > 0);
+    await sleep(400);
+    const seen = await b.evaluate(() => {
+      const l = document.querySelector('#app > .cards'), c = l && l.querySelector('.card.sel'), f = document.querySelector('#app .find input');
+      if (!c) return 'no selected card';
+      const a = l.getBoundingClientRect(), r = c.getBoundingClientRect();
+      const bottom = Math.min(a.bottom, innerHeight);
+      return { name: c.querySelector('.c-name').textContent.trim(), inView: r.top >= a.top - 1 && r.top + Math.min(r.height, 60) <= bottom + 1,
+               typing: document.activeElement === f};
+    });
+    is('phone docs: a session-only query leaves its first result visible, the field still typing', { name: 'docs-pass', inView: true, typing: true },
+       typeof seen === 'object' ? { name: seen.name, inView: seen.inView, typing: seen.typing } : seen);
+    // NOT ASSERTED HERE: that the page and the visual viewport stay put while the list scrolls.
+    // Headless Chrome raises no on-screen keyboard, so the page never shifts, and a row about it
+    // stayed green with scrollIntoView() put back. Only a real phone can show that half.
+    await b.evaluate(() => { document.querySelector('#app .find .clear')?.click(); return null; });
+    await sleep(300);
+
     // ── the phone grid gets the field ──
     await b.evaluate(() => { try { document.activeElement && document.activeElement.blur(); } catch {} return null; });
     await tap('#app .cards .card .c-name', 'acme-api');
