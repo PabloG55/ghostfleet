@@ -16996,9 +16996,22 @@ serve_stop
 #   bug); the client's query swallowing removed (xterm's answers to nvim's queries landed in
 #   the shell as typing: the back-to-the-shell and desk-key rows); fleet-tab's -d ignored
 #   (the desk's client was moved into the tab); a vendored byte changed (--check).
-#   NOT WATCHED RED, and so not claimed: the key row's preventDefault. Removed, every row
-#   stayed green — a headless Chrome never moves the focus to a tapped button, so there is
-#   nothing here for it to lose. Whether the keyboard stays up is an iPhone's to say.
+#   THE PHONE'S VIEW, KEYS AND TOUCH (term-check's "phone view" and "touch" rows), each
+#   watched red by running them against the client from before them: 46 columns at the old
+#   13px against the 64 asked for; no A−/A+, no ⌨, so nothing resized, nothing was
+#   remembered and the keyboard never came up; no Alt, ␣ leader, : or ⏎ (the od row read
+#   none of 17 1b 78 20 3a 0d); a finger drag scrolled nothing; a long press made no visual
+#   selection and copied nothing; and a tap focused the terminal — on a phone, the keyboard
+#   over half the screen at every tap on a file.
+#   NOT WATCHED RED, and so not claimed: that a tap moves nvim's cursor, that it is an SGR
+#   press and release, and that two taps are a double click. Chrome's touch emulation makes
+#   compatibility mouse events of a tap, which xterm already read as a click, so those
+#   three were green before. They are here so the click does not regress; whether a tap
+#   OPENS an entry on an iPhone, where the report came from, is the iPhone's to say. Nor is
+#   landscape (a fixed 13px also had more columns there), nor the key row's preventDefault:
+#   removed, every row stayed green — a headless Chrome never moves the focus to a tapped
+#   button, so there is nothing here for it to lose. Whether the keyboard stays up is an
+#   iPhone's to say.
 group "fleet-serve: the web terminal is a fleet tab behind four gates"
 if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d "$TEST_RUNS.$$.term.XXXXXX")" && pwd -P)"
@@ -17124,7 +17137,7 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     else
       is "term-check ran"                    "0"   "$wtrc"
       is "...without complaining"            ""    "$(head -2 "$WT/ui.err" | tr '\n' ' ' | sed 's/ *$//')"
-      is "...and produced its checks"        "yes" "$([ "$(grep -c . "$WT/ui.out")" -ge 45 ] && echo yes || echo "no: $(grep -c . "$WT/ui.out") rows")"
+      is "...and produced its checks"        "yes" "$([ "$(grep -c . "$WT/ui.out")" -ge 60 ] && echo yes || echo "no: $(grep -c . "$WT/ui.out") rows")"
       while IFS=$'\x1f' read -r name want got; do
         [ -n "$name" ] || continue
         if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi

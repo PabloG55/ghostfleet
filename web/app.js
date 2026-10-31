@@ -3693,6 +3693,28 @@ const editWord = {
 };
 const termSays = (state, kind) => (kind === 'edit' && editWord[state]) || termWord[state] || '';
 function termTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
+// THE PHONE'S FONT SIZE, AND SO ITS COLUMNS. The desk keeps 13px. A phone at 13px fits 37
+// columns at 390pt — LazyVim's explorer and a file beside it do not fit in that, and the
+// owner's first look at the editor was "I can't do anything". So the default is the size
+// that fits about seventy columns across the phone's SHORT side: floor(short / 42), because
+// a monospace cell is about 0.6em and 0.6 × 70 = 42. At 390pt that is 9px and 68 columns
+// (the suite asks for at least 64); a 320pt phone gets 8px, a 430pt one 10px. The short side,
+// so that turning the phone does not change the font — landscape is the same text with more
+// columns, not the same columns in bigger text.
+//   A pinch or A−/A+ replaces the default, and is remembered on this device (gf.termFont):
+// what is readable is a matter of eyes and of the phone, and both belong to the device.
+const TERM_FONT_KEY = 'gf.termFont';
+function termFontDefault() {
+  const w = Number(screen && screen.width) || innerWidth, h = Number(screen && screen.height) || innerHeight;
+  return Math.max(8, Math.min(12, Math.floor(Math.min(w, h) / 42)));
+}
+function termFont() {
+  if (!termTouch()) return 13;
+  let v = 0;
+  try { v = Number(localStorage.getItem(TERM_FONT_KEY)) || 0; } catch {}
+  return v >= 6 && v <= 24 ? v : termFontDefault();
+}
+const termFontSave = (px) => { try { localStorage.setItem(TERM_FONT_KEY, String(px)); } catch {} };
 // The tap. Everything the passkey needs happens BEFORE the first await, so WebKit still
 // counts this as the tap (passkey.js freshNow). Then the screen, then the rest.
 function openTerminal(project = S.project, kind = 'term') {
@@ -3752,6 +3774,10 @@ async function startTerm(asking) {
       TS.h = termLib.mount(TS.host, {
         onState: ({ state, why }) => termState(state === 'open' ? 'open' : state === 'closed' ? 'closed' : 'opening', why),
         onLeave: () => { if (TS && TS.h) TS.h.blur(); try { (document.querySelector('#side .cards') || document.body).focus(); } catch {} },
+        fontSize: termFont(),
+        onFont: (px) => { if (termTouch()) termFontSave(px); },
+        onFocus: (up) => { if (TS && TS.kbd) TS.kbd.classList.toggle('on', up); },
+        onCopy: () => toast('copied'),
       });
     }
     const r = await api.termOpen(TS.project, TS.h.size(), a, TS.kind);
@@ -3776,19 +3802,45 @@ function termScreenRoot() {
   const host = el('div', { class: 'term-host' });
   const title = el('span', { class: 'nm' });
   const st = el('span', { class: 'st' });
+  // THE PHONE'S THREE CONTROLS, on touch only: smaller and larger text (a pinch does the
+  // same, but a pinch is not something a screen announces), and the KEYBOARD. Nothing else
+  // raises it: a tap on the terminal is a mouse click there (term.js touchAsMouse), and a
+  // click that also raised the keyboard would cover half of nvim at every tap on a file.
+  // Each acts on its click, with pointerdown and mousedown prevented so the tap moves no
+  // focus of its own — iOS raises the keyboard only for a focus inside a user gesture, and
+  // the click is one.
+  const tool = (label, aria, act) => {
+    const b = el('button', { type: 'button', class: 'tt', text: label, 'aria-label': aria });
+    b.addEventListener('pointerdown', (ev) => ev.preventDefault());
+    b.addEventListener('mousedown', (ev) => ev.preventDefault());
+    b.addEventListener('click', () => { if (TS && TS.h) act(TS.h); });
+    return b;
+  };
+  const kbd = tool('⌨', 'Keyboard', (h) => h.keyboard());
+  kbd.classList.add('kbd');
+  const tools = el('div', { class: 'term-tools' }, [
+    tool('A−', 'Smaller text', (h) => h.zoom(-1)), tool('A+', 'Larger text', (h) => h.zoom(1)), kbd]);
   const bar = el('div', { class: 'sbar' }, [
     btn('‹', () => back()),
     el('div', { class: 'who' }, [title, st]),
+    tools,
   ]);
   // THE KEY ROW, on touch only: a hardware keyboard has every one of these keys, and at a
-  // desk the row would be eleven buttons of nothing. pointerdown and preventDefault, so a
+  // desk the row would be fifteen buttons of nothing. pointerdown and preventDefault, so a
   // tap never takes the focus from the terminal — the on-screen keyboard stays up.
   const row = el('div', { class: 'term-keys' });
-  for (const k of (termLib ? termLib.KEYS : [])) row.append(termKeyBtn(k));
-  return { root: el('div', { class: 'term-screen' }, [bar, msg, act, host, row]), host, msg, act, title, st, row };
+  return { root: el('div', { class: 'term-screen' }, [bar, msg, act, host, row]), host, msg, act, title, st, row, tools, kbd };
+}
+// The row's two bands, each one line that scrolls sideways where a phone is too narrow for it.
+function termKeyRows(row) {
+  for (const band of termLib.KEY_ROWS) {
+    const b = el('div', { class: 'tk-band' });
+    for (const k of band) b.append(termKeyBtn(k));
+    row.append(b);
+  }
 }
 function termKeyBtn(k) {
-  const b = el('button', { type: 'button', class: 'tk' + (k.ctrl ? ' latch' : ''), text: k.label, 'aria-label': k.label === 'Ctrl' ? 'Control' : k.label });
+  const b = el('button', { type: 'button', class: 'tk' + (k.latch ? ' latch' : '') + (k.wide ? ' wide' : ''), text: k.label, 'aria-label': k.aria || k.label });
   const press = (ev) => { ev.preventDefault(); if (TS && TS.h) TS.h.key(k, b); };
   b.addEventListener('pointerdown', press);
   b.addEventListener('mousedown', (ev) => ev.preventDefault());
@@ -3809,9 +3861,9 @@ function paintTerm(app = document.getElementById('app')) {
     composerNode = null;
     app.append(TS.root);
   }
-  // The row needs term.js's KEYS, which arrive with the first open.
-  if (termLib && !TS.row.firstChild) for (const k of termLib.KEYS) TS.row.append(termKeyBtn(k));
-  TS.row.hidden = !termTouch() || !TS.h;
+  // The row needs term.js's KEY_ROWS, which arrive with the first open.
+  if (termLib && !TS.row.firstChild) termKeyRows(TS.row);
+  TS.row.hidden = TS.tools.hidden = !termTouch() || !TS.h;
   const noun = termNoun(TS.kind);
   TS.title.textContent = `${noun} · ${TS.project}`;
   const { state, why } = S.termSt;
