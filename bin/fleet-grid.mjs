@@ -2542,7 +2542,7 @@ function render() {
 // ── input ───────────────────────────────────────────────────────────────
 function cleanup() {
   try { process.stdin.setRawMode(false); } catch {}
-  out('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');   // disable mouse, show cursor, leave alt-screen
+  out('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?7h\x1b[?1049l');   // disable mouse, show cursor, wrap on, leave alt-screen
 }
 function finish(result) {
   cleanup();
@@ -4446,7 +4446,46 @@ let sItems = [], sSel = 0, sMembers = new Set(), sMsg = '';
 // low. This screen cannot drift that way, because the only thing that fills this map is
 // the loop that draws the lines. A row nobody drew is a row nobody can click.
 let sHitRow = new Map();
+// `/` FINDS, as it does on the grid (see srchQ there for why it takes two steps): every
+// printable key types into the query and the cursor follows the first match; ⏎ locks it,
+// and only then do n / N step. Matching is lib/grid-search.mjs, so `bil` means here what
+// it means on the desk. Two things differ, and both are this screen's job:
+//   - it NARROWS rather than dims. The grid is a few cards you can see at once; this list
+//     is every session in every project and is longer than the window, so a dimmed miss
+//     still costs the row a match needed.
+//   - SPACE IS NEVER TYPED. It toggles the session under the cursor in both steps, because
+//     picking what you just found is the reason to search here, and no session or project
+//     name has a space in it to lose.
+let sQ = null;               // null = no search; otherwise the query ('' just after `/`)
+let sTyping = false;         // true = keys type into the query; false = locked, n/N act
+// A session row answers to its own name AND its project's, so `bil` finds every session
+// of billing-svc as well as any session named like it. Headers are never matches: there
+// is nothing to stack on a header.
+function sMatches() {
+  return sQ ? matchIndices(sItems, sQ, it => it.header ? null : { label: it.proj, name: it.name }) : [];
+}
+function sFirst() { const m = sMatches(); if (m.length) sSel = m[0]; }
+// The rows the list is made of, as indices into sItems: everything, or — while a search
+// matches something — the matches and the headers they sit under. A query that matches
+// NOTHING leaves the whole list up, with the cursor where it was: an empty list would hide
+// the cursor, and the prompt already says nothing matched.
+function sView() {
+  const m = sMatches();
+  if (!m.length) return sItems.map((_, i) => i);
+  const keep = new Set(m), view = [];
+  let hdr = -1;
+  sItems.forEach((it, i) => {
+    if (it.header) { hdr = i; return; }
+    if (keep.has(i)) { if (hdr >= 0) view.push(hdr); hdr = -1; view.push(i); }
+  });
+  return view;
+}
+const sKey = it => it && !it.header ? `${it.sock}\t${it.name}` : '';
 function sBuild() {
+  // The cursor is a SESSION, not a position: a session that starts or stops above it
+  // shifts every index by one, and a 2.5s poll would walk the cursor off what you were
+  // about to press space on.
+  const was = sKey(sItems[sSel]);
   sMembers = stackMembers();
   sItems = [];
   for (const p of visibleProjects()) {
@@ -4471,16 +4510,48 @@ function sBuild() {
     });
     for (const r of rows) sItems.push(r);
   }
+  if (was) { const i = sItems.findIndex(it => sKey(it) === was); if (i >= 0) sSel = i; }
   // Land on a session, never on a project header — space/⏎ would have nothing to act on.
   if (sSel >= sItems.length) sSel = sItems.length - 1;
   if (sSel < 0) sSel = 0;
-  if (sItems[sSel]?.header) sMoveStack(1) || sMoveStack(-1);
+  // ...and on one the list is showing: the session under the cursor can stop matching (or
+  // stop) while a search is up.
+  if (sItems[sSel]?.header || !sView().includes(sSel)) {
+    if (sMatches().length) sFirst(); else sMoveStack(1) || sMoveStack(-1);
+  }
 }
 function sMoveStack(d) {               // step to the next selectable row; false if none
+  const view = new Set(sView());
   for (let i = sSel + d; i >= 0 && i < sItems.length; i += d) {
-    if (!sItems[i].header) { sSel = i; return true; }
+    if (!sItems[i].header && view.has(i)) { sSel = i; return true; }
   }
   return false;
+}
+function sToggle() {
+  const it = sItems[sSel];
+  if (it && !it.header) { stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers(); }
+}
+// Reverse the letters of `plain` that the search matched. Offsets are taken on the plain
+// text before any colour goes in, so the padding around it is untouched.
+function sMark(plain, base) {
+  const sp = sQ ? matchSpan(plain, sQ) : null;
+  if (!sp) return base + plain;
+  return base + plain.slice(0, sp[0]) + C.rev + plain.slice(sp[0], sp[1]) + C.unrev + plain.slice(sp[1]);
+}
+// The search prompt, in the message slot under the count — one row, styled like the
+// grid's: a yellow lead, dim prose, the keys themselves bright.
+function sSearchLine() {
+  const k = t => `${C.reset}${C.bold}${t}${C.dim}`;
+  const m = sMatches();
+  const q = clip(sQ, Math.max(8, W() - 56));
+  const lead = ` ${C.yellow}${C.bold}/${C.reset}${C.bold}${q}${C.reset}${sTyping ? `${C.rev} ${C.unrev}` : ' '} `;
+  if (!sQ) return lead + `${C.dim}type part of a session or project name · ${k('esc')} cancel${C.reset}`;
+  if (!m.length) return lead + `${C.yellow}nothing matches '${q}'${C.reset}`;
+  const n = `${m.length} match${m.length === 1 ? '' : 'es'}`;
+  if (sTyping) return lead + `${C.dim}${n} · ${k('space')} add · ${k('⏎')} keep · ${k('esc')} clear${C.reset}`;
+  const at = m.indexOf(sSel);
+  return lead + `${C.dim}${at >= 0 ? `${at + 1} of ${m.length}` : n} · ${k('n')}/${k('N')} next/prev · ` +
+    `${k('space')} add · ${k('⏎')} open the stack · ${k('/')} edit · ${k('esc')} clear${C.reset}`;
 }
 function sRender() {
   const memberRows = sItems.filter(it => !it.header && sMembers.has(`${it.sock}\t${it.name}`));
@@ -4488,18 +4559,50 @@ function sRender() {
   // The same arithmetic bin/fleet-stack applies before it builds anything, shown here
   // so the limit is visible BEFORE you press ⏎ rather than as a message after.
   const fits = Math.max(1, Math.floor((W() + 1) / (STACK_MIN_COLS + 1)));
-  let buf = '\x1b[H';
+  // AUTOWRAP OFF for the frame: a line wider than the window would otherwise take two rows
+  // and push the footer off the bottom — the same overflow as the list's, from the side.
+  // The terminal clips it at the margin instead; cleanup() turns wrapping back on.
+  let buf = '\x1b[?7l\x1b[H';
   buf += ` ${C.bold}stack${C.reset} ${C.dim}— several sessions on screen at once, across projects${C.reset}\x1b[K\n`;
   buf += n === 0
     ? ` ${C.dim}nothing stacked yet — ${C.reset}space${C.dim} adds the selected session${C.reset}\x1b[K\n`
     : ` ${C.green}${n} stacked${C.reset}${C.dim} · ~${Math.floor((W() - n + 1) / n)} columns each${C.reset}` +
       (n > fits ? `  ${C.red}${C.bold}this window fits ${fits} — the rest will be left out${C.reset}` : '') + '\x1b[K\n';
-  buf += sMsg ? ` ${C.yellow}${sMsg}${C.reset}\x1b[K\n` : '\x1b[K\n';
+  buf += sMsg ? ` ${C.yellow}${sMsg}${C.reset}\x1b[K\n` : sQ != null ? sSearchLine() + '\x1b[K\n' : '\x1b[K\n';
   const STC = { working: C.cyan, 'need-you': C.red, parked: C.grey, ready: C.green, idle: C.grey, unknown: C.grey };
-  const maxShow = Math.max(6, H() - 7);
-  let start = Math.max(0, sSel - Math.floor(maxShow / 2));
-  const end = Math.min(sItems.length, start + maxShow);
-  start = Math.max(0, end - maxShow);
+  // ── the window, IN LINES ──
+  // Three rows above the list (title, count, message slot) and two below (a blank, the
+  // footer) are always drawn, and the list gets exactly what is left. It was windowed in
+  // ITEMS, and a header draws TWO lines (a blank, then its name) to a session's one, so a
+  // fleet with many projects drew a frame taller than the terminal: it scrolled, and the
+  // title, the count and the message slot went off the top. Measured at 58 rows with 11
+  // projects and ~40 sessions, the frame started mid-list with no title at all.
+  //   The window grows from the cursor outward, a row below then a row above, until the
+  // next one would not fit — counting a `↑ N more` / `↓ N more` line for whichever side
+  // still has rows past the edge, since that line costs a row too. The cursor is in it by
+  // construction, and it sits mid-window wherever there is list on both sides of it.
+  const view = sView();
+  const budget = Math.max(1, H() - 5);
+  const cost = i => sItems[i].header ? 2 : 1;
+  const span = (a, b) => {
+    let l = (a > 0 ? 1 : 0) + (b < view.length ? 1 : 0);
+    for (let p = a; p < b; p++) l += cost(view[p]);
+    return l;
+  };
+  const c = Math.max(0, view.indexOf(sSel));
+  let a = c, b = Math.min(view.length, c + 1);
+  // Downward, a header comes in only WITH its first session: a project name on the last
+  // row with nothing under it is a heading for a list that is not there.
+  for (let grew = true; grew;) {
+    grew = false;
+    const step = b + 1 < view.length && sItems[view[b]].header ? 2 : 1;
+    if (b < view.length && span(a, b + step) <= budget) { b += step; grew = true; }
+    if (a > 0 && span(a - 1, b) <= budget) { a--; grew = true; }
+  }
+  // A window too short for even the cursor and its markers drops the markers, never the
+  // cursor: the row you are acting on is the one thing that has to be on screen.
+  const marks = span(a, b) <= budget;
+  const hidden = (from, to) => view.slice(from, to).filter(i => !sItems[i].header).length;
   // Three lines are always emitted above the list: the title, the count, and the message
   // slot. `row` walks with the buffer from there so a session's row is whatever line it
   // actually landed on — a header costs TWO (a blank, then its name) and a session one,
@@ -4507,10 +4610,17 @@ function sRender() {
   let row = 3;
   sHitRow = new Map();
   if (!sItems.length) { buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`; row++; }
-  for (let i = start; i < end; i++) {
-    const it = sItems[i];
+  if (marks && a > 0) {
+    // ...and the project the top rows belong to, when its own header is above the window:
+    // every project has a `master`, so a list that opens on one does not say whose it is.
+    const top = sItems[view[a]];
+    const owner = top && !top.header ? ` · ${C.reset}${C.bold}${top.proj}${C.reset}` : C.reset;
+    buf += `   ${C.dim}↑ ${hidden(0, a)} more${owner}\x1b[K\n`; row++;
+  }
+  for (let p = a; p < b; p++) {
+    const i = view[p], it = sItems[i];
     if (it.header) {
-      buf += `\x1b[K\n ${C.bold}${C.white}${it.header}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
+      buf += `\x1b[K\n ${sMark(it.header, C.bold + C.white)}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
       row += 2;
       continue;
     }
@@ -4533,11 +4643,63 @@ function sRender() {
     // repeated itself. `↳` says this row HANGS OFF the one named beside it, so the origin
     // stays readable and the kind column is the difference rather than the only clue.
     const label = it.tab ? `↳ ${it.name.replace(/^_(?:term|edit)-/, '')}` : it.name;
-    const nm = (sel ? C.bold + C.white : C.reset) + padEndV(label, 24) + C.reset;
+    const nm = sMark(padEndV(label, 24), sel ? C.bold + C.white : C.reset) + C.reset;
     buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(kind, 10)}${C.reset}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓/jk/wheel move · space or click add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
+  if (marks && b < view.length) { buf += `   ${C.dim}↓ ${hidden(b, view.length)} more${C.reset}\x1b[K\n`; row++; }
+  // The footer is PLACED on the last row rather than written after the list, so nothing
+  // the list does can move it — and it is the one line that ends without a newline, since
+  // a newline on the bottom row scrolls the whole frame up by one. Shortest form that fits.
+  const foot = [
+    '↑↓/jk/wheel move · / find · space or click add/remove · ⏎ open the stack · c clear · esc/q/` back',
+    '↑↓ move · / find · space add/remove · ⏎ open · c clear · esc back',
+    '/ find · space add · ⏎ open · esc back',
+  ].find(f => vis(f) + 1 <= W()) || 'esc back';
+  buf += `\x1b[J\x1b[${H()};1H${C.dim} ${foot}${C.reset}\x1b[K`;
   out(buf);
+}
+// One key while a search is up. Returns a choice to finish with, or null.
+function sSearchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const enter = key === '\r' || key === '\n';
+  const shorter = () => [...sQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { sQ = null; return null; }
+  if (key === '\x1b[A') { sMoveStack(-1); return null; }
+  if (key === '\x1b[B') { sMoveStack(1); return null; }
+  if (key === ' ') { sToggle(); return null; }
+  if (sTyping) {
+    // Locks only onto something, as on the grid: with nothing matching there is nothing
+    // for n to step through.
+    if (enter) { if (sMatches().length) sTyping = false; return null; }
+    if (bs) { if (!sQ) sQ = null; else { sQ = shorter(); sFirst(); } return null; }
+    if (key.startsWith('\x1b')) return null;
+    // Every printable key but space, in order. A space that arrives in the same read as
+    // the letters before it (`bill ` while the poll held the loop) is still the toggle it
+    // was typed as, on whatever those letters found.
+    for (const ch of key) {
+      if (ch === ' ') sToggle();
+      else if (ch > ' ' && ch !== '\x7f') { sQ += ch; sFirst(); }
+    }
+    return null;
+  }
+  // LOCKED. n / N step, j / k move, ⏎ opens the stack as it does without a search, / or ⌫
+  // go back to editing; q and ` clear the search before they would leave the screen.
+  // Everything else is inert — `c` clearing the whole stack is not what a stray letter
+  // typed into the wrong step should do.
+  if (key === 'q' || key === '\x60') { sQ = null; return null; }
+  if (key === '/') { sTyping = true; return null; }
+  if (bs) { sTyping = true; sQ = shorter(); sFirst(); return null; }
+  if (enter) {
+    if (sMembers.size === 0) { sMsg = 'the stack is empty — press space on a session first'; return null; }
+    return 'stackopen';
+  }
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(sMatches(), sSel, ch === 'n' ? 1 : -1); if (i >= 0) sSel = i; }
+    else if (ch === 'k') sMoveStack(-1);
+    else if (ch === 'j') sMoveStack(1);
+    else if (ch === ' ') sToggle();
+  }
+  return null;
 }
 function onKeyStack(key) {
   // THE MOUSE, and it has to come first: an SGR event arrives as one multi-character
@@ -4558,21 +4720,39 @@ function onKeyStack(key) {
       const i = sHitRow.get(mev.y), it = sItems[i];
       if (it && !it.header) {
         sSel = i; sMsg = '';
-        stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers();
+        sToggle();
         sRender();
       }
       return;
     }
     return;   // releases, drags, right-clicks, and clicks on chrome
   }
-  if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
   sMsg = '';
-  if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
+  if (sQ != null) { const c = sSearchKey(key); if (c) return finish(c); sRender(); return; }
+  if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
+  // A RUN OF KEYS IN ONE READ is each of them. The poll walks every project's sessions
+  // synchronously, and with forty of them that blocks the loop long enough that a held j,
+  // or `/` and the first letters after it, arrive as one chunk — which lib/keys.mjs keeps
+  // as one text event and the comparisons below never match, so a held j dropped moves.
+  // Only the keys that are safe to replay: j, k and space step and toggle, and `/` hands
+  // the rest of the run to the query it opens. Anything else ends the run unread, so a
+  // stray paste cannot reach `c` (clear the stack) or `q`.
+  if (key.length > 1 && /^[jk /]/.test(key)) {
+    const run = [...key];
+    for (let x = 0; x < run.length; x++) {
+      const ch = run[x];
+      if (ch === 'j') sMoveStack(1);
+      else if (ch === 'k') sMoveStack(-1);
+      else if (ch === ' ') sToggle();
+      else if (ch === '/') { sQ = ''; sTyping = true; const rest = run.slice(x + 1).join(''); if (rest) sSearchKey(rest); break; }
+      else break;
+    }
+  }
+  else if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
   else if (key === '\x1b[B' || key === 'j') sMoveStack(1);
-  else if (key === ' ') {
-    const it = sItems[sSel];
-    if (it && !it.header) { stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers(); }
-  } else if (key === 'c' || key === 'C') { stackRun(['clear']); sMembers = stackMembers(); }
+  else if (key === '/') { sQ = ''; sTyping = true; }
+  else if (key === ' ') sToggle();
+  else if (key === 'c' || key === 'C') { stackRun(['clear']); sMembers = stackMembers(); }
   else if (key === '\r' || key === '\n') {
     if (sMembers.size === 0) sMsg = 'the stack is empty — press space on a session first';
     else return finish('stackopen');
@@ -4611,6 +4791,9 @@ if (SCREEN === 'projects') {
 } else if (SCREEN === 'stack') {
   sBuild(); sRender(); process.stdin.on('data', keyReader(onKeyStack));
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);
+  // A RESIZE REDRAWS NOW, not at the next poll: the window is cut to the terminal's height,
+  // and for up to 2.5s after a shrink the frame drawn for the old one scrolls the title off.
+  process.stderr.on('resize', () => sRender());
 } else {
   process.stdin.on('data', keyReader(onKey));
   sweepRemovingMarkers();          // a previous grid may have left one behind (see above)
