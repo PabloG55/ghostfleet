@@ -18965,6 +18965,39 @@ else
   skip "phone client" "web/ not present"
 fi
 
+group "phone client: where a login lands, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
+  # ── a login lands on Projects, and a back swipe never shows the lock screen ────
+  # Two reports from one phone. A login reopened whatever screen the app was left on, so a
+  # face at the lock screen an hour later opened a session nobody asked for. And a back swipe
+  # flashed the lock screen before landing: the restored screen's back trail was pushed at
+  # boot while the lock screen was what was painted, and iOS previews an entry with the
+  # picture it took as the page left it. The helper records what every frame painted beside
+  # every history call and slide the app makes, at 390x844 with touch and 1600x900 with a
+  # mouse, and against a fake daemon for a reload that kept its session and a passkey
+  # unlock (a virtual authenticator) from inside a session. Watched red against staging's
+  # client on every landing and history row, and against four copies of this one broken on
+  # purpose for the rows staging already passed (a deep link, a resume, a reload).
+  LGN="$(mktemp -d "$TEST_RUNS.$$.login.XXXXXX")"
+  node "$ROOT/test/helpers/login-check.mjs" > "$LGN/out" 2> "$LGN/err"
+  lgnrc=$?
+  if grep -q 'no chrome' "$LGN/out" 2>/dev/null; then
+    skip "where a login lands" "no chrome to log in with"
+  else
+    is "login-check ran"                "0" "$lgnrc"
+    is "...without complaining"         ""  "$(head -2 "$LGN/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$LGN/out")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$LGN/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$LGN/out"
+  fi
+  rm -rf "$LGN"
+else
+  skip "phone client" "web/ not present"
+fi
+
 group "phone client: the queue page, in a real browser"
 if [ -d "$ROOT/web" ]; then
 

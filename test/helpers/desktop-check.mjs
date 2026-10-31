@@ -799,15 +799,21 @@ try {
     await sleep(200);
   };
   const leaveBox = () => b.evaluate(() => { document.activeElement?.blur?.(); return null; });
-  // A reload that keeps storage — the page is opened again, as a relaunch opens it.
+  // A reload that keeps storage — the page is opened again, as a relaunch opens it. Getting
+  // past the lock is a LOGIN, and a login lands on Projects (login-check.mjs), so the chat is
+  // walked back to by tap: what these rows are about is that its draft was kept, not which
+  // screen the app opens on.
   const reopen = async () => {
     await b.call('Page.reload', {});
     await sleep(800);
     await until(() => b.evaluate(() => {
       const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
       if (e) e.click();
-      return !!document.querySelector('#app .composer textarea');
+      return !!document.querySelector('.card[data-idx] .c-name');
     }), 10000);
+    await settle(atProjects);
+    await tap('acme-api'); await settle(onGrid); await slid();
+    await tap('api-fix'); await settle(x => x.session === 'api-fix'); await slid();
     await sleep(600);
   };
   const back = async () => { await b.evaluate(() => { history.back(); return null; }); await sleep(700); };
@@ -822,7 +828,7 @@ try {
 
   await reopen();
   s = await look();
-  is('drafts: after a reload, the same chat and its draft', ['api-fix', 'draft one'], [s.session, s.draft]);
+  is('drafts: after a reload, that chat still has its draft', ['api-fix', 'draft one'], [s.session, s.draft]);
 
   await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
   await press('Enter', { as: 'drafts ⏎' });

@@ -342,8 +342,14 @@ try {
   is('×: closes the column', ['master', 'api-fix'], s.cols.map(c => c.nm));
   is('...and takes it out of the stack', ['master', 'api-fix'], (s.stored?.members || []).map(m => m.session));
 
-  // The selection survives a reload — the stack, its order and its drafts.
+  // The selection survives a reload — the stack, its order and its drafts. Getting past the
+  // lock is a login, and a login lands on Projects (login-check.mjs), so the stack is opened
+  // again from there: Ctrl-x finds it still selected, and ⏎ opens it.
   await b.call('Page.reload'); await sleep(800); await unlock();
+  await settle(x => !x.stack && !x.picker && !x.session);
+  await press('x', { ctrl: true });
+  is('reload: the picker still has the stack selected', ['master', 'api-fix'], (await settle(x => x.picker && x.stacked.length === 2)).stacked);
+  await press('Enter');
   s = await settle(x => x.cols.length === 2 && x.cols[1].turns > 0, 8000);
   is('reload: the stack comes back as it was', ['master', 'api-fix'], s.cols.map(c => c.nm));
   is('...with each column\'s draft', ['half for master', 'half for api-fix'], s.cols.map(c => c.draft));
@@ -370,8 +376,8 @@ try {
   is('picker q: back', true, (await settle(x => x.stack)).stack);
   await press('`');
   s = await settle(x => !x.stack && !x.picker);
-  // Reopened by a reload, the stack was opened from nowhere: back is Projects, with nothing
-  // open beside it.
+  // Reopened after a reload's login, the stack was opened from Projects: back is Projects,
+  // with nothing open beside it.
   is('` in the stack: back out to where it was opened from', true, !s.stack && !s.picker &&
      await b.evaluate(() => /projects/.test((document.querySelector('#side .hdr .scope') || {}).textContent || '') && !!document.querySelector('#app .duo-empty')));
 
