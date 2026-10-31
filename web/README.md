@@ -167,6 +167,8 @@ dismiss.
 | `grid-search.js` | the desk's `/` matcher — **a byte-for-byte copy** of `lib/grid-search.mjs`, which the suite holds identical. A copy and not an import, because a browser can only fetch `web/` and the desk must not need `web/` to start |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
+| `term.js` | the terminal screen's engine: xterm.js on one side, `fleet-serve`'s WebSocket on the other, the key row and the leave key. Loaded on demand |
+| `xterm.js` · `xterm-fit.js` · `xterm.css` | **vendored** from npm (`@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0) by `scripts/vendor-xterm.sh`, which refuses a tarball whose digest is not the pinned one. The suite reruns its `--check`, so a hand-edited copy goes red |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
@@ -254,12 +256,12 @@ desk's; see *On a desk* below for the whole map.
 
 - **the stack** — it exists to put four sessions side by side, and a phone has no side.
   At `nc = 1` that is this card list.
-- **`Ctrl-t` terminal / `Ctrl-n` editor tabs** — they open a shell and neovim in the
-  session's folder. There is no local shell on a phone, and streaming a remote one is a
-  bigger surface than the whole rest of the design.
+- **the `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
+  (below) can run nvim instead, in the project's.
 
 The settings sheet says both out loud, so the gap reads as a decision rather than as
-something half-built.
+something half-built. The **terminal** was a third, until the owner decided it was worth its
+surface; it is here now, with gates of its own — see *The terminal*.
 
 ## On a desk
 
@@ -411,10 +413,11 @@ added here without a row that presses it.
 | `Ctrl-f <p>` · `Ctrl-f <p> <s>` · `Ctrl-f <p> ⏎` · `Ctrl-f <p> m` · `Ctrl-f <p> s` · `Ctrl-f s <p>` · `Ctrl-f p` · `Ctrl-f Esc` | everywhere | project p, then: card s · its master · its master · its grid; `s` then a digit is that project's grid; `p` is Projects; `Esc` cancels |
 | `Ctrl-a` | session | tmux's prefix: the next key is read from its table |
 | `Ctrl-a g` · `Ctrl-a d` · `Ctrl-a s` · `Ctrl-a p` · `Ctrl-a f` · `Ctrl-a →` · `Ctrl-a ←` | session | back · back · the grid · Projects · the jump chord · next session · previous session |
+| `Ctrl-a t` | session | the project's **terminal**, in the right pane — the desk's `Ctrl-a t`, which is its `Ctrl-t`. It asks for the passkey; inside it every key is the shell's and `⇧Esc` leaves (see *The terminal*) |
 | `p` | session | any key tmux does not bind goes to the agent: typed into the composer, which keeps the focus |
 | `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
 | `` ` `` · `⇧←` · `⇧→` · `Ctrl-s` · `Ctrl-p` · `Ctrl-f` · `Ctrl-a` | composer, focused | the same as in the session row above: tmux answers these before the agent at the desk, so they act from inside the box; every other key is text |
-| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them), and a terminal or editor in the browser is out of scope |
+| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them). The terminal is `Ctrl-a t` here, the desk's other spelling of it; the editor is not in this client |
 | `t` · `Ctrl-x` · `Ctrl-a x` · `Ctrl-a <` · `Ctrl-a >` | grid, session | the stack — not in this client (§7: it exists to put sessions side by side; the two panes are as far as this goes) |
 | `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |
 | `Ctrl-c Ctrl-c` | Projects | quit — no meaning in a browser: a page cannot close its own tab |
@@ -472,6 +475,15 @@ GET  /api/pane?project=&session=[&scrollback=0..2000]
 GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 POST /api/verb   { tool, args }             -> { ok, text }         Bearer token required
+GET  /api/term                              -> { ok, enabled, since, idle }   for THIS device
+POST /api/term/enable { on }                -> { ok, enabled }      on: needs X-Fleet-Assertion; off: never
+POST /api/term/open { project, cols, rows } -> { ok, project, session, ticket, ttl, idle }
+                                            403 { needs: 'enable' } while off for this device;
+                                            401 { needs: 'passkey' } without a fresh X-Fleet-Assertion
+GET  /api/term/ws?ticket=…  (WebSocket)     the terminal. Origin must be a configured origin; the
+                                            ticket is single-use and dies in 30s. Binary frames
+                                            are the pane's bytes / keystrokes; text frames are
+                                            {t:'resize',cols,rows} up and {t:'hello'|'ready'|'closed'} down
 GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 POST /api/auth/register { code, id, … }     -> { token, expires_at }
 POST /api/auth/assert                       -> { token, expires_at }
@@ -597,6 +609,45 @@ Two notes for whoever wires the server up:
 - **`web/package.json` is `{"type":"module"}` for node's benefit, not the browser's** —
   it is what lets `node --check` and the test helpers read these `.js` files as ES
   modules. Don't remove it.
+
+## The terminal
+
+A real shell, in the project's folder, from the phone or a desktop browser — and **the same
+shell the desk sees**: `fleet-serve` opens the project's terminal tab with the desk's own
+`bin/fleet-tab` (`Ctrl-t` at the Mac, from the Projects-level origin), so it is a session
+called `_term-<project>` on the fleet's tmux server, on the grid like any other tab, and the
+browser attaches to it as a tmux **control-mode** client (`lib/web-term.mjs`). Closing the
+browser, or the socket dropping, detaches; the tab stays.
+
+**Open it from** the grid's `⋯` (`terminal`), a session's `⋯`, or `Ctrl-a t` in a session.
+
+**Four gates, all on the server** (`bin/fleet-serve.mjs`, TERMINAL):
+
+1. **off per device.** Settings → *terminal* turns it on for this device — it asks for the
+   passkey, and the Mac records the switch on this device's enrolment (`terminal: { on, at,
+   ip }` in `serve.json`) with an audit row. Off never asks, and closes any terminal open.
+2. **a fresh passkey at every open**, like a destructive verb — the unlock does not count. The
+   challenge is fetched before the tap, so on iOS the sheet is asked for inside it.
+3. **the address fleet-serve already binds** (tailnet or loopback), nothing new; the
+   WebSocket also needs a configured `Origin` and a one-use ticket from the open.
+4. **inside the fleet's tmux**, so the Mac sees it.
+
+It closes after **15 minutes without a keystroke** (`terminal_idle` in `serve.json`) — the same
+idle window as the session token, so an unlocked phone on a table does not hold a shell open
+longer than it holds the app. Output does not count: a build printing to a terminal nobody is
+at is exactly the one to close. Nothing the terminal prints reaches `serve.log` — one line
+when it opens and one when it closes, with byte counts.
+
+**On a phone** a key row sits above the keyboard: `Esc` `Ctrl` `Tab` `←` `↑` `↓` `→` `|` `~`
+`/` `-`. `Ctrl` latches and changes the next key (`Ctrl` then `c` is Ctrl-C). A hardware
+keyboard needs none of it.
+
+**At a desk** it opens in the right pane with the grid beside it, and while it has the focus
+**every key is the shell's** — the desk's `Ctrl-a`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and `` ` ``
+included — except the ones the browser keeps for itself. **`⇧Esc` leaves it** (a terminal
+cannot tell ⇧Esc from Esc, so taking it costs the shell nothing); so does a click outside it.
+Then the desk's keys are back: `` ` `` or `q` returns to where it was opened from, `⏎` goes
+back in.
 
 ## The pane
 

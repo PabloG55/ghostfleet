@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 494321ff0ba3
+// CLIENT-HASH: 55c4628b5e1d
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -401,7 +401,8 @@
 // relaunched.
 // v81 stops at a failed wake: the tap used to open the session whatever the wake answered, so
 // a wake that failed showed its reason and then an empty pane. A phone still on v80 does that.
-const VERSION = 'ghostfleet-v81';
+// v82 adds the terminal: a real shell in a fleet tab, off per device, a passkey at each open.
+const VERSION = 'ghostfleet-v82';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -410,6 +411,12 @@ const SHELL = [
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
   // where that is the whole reason hashing is switched off.
   './screens.js', './preact.js',
+  // The terminal: web/term.js and the xterm.js it drives, vendored from npm with pinned
+  // digests (scripts/vendor-xterm.sh). Precached like everything else even though most
+  // opens never load them, because "every shipped file is precached" is what keeps an
+  // offline open from half-working — and an installed app that cannot load its terminal
+  // after a deploy until it happens to be online is that half.
+  './term.js', './xterm.js', './xterm-fit.js', './xterm.css',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',

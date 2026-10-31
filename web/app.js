@@ -9,10 +9,10 @@
 //
 // Two things are deliberately missing and are not to be substituted (§7): the STACK
 // (it exists to put sessions side by side, and a phone has no side — at nc = 1 it is
-// this list) and the Ctrl-t / Ctrl-n terminal and editor tabs (they open a shell and
-// neovim in the session's folder, and there is no local shell on a phone; streaming a
-// remote one is a larger surface than the whole rest of the design). The settings sheet
-// says so out loud rather than leaving a hole where a key used to be.
+// this list) and the Ctrl-n editor tab. The settings sheet says so out loud rather than
+// leaving a hole where a key used to be. The TERMINAL was the third, until the owner
+// decided it was worth its surface: it is here now, off per device and behind a passkey
+// at every open (see "the terminal" below, and fleet-serve's TERMINAL for the gates).
 
 import * as G from './grid.js';
 import * as api from './api.js';
@@ -76,6 +76,9 @@ const S = {
   jump: null,           // the Ctrl-f chord in progress: { stage: 'first'|'proj'|'grid', proj }
   prefix: false,        // Ctrl-a was pressed in a session: the next key is a tmux-prefixed one
   wantCard: 0,          // Ctrl-f <p> <s>: open card s once project p's grid has been read
+  termOn: null,         // /api/term's answer for THIS device: may it open a terminal. null = not asked
+  termBack: null,       // where the terminal screen was opened from, which is where back goes
+  termSt: { state: 'checking', why: '' },   // what the terminal screen says (see termState)
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -228,6 +231,7 @@ async function refreshOnce() {
       ]);
     }
     else if (S.screen === 'grid') {
+      termAsk();
       S.grid = await api.getGrid(S.project, S.sub);
       // The sub-lead went away while its grid was open: the server answers the top grid's
       // shape with no cards, and staying on an empty screen with a name on it is the lie.
@@ -240,6 +244,11 @@ async function refreshOnce() {
         if (it && it.card) { S.sel = items().indexOf(it); save(); openItem(it); return; }
       }
     }
+    else if (S.screen === 'term') {
+      // The grid beside it (two panes), and nothing of the terminal's own: its bytes arrive
+      // on the socket, never on this poll.
+      S.grid = await api.getGrid(S.project, S.sub);
+    }
     else if (S.screen === 'session') {
       // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
       // the ordinary session read — the same grid card, the same transcript, the same pane.
@@ -250,6 +259,7 @@ async function refreshOnce() {
         if (!S.jarvis || !S.jarvis.present) { S.stale = 0; renderUnlessTyping(); return; }
         S.project = S.jarvis.project; S.session = 'master';
       }
+      termAsk();
       S.grid = await api.getGrid(S.project, S.sub);
       // THE MAC'S EARS, for a session's `talk`: a session screen opened straight from a
       // notification has never asked the Projects poll's question. Once, whatever Jarvis's
@@ -329,6 +339,9 @@ function markStandalone() {
 function lock() {
   // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
   if (S.talk) talkStop('');
+  // ...AND NO SHELL. The server would end the socket on its own idle clock; a lock is the
+  // owner saying so now.
+  disposeTerm();
   S.locked = true; api.clearToken(); render();
   // Coming back to an expired session: the one attempt this resume was armed for.
   tryAutoUnlock();
@@ -381,10 +394,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'term']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, session: 2 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, session: 2, term: 3 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -469,7 +482,8 @@ function renderDuo(app, side) {
   // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
   const queue = S.screen === 'queue';
   const left = (S.screen === 'projects' || queue || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
-  const inSession = S.screen === 'session';
+  // The terminal is a right-pane screen like a session: its project's grid stays beside it.
+  const inSession = S.screen === 'session' || S.screen === 'term';
   const props = left === 'grid' ? gridProps() : projectsProps();
   // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
   // session's; drawn in both, a `y` would read as answering two questions.
@@ -494,6 +508,8 @@ function renderDuo(app, side) {
   syncPanePoll(); syncChatPoll();
 }
 function render() {
+  // Leaving the terminal's screen, by any route, closes its socket; the tab stays in tmux.
+  if (TS && S.screen !== 'term') disposeTerm();
   if (slideNav()) return;
   const app = document.getElementById('app');
   const side = sideNode();
@@ -586,6 +602,7 @@ function paintElScreenBody(app) {
   paneBoxNode = paneNode = paneGeomNode = chatNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.textContent = ''; screenMem = null; app.append(lockScreen()); renderSheet(); syncPanePoll(); syncChatPoll(); return; }
+  if (S.screen === 'term') { paintTerm(app); return; }
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
@@ -1338,6 +1355,8 @@ function gridProps() {
         onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
       { label: 'new', onClick: () => sheetPicker() },
       { label: 'worktrees', onClick: () => sheetWorktree() },
+      // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin.
+      { label: 'terminal', onClick: () => openTerminal() },
       // Only when there is something for it to act on — see sheetMore on why a disabled
       // row earns a line in a footer and not in a sheet.
       sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
@@ -2646,6 +2665,166 @@ function sessionScreen() {
   out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
+}
+
+// ── the terminal: a fleet tab, on this screen ─────────────────────────────────
+// A real shell in the project's folder — the same terminal tab Ctrl-t opens at the desk,
+// made by the server with the desk's own script and attached through fleet-serve, so the desk's grid shows the
+// session the phone is typing into. The gates are the server's (fleet-serve TERMINAL): off
+// per device until switched on in settings, and a fresh passkey every time one opens. This
+// file only decides what to SAY about each refusal.
+//
+// ONE NODE FOR AS LONG AS IT IS OPEN. Every other screen here is rebuilt by render(), on a
+// poll as often as every two seconds, and a terminal cannot be: rebuilding it would drop
+// the xterm instance, its scrollback and the keyboard's focus mid-word. So TS holds the
+// screen's root and render() only updates its words; leaving the screen is what disposes it.
+let TS = null;              // { project, root, host, msg, act, rowNode, h, state, why, session }
+let termLib = null;         // web/term.js, imported the first time a terminal opens
+const termWord = {
+  fixtures: 'the terminal needs the fleet server — the fixture fleet has no shell to open',
+  checking: 'checking whether this device may open a terminal…',
+  off: 'the terminal is off for this device. Settings turns it on — it asks for the passkey, and the Mac records which device did it.',
+  gate: 'a terminal asks for the passkey every time it opens',
+  asking: 'waiting for the passkey…',
+  opening: 'opening the terminal…',
+};
+function termTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
+// The tap. Everything the passkey needs happens BEFORE the first await, so WebKit still
+// counts this as the tap (passkey.js freshNow). Then the screen, then the rest.
+function openTerminal(project = S.project) {
+  if (!project) return;
+  const asking = api.mode() === 'server' && S.termOn === true && pk.available() && pk.registered()
+    ? pk.freshNow(`terminal ${project}`) : null;
+  if (S.screen !== 'term') S.termBack = { screen: S.screen, session: S.session, view: S.view, entry: S.entry, sub: S.sub };
+  if (TS && TS.project !== project) disposeTerm();
+  S.project = project; S.screen = 'term'; S.srch = null;
+  S.termSt = { state: asking ? 'asking' : 'checking', why: '' };
+  if (S.termBack.screen !== 'term') pushNav();
+  render();
+  if (asking) return startTerm(asking);
+  if (api.mode() !== 'server') return termState('fixtures');
+  if (S.termOn === null) {
+    termState('checking');
+    api.getTerm().then((j) => { S.termOn = !!j.enabled; termState(S.termOn ? 'gate' : 'off'); if (S.termOn) pk.prepareFresh().catch(() => {}); },
+                       (e) => termState('gate', String(e.message || e)));
+    return;
+  }
+  termState(S.termOn ? 'gate' : 'off');
+  if (S.termOn) pk.prepareFresh().catch(() => {});
+}
+// Asked once per unlock, off the screens that offer a terminal, so the tap that opens one
+// already knows whether it may — and, when it may, has a challenge ready for the passkey.
+// A daemon from before the terminal answers 404: that is "no", not an error to show.
+function termAsk() {
+  if (api.mode() !== 'server') return;
+  if (S.termOn === true) { pk.prepareFresh().catch(() => {}); return; }
+  if (S.termOn !== null || termAsking) return;
+  termAsking = true;
+  api.getTerm().then((j) => { S.termOn = !!j.enabled; if (S.termOn) pk.prepareFresh().catch(() => {}); },
+                     (e) => { if (e && e.status === 404) S.termOn = false; })
+     .finally(() => { termAsking = false; });
+}
+let termAsking = false;
+// THE STATE IS S's, NOT THE NODE's. render() can hand the paint to a view transition that
+// runs a frame later (slideNav), so the screen's node may not exist yet when the first
+// state arrives — measured: the "off for this device" answer landed in that frame and the
+// screen sat on "checking…" for good. Kept here, painted whenever the node is.
+function termState(state, why = '') { S.termSt = { state, why }; if (TS && S.screen === 'term') paintTerm(); }
+async function startTerm(asking) {
+  termState('asking');
+  let a;
+  try { a = await asking; }
+  catch (e) { return termState('gate', e && e.name === 'NotReady' ? e.message : pk.describe(e).replace(/Tap unlock/g, 'Tap open')); }
+  if (!TS) return;
+  termState('opening');
+  try {
+    termLib = termLib || await import('./term.js');
+    if (!TS) return;
+    paintTerm();                      // the key row, and the host shown before xterm measures it
+    if (!TS.h) {
+      TS.h = termLib.mount(TS.host, {
+        onState: ({ state, why }) => termState(state === 'open' ? 'open' : state === 'closed' ? 'closed' : 'opening', why),
+        onLeave: () => { if (TS && TS.h) TS.h.blur(); try { (document.querySelector('#side .cards') || document.body).focus(); } catch {} },
+      });
+    }
+    const r = await api.termOpen(TS.project, TS.h.size(), a);
+    if (!TS) return;
+    TS.session = r.session;
+    TS.h.connect(r.ticket);
+    if (!termTouch()) TS.h.focus();
+  } catch (e) {
+    if (e instanceof api.AuthError) { disposeTerm(); return lock(); }
+    if (e && e.needs === 'enable') { S.termOn = false; return termState('off'); }
+    termState('gate', String((e && e.message) || e));
+  }
+}
+function disposeTerm() {
+  if (!TS) return;
+  try { if (TS.h) TS.h.dispose(); } catch {}
+  TS = null;
+}
+function termScreenRoot() {
+  const msg = el('div', { class: 'term-msg' });
+  const act = el('div', { class: 'term-act' });
+  const host = el('div', { class: 'term-host' });
+  const title = el('span', { class: 'nm' });
+  const st = el('span', { class: 'st' });
+  const bar = el('div', { class: 'sbar' }, [
+    btn('‹', () => back()),
+    el('div', { class: 'who' }, [title, st]),
+  ]);
+  // THE KEY ROW, on touch only: a hardware keyboard has every one of these keys, and at a
+  // desk the row would be eleven buttons of nothing. pointerdown and preventDefault, so a
+  // tap never takes the focus from the terminal — the on-screen keyboard stays up.
+  const row = el('div', { class: 'term-keys' });
+  for (const k of (termLib ? termLib.KEYS : [])) row.append(termKeyBtn(k));
+  return { root: el('div', { class: 'term-screen' }, [bar, msg, act, host, row]), host, msg, act, title, st, row };
+}
+function termKeyBtn(k) {
+  const b = el('button', { type: 'button', class: 'tk' + (k.ctrl ? ' latch' : ''), text: k.label, 'aria-label': k.label === 'Ctrl' ? 'Control' : k.label });
+  const press = (ev) => { ev.preventDefault(); if (TS && TS.h) TS.h.key(k, b); };
+  b.addEventListener('pointerdown', press);
+  b.addEventListener('mousedown', (ev) => ev.preventDefault());
+  return b;
+}
+function paintTerm(app = document.getElementById('app')) {
+  if (!app) return;
+  if (!TS || TS.project !== S.project) {
+    disposeTerm();
+    const r = termScreenRoot();
+    TS = { project: S.project, ...r, h: null, session: '' };
+  }
+  if (TS.root.parentNode !== app) {
+    if (preactUp) { screensUI.unmount(app); preactUp = false; }
+    app.textContent = '';
+    screenMem = null;
+    paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+    composerNode = null;
+    app.append(TS.root);
+  }
+  // The row needs term.js's KEYS, which arrive with the first open.
+  if (termLib && !TS.row.firstChild) for (const k of termLib.KEYS) TS.row.append(termKeyBtn(k));
+  TS.row.hidden = !termTouch() || !TS.h;
+  TS.title.textContent = `terminal · ${TS.project}`;
+  const { state, why } = S.termSt;
+  const live = state === 'open';
+  TS.st.textContent = live ? ` ${TS.session}${termTouch() ? '' : ' · ⇧Esc leaves it'}` : '';
+  const words = state === 'closed' ? `closed — ${why || 'the connection ended'}. The tab is still open on the desk.`
+    : (why && (state === 'gate' || state === 'off') ? why : termWord[state] || '');
+  TS.msg.textContent = words;
+  TS.msg.hidden = !words || live;
+  TS.act.textContent = '';
+  if (state === 'off') TS.act.append(btn('settings', () => sheetSettings()));
+  if (state === 'gate' || state === 'closed')
+    TS.act.append(btn(state === 'closed' ? 'open it again — passkey' : 'open the terminal — passkey', () => {
+      if (TS && TS.h) { TS.h.dispose(); TS.h = null; TS.host.textContent = ''; }
+      startTerm(pk.freshNow(`terminal ${S.project}`));
+    }, 'go'));
+  TS.act.hidden = !TS.act.firstChild;
+  TS.host.hidden = !TS.h && state !== 'opening';
+  if (S.toast) { TS.msg.hidden = false; TS.msg.textContent = S.toast.text; }
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
 }
 
 function setView(v) {
@@ -4010,6 +4189,9 @@ function sheetActions(name = S.session) {
       : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
     btn('s sched', go(() => sheetSchedule(name))),
     btn('l label', go(() => sheetLabel(name))),
+    // The PROJECT's terminal, not this worker's worktree: one shell per project is what the
+    // passkey and the per-device switch are guarding, and it is the tab the grid shows.
+    btn('terminal', go(() => openTerminal())),
     lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
     lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
@@ -5007,6 +5189,15 @@ function popTo() {
   // A master entered the desk's way is one level under Projects, like Jarvis.
   else if (S.screen === 'session' && S.entry === 'projects') { talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  // Back from the terminal is wherever it was opened from — the grid, or the session whose
+  // ⋯ (or Ctrl-a t) opened it.
+  else if (S.screen === 'term') {
+    const b = S.termBack || { screen: 'grid' };
+    disposeTerm();
+    S.screen = b.screen === 'session' && b.session ? 'session' : b.screen === 'projects' ? 'projects' : 'grid';
+    S.session = S.screen === 'session' ? b.session : null; S.view = b.view || DEFAULT_VIEW; S.entry = b.entry || ''; S.sub = b.sub || '';
+    S.sess = null; S.pane = null; S.paneErr = ''; S.termBack = null;
+  }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; S.srch = null; }
@@ -5596,7 +5787,7 @@ function unlocked() {
   pk.release();
   S.unlockErr = '';
   if (!S.locked) return;
-  S.locked = false; render(); refresh();
+  S.locked = false; S.termOn = null; render(); refresh();
 }
 // Whether the last hide was the Face ID sheet's (see the visibilitychange listener).
 let hidByCeremony = false;
@@ -6114,6 +6305,45 @@ async function sheetSettings() {
     el('option', { value: 'url', text: 'a URL I type below', selected: p.kind === 'server' }),
   ]);
   const base = input(p.kind === 'server' ? p.base : '', { placeholder: 'http://mac.tailnet.ts.net:8787' });
+  // ── the terminal, for THIS device ──────────────────────────────────────────
+  // Off until switched on here, per device: the server records the switch on this
+  // device's enrolment, with when and from where. ON asks for the passkey (it is a grant);
+  // OFF never does, and closes any terminal this device has open.
+  if (api.mode() === 'server') {
+    kids.push(el('h2', { text: 'terminal' }));
+    const line = el('p', { class: 'term-set', text: 'asking the Mac…' });
+    const tbtn = btn('…', () => {}, '');
+    kids.push(line, el('div', { class: 'row' }, [tbtn]));
+    const show = (on, why = '') => {
+      line.textContent = (on ? 'on for this device — a terminal still asks for the passkey every time it opens.'
+                             : 'off for this device. Turning it on asks for the passkey; the Mac records that this device did it.') + (why ? ` (${why})` : '');
+      tbtn.textContent = on ? 'turn the terminal off' : 'turn the terminal on — passkey';
+      tbtn.className = on ? '' : 'go';
+      tbtn.onclick = () => {
+        // The passkey inside the tap (passkey.js freshNow), before anything awaits.
+        const asking = on ? null : pk.freshNow('terminal on');
+        tbtn.disabled = true;
+        (async () => {
+          try {
+            const r = await api.termEnable(!on, asking ? await asking : null);
+            S.termOn = !!r.enabled; show(S.termOn);
+            if (S.termOn) pk.prepareFresh().catch(() => {});
+            // Opened from the terminal screen's "off" (its settings button): that screen now
+            // offers the open, and switched off it says off again.
+            if (S.screen === 'term' && (S.termSt.state === 'off' || S.termSt.state === 'gate'))
+              termState(S.termOn ? 'gate' : 'off');
+          } catch (e) {
+            if (e instanceof api.AuthError) { closeSheet(); return lock(); }
+            show(on, e && e.name === 'NotReady' ? e.message : String((e && e.message) || e));
+          } finally { tbtn.disabled = false; }
+        })();
+      };
+    };
+    pk.prepareFresh().catch(() => {});
+    api.getTerm().then((j) => { S.termOn = !!j.enabled; show(S.termOn); },
+                       (e) => { line.textContent = `could not ask: ${String((e && e.message) || e)}`; });
+  }
+
   kids.push(el('h2', { text: 'connection' }));
   kids.push(el('p', { text: `right now: ${api.resolution().detail}` }));
   kids.push(field('where the fleet is', how));
@@ -6198,7 +6428,7 @@ async function sheetSettings() {
 
   kids.push(el('div', { class: 'absent' }, [el('div', { text: 'not here, on purpose (§7):' }),
     el('div', { text: '· the stack — it exists to put sessions side by side, and a phone has no side. At nc = 1 that is the card list.' }),
-    el('div', { text: '· Ctrl-t terminal / Ctrl-n editor tabs — they open a shell and neovim in the session\'s folder, and there is no local shell here.' })]));
+    el('div', { text: '· the Ctrl-n editor tab — it opens neovim in the session\'s folder. The terminal above can run nvim instead, in the project\'s.' })]));
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
@@ -6380,6 +6610,7 @@ function onKey(e) {
   if (S.jump) { e.preventDefault(); jumpKey(k, lk, ctrl); return; }
   let used;
   if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
+  else if (S.screen === 'term') used = termKey(e, k, lk, ctrl);
   else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
   else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
   else used = projectsKey(e, k, lk, ctrl);
@@ -6429,6 +6660,7 @@ function sessionKey(e, k, lk, ctrl) {
     else if (lk === 's') toGridOf(S.project);
     else if (lk === 'p') toProjects();
     else if (lk === 'f') startJump();
+    else if (lk === 't' && !S.jarvisMode) openTerminal();
     else if (k === 'ArrowRight' && !S.jarvisMode) cycleSession(1);
     else if (k === 'ArrowLeft' && !S.jarvisMode) cycleSession(-1);
     return true;
@@ -6470,6 +6702,22 @@ function typeIntoComposer(text) {
     box.dispatchEvent(new Event('input', { bubbles: true }));
   } catch { return false; }
   return true;
+}
+
+// ── the terminal, when it does NOT have the focus ─────────────────────────────────────
+// With the focus every key is the shell's (xterm.js has it, and onKey never sees it — the
+// focused element is a textarea). After ⇧Esc, or a click outside it, these are the desk's
+// keys again: ` and q go back where it was opened from, ⏎ goes back into it.
+function termKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 's') { toGridOf(S.project); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  if (k === '`' || k === 'q') { back(); return true; }
+  if (k === 'Enter' && TS && TS.h && S.termSt.state === 'open') { TS.h.focus(); return true; }
+  return false;
 }
 
 // ── the grid: fleet-grid.mjs's onKey, mode 'grid' ──────────────────────────────────────

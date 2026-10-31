@@ -43,6 +43,10 @@
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="./app.css">
+<!-- The terminal's own rules (web/xterm.css, vendored with xterm.js — scripts/vendor-xterm.sh).
+     Loaded with the shell rather than with the terminal, because it is 7 kB and a stylesheet
+     injected later would be a <link> the CSP and the precache list both have to know about. -->
+<link rel="stylesheet" href="./xterm.css">
 </head>
 <body>
 <!-- Everything below is built by app.js. The static shell is deliberately this small:

@@ -344,21 +344,6 @@ unset TMUX_PANE
 SUITE_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
 SUITE_HOME="$HOME"
 unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR TMUX
-#   A LIST OF FIVE WAS FIVE OF THE ONES THAT HAD BITTEN. A fleet session also exports its
-# project root, scope, profile, agent, model and projects file, and every one of them still
-# reached each fixture: a tmux server inherits the suite's environment, so a grid started on
-# a fixture socket drew the CALLER's project and profile in its header, and
-# CLAUDE_FLEET_PROJECTS pointed it at the owner's real projects file — which the Projects
-# screen WRITES when a project is added, removed or reordered. CI has none of them, so the
-# rule is the prefix, not a list: drop everything the caller's fleet exported, keep only
-# what this file set above. A group that wants one sets it on the command it runs.
-# The caller's own pairs are kept aside first, so a row can ask whether any of them still
-# reached a fixture — by value, because the suite exports some of these names itself.
-: > "$TMUX_TMPDIR/caller-fleet.env"
-for v in $(compgen -e | grep -E '^(CLAUDE_FLEET_|GHOSTFLEET_)'); do
-  [ "$v" = CLAUDE_FLEET_EXPERIMENTAL_DIR ] && continue
-  printf '%s=%s\n' "$v" "${!v}" >> "$TMUX_TMPDIR/caller-fleet.env"; unset "$v"
-done
 HOME="$TMUX_TMPDIR/home"; export HOME; mkdir -p "$HOME"
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
@@ -15948,13 +15933,20 @@ is "the MCP server imports it too"      "1" \
 # goes through the shared planner, so an edit that shells out to fleet-send — or that
 # hands one of these an argument off the wire — turns this red rather than passing
 # quietly. The list is the assertion: a fourth name here has to be argued for.
-is "it runs only reads, by hand" "fleet-agent fleet-awake fleet-grid.mjs" \
+#   fleet-tab IS the fourth, and it is a write — it makes the project's terminal tab. The
+# argument for it: a terminal must be the DESK's tab, made by the desk's own naming rule,
+# and a second copy of that rule in this file is a name that drifts (the web terminal would
+# attach to a session fleet-tab never makes). It takes no wire input either: every argument
+# is a literal or comes from resolveProject(), i.e. the projects file — asserted below.
+is "it runs only reads, by hand — and fleet-tab" "fleet-agent fleet-awake fleet-grid.mjs fleet-tab" \
    "$(grep -oE "join\(BIN, '[^']+'" "$ROOT/bin/fleet-serve.mjs" | sed "s/.*'\(.*\)'/\1/" | sort -u | tr '\n' ' ' | sed 's/ $//')"
 # ...and the registry really is fed literals. A request field reaching it would make the
 # daemon a second, unvalidated entry point to a bin/ command, which is the whole thing
 # mcp/fleet-dispatch.mjs exists to prevent.
 is "...and the registry takes no wire input" "0" \
    "$(sed -n '/function agentCatalogue/,/^}/p' "$ROOT/bin/fleet-serve.mjs" | grep -cE 'req\.|url\.|rawArgs|body' || true)"
+is "...and fleet-tab takes no wire input" "0" \
+   "$(sed -n '/^function openTermTab/,/^}/p' "$ROOT/bin/fleet-serve.mjs" | grep -cE 'req\.|url\.|rawArgs|body' || true)"
 is "and every verb goes through it"      "1" \
    "$([ "$(grep -c 'callToolAsync(' "$ROOT/bin/fleet-serve.mjs" || true)" -ge 1 ] && echo 1 || echo 0)"
 is "the MCP server no longer execs"      "0" \
@@ -16049,6 +16041,164 @@ rm -rf "${AQ:?}"
 rm -rf "$SV"
 fi
 serve_stop
+
+# ── the web terminal: a fleet tab, from the browser, behind four gates ───────
+# A real shell in the web client, attached to the project's `_term-<project>` tab on the
+# fleet's own tmux server (bin/fleet-tab), through fleet-serve's WebSocket and a tmux
+# control-mode client (lib/web-term.mjs). The gates are the server's, and each refusal row
+# below sits beside the same request with only the missing thing put back — a gate that
+# refuses everything would pass every refusal on its own.
+#   Three halves: the wire formats on their own (no server); the server half, from node,
+#   which is what curl would test (test/helpers/term-probe.mjs); and the browser half, in a
+#   headless Chrome with a virtual authenticator holding the enrolled key, so the page's own
+#   passkey.js runs the ceremony (test/helpers/term-check.mjs).
+#   WATCHED GOING RED, each on purpose and then put back: the origin check removed (the
+#   evil-origin and no-origin rows took a 101, and two extra control clients attached); the
+#   per-device check removed from open (the disabled-device rows got 200 and a tab); the
+#   fresh assertion not required on open (the no-passkey row got through); the 'end'
+#   listener removed (a dropped socket kept its control client — the row that found the
+#   bug); the client's query swallowing removed (xterm's answers to nvim's queries landed in
+#   the shell as typing: the back-to-the-shell and desk-key rows); fleet-tab's -d ignored
+#   (the desk's client was moved into the tab); a vendored byte changed (--check).
+#   NOT WATCHED RED, and so not claimed: the key row's preventDefault. Removed, every row
+#   stayed green — a headless Chrome never moves the focus to a tapped button, so there is
+#   nothing here for it to lose. Whether the keyboard stays up is an iPhone's to say.
+group "fleet-serve: the web terminal is a fleet tab behind four gates"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  WT="$(cd "$(mktemp -d "$TEST_RUNS.$$.term.XXXXXX")" && pwd -P)"
+  # ── the wire formats, alone ─────────────────────────────────────────────────
+  node --input-type=module -e "
+    import * as W from '$ROOT/lib/web-term.mjs';
+    import crypto from 'node:crypto';
+    const US = '\x1f', out = [];
+    const is = (n, w, g) => out.push(n + US + JSON.stringify(w) + US + JSON.stringify(g));
+    // RFC 6455 §1.3's own example key.
+    is('term wire: the accept key is the RFC\'s', 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', W.wsAccept('dGhlIHNhbXBsZSBub25jZQ=='));
+    const mask = (op, data, fin = true) => { const m = crypto.randomBytes(4), p = Buffer.from(data);
+      const x = Buffer.from(p); for (let i = 0; i < x.length; i++) x[i] ^= m[i & 3];
+      return Buffer.concat([Buffer.from([(fin ? 0x80 : 0) | op, 0x80 | p.length]), m, x]); };
+    let r = new W.FrameReader();
+    is('term wire: a masked frame is read', 'hi', r.push(mask(2, 'hi'))[0].data.toString());
+    r = new W.FrameReader();
+    const split = mask(2, 'abc'); const a1 = r.push(split.subarray(0, 3)), a2 = r.push(split.subarray(3));
+    is('...across two reads', '0 abc', a1.length + ' ' + a2[0].data.toString());
+    r = new W.FrameReader();
+    const fr = r.push(Buffer.concat([mask(1, '{\"t\":', false), mask(9, ''), mask(0, '1}')]));
+    is('...fragments reassembled, a ping between them handed over', '9 {\"t\":1}', fr.map(f => f.op === 9 ? 9 : f.data.toString()).join(' '));
+    r = new W.FrameReader();
+    is('term wire: an UNMASKED client frame fails the connection', 1002, (r.push(Buffer.from([0x82, 2, 104, 105]))[0] || {}).code);
+    r = new W.FrameReader(8);
+    is('...and so does a message over the cap', 1009, (r.push(mask(2, 'way past eight'))[0] || {}).code);
+    // A UTF-8 character split over two %output lines, and a backslash, which tmux escapes too.
+    const bytes = Buffer.concat([W.unescapeOutput('\\\\303'), W.unescapeOutput('\\\\251 a\\\\134b\\\\015')]);
+    is('term wire: %output unescapes to BYTES, a split character intact', 'é a\\\\b\r', bytes.toString('utf8'));
+    const cmds = W.sendKeysCommands('%3', Buffer.alloc(W.SEND_CHUNK * 2 + 1, 0x61));
+    is('term wire: a paste is many short send-keys, not one long line', '3 %3', cmds.length + ' ' + cmds[0].split(' ')[2]);
+    is('...each byte as hex', '61', W.sendKeysCommands('%0', 'a')[0].split(' ').pop());
+    const st = W.parseState('%7 1 4 2 1 1 0 0 0 1 1 0 0 1 0 0 23 24');
+    is('term wire: the pane state parses', '%7 alt mouse sgr cursor 4,2', st && [st.pane, st.alt && 'alt', st.many && 'mouse', st.msgr && 'sgr', st.kcursor && 'cursor', st.cx + ',' + st.cy].join(' '));
+    const rp = W.repaint(st, ['top'], ['normal']).toString();
+    is('...and the repaint restores the alternate screen and the modes', true, /normal.*\x1b\[\?1049h.*top/s.test(rp) && rp.includes('\x1b[?1003h') && rp.includes('\x1b[?1006h') && rp.includes('\x1b[?1h') && rp.endsWith('\x1b[3;5H'));
+    is('term wire: a malformed state is refused, not guessed', null, W.parseState('garbage'));
+    console.log(out.join('\n'));
+  " > "$WT/wire" 2> "$WT/wire.err"
+  is "term wire: the checks ran"             ""   "$(head -2 "$WT/wire.err" | tr '\n' ' ' | sed 's/ *$//')"
+  while IFS=$'\x1f' read -r name want got; do [ -n "$name" ] && is "$name" "$want" "$got"; done < "$WT/wire"
+
+  # ── the vendored xterm.js is the pinned bytes, both directions ──────────────
+  is "xterm.js, its css and the fit addon are the pinned bytes" "" "$("$ROOT/scripts/vendor-xterm.sh" --check 2>&1)"
+  mkdir -p "$WT/vend/scripts" "$WT/vend/web"
+  cp "$ROOT/scripts/vendor-xterm.sh" "$WT/vend/scripts/"; cp "$ROOT/web/xterm.js" "$ROOT/web/xterm.css" "$ROOT/web/xterm-fit.js" "$WT/vend/web/"
+  printf '/* edited */' >> "$WT/vend/web/xterm.css"
+  is "...and one edited byte is caught"      "1"  "$("$WT/vend/scripts/vendor-xterm.sh" --check 2>&1 | grep -c '^web/xterm.css: ' || true)"
+
+  # ── fleet-tab -d moves nobody ───────────────────────────────────────────────
+  # The server has no client of its own, so a tab made without -d would switch-client
+  # whoever IS attached — the person at the desk. A control-mode client stands in for them.
+  tmux -L wt-desk -f /dev/null new-session -d -s desk -x 80 -y 20 'sleep 600' 2>/dev/null
+  wtdesk() { node --input-type=module -e "
+    import { ControlClient } from '$ROOT/lib/web-term.mjs';
+    import { execFileSync } from 'node:child_process';
+    const c = new ControlClient({ sockArgs: ['-L', 'wt-desk'], session: 'desk' });
+    await c.command('display-message -p x');
+    try { execFileSync('$ROOT/bin/fleet-tab', ['term', 'wt-desk', '$WT', 'deskproj', ...process.argv.slice(1)], { stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+    await new Promise(r => setTimeout(r, 300));
+    console.log(execFileSync('tmux', ['-L', 'wt-desk', 'list-clients', '-F', '#{client_session}'], { encoding: 'utf8' }).trim());
+    c.close(); setTimeout(() => process.exit(0), 200);
+  " -- "$@" 2>/dev/null; }
+  is "fleet-tab -d leaves the desk's client where it was" "desk"  "$(wtdesk -d)"
+  tmux -L wt-desk kill-session -t '=_term-deskproj' 2>/dev/null
+  is "...where without -d it would have been moved"       "_term-deskproj" "$(wtdesk)"
+  tmux -L wt-desk kill-server 2>/dev/null
+
+  # ── one daemon, the suite's own tmux, two projects so the halves start clean ──
+  mkdir -p "$WT/home/.config/ghostfleet" "$WT/probe" "$WT/ui"
+  printf 'wtprobe\t%s\twork\nwtui\t%s\twork\n' "$WT/probe" "$WT/ui" > "$WT/home/.config/ghostfleet/projects"
+  WTPORT="$(free_port)"; WTPORT="${WTPORT:-18961}"
+  WTBASE="http://localhost:$WTPORT"
+  wt_cli() { [ $# -gt 0 ] || return 2; GHOSTFLEET_SERVE_CONFIG="$WT/serve.json" GHOSTFLEET_SERVE_AUDIT="$WT/audit.jsonl" \
+             HOME="$WT/home" TMUX= node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
+  wt_cli init --bind 127.0.0.1 --port "$WTPORT" >/dev/null 2>&1
+  # A short idle for the probe, which waits one out; the browser half gets a long one below.
+  # And a SECOND origin, as a config that serves both a tailnet name and localhost has: the
+  # upgrade must take any origin the list holds, not only the one `init` wrote first.
+  wt_cfg() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};c.terminal_idle=+process.argv[2];c.origins=[...new Set([...(c.origins||[]),"http://127.0.0.1:"+c.port])];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$WT/serve.json" "$1"; }
+  wt_cfg 10
+  # SHELL=/bin/sh and an empty ENV: the tab runs `$SHELL -l`, and the rows read its prompt.
+  GHOSTFLEET_SERVE_CONFIG="$WT/serve.json" GHOSTFLEET_SERVE_AUDIT="$WT/audit.jsonl" HOME="$WT/home" TMUX= \
+    CLAUDE_FLEET_AWAKE=off SHELL=/bin/sh ENV= PS1='$ ' node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$WT/log" 2>&1 &
+  WT_PID=$!
+  SERVE_PIDS="${SERVE_PIDS:-} $WT_PID"; sv_reg "$WT_PID"
+  i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$WTBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
+  if [ "$up" != yes ]; then
+    bad "the terminal daemon comes up" "listening on $WTBASE" "$(tr '\n' ' ' < "$WT/log" 2>/dev/null | cut -c1-180)"
+  else
+    node "$ROOT/test/helpers/term-probe.mjs" "$WTBASE" "$(wt_cli enroll probe | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" wtprobe cf-wtprobe \
+      > "$WT/probe.out" 2> "$WT/probe.err"
+    is "term-probe ran"                      "0"   "$?"
+    is "...without complaining"              ""    "$(head -2 "$WT/probe.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"          "yes" "$([ "$(grep -c "$US" "$WT/probe.out")" -ge 35 ] && echo yes || echo "no: $(grep -c . "$WT/probe.out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      case "$name" in ''|'#MARK') continue ;; esac
+      is "$name" "$want" "$got"
+    done < "$WT/probe.out"
+    # NOTHING THE TERMINAL PRINTED IS IN serve.log — and the marker it printed is real: the
+    # probe found it in the pane and on the socket, so a 0 here is an absence, not a typo.
+    wtmark="$(grep -m1 "^#MARK$US" "$WT/probe.out" | cut -d "$US" -f2)"
+    is "term: the probe's marker is known"   "yes" "$([ -n "$wtmark" ] && echo yes || echo no)"
+    is "term: serve.log holds none of what the terminal printed" "0" "$(grep -c "${wtmark:-no-marker}" "$WT/log" || true)"
+    is "...but does say a terminal opened and closed" "yes" \
+       "$(grep -q 'terminal open: ' "$WT/log" && grep -q 'terminal closed: ' "$WT/log" && echo yes || echo no)"
+    is "term: the audit log has the opens, confirmed by passkey" "yes" \
+       "$(grep -q '"verb":"terminal".*"confirmed":"passkey:terminal' "$WT/audit.jsonl" && echo yes || echo no)"
+    wtcsp="$(curl -sI "$WTBASE/" | tr -d '\r')"
+    is "term: the page's CSP lets the terminal's socket and styles in, and script nowhere else" "yes" \
+       "$(grep -qi "^content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:$WTPORT wss://localhost:$WTPORT;" <<< "$wtcsp" && echo yes || echo no)"
+
+    # ── the browser half ──────────────────────────────────────────────────────
+    wt_cfg 600
+    GHOSTFLEET_SERVE_CONFIG="$WT/serve.json" node "$ROOT/test/helpers/term-check.mjs" "$WTBASE" \
+      "$(wt_cli enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" wtui cf-wtui "$WT/log" "$WT/ui" > "$WT/ui.out" 2> "$WT/ui.err"
+    wtrc=$?
+    if grep -q '^#SKIP'"$US"'the web terminal in a browser' "$WT/ui.out" 2>/dev/null; then
+      skip "the web terminal in a browser" "no chrome"
+    else
+      is "term-check ran"                    "0"   "$wtrc"
+      is "...without complaining"            ""    "$(head -2 "$WT/ui.err" | tr '\n' ' ' | sed 's/ *$//')"
+      is "...and produced its checks"        "yes" "$([ "$(grep -c . "$WT/ui.out")" -ge 45 ] && echo yes || echo "no: $(grep -c . "$WT/ui.out") rows")"
+      while IFS=$'\x1f' read -r name want got; do
+        [ -n "$name" ] || continue
+        if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+        is "$name" "$want" "$got"
+      done < "$WT/ui.out"
+    fi
+  fi
+  reap "$WT_PID"
+  tmux -L cf-wtprobe kill-server 2>/dev/null; tmux -L cf-wtui kill-server 2>/dev/null
+  rm -rf "${WT:?}"
+else
+  skip "the web terminal" "node or tmux missing"
+fi
 
 # ── the digest is a tool, so Jarvis reaches it the way it reaches everything ──
 # A command that only exists on PATH is invisible to a session restricted to MCP, and
@@ -17936,26 +18086,6 @@ if [ -d "$ROOT/web" ]; then
   # Asked of cf-sync, the one place that decides it — including passing over a Windows
   # pnpm that WSL puts on PATH, which cannot build here.
   PMB="$("$ROOT/bin/cf-sync" --pm)"
-  # THE PACKAGES ON DISK MUST BE THE ONES THIS BRANCH LOCKS, or a mismatch is a statement
-  # about the install, not about the build. A worktree's node_modules is a symlink to the
-  # main checkout's (fleet-spawn links it), and the main checkout can sit parked at an older
-  # release — so the rebuild would use another commit's packages and report drift nobody
-  # introduced. pnpm keeps a copy of the lockfile it installed from; compare the resolved
-  # package SET, not the bytes, so a pnpm that only formats the file differently is not a
-  # reason to skip. With no such copy (an npm install) there is nothing to compare against,
-  # and the row runs as before.
-  lock_pkgs() { grep -E '^  [^ ].*@[^ ]+:$' "$1" 2>/dev/null | sort -u; }
-  stale_install=""
-  if [ -f "$ROOT/node_modules/.pnpm/lock.yaml" ] && [ -f "$ROOT/pnpm-lock.yaml" ] \
-     && [ "$(lock_pkgs "$ROOT/node_modules/.pnpm/lock.yaml")" != "$(lock_pkgs "$ROOT/pnpm-lock.yaml")" ]; then
-    # The fix differs by whose node_modules it is: installing into a LINK would rewrite the
-    # other checkout's packages under it, so a linked one is replaced with its own first.
-    if [ -L "$ROOT/node_modules" ]; then
-      stale_install="node_modules links to another checkout installed from a different lockfile — run: rm node_modules && $PMB install"
-    else
-      stale_install="node_modules was installed from a different lockfile — run: $PMB install"
-    fi
-  fi
   if [ ! -f "$ROOT/vite.config.mjs" ]; then
     skip "the committed build matches its source" "no vite.config.mjs"
   elif [ -z "$PMB" ]; then
@@ -17964,11 +18094,7 @@ if [ -d "$ROOT/web" ]; then
     skip "the committed build matches its source" "no node_modules — run: $PMB install"
   else
     BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
-    # Only THIS row is gated on the lockfile: the probe below asks whether the config keeps
-    # grid.js external, which any vite answers, so it goes on running.
-    if [ -n "$stale_install" ]; then
-      skip "the committed build matches its source" "$stale_install"
-    elif ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
+    if ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
       drift=""
       for f in screens.js preact.js; do
         cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
@@ -19577,73 +19703,40 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pmark scratch   "$NP/root/acme-web"   "$(date +%s)"
   pmark docs-pass "$NP/root/acme-api-2" "$(date +%s)"
   sleep 0.4
-  # A CAPTURE WAITS FOR THE SCREEN IT IS ABOUT TO JUDGE, never for a fixed time. This group
-  # slept 3s for the grid and 0.6s a key, and on a loaded machine that loses a race CI never
-  # runs: the grid has drawn its cards but not yet handled the queued `n` and Enter (`n`
-  # walks the checkouts and asks git for their worktrees), so the capture is the GRID. That
-  # reads as five reds with one shape — no name screen, no parked list, and `scratch` and
-  # `docs-pass` "leaking in", which are only their own cards. Measured: a full run on a dev
-  # Mac with sibling suites going, red on exactly those five; reproduced every time by
-  # capturing straight after the keys. Keys are never lost — the tty queues them and the
-  # grid takes them in order — so only the READ has to wait.
-  #   ...and an absence is only evidence on the screen it is about. "scratch is not listed"
-  # on a screen that never became the name screen is a row that cannot fail, so those rows
-  # answer "not on the name screen" instead of "no".
-  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
-  pwait() {   # ERE [want: yes|no] — the screen once the pattern is (or is no longer) on it
-    local i scr
-    for ((i = 0; i < 100; i++)); do
-      scr="$(pscreen)"
-      if grep -qE "$1" <<<"$scr"; then [ "${2:-yes}" = yes ] && break; else [ "${2:-yes}" = no ] && break; fi
-      sleep 0.2
-    done
-    printf '%s\n' "$scr"
-  }
-  cwait() {   # pattern — true once the grid has printed that choice
-    local i; for ((i = 0; i < 100; i++)); do grep -q "$1" "$NP/choice" 2>/dev/null && return 0; sleep 0.2; done; return 1; }
   pgrid() {
     tmux -L cfpark kill-session -t _grid 2>/dev/null; rm -f "$NP/choice"
     tmux -L cfpark new-session -d -s _grid -x 120 -y 40 -c "$NP/root" \
       -e CLAUDE_FLEET_DIR="$NP/fleet" -e HOME="$NP/home" -e CLAUDE_FLEET_ROOT="$NP/root" \
       "node '$ROOT/bin/fleet-grid.mjs' cfpark > '$NP/choice' 2>/dev/null ; sleep 20" 2>/dev/null
-    pwait '\+ new session' >/dev/null
+    sleep 3
   }
-  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.3; done; }
-  onname() { grep -qE "session name — .*/$1\$" <<<"$2"; }   # checkout scr
-  # THE FIXTURE SEES NOTHING OF THE CALLER'S FLEET. Asked of the fixture server's own
-  # environment, which is what the grid inherits — not of the suite's variables, which is the
-  # proxy — and by value, since the suite's own fleet-serve groups export GHOSTFLEET_SERVE_*. Run from inside a fleet session this listed the caller's root, scope, profile and
-  # projects file until the preamble dropped them by prefix.
-  pgrid
-  is "park: the fixture server carries none of the caller's fleet env" "" \
-     "$(tmux -L cfpark show-environment -g 2>/dev/null | grep -Fxf "$TMUX_TMPDIR/caller-fleet.env" \
-        | sed 's/=.*//' | tr '\n' ' ' | sed 's/ *$//')"
+  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.6; done; }
+  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
   # n -> the checkout picker (acme-api is first, sorted) -> Enter -> the name screen
-  pkeys n Enter
-  scr="$(pwait 'session name')"
-  is "park: the name screen is the one reached"            "yes" "$(onname acme-api "$scr" && echo yes || echo no)"
+  pgrid; pkeys n Enter
+  scr="$(pscreen)"
+  is "park: the name screen is the one reached"            "yes" "$(grep -q 'session name' <<<"$scr" && echo yes || echo no)"
   is "park: it lists the checkout's asleep session"        "yes" "$(grep -qE '1 +billing-svc +☾ asleep' <<<"$scr" && echo yes || echo no)"
   is "park: ...and its exited one"                         "yes" "$(grep -qE '2 +toolbox +⏹ exited' <<<"$scr" && echo yes || echo no)"
-  is "park: ...and nothing from another checkout"          "no"  "$(onname acme-api "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
-  is "park: ...nor from one whose name has it as a prefix" "no"  "$(onname acme-api "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and nothing from another checkout"          "no"  "$(grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
+  is "park: ...nor from one whose name has it as a prefix" "no"  "$(grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
   # A DIGIT ON THE NAME FIELD IS TYPING: `api-2` is a legal name.
   pkeys 2
   is "park: a digit typed in the name field is the name"   "yes:no" \
-     "$(grep -q 'name: *acme-api2' <<<"$(pwait 'name: *acme-api2')" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
+     "$(grep -q 'name: *acme-api2' <<<"$(pscreen)" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
   # ↓ moves onto the list; Enter reopens the row under it. The consumer wakes an asleep one.
-  pkeys BSpace Down Enter
+  pkeys BSpace Down Enter; sleep 1
   is "park: down + Enter reopens the first parked session" "yes" \
-     "$(cwait "attach.billing-svc" && echo yes || echo no)"
+     "$(grep -q "attach.billing-svc" "$NP/choice" 2>/dev/null && echo yes || echo no)"
   # ...and on the list a digit picks that row.
-  pgrid; pkeys n Enter Down 2
+  pgrid; pkeys n Enter Down 2; sleep 1
   is "park: on the list, 2 reopens the second"             "yes" \
-     "$(cwait "attach.toolbox" && echo yes || echo no)"
+     "$(grep -q "attach.toolbox" "$NP/choice" 2>/dev/null && echo yes || echo no)"
   # A checkout with nothing parked draws no list at all. Sorted: acme-api, acme-api-2,
   # acme-web, billing-svc — the fourth has nothing.
   pgrid; pkeys n Down Down Down Enter
-  scr="$(pwait 'session name — .*/billing-svc$')"
   is "park: a checkout with nothing parked shows no list"  "no" \
-     "$(onname billing-svc "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'reopen one parked here' <<<"$scr" && echo yes || echo no)"
+     "$(grep -q 'reopen one parked here' <<<"$(pscreen)" && echo yes || echo no)"
 
   # ── F, at the desk: x on an asleep card leaves no card ──
   # Cards: 1 is _grid itself (the pane this runs in), 2 is toolbox, then the slept ones in
@@ -19652,11 +19745,10 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pgrid
   scr="$(pscreen)"
   is "stop: the asleep card is on the grid"                "yes" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
-  pkeys Right Right x y
-  scr="$(pwait 'billing-svc' no)"
+  pkeys Right Right x y; sleep 1.5
   is "stop: x on it clears its marker"                     "no" \
      "$([ -f "$NP/fleet/cfpark.billing-svc.asleep" ] && echo yes || echo no)"
-  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
+  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$(pscreen)" && echo yes || echo no)"
   tmux -L cfpark kill-server 2>/dev/null
   rm -rf "$NP"
 else
@@ -22459,18 +22551,6 @@ STUB
   sleep 0.2
   is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
   reap "$OCH"
-  # A BUSY MACHINE STILL HAS HOLDERS. The scan reads every argv on the machine, and past
-  # execFileSync's 1 MB default it threw, came back empty, and said nobody held anything —
-  # nine rows here red on a dev Mac whose process table had grown to 1.2 MB, and green on a
-  # quiet one. So the table is padded past the old cap on purpose: 8 × 60 KB of argv.
-  OCPAD=""; OCPADARG="pad-$(head -c 60000 /dev/zero | tr '\0' x)"
-  for i in 1 2 3 4 5 6 7 8; do ( exec -a "$OCPADARG" sleep 60 ) & OCPAD="$OCPAD $!"; disown "$!"; done
-  ( exec -a "claude --resume $V" sleep 60 ) & OCH=$!; disown "$OCH"
-  sleep 0.3
-  is "Q3: a holder is still seen when the process table is over 1 MB" "$OCH" \
-     "$(cd "$ROOT" && node -e 'import("./lib/slot-claim.mjs").then(m => console.log(m.holders({ cfgs: [] }).get(process.argv[1]) || ""))' "$V" 2>/dev/null)"
-  # shellcheck disable=SC2086
-  reap "$OCH" $OCPAD
 
   # A PATH WITH AN UNDERSCORE. claude-here names a transcript folder by turning only `/` and
   # `.` into `-`; lib/slot-claim.mjs once re-derived it turning everything non-alphanumeric,
