@@ -384,6 +384,52 @@ The layers answer different questions, which is why all of them are here: Tailne
 *can this device join*; the ACL — *may it reach this port*; the passkey — *is this the
 owner*; the session token — *is that still true right now*.
 
+### On the Mac itself: `http://localhost:8787`
+
+The same client opens on the Mac without Tailscale: `ghostfleet web` (or `fleet-web`)
+opens `http://localhost:<port>` in the default browser. It starts nothing; if `fleet-serve`
+is not running, it says so and prints the command that starts it.
+
+`fleet-serve` listens on **`127.0.0.1`** on the same port, beside its tailnet address.
+Nothing about the tailnet listener changes, and the phone sees no difference.
+
+**The two listeners are independent.** Either one can be unavailable while the other serves.
+- **The tailnet address is gone** (tailscaled down, or the machine moved to another
+  tailnet): the daemon serves localhost and logs once that the tailnet listener is off, with
+  the `fleet-serve init` line that fixes it.
+- **127.0.0.1:<port> is held by something else:** the reverse. The tailnet serves, and the
+  log says localhost is off, once.
+
+A listener that is down is retried every 30 s. The retries are silent, and one more line
+says when it comes up. The daemon exits only when neither can listen, and then names both
+reasons. A configured address that policy refuses (a wildcard, a LAN or a public address)
+is still fatal at startup, as it always was.
+
+Two configurations
+have no second listener, and both are reported at startup and by `fleet-serve check`:
+- a config that is already `--bind 127.0.0.1` for `localhost`, where the configured
+  listener is the Mac's own door;
+- `127.0.0.1` bound for another name (a tunnel's). Serving two relying parties from one
+  socket would mean reading the scope from the `Host` header, which the client writes.
+
+`localhost` is **its own relying party**. A passkey is bound to the rp_id it was made for,
+so the Mac enrols its own the first time, through the same flow as the phone:
+`fleet-serve enroll mac`, then the code, then Touch ID. `http://localhost` is a secure
+context without TLS, the one `http://` origin WebAuthn accepts. The two listeners share
+nothing. Origin, `clientData.origin`, the authenticator's rpIdHash, the challenge, the
+credential and the session token each belong to the socket they were made on. An assertion
+made at localhost is refused on the tailnet and the reverse, a POST carrying the other
+listener's Origin is refused, and a token minted on one is dead on the other. The tailnet's
+passkeys and sessions are untouched.
+
+**Why localhost still needs the passkey.** `127.0.0.1` cannot be reached from the network,
+but **every process on the Mac** can reach it: every agent the fleet runs, every
+`npm install` postinstall script, and every page open in a local browser that tries a
+`fetch`. Without the tailnet there is no second layer. The passkey, the idle session, the
+second assertion on destructive verbs, the Origin check and the `Host` allowlist (which
+keeps DNS rebinding out) are all that stand between those processes and an endpoint that
+runs code as you. So localhost gets a different rp_id, and nothing else is relaxed.
+
 ## 6. Client: a PWA, and the reason is the repo
 
 The client is a **Progressive Web App**, served by `fleet-serve`, installed to the home

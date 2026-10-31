@@ -199,6 +199,12 @@ over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a publ
 the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
 for the design and the threat model.
 
+The same client also opens on the Mac itself, with no Tailscale: `ghostfleet web` opens
+`http://localhost:8787` (the daemon listens on `127.0.0.1` too). The Mac enrols its own
+passkey with Touch ID the first time, through `fleet-serve enroll`, because any process on
+the machine can reach localhost
+([docs/mobile.md](docs/mobile.md#on-the-mac-itself-httplocalhost8787)).
+
 **Optional, and local only: the Mac's voice.** The phone can read replies aloud with
 [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) running on your machine — better English,
 real Spanish, chosen sentence by sentence — instead of the phone's own voice. It is ~350 MB, so

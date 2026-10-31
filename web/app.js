@@ -5732,14 +5732,14 @@ function lockScreen() {
       // no window and no one-time code authorised. That refusal is not a bug to route
       // around — the endpoint is remote code execution — so the phone gets a field to
       // type the code into, which is the half that was missing.
-      if (server) row.append(btn('enrol this phone', () => sheetEnrol(), 'go'));
+      if (server) row.append(btn(`enrol ${pk.device().noun}`, () => sheetEnrol(), 'go'));
       else row.append(btn('register a passkey', async () => {
         try { await pk.register(); S.locked = false; render(); refresh(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     } else if (pk.available()) {
       const going = pk.unlocking();
-      const b = btn(going ? 'unlocking…' : 'unlock with Face ID', unlockTap, 'go');
+      const b = btn(going ? 'unlocking…' : `unlock with ${pk.device().sensor}`, unlockTap, 'go');
       if (going) b.setAttribute('disabled', 'disabled');
       row.append(b);
       // The challenge the tap will sign, fetched NOW so the tap has nothing to wait for
@@ -6216,8 +6216,9 @@ function sheetEnrol() {
       refresh();
     } catch (e) { err.textContent = String((e && e.message) || e); }
   };
-  openSheet(sheet('enrol this phone', api.modeLabel(), [
-    el('p', { text: 'On the Mac: fleet-serve enroll <client-id> — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.' }),
+  const dev = pk.device();
+  openSheet(sheet(`enrol ${dev.noun}`, api.modeLabel(), [
+    el('p', { text: `${dev.enrol} — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.` }),
     note, field('enrolment code', code), err,
     el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', closeSheet)]),
   ]));
@@ -6227,7 +6228,7 @@ function sheetEnrol() {
     note.className = st.open ? 'ok' : 'warn';
     note.textContent = st.open
       ? `a window is open for '${st.client}' — enter the code it printed.`
-      : 'no enrolment is open. On the Mac: fleet-serve enroll <client-id>, then come back.';
+      : `no enrolment is open. ${dev.enrol}, then come back.`;
   }).catch(e => {
     note.className = 'warn';
     note.textContent = `could not ask the server: ${String((e && e.message) || e)}`;
@@ -6375,7 +6376,7 @@ async function sheetSettings() {
     : `unavailable: ${pk.unavailableReason()}` }));
   kids.push(el('div', { class: 'row' }, [
     pk.available() && !pk.registered() && api.mode() === 'server'
-      ? btn('enrol this phone', () => { closeSheet(); sheetEnrol(); }) : null,
+      ? btn(`enrol ${pk.device().noun}`, () => { closeSheet(); sheetEnrol(); }) : null,
     pk.available() && !pk.registered() && api.mode() === 'fixtures'
       ? btn('register', async () => { try { await pk.register(); toast('passkey registered', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); } closeSheet(); }) : null,
     pk.registered() ? btn('forget this device\'s passkey', () => { pk.forget(); toast('forgotten — a lost phone is revoked server-side too', 'good'); closeSheet(); }, 'danger') : null,

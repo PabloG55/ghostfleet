@@ -15026,6 +15026,325 @@ else
 fi
 sv_rate 4000 4000 4000
 
+# ── the Mac's own door: localhost, beside the tailnet, and nothing crosses ─────
+# fleet-serve listens on 127.0.0.1 on the configured port as well, so the Mac opens
+# http://localhost:<port> without Tailscale. That socket is its own relying party, with rp_id
+# `localhost`. Every check that reads origins (POST Origin, clientData.origin, the rpIdHash,
+# the challenge, the credential, the session) answers for the socket the request came in
+# on, so a passkey or token made on one is refused on the other.
+#
+# A RUNNER HAS NO TAILNET, so ::1 stands in for the 100.x bind, configured with a tailnet
+# name and https origin exactly as the owner's is. Every request goes to an ADDRESS with the
+# Host its listener expects (serve-local.mjs says why). WATCHED RED on staging's
+# fleet-serve.mjs: 127.0.0.1 refused the connection, and every localhost row after it went
+# red with it.
+LH_TAILHOST="box.example.ts.net"
+LH_TAILORIGIN="https://box.example.ts.net"
+LH=""
+# ITS OWN RUNTIME COPY, with the client in it. $SV's copy has no web/ on purpose (the
+# no-client group above asserts the notice), and the browser rows need the real web/.
+# Its own HOME too, holding one project whose fleet the web terminal opens its tab in (its
+# own tmux server, inside this run's namespace), and tmux/ for the config that tab is made with.
+lh_rt() {
+  LH="$SV/lh"; mkdir -p "$LH"
+  [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/app.js" ] && return 0
+  mkdir -p "$LH/rt" "$LH/proj" "$LH/home/.config/ghostfleet" "$LH/home/.claude/fleet"
+  printf 'lhterm\t%s\twork\n' "$LH/proj" > "$LH/home/.config/ghostfleet/projects"
+  cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$ROOT/tmux" "$LH/rt/"
+}
+LH_SERVE() { printf '%s' "$LH/rt/bin/fleet-serve.mjs"; }
+lh_cli() { [ $# -gt 0 ] || return 2; HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= node "$(LH_SERVE)" "$@"; }
+lh_init() {                        # $1 = bind, $2 = port, $3 = rp_id, $4 = origin
+  rm -f "$LH/serve.json" "$LH/serve-sessions.json"
+  # init with ::1 and then the bind written in: `init` refuses an address this machine does
+  # not have, and a vanished tailnet address is one of the configs under test.
+  lh_cli init --bind ::1 --port "$2" --rp-id "$3" --origin "$4" >/dev/null 2>&1
+  node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.bind=process.argv[2];c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$LH/serve.json" "$1"
+}
+LH_PID=""
+lh_start() {                       # $1 = log name, $2 = the healthz URL that means "up"
+  HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
+    SHELL=/bin/sh ENV= PS1='$ ' GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.$1" 2>&1 &
+  LH_PID=$!
+  SERVE_PIDS="$SERVE_PIDS $LH_PID"
+  sv_reg "$LH_PID"
+  i=0; while [ "$i" -lt 60 ]; do
+    curl -s -m1 -g "$2" >/dev/null 2>&1 && return 0
+    kill -0 "$LH_PID" 2>/dev/null || break
+    i=$((i+1)); sleep 0.1
+  done
+  bad "the daemon comes up ($1)" "answering $2" "$(tr '\n' ' ' < "$LH/log.$1" | cut -c1-180)"
+  reap "$LH_PID"; LH_PID=""
+  return 1
+}
+lh_stop() { [ -n "$LH_PID" ] && reap "$LH_PID"; LH_PID=""; return 0; }
+# ::1 is the stand-in, so it has to be bindable here. Measured rather than assumed: a host
+# with IPv6 switched off has no ::1, and that is a missing capability, not a failure.
+lh_v6="$(node -e 'const s=require("net").createServer();s.on("error",()=>console.log("no"));s.listen(0,"::1",()=>{s.close(()=>console.log("yes"))})' 2>/dev/null)"
+
+group "fleet-serve: localhost is a second listener, and nothing crosses to the tailnet"
+# needs: free_port answers in digits
+if [ -z "${SV:-}" ] || ! command -v node >/dev/null 2>&1; then
+  skip "localhost listener" "node missing"
+elif [ "$lh_v6" != yes ]; then
+  skip "localhost listener" "::1 is not bindable here, and it is the tailnet bind's stand-in"
+else
+  lh_rt
+  LHPORT="$(free_port)"
+  lh_init ::1 "$LHPORT" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start dual "http://[::1]:$LHPORT/healthz"; then
+    is "the startup log names the localhost listener" "1" \
+       "$([ "$(grep -c "localhost: also listening on 127.0.0.1:$LHPORT" "$LH/log.dual" || true)" -ge 1 ] && echo 1 || echo 0)"
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" LH_TOKENS="$LH/tokens" \
+      node "$ROOT/test/helpers/serve-local.mjs" "$(LH_SERVE)" "$LHPORT" "$LH_TAILHOST" "$LH_TAILORIGIN" \
+      > "$LH/probe" 2> "$LH/probe.err"
+    is "serve-local ran"                 "" "$(head -2 "$LH/probe.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/probe")" -ge 36 ] && echo yes || echo "no: $(wc -l < "$LH/probe" | tr -d ' ') rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$LH/probe"
+    # `fleet-serve check` says the same thing the daemon does, before it is started.
+    is "check reports the localhost listener" "1" \
+       "$([ "$(lh_cli check 2>/dev/null | grep -c "^localhost  127.0.0.1:$LHPORT also, rp_id localhost")" -ge 1 ] && echo 1 || echo 0)"
+    is "...and counts the localhost passkey" "1" \
+       "$([ "$(lh_cli check 2>/dev/null | grep -c 'mac/1 passkeys (1 localhost)')" -ge 1 ] && echo 1 || echo 0)"
+    lh_stop
+
+    # A RESTART KEEPS BOTH, EACH ON ITS OWN SIDE. Sessions are persisted, and a tag that
+    # did not survive the file would put every restored localhost token on the tailnet's
+    # side (an untagged row is read as the configured listener's). Watched red with the tag
+    # dropped in loadSessions: the localhost token was dead at localhost after the restart.
+    read -r lh_mac lh_phone < "$LH/tokens" 2>/dev/null
+    if lh_start dual-restart "http://[::1]:$LHPORT/healthz"; then
+      lh_h() { curl -s -g -o /dev/null -w '%{http_code}' -H "Host: $1" -H "authorization: Bearer $3" "$2/api/health"; }
+      is "after a restart the localhost token still reads at localhost" "200" "$(lh_h "localhost:$LHPORT" "http://127.0.0.1:$LHPORT" "$lh_mac")"
+      is "...and is still dead on the tailnet"                         "401" "$(lh_h "$LH_TAILHOST" "http://[::1]:$LHPORT" "$lh_mac")"
+      is "the tailnet token still reads on the tailnet"                "200" "$(lh_h "$LH_TAILHOST" "http://[::1]:$LHPORT" "$lh_phone")"
+      is "...and is still dead at localhost"                           "401" "$(lh_h "localhost:$LHPORT" "http://127.0.0.1:$LHPORT" "$lh_phone")"
+      lh_stop
+    fi
+  fi
+
+  # Something else holding an address:port, for as long as a row needs it taken.
+  lh_squat() {                     # $1 = address, $2 = port; sets LH_SQ
+    node -e 'require("net").createServer().listen(+process.argv[2],process.argv[1],()=>console.log("up"));setTimeout(()=>process.exit(0),30000)' "$1" "$2" > "$LH/squat.out" 2>&1 &
+    LH_SQ=$!; sv_reg "$LH_SQ"
+    i=0; while [ "$i" -lt 40 ] && ! grep -q up "$LH/squat.out" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  }
+  lh_until() {                     # $1 = log, $2 = fixed string; up to 5s
+    i=0; while [ "$i" -lt 50 ] && ! grep -qF -- "$2" "$1" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  }
+
+  # THE PHONE MUST NOT DEPEND ON THE SECOND SOCKET. 127.0.0.1:<port> taken by something
+  # else: the tailnet listener comes up anyway, the log says the localhost one did not, and
+  # it comes up by itself once the port is free. Watched red with listenLocal's error path
+  # made fatal (the daemon exited and the tailnet never answered), and with no retry for it.
+  LHPORT2="$(free_port)"
+  lh_init ::1 "$LHPORT2" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  lh_squat 127.0.0.1 "$LHPORT2"
+  if lh_start squatted "http://[::1]:$LHPORT2/healthz"; then
+    is "a taken 127.0.0.1 does not stop the tailnet listener" "200" \
+       "$(curl -s -g -o /dev/null -w '%{http_code}' -H "Host: $LH_TAILHOST" "http://[::1]:$LHPORT2/api/auth/challenge")"
+    is "...and the log says localhost is not listening" "1" \
+       "$([ "$(grep -c "localhost: NOT listening on 127.0.0.1:$LHPORT2 (EADDRINUSE)" "$LH/log.squatted" || true)" -ge 1 ] && echo 1 || echo 0)"
+    sleep 1                        # ten retries at 100ms, every one of them refused
+    is "...once, however many retries it takes" "1" "$(grep -c 'localhost: NOT listening' "$LH/log.squatted" || true)"
+    reap "$LH_SQ"
+    lh_until "$LH/log.squatted" "localhost: UP after"
+    is "a freed 127.0.0.1 is taken up without a restart" "200" \
+       "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$LHPORT2" "http://127.0.0.1:$LHPORT2/")"
+    lh_stop
+  fi
+  reap "$LH_SQ"
+
+  # THE REVERSE, AND THE CASE IT WAS FOR. The machine moved to another tailnet, so the
+  # configured 100.x address is not on it any more: fleet-serve used to refuse to start, and
+  # launchd restarted it every few seconds, thousands of times, with localhost shut too.
+  # Now localhost serves, the log says the tailnet listener is off ONCE with what to run,
+  # and the daemon stays up, because not exiting is what stops the crash loop. 100.64.99.99
+  # is in Tailscale's range and on no interface here. Watched red on the previous commit:
+  # the daemon exited with "refusing to bind".
+  LHPORT6="$(free_port)"
+  lh_init 100.64.99.99 "$LHPORT6" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start notailnet "http://127.0.0.1:$LHPORT6/healthz"; then
+    is "an absent tailnet bind still serves localhost" "200" \
+       "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$LHPORT6" "http://127.0.0.1:$LHPORT6/")"
+    sleep 1
+    is "...and the log says the tailnet listener is off, once" "1" \
+       "$(grep -c 'the tailnet listener is OFF' "$LH/log.notailnet" || true)"
+    is "...saying why"                    "1" \
+       "$([ "$(grep -c 'OFF — 100.64.99.99 is not on any interface of this machine' "$LH/log.notailnet" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and what to run"               "1" \
+       "$([ "$(grep -c 'fleet-serve init --bind "$(tailscale ip -4)"' "$LH/log.notailnet" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and it is still running"       "yes" "$(kill -0 "$LH_PID" 2>/dev/null && echo yes || echo no)"
+    lh_stop
+  fi
+
+  # ...and a configured listener that comes back is taken up, said once. ::1 stands in
+  # again, held by a squatter and then released. Watched red with the retry removed.
+  LHPORT7="$(free_port)"
+  lh_init ::1 "$LHPORT7" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  lh_squat ::1 "$LHPORT7"
+  if lh_start tailback "http://127.0.0.1:$LHPORT7/healthz"; then
+    sleep 1
+    is "a taken tailnet bind is off, once"  "1" "$(grep -c 'the tailnet listener is OFF' "$LH/log.tailback" || true)"
+    reap "$LH_SQ"
+    lh_until "$LH/log.tailback" "the tailnet listener is UP"
+    is "...comes up when it is free"        "200" \
+       "$(curl -s -g -o /dev/null -w '%{http_code}' -H "Host: $LH_TAILHOST" "http://[::1]:$LHPORT7/api/auth/challenge")"
+    is "...and says so once"                "1" "$(grep -c 'the tailnet listener is UP' "$LH/log.tailback" || true)"
+    lh_stop
+  fi
+  reap "$LH_SQ"
+
+  # ONLY WHEN NEITHER CAN LISTEN does it exit, non-zero, naming both. Watched red on the
+  # previous commit, which exited for the tailnet alone and never said a word about localhost.
+  LHPORT8="$(free_port)"
+  lh_init 100.64.99.99 "$LHPORT8" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  lh_squat 127.0.0.1 "$LHPORT8"
+  HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" TMUX= CLAUDE_FLEET_AWAKE=off \
+    GHOSTFLEET_SERVE_RETRY_MS=100 node "$SV_TAG" "$LH/rt/bin/fleet-serve.mjs" > "$LH/log.neither" 2>&1 &
+  lhn=$!
+  SERVE_PIDS="$SERVE_PIDS $lhn"; sv_reg "$lhn"
+  i=0; while [ "$i" -lt 100 ] && kill -0 "$lhn" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  if kill -0 "$lhn" 2>/dev/null; then lhrc="still running after 10s"; reap "$lhn"; else wait "$lhn"; lhrc=$?; fi
+  is "neither listener: it exits non-zero"  "1" "$lhrc"
+  is "...saying nothing can listen"         "1" "$(grep -c 'nothing can listen, so there is nothing to serve' "$LH/log.neither" || true)"
+  is "...naming the tailnet's reason"       "1" "$(grep -c '  - the configured listener on 100.64.99.99:'"$LHPORT8"': 100.64.99.99 is not on any interface' "$LH/log.neither" || true)"
+  is "...and localhost's"                   "1" "$(grep -c "  - localhost: 127.0.0.1:$LHPORT8 could not be bound (EADDRINUSE)" "$LH/log.neither" || true)"
+  reap "$LH_SQ"
+
+  # THE TWO SHAPES WITH ONE SOCKET, said out loud rather than guessed around. A loopback
+  # config for localhost is already the Mac's door; a loopback bind for ANOTHER name (a
+  # tunnel's) holds 127.0.0.1, and one socket cannot be two relying parties.
+  LHPORT3="$(free_port)"
+  lh_init 127.0.0.1 "$LHPORT3" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start tunnel "http://127.0.0.1:$LHPORT3/healthz"; then
+    is "a tunnel's 127.0.0.1 bind is not doubled" "1" \
+       "$([ "$(grep -c 'localhost: not a second listener — the configured bind is 127.0.0.1 itself' "$LH/log.tunnel" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and that socket still answers to the tunnel's name only" "403" \
+       "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$LHPORT3" "http://127.0.0.1:$LHPORT3/")"
+    lh_stop
+  fi
+fi
+
+# ── the web terminal is judged by the listener it arrives on ───────────────────
+# The terminal's WebSocket (#89) is an upgrade, not a request through api(), so it has its
+# own Origin and Host gates and its own ticket store. All three now read the scope of the
+# socket the upgrade arrived on. The localhost origin is accepted only on 127.0.0.1 and the
+# tailnet's only on the tailnet listener, and a ticket minted by /api/term/open on one does
+# not upgrade on the other. term-local.mjs runs each rule beside its mirror, against the same
+# two-listener daemon as above and a real tab on this group's own fleet. WATCHED RED on the
+# rebase before this change, where termUpgrade read the config's origins and an unscoped
+# Host list: the localhost listener refused its own Host (403) on every upgrade, so neither
+# mirror passed, and the tailnet listener took a localhost ticket.
+group "fleet-serve: the web terminal is judged by the listener it arrives on"
+# needs: free_port answers in digits
+if [ -z "${SV:-}" ] || [ "$lh_v6" != yes ] || ! command -v tmux >/dev/null 2>&1; then
+  skip "web terminal per listener" "needs node, tmux and a bindable ::1"
+else
+  lh_rt
+  LHPORT9="$(free_port)"
+  lh_init ::1 "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start term "http://[::1]:$LHPORT9/healthz"; then
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" \
+      node "$ROOT/test/helpers/term-local.mjs" "$(LH_SERVE)" "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN" lhterm \
+      > "$LH/term" 2> "$LH/term.err"
+    is "term-local ran"                  "" "$(head -2 "$LH/term.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$LH/term"
+    lh_stop
+  fi
+  tmux -L cf-lhterm kill-server 2>/dev/null
+fi
+
+# ── `ghostfleet web`: open it, start nothing ────────────────────────────────────
+# The opener is a shim on PATH that writes down what it was asked to open (`open` on macOS,
+# `xdg-open` on Linux), so nothing here reaches a real browser. Both directions: a running
+# daemon is opened at its localhost URL, and a stopped one opens NOTHING and prints the
+# command that starts it. WATCHED RED with the probe's status test inverted: the stopped
+# daemon was "opened".
+group "ghostfleet web opens the localhost client, and starts nothing"
+# needs: free_port answers in digits
+if [ -z "${SV:-}" ] || [ "$lh_v6" != yes ] || ! command -v curl >/dev/null 2>&1; then
+  skip "ghostfleet web" "needs node, curl and a bindable ::1"
+else
+  lh_rt; mkdir -p "$LH/shim"
+  for o in open xdg-open; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/opened"\n' "$LH" > "$LH/shim/$o"; chmod +x "$LH/shim/$o"
+  done
+  lh_web() { HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" PATH="$LH/shim:$PATH" "$ROOT/bin/ghostfleet" web "$@"; }
+  LHPORT4="$(free_port)"
+  lh_init ::1 "$LHPORT4" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  : > "$LH/opened"
+  out="$(lh_web 2>&1)"; rc=$?
+  is "a stopped daemon is not opened"            "" "$(cat "$LH/opened")"
+  is "...exits non-zero"                         "1" "$rc"
+  is "...and says how to start it"               "1" "$([ "$(grep -c '^  fleet-serve$' <<< "$out")" -ge 1 ] && echo 1 || echo "0: $out")"
+  is "...without starting one"                   "000" "$(curl -s -o /dev/null -m1 -w '%{http_code}' "http://127.0.0.1:$LHPORT4/healthz")"
+  if lh_start web "http://[::1]:$LHPORT4/healthz"; then
+    : > "$LH/opened"
+    out="$(lh_web 2>&1)"; rc=$?
+    is "a running daemon is opened at localhost"  "http://localhost:$LHPORT4" "$(cat "$LH/opened")"
+    is "...and exits 0"                           "0" "$rc"
+    is "--print prints the URL instead"           "http://localhost:$LHPORT4" "$(lh_web --print 2>&1)"
+    is "fleet-web is the same command"            "http://localhost:$LHPORT4" \
+       "$(HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" "$ROOT/bin/fleet-web" --print 2>&1)"
+    lh_stop
+  fi
+  # A daemon from before the localhost listener: up on its bind, nothing on 127.0.0.1. Not
+  # "not running", which would send the owner to start a second one beside it.
+  node -e 'require("http").createServer((q,r)=>r.end("ok\n")).listen(+process.argv[1],"::1",()=>console.log("up"));setTimeout(()=>process.exit(0),20000)' "$LHPORT4" > "$LH/old.out" 2>&1 &
+  old=$!; sv_reg "$old"
+  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$LH/old.out" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  : > "$LH/opened"
+  out="$(lh_web 2>&1)"
+  is "an old daemon is told apart from a stopped one" "1" \
+     "$([ "$(grep -c 'running on \[::1\]:'"$LHPORT4"' but not on localhost' <<< "$out")" -ge 1 ] && echo 1 || echo "0: $out")"
+  is "...and is not opened either"               "" "$(cat "$LH/opened")"
+  reap "$old"
+  lh_init 127.0.0.1 "$LHPORT4" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  is "a tunnel's loopback bind says it has no localhost" "1" \
+     "$([ "$(lh_web 2>&1 | grep -c 'does not also serve localhost')" -ge 1 ] && echo 1 || echo 0)"
+  is "an unset config points at fleet-phone"     "1" \
+     "$([ "$(HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/nope.json" "$ROOT/bin/ghostfleet" web 2>&1 | grep -c 'fleet-phone')" -ge 1 ] && echo 1 || echo 0)"
+fi
+
+# ── the Mac enrols its own passkey, in a browser, at localhost ─────────────────
+# Headless Chrome with a CDP virtual authenticator standing in for Touch ID, the real
+# enrolment sheet, the real web/passkey.js, and a daemon configured as above
+# (local-enrol-check.mjs says what is and is not synthetic). WATCHED RED on staging's
+# fleet-serve.mjs: nothing answered at localhost, so the page never loaded. The wording rows
+# were watched red on staging's app.js and passkey.js, where the Mac was offered "enrol this
+# phone".
+group "fleet-serve: the Mac enrols a localhost passkey in a real browser"
+# needs: free_port answers in digits
+if [ -z "${SV:-}" ] || [ "$lh_v6" != yes ]; then
+  skip "localhost enrolment in a browser" "needs node and a bindable ::1"
+else
+  lh_rt
+  LHPORT5="$(free_port)"
+  lh_init ::1 "$LHPORT5" "$LH_TAILHOST" "$LH_TAILORIGIN"
+  if lh_start browser "http://[::1]:$LHPORT5/healthz"; then
+    HOME="$LH/home" GHOSTFLEET_SERVE_CONFIG="$LH/serve.json" GHOSTFLEET_SERVE_AUDIT="$LH/audit.jsonl" \
+      node "$ROOT/test/helpers/local-enrol-check.mjs" "$(LH_SERVE)" "$LHPORT5" mac > "$LH/enrol" 2> "$LH/enrol.err"
+    lerc=$?
+    if grep -q '^#SKIP' "$LH/enrol" 2>/dev/null; then
+      skip "localhost enrolment in a browser" "no chrome"
+    else
+      is "local-enrol-check ran"         "0" "$lerc"
+      is "...without complaining"        ""  "$(head -2 "$LH/enrol.err" | tr '\n' ' ' | sed 's/ *$//')"
+      is "...and produced its checks"    "yes" "$([ "$(wc -l < "$LH/enrol")" -ge 11 ] && echo yes || echo "no: $(wc -l < "$LH/enrol" | tr -d ' ') rows")"
+      while IFS=$'\x1f' read -r name want got; do
+        is "$name" "$want" "$got"
+      done < "$LH/enrol"
+    fi
+    lh_stop
+  fi
+fi
+
 # ── push: a bell for the two things worth one, and silence for everything else ──
 # docs/mobile.md §9 argued against building this. What changed is in the PR; what did NOT
 # change is the reason every assertion below comes in pairs. A push that fires when he is

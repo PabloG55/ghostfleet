@@ -438,16 +438,42 @@ function verifySig(jwk, alg, data, sig) {
 // for nothing. What matters is unchanged: the challenge has to be one WE issued, still
 // live, and NOT YET USED. takeChallenge consumes it, because a replayed assertion is
 // exactly what somebody with a copy of the traffic would send.
-function checkClientData(raw, c, expectType) {
+// ── which listener a request arrived on, and what it may accept ─────────────────
+// Two sockets, two relying parties. The configured bind (the tailnet) is the phone's, with
+// the rp_id and origins in serve.json. The second is 127.0.0.1 on the same port, so the
+// Mac itself can open http://localhost:<port> without Tailscale — a secure context with no
+// TLS, which is the one http:// origin WebAuthn accepts — and it is its own rp_id,
+// 'localhost', because a passkey is bound to the rp_id it was made for and one made at the
+// tailnet name cannot be asserted at localhost anyway.
+//
+// NOTHING CROSSES. A request is judged by the scope of the socket it came in on and by
+// nothing it says about itself: Origin, clientData.origin, the authenticator's rpIdHash,
+// the challenge, the credential and the session token each belong to one listener, so an
+// assertion made at localhost is refused on the tailnet and the reverse, and a token minted
+// on one is dead on the other. Any process on the Mac can reach 127.0.0.1, which is why
+// the localhost listener gets no shortcut past the passkey — only a different rp_id.
+//
+// `ls` absent means the configured listener, which is what every caller was before there
+// were two.
+export const LOCAL_BIND = '127.0.0.1';
+export const LOCAL_RP = 'localhost';
+const scopeOf = (c, ls) => ls && ls.local
+  ? { rp_id: LOCAL_RP, origins: [`http://${LOCAL_RP}:${ls.port}`], local: true }
+  : { rp_id: c.rp_id, origins: c.origins || [], local: false };
+// What a credential or session was made on. Rows written before there were two listeners
+// carry no tag, and every one of them was made on the configured listener.
+const rpOfRow = (c, row) => (row && row.rp_id) || c.rp_id;
+
+function checkClientData(raw, c, expectType, ls) {
   let cd;
   try { cd = JSON.parse(raw.toString('utf8')); } catch { return { error: 'clientDataJSON is not JSON' }; }
   if (cd.type !== expectType) return { error: `clientData type is '${cd.type}', expected '${expectType}'` };
-  const origins = c.origins || [];
-  if (!origins.includes(cd.origin)) return { error: `origin '${cd.origin}' is not in this server's origins (${origins.join(', ') || 'none configured'})` };
+  const { origins, rp_id } = scopeOf(c, ls);
+  if (!origins.includes(cd.origin)) return { error: `origin '${cd.origin}' is not in this listener's origins (${origins.join(', ') || 'none configured'})` };
   if (cd.crossOrigin === true) return { error: 'cross-origin assertion refused' };
   if (typeof cd.challenge !== 'string') return { error: 'no challenge in clientDataJSON' };
-  const ch = takeChallenge(cd.challenge);
-  if (!ch) return { error: 'that challenge is not one this server issued, or it has expired or already been used' };
+  const ch = takeChallenge(cd.challenge, rp_id);
+  if (!ch) return { error: 'that challenge is not one this listener issued, or it has expired or already been used' };
   return { ch };
 }
 
@@ -507,19 +533,19 @@ function rateRoom(name, key, res) {
 }
 
 const CHALLENGE_TTL = 120;
-function newChallenge() {
+function newChallenge(rp) {
   const challenge = rand(32);
-  challenges.set(challenge, { exp: now() + CHALLENGE_TTL });
+  challenges.set(challenge, { exp: now() + CHALLENGE_TTL, rp });
   // A challenge is cheap and unauthenticated to ask for, so cap the table rather than
   // let anyone who can reach the port grow it without limit.
   if (challenges.size > 512) for (const k of challenges.keys()) { challenges.delete(k); if (challenges.size <= 256) break; }
   return challenge;
 }
-function takeChallenge(ch) {
+function takeChallenge(ch, rp) {
   const c = challenges.get(ch);
   if (!c || c.exp <= now()) return null;
   challenges.delete(ch);                                  // single use, always
-  return c;
+  return c.rp === rp ? c : null;                          // ...and spent even when refused
 }
 
 // ONE TOKEN, and a passkey assertion is the only thing that mints it.
@@ -543,16 +569,19 @@ function takeChallenge(ch) {
 // gone unused for fifteen minutes, which a thief using it never lets happen — and that is
 // exactly why revocation is immediate and does not wait for the window. There is no
 // absolute cap, by decision: an app in use should never ask for a face mid-sentence.
-function mintSession(clientId, purpose = 'open') {
+function mintSession(clientId, purpose = 'open', rp_id = loadConfig().rp_id) {
   const c = loadConfig(), tok = rand(32), ttl = c.session_ttl || 900;
-  sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose });
+  sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose, rp_id });
   persistSessions();                                      // a mint is worth a write NOW
   return { token: tok, ttl, expires_at: now() + ttl };
 }
-function liveSession(tok) {
+function liveSession(tok, rp_id = loadConfig().rp_id) {
   if (!tok) return null;
   const k = sha256(tok), s = sessions.get(k);
   if (!s || s.exp <= now()) return null;
+  // A token is good on the listener that minted it and nowhere else. Refused, not deleted:
+  // it is still its owner's on the right socket.
+  if (rpOfRow(loadConfig(), s) !== rp_id) return null;
   // Revoked between two requests: the token dies with the client, which is what makes
   // revocation land on a RUNNING daemon instead of at the next restart. Deleted, not just
   // refused, so the persisted copy goes on the next flush.
@@ -611,7 +640,8 @@ function loadSessions() {
   for (const [k, v] of Object.entries(raw)) {
     const ok = /^[0-9a-f]{64}$/.test(k) && v && typeof v.client === 'string' &&
                Number.isFinite(v.exp) && Number.isFinite(v.born) && v.exp > t && sessionClientLive(v);
-    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open') }); kept++; }
+    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open'),
+                                ...(typeof v.rp_id === 'string' && v.rp_id ? { rp_id: v.rp_id } : {}) }); kept++; }
     else dropped++;
   }
   if (dropped) persistSessions();
@@ -1244,8 +1274,12 @@ async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
 // that then 403'd every single request as an unexpected Host — a server that looked up
 // and answered nothing.
 let listening = null;
-function allowedHosts(c) {
+function allowedHosts(c, ls) {
   const h = new Set();
+  // The localhost listener answers to its own name and nothing else — not 127.0.0.1, whose
+  // page could not use a passkey anyway (an IP is never an rp_id), and above all not the
+  // tailnet's names, which would let one socket stand in for the other.
+  if (ls && ls.local) { h.add(`${LOCAL_RP}:${ls.port}`); return h; }
   for (const o of c.origins || []) { try { h.add(new URL(o).host); } catch {} }
   const port = listening?.port ?? c.port;
   for (const a of [c.bind, listening?.bind]) {
@@ -1956,19 +1990,21 @@ function serveStatic(req, res, pathname) {
 // action" (the X-Fleet-Assertion header on a destructive verb). One implementation, so
 // the second factor cannot end up weaker than the first — which is the shape this kind of
 // bug takes.
-function verifyAssertion(body, c) {
+function verifyAssertion(body, c, ls) {
   for (const k of ['id', 'client_data', 'authenticator_data', 'signature'])
     if (typeof body[k] !== 'string' || !body[k]) return { error: `assertion is missing '${k}'` };
   const cl = clientByCredential(body.id);
   if (!cl) return { error: 'that credential is not enrolled here (or its client is revoked)' };
   const cred = (cl.creds || []).find(x => x.id === body.id);
   if (!ALG_OK.has(cred.alg)) return { error: `credential algorithm ${cred.alg} is not supported` };
+  const { rp_id } = scopeOf(c, ls);
+  if (rpOfRow(c, cred) !== rp_id) return { error: `that passkey was enrolled for '${rpOfRow(c, cred)}', not for this listener's '${rp_id}'` };
   const clientData = Buffer.from(body.client_data, 'base64url');
-  const cd = checkClientData(clientData, c, 'webauthn.get');
+  const cd = checkClientData(clientData, c, 'webauthn.get', ls);
   if (cd.error) return { error: cd.error };
   let ad;
   try { ad = parseAuthData(Buffer.from(body.authenticator_data, 'base64url')); } catch (e) { return { error: e.message }; }
-  if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(c.rp_id))) return { error: `authenticator signed for a different rpId than '${c.rp_id}'` };
+  if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(rp_id))) return { error: `authenticator signed for a different rpId than '${rp_id}'` };
   if (!ad.up) return { error: 'user-presence flag is not set — the authenticator was not touched' };
   const data = Buffer.concat([Buffer.from(body.authenticator_data, 'base64url'),
                               crypto.createHash('sha256').update(clientData).digest()]);
@@ -2156,12 +2192,14 @@ async function api(req, res, url, ip) {
   try { c = loadConfig(); } catch (e) { return send(res, 500, { ok: false, text: `config unreadable: ${e.message}` }); }
   const p = url.pathname;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const scope = scopeOf(c, req.ls);
 
-  // Every POST is checked against the configured origins as well. A browser sends Origin
+  // Every POST is checked against this listener's origins as well. A browser sends Origin
   // on a cross-site request; refusing an unrecognised one closes CSRF from any page that
-  // is not ours, and costs a client of ours nothing.
-  if (req.method === 'POST' && req.headers.origin && !(c.origins || []).includes(req.headers.origin))
-    return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured` });
+  // is not ours, and costs a client of ours nothing. THIS listener's: the tailnet origin is
+  // as foreign to the localhost socket as any other site, and the reverse.
+  if (req.method === 'POST' && req.headers.origin && !scope.origins.includes(req.headers.origin))
+    return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured for this listener` });
 
   if (p === '/api/auth/challenge') {
     if (!rateOk('challenge', ip, res)) return send(res, 429, { ok: false, text: 'rate limited' });
@@ -2176,7 +2214,7 @@ async function api(req, res, url, ip) {
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
     // only because a passkey signed a challenge, and it dies after session_ttl unused.
-    const s = liveSession(bearer);
+    const s = liveSession(bearer, scope.rp_id);
     if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires once idle)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
     // The slide, told to the client: web/api.js keeps its own copy of the expiry so it can
@@ -2225,10 +2263,13 @@ async function api(req, res, url, ip) {
     // GET, and unauthenticated: it is what a cold open asks for before it has anything.
     // Single-use and short-lived, so handing them out freely costs nothing.
     const first = (c.clients || []).find(x => !x.revoked && (x.creds || []).length);
-    return send(res, 200, { challenge: newChallenge(), rp_id: c.rp_id, ttl: CHALLENGE_TTL,
+    return send(res, 200, { challenge: newChallenge(scope.rp_id), rp_id: scope.rp_id, ttl: CHALLENGE_TTL,
       user: { id: (c.enroll && c.enroll.exp > now() ? c.enroll.id : first?.id) || 'ghostfleet',
               name: (c.enroll && c.enroll.exp > now() ? c.enroll.id : first?.id) || 'ghostfleet' },
-      allow: (c.clients || []).filter(x => !x.revoked).flatMap(x => (x.creds || []).map(y => ({ type: 'public-key', id: y.id }))),
+      // Only the passkeys this listener can verify: offering the tailnet's at localhost would
+      // ask the browser for a credential it cannot produce here.
+      allow: (c.clients || []).filter(x => !x.revoked).flatMap(x => (x.creds || [])
+        .filter(y => rpOfRow(c, y) === scope.rp_id).map(y => ({ type: 'public-key', id: y.id }))),
       enrolling: !!(c.enroll && c.enroll.exp > now()) });
   }
 
@@ -2251,7 +2292,7 @@ async function api(req, res, url, ip) {
     for (const k of ['id', 'attestation', 'client_data'])
       if (typeof body[k] !== 'string' || !body[k]) return send(res, 400, { ok: false, text: `registration is missing '${k}'` });
     const clientData = Buffer.from(body.client_data, 'base64url');
-    const cd = checkClientData(clientData, c, 'webauthn.create');
+    const cd = checkClientData(clientData, c, 'webauthn.create', req.ls);
     if (cd.error) return send(res, 400, { ok: false, text: cd.error });
     let ad, key;
     try {
@@ -2262,12 +2303,12 @@ async function api(req, res, url, ip) {
       if (!ad.at || !ad.cose) return send(res, 400, { ok: false, text: 'no attested credential data' });
       key = coseToJwk(ad.cose);
     } catch (e) { return send(res, 400, { ok: false, text: `attestation could not be parsed: ${e.message}` }); }
-    if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(c.rp_id))) return send(res, 400, { ok: false, text: `credential was created for a different rpId than '${c.rp_id}'` });
+    if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(scope.rp_id))) return send(res, 400, { ok: false, text: `credential was created for a different rpId than '${scope.rp_id}'` });
     if (!ad.up) return send(res, 400, { ok: false, text: 'user-presence flag is not set' });
     if (!ALG_OK.has(key.alg)) return send(res, 400, { ok: false, text: `algorithm ${key.alg} is not supported (ES256 or RS256)` });
     if (b64u(ad.credId) !== body.id) return send(res, 400, { ok: false, text: "the credential id does not match the authenticator's own" });
 
-    const cred = { id: b64u(ad.credId), jwk: key.jwk, alg: key.alg, counter: ad.signCount, created: now() };
+    const cred = { id: b64u(ad.credId), jwk: key.jwk, alg: key.alg, counter: ad.signCount, created: now(), rp_id: scope.rp_id };
     let cl = c.clients.find(x => x.id === pend.id);
     if (cl) {
       if ((cl.creds || []).some(x => x.id === cred.id)) return send(res, 409, { ok: false, text: 'that passkey is already enrolled' });
@@ -2282,15 +2323,15 @@ async function api(req, res, url, ip) {
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'enroll', subject: cred.id.slice(0, 12), result: 'ran',
                   output: `passkey enrolled (${(cl.creds || []).length} on this client)` });
     log(`enrolled '${cl.id}' passkey ${cred.id.slice(0, 12)}… from ${ip}`);
-    const sess = mintSession(cl.id, 'register');
+    const sess = mintSession(cl.id, 'register', scope.rp_id);
     return send(res, 200, { ok: true, client_id: cl.id, token: sess.token, expires_at: sess.expires_at });
   }
 
   if (p === '/api/auth/assert') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    const v = verifyAssertion(body, c);
+    const v = verifyAssertion(body, c, req.ls);
     if (v.error) { log(`auth FAILED from ${ip}: ${v.error}`); return send(res, 401, { ok: false, text: v.error }); }
-    const sess = mintSession(v.client.id, v.purpose || 'open');
+    const sess = mintSession(v.client.id, v.purpose || 'open', scope.rp_id);
     log(`session for '${v.client.id}' from ${ip} (${sess.ttl}s, ${v.purpose || 'open'})`);
     return send(res, 200, { ok: true, token: sess.token, expires_at: sess.expires_at, client_id: v.client.id });
   }
@@ -2573,7 +2614,8 @@ function agentCatalogue() {
 
   if (p === '/api/health' && req.method === 'GET') {
     const f = funnelState();
-    return send(res, 200, { ok: true, version: VERSION, bind: c.bind, port: listening?.port ?? c.port,
+    return send(res, 200, { ok: true, version: VERSION, bind: req.ls?.local ? LOCAL_BIND : c.bind, port: listening?.port ?? c.port,
+      rp_id: scope.rp_id,
       client: req.client.id, session_expires_in: req.session.exp - now(),
       grid_json: gridSupportsJson(), web: webPresent ? WEB : null, awake: awakeHeld,
       funnel: f.checked ? (f.on.length ? { on: f.on } : 'off') : `unverified (${f.why})`,
@@ -2809,7 +2851,7 @@ function headerAssertion(req, c) {
   let parsed;
   try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
   catch { return { error: 'X-Fleet-Assertion is not JSON' }; }
-  const r = verifyAssertion(parsed, c);
+  const r = verifyAssertion(parsed, c, req.ls);
   // An assertion signed by a DIFFERENT enrolled client is not this session's
   // confirmation: the token and the fingerprint have to be the same person.
   return r.error ? { error: r.error }
@@ -2921,7 +2963,8 @@ async function termRoutes(p, req, res, body, c, ip) {
     const tab = await openTermTab(rp.t);
     if (tab.error) return send(res, 502, { ok: false, text: tab.error });
     const ticket = rand(32);
-    tickets.set(sha256(ticket), { client: cl.id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
+    // Tagged with the listener that minted it: termUpgrade spends it only on that one.
+    tickets.set(sha256(ticket), { client: cl.id, rp_id: scopeOf(c, req.ls).rp_id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
       cols: termSize(body.cols, 2, 500, 80), rows: termSize(body.rows, 1, 300, 24), exp: now() + TERM_TICKET_TTL });
     for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
@@ -2950,12 +2993,15 @@ function termUpgrade(req, sock) {
   if (pathname !== '/api/term/ws') return refuse(404, 'no WebSocket here');
   let c;
   try { c = loadConfig(); } catch (e) { return refuse(500, 'config unreadable'); }
-  const hosts = allowedHosts(c);
+  // THIS LISTENER'S Host and origins (scopeOf): the socket the upgrade arrived on stamped
+  // req.ls before this ran, and nothing the client sends can move it.
+  const scope = scopeOf(c, req.ls);
+  const hosts = allowedHosts(c, req.ls);
   if (req.headers.host && hosts.size && !hosts.has(req.headers.host)) return refuse(403, `unexpected Host '${req.headers.host}'`);
   // REQUIRED, not merely checked when present (POSTs check it only when present): every
   // browser sends Origin on a WebSocket, so a missing one is not a browser of ours.
   const origin = req.headers.origin || '';
-  if (!origin || !(c.origins || []).includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured`);
+  if (!origin || !scope.origins.includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured for this listener`);
   if (!rateOk('write', ip, { setHeader() {} })) return refuse(429, 'rate limited');
   if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !req.headers['sec-websocket-key'])
     return refuse(400, 'not a WebSocket upgrade');
@@ -2963,6 +3009,10 @@ function termUpgrade(req, sock) {
   const k = sha256(raw), t = raw && tickets.get(k);
   if (t) tickets.delete(k);                                  // single use, spent even on a refusal below
   if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again (it asks for the passkey)');
+  // A ticket is the listener's that minted it, as a session token is: one minted on the
+  // tailnet is not a way in at localhost, nor the reverse. Spent above all the same.
+  if (rpOfRow(c, t) !== scope.rp_id)
+    return refuse(403, `that ticket was minted on the other listener ('${rpOfRow(c, t)}'), not this one ('${scope.rp_id}') — open the terminal again here`);
   const cl = clientById(t.client);
   if (!termOn(cl)) return refuse(403, 'the terminal is off for this device');
   sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
@@ -3101,7 +3151,7 @@ function requestHandler(req, res) {
 
   let c;
   try { c = loadConfig(); } catch (e) { log('config:', e.message); return send(res, 500, { ok: false, error: `config unreadable: ${e.message}` }); }
-  const hosts = allowedHosts(c);
+  const hosts = allowedHosts(c, req.ls);
   if (req.headers.host && hosts.size && !hosts.has(req.headers.host))
     return send(res, 403, { ok: false, error: `unexpected Host '${req.headers.host}' — this server answers to ${[...hosts].join(', ')}` });
 
@@ -3169,6 +3219,40 @@ function pmsetWarning() {
 }
 
 // ── starting up ─────────────────────────────────────────────────────────────
+// Whether the localhost listener is a second socket, and why not when it is not. Two cases
+// make it one socket or none:
+//   - the configured rp_id IS localhost: the configured listener is already the Mac's door
+//     (`fleet-serve init --bind 127.0.0.1`), and a second one would be the same scope twice;
+//   - the configured bind is 127.0.0.1 under another name (a tunnel's): that socket is
+//     taken, and serving two rp_ids from one socket would mean choosing the scope from the
+//     Host header — which the client writes, and which is exactly what must not decide it.
+export function localPlan(addrs, rp_id) {
+  if (rp_id === LOCAL_RP) return { on: false, why: 'the configured listener is already localhost' };
+  if ((addrs || []).some(a => a.address === LOCAL_BIND))
+    return { on: false, why: `the configured bind is ${LOCAL_BIND} itself (for '${rp_id}'), and one socket cannot be two relying parties without trusting the Host header` };
+  return { on: true };
+}
+// `quiet`: a retry. It says nothing when it fails again, so a socket held for an hour is
+// one line in the log and not 120.
+let localErr = '';                          // why the last localhost attempt failed
+async function listenLocal(addrs, port, c, tune, { quiet = false } = {}) {
+  const plan = localPlan(addrs, c.rp_id);
+  if (!plan.on) { if (!quiet) log(`  localhost: not a second listener — ${plan.why}`); return null; }
+  const ls = Object.freeze({ local: true, bind: LOCAL_BIND, port });
+  const srv = tune(http.createServer((req, res) => { req.ls = ls; requestHandler(req, res); }), ls);
+  const err = await new Promise((resolve) => {
+    srv.once('error', resolve);
+    srv.listen(port, LOCAL_BIND, () => resolve(null));
+  });
+  if (err) {
+    localErr = err.code || err.message;
+    if (!quiet) log(`  localhost: NOT listening on ${LOCAL_BIND}:${port} (${localErr}) — the other listener is unaffected; retrying quietly, and saying so only when it comes up`);
+    return null;
+  }
+  log(`  localhost: also listening on ${LOCAL_BIND}:${port} · rp_id ${LOCAL_RP} · origin http://${LOCAL_RP}:${port} — its own passkeys, sessions and origin; nothing crosses to the tailnet listener`);
+  return srv;
+}
+
 async function serve(argv) {
   const c = loadConfig();
   const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; };
@@ -3197,7 +3281,13 @@ async function serve(argv) {
     `  config: ${CONFIG}`,
   ]);
   const b = await assertBindable(bind);
-  if (!b.ok) die([
+  // A REFUSAL BY POLICY STAYS FATAL: a wildcard, a LAN or a public address is a config that
+  // would publish this endpoint, and serving localhost beside it would make that easy to
+  // miss. An address that is simply NOT HERE (the tailnet went away, or the machine moved
+  // to another one) is not that. It is the moment the Mac's own door matters most, so it
+  // is handled below, by the listeners, and is not an exit.
+  const policy = (b.addrs || []).some(a => !BINDABLE.has(a.kind));
+  if (policy) die([
     `refusing to bind '${bind}':`,
     ...b.why.map(w => `  - ${w}`),
     'only loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are allowed — the two',
@@ -3206,7 +3296,7 @@ async function serve(argv) {
     'addresses this machine has:',
     ...localAddrs().map(a => `  - ${a.address}  (${a.iface}, ${a.kind})`),
   ]);
-  const kind = b.addrs[0].kind;
+  const kind = b.addrs ? b.addrs[0].kind : classifyAddr(bind).kind === 'name' ? 'tailnet' : classifyAddr(bind).kind;
 
   // §11.1: Funnel is the one setting that would undo all of §5, so it is asserted rather
   // than remembered — and reported as UNVERIFIED, not as a pass, when the CLI is absent.
@@ -3222,31 +3312,89 @@ async function serve(argv) {
     `  fleet-serve init --bind ${bind} --port ${port} [--rp-id <host>]`,
   ]);
 
-  const server = c.tls
-    ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, requestHandler)
-    : http.createServer(requestHandler);
-  server.headersTimeout = 20000;
-  server.requestTimeout = 20 * 60 * 1000;      // a spawn can legitimately take minutes
-  server.keepAliveTimeout = 65000;
-  server.maxConnections = 64;
-  server.on('clientError', (e, sock) => { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} });
-  // The web terminal's WebSocket (TERMINAL, above). Nothing else here upgrades, and a
-  // request that asks to anywhere else is refused by termUpgrade on its path.
-  server.on('upgrade', termUpgrade);
-
-  await new Promise((resolve) => {
-    server.once('error', (e) => {
-      if (e.code === 'EADDRNOTAVAIL') die([`${bind} is not an address on this machine right now.`,
-        kind === 'tailnet' ? '  is tailscaled up and signed in?  tailscale status' : '']);
-      if (e.code === 'EADDRINUSE') die([`port ${port} is already in use on ${bind} — another fleet-serve?`]);
-      die([`listen failed: ${e.message}`]);
-    });
-    server.listen(port, bind, resolve);
-  });
-
+  // Each socket stamps its own scope on the request before anything reads it, so no
+  // handler can learn the listener from a header the client chose. That includes the web
+  // terminal's WebSocket (TERMINAL, above): an upgrade is a request too, and it is judged
+  // by the socket it arrived on like every other. Nothing else here upgrades, and a request
+  // that asks to anywhere else is refused by termUpgrade on its path.
+  const tune = (srv, ls) => {
+    srv.headersTimeout = 20000;
+    srv.requestTimeout = 20 * 60 * 1000;       // a spawn can legitimately take minutes
+    srv.keepAliveTimeout = 65000;
+    srv.maxConnections = 64;
+    srv.on('clientError', (e, sock) => { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} });
+    srv.on('upgrade', (req, sock) => { req.ls = ls; termUpgrade(req, sock); });
+    return srv;
+  };
+  const onConfigured = (req, res) => { req.ls = null; requestHandler(req, res); };
+  const makeServer = () => tune(c.tls
+    ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, onConfigured)
+    : http.createServer(onConfigured), null);
+  const lit = net.isIPv6(bind) ? `[${bind}]` : bind;
   listening = { bind, port };
-  log(`fleet-serve ${VERSION} listening on ${net.isIPv6(bind) ? `[${bind}]` : bind}:${port} (${kind}${c.tls ? ', tls' : ''})`);
+
+  // TWO INDEPENDENT LISTENERS. Either may be unavailable; the daemon exits only when
+  // NEITHER can listen. Measured on the owner's Mac: the machine moved to another tailnet,
+  // its configured 100.x address went away, fleet-serve refused to start, and launchd
+  // restarted it every few seconds, thousands of times, while the one door that did not
+  // need the tailnet stayed shut with it. So a configured bind that is absent or taken is
+  // logged ONCE, retried quietly, and announced once more when it comes up.
+  let server = null;                         // the configured listener, once it is up
+  const tryConfigured = async () => {
+    const bb = await assertBindable(bind);
+    // assertBindable's own hint is dropped: fixHint below says the same thing, once.
+    if (!bb.ok) return bb.why.map(w => w.replace(/ — is tailscaled running.*$/, '')).join('; ');
+    const srv = makeServer();
+    const err = await new Promise((resolve) => {
+      srv.once('error', resolve);
+      srv.listen(port, bind, () => resolve(null));
+    });
+    if (!err) { server = srv; return null; }
+    return err.code === 'EADDRNOTAVAIL' ? `${bind} is not an address on this machine right now`
+         : err.code === 'EADDRINUSE' ? `port ${port} is already in use on ${bind} — another fleet-serve?`
+         : `listen failed: ${err.message}`;
+  };
+  const fixHint = kind === 'tailnet'
+    ? `is tailscaled up, and signed in to the tailnet this config names? \`tailscale ip -4\` should list ${bind}; if the machine moved tailnets: fleet-serve init --bind "$(tailscale ip -4)" --rp-id <name>.ts.net`
+    : `check what holds ${lit}:${port}, or re-run: fleet-serve init --bind <addr>`;
+  const why = await tryConfigured();
+  if (!why) log(`fleet-serve ${VERSION} listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''})`);
   log(`  config ${CONFIG} · audit ${AUDIT} · rp_id ${c.rp_id} · origins ${c.origins.join(' ')}`);
+
+  // THE MAC'S OWN DOOR: 127.0.0.1, same port, plain http, rp_id localhost (see scopeOf).
+  // Best effort, deliberately: the configured listener is the phone's, and nothing about
+  // this one may stop it serving — so a refusal here is a log line, not an exit.
+  let localSrv = await listenLocal(b.addrs, port, c, tune);
+  if (why && !localSrv) die([
+    'nothing can listen, so there is nothing to serve:',
+    `  - the configured listener on ${lit}:${port}: ${why}`,
+    `    ${fixHint}`,
+    `  - localhost: ${localPlan(b.addrs, c.rp_id).on ? `${LOCAL_BIND}:${port} could not be bound (${localErr})` : localPlan(b.addrs, c.rp_id).why}`,
+  ]);
+  // One retry loop per listener that is down. Silent while it keeps failing; one line when
+  // it comes up. Unref'd: a retry must never be the thing that keeps a stopping daemon up.
+  const every = Math.max(50, Number(process.env.GHOSTFLEET_SERVE_RETRY_MS) || 30000);
+  const keepTrying = (attempt, upLine) => {
+    const t0 = Date.now();
+    let busy = false;
+    const t = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try { if (await attempt()) { clearInterval(t); log(upLine(Math.round((Date.now() - t0) / 1000))); } }
+      catch (e) { log(`  retry: ${e.message}`); }
+      finally { busy = false; }
+    }, every);
+    t.unref?.();
+  };
+  const everyText = every >= 1000 ? `${Math.round(every / 1000)}s` : `${every}ms`;
+  if (why) {
+    log(`fleet-serve ${VERSION}: the tailnet listener is OFF — ${why}. ${fixHint}. Serving localhost only; retrying ${lit}:${port} every ${everyText}, and saying so only when it comes up.`);
+    keepTrying(async () => !(await tryConfigured()),
+      (s) => `fleet-serve: the tailnet listener is UP — listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''}), after ${s}s off`);
+  }
+  if (!localSrv && localPlan(b.addrs, c.rp_id).on)
+    keepTrying(async () => !!(localSrv = await listenLocal(b.addrs, port, c, tune, { quiet: true })),
+      (s) => `  localhost: UP after ${s}s off`);
   if (!f.checked) log(`  funnel: UNVERIFIED — ${f.why}. Assert it by hand: tailscale funnel status`);
   else log('  funnel: off (asserted)');
   webPresent = (() => { try { return fs.statSync(WEB).isDirectory(); } catch { return false; } })();
@@ -3293,8 +3441,10 @@ async function serve(argv) {
     // for the whole grace. Say goodbye to each terminal; the tabs stay open in tmux.
     for (const t of [...terms]) t.end(1001, 'fleet-serve is restarting — open the terminal again');
     log(`${sig} — draining, then stopping`);
-    server.close(() => { log('stopped'); process.exit(0); });
-    server.closeIdleConnections?.();
+    const live = [server, localSrv].filter(Boolean);
+    let open = live.length;
+    const closed = () => { if (--open === 0) { log('stopped'); process.exit(0); } };
+    for (const srv of live) { srv.close(closed); srv.closeIdleConnections?.(); }
     setTimeout(() => { log('grace expired with a request still open — cutting it off'); process.exit(0); }, 15000).unref();
   });
 }
@@ -3359,7 +3509,9 @@ async function main() {
     console.log(`rp_id      ${c.rp_id || '(unset)'}`);
     console.log(`origins    ${(c.origins || []).join(' ') || '(unset)'}`);
     console.log(`tls        ${c.tls ? `${c.tls.cert}` : 'none'}`);
-    console.log(`clients    ${c.clients.length ? c.clients.map(x => `${x.id}${x.revoked ? ' (revoked)' : ''}/${(x.creds || []).length} passkeys`).join(', ') : '(none enrolled)'}`);
+    { const lp = localPlan(b.addrs, c.rp_id);
+      console.log(`localhost  ${lp.on ? `${LOCAL_BIND}:${c.port} also, rp_id ${LOCAL_RP} · origin http://${LOCAL_RP}:${c.port}` : `no second listener — ${lp.why}`}`); }
+    console.log(`clients    ${c.clients.length ? c.clients.map(x => `${x.id}${x.revoked ? ' (revoked)' : ''}/${(x.creds || []).length} passkeys${(x.creds || []).some(y => y.rp_id === LOCAL_RP && c.rp_id !== LOCAL_RP) ? ` (${(x.creds || []).filter(y => y.rp_id === LOCAL_RP).length} localhost)` : ''}`).join(', ') : '(none enrolled)'}`);
     console.log(`grid --json ${gridSupportsJson() ? 'present' : 'MISSING — /api/grid will 503'}`);
     console.log(`client     ${(() => { try { return fs.statSync(WEB).isDirectory() ? WEB : `${WEB} is not a directory`; } catch { return `NONE at ${WEB}`; } })()}`);
     console.log(`funnel     ${f.checked ? (f.on.length ? `ON for ${f.on.join(', ')} — REFUSED` : 'off (asserted)') : `unverified (${f.why})`}`);
@@ -3408,6 +3560,9 @@ async function main() {
     console.log(`enrolment open for '${id}' — ${Math.round((c.enroll_ttl || 900) / 60)} minutes, one use.`);
     console.log(`\n    code:  ${code}\n`);
     console.log(`Open ${(c.origins || ['(no origin configured)'])[0]} on the phone and enter it.`);
+    // The same window serves the Mac's own door; the passkey it makes is a localhost one.
+    if (c.rp_id && c.rp_id !== LOCAL_RP)
+      console.log(`On this Mac, open http://${LOCAL_RP}:${c.port || 8787} instead (or: ghostfleet web) — it enrols a localhost passkey.`);
     console.log(existing ? 'It adds a passkey to that client.'
                          : 'It enrols the passkey; from then on the phone signs in with it.');
     console.log('A running daemon picks this up on its next request; no restart needed.');

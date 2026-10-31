@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 55c4628b5e1d
+// CLIENT-HASH: 451153b21340
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -402,7 +402,10 @@
 // v81 stops at a failed wake: the tap used to open the session whatever the wake answered, so
 // a wake that failed showed its reason and then an empty pane. A phone still on v80 does that.
 // v82 adds the terminal: a real shell in a fleet tab, off per device, a passkey at each open.
-const VERSION = 'ghostfleet-v82';
+// v83 names the device on the lock screen: a desktop Mac, which can now open the client at
+// http://localhost, is offered "enrol this Mac" and "unlock with Touch ID"; every other device
+// keeps the phone's words. A Mac still on v82 says "this phone" and "Face ID".
+const VERSION = 'ghostfleet-v83';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
