@@ -17081,8 +17081,11 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   wt_cfg() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};c.terminal_idle=+process.argv[2];c.origins=[...new Set([...(c.origins||[]),"http://127.0.0.1:"+c.port])];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$WT/serve.json" "$1"; }
   wt_cfg 10
   # SHELL=/bin/sh and an empty ENV: the tab runs `$SHELL -l`, and the rows read its prompt.
+  # EDITOR and CLAUDE_FLEET_EDITOR emptied: the editor tab opens fleet-tab's default (nvim),
+  # which is what the rows assert, not whatever editor the machine running the suite prefers.
   GHOSTFLEET_SERVE_CONFIG="$WT/serve.json" GHOSTFLEET_SERVE_AUDIT="$WT/audit.jsonl" HOME="$WT/home" TMUX= \
-    CLAUDE_FLEET_AWAKE=off SHELL=/bin/sh ENV= PS1='$ ' node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$WT/log" 2>&1 &
+    CLAUDE_FLEET_AWAKE=off SHELL=/bin/sh ENV= PS1='$ ' EDITOR= CLAUDE_FLEET_EDITOR= \
+    node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$WT/log" 2>&1 &
   WT_PID=$!
   SERVE_PIDS="${SERVE_PIDS:-} $WT_PID"; sv_reg "$WT_PID"
   i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$WTBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
@@ -18021,6 +18024,31 @@ else
   done < "$PDC/out"
 fi
 rm -rf "$PDC"
+
+# "we need an X on the modals; if you click outside it should exit". Every sheet the fixture
+# fleet opens, at 390x844 with touch and 1600x900 with a mouse: an X in its top-right corner
+# that Chrome's accessibility tree calls "close" and that closes it, a tap or click on the
+# scrim that closes it, a drag from inside to outside that does NOT, typed text that is
+# still there after either (the queue answer, the schedule box), and the confirm bar's X and
+# its outside press — which cancels, is eaten, and never confirms. Watched red against
+# staging's client (105 rows); the rows staging passes by never closing anything, against
+# copies of this client broken on purpose (listed in the PR).
+group "phone client: every sheet has an X and closes on a tap beside it, in a real browser"
+SHC="$(mktemp -d "$TEST_RUNS.$$.sheets.XXXXXX")"
+node "$ROOT/test/helpers/sheets-check.mjs" > "$SHC/out" 2> "$SHC/err"
+shcrc=$?
+if grep -q '^#SKIP'"$US"'the sheets' "$SHC/out" 2>/dev/null; then
+  skip "the sheets" "no chrome to tap in"
+else
+  is "sheets-check ran"               "0" "$shcrc"
+  is "...without complaining"         ""  "$(head -2 "$SHC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SHC/out")" -ge 150 ] && echo yes || echo "no: $(wc -l < "$SHC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    is "$name" "$want" "$got"
+  done < "$SHC/out"
+fi
+rm -rf "$SHC"
 
 # THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
 # notification could ever reach it; a subscription is now one of the steps, both ways.

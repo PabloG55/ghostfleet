@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 8afa91730a1e
+// CLIENT-HASH: 8c73a30de62b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -421,7 +421,10 @@
 // it), and touches the history only once a screen is painted, so a back swipe never previews
 // the lock screen. A phone still on v88 reopens the last screen after Face ID, and can flash
 // the lock screen on the first back swipe after a cold open.
-const VERSION = 'ghostfleet-v89';
+// v90 gives every sheet and the confirm bar an X, closes a sheet on a tap beside it (keeping
+// what was typed in it), makes a press outside the confirm bar cancel it, and adds the
+// editor — the desk's Ctrl-n — beside the terminal. A phone on v89 has none of it.
+const VERSION = 'ghostfleet-v90';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

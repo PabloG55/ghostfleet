@@ -729,6 +729,26 @@ html.duo .sheet::before { display: none; }
 }
 @keyframes gf-pop { from { transform: scale(.97); opacity: 0 } }
 .sheet h2 { font: inherit; font-size: 18px; font-weight: 600; color: var(--white); margin: 0 0 .3em; letter-spacing: -.01em; }
+/* THE X, top right on every sheet and on the confirm bar: one component (closeX() in app.js,
+ * ConfirmBar in screens.jsx), and the same thing esc does. FLOATED, so the title wraps round
+ * it instead of running under it, and STICKY, so on a long sheet (settings) it stays in the
+ * corner while the rest scrolls — a close you have to scroll back up to find is not one.
+ * 40px at a phone, which is the smallest a thumb hits reliably, and a step smaller at a desk.
+ * The NEGATIVE bottom margin keeps the float inside the title's line: a float taller than the
+ * h2 reaches into the first row under it, and that row shrinks round it — measured, the
+ * actions sheet's `answer keys` came out a button-width shorter than every row below it. */
+.sheet-x {
+  float: right; position: sticky; top: 0; z-index: 1;
+  width: 40px; height: 40px; padding: 0; margin: -6px -6px -14px 12px;
+  display: inline-grid; place-items: center; border-radius: var(--pill);
+  color: var(--dim); background: var(--sheet-bg);
+}
+.sheet-x svg { width: 18px; height: 18px; display: block; }
+.sheet-x:focus-visible { outline: none; box-shadow: var(--ring); }
+@media (hover: hover) and (pointer: fine) { .sheet-x:hover:not(:disabled) { color: var(--fg); background: var(--surface-3); } }
+html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
+/* On the bar it takes the bar's colour (red for a destructive question), not the sheet's. */
+.confirm .confirm-x { position: static; width: 32px; height: 32px; margin: -6px -6px 4px 8px; color: inherit; background: transparent; }
 .sheet h2 .sub { color: var(--dim); font-weight: 400; font-size: 14px; font-family: var(--font-mono); }
 /* An origin is one unbreakable token — `http://mac-studio-2.tailfe8c.ts.net:8787` — and
  * the settings sheet prints the resolved one in prose. At large text that single word was

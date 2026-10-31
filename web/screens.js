@@ -15,7 +15,10 @@ function Btn({ label, onClick, cls = "" }) {
 		children: label
 	});
 }
-var ICONS = { more: ["M6 12h.01M12 12h.01M18 12h.01"] };
+var ICONS = {
+	more: ["M6 12h.01M12 12h.01M18 12h.01"],
+	close: ["M6 6l12 12M18 6 6 18"]
+};
 function Icon({ name }) {
 	const ds = ICONS[name];
 	if (!ds) return null;
@@ -137,6 +140,14 @@ function ConfirmBar({ confirm }) {
 	return /* @__PURE__ */ u("div", {
 		class: "confirm " + confirm.cls,
 		children: [
+			confirm.close ? /* @__PURE__ */ u("button", {
+				type: "button",
+				class: "sheet-x confirm-x",
+				"aria-label": "close",
+				title: "close · esc",
+				onClick: confirm.close,
+				children: /* @__PURE__ */ u(Icon, { name: "close" })
+			}) : null,
 			/* @__PURE__ */ u("span", {
 				class: "q",
 				children: " " + confirm.q

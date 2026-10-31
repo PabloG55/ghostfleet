@@ -848,8 +848,13 @@ is('...it is here: a picker and its columns', true, /function paintPicker\(/.tes
 // with bin/fleet-tab, so the client must never spell a tab name of its own. One that did
 // would be a second copy of the naming rule, and the one a phone could get wrong.
 is('the client never builds a tab name itself', 0, (APP.match(/['"]_(term|edit)-/g) || []).length);
-is('no editor tab', 0, (APP.match(/openEditor|editorScreen/g) || []).length);
-is('...and that is named as absent', true, /the Ctrl-n editor tab/.test(APP));
+// THE EDITOR IS NO LONGER ONE OF THEM EITHER — the owner asked for the desk's LazyVim on the
+// web. It is the terminal's screen with the other tab in it, so the rows that matter are that
+// it has no path of its own to the server (term-check.mjs drives the gates in a browser), and
+// that nothing calls it absent any more.
+is('the editor opens through the terminal\'s own path', true,
+   /function openEditor\([^)]*\) \{ openTerminal\(project, 'edit'\); \}/.test(APP) && /api\.termOpen\(TS\.project, TS\.h\.size\(\), a, TS\.kind\)/.test(APP));
+is('...and it is no longer named as absent', false, /not here, on purpose|the Ctrl-n editor tab/.test(APP));
 is('the page bound is 20', 20, api.PAGE);
 
 // ── 5b. nothing runs before its declarations exist ────────────────────────
@@ -1082,7 +1087,8 @@ is('...popstate is what moves back', true, /addEventListener\('popstate', \((e)?
 is('...and the back button asks the platform', true, /if \(navDepth > 0 &&[^\n]*history\.back/.test(APP));
 // A sheet and a confirmation are back-steps too: the gesture must close them rather than
 // leaving the screen under them.
-is('back closes a sheet first', true, /if \(S\.sheet\) \{ closeSheet\(\); return; \}/.test(APP));
+// dismissSheet, not closeSheet: back is one of the ways out that keeps what was typed.
+is('back closes a sheet first', true, /if \(S\.sheet\) \{ dismissSheet\(\); return; \}/.test(APP));
 is('...then a confirmation', true, /if \(S\.confirm\) \{ cancel\(\); return; \}/.test(APP));
 
 // ── 5e. reading a message aloud ───────────────────────────────────────────
