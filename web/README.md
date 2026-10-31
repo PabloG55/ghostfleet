@@ -258,7 +258,7 @@ button or `y`.
 | `⇧hjkl` reorder | drag a card **by its title line** (the grip — the rest of the card still scrolls) |
 | `p` / `P` | swipe ← pause · swipe → resume |
 | `x` | long-press |
-| `/` find a project | the **find a project** field at the top of Projects: matches are lit and the rest dimmed in place as you type, the count sits in the field, `×` clears it. Always drawn, so nothing moves when you use it, and never focused for you, so the keyboard only comes up when you tap it |
+| `/` find a project or a session | the **find a project or session** field at the top of Projects: matching projects are lit and the rest dimmed in place as you type, and the sessions it finds — by name, label or branch, in every project and on every paired machine — are listed under the projects, each naming its project (and machine). A tap on one opens its conversation, and back comes to the search as you left it. The count sits in the field, `×` clears it. Always drawn, so nothing moves when you use it, and never focused for you, so the keyboard only comes up when you tap it. A project's grid has the same field, **find a session** |
 | `,` settings · `Ctrl-p`/`Q` projects · `q` back | buttons in the footer bar, key letter included |
 
 With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
@@ -405,7 +405,7 @@ added here without a row that presses it.
 | `y` · `any other key` | a question | yes / cancel — and so is a click anywhere outside the bar, which only ever cancels. A refused worktree removal takes `f`, as at the desk |
 | `Esc` | a sheet | close it — the same as its X and a click beside it, and what was typed in it is kept |
 | `⏎` | grid | open the selected card: a session on the right, a sub-lead's sub-grid, a name for a free worktree |
-| `/` | Projects, grid | find a project (by its name or its folder's) / an agent: every key types into the query, the cursor on the first match, the rest dimmed. On Projects a project the profile tab hides is not found. A touch screen gets the field instead |
+| `/` | Projects, grid | find a project (by its name or its folder's) / an agent: every key types into the query, the cursor on the first match, the rest dimmed. On Projects a project the profile tab hides is not found, and the sessions of every project and paired machine whose name, label or branch matches are listed under the projects — `n` walks on into them, `⏎` on one opens its conversation, and `` ` `` or back from it returns to the search. A touch screen gets the field instead |
 | `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | Projects, grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
 | `n` · `N` | grid | the new-session picker. One picker for both: this client starts sessions with `fleet_spawn`, which has no resume-or-blank switch |
 | `w` | grid | new worktree |

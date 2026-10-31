@@ -95,8 +95,8 @@ function FindField({ find }) {
 			/* @__PURE__ */ u("input", {
 				type: "search",
 				value: find.q,
-				placeholder: "find a project",
-				"aria-label": "find a project",
+				placeholder: find.placeholder,
+				"aria-label": find.placeholder,
 				enterkeyhint: "search",
 				autocomplete: "off",
 				autocapitalize: "off",
@@ -270,7 +270,7 @@ function ProjectsScreen(p) {
 function GridScreen(p) {
 	return /* @__PURE__ */ u(CardScreen, {
 		...p,
-		band: /* @__PURE__ */ u(CountStrip, { strip: p.strip })
+		band: /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u(FindField, { find: p.find }), /* @__PURE__ */ u(CountStrip, { strip: p.strip })] })
 	});
 }
 function QueueScreen(p) {

@@ -20,7 +20,7 @@ import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
 // The desk's own matcher for `/` — one answer to "which cards does `bil` mean" (see the file).
-import { matchIndices, stepMatch } from './grid-search.js';
+import { matchIndices, stepMatch, sessionMatches } from './grid-search.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
 // vite's output from web/src/screens.jsx, committed beside its source. It holds BOTH card
 // screens — Projects and the grid — which is why it is no longer called projects.js. The
@@ -74,6 +74,7 @@ const S = {
   entry: '',            // 'projects' when this session is a master entered the desk's way (⏎ on a
                         // project, ` on its grid, Ctrl-f n m) — one level under Projects, not two
   srch: null,           // the grid's `/` search: { q, typing } — see "the keyboard" at the bottom
+  foundBack: null,      // a session opened from the Projects search: { q, sel } to put back on the way out
   jump: null,           // the Ctrl-f chord in progress: { stage: 'first'|'proj'|'grid', proj }
   prefix: false,        // Ctrl-a was pressed in a session: the next key is a tmux-prefixed one
   wantCard: 0,          // Ctrl-f <p> <s>: open card s once project p's grid has been read
@@ -253,6 +254,10 @@ async function refreshOnce() {
                               (e) => { if (e instanceof api.AuthError) throw e; }),
         // THE ACCOUNTS LINE, on its own slower clock (readUsage), and allowed to fail like the rest.
         readUsage(),
+        // THE SESSIONS A SEARCH FINDS, while there is a query: the picker's grid reads (every
+        // project not yet read, then a few a tick), so a session that starts or stops while
+        // the search is up is found or dropped without retyping it.
+        S.screen === 'projects' && S.srch && S.srch.q ? readGrids(foundProjects().map(p => p.name)) : null,
       ]);
     }
     else if (S.screen === 'grid') {
@@ -994,7 +999,8 @@ function projectsProps() {
   // no ring anywhere, and `⏎ open` acting on a project that is not on screen. Same clamp
   // the file already applies on the grid screen, for the same reason.
   const shown = shownProjects(projects);
-  if (shown.length && !shown.some(v => v.i === S.sel) && S.sel !== projects.length) S.sel = shown[0].i;
+  // (A session the search found sits past `+ new project`, and is drawn too.)
+  if (shown.length && !shown.some(v => v.i === S.sel) && !(S.sel >= projects.length && S.sel < projectList().length)) S.sel = shown[0].i;
   // A `/` search dims what it does not match, in place — the grid's dimUnmatched, so the
   // numbering and the order never move under the reader.
   const hits = S.srch && S.srch.q ? new Set(srchMatches()) : null;
@@ -1046,6 +1052,7 @@ function projectsProps() {
       dim(projects.length, cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
       }, projects.length)),
+      ...foundCards(projects.length + 1),
     ],
     // THE SCROLL MEMORY STAYS HERE, and it is still the same one call that does both
     // halves. It fires once, when Preact creates the list, rather than on every render —
@@ -1104,19 +1111,25 @@ function offlineHostCards() {
 // half the list, so nothing here calls focus() — only the reader's own tap does (and `/`
 // on a keyboard attached to a tablet, which is a reader asking for it).
 //   A mouse does not get it: a desk has `/` and the prompt row, as on the grid.
+//   ONE PROJECT'S GRID GETS THE SAME FIELD, by the same rules and the same code — it is the
+// grid's own `/` search (items(), its matcher, its dimming), typed into a box. Projects'
+// finds sessions too, so its words say so.
 function projectField() { return !finePointer(); }
 function findSpec() {
   if (!projectField()) return null;
   const q = (S.srch && S.srch.q) || '';
   const n = q ? srchMatches().length : 0;
+  const onGrid = S.screen === 'grid';
   return {
     q,
-    count: !q ? '' : n ? `${n} match${n === 1 ? '' : 'es'}` : 'no project matches',
+    placeholder: onGrid ? 'find a session' : 'find a project or session',
+    count: !q ? '' : n ? `${n} match${n === 1 ? '' : 'es'}` : onGrid ? 'no session matches' : 'no project or session matches',
     onInput: (v) => {
       if (!v) S.srch = null;
       else { S.srch = { q: v, typing: true }; srchFirst(); }
       render();
       revealSel();
+      readFoundSoon();
     },
     // ⏎ on the phone's keyboard puts it away and keeps the search; a tap on a lit card opens
     // it, as a tap always does. Esc (a tablet's keyboard) clears, as at the desk.
@@ -1130,12 +1143,27 @@ function findSpec() {
 function focusProjectField() {
   try { const f = document.querySelector('#app .find input, #side .find input'); if (f) f.focus(); } catch {}
 }
-// The first match may be below the fold; bring it into view only if it is not already —
-// `nearest` scrolls not at all when the card is on screen, so typing never jolts the list.
+// The first match may be below the fold; bring it into view only if it is not already, so
+// typing never jolts a list whose match is on screen.
+//   THE LIST SCROLLS, AND NOTHING ELSE DOES. scrollIntoView() scrolls every scrollable
+// ancestor it takes to show the card — on a phone with the keyboard up that includes the
+// page and the visual viewport, which slides the field (and the caret in it) out from under
+// the thumb that is typing. Setting the list's own scrollTop moves only the cards: the field
+// keeps the focus and its place, and the keyboard stays exactly as it was.
+//   ...MEASURED AGAINST WHAT IS VISIBLE, which with the keyboard up is the visual viewport,
+// not the list's box: the bottom of the list is behind the keyboard, and a card "in view"
+// there is a card nobody can see.
 function revealSel() {
   try {
     const c = document.querySelector('#app .cards .card.sel, #side .cards .card.sel');
-    if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' });
+    const l = c && c.closest('.cards');
+    if (!l) return;
+    const a = l.getBoundingClientRect(), r = c.getBoundingClientRect();
+    const vv = typeof visualViewport !== 'undefined' && visualViewport;
+    const bottom = Math.min(a.bottom, vv ? vv.offsetTop + vv.height : innerHeight);
+    if (r.top < a.top) l.scrollTop -= a.top - r.top;
+    // the card's top line when it is taller than the room: its name is what is looked for
+    else if (r.bottom > bottom) l.scrollTop += Math.min(r.bottom - bottom, r.top - a.top);
   } catch {}
 }
 
@@ -1363,14 +1391,14 @@ function sheetUsage() {
 function toProjects() {
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null; S.fromStack = false; S.pick = null;
   stopSpeaking(); S.jarvisMode = false; talkStop('');
-  S.entry = ''; S.srch = null; S.wantCard = 0;
+  S.entry = ''; S.srch = null; S.wantCard = 0; S.foundBack = null;
   setDepth(0);
   render(); refresh();
 }
 
 function openProject(name) {
   if (!name) return;
-  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = ''; S.srch = null;
+  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = ''; S.srch = null; S.foundBack = null;
   // Another project's card list is a different list; row 12 of it means nothing here.
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
@@ -1446,6 +1474,7 @@ function gridProps() {
     // of the seam so that screens.jsx contains no hex at all.
     counts: G.countsSegments(counts).map(seg => ({ text: seg.text, color: seg.color ? G.COLORS[seg.color] : null })),
     strip: stripTiles(counts),
+    find: findSpec(),
     confirm: withClose(confirmSpec()),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
@@ -2718,7 +2747,7 @@ function leadOf(project = S.project) {
 function enterMaster(name) {
   if (!name) return;
   if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
-  S.project = name; S.sub = '';
+  S.project = name; S.sub = ''; S.foundBack = null;
   openSession(leadOf(name), { depth: 1, entry: 'projects' });
 }
 // Straight to a project's grid (Ctrl-s), and — for Ctrl-f <p> <s> — to card s on it once
@@ -2727,7 +2756,7 @@ function toGridOf(name, want = 0) {
   if (!name) return;
   if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
   if (S.screen === 'session' || S.screen === 'stack') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
-  S.project = name; S.screen = 'grid'; S.sub = ''; S.jarvisMode = false; S.entry = ''; S.srch = null;
+  S.project = name; S.screen = 'grid'; S.sub = ''; S.jarvisMode = false; S.entry = ''; S.srch = null; S.foundBack = null;
   S.wantCard = want; S.fromStack = false; S.pick = null;
   setDepth(1);
   render(); refresh();
@@ -3530,7 +3559,11 @@ async function refreshStack() {
 // then a few at a time.
 async function refreshPicker() {
   if (!S.projects) { const j = await api.getProjects(); S.projects = j.projects; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
-  const ps = pickProjects().map(p => p.name);
+  await readGrids(pickProjects().map(p => p.name));
+}
+// Every grid in `ps` not read yet; once all are, PICK_GRIDS_PER_TICK of them in turn. Shared
+// by the picker and the Projects search, which list the same sessions from the same cache.
+async function readGrids(ps) {
   const missing = ps.filter(p => !stackGrids.has(p));
   let want = missing;
   if (!missing.length && ps.length) {
@@ -6213,8 +6246,14 @@ function popTo() {
   else if (S.screen === 'stackpick' || S.screen === 'stack') leaveStack();
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
   else if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
-  // A master entered the desk's way is one level under Projects, like Jarvis.
-  else if (S.screen === 'session' && S.entry === 'projects') { talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  // A master entered the desk's way is one level under Projects, like Jarvis — and so is a
+  // session opened from the Projects search, which comes back to that search as it was left.
+  else if (S.screen === 'session' && S.entry === 'projects') {
+    talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking();
+    const f = S.foundBack;
+    S.foundBack = null;
+    if (f) { S.srch = { q: f.q, typing: false }; S.sel = f.sel; }
+  }
   else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   // Back from the terminal is wherever it was opened from — the grid, or the session whose
   // ⋯ (or Ctrl-a t) opened it.
@@ -6498,7 +6537,7 @@ function markSel() {
 // that check can no longer see. One spelling, two renderers.
 function confirmSpec() {
   const c = S.confirm;
-  if (!c) return S.jump ? jumpSpec() : (S.srch && (S.screen === 'grid' || (S.screen === 'projects' && !projectField()))) ? searchSpec() : null;
+  if (!c) return S.jump ? jumpSpec() : (S.srch && (S.screen === 'grid' || S.screen === 'projects') && !projectField()) ? searchSpec() : null;
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
@@ -6552,8 +6591,8 @@ function jumpSpec() {
 function searchSpec() {
   const { q, typing } = S.srch;
   const m = srchMatches();
-  const what = S.screen === 'projects' ? 'project' : 'agent';
-  const keys = !q ? `type part of ${what === 'agent' ? 'an agent' : 'a project'}'s name · esc cancel`
+  const what = S.screen === 'projects' ? 'project or session' : 'agent';
+  const keys = !q ? `type part of ${what === 'agent' ? 'an agent' : 'a project\'s or a session'}'s name · esc cancel`
     : !m.length ? `no ${what} matches '${q}'`
     : typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · ⏎ keep · esc clear`
     : `${m.indexOf(S.sel) >= 0 ? `${m.indexOf(S.sel) + 1} of ${m.length}` : `${m.length} match${m.length === 1 ? '' : 'es'}`} · n next · N prev · ⏎ open · / edit · esc clear`;
@@ -6561,16 +6600,102 @@ function searchSpec() {
 }
 function srchMatches() {
   if (!S.srch || !S.srch.q) return [];
-  return S.screen === 'projects' ? matchIndices(projectList(), S.srch.q, projectCard()) : matchIndices(items(), S.srch.q, it => it.card);
+  if (S.screen !== 'projects') return matchIndices(items(), S.srch.q, it => it.card);
+  // A found session is in the list only because it matched, so every one is a match.
+  const list = projectList();
+  return matchIndices(list, S.srch.q, projectCard()).concat(list.flatMap((it, i) => (it.found ? [i] : [])));
 }
 // PROJECTS, as the desk's pItems: every project at its GLOBAL index (the index the digits
 // and S.sel use), then `+ new project`. A project answers to the name its card shows and to
 // its folder's name — the desk's pCardOf — and one the profile tab hides answers to nothing:
 // a match nobody can see is a cursor that disappears.
-function projectList() { return [...(S.projects || []).map(p => ({ project: p })), { add: true }]; }
+//   THEN THE SESSIONS THE QUERY FINDS, after `+ new project`, so every index above is the
+// one it always was: the digits, the cursor and the dimming of the projects do not move
+// because a session matched. n / N walk on from the last project match into them.
+function projectList() {
+  return [...(S.projects || []).map(p => ({ project: p })), { add: true }, ...foundSessions(S.srch && S.srch.q)];
+}
+
+// ── sessions, found from Projects ─────────────────────────────────────────────────────
+// "a search for projects or sessions on web". The cards come from each project's GRID — the
+// same reads, and the same cache, the stack picker fills (stackGrids, readGrids) — because
+// that is the only place a session's name, label and branch are known; /api/projects carries
+// counts, not cards. A project whose rollup says nothing is running is not read at all.
+//   EVERY PROJECT PROJECTS COULD SHOW, NOT ONLY THE OPEN TAB'S. A project the tab hides is
+// not found because its card is not drawn — but a session is drawn in its own row, naming
+// its project and its machine, so one in another tab (or on another machine, which is
+// another tab) is visible the moment it matches. The hidden demo stays hidden.
+//   A LOST card is left out, as the picker leaves it: there is no conversation to open,
+// only a crash to reopen, and that is its grid's job.
+function foundProjects() {
+  return shownProjects(S.projects || []).map(({ p }) => p).filter(p => !p.sessions || (p.sessions.total || 0) > 0);
+}
+function foundSessions(q) {
+  if (!q) return [];
+  const out = [];
+  for (const p of foundProjects()) {
+    const g = stackGrids.get(p.name);
+    for (const c of (g && g.cards) || []) if (!c.lost && sessionMatches(c, q)) out.push({ found: true, project: p, card: c });
+  }
+  return out;
+}
+// A query that starts before the grids are known reads them NOW rather than at the next
+// 5 s poll — the first letter typed is when someone wants the answer. One read at a time;
+// a project already in the cache is the poll's to re-read (refreshOnce).
+//   THE ANSWER CAN ARRIVE AFTER THE LAST KEY. A query typed faster than a grid read — or
+// committed as one word, which is how a phone's predictive text types — matched nothing
+// when it was typed, so the cursor stayed where it was and every reveal had already run.
+// When the read lands the session rows appear under every project, below the fold on a
+// phone, and the count said `1 match` over a screen with no match on it. So the read's
+// return does what a keystroke does: the cursor to the first match (only if it is not on
+// one already — a cursor the reader moved onto a match stays), and that match into view.
+let foundReading = null;
+function readFoundSoon() {
+  if (foundReading || S.screen !== 'projects' || !S.srch || !S.srch.q) return;
+  const miss = foundProjects().map(p => p.name).filter(n => !stackGrids.has(n));
+  if (!miss.length) return;
+  foundReading = Promise.all(miss.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); }, () => {})))
+    .finally(() => {
+      foundReading = null;
+      if (S.screen !== 'projects' || !S.srch || !S.srch.q) return;
+      if (!srchMatches().includes(S.sel)) srchFirst();
+      render();
+      revealSel();
+    });
+}
+// The card a found session draws as: the grid's own card, with its PROJECT (and, once there
+// are two machines, its machine) leading the line that says where it is — the same session
+// name can be in every project, `master` always is. No digit: on Projects a digit opens a
+// project, and this session's digit is an address in its own grid.
+function foundModel(it, selected) {
+  const m = G.cardModel(it.card, selected, -1);
+  const p = it.project;
+  const whose = [G.bareName(p.name), S.hosts ? (p.host || hostLabelOf(p.name)) : ''].filter(Boolean).join(' · ');
+  return { ...m, num: null, where: m.where ? `${whose} · ${m.where}` : whose };
+}
+function foundCards(base) {
+  const found = projectList().slice(base);
+  if (!found.length) return [];
+  return [el('div', { class: 'sect found', text: `sessions · ${found.length}` }),
+    ...found.map((it, k) => cardEl(foundModel(it, base + k === S.sel), { tap: () => openFound(it, S.srch, base + k) }, base + k))];
+}
+// OPENING ONE IS OPENING ITS CONVERSATION, from wherever it lives: one level under Projects,
+// as a master entered the desk's way is (entry 'projects'), so back is Projects — and the
+// search is put back as it was left, locked on the session that was opened.
+function openFound(it, from, at = S.sel) {
+  if (!it || !it.card) return;
+  const name = it.project.name, back = from && from.q ? { q: from.q, sel: at } : null;
+  if (S.project !== name) { S.sel = 0; scrollMem.delete('grid'); }
+  // The grid the search read, so the session's card (its status, the lead's rules) is there
+  // before the first poll of this screen comes back.
+  S.project = name; S.sub = ''; S.grid = stackGrids.get(name) || null;
+  openSession(it.card.name, { depth: 1, entry: 'projects' });
+  S.foundBack = back;
+}
 function projectCard() {
   const shown = new Set(visibleProjects().map(v => v.p));
-  return (it) => it.project && shown.has(it.project) ? { label: it.project.name, name: G.basename(it.project.path || '') } : null;
+  // (A found session carries its project too, and is not a project: it is matched as a session.)
+  return (it) => it.project && !it.found && shown.has(it.project) ? { label: it.project.name, name: G.basename(it.project.path || '') } : null;
 }
 // The cursor follows the first match on every keystroke — and stays put when nothing
 // matches, because the card you were on is a better place to be left than the top.
@@ -7917,6 +8042,8 @@ function sessionKey(e, k, lk, ctrl) {
 // goes back to Projects — at the desk master IS the project's front door (enter_master).
 function sessionBack() {
   if (S.jarvisMode) return back();
+  // Opened from the Projects search: back to it, a worker included.
+  if (S.foundBack) return back();
   if (isLeadCard(S.session) || (S.entry === 'projects' && S.session === leadOf())) return toProjects();
   if (navDepth >= 2) back();               // up to the grid (or sub-grid) it was opened from
   else toGridOf(S.project);
@@ -7980,7 +8107,7 @@ function gridKey(e, k, lk, ctrl) {
     // Not in a sub-grid: the order file is the TOP grid's numbering.
     case 'H': case 'K': if (it.card && !S.sub) reorder(it.card.name, k === 'H' ? -1 : -nc); break;
     case 'L': case 'J': if (it.card && !S.sub) reorder(it.card.name, k === 'L' ? 1 : nc); break;
-    case '/': S.srch = { q: '', typing: true }; render(); break;
+    case '/': if (projectField()) focusProjectField(); else { S.srch = { q: '', typing: true }; render(); } break;
     case 'Enter': openItem(it); break;
     // The web has one way to start a session (fleet_spawn), so n and N open the same picker.
     case 'n': case 'N': if (S.sub) sub(); else sheetPicker(); break;
@@ -8036,13 +8163,15 @@ function searchKey(e, k, lk, ctrl) {
   else if (s.typing) {
     if (k === 'Enter') { if (srchMatches().length) s.typing = false; }
     else if (k === 'Backspace') { if (!s.q) S.srch = null; else { s.q = shorter(); srchFirst(); } }
-    else if (k.length === 1) { s.q += k; srchFirst(); }
+    else if (k.length === 1) { s.q += k; srchFirst(); if (onProj) readFoundSoon(); }
     else return false;
   } else {
     if (k === 'q' || k === '`') S.srch = null;
     else if (k === '/') s.typing = true;
     else if (k === 'Backspace') { s.typing = true; s.q = shorter(); srchFirst(); }
-    else if (k === 'Enter') { S.srch = null; if (onProj) openProjectItem(projectList()[S.sel]); else openItem(items()[S.sel]); return true; }
+    // The item is read BEFORE the search is cleared: a found session is in the list only
+    // while there is a query to find it.
+    else if (k === 'Enter') { const it = onProj ? projectList()[S.sel] : items()[S.sel]; S.srch = null; if (onProj) openProjectItem(it, s); else openItem(it); return true; }
     else if (k === 'n' || k === 'N') { const i = stepMatch(srchMatches(), S.sel, k === 'n' ? 1 : -1); if (i >= 0) S.sel = i; }
     else if (k === 'k') move(-nc);
     else if (k === 'j') move(nc);
@@ -8050,6 +8179,10 @@ function searchKey(e, k, lk, ctrl) {
     else if (k === 'l') move(1);
   }
   render();
+  // On Projects the cursor can land on a session found below the fold — below every project
+  // — and a match nobody can see is a count with nothing under it. Brought into view only
+  // when it is not already (revealSel), so a match on screen moves nothing.
+  if (onProj) revealSel();
   return true;
 }
 
@@ -8118,22 +8251,26 @@ function queueKey(e, k, lk, ctrl) {
 // Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
 // j/k onto a card the profile tab hides is a cursor that disappears. Moves S.sel and says
 // whether it did; the caller renders. Shared by the plain keys and the `/` search's.
+// The sessions a search finds come after `+ new project` and are stops too.
 function stepProject(d) {
   const projects = S.projects || [];
+  const last = projectList().length - 1;
   let n = S.sel + d;
   if (visibleProjects().length !== projects.length) {
-    const stops = [...visibleProjects().map(v => v.i), projects.length];
+    const stops = [...visibleProjects().map(v => v.i)];
+    for (let i = projects.length; i <= last; i++) stops.push(i);
     const at = stops.indexOf(S.sel);
     n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
     if (n == null) return false;
   }
-  if (n >= 0 && n <= projects.length) { S.sel = n; return true; }
+  if (n >= 0 && n <= last) { S.sel = n; return true; }
   return false;
 }
 // ⏎ enters the project's MASTER, as at the desk; on `+ new project` it adds one. The same
 // from a search as without one.
-function openProjectItem(it) {
-  if (it && it.add) sheetAddProject();
+function openProjectItem(it, from = S.srch) {
+  if (it && it.found) openFound(it, from);
+  else if (it && it.add) sheetAddProject();
   else if (it && it.project) enterMaster(it.project.name);
 }
 // ⇧hjkl on Projects: the desk's reorderProject. The daemon refuses fleet_project_order by

@@ -27,6 +27,16 @@ export function agentMatches(card, query) {
   return [card.label, card.name].some(s => s && norm(s).includes(q));
 }
 
+// A session found from OUTSIDE its grid (the web's Projects search) answers to its branch
+// as well. Inside a grid the branch is printed on the card, one line under the name, so a
+// reader can see why it lit; on Projects the session is not on screen until it matches,
+// and the branch is the name a person remembers a worker by as often as its session name
+// ("the retry one"). A separate function rather than a third field in agentMatches, so
+// the desk's grid and the stack picker keep answering exactly what they answer today.
+export function sessionMatches(card, query) {
+  return agentMatches(card, query) || (!!card && agentMatches({ name: card.branch }, query));
+}
+
 // Indices of the entries in `list` that match, in list order — which is grid order, so
 // "the first match" is the first one the eye reaches. `pick` turns an entry into its
 // card, or into nothing for an entry that is not a session (a free worktree, `+ new`):

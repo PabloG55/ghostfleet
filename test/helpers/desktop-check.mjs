@@ -252,10 +252,10 @@ try {
   await press('l');                                   // the cursor starts OFF the match
   await press('/', { as: '/' });
   s = await settle(x => x.confirm);
-  is('Projects /: opens the search prompt', ['/▏', "type part of a project's name · esc cancel"], [s.confirm, s.keys]);
+  is('Projects /: opens the search prompt', ['/▏', "type part of a project's or a session's name · esc cancel"], [s.confirm, s.keys]);
   await keys('x', 's', '3');                          // the screen's verbs and a digit: all query
   s = await look();
-  is('Projects / typing: x, s and digits type, not act', ['/xs3▏', "no project matches 'xs3'", ''], [s.confirm, s.keys, s.session]);
+  is('Projects / typing: x, s and digits type, not act', ['/xs3▏', "no project or session matches 'xs3'", ''], [s.confirm, s.keys, s.session]);
   await keys('Backspace', 'Backspace', 'Backspace', 'A', 'C', 'M', 'E');
   s = await look();
   is('Projects /: case-insensitive, the cursor on the first match', ['/ACME▏', 'acme-api'], [s.confirm, s.sel]);
@@ -280,7 +280,7 @@ try {
   await fresh();
   await b.evaluate(() => { const t = [...document.querySelectorAll('.seg.tabs button')].find(x => x.textContent.trim() === 'work'); if (t) t.click(); return null; });
   await keys('/', 's', 'c', 'r');
-  is('Projects /: a project the profile tab hides is not found', "no project matches 'scr'", (await look()).keys);
+  is('Projects /: a project the profile tab hides is not found', "no project or session matches 'scr'", (await look()).keys);
 
   // ── the phone's search field ────────────────────────────────────────────────────────
   // Always drawn on a touch screen, never focused for it (focus is the on-screen keyboard),
@@ -322,7 +322,7 @@ try {
   for (const ch of 'zz') await b.call('Input.insertText', { text: ch });
   await sleep(300);
   f1 = await field();
-  is('phone: no match says so, in the field', ['webzz', 'no project matches', f0?.top], [f1?.value, f1?.count, f1?.top]);
+  is('phone: no match says so, in the field', ['webzz', 'no project or session matches', f0?.top], [f1?.value, f1?.count, f1?.top]);
   await b.evaluate(() => { document.querySelector('#app .find .clear')?.click(); return null; });
   await sleep(300);
   f1 = await field();

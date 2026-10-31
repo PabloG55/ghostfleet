@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 8c73a30de62b
+// CLIENT-HASH: 34e27a8327d5
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -424,7 +424,10 @@
 // v90 gives every sheet and the confirm bar an X, closes a sheet on a tap beside it (keeping
 // what was typed in it), makes a press outside the confirm bar cancel it, and adds the
 // editor — the desk's Ctrl-n — beside the terminal. A phone on v89 has none of it.
-const VERSION = 'ghostfleet-v90';
+// v91 makes the Projects search find sessions too, across every project and paired machine,
+// and gives a project's grid its own "find a session" field. A phone still on v90 finds
+// projects only, and its grid has no field.
+const VERSION = 'ghostfleet-v91';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
