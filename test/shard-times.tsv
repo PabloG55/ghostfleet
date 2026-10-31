@@ -1,0 +1,306 @@
+# seconds<TAB>group — read by test/helpers/shard-plan.mjs to balance ./test/run.sh --shard.
+# Seeded from staging run 41161159898 (2026-10-31), the slower of the two platforms per group;
+# the phone client's groups were one group then, and are split here by its rows' timestamps.
+# Regenerate from a sharded run's groups-run artifacts: node test/helpers/shard-plan.mjs times groups-run-*.txt
+0.6	socket namespace (this run's own)
+0.3	the orphan sweep takes this checkout's leaks and nobody else's
+0.0	a skip may only blame the environment
+0.1	the harness captures plain bytes
+0.0	wire format (split_choice)
+0.1	pane detectors (busy_re)
+0.1	pane detectors at stack width
+0.4	agy detectors: every width, and a dialog is not work
+0.8	cursor detectors: every width, the frames that lie, and a dialog is not work
+2.4	governor usage scrape vs pane width
+3.7	governor: a frozen pane must not pin the fleet
+10.7	governor: look twice before parking
+0.1	busy: prose about a spinner is not a spinner
+0.5	a running subagent reads as working, not ready
+4.9	the GRID's own verdict on a real pane
+0.0	the grid's inline fallback matches the adapter
+0.3	ready detectors (ready_re)
+0.1	projects file columns
+0.1	fleet-project add --agent
+0.6	fleet-project agent (the edit path)
+0.9	codex dialog reads as need-you on the card
+31.0	agent switch: a running master moves, waits for its turn, and comes back resumed
+0.6	fleet-demo builds a demo fleet, and twice is the same as once
+0.1	fleet-demo stops rather than repairing
+0.0	ghostfleet demo is a profile that can build itself
+5.5	fleet-phone is the step, and it never runs anything
+6.3	the first-run path mentions the phone, once
+12.5	an empty projects list guides instead of stalling
+12.1	the add-project browser clones a repo
+6.7	the installer's first screen is short, and lands somewhere
+3.5	an install that is missing prerequisites says so once, and completely
+0.3	agent capabilities are declared, not hardcoded
+0.2	install.sh registers the MCP for codex and opencode
+2.5	Kokoro: an optional voice, verified before it counts as installed
+1.1	agy: the installer, the event bridge and the launcher
+1.3	cursor: the installer, the event bridge, the compat guard and the launcher
+0.5	codex-here runs without the shared daemon, when codex has the flag
+2.0	codex conversations: the rollout a process holds open becomes its record
+0.2	the phone's chat shows only what the owner wrote
+4.5	codex-here records only inside a fleet pane
+3.0	a lost codex session goes through the same reopen as a lost claude one
+1.0	fleet-review asks a DIFFERENT model, or says it cannot
+0.1	every backgrounded daemon is registered for teardown
+4.1	a daemon that ignores SIGTERM is still reaped
+0.1	projects screen reads the agent column
+2.8	the agent column says it cycles
+6.4	projects banner
+0.0	session naming
+0.3	card order (grid vs fleet-cycle)
+0.5	rename keeps its slot in the card order
+4.8	rename carries the conversation
+0.5	fleet-read finds the transcript in one pass, and can say nothing changed
+2.5	a conversation sent to the background keeps its card
+0.1	--order is only offered to a grid that has it
+6.6	grid clicks land on the card you clicked
+0.2	stdin splits into events (lib/keys.mjs)
+9.9	a screen never outlives its launcher
+0.5	an answered need-you stops being red
+1.0	the Claude Code mod: the session's own word, and when to believe it
+0.3	the mod's guards agree with the shell guard; the band fits any width
+1.2	the mod's ledger: the judge's shape, the loop bound, the band row, fleet-ledger
+3.5	codex history (rollout -> ready)
+15.3	MCP: fleet_worktrees reaches another project
+0.3	MCP refuses a missing required argument
+0.6	fleet-answer refuses an empty text itself
+3.4	permission dialogs: detected on real panes, and only on those
+2.4	question pickers: detected on real captures, and only on those
+11.6	fleet-answer refuses to approve a permission dialog
+1.5	prompt fingerprints: every kind, stable across a resize, distinct across prompts
+5.9	fleet-answer --expect sends only to the prompt that was showing
+7.9	fleet-answer sends a picker's digit without Enter
+0.1	fleet_answer never passes --human-approved on its own
+2.0	Jarvis: the owner's yes is what approves a permission dialog
+3.6	agents can approve: project-on and session-on, and only that session
+0.4	boundary settings: set, carried by rename, cleared by stop
+0.6	dev-stack slots
+0.1	dev-stack slots: pinned primary
+1.6	dev-stack slots: post-create hook
+3.5	a spawn only says 'started' when it did
+1.2	spawning from inside a worktree is refused
+8.6	nested leads
+2.0	a sub-lead's card is its team's state
+6.1	an explicit socket beats $TMUX
+10.5	the grid's create lands on the grid's own fleet
+1.8	a stray ref in the git dir is refused up front
+0.2	the new-worktree form keeps the advice
+11.7	the worktree form's footer stays put
+0.4	a container root resolves to its main checkout
+0.2	EnterWorktree is refused in a fleet
+1.3	a worker in a linked worktree cannot merge a PR
+1.7	a subagent is refused where a worker was meant
+0.3	the observation contract reaches claude
+21.7	fleet-shots walks a flow, and a 404 is not a pass
+10.9	a fill that the framework ignores is not a fill
+6.2	the stepper: one at a time, and a flag needs a reason
+0.5	fleet-shots: a recorded flow has one verdict
+9.6	fleet-shots: the review page plays, seeks and decides
+0.5	a foreign manifest.json does not take the review server down
+0.1	the installer arms the pre-push guard
+0.2	no withheld name in a PR title or body
+0.0	no tracked file carries this machine's home path
+0.0	an edited PR body re-runs pr-text and never the matrix
+0.0	nothing a checkout makes for itself is tracked
+1.2	the pre-push hook refuses to publish a withheld name
+0.5	the review server answers every page it links to
+0.8	a review that cannot say no is a ceremony
+19.8	fleet-look photographs, and refuses to photograph nothing
+0.1	every dir a bin imports from is one cf-sync copies
+0.9	the npm package ships only files the sweep reads
+0.1	the npm package's bin survives npm's publish-time fixes
+0.0	no assertion pipes into a short-circuiting reader
+53.4	fleet-send records what it dispatched
+3.6	a page error is reported by its message, not by CDP's prefix
+13.8	fleet-look closes what it opened
+8.1	a browser that stops answering is a red row, not a hung job
+0.1	free worktrees exclude Claude's own
+0.9	a worktree gets a teardown, not just a setup
+2.8	the projects card shows the running agent
+0.2	fleet-clean and Claude's locked worktrees
+10.9	session display label
+2.4	grid search: / finds an agent
+0.2	stack membership (stack.tsv)
+0.1	stack config steals only what it must
+8.2	stack pane focus (real client, keys sent)
+0.1	stack reorder (the file's rows)
+0.4	stack reorder (real panes and the file together)
+3.8	tmux <= 3.5 escapes what it prints
+0.0	an empty field survives \x1f and not a tab
+0.0	the tmux wire separator is a tab, ours is $'\x1f'
+0.1	stack reorder chord (fleet prefix table)
+52.1	a reply that cannot arrive is not promised
+1.1	reply relay (hook routing)
+2.0	reply relay (a direct answer replaces the row)
+17.6	reply relay (fleet-send --reply-to)
+21.5	a send to a busy session is queued
+5.6	a queued question carries its reply address
+2.3	the queue can be read, and a waiting prompt taken back out
+5.7	fleet-pause --interrupt ends the turn and parks nothing
+13.6	a session whose mod is live takes its prompts from the mod
+27.1	a mod record on another tmux server is not this session's mod
+128.4	a run leaves the fleet that started it untouched
+0.6	a send held behind a question says so
+2.1	the queue moves with a rename and goes with a stop
+1.4	a prompt typed mid-turn is labelled queued
+0.6	peer name (claude-here --name)
+33.5	stack screen (real TUI, keys sent)
+53.1	stack screen in a small window (real TUI, keys sent)
+15.9	stack window (live tmux)
+21.5	stack reorder through the nest (real keys)
+13.3	tabs (fleet-tab)
+3.5	tab bindings (real tmux server)
+0.3	a tab is a session, so tabs must not beget tabs
+4.3	your own terminal can be stacked beside your agent
+0.4	tabs are not sessions
+1.5	grid tab keys (real TUI)
+0.7	worktree removal: the refusal survives, and the wait is visible
+1.0	Projects screen tab keys (real TUI)
+1.1	the folder browser takes a typed path (real TUI)
+4.2	the folder browser filters and makes a folder (real TUI)
+0.1	tab name is single-sourced
+0.1	session limit is not ready
+5.5	status glyphs are one column
+0.0	interrupted is not ready
+0.0	fleet-send can see the composer
+0.1	the wake finds the input box, not the last ❯
+12.2	a skipped wake comes back
+5.7	a need-you names the worker and the ask
+3.7	drag to copy
+8.9	drag to copy in the editor (real nvim)
+0.0	fleet-copy finds a clipboard
+0.0	fleet sessions don't auto-update
+0.1	worktree location follows the repo
+0.7	worktrees span sibling clones
+3.3	finished worktrees surface to the lead
+0.3	fleet-merged: numbers as well as names, and never a network call in a draw
+1.8	the card carries the PR number, and not the default branch's
+3.7	fleet-stop --reclaim
+1.0	fleet-stop carries a worker's unfinished ledger items to its lead
+2.2	fleet-stop --reclaim after a squash merge
+16.9	fleet-send refuses a finished worker's next task
+1.5	fleet-spawn never starts beside a live session
+0.2	fleet-stop flag order
+0.0	no node_modules symlink into a workspace
+2.6	the grid refuses a session that did not start
+3.3	the grid says both new-session keys
+0.1	fleet_companion is a tool, and it says what it costs
+0.0	reclaim is reachable from MCP
+0.7	the lead cannot be stopped from MCP either
+4.8	--json: the §4 schema
+5.0	--json: the lead's card
+1.5	--json: free_worktrees
+1.2	--json survives a payload bigger than a pipe buffer
+1.2	a card's message is stripped of markdown, not of meaning
+2.3	governor: a resumed pane is a stopped clock too
+0.0	governor: recovery ramps, it does not slam
+0.0	fleet-resume says what it actually cleared
+3.1	a resume turn that made nothing is RESUMED, not DONE
+0.1	awake mode is persisted, not just an env var
+0.0	fleet-awake guards
+0.3	fleet-awake --status: one shape on both platforms
+0.1	fleet-awake --status: a refusal is not silence
+3.2	fleet-awake arms the flags its table claims
+0.1	agent adapter
+2.1	notification carries the jump chord
+2.1	fleet-serve refuses a bind that is not the tailnet
+0.2	free_port answers in digits, colour or not
+0.5	fleet-serve: a token exists only because a passkey signed for it
+10.6	fleet-serve: a session is an idle window, and outlives a restart
+0.6	fleet-serve: destructive verbs need a fresh passkey, on the tool name
+0.8	fleet-serve: the grid is never launched without --json
+2.0	fleet-serve: reads proxy the grid, per project, and bound the tail
+4.8	fleet-serve: /api/pane is the pane, and answer keys clears what it shows
+1.5	fleet-serve: the REAL grid, two projects, one daemon process
+1.7	fleet-serve: the open chat's read is cheap, conditional and shared
+0.8	fleet-serve rate limits a token that leaked
+0.8	fleet-serve: tapping unlock cannot lock the owner out
+8.4	fleet-serve: localhost is a second listener, and nothing crosses to the tailnet
+0.9	fleet-serve: the web terminal is judged by the listener it arrives on
+1.4	ghostfleet web opens the localhost client, and starts nothing
+2.5	fleet-serve: the Mac enrols a localhost passkey in a real browser
+82.6	fleet-serve: push tells a phone about the two events, and shuts up otherwise
+0.5	fleet-serve asserts Tailscale Funnel is off
+3.7	fleet-serve holds a sleep inhibitor while it runs
+1.2	fleet-serve serves the client, and says when there is none
+0.3	cf-sync tells the truth about a failed sync
+0.5	cf-sync will not deploy a client it could not build
+0.7	stale runtime warning
+78.2	phone client: served by the daemon means talking to the daemon
+2.3	fleet-serve: Jarvis's digest, its yes, and its ears
+0.2	conversation mode: 3.5 s of quiet ends an utterance, and the WAV is heard
+0.0	fleet-serve does not fork the dispatch
+0.7	fleet-serve: a photo becomes a file, and everything else is refused
+0.1	fleet-serve: a message of photos never deletes itself
+39.6	fleet-serve: the web terminal is a fleet tab behind four gates
+8.6	MCP: fleet_digest is a tool, and it reads every profile
+1.0	fleet-digest rolls every profile up, from files
+14.8	Jarvis's confirm-list waits for a yes the model did not write
+47.3	a need-you anywhere wakes Jarvis at once; finished work never does
+0.6	fleet-jarvis init makes a home outside every repo, and registers it
+2.1	Jarvis restarts when its conversation outgrows restart_tokens, idle-only, with a handoff
+10.7	Jarvis is experimental: off by default, and off means gone
+1.4	fleet-phone says notifications: not set up, until a subscription exists
+0.1	push: held while he is at the Mac, released when he leaves, dropped when seen or old
+0.6	push: an expired wake is a need-you for its lead
+0.1	push: a master's new waiting item rings once per project, and says nothing it should not
+51.8	accounts on the phone: /api/usage says what fleet-accounts list says, and the line and sheet draw it
+0.8	push: a subject Apple accepts, and a refusal that says why
+0.1	fleet-stop and fleet-clean agree on 'remove anyway'
+11.2	fleet-spawn warns about a thin brief and dispatches anyway
+1.1	fleet-ack records the worker half beside the lead half
+8.5	phone client: the card the phone draws is the card the TUI draws
+65.9	phone client: the page never scrolls sideways, in a real browser
+44.3	phone client: the card's title is a tap target, in a real browser
+209.6	phone client: the client on a desk, in a real browser
+36.4	phone client: the queue page, in a real browser
+13.1	phone client: the owner's music keeps playing, in a real browser
+2.2	phone client: the suite makes no sound
+33.4	phone client: barge-in, in a real browser
+1.2	phone client: web/ ships, parses, and is what its source builds
+3.5	no real project name in the tree
+3.1	no withheld name in what npm actually ships
+1.3	the utilization meter
+2.2	the evaluator refuses what it cannot support
+1.1	recognising an ambiguity is not asking about one
+5.9	hibernation refuses before it acts
+8.0	a session sleeps and comes back
+3.7	Jarvis never sleeps
+0.0	how long a wake actually takes
+9.0	the vetoes that made hibernation do nothing
+4.9	hibernation reads the live conversation
+16.1	hibernation follows a conversation sent to the background
+1.2	a stale asleep marker does not outlive its session
+0.4	fleet_list shows asleep sessions with their age
+30.6	the new-session screen lists parked sessions
+39.8	a wake that worked must not report failure
+41.4	a wake stays up, or says it did not
+0.1	the phone opens a woken session only when it woke
+1.1	a hibernated session shows on the grid
+1.6	a session killed by a crash shows as lost
+0.4	install list covers every command
+0.1	a scripted model drives a real session
+0.4	the Stop-hook observation check
+2.1	syntax
+1.4	fleet-restart resumes by recorded id, never by --continue
+0.1	fleet-restart refuses rather than guessing
+2.0	fleet-restart resumes the live conversation, or refuses
+3.3	a fleet is restarted and drawn under its own account, not the caller's
+43.1	phone client: an open chat converges to the transcript without reopening
+13.0	a fleet runs under its own profile, whoever started its server
+70.0	accounts: several logins per profile, failover at the limit
+11.7	accounts planner: spend the allowance that expires first
+16.7	accounts: never switch to an account that is out of usage
+7.0	fleet-mod reload: idle and empty only, and done is the record
+0.0	exit keeps the card
+0.1	an exited session is still a card
+11.6	a hibernated card says asleep
+5.7	waking a hibernated session brings it back
+0.0	an asleep card wakes before it opens
+1.8	ghostfleet update
+4.4	a clean npx install on WSL
+17.7	one conversation, one slot
+0.8	a run leaves no fleet-serve it did not find
