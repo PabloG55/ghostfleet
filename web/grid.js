@@ -272,6 +272,16 @@ export function countsLine(counts) { return countsSegments(counts).map(s => s.te
 // Same contract as cardModel() above: the FACTS, decided once, formatted by whoever is
 // drawing. projectModel shares projectCard()'s rollup rules by calling it for the one
 // derived string that carries a judgement — which of need/working/parked/ready wins.
+// A PROJECT'S ADDRESS AND ITS NAME ARE TWO THINGS once two machines are paired: `acme-api@vm`
+// is how the client asks for acme-api on the vm (fleet-serve's PAIRED HOSTS), and `acme-api`
+// is what a card calls it — the machine goes on the line beneath, beside the profile, where
+// every row says which host it is on. A project name is A-Za-z0-9._-, so the `@` is always
+// the address's and never the name's.
+export function bareName(name) {
+  const s = String(name || ''), i = s.lastIndexOf('@');
+  return i > 0 ? s.slice(0, i) : s;
+}
+export const hostKeyOf = (name) => { const s = String(name || ''), i = s.lastIndexOf('@'); return i > 0 ? s.slice(i + 1) : ''; };
 export function projectModel(p, idx = -1, selected = false) {
   const st = p.sessions || { need: 0, working: 0, parked: 0, total: 0 };
   // pRender's order, and the order IS the content: a project with one blocked worker and
@@ -285,12 +295,14 @@ export function projectModel(p, idx = -1, selected = false) {
   return {
     kind: 'project', selected, color,
     num: idx >= 0 && idx < 9 ? idx + 1 : null,
-    title: p.name,
+    title: bareName(p.name),
     // The project's default agent appears beside its profile only when it HAS one: the
     // daemon normalises the empty column to 'claude', so printing it everywhere would hide
     // the one project that actually differs — which is the whole point of showing it.
-    where: p.agent && p.agent !== 'claude' ? `${p.profile} · ${p.agent}` : p.profile,
-    path: homeTilde(p.path),
+    // `host` is there only once a second machine is paired, and leads, as it does on the tab.
+    where: [p.host, p.profile, p.agent && p.agent !== 'claude' ? p.agent : ''].filter(Boolean).join(' · '),
+    // A peer's path is under THAT machine's home, which it sends beside its rows.
+    path: p.host_key ? homeTilde(p.path, p.home) : homeTilde(p.path),
     statusLabel: line,
     when: p.sched && p.sched.at ? `@${clockLabel(p.sched.at)}` : '',
     msg: '', placeholder: '', agent: '', pr: '', lead: false, exited: false,
@@ -326,9 +338,9 @@ export function freeModel(w, selected = false, idx = -1) {
 // it a card's path line is 40 columns of /Users/… and clips before it says anything.
 let HOME = '';
 export function setHome(h) { HOME = h || ''; }
-export function homeTilde(p) {
+export function homeTilde(p, home = HOME) {
   const s = String(p || '');
-  return HOME && s.startsWith(HOME) ? '~' + s.slice(HOME.length) : s;
+  return home && s.startsWith(home) ? '~' + s.slice(home.length) : s;
 }
 
 // ── "when" (the schedule form) ────────────────────────────────────────────

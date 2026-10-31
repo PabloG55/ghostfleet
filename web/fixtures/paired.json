@@ -1,0 +1,51 @@
+{
+  "self": "laptop",
+  "peer": {
+    "key": "vm",
+    "label": "vm",
+    "last_seen_ago": 10800
+  },
+  "home": "/home/you",
+  "projects": [
+    {
+      "name": "acme-api",
+      "profile": "work",
+      "path": "/home/you/acme-api",
+      "agent": null,
+      "sessions": {
+        "need": 1,
+        "working": 1,
+        "parked": 0,
+        "total": 3
+      },
+      "sched": null
+    },
+    {
+      "name": "billing-svc",
+      "profile": "work",
+      "path": "/home/you/billing-svc",
+      "agent": "codex",
+      "sessions": {
+        "need": 0,
+        "working": 2,
+        "parked": 0,
+        "total": 2
+      },
+      "sched": null
+    }
+  ],
+  "waiting": [
+    {
+      "project": "billing-svc",
+      "profile": "work",
+      "session": "master",
+      "key": "vm-billing-1",
+      "id": "4",
+      "text": "rotate the staging key now or after the deploy",
+      "state": "waiting",
+      "reason": "waits on the person: pick now or after",
+      "since_ago": 5400,
+      "at_ago": 9000
+    }
+  ]
+}

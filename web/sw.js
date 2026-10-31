@@ -83,10 +83,13 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 960eefa3a9dd
+// CLIENT-HASH: d7f3daaa55cc
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
+// v85 is one client for several machines: a project addressed `<name>@<host>` lives on a
+// paired fleet-serve, its tab and its row say which machine, a machine that does not answer
+// is a card saying since when, and the settings sheet lists the machines and unpairs one.
 // v21 puts the project's agent on a screen: the 4th column of the projects list has been
 // read by bin/ghostfleet for a while and nothing could WRITE it, so "the master cant be
 // selected as open code or codex" had no answer that was not a text editor.
@@ -407,7 +410,7 @@
 // keeps the phone's words. A Mac still on v82 says "this phone" and "Face ID".
 // v84 finds a project by typing its name: a field at the top of Projects on a phone, `/` at
 // a desk, both through the grid's matcher. A phone still on v83 has no field.
-const VERSION = 'ghostfleet-v84';
+const VERSION = 'ghostfleet-v85';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -435,6 +438,7 @@ const SHELL = [
   './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
   './fixtures/waiting.json',
   './fixtures/usage.json',
+  './fixtures/paired.json',
 ];
 
 self.addEventListener('install', e => {
