@@ -1,13 +1,16 @@
 /* web/app.css — a terminal, on a phone.
  *
- * There is no visual design in this file, and that is deliberate (docs/mobile.md §10:
- * "No redesign of the grid"). The cards are the SAME box-drawing characters the TUI
- * emits, so all the CSS has to do is give them a monospace face, the terminal's own
- * colours, and enough size to fill a phone. Anything that made a card prettier here
- * would be a second layout to keep in step with fleet-grid.mjs forever.
+ * It began with no visual design at all (docs/mobile.md §10: "No redesign of the grid"),
+ * when the cards were the TUI's own box-drawing characters. They stopped being that (see
+ * "the card" below), and the client has since been given a design of its own: the TUI's
+ * ten colours, unchanged and still the only hues in this file, spent through one set of
+ * tokens — surfaces, two faces, a spacing and radius scale, three durations — declared at
+ * the top of :root. What stays the terminal's is the PANE: real output, measured in cells,
+ * in the terminal's face, and nothing below may touch its geometry.
  *
- * The one number that matters is --fs: app.js measures the font and sets it so a
- * 32-column card (CW + 2) spans the viewport. Everything else follows from that. */
+ * --fs is still set by fitCards() from a measured box rule; nothing in this file reads it
+ * any more, and it is kept because the width probe is how the suite proves the monospace
+ * face has box-drawing glyphs of one advance. */
 
 :root {
   --bg: #0b0d10;          /* a terminal on a dark profile, which is where the grid lives */
@@ -21,10 +24,45 @@
   --yellow: #ffd75f;      /* 221 */
   --grey: #8a8a8a;        /* 245 */
   --white: #ffffff;       /* 231 */
+
+  /* ── THE SYSTEM EVERYTHING BELOW IS BUILT FROM ─────────────────────────────────────
+   * The ten colours above are the TUI's and locked. What is not locked is how they are
+   * spent, and the client had grown a dozen one-off radii (2, 3, 4, 6, 8, 9, 10, 12, 16px),
+   * three hand-picked near-black hexes for surfaces and no spacing scale at all. These are
+   * the only values the rules below reach for.
+   *   SURFACES ARE WHITE OVER THE GROUND, never a new hex — the same derivation the card
+   * already used, so every surface is provably a shade of --bg and follows it if it moves.
+   * One step per elevation; a surface carries either a fill or a hairline, not both plus a
+   * shadow. */
+  --surface-1: rgba(255, 255, 255, .035);   /* a card, a tile, a row */
+  --surface-2: rgba(255, 255, 255, .06);    /* a control at rest, a field, an agent bubble */
+  --surface-3: rgba(255, 255, 255, .095);   /* the same control under a pointer or a finger */
+  --sheet-bg: color-mix(in srgb, var(--bg), #fff 4%);   /* an OPAQUE lift for the sheet: it covers content */
+  --scrim: rgba(4, 6, 8, .72);
+
+  /* Two faces. The TERMINAL'S voice — names, branches, paths, numbers, the pane, the ship —
+   * stays monospace, because that is what this app is. Labels, buttons and prose are a UI
+   * face: a sentence set in a terminal font at 16px is the part that read as a raw tool. */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* 4px steps. */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
+  /* Three radii and a pill: a chip, a control, a surface. */
+  --r1: 6px; --r2: 10px; --r3: 14px; --pill: 999px;
+
+  /* Motion: one curve that decelerates, three lengths. Under 300ms everywhere — this app
+   * is opened to glance at, and nothing may hold up the next tap. */
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --t1: 120ms; --t2: 200ms; --t3: 280ms;
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px color-mix(in srgb, var(--cyan) 75%, transparent);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+/* The terminal's own surfaces keep the terminal's face, whatever body says — <pre> is the
+ * lock screen's ship and fitCards()'s width probe, and both measure box-drawing glyphs. */
+pre, code, kbd, .mono { font-family: var(--font-mono); }
 /* The UA's own surfaces dark as well — see the block in index.html for the white frame. */
 :root { color-scheme: dark; }
 /* THE PAGE NEVER SCROLLS SIDEWAYS. docs/mobile.md has said so since #48 — wide content
@@ -40,15 +78,19 @@ html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
 html, body { overflow-x: clip; }
 #app { overflow-x: clip; }
 body {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-ui);
   /* Prose, buttons and headers are sized for reading. --fs is NOT inherited here: it is
    * whatever it takes to make a 32-column card span the phone, which on a 390pt screen
    * is ~19px — fine for the card, far too big for a sentence. */
   font-size: 14px;
-  line-height: 1.3;
+  line-height: 1.4;
   -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: contain;   /* no rubber-band reload while dragging a card */
 }
+/* The keyboard's ring, and only the keyboard's: a tap must not leave a halo behind. */
+:focus { outline: none; }
+:focus-visible { outline: none; box-shadow: var(--ring); }
 /* The left pane of two (html.duo, below) is a column of the same screen and owes the
  * same insets, so it shares this rule rather than declaring them a second time. */
 #app, html.duo #side.shell {
@@ -58,6 +100,10 @@ body {
    * the inset normally and 0 while the keyboard is open; app.js sets it from
    * visualViewport, which is the only thing on iOS that knows. */
   padding: calc(env(safe-area-inset-top) + 8px) 8px calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px);
+  /* The sides are a GUTTER, not an inset: 8px put every card and bubble against the glass.
+   * The shorthand above stays whole because its bottom term is the keyboard's contract;
+   * only the horizontal half is widened, here. */
+  padding-inline: 12px;
   max-width: 46em;                  /* a wide screen keeps the phone layout: nc = 1 */
   margin: 0 auto;
 }
@@ -239,7 +285,7 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  *   Nothing on a desktop engine shows it, which is why it survived review and why the
  * suite now asks the question structurally instead: every inset on this path is 0 on
  * every desktop engine, so both the bug and the fix render identically there. */
-:is(#app, #side).shell > .cards { padding-bottom: 14px; }
+:is(#app, #side).shell > .cards { padding-bottom: 16px; }
 :is(#app, #side).shell > .paneview {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
@@ -275,6 +321,9 @@ html.duo #side.shell {
   display: flex; flex-direction: column; gap: 0; overflow: hidden;
   position: fixed; top: 0; bottom: 0; left: 0; width: var(--side-w); margin: 0;
   border-right: 1px solid var(--hair);
+  /* The list is the quieter half: a step up from the ground, so the two panes read as two
+   * surfaces without a second rule between them. */
+  background: color-mix(in srgb, var(--bg), #fff 1.5%);
 }
 html.duo #app.shell { left: var(--side-w); right: 0; max-width: none; margin: 0; }
 /* One column in the list, whatever --side-w comes to: the left pane is a list to pick
@@ -283,13 +332,24 @@ html.duo #side .cards { grid-template-columns: minmax(0, 1fr); }
 /* A full-width bubble on a 1600px window is a line nobody can read to its end; the
  * phone's 88% stays the rule, capped at a measure. */
 html.duo .chat .turn { max-width: min(88%, 52em); }
+/* ...and the conversation itself is a column down the middle of the pane, the composer under
+ * it at the same width: on a 1600px window a transcript flush left with a 1100px input box
+ * reads as a log, not a conversation. Padding, not a max-width, so the scroller stays the
+ * pane's full width and a wheel anywhere over it scrolls it. */
+html.duo #app.shell > .chat, html.duo #app.shell > .composer { padding-inline: max(2px, calc((100% - 880px) / 2)); }
 /* The right pane with nothing open in it — one dim line saying what puts something there. */
-.duo-empty { margin: auto; color: var(--dim); text-align: center; padding: 1em; }
+.duo-empty { margin: auto; max-width: 30em; color: var(--dim); text-align: center; padding: var(--s5);
+              font-size: 15px; line-height: 1.6; text-wrap: balance; }
+/* The fleet's mark above the line, drawn by the stylesheet so the sentence stays app.js's. */
+.duo-empty::before { content: ""; display: block; width: 44px; height: 44px; margin: 0 auto var(--s4);
+  border-radius: var(--r3); background: var(--surface-2) center / 24px no-repeat
+  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235fd7d7' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6h16M4 12h10M4 18h7'/%3E%3C/svg%3E"); }
 /* An image dragged over the conversation: the whole pane is the target, and says so. */
-#app.drop-on > .chat, #app.drop-on > .paneview { outline: 2px dashed var(--cyan); outline-offset: -6px; }
+#app.drop-on > .chat, #app.drop-on > .paneview { outline: 2px dashed var(--cyan); outline-offset: -6px; border-radius: var(--r3);
+  background: color-mix(in srgb, var(--cyan) 5%, transparent); }
 /* The grid's `/` search and the Ctrl-f chord speak in the confirm row, as at the desk
  * (searchLine / jumpHint there): a yellow line, keys and all. */
-.confirm.search, .confirm.jump { color: var(--yellow); }
+.confirm.search, .confirm.jump { color: var(--yellow); font-family: var(--font-mono); font-size: 13px; }
 /* While a search is up, the cards that do not match are dimmed in place — not hidden, so
  * the numbering and the cursor's arithmetic stay the grid's. */
 .card.miss { opacity: .4; }
@@ -301,38 +361,45 @@ html.duo .chat .turn { max-width: min(88%, 52em); }
  * COUNTS line rather than the top right. Taking it out of flow pins it to the corner at
  * every width and every text size, and the reserved padding on the right is what keeps the
  * text from running under it. */
-.hdr { position: relative; display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline;
-       padding: .2em 46px .6em .2em; font-size: 13px; }
+.hdr { position: relative; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+       padding: 8px 52px 8px 0; font-size: 13px; min-height: 44px; }
 /* 44px, the same floor the footer's buttons were held to and for the same reason: it is the
  * size a finger needs, not the size the glyph needs. It is the ONLY control on this screen
  * now, so it is the one that must not be fiddly. */
-.hdr .more { position: absolute; top: -4px; right: -4px; width: 44px; height: 44px;
+.hdr .more { position: absolute; top: 0; right: 0; width: 44px; height: 44px;
              display: inline-flex; align-items: center; justify-content: center;
-             padding: 0; border-radius: 10px; }
+             padding: 0; border-radius: var(--pill); border-color: transparent; background: var(--surface-2); }
 .hdr .more svg { width: 20px; height: 20px; display: block; }
-.hdr .name { font-weight: 700; color: var(--white); }
-.hdr .scope { color: var(--dim); }
+/* The wordmark and where you are, on one line: the mark in the terminal's face because it is
+ * the fleet's name, the scope beside it at the size of a screen title. */
+.hdr .name { font-family: var(--font-mono); font-weight: 700; font-size: 16px; color: var(--white); letter-spacing: -.01em; }
+.hdr .scope { font-family: var(--font-mono); color: var(--dim); font-size: 13px; }
 /* The counts line WRAPS. It was nowrap, and on a 390pt screen "· 2 at limit · 2 parked"
  * ran off the right edge — the summary line losing exactly the clauses that only appear
  * when something is wrong. Each segment is its own span, so a break lands between
  * clauses. */
-.hdr .counts { white-space: normal; }
+.hdr .counts { white-space: normal; flex-basis: 100%; font-size: 13px; font-weight: 500; }
 /* Which fleet this screen is showing, in the header, on every screen. Yellow for
  * fixtures because sample data presented as a fleet is the failure this row exists for;
  * dim for a real origin, since that is the ordinary state and nothing is wrong. A
  * tailnet hostname is long, so it is allowed to break rather than push the counts off. */
 .hdr .mode { overflow-wrap: anywhere; }
-.hdr .mode.server, .hdr .mode.probing { color: var(--dim); }
-.hdr .mode.fixtures { color: var(--yellow); }
-.stale { color: var(--yellow); padding: .2em .4em .6em; }
+/* A chip, not loose words: it is a STATE of the screen, and a tinted pill is how this file
+ * says state everywhere else (the card's status chip). */
+.hdr .mode { font-size: 12px; padding: 1px 8px; border-radius: var(--pill); align-self: center; }
+.hdr .mode.server, .hdr .mode.probing { color: var(--dim); background: var(--surface-2); }
+.hdr .mode.fixtures { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); }
+.stale { color: var(--yellow); padding: 8px 12px; margin: 0 0 6px; font-size: 13px;
+         border-radius: var(--r2); background: color-mix(in srgb, var(--yellow) 8%, transparent); }
 
 /* ── the confirm bar: same place the TUI puts it, under the header ──────── */
-.confirm { padding: .5em .4em; margin: 0 0 .6em; border: 1px solid currentColor; }
+.confirm { padding: 12px; margin: 0 0 8px; border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+            border-radius: var(--r2); background: color-mix(in srgb, currentColor 7%, transparent); }
 .confirm.red { color: var(--red); }
 .confirm.busy { color: var(--yellow); }
 .confirm .q { font-weight: 700; }
 .confirm .keys { color: inherit; opacity: .85; }
-.confirm .row { display: flex; gap: .6em; margin-top: .6em; }
+.confirm .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 
 /* ── cards ──────────────────────────────────────────────────────────────── */
 /* MORE COLUMNS, NOT A TABLET LAYOUT. The TUI picks its column count from the terminal
@@ -370,8 +437,8 @@ html.duo .chat .turn { max-width: min(88%, 52em); }
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(21em, 100%), 1fr));
-  gap: 10px; align-content: start;
-  padding: 10px 2px 14px;
+  gap: 12px; align-content: start;
+  padding: 4px 0 16px;
   /* A FLICK SETTLES ON A CARD, not halfway through one. `proximity`, not `mandatory`:
    * mandatory fights a deliberate short drag and makes a long list feel sticky, and on a
    * list whose items are taller than the viewport it can trap a card you cannot scroll
@@ -391,42 +458,56 @@ html.duo .chat .turn { max-width: min(88%, 52em); }
    * colours: this is white at 3% over --bg, so it is provably a shade of the same ground
    * and it stays correct if --bg is ever retuned. A literal #12161b would be a fourth
    * neutral nobody could check against the terminal. */
-  background: rgba(255, 255, 255, .03);
-  border: 1px solid var(--hair);
-  /* The status hue, as a rail rather than a box. --c is set per card by cardEl(). */
-  border-left: 3px solid var(--c);
-  border-radius: 10px;
-  padding: 10px 12px;
+  background: var(--surface-1);
+  /* ONE EDGE, AND IT IS THE STATUS. A hairline all round plus a 3px rail in the status hue
+   * was two borders saying one thing. The card is a fill now, and the hue lives in a short
+   * bar inset from the corners (::before) — so it reads as a mark the card carries rather
+   * than as a box that has been coloured on one side. --c is set per card by cardEl(). */
+  border: 1px solid transparent;
+  border-radius: var(--r3);
+  padding: 12px 16px;
+  position: relative;
   cursor: pointer; -webkit-tap-highlight-color: transparent;
   color: var(--fg);
+  transition: background-color var(--t1) var(--ease), border-color var(--t1) var(--ease), opacity var(--t2) var(--ease);
 }
+.card::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px;
+                border-radius: 0 3px 3px 0; background: var(--c); }
+/* A press answers under the finger at once — a fill, never a transform: the drag-to-reorder
+ * code reads card rects mid-gesture, and a scaled card is a card whose rect has moved. */
+.card:active { background: var(--surface-2); }
+@media (hover: hover) and (pointer: fine) { .card:hover { background: var(--surface-2); } }
 .card.dim { opacity: .65; }
-.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+.card .c-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 /* The title row is the drag grip, and it is still exactly ONE line: it alone swallows the
  * vertical pan, so a drag anywhere else on the card still scrolls the list. Widening this
  * is how reorder starts fighting the scroll. `.t` is set only on a card that reorders. */
 .card .c-top.t { touch-action: none; }
-.card .c-num { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
-.card .c-name { font-weight: 600; font-size: 16px; color: var(--white);
+.card .c-num { color: var(--dim); font-family: var(--font-mono); font-size: 13px;
+                font-variant-numeric: tabular-nums; flex: 0 0 auto; min-width: 1ch; }
+.card .c-name { font-family: var(--font-mono); font-weight: 600; font-size: 16px; color: var(--white);
+                letter-spacing: -.01em;
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .c-when { margin-left: auto; color: var(--dim); font-size: 12px;
                 font-variant-numeric: tabular-nums; white-space: nowrap; flex: 0 0 auto; }
-.card .c-meta { display: flex; align-items: center; gap: .45em; flex-wrap: wrap; margin-top: 7px; }
-.card .c-where { color: var(--dim); font-size: 12px; min-width: 0;
+.card .c-meta { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; margin-top: 8px; }
+.card .c-where { color: var(--dim); font-family: var(--font-mono); font-size: 12px; min-width: 0;
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* ONE CHIP, NOT BORDER + GLYPH + WORD. The word is the TUI's own (§7: the vocabulary is
  * the desk's), and the hue is the card's rail hue, so the two agree by construction. */
-.card .chip { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
-              flex: 0 0 auto; }
+.card .chip { font-size: 12px; font-weight: 500; line-height: 18px; padding: 1px 8px; border-radius: var(--pill);
+              white-space: nowrap; flex: 0 0 auto; }
 .card .chip.st { color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); }
-.card .chip.tag { color: var(--dim); background: rgba(255, 255, 255, .06); }
+.card .chip.tag { color: var(--dim); background: var(--surface-2); font-family: var(--font-mono); font-size: 11.5px; font-weight: 400; }
 .card .chip.lead { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 /* THE POINT OF THE REDESIGN: the agent's last line gets TWO real lines instead of one cut
  * mid-word. The clamp is the browser's, so it lands at whatever text size the reader has
  * chosen rather than at a column count the client guessed. */
 .card .c-msg {
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair);
-  font-size: 13.5px; line-height: 1.45; color: var(--fg);
+  /* No rule above it: the change of face — terminal above, prose here — already says where
+   * the facts end and the agent's words begin. */
+  margin-top: 8px;
+  font-size: 14.5px; line-height: 1.45; color: var(--fg);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .card .c-msg.none { color: var(--dim); }
@@ -439,37 +520,46 @@ html.duo .chat .turn { max-width: min(88%, 52em); }
  * own width, in the hint's dim, so they read as labels rather than as cards. */
 /* A snap point like a card: the list snaps to `start` (`.cards`), and with only the cards to
  * land on it settled on the first one and scrolled the top heading out of view. */
-.cards > .sect { grid-column: 1 / -1; color: var(--dim); font-size: 12px; margin: 2px 2px -4px;
+/* THE EMPTY LIST IS AN ANSWER, not an absence: when a heading is the only thing in the list
+ * ("nothing is waiting on you"), it is centred in the room the cards would have taken, under
+ * a check in the colour that means done. */
+.cards > .sect:only-child { align-self: center; justify-self: center; margin: 18vh 0 0; text-align: center;
+                            font-size: 15px; font-weight: 500; }
+.cards > .sect:only-child::before { content: "✓"; display: block; width: 44px; height: 44px; margin: 0 auto 12px;
+  border-radius: var(--pill); line-height: 44px; font-size: 20px; color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent); }
+.cards > .sect { grid-column: 1 / -1; color: var(--dim); font-size: 13px; font-weight: 600; margin: 8px 4px 0;
                  scroll-snap-align: start; }
 /* THE ACCOUNTS LINE (app.js usageCards): the list's full width, a line per profile, in the
  * card's type. Its hue is the state's, from the palette above and nothing else. A long line
  * WRAPS beside its profile's name rather than ending in an ellipsis: the first version cut
  * "all accounts exhausted until 17:00 — workers paused" at 17:00 on a phone, and the words it
  * dropped were the ones that say what the owner has lost. */
-.cards > .usage { grid-column: 1 / -1; display: block; width: 100%; text-align: left; font: inherit;
-                  font-size: 13px; background: none; border: 1px solid var(--hair); border-radius: 8px;
-                  padding: 6px 10px; margin: 0; color: var(--fg); scroll-snap-align: start; }
+.cards > .usage { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left; font: inherit;
+                  font-size: 13px; line-height: 1.45; background: var(--surface-1); border: 1px solid transparent; border-radius: var(--r3);
+                  padding: 12px 16px; margin: 0; color: var(--fg); scroll-snap-align: start; }
 button.usage { cursor: pointer; }
 /* THE QUEUE'S LINE ON PROJECTS (app.js queueRow): one row the list's full width, where the
  * list itself used to be. Red while anything waits on the owner; the TUI's grey when every
  * item is answered or untouched. The palette's own tokens, nothing new. */
-.cards > .queue-row { grid-column: 1 / -1; display: flex; align-items: baseline; gap: .6em; width: 100%;
-                      text-align: left; font: inherit; font-size: 14px; background: none; cursor: pointer;
-                      border: 1px solid var(--hair); border-radius: 8px; padding: 8px 10px; margin: 0;
+.cards > .queue-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px;
+                      text-align: left; font: inherit; font-size: 14px; background: var(--surface-1); cursor: pointer;
+                      border: 1px solid transparent; border-radius: var(--r3); padding: 12px 16px; margin: 0;
                       color: var(--dim); scroll-snap-align: start; }
 .queue-row .qt { flex: 1 1 auto; min-width: 0; }
-.queue-row .qgo { flex: none; }
-.cards > .queue-row.hot { border-color: var(--red); color: var(--red); font-weight: 700; }
-.usage .u-line { display: flex; gap: .6em; min-width: 0; }
-.usage .u-prof { color: var(--dim); flex: none; }
+.queue-row .qgo { flex: none; font-size: 18px; line-height: 1; }
+.cards > .queue-row.hot { border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red); font-weight: 600;
+                          background: color-mix(in srgb, var(--red) 9%, transparent); }
+.usage .u-line { display: flex; gap: 12px; min-width: 0; }
+.usage .u-prof { color: var(--dim); flex: none; font-family: var(--font-mono); font-size: 12px; min-width: 5.5em; line-height: 20px; }
 .usage .u-text { min-width: 0; overflow-wrap: anywhere; }
 .u-green .u-text, .u-green .u-state { color: var(--green); }
 .u-yellow .u-text, .u-yellow .u-state { color: var(--yellow); }
 .u-red .u-text, .u-red .u-state { color: var(--red); }
 .u-grey .u-text, .u-grey .u-state { color: var(--grey); }
 /* The sheet: an account per block, as `fleet-accounts list` prints them, wrapped not cut. */
-.sheet h3.u-prof { font: inherit; font-weight: 700; color: var(--white); margin: 1em 0 .2em; overflow-wrap: anywhere; }
-.sheet .u-acct { padding: .45em 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
+.sheet h3.u-prof { font: inherit; font-family: var(--font-mono); font-weight: 700; color: var(--white); margin: 1.2em 0 .3em; overflow-wrap: anywhere; }
+.sheet .u-acct { padding: .6em 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
 .sheet .u-head { display: flex; flex-wrap: wrap; gap: .2em .8em; }
 .sheet .u-name { color: var(--white); }
 .sheet .u-win { color: var(--fg); font-size: 13px; }
@@ -479,7 +569,9 @@ button.usage { cursor: pointer; }
  * a card rule: the reason is historical box-art geometry, but the assertion that forbids
  * it is still live and the rule is still right for a different reason (a bolder title on
  * tap is a layout shift under the finger). */
-.card.sel { filter: brightness(1.14); border-color: var(--c); }
+/* Selected: the card's own hue round its edge and on its name — the TUI's "this one", said
+ * with the colour the card already carries rather than a new one. */
+.card.sel { background: var(--surface-2); border-color: color-mix(in srgb, var(--c) 70%, transparent); }
 .card.sel .c-name { color: var(--c); }
 .card.lift { opacity: .8; }
 .card.drop-above { box-shadow: 0 -2px 0 0 var(--white); }
@@ -512,24 +604,27 @@ button.usage { cursor: pointer; }
  * the same grey the parked status already uses. */
 .card.exited { opacity: .62; }
 .card.exited { --c: var(--hair); }
-.card.exited .chip.st.exited { color: var(--dim); border-color: var(--hair); background: transparent; }
+.card.exited .chip.st.exited { color: var(--dim); border-color: var(--hair); background: transparent; box-shadow: inset 0 0 0 1px var(--hair); }
 
 /* ── the count strip: the summary as numbers, not as a sentence ────────────
  * `0 need you · 2 working · 5 ready` is a sentence you have to read. The same counts as
  * four tiles are a thing you glance at, and the one that matters — need-you — is the one
  * that changes colour when it is not zero. The WORDS are unchanged: they are the TUI's own
  * vocabulary and grid.js still decides them. */
-.strip { display: flex; gap: 6px; padding: 8px 2px; }
-.strip .stat { flex: 1 1 0; min-width: 0; background: rgba(255, 255, 255, .03);
-               border: 1px solid var(--hair); border-radius: 9px; padding: 6px 8px; }
-.strip .stat .n { font-size: 18px; font-weight: 600; line-height: 1.1;
+.strip { display: flex; gap: 8px; padding: 2px 0 8px; }
+.strip .stat { flex: 1 1 0; min-width: 0; background: var(--surface-1);
+               border: 1px solid transparent; border-radius: var(--r3); padding: 8px 12px;
+               transition: background-color var(--t2) var(--ease), border-color var(--t2) var(--ease); }
+.strip .stat .n { font-size: 24px; font-weight: 600; line-height: 1.1; letter-spacing: -.02em;
                   font-variant-numeric: tabular-nums; color: var(--dim); }
-.strip .stat .l { font-size: 10.5px; color: var(--dim); margin-top: 2px;
+.strip .stat .l { font-size: 12px; color: var(--dim); margin-top: 2px;
                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Only a NON-ZERO count earns its colour. A strip where every tile is lit is a strip that
  * says nothing, and the question this app exists to answer is which one is not zero. */
 .strip .stat.on .n { color: var(--c); }
-.strip .stat.on { border-color: color-mix(in srgb, var(--c) 40%, var(--hair)); }
+.strip .stat.on { background: color-mix(in srgb, var(--c) 9%, transparent);
+                   border-color: color-mix(in srgb, var(--c) 30%, transparent); }
+.strip .stat.on .l { color: var(--fg); }
 /* A BUTTON NEVER LEAVES THE SCREEN, IT TRUNCATES. The bar already wrapped, which handles
  * "too many buttons" and does nothing at all for "one button wider than the phone" — at
  * iOS's largest accessibility text `x remove` on its own is 342px against a 304px column,
@@ -543,42 +638,80 @@ button.usage { cursor: pointer; }
  * different row was found hanging off the edge. A control that is wider than the thing
  * containing it is never what was wanted, at any text size, anywhere in this app. */
 button { max-width: 100%; }
+/* ONE BUTTON. A filled control at rest (no outline: a hairline round a fill is two edges),
+ * a step lighter under the pointer, and a small give under the finger — a transform, so it
+ * moves no layout, and it only ever SHRINKS the box, so nothing can be pushed past an edge
+ * by pressing it. The border is kept, transparent, so a variant that colours it does not
+ * change the button's size. */
 button {
-  font: inherit; color: var(--fg); background: #14181d; border: 1px solid var(--hair);
-  padding: .45em .7em; border-radius: 2px; cursor: pointer;
+  font: inherit; font-weight: 500; color: var(--fg); background: var(--surface-2); border: 1px solid transparent;
+  padding: .5em .85em; border-radius: var(--r2); cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  transition: background-color var(--t1) var(--ease), color var(--t1) var(--ease),
+              border-color var(--t1) var(--ease), transform var(--t1) var(--ease), opacity var(--t1) var(--ease);
 }
+@media (hover: hover) and (pointer: fine) { button:hover:not(:disabled) { background: var(--surface-3); } }
+button:active:not(:disabled) { background: var(--surface-3); transform: scale(.97); }
 button:disabled { opacity: .4; cursor: default; }
 button.k { color: var(--dim); }
-button.k b { color: var(--fg); font-weight: 700; }
-button.danger { color: var(--red); border-color: #40202a; }
-button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
-.hint { color: var(--dim); padding: .4em .2em; }
-.absent { color: var(--dim); padding: .6em .2em; border-top: 1px solid var(--hair); margin-top: .6em; }
+button.k b { color: var(--fg); font-weight: 700; font-family: var(--font-mono); }
+button.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, transparent);
+                background: color-mix(in srgb, var(--red) 8%, transparent); }
+button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan); font-weight: 600; }
+@media (hover: hover) and (pointer: fine) { button.go:hover:not(:disabled) { background: color-mix(in srgb, var(--cyan) 86%, #fff); } }
+button.go:active:not(:disabled) { background: color-mix(in srgb, var(--cyan) 82%, #000); }
+.hint { color: var(--dim); padding: 6px 4px; font-size: 13px; line-height: 1.5; }
+.absent { color: var(--dim); padding: .8em .2em; border-top: 1px solid var(--hair); margin-top: .8em; }
 
 /* ── sheets (the TUI's full-screen forms: picker, name, worktree, schedule…) */
 #sheet:empty { display: none; }
 #sheet {
-  position: fixed; inset: 0; background: rgba(4, 6, 8, .86);
+  position: fixed; inset: 0; background: var(--scrim);
   display: flex; align-items: flex-end; z-index: 10;
 }
+/* A sheet RISES from where it is anchored and the room behind it dims; nothing else moves.
+ * Only on the way in — a sheet is closed by removing it, and a closing animation would be a
+ * frame where the next tap lands on a sheet that is already gone. */
+@media (prefers-reduced-motion: no-preference) {
+  #sheet:not(:empty) { animation: gf-scrim var(--t2) ease-out both; }
+  #sheet > .sheet { animation: gf-rise var(--t3) var(--ease) both; }
+}
+@keyframes gf-scrim { from { background-color: transparent } }
+@keyframes gf-rise  { from { transform: translateY(24px); opacity: 0 } }
 /* 92dvh, not 92vh, and a TOP inset. vh counts the URL bar on iOS, so a tall sheet was
  * taller than the visual viewport and its first rows ended up under the status bar — the
  * clock sitting on top of the app's own text. The bottom inset was already here for the
  * home indicator; the top one was missing because a bottom sheet is not supposed to reach
  * that far, and a long one does. */
 .sheet {
-  width: 100%; max-width: 100%; min-width: 0; overflow: auto; background: var(--bg);
+  width: 100%; max-width: 100%; min-width: 0; overflow: auto; background: var(--sheet-bg);
   max-height: 92vh; max-height: 92dvh;
   border-top: 1px solid var(--hair);
-  padding: calc(env(safe-area-inset-top) + 1em) .8em calc(env(safe-area-inset-bottom) + 1em);
+  border-radius: 20px 20px 0 0;
+  padding: calc(env(safe-area-inset-top) + 1em) 16px calc(env(safe-area-inset-bottom) + 1em);
+  overscroll-behavior: contain;
 }
-.sheet h2 { font: inherit; font-weight: 700; color: var(--white); margin: 0 0 .2em; }
-.sheet h2 .sub { color: var(--dim); font-weight: 400; }
+/* The grabber says "this came up from below, and it goes back down". Decoration only — the
+ * sheet is dismissed the ways it always was. */
+.sheet::before { content: ""; display: block; width: 36px; height: 4px; border-radius: 2px;
+                 background: var(--surface-3); margin: -6px auto 12px; }
+/* AT A DESK THE SHEET IS A DIALOG. A bottom sheet 1600px wide is a banner with its buttons at
+ * the far left; the same node, centred and capped at a reading width, is what a mouse expects. */
+html.duo #sheet { align-items: center; justify-content: center; padding: 24px; }
+html.duo .sheet { max-width: 560px; max-height: min(86dvh, 760px); border: 0;
+                  border-radius: 18px; padding: 22px 22px 20px; box-shadow: 0 24px 64px rgba(0, 0, 0, .5); }
+html.duo .sheet::before { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  html.duo #sheet > .sheet { animation: gf-pop var(--t2) var(--ease) both; }
+}
+@keyframes gf-pop { from { transform: scale(.97); opacity: 0 } }
+.sheet h2 { font: inherit; font-size: 18px; font-weight: 600; color: var(--white); margin: 0 0 .3em; letter-spacing: -.01em; }
+.sheet h2 .sub { color: var(--dim); font-weight: 400; font-size: 14px; font-family: var(--font-mono); }
 /* An origin is one unbreakable token — `http://mac-studio-2.tailfe8c.ts.net:8787` — and
  * the settings sheet prints the resolved one in prose. At large text that single word was
  * 480px inside a 329px sheet. */
-.sheet p { margin: .35em 0; color: var(--dim); overflow-wrap: anywhere; }
-.sheet .field { display: block; margin: .8em 0 .2em; color: var(--dim); }
+.sheet p { margin: .4em 0; color: var(--dim); overflow-wrap: anywhere; line-height: 1.5; }
+.sheet .field { display: block; margin: 1em 0 .35em; color: var(--dim); font-size: 13px; font-weight: 500; }
 /* ── 16px, AND IT IS NOT A TYPOGRAPHY CHOICE ──────────────────────────────────────────
  * iOS Safari ZOOMS THE PAGE when a text control smaller than 16px takes focus. It is not
  * a scroll and nothing overflows — the layout is untouched and every element still fits
@@ -597,17 +730,23 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * that disables pinch-zoom for everyone, which is a real accessibility loss, and iOS has
  * ignored it in some versions anyway. 16px is the actual threshold and the actual fix. */
 .sheet input[type=text], .sheet textarea, .sheet select {
-  font: inherit; font-size: 16px; width: 100%; color: var(--white); background: #101418;
-  border: 1px solid var(--hair); padding: .5em; border-radius: 2px;
+  font: inherit; font-size: 16px; width: 100%; color: var(--white); background: var(--surface-2);
+  border: 1px solid transparent; padding: .6em .75em; border-radius: var(--r2);
+  transition: border-color var(--t1) var(--ease), background-color var(--t1) var(--ease);
+}
+/* A field says it has the caret with its edge, in the colour that means "this one". */
+.sheet input[type=text]:focus, .sheet textarea:focus, .sheet select:focus,
+.composer textarea:focus, .find input:focus {
+  border-color: color-mix(in srgb, var(--cyan) 60%, transparent); box-shadow: none;
 }
 .sheet textarea { min-height: 5.5em; resize: vertical; }
 /* THE GESTURES, WHERE THEY ARE WORTH READING. They were a permanent three-line band on the
  * grid — 66 of 844 points, every second the screen was open, saying what a swipe does. Here
  * they sit under the actions, in the sheet you open when you want to know what you can do.
  * Dim and small on purpose: this is reference, not a control. */
-.sheet .gest { margin: .9em 0 0; padding-top: .7em; border-top: 1px solid var(--hair);
-               color: var(--dim); font-size: 12px; line-height: 1.5; }
-.sheet .row { display: flex; flex-wrap: wrap; gap: .5em; margin-top: 1em; }
+.sheet .gest { margin: 1em 0 0; padding-top: .8em; border-top: 1px solid var(--hair);
+               color: var(--dim); font-size: 12.5px; line-height: 1.6; }
+.sheet .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 1.1em; }
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
 .sheet .warn { color: var(--yellow); }
@@ -623,7 +762,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .rows { margin: .6em 0; }
 /* Wraps, because this row is a project name and two toggles and at large text the three
  * of them do not fit beside each other. */
-.srow { display: flex; flex-wrap: wrap; align-items: center; gap: .6em; padding: .45em .2em; border-bottom: 1px solid var(--hair); }
+.srow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 2px; border-bottom: 1px solid var(--hair); }
 /* ── THE 44px FLOOR FOLLOWED THE VERBS IN HERE ─────────────────────────────
  * The footer held its buttons to 44px tall and 8px apart, because that is the size a
  * finger needs and the separation that stops a mis-tap. Moving the verbs into this sheet
@@ -637,13 +776,23 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .srow { min-height: 44px; }
 .srow button { min-height: 44px; }
 .rows .srow + .srow { margin-top: 8px; }
-.srow .nm { flex: 1; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A ROW THAT IS ONE VERB IS A LIST ITEM: the button is the whole row, its label at the left
+ * edge where the eye runs down a list — not a chip floating at the start of a ruled line. */
+.rows .srow:has(> button:only-child) { padding: 0; border-bottom: 0; }
+.rows .srow > button:only-child { flex: 1 1 auto; text-align: left; min-height: 48px; padding: 0 16px;
+                                  border-radius: var(--r3); }
+.srow .nm { flex: 1; color: var(--white); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* `min(8.5em, 45%)`, not a bare 8.5em: the em keeps the toggles aligned in a column at
  * ordinary sizes, and at 38px text 8.5em is 323px — a minimum wider than the sheet it is
  * in, which is a minimum that has stopped meaning "align these" and started meaning
  * "overflow". */
 .srow .badge { min-width: min(8.5em, 45%); }
-.on { color: var(--green); } .off { color: var(--red); } .inherit { color: var(--dim); }
+/* SCOPED TO THE BADGE. These were bare `.on`/`.off`, and `.on` is also the class the stack
+ * puts on its focused column — so every word in the focused conversation came out green. */
+.badge.on { color: var(--green); } .badge.off { color: var(--red); } .badge.inherit { color: var(--dim); }
+/* ...and a chosen option in a sheet's list (a voice, a project's agent) says so the way the
+ * bare `.on` used to: green, plus the tint every selected control in this file carries. */
+.sheet button.on { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
 .bud-on { color: var(--yellow); }
 
 /* ── the session screen: the pane ───────────────────────────────────────── */
@@ -674,13 +823,14 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
    * rows the buttons need), so no vh constant is right on every phone; this one is here
    * so the box is never unbounded in the frame before the measurement lands. */
   max-height: 68vh; background: #07090b; border: 1px solid var(--hair);
-  padding: .35em .45em;
+  border-radius: var(--r2);
+  padding: .5em .6em;
 }
 /* line-height 1 for the same reason the cards use it: a terminal's cell height IS its
  * line height, and anything looser opens gaps that break ─ into a row of dashes and │
  * into a dotted line. */
 .pane {
-  margin: 0; font: inherit; font-size: var(--pfs, 11px); line-height: 1;
+  margin: 0; font: inherit; font-family: var(--font-mono); font-size: var(--pfs, 11px); line-height: 1;
   white-space: pre; width: max-content; color: var(--fg);
 }
 /* One cell per cell — grid.js's cells(), same as a card, boxed here too. ⧗ measures 1.274
@@ -695,14 +845,14 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * viewport to see its SHAPE (where the dialog is, whether a diff is on screen), and the
  * ± steps take it back to a size you can read and pan. Font-size rather than a transform,
  * so the glyphs re-lay out crisply at every step instead of being scaled bitmaps. */
-.pane-bar { display: flex; flex-wrap: wrap; gap: .4em; align-items: baseline; padding: .4em .2em; }
-.pane-bar .geom { color: var(--dim); margin-left: auto; }
-.pane-bar button { padding: .3em .55em; }
-.pane-bar button.on { color: var(--bg); background: var(--dim); border-color: var(--dim); }
+.pane-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 0; }
+.pane-bar .geom { color: var(--dim); margin-left: auto; font-family: var(--font-mono); font-size: 12px; }
+.pane-bar button { padding: .35em .75em; min-width: 40px; border-radius: var(--pill); font-size: 13px; }
+.pane-bar button.on { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 16%, transparent); }
 /* The view switch: the pane is what a tap on a card lands on, and the message list is
  * still one tap away. Both are labelled with what they ARE, not with which is default. */
 .viewsw { display: flex; gap: .4em; padding: .5em .2em 0; }
-.viewsw button.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.viewsw button.on { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 16%, transparent); }
 
 /* ── the session screen: the top bar ────────────────────────────────────────
  * Ten footer buttons used to sit between the card and the content — "it has a bunch of
@@ -710,12 +860,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * them carries only what you need to READ the screen: where you are, what the session is
  * doing, and which of the two views you are in. */
 .sbar {
-  display: flex; align-items: center; gap: .5em;
-  padding: .1em .1em .5em; border-bottom: 1px solid var(--hair); margin-bottom: .5em;
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 0 8px; border-bottom: 1px solid var(--hair); margin-bottom: 0;
 }
 .sbar { min-width: 0; }
 .sbar .who { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
-.sbar .who .nm { font-weight: 700; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sbar .who .nm { font-family: var(--font-mono); font-weight: 700; font-size: 16px; letter-spacing: -.01em; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* THE STATUS LINE ELLIPSISES TOO. `.who` may shrink to nothing, but a child with
  * `overflow: visible` paints past it whatever its parent's width says — and this line is
  * "◆ working" plus the project and the folder, which on a real fleet is longer than the
@@ -728,8 +878,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *   So `.scope` is the only shrinkable child; the status word and the chip keep their size,
  * and the chip keeps its own 7em clamp below for the case where the hostname is the long
  * thing. `min-width: 0` on the row is what lets a flex child ellipsise at all. */
-.sbar .who .st { display: flex; align-items: baseline; gap: .35em; min-width: 0;
+.sbar .who .st { display: flex; align-items: baseline; gap: .45em; min-width: 0; margin-top: 1px;
                  font-size: 12px; overflow: hidden; white-space: nowrap; }
+.sbar .who .st > .scope { font-family: var(--font-mono); color: var(--dim); }
 .sbar .who .st > .scope { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sbar .who .st > .mode { flex: 0 0 auto; }
 /* THE CHROME DOES NOT SCALE WITH THE TEXT, AND THIS IS THE FIX FOR THE ⋯ HALF OFF THE
@@ -743,6 +894,16 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * proportional to somebody's reading preference. Fixed px here caps the row at about
  * 190px whatever the text does. */
 .hdr > .back, .sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
+/* The round affordances of the bar — back and ⋯ — are 40px circles: a finger's target with
+ * the glyph centred, rather than a box sized by its one character. */
+.hdr > .back, .sbar > button {
+  min-width: 40px; min-height: 40px; border-radius: var(--pill); padding: 0 .55em; }
+/* A screen one level down: back pinned to the top LEFT corner the way ⋯ is pinned to the right,
+ * so the name and the chip flow beside it and wrap under the name, never under the button. */
+.hdr:has(> .back) { padding-left: 50px; }
+/* Identical to the conversation's own ‹ (the rule above), at the same point on the screen —
+ * queue-check measures the two against each other, box for box. */
+.hdr > .back { position: absolute; top: 2px; left: 0; }
 /* THE VIEW TOGGLE DOES NOT SHRINK. It was `flex: 0 1 auto`, so once the bar stopped
  * wrapping the toggle became a thing that could give way — measured at 320 with a tailnet
  * hostname in the chip it was squeezed from 101px to 46px, which clips `chat`/`pane` to
@@ -769,14 +930,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* ...and the segmented controls wrap for the same reason. The chat/pane switch in the
  * session bar is pinned to 13px and never reaches this; the profile tabs scale with the
  * page and do. */
-.seg { display: flex; flex-wrap: wrap; border: 1px solid var(--hair); max-width: 100%; }
-.seg button { border: 0; padding: .35em .7em; }
-.seg button.on { color: var(--bg); background: var(--cyan); }
+/* A SEGMENTED CONTROL: one track, the chosen segment a lighter pill inside it with the
+ * cyan this app uses for "this one" on its text. A solid cyan block was the loudest thing on
+ * every screen it was on, and the least important — it says which view, not what happened. */
+.seg { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 0; border-radius: var(--r2);
+       background: var(--surface-1); max-width: 100%; }
+.seg button { border: 0; padding: 4px 12px; background: transparent; border-radius: 6px; color: var(--dim); }
+.seg button.on { color: var(--cyan); background: var(--surface-3); font-weight: 600; }
 /* The projects screen's profile tabs are the session screen's chat/pane control, on
  * purpose: one kind of tab in this app, not two. Full width because they sit alone on
  * their row, and wrapping because a fleet can have more profiles than fit — `ghostfleet
  * <profile>` takes any name. */
-.seg.tabs { flex-wrap: wrap; margin: 0 0 .4em; }
+.seg.tabs { flex-wrap: wrap; margin: 0 0 6px; }
 .seg.tabs button { flex: 1 0 auto; }
 
 /* ── the chat ───────────────────────────────────────────────────────────────
@@ -799,7 +964,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * keeps its 88% so the empty column still reads as "who is speaking" at a glance, which is
  * what an asymmetric bubble is FOR — it is only wasted when the other side is touching the
  * edge, because then it looks like a mistake rather than a margin. */
-.chat { padding: 0 12px; display: flex; flex-direction: column; gap: .5em; }
+/* The shell's 12px is the gutter now, so the list adds only breathing room above and below. */
+.chat { padding: 12px 0 8px; display: flex; flex-direction: column; gap: .5em; }
 /* A SHORT conversation sits on the composer, not at the top of an empty column — which is
  * where every chat on the phone puts it. `margin-top: auto` on the first child rather than
  * `justify-content: flex-end`, because that one clips the top of a LONG conversation out of
@@ -808,6 +974,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* The mode chip is in the top bar now, and a tailnet hostname is long enough to squeeze
  * the view switch off the end of it. */
 .sbar .mode { max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.sbar .mode.fixtures { color: var(--yellow); }
+.sbar .mode.server, .sbar .mode.probing { color: var(--dim); }
 .hint.lead1 { padding: .15em .2em .3em; font-size: 12px; }
 /* 16px AND 1.55, BOTH FROM THE SAME PLACE. 16px is the readable-body floor on a phone, and
  * this app has just paid for learning it from the other direction: #14 raised the composer
@@ -818,13 +986,14 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *   The family is unchanged and deliberately not the body font: this is prose, and the rest
  * of the client is a terminal. */
 .chat .bub, .chat .thinking .dots {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 16px; line-height: 1.55;
-  padding: .6em .8em; border-radius: 16px; max-width: 88%;
+  padding: .6em .85em; border-radius: 18px; max-width: 88%;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 4px; }
-.chat .bub.agent, .chat .thinking .dots { align-self: flex-start; background: #14181d; border: 1px solid var(--hair); border-bottom-left-radius: 4px; }
+.chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 6px; }
+/* A fill, no outline: the bubble's shape and side already say whose it is. */
+.chat .bub.agent, .chat .thinking .dots { align-self: flex-start; background: var(--surface-2); border: 1px solid transparent; border-bottom-left-radius: 6px; }
 /* A message that has been sent but has not come back in the transcript yet. It is dimmed
  * rather than absent, because a chat where your own message vanishes for five seconds
  * reads as a send that failed. */
@@ -846,7 +1015,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* Queued behind the running turn: still yours to take back, so it reads as a thing you can
  * tap — a dashed edge in the colour it already has, no new colour. */
 .chat .turn.queued .bub.pending { cursor: pointer; border: 1px dashed currentColor; }
-.chat .meta { font-size: 11px; color: var(--dim); padding: 0 .3em; }
+.chat .meta { font-size: 11px; color: var(--dim); padding: 0 .5em; font-variant-numeric: tabular-nums; }
 .chat .meta.r { align-self: flex-end; }
 .chat .meta.l { align-self: flex-start; }
 .chat .row { display: flex; gap: .5em; align-items: center; }
@@ -856,8 +1025,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * cannot show one. The status can, and does — this is the affordance that keeps #45's
  * lesson working under the new default. */
 .chat .blocked {
-  align-self: stretch; border: 1px solid var(--red); color: var(--red);
-  padding: .55em .7em; display: flex; gap: .6em; align-items: center; flex-wrap: wrap;
+  align-self: stretch; border: 1px solid color-mix(in srgb, var(--red) 55%, transparent); color: var(--red);
+  background: color-mix(in srgb, var(--red) 9%, transparent); border-radius: var(--r3);
+  padding: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-weight: 500;
 }
 .chat .blocked .t { flex: 1 1 auto; }
 
@@ -889,7 +1059,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * installed app, last turn bottom = list bottom = composer top), so this padding is the
  * whole of the space between the conversation and the box — "tight like a normal chat app". */
 .composer { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; min-width: 0; flex: 0 0 auto;
-  padding: 4px 1px 0; border-top: 1px solid var(--hair); }
+  padding: 8px 0 0; border-top: 1px solid var(--hair); }
 /* Reported as the send button rendering "senc" — its last character past the right edge.
  * The textarea is the one thing here that may shrink, and the buttons must not: with every
  * child shrinkable the browser is free to take the width out of whichever it likes. */
@@ -910,8 +1080,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * Gone entirely when there are none — an empty row would push the box up for nothing. */
 .composer .photos { flex: 1 0 100%; display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 1px; }
 .composer .photos:empty { display: none; }
-.composer .ph { position: relative; flex: 0 0 auto; width: 56px; height: 56px;
-  border: 1px solid var(--hair); border-radius: 8px; overflow: hidden; background: #14181d; }
+.composer .ph { position: relative; flex: 0 0 auto; width: 60px; height: 60px;
+  border: 1px solid var(--hair); border-radius: var(--r2); overflow: hidden; background: var(--surface-2); }
 .composer .ph-img { width: 100%; height: 100%; display: block; }
 /* Still going up: dimmed, so "send" waiting on it is not a surprise. Failed: a red edge. */
 .composer .ph.up .ph-img { opacity: .45; }
@@ -934,20 +1104,27 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
    * purely the leftover, so the row wraps when the BUTTONS genuinely do not fit and never
    * because of the text inside it. */
   flex: 1 1 0; min-width: 0; resize: none; font: inherit; font-size: 16px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  background: #14181d; color: var(--fg); border: 1px solid var(--hair); border-radius: 12px;
+  font-family: var(--font-ui);
+  background: var(--surface-2); color: var(--fg); border: 1px solid transparent; border-radius: 20px;
+  transition: border-color var(--t1) var(--ease);
   /* THE SAME NUMBER AS COMPOSER_MAX_PX IN app.js, and it has to be: growComposer() caps
    * the height it writes at that constant and this caps what the browser will honour, so
    * the smaller of the two is the real ceiling. They were 160 and `8em` of a 15px font
    * = 120, which meant the documented constant had been dead for everything above 120px
    * — a growing box that stops for a reason nobody had written down. */
-  padding: .5em .7em; max-height: 120px; line-height: 1.35;
+  padding: .55em .9em; max-height: 120px; line-height: 1.35;
 }
+.composer textarea::placeholder { color: var(--dim); }
 /* 14px, the same as `.sbar button` and for the same reason. This is the number that keeps
  * the row one line high at every text size, so it is the one to change if the row ever has
  * to grow — not the wrap above it. */
 .composer button { padding: .5em .7em; font-size: 14px; }
-.composer button.go { color: var(--bg); background: var(--green); border-color: var(--green); }
+/* Pills, the box's own shape, and as tall as the box is at one line — so the row reads as one
+ * control rather than a field with things stuck to it. */
+.composer > button { min-height: 40px; border-radius: var(--pill); padding: .5em .95em; }
+.composer > button.cam { min-width: 40px; padding: 0 .7em; }
+.composer button.go { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 600; }
+@media (hover: hover) and (pointer: fine) { .composer button.go:hover:not(:disabled) { background: color-mix(in srgb, var(--green) 86%, #fff); } }
 /* Speaking is a toggle, and it says which state it is in — a play button that is really a
  * stop button is how you end up with two voices at once. */
 .speak.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
@@ -1098,36 +1275,72 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * a path that does not fit is one you can already see in the composer, where attachPhoto
  * just put it. Bounded rather than truncated: a short toast is unchanged. */
 .toast {
-  background: #14181d; border: 1px solid var(--hair); padding: .55em .7em;
-  margin: 6px 0 0; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid transparent; padding: 12px 16px;
+  margin: 8px 0 0; border-radius: var(--r3); font-weight: 500;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   overflow-wrap: anywhere;
 }
-.toast.bad { color: var(--red); border-color: #40202a; }
+.toast.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, transparent);
+             background: color-mix(in srgb, var(--red) 9%, transparent); }
+/* A notice ARRIVES: a short rise from the edge it sits on. Its band's height is taken at once
+ * (it is in flow), so only the paint moves, never the list beside it. */
+@media (prefers-reduced-motion: no-preference) {
+  .toast { animation: gf-toast var(--t2) var(--ease) both; }
+}
+@keyframes gf-toast { from { opacity: 0; transform: translateY(6px) } }
 /* A toast with a button ("queued behind a question" -> answer it) is a row, not a clamped
  * box: the clamp would hide the button with the third line. */
 .toast.act { display: flex; align-items: center; gap: .6em; -webkit-line-clamp: none; }
 .toast.act > span { flex: 1; min-width: 0; }
 .toast.act > button { flex: none; min-height: 44px; }
-.toast.good { color: var(--green); }
+.toast.good { color: var(--green); background: color-mix(in srgb, var(--green) 9%, transparent); }
 .audit { color: var(--dim); }
 .audit li { margin: .3em 0; overflow-wrap: anywhere; }
 
 /* ── the lock screen ────────────────────────────────────────────────────── */
-.lock { text-align: left; padding: 12vh .6em 0; }
-.lock .ship { color: var(--cyan); white-space: pre; font: inherit; font-size: var(--fs); line-height: 1.05; margin: 0 0 1em; }
-.lock h1 { font: inherit; font-weight: 700; color: var(--white); margin: 0 0 .4em; }
+/* ── the lock screen: the ship, the name, the one thing to do ─────────────────
+ * A column centred on the screen, the ship first because it is the fleet's mark, and the
+ * actions as a full-width stack — the primary one on top and the size of a thumb. The words
+ * between are the diagnosis (which backend, and why) and stay exactly as api.js writes them. */
+.lock { display: flex; flex-direction: column; align-items: center; text-align: center;
+        max-width: 26rem; margin: 0 auto; padding: max(10vh, calc(env(safe-area-inset-top) + 48px)) 20px 24px; }
+.lock .ship { color: var(--cyan); white-space: pre; font: inherit; font-family: var(--font-mono);
+              font-size: clamp(7px, 2.6vw, 14px); line-height: 1.05; margin: 0 0 28px; text-align: left; }
+/* The ship rides a slow swell — the one ambient motion in the app, on the one screen with
+ * nothing else to watch. Off entirely under reduced motion (the rule at the end of the file). */
+@media (prefers-reduced-motion: no-preference) {
+  .lock .ship { animation: gf-swell 4.8s ease-in-out infinite; }
+}
+@keyframes gf-swell { 0%, 100% { transform: translateY(0) rotate(0deg) } 50% { transform: translateY(-4px) rotate(-.6deg) } }
+.lock h1 { font: inherit; font-family: var(--font-mono); font-size: 26px; font-weight: 700; letter-spacing: -.02em;
+           color: var(--white); margin: 0 0 12px; }
+.lock p { margin: 0 0 10px; color: var(--dim); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; text-wrap: pretty; }
+.lock .row { display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; margin-top: 18px; }
+.lock .row button { min-height: 48px; border-radius: var(--r3); font-size: 15px; white-space: normal; }
+/* `settings` is always last and is never the thing you came here to do: a quiet text button. */
+.lock .row button:last-child:not(.go):not(:first-child) { background: transparent; color: var(--dim); min-height: 44px; }
 /* The two sentences that have to be READ, not skimmed past: "fixtures, and here is why"
  * and "the passkey is unavailable, and here is why". `.sheet .warn` existed; this one did
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
 .lock .err { color: var(--red); }
+.lock .toast { width: 100%; }
 
 /* The per-message play control (turn()), on every message's .meta row. Sized off the
  * meta text rather than the button scale: this sits beside a timestamp, not in the verb
  * bar. */
 .chat .meta { display: flex; align-items: center; gap: .5em; }
-.chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em; }
+.chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em;
+                          color: var(--dim); background: none; border-color: transparent; border-radius: var(--r1); }
+.chat .meta .speak.tiny.on { color: var(--bg); background: var(--yellow); }
+/* The bubble's tools are reference, not content: on a desk they come up with the pointer
+ * (and with the keyboard's focus), at rest they sit back. On touch, where nothing hovers,
+ * they stay as they are. */
+@media (hover: hover) and (pointer: fine) {
+  .chat .turn .meta .tiny { opacity: .45; }
+  .chat .turn:hover .meta .tiny, .chat .turn .meta .tiny:focus-visible, .chat .turn .meta .tiny.on,
+  .chat .turn .meta .tiny.done { opacity: 1; }
+}
 /* The icon is sized in em so it is the button's size, and the SAME size in both states —
    see speakIcon() in app.js for why that is the one property this control cannot lose.
    1.15em because a stroked glyph at 1em reads smaller than the emoji it replaced; the
@@ -1164,21 +1377,24 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * the card list and the chat under them are what scrolls. */
 :is(#app, #side).shell > .jarvis-bar, :is(#app, #side).shell > .notify-bar,
 :is(#app, #side).shell > .ask, :is(#app, #side).shell > .talkband { flex: 0 0 auto; }
-.jarvis-bar { display: flex; align-items: baseline; gap: .6em; width: 100%; text-align: left;
-  margin: 4px 0 6px; padding: .55em .7em; background: transparent; border: 1px solid var(--cyan);
-  border-radius: 6px; font-size: 14px; }
-.jarvis-bar .jt { color: var(--cyan); font-weight: 700; flex: 0 0 auto; }
+.jarvis-bar { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; text-align: left;
+  margin: 0 0 8px; padding: 12px 16px; background: color-mix(in srgb, var(--cyan) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 35%, transparent);
+  border-radius: var(--r3); font-size: 14px; }
+.jarvis-bar .jt { color: var(--cyan); font-weight: 600; flex: 0 0 auto; }
 .jarvis-bar .js { color: var(--dim); flex: 1 1 auto; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-.jarvis-bar .jgo { color: var(--cyan); flex: 0 0 auto; }
-.jarvis-bar.hot { border-color: var(--yellow); }
+.jarvis-bar .jgo { color: var(--cyan); flex: 0 0 auto; font-size: 18px; line-height: 1; }
+.jarvis-bar.hot { border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
+                  background: color-mix(in srgb, var(--yellow) 7%, transparent); }
 .jarvis-bar.hot .js { color: var(--yellow); }
-.jarvis-bar.dim { border-color: var(--hair); }
+.jarvis-bar.dim { border-color: transparent; background: var(--surface-1); }
 .jarvis-bar.dim .jt, .jarvis-bar.dim .jgo { color: var(--dim); }
 /* The push offer and a proposal are the same shape: a sentence and one or two answers. The
  * buttons are pinned to 14px like the composer's, for the composer's reason. */
-.notify-bar, .ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  margin: 4px 0; padding: .5em .6em; border: 1px solid var(--yellow); border-radius: 6px; font-size: 14px; }
+.notify-bar, .ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 0 0 8px; padding: 12px; border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent);
+  background: color-mix(in srgb, var(--yellow) 6%, transparent); border-radius: var(--r3); font-size: 14px; }
 .notify-bar .nt, .ask .t { flex: 1 1 12em; min-width: 0; color: var(--fg); }
 .notify-bar button, .ask button { font-size: 14px; flex: 0 0 auto; }
 .ask .id { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
@@ -1195,15 +1411,16 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
 .hint.jarvis-none p { margin: .4em 0; }
 /* Jarvis is an experimental feature, and its screen says so beside its name. */
-.sbar .who .nm .tag-exp { margin-left: .5em; padding: 0 .35em; border: 1px solid var(--yellow); border-radius: 4px;
-  color: var(--yellow); font-size: 11px; font-weight: 400; vertical-align: middle; }
+.sbar .who .nm .tag-exp { margin-left: .5em; padding: 1px 7px; border-radius: var(--pill);
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+  color: var(--yellow); font-family: var(--font-ui); font-size: 11px; font-weight: 500; vertical-align: middle; }
 /* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
 /* EVENTS: a compaction, a run of tool calls. A card, not a bubble — full width of neither
  * side, the palette's own --dim and --hair, so it reads as the machine and never as him.
  * Folded to one line; the body is the detail for whoever wants it. */
-.chat .evt { align-self: stretch; margin: .35em .2em; border: 1px solid var(--hair); border-radius: 8px;
-             font-size: 12px; color: var(--dim); background: rgba(255, 255, 255, .02); min-width: 0; }
-.chat .evt > summary { display: flex; gap: .5em; align-items: baseline; padding: .35em .6em; cursor: pointer;
+.chat .evt { align-self: stretch; margin: .35em .2em; border: 1px solid var(--hair); border-radius: var(--r2);
+             font-size: 12px; color: var(--dim); background: transparent; min-width: 0; }
+.chat .evt > summary { display: flex; gap: .5em; align-items: baseline; padding: .5em .75em; cursor: pointer;
                        list-style: none; min-width: 0; }
 .chat .evt > summary::-webkit-details-marker { display: none; }
 .chat .evt .evt-ico { flex: 0 0 auto; }
@@ -1240,11 +1457,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px;
 }
 #app.shell:has(> .term-screen) { max-width: none; }
-.term-screen > .term-msg { color: var(--dim); padding: .6em .2em; line-height: 1.4; }
+.term-screen > .term-msg { color: var(--dim); padding: 12px 16px; line-height: 1.5; border-radius: var(--r3);
+                           background: var(--surface-1); }
 .term-screen > .term-act { display: flex; gap: 8px; flex-wrap: wrap; }
 .term-screen > .term-host {
   flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden;
-  background: var(--bg); border: 1px solid var(--hair); border-radius: 6px; padding: 4px;
+  background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r2); padding: 6px;
 }
 /* xterm sizes itself to its own element; it must not size the column back. */
 .term-screen > .term-host .xterm { height: 100%; }
@@ -1257,7 +1475,8 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * that scrolls sideways hides the keys at its end — measured, `~ / -` were off screen at
  * the first cut's 2.6em minimum. 40px tall is the thumb's target, not the label's. */
 .term-screen > .term-keys button.tk {
-  flex: 1 1 0; min-width: 0; min-height: 40px; padding: 0 1px; font-size: 13px;
+  flex: 1 1 0; min-width: 0; min-height: 40px; padding: 0 1px; font-size: 13px; font-family: var(--font-mono);
+  border-radius: var(--r1);
   -webkit-user-select: none; user-select: none; touch-action: manipulation;
 }
 .term-screen > .term-keys button.tk.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
@@ -1272,11 +1491,15 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *   No new colours: the sheet inputs' own field, the hairline, the TUI's dim grey. */
 :is(#app, #side).shell > .find { flex: 0 0 auto; }
 /* the top margin clears the header's ⋯, a 44px target that hangs below the header line */
-.find { position: relative; margin: 10px 0 .4em; }
+.find { position: relative; margin: 2px 0 8px; }
+/* A search field looks like one: a lens at its start, the field's own fill, round ends. */
 .find input {
   display: block; width: 100%; font: inherit; font-size: 16px; color: var(--white);
-  background: #101418; border: 1px solid var(--hair); border-radius: 2px;
-  padding: .45em 9.5em .45em .6em; -webkit-appearance: none; appearance: none;
+  background: var(--surface-2) 12px 50% / 16px no-repeat
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+  border: 1px solid transparent; border-radius: var(--r2); min-height: 44px;
+  padding: .5em 9.5em .5em 38px; -webkit-appearance: none; appearance: none;
+  transition: border-color var(--t1) var(--ease);
 }
 .find input::placeholder { color: var(--dim); }
 /* the browser's own clear glyph would be a second ×, drawn where the count goes */
@@ -1295,7 +1518,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *   No new colours: the hairline between columns, cyan for the focus, the TUI's dim. */
 :is(#app).shell > .stack { flex: 1 1 auto; min-height: 0; display: flex; gap: 0; }
 .stack > .scol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
-  border-left: 1px solid var(--hair); padding: 0 6px; }
+  border-left: 1px solid var(--hair); padding: 0 12px; transition: background-color var(--t2) var(--ease); }
 .stack > .scol:first-child { border-left: 0; padding-left: 0; }
 .stack > .scol:last-child { padding-right: 0; }
 .stack.one > .scol { padding: 0; }
@@ -1305,17 +1528,19 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .scol > .sbar { padding-top: .35em; }
 /* THE FOCUSED COLUMN: a rule along its top and its name in cyan. Only one column at a time
  * takes keys, ⏎ and a paste, and a desk with four composers must say which. */
-.stack:not(.one) > .scol.on { box-shadow: inset 0 2px 0 var(--cyan); }
+.stack:not(.one) > .scol.on { box-shadow: inset 0 2px 0 var(--cyan); background: rgba(255, 255, 255, .012); }
 .stack:not(.one) > .scol.on > .sbar .nm { color: var(--cyan); }
-.stack:not(.one) > .scol:not(.on) > .composer { opacity: .7; }
+.stack:not(.one) > .scol:not(.on) > .composer { opacity: .6; }
+.stack:not(.one) > .scol:not(.on) > .sbar .nm { color: var(--fg); }
 :is(#app).shell > .stack-bar { flex: 0 0 auto; }
 .stack-bar > .seg { flex: 0 1 auto; flex-wrap: nowrap; overflow: hidden; }
 .stack-bar > .stack-hidden button { font-size: 13px; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stack-bar > .stack-pos { flex: 0 0 auto; align-items: center; }
-.stack-bar > .stack-pos .pos { padding: 0 .5em; color: var(--white); font-variant-numeric: tabular-nums; font-size: 13px; }
+.stack-bar > .stack-pos .pos { padding: 0 .5em; color: var(--white); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 13px; }
 /* The picker: the grid's cards under a heading per project (and per machine), each marked
  * with whether it is in the stack. */
 :is(#app).shell > .pick-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-.pick-list > .sect.pick-host { color: var(--white); font-weight: 700; margin-top: 8px; }
+.pick-list > .sect.pick-host { color: var(--white); font-weight: 700; margin-top: 12px; }
 .pick-list > .sect.pick-proj { color: var(--white); }
-.card.pickrow.stacked { border-color: var(--green); }
+.card.pickrow.stacked { border-color: color-mix(in srgb, var(--green) 60%, transparent);
+                         background: color-mix(in srgb, var(--green) 6%, transparent); }
