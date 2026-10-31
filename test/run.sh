@@ -19026,6 +19026,39 @@ else
   skip "phone client" "web/ not present"
 fi
 
+group "phone client: one search finds projects and sessions, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
+  # ── the Projects search finds sessions too, and the phone grid has a field ─────────
+  # #94 found projects; a session could only be found inside its own project's grid. The
+  # helper types into Projects at 1600x900 (the `/` keys) and at 390x844 (the field, with
+  # touch): a session found by its name, its label and its branch, listed under the projects
+  # with its project named and no digit; n walking from a project into the sessions; ⏎, a tap,
+  # ` and ‹ into its conversation and back to the search as it was left; a project query
+  # exactly as #94 drew it; the Queue row neither dimmed nor counted; the phone grid's "find a
+  # session" field filtering in place while the desk's grid keeps its `/`; and with a second
+  # machine paired, the same session on each machine, each row naming its machine. Watched
+  # red against staging's client (30 of its 39 rows) and the other nine against seven copies
+  # of this one broken on purpose, one fault each, until every row had been red at least once.
+  FND="$(mktemp -d "$TEST_RUNS.$$.found.XXXXXX")"
+  node "$ROOT/test/helpers/found-check.mjs" > "$FND/out" 2> "$FND/err"
+  fndrc=$?
+  if grep -q 'no chrome' "$FND/out" 2>/dev/null; then
+    skip "the Projects search" "no chrome to press keys in"
+  else
+    is "found-check ran"                "0" "$fndrc"
+    is "...without complaining"         ""  "$(head -2 "$FND/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$FND/out")" -ge 39 ] && echo yes || echo "no: $(wc -l < "$FND/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$FND/out"
+  fi
+  rm -rf "$FND"
+else
+  skip "phone client" "web/ not present"
+fi
+
 group "phone client: the queue page, in a real browser"
 if [ -d "$ROOT/web" ]; then
 

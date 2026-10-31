@@ -172,17 +172,18 @@ function ProfileTabs({ tabs, onTab }) {
   );
 }
 
-// ── the phone's project search ────────────────────────────────────────────────────────
+// ── the phone's search, on Projects and on a project's grid ──────────────────────────
 // Everything it says and does arrives from app.js's findSpec(), which says why it is always
-// drawn and never focused for you. What lives here is only the box: an input, the count
-// and a clear button laid over its right end, so neither changes the row's height or the
-// input's width as they come and go.
+// drawn and never focused for you — its words included, since the two screens find
+// different things. What lives here is only the box: an input, the count and a clear
+// button laid over its right end, so neither changes the row's height or the input's width
+// as they come and go.
 function FindField({ find }) {
   if (!find) return null;
   return (
     <div class="find">
-      <input type="search" value={find.q} placeholder="find a project"
-             aria-label="find a project" enterkeyhint="search"
+      <input type="search" value={find.q} placeholder={find.placeholder}
+             aria-label={find.placeholder} enterkeyhint="search"
              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false}
              onInput={(e) => find.onInput(e.currentTarget.value)} onKeyDown={find.onKey} />
       <span class="count">{find.count}</span>
@@ -335,7 +336,10 @@ function ProjectsScreen(p) {
   </Fragment>} />;
 }
 function GridScreen(p) {
-  return <CardScreen {...p} band={<CountStrip strip={p.strip} />} />;
+  return <CardScreen {...p} band={<Fragment>
+    <FindField find={p.find} />
+    <CountStrip strip={p.strip} />
+  </Fragment>} />;
 }
 // What the masters hold for the owner. No band: the list is the whole screen, and the line
 // that opens it is a card on Projects (app.js queueRow), not a band here.

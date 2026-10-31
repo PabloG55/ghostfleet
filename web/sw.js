@@ -424,7 +424,10 @@
 // v90 gives every sheet and the confirm bar an X, closes a sheet on a tap beside it (keeping
 // what was typed in it), makes a press outside the confirm bar cancel it, and adds the
 // editor — the desk's Ctrl-n — beside the terminal. A phone on v89 has none of it.
-const VERSION = 'ghostfleet-v90';
+// v91 makes the Projects search find sessions too, across every project and paired machine,
+// and gives a project's grid its own "find a session" field. A phone still on v90 finds
+// projects only, and its grid has no field.
+const VERSION = 'ghostfleet-v91';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
