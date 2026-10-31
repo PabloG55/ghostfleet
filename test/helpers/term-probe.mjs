@@ -138,6 +138,14 @@ const noOrigin = await wsOpen(tk(r3), { origin: '' });
 is('term: a WebSocket with no Origin at all is refused', 403, noOrigin.status);
 const forged = await wsOpen('/api/term/ws?ticket=not-a-ticket');
 is('term: a WebSocket with no live ticket is refused', 401, forged.status);
+// Any origin the config LISTS, not only the first: run.sh lists this one second. Closed,
+// and gone from tmux, before the good one opens — the rows below count its control client
+// as the only one.
+const r2b = await open(await a.fresh(BASE, 'terminal'));
+const second = await wsOpen(tk(r2b), { origin: `http://127.0.0.1:${U.port}`, host: `127.0.0.1:${U.port}` });
+is('term: a second configured origin upgrades too', 101, second.status);
+if (second.status === 101) { await until(() => second.msgs.some(m => m.t === 'ready')); second.close(); }
+await until(() => !tmux('list-clients', '-t', TAB, '-F', '#{client_control_mode}').includes('1'));
 // The good one: same everything, right origin, fresh ticket.
 const r4 = await open(await a.fresh(BASE, 'terminal'));
 const ws = await wsOpen(tk(r4));

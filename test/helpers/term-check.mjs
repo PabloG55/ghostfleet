@@ -52,30 +52,59 @@ const a = new Authenticator({ rpId: U.hostname, origin: U.origin });
 const reg = await a.enroll(BASE, CODE);
 is('term-ui: the device enrolled', 200, reg.status);
 
-try { browser = await launch({ width: 390, height: 844, scale: 2, mobile: true }); }
-catch (e) { if (/no chrome/.test(String(e.message))) { skipGroup('the web terminal in a browser', 'no chrome'); await done(0); } throw e; }
-const { call, evaluate } = browser;
-// The page's own failures, on stderr — run.sh shows the first lines of it under a red row.
-browser.onEvent((m, p) => {
-  if (m === 'Runtime.exceptionThrown') console.error('page threw:', (p.exceptionDetails && (p.exceptionDetails.exception?.description || p.exceptionDetails.text) || '').split('\n')[0]);
-  if (m === 'Runtime.consoleAPICalled' && p.type === 'error') console.error('page console.error:', (p.args || []).map(x => x.value ?? x.description).join(' ').slice(0, 200));
-});
-await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-await call('WebAuthn.enable', { enableUI: false });
-const { authenticatorId } = await call('WebAuthn.addVirtualAuthenticator', { options: {
-  protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
-  isUserVerified: true, automaticPresenceSimulation: true } });
-await call('WebAuthn.addCredential', { authenticatorId, credential: {
-  credentialId: a.credId.toString('base64'), isResidentCredential: false, rpId: U.hostname,
-  privateKey: a.priv.export({ format: 'der', type: 'pkcs8' }).toString('base64'), signCount: a.counter } });
+// ONE CHROME PER DEVICE: the phone, then a desk. Not one browser whose touch emulation is
+// switched off half way: on a Linux runner, which has no pointing device at all, turning it
+// off drops the page back to (pointer: none) and no hover — measured, the launch switch that
+// declares a mouse is forgotten there (a Mac goes back to fine) — and the two panes, which
+// ask for a fine pointer that hovers, never appeared. So the desk is launched as a desk,
+// with the mouse declared as desktop-check.mjs does, and is handed the same passkey with
+// the signature counter where the phone left it: the server refuses one that goes back.
+const MOUSE = '--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2';
+let call, evaluate, authenticatorId, signCount = a.counter;
+async function device(phone) {
+  if (browser) {
+    const { credentials = [] } = await call('WebAuthn.getCredentials', { authenticatorId }).catch(() => ({}));
+    if (credentials[0]) signCount = credentials[0].signCount;
+    await browser.close(); browser = null;
+  }
+  try { browser = await launch(phone ? { width: 390, height: 844, scale: 2, mobile: true } : { width: 1280, height: 800, scale: 1, mobile: false, args: [MOUSE] }); }
+  catch (e) { if (/no chrome/.test(String(e.message))) { skipGroup('the web terminal in a browser', 'no chrome'); await done(0); } throw e; }
+  ({ call, evaluate } = browser);
+  // The page's own failures, on stderr — run.sh shows the first lines of it under a red row.
+  browser.onEvent((m, p) => {
+    if (m === 'Runtime.exceptionThrown') console.error('page threw:', (p.exceptionDetails && (p.exceptionDetails.exception?.description || p.exceptionDetails.text) || '').split('\n')[0]);
+    if (m === 'Runtime.consoleAPICalled' && p.type === 'error') console.error('page console.error:', (p.args || []).map(x => x.value ?? x.description).join(' ').slice(0, 200));
+  });
+  if (phone) await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await call('WebAuthn.enable', { enableUI: false });
+  ({ authenticatorId } = await call('WebAuthn.addVirtualAuthenticator', { options: {
+    protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
+    isUserVerified: true, automaticPresenceSimulation: true } }));
+  await call('WebAuthn.addCredential', { authenticatorId, credential: {
+    credentialId: a.credId.toString('base64'), isResidentCredential: false, rpId: U.hostname,
+    privateKey: a.priv.export({ format: 'der', type: 'pkcs8' }).toString('base64'), signCount } });
+  // Every WebSocket the page constructs, and every click, counted before any script of the app runs.
+  await call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    window.__gfWs = 0;
+    window.__gfClicks = 0;
+    document.addEventListener('click', () => { window.__gfClicks++; }, true);
+    const W = window.WebSocket;
+    // ...and every binary frame it writes, one entry per send, so a row that fails over a
+    // key can print the bytes and their write boundaries the page put on the socket.
+    window.__gfSent = [];
+    window.WebSocket = class extends W {
+      constructor(...x) { super(...x); window.__gfWs++; }
+      send(d) {
+        if (typeof d !== 'string') window.__gfSent.push(Array.from(new Uint8Array(d.buffer || d, d.byteOffset || 0, d.byteLength), (b) => b.toString(16).padStart(2, '0')).join(''));
+        if (window.__gfSent.length > 200) window.__gfSent.shift();
+        return super.send(d);
+      }
+    };
+    try { localStorage.setItem('gf.cred:${U.origin}', ${JSON.stringify(a.credentialId)}); } catch {}
+  ` });
+}
+await device(true);
 const userVerified = (v) => call('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: v });
-// Every WebSocket the page constructs, counted before any script of the app runs.
-await call('Page.addScriptToEvaluateOnNewDocument', { source: `
-  window.__gfWs = 0;
-  const W = window.WebSocket;
-  window.WebSocket = class extends W { constructor(...x) { super(...x); window.__gfWs++; } };
-  try { localStorage.setItem('gf.cred:${U.origin}', ${JSON.stringify(a.credentialId)}); } catch {}
-` });
 
 const nav = async () => {
   await call('Page.navigate', { url: BASE + '/' });
@@ -99,17 +128,23 @@ let touching = true;
 async function tap(sel, text) {
   const p = await until(() => rectOf(sel, text), 6000);
   if (!p) return false;
+  const n0 = await evaluate(() => window.__gfClicks);
   if (touching) {
-    // Through Chrome's own gesture recogniser, which is what turns a finger into the
-    // pointerdown, touchstart and click a page sees — a bare touchStart/touchEnd pair does
-    // not make a click, and the grid's ⋯ never opened.
-    await call('Input.synthesizeTapGesture', { x: p.x, y: p.y, duration: 40, tapCount: 1, gestureSourceType: 'touch' });
+    // A touch pair, which Chrome turns into pointerdown, touchstart, touchend and click.
+    // NOT Input.synthesizeTapGesture: on Linux headless Chrome it delivers the pointer and
+    // touch events and never the click — measured, 0 clicks in 3 there against 3 in 3 on a
+    // Mac — so on the Linux leg the ⋯ "opened" nothing and every row after it went red.
+    await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p.x, y: p.y }] });
+    await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   } else {
     await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', clickCount: 1 });
     await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', clickCount: 1 });
   }
+  // Returns once the click has ARRIVED (a touch becomes one asynchronously), so a tap that
+  // made none is red here, at the tap, instead of as the next thirty rows.
+  const clicked = !!(await until(async () => (await evaluate(() => window.__gfClicks)) > n0, 3000));
   await sleep(150);
-  return true;
+  return clicked;
 }
 // TERM_SHOTS=<dir>: a PNG at the moments worth looking at, for a human reviewing a change.
 const shot = async (name) => {
@@ -247,7 +282,19 @@ else {
   is('...with the file name on it', true, !!drawn && drawn.includes(FILE));
   await shot('phone-nvim');
   await typeText('ihello from nvim');
-  await tap('.term-keys button', 'Esc');                // Esc from the key row
+  // Each step once the last one is ON SCREEN, as a person would, and the Esc's own effect
+  // looked for before `:wq` is typed. On the Linux runner the Esc once took no effect: nvim
+  // stayed in insert mode and `:wq` became text. Not reproduced here — 40 runs recording the
+  // pane's input had the bytes whole and in order, and nvim 0.9.5 leaves insert mode for an
+  // ESC followed by `:` at any gap from 0 to 100ms — so when it happens again this says
+  // whether the tap clicked and what the page wrote to the socket, write by write.
+  await until(() => screenText().then(t => t.includes('hello from nvim') && t.includes('-- INSERT --')), 6000);
+  const sent0 = await evaluate(() => window.__gfSent.length);
+  const escTapped = await tap('.term-keys button', 'Esc');                // Esc from the key row
+  if (!(await until(() => screenText().then(t => !t.includes('-- INSERT --')), 6000))) {
+    console.error(`key-row Esc: clicked ${escTapped}, written since ${JSON.stringify(await evaluate((n) => window.__gfSent.slice(n), sent0))}, ` +
+      `nvim's last line ${JSON.stringify(capture().split('\n').filter(Boolean).slice(-1)[0] || '')}`);
+  }
   await typeText(':wq'); await key('Enter');
   const saved = await until(() => { try { return fs.readFileSync(`${REPO}/${FILE}`, 'utf8'); } catch { return ''; } }, 8000);
   is('term-ui: insert, Esc from the key row, :wq — and the file is written', 'hello from nvim\n', saved);
@@ -263,10 +310,9 @@ is('...and the tab stays for the desk', true, hasTab());
 
 // ══ DESKTOP, 1280x800, a mouse and a keyboard ══════════════════════════════════════
 touching = false;
-await call('Emulation.setTouchEmulationEnabled', { enabled: false });
-await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+await device(false);
 await nav();
-// From Projects, whatever the phone half left on screen (the app restores its last screen).
+// From Projects, whatever screen the app chose to open on.
 await key('Escape'); await key('p', CTRL);
 await sleep(600);
 const duo = await until(() => evaluate(() => document.documentElement.classList.contains('duo')), 6000);
@@ -312,7 +358,15 @@ if (hasNvim) {
   await sleep(300);
   await typeText(`nvim --clean -n ${MF}`); await key('Enter');
   await until(() => screenText().then(t => t.includes('ccc')), 8000);
+  // NOT ON THE FIRST FRAME WITH THE TEXT: until xterm has seen nvim ask for the mouse, a
+  // click is a selection and nvim never hears it. xterm marks its element once a mode is on.
+  // On a macOS runner the click once moved nothing and the `x` deleted the first character
+  // of the file; it did not reproduce here, even with the page throttled 20x, so this wait
+  // and the line printed after the click are there to say which half it was next time.
+  await until(() => evaluate(() => !!document.querySelector('#app .xterm.enable-mouse-events')), 6000);
   await shot('desk-nvim');
+  // The row the cursor is drawn on, 0-based: how the click is seen to have reached nvim.
+  const cursorRow = () => evaluate(() => [...document.querySelectorAll('#app .xterm-rows > div')].findIndex(d => d.querySelector('.xterm-cursor')));
   const third = await evaluate(() => {
     const r = [...document.querySelectorAll('#app .xterm-rows > div')].find(d => d.textContent.startsWith('ccc'));
     if (!r) return null;
@@ -322,8 +376,12 @@ if (hasNvim) {
   if (third) {
     await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: third.x, y: third.y, button: 'left', clickCount: 1 });
     await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: third.x, y: third.y, button: 'left', clickCount: 1 });
-    await sleep(300);
-  }
+    // ...and the `x` only once nvim has drawn its cursor on that row, not after a fixed wait.
+    if (!(await until(async () => (await cursorRow()) === 2, 5000))) {
+      const under = await evaluate((x, y) => { const e = document.elementFromPoint(x, y); return e ? `${e.tagName.toLowerCase()}.${String(e.className && e.className.baseVal !== undefined ? e.className.baseVal : e.className).replace(/ +/g, '.')}` : 'nothing'; }, third.x, third.y);
+      console.error(`desk click: the cursor is on row ${await cursorRow()}, mouse mode ${await evaluate(() => !!document.querySelector('#app .xterm.enable-mouse-events'))}, under the click ${under}`);
+    }
+  } else console.error('desk click: no row of the screen starts with ccc');
   await typeText('x:wq'); await key('Enter');
   const after2 = await until(() => { const t = fs.readFileSync(`${REPO}/${MF}`, 'utf8'); return t !== 'aaa\nbbb\nccc\n' && t; }, 6000);
   is('term-ui (desk): a click moves nvim\'s cursor (x deleted the char under it)', 'aaa\nbbb\ncc\n', after2 || 'unchanged');

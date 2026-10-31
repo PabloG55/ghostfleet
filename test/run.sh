@@ -16140,7 +16140,9 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
              HOME="$WT/home" TMUX= node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
   wt_cli init --bind 127.0.0.1 --port "$WTPORT" >/dev/null 2>&1
   # A short idle for the probe, which waits one out; the browser half gets a long one below.
-  wt_cfg() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};c.terminal_idle=+process.argv[2];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$WT/serve.json" "$1"; }
+  # And a SECOND origin, as a config that serves both a tailnet name and localhost has: the
+  # upgrade must take any origin the list holds, not only the one `init` wrote first.
+  wt_cfg() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000,challenge:4000};c.terminal_idle=+process.argv[2];c.origins=[...new Set([...(c.origins||[]),"http://127.0.0.1:"+c.port])];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$WT/serve.json" "$1"; }
   wt_cfg 10
   # SHELL=/bin/sh and an empty ENV: the tab runs `$SHELL -l`, and the rows read its prompt.
   GHOSTFLEET_SERVE_CONFIG="$WT/serve.json" GHOSTFLEET_SERVE_AUDIT="$WT/audit.jsonl" HOME="$WT/home" TMUX= \
