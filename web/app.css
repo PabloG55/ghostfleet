@@ -631,6 +631,18 @@ button.usage { cursor: pointer; }
 .strip .stat.on { background: color-mix(in srgb, var(--c) 9%, transparent);
                    border-color: color-mix(in srgb, var(--c) 30%, transparent); }
 .strip .stat.on .l { color: var(--fg); }
+/* TWO BY TWO WHERE FOUR ACROSS CANNOT HOLD THE WORDS. At 320px each of four tiles leaves its
+ * label 42px, and `need you` needs 52 and `working` 45 — so they read "need …" and "worki…",
+ * the ellipsis above doing its job on the two words that most need reading. Wrapping keeps
+ * every word whole for everyone; shortening the visible label would have kept it whole
+ * only for a screen reader, and these are the TUI's own words, not this file's to trim.
+ *   374 because four across needs about 336px of strip for `need you`, which a 360px
+ * Android phone gives it with nothing to spare, and 375 (the smallest current iPhone) gives
+ * it 7% over. The duo layout starts at 1024, so no desktop ever reaches this. */
+@media (max-width: 374px) {
+  .strip { flex-wrap: wrap; }
+  .strip .stat { flex-basis: calc(50% - 4px); }
+}
 /* A BUTTON NEVER LEAVES THE SCREEN, IT TRUNCATES. The bar already wrapped, which handles
  * "too many buttons" and does nothing at all for "one button wider than the phone" — at
  * iOS's largest accessibility text `x remove` on its own is 342px against a 304px column,
