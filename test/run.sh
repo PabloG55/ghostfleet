@@ -9735,6 +9735,14 @@ while :; do
     if [ "$text" = DROPME ]; then
       printf '{"id":"%s","dropped":"refused by a hook"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
     fi
+    # The host's refusal, quotes and all, and a slash command that ran with no turn of its own.
+    if [ "$text" = ERRME ]; then
+      printf '{"id":"%s","error":"%s","head":"ERRME","sock":"cffm","slot":"w1"}' "$id" 'the host said \"no\" (host check)' > "$sp/$id.done"
+      rm -f "$sp/$id.taken"; continue
+    fi
+    if [ "$text" = RANME ]; then
+      printf '{"id":"%s","ran":"/cost"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
+    fi
     st=working; rec
     printf 'TURN %s%s%s\n' "$text" "${rs:+ reply=$rs}" "${k:+ kind=$k}" >> "$log"
     printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
@@ -9819,6 +9827,26 @@ MOD
   mready
   mx="$(MS w1 "DROPME")"; mxc=$?
   is "a prompt the session refuses: exit 1, and said" "1 1" "$mxc $(grep -c 'not delivered' <<< "$mx" || true)"
+  # The host's words whole, its quotes unescaped, and the receipt taken: fleet-send read
+  # it and said it, so it is no longer fleet-inbox's to report (lib/handoff-sweep.mjs).
+  mready
+  mx="$(MS w1 "ERRME")"; mxc=$?
+  is "a refused delivery: exit 1 with the error, whole" "1 1" "$mxc $(grep -cF 'the host said "no" (host check)' <<< "$mx" || true)"
+  is "...and its receipt is consumed"                 "0" "$(grep -l 'host said' "$MF"/fm-1.handoff/*.done 2>/dev/null | grep -c . || true)"
+  is "...and nothing filed: the sender was told"      "0" "$(grep -c 'failed' <<< "$(cat "$MF/cffm.inbox" 2>/dev/null)" || true)"
+  # A slash command that ran without starting a turn (a panel, a local command) delivered.
+  mready
+  mx="$(MS w1 "RANME")"; mxc=$?
+  is "a command that ran with no turn: delivered"     "0 1" "$mxc $(grep -c '→ w1 (ran /cost; it started no turn)' <<< "$mx" || true)"
+  # Refused from the QUEUE: the drain sends with its output going nowhere, so the failure
+  # is filed in the lead's inbox, naming the worker and the host's words.
+  mready; : > "$M/turns"
+  MS w1 "task-slow-kilo" >/dev/null; mwait 1 25
+  mq="$(MS w1 "ERRME")"
+  is "a refused prompt drained from the queue..."     "1" "$(grep -c 'queued #1' <<< "$mq" || true)"
+  for _ in $(seq 1 60); do grep -q 'failed' "$MF/cffm.inbox" 2>/dev/null && break; sleep 0.2; done
+  is "...is filed in the lead's inbox, with the error" "1" \
+     "$(grep -cF "$(printf '\tw1\tfailed\ta queued prompt not delivered — the host said "no" (host check)')" <<< "$(cat "$MF/cffm.inbox" 2>/dev/null)" || true)"
 
   # A mod that is live and idle but never claims: taken back and pasted.
   : > "$M/turns"; touch "$MF/pause"
@@ -9852,6 +9880,85 @@ MOD
   rm -rf "${M:?}"
 else
   skip "a session whose mod is live takes its prompts from the mod" "tmux/jq/node missing"
+fi
+
+# ── 4c1m2. a prompt that does not land says so, wherever it was sent from ──────────
+# The host refuses `$.prompt.submit` for a text that starts with "/", so a brief opening
+# with a skill was refused in every fleet that sent one: the receipt said why, fleet-spawn's
+# deferred send had already dropped its output, and the lead saw a worker that "never
+# started". The mod now runs such a text as the command it is (the harness, `claude plugin
+# test`, holds that end; its parsing is held here too, where CI has no claude), and a
+# delivery that still fails reaches a person: fleet-spawn files it in the lead's inbox and
+# says it on the terminal it ran in, and a failed receipt no sender read is filed by
+# fleet-inbox (lib/handoff-sweep.mjs).
+group "a prompt that does not land says so"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  hp="$(node --input-type=module -e "
+    import { commandOf, isTurnOf } from '$ROOT/mods/ghostfleet/hooks/handoff.js';
+    const c = commandOf('/some-skill redo the page\n\nkeep the colours  ');
+    const p = { text: '/some-skill a b', command: commandOf('/some-skill a b') };
+    const turn = a => '<command-message>some-skill</command-message>\n<command-name>/some-skill</command-name>\n<command-args>' + a + '</command-args>';
+    console.log([c.command, JSON.stringify(c.args), commandOf('plain words, see /tmp/log') === null,
+      Boolean(commandOf('//literal').refused), Boolean(commandOf('/Users/x/notes.md hi').refused),
+      isTurnOf(p, turn('a b')), isTurnOf(p, turn('other')), isTurnOf(p, '/some-skill a b')].join(' '))")"
+  is "a brief that opens with a skill runs as that command, its args whole" \
+     'some-skill "redo the page\n\nkeep the colours" true true true true false false' "$hp"
+
+  # THE SWEEP. Three spools: worker w1's (the receipt names it), worker w2's (an older mod's
+  # receipt that names nobody, so its status record does; its lead is a live sub-lead), and
+  # a worker of ANOTHER fleet that shares the dir.
+  HS="$(mktemp -d)"; HF="$HS/fleet"; mkdir -p "$HF/s-1.handoff" "$HF/s-2.handoff" "$HF/s-3.handoff"
+  hold=$(( ($(date +%s) - 120) * 1000 )); hnew=$(( $(date +%s) * 1000 ))
+  printf '{"id":"%s-1","error":"no command named /x","head":"/x do it","sock":"cfhs","slot":"w1","at":%s}' "$hold" "$hold" > "$HF/s-1.handoff/$hold-1.done"
+  printf '{"id":"%s-2","error":"fresh","sock":"cfhs","slot":"w1","at":%s}' "$hnew" "$hnew" > "$HF/s-1.handoff/$hnew-2.done"
+  printf '{"id":"%s-3","turnId":"t1","at":%s}' "$hold" "$hold" > "$HF/s-1.handoff/$hold-3.done"
+  printf '{"id":"%s-4","dropped":"a hook said no","at":%s}' "$hold" "$hold" > "$HF/s-2.handoff/$hold-4.failed"
+  printf '{"session_id":"s-2","sock":"cfhs","slot":"w2"}' > "$HF/s-2.json"
+  printf 'lead2\n' > "$HF/cfhs.w2.parent"
+  printf '{"id":"%s-5","error":"elsewhere","sock":"cfother","slot":"w1","at":%s}' "$hold" "$hold" > "$HF/s-3.handoff/$hold-5.done"
+  tmux -L cfhs kill-server 2>/dev/null; tmux -L cfhs new-session -d -s lead2 'sleep 120' 2>/dev/null
+  HI() { env -u TMUX -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK CLAUDE_FLEET_DIR="$HF" "$ROOT/bin/fleet-inbox" -s cfhs 2>&1; }
+  hi="$(HI)"
+  is "a failed receipt nobody read is in fleet-inbox, naming the worker and the prompt" "1" \
+     "$(grep -cE 'w1 +FAILED +"/x do it" was not delivered at [0-9:]+, and no sender read why — no command named /x' <<< "$hi" || true)"
+  is "...its receipt cleared, so it is filed once"   "no" "$([ -e "$HF/s-1.handoff/$hold-1.done" ] && echo yes || echo no)"
+  is "...a fresh one is still its sender's to read"  "yes 0" \
+     "$([ -e "$HF/s-1.handoff/$hnew-2.done" ] && echo yes || echo no) $(grep -c fresh <<< "$hi" || true)"
+  is "...a delivered one is left alone"              "yes" "$([ -e "$HF/s-1.handoff/$hold-3.done" ] && echo yes || echo no)"
+  is "...another fleet's is left for that fleet"     "yes 0" \
+     "$([ -e "$HF/s-3.handoff/$hold-5.done" ] && echo yes || echo no) $(grep -c elsewhere <<< "$hi" || true)"
+  is "a kept failure goes to the inbox of the worker's lead" "1" \
+     "$(grep -cF "$(printf '\tw2\tfailed\ta prompt was not delivered at')" <<< "$(cat "$HF/cfhs.lead2.inbox" 2>/dev/null)" || true)"
+  is "...naming what refused it"                     "1" "$(grep -c 'dropped by a hook: a hook said no' <<< "$(cat "$HF/cfhs.lead2.inbox" 2>/dev/null)" || true)"
+  is "...and a second look files nothing again"      "1" "$(grep -c 'inbox: nothing new' <<< "$(HI)" || true)"
+  tmux -L cfhs kill-server 2>/dev/null; rm -rf "${HS:?}"
+
+  # FLEET-SPAWN'S DEFERRED BRIEF. The send runs after fleet-spawn returned, so its failure
+  # (here a fleet-send that answers as one does when the mod could not deliver) is filed for
+  # the lead and printed on the terminal fleet-spawn ran in: run inside a pane, so its
+  # stderr IS a terminal, and the worker's pane shows a ready composer so the send happens.
+  FS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$FS/home/.config/ghostfleet" "$FS/stub" "$FS/fleet"
+  printf '#!/usr/bin/env bash\nprintf "❯ \\n"; sleep 120\n' > "$FS/stub/agent-here"
+  printf '#!/usr/bin/env bash\necho "fleet-send: → $3 (not delivered: the mod could not submit it — no command named /x)" >&2\nexit 1\n' > "$FS/stub/fleet-send"
+  chmod +x "$FS/stub/agent-here" "$FS/stub/fleet-send"
+  git init -q -b main "$FS/repo" 2>/dev/null
+  git -C "$FS/repo" config user.email t@t; git -C "$FS/repo" config user.name t
+  : > "$FS/repo/f"; git -C "$FS/repo" add -A; git -C "$FS/repo" commit -qm init 2>/dev/null
+  tmux -L cfhsw kill-server 2>/dev/null; tmux -L cfhsrun kill-server 2>/dev/null
+  tmux -L cfhsrun new-session -d -x 220 -y 50 \
+    "cd '$FS/repo' && env -u TMUX -u CLAUDE_FLEET_SLOT HOME='$FS/home' CLAUDE_FLEET_SOCK=cfhsw CLAUDE_FLEET_DIR='$FS/fleet' \
+       CLAUDE_FLEET_SLOTS='$FS/slots' PATH='$FS/stub:$ROOT/bin':\"\$PATH\" '$ROOT/bin/fleet-spawn' w1 --new --prompt '/x do it'; sleep 120" 2>/dev/null
+  for _ in $(seq 1 100); do grep -q failed <<< "$(cat "$FS/fleet/cfhsw.inbox" 2>/dev/null)" && break; sleep 0.2; done
+  fi_="$(env -u TMUX -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK CLAUDE_FLEET_DIR="$FS/fleet" "$ROOT/bin/fleet-inbox" -s cfhsw 2>&1)"
+  is "a deferred brief that fails is in fleet-inbox, naming the worker and why" "1" \
+     "$(grep -cE 'w1 +FAILED +its initial prompt was not delivered — fleet-send: → w1 \(not delivered: the mod could not submit it — no command named /x\)' <<< "$fi_" || true)"
+  for _ in $(seq 1 20); do grep -q 'NOT delivered' <<< "$(tmux -L cfhsrun capture-pane -p -J 2>/dev/null)" && break; sleep 0.2; done
+  is "...and is said on the terminal fleet-spawn ran in" "1" \
+     "$(grep -c "fleet-spawn: w1: its initial prompt was NOT delivered — fleet-send: → w1" <<< "$(tmux -L cfhsrun capture-pane -p -J 2>/dev/null)" || true)"
+  tmux -L cfhsw kill-server 2>/dev/null; tmux -L cfhsrun kill-server 2>/dev/null
+  rm -rf "${FS:?}"
+else
+  skip "a prompt that does not land says so" "node/tmux/git missing"
 fi
 
 # ── 4c1n. a mod record on ANOTHER tmux server is not this session's mod ─────────

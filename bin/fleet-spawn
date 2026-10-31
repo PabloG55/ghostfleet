@@ -978,8 +978,17 @@ if [ -n "$PROMPT" ]; then
   if [ "$AGENT" != claude ] && command -v fleet-agent >/dev/null 2>&1; then
     READY_RE="$(fleet-agent field "$AGENT" ready_re 2>/dev/null)"
   fi
+  # A BRIEF THAT IS NOT DELIVERED SAYS SO. This send runs after fleet-spawn has returned,
+  # with its output going nowhere, so a refusal (a brief opening with a slash command the
+  # mod could not run, a session gone before it was ready) used to leave a worker that
+  # "never started" and nothing to say why. Its failure is filed in the inbox of the lead
+  # the worker reports to, naming the worker and fleet-send's own words, and printed on
+  # the terminal fleet-spawn ran in, when it ran in one.
+  _inbox="$FLEET_DIR_NOW/$SOCK.inbox"
+  case "$PARENT_SESS" in ''|master) ;; *) _inbox="$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.inbox" ;; esac
+  _tty=""; [ -t 2 ] && _tty="$(tty <&2 2>/dev/null)"; case "$_tty" in /dev/*) ;; *) _tty="" ;; esac
   nohup bash -c '
-    sock="$1"; name="$2"; msg="$3"; re="$4"
+    sock="$1"; name="$2"; msg="$3"; re="$4"; inbox="$5"; tty="$6"
     if [ -n "$re" ]; then
       for _ in $(seq 1 90); do
         tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null | grep -qE "$re" && break
@@ -989,7 +998,11 @@ if [ -n "$PROMPT" ]; then
       sleep 15                      # no ready marker for this agent — best effort
     fi
     sleep 1
-    fleet-send -s "$sock" "$name" "$msg"
-  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" >/dev/null 2>&1 &
-  echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input"
+    out="$(fleet-send -s "$sock" "$name" "$msg" 2>&1)" && exit 0
+    why="$(printf "%s\n" "$out" | grep -v "^[[:space:]]*$" | tail -1 | tr "\t\r" "  " | cut -c1-300)"
+    printf "%s\t%s\tfailed\t%s\n" "$(date +%s)" "$name" "its initial prompt was not delivered — ${why:-fleet-send failed without a reason}" >> "$inbox" 2>/dev/null
+    [ -n "$tty" ] && printf "\nfleet-spawn: %s: its initial prompt was NOT delivered — %s\n" "$name" "${why:-fleet-send failed without a reason}" > "$tty" 2>/dev/null
+    exit 1
+  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" "$_inbox" "$_tty" >/dev/null 2>&1 &
+  echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input (a failure goes to fleet-inbox)"
 fi

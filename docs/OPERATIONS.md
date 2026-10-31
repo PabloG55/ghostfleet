@@ -943,7 +943,9 @@ problems.
 ```
 <id>.json      fleet-send left it: { id, text, reply? }
 <id>.taken     the mod claimed it (a rename) while no turn was running
-<id>.done      the receipt: { turnId } once its turn started, or { dropped | error }
+<id>.done      the receipt: { turnId } once its turn started, { ran } for a slash command
+               that ran without starting one, or { dropped | error }
+<id>.failed    a failed receipt nobody read within the hour, kept for fleet-inbox
 <id>.revoked   fleet-send took it back unclaimed and pasted it instead
 .ready         the pid of the mod process that delivers from here
 ```
@@ -954,6 +956,27 @@ renames it to `.revoked`. If the session went busy in that gap, the prompt is qu
 Otherwise it is pasted, with a note on stderr. If the mod claimed it first, the revoke's
 rename fails, so a prompt is never both submitted and pasted. Receipts are kept for an
 hour.
+
+**A prompt may start with a slash command.** `fleet-spawn w1 --prompt "/some-skill redo the
+settings page …"` runs `/some-skill` with everything after it as its arguments, exactly as if
+it had been typed, and its turn is the one the receipt names. The host refuses a text
+beginning with `/` as a plain prompt, so the mod runs it through `$.command.run` instead.
+There is no escape for a literal leading slash. The host refuses `//x`, ` /x` and `/x` alike
+as prompt text, so a `//` brief, a bare `/` or a path (`/tmp/log …`) is refused with a
+message that says to reword it. A command that answers without a turn (a panel, a local
+command) is receipted `ran`, and `fleet-send` prints `→ w1 (ran /cost; it started no turn)`.
+The mod's own `/fleet`, `/inbox` and `/ledger` cannot be run this way: the host skips a
+plugin's own hooks when it runs a command itself. Use `fleet-list`, `fleet-inbox` and
+`fleet-ledger` instead.
+
+**A delivery that fails is never silent.** `fleet-send` waits for the receipt, prints the
+mod's error and exits 1, and removes a failed receipt once it has reported it. Two senders
+have no reader for that output, so they file the failure as a `failed` row in the inbox of
+the worker's lead: `fleet-spawn`'s deferred brief (also printed on the terminal
+`fleet-spawn` ran in, when there is one) and the queue's drain. Any failed receipt still on
+disk 30 seconds after it was written was read by nobody. `fleet-inbox` files it as a
+`failed` row naming the worker, the opening words of the prompt and the error, then clears
+it (`lib/handoff-sweep.mjs`).
 
 **What stays the same.** Outputs and exit codes, the queue and its card count, the
 `[fleet]` preambles, the nudges and their deferral (they still wait for an empty box,
@@ -972,8 +995,9 @@ session of that name.
 
 **Who sent it.** Each `.sent` row carries a fifth field:
 `from=<sock>/<session> cwd=<dir> by=<parent command>`. The session comes from `$TMUX`, and
-is marked `env:` when it was only read from the environment. `-` means no fleet session. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
-exits 1 with `not delivered`.
+is marked `env:` when it was only read from the environment. `-` means no fleet session. One new failure gets a code: a prompt the mod could not submit (a hook dropped it, the
+host refused it, a command that does not exist) exits 1 with `not delivered` and the
+mod's own words.
 
 **Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet
 plugin`. The record's `turnId` and the handoff's `<id>.done` name the same turn.

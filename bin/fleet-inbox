@@ -258,6 +258,13 @@ finished_live() {
 }
 reclaim_hints() { finished_live; reclaimable; }
 
+# A PROMPT THE MOD REFUSED, THAT NO SENDER READ. fleet-send reports a failed handoff and
+# removes its receipt; one still on disk was read by nobody (fleet-send gave up waiting, or
+# it failed after), so it is filed here as a `failed` row before the inbox is read
+# (lib/handoff-sweep.mjs). Without node it stays on disk for a reader that has it.
+SWEEP="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/handoff-sweep.mjs"
+[ -f "$SWEEP" ] && command -v node >/dev/null 2>&1 && node "$SWEEP" "$FLEET_DIR" "$SOCK" >/dev/null 2>&1
+
 [ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; reclaim_hints; exit 0; }
 ANN="$(annotate)"
 

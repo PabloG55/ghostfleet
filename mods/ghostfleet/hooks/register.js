@@ -51,6 +51,7 @@ import {
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
+  commandOf, failureOf, headOf,
 } from './handoff.js'
 
 // ── the record ──────────────────────────────────────────────────────────────
@@ -340,7 +341,10 @@ async function onInbox($) { return runFleet($, 'fleet-inbox') }
 // folded into the running turn so the next Stop belonged to work nobody asked for (hence
 // arming reply-to on UserPromptSubmit). From in here it is one call, `$.prompt.submit`,
 // which leaves the person's draft alone, runs as a turn of its own, and whose turn this
-// section can name exactly.
+// section can name exactly. A prompt that opens with a slash command (`/skill args`) is the
+// one exception: the host refuses it to `$.prompt.submit`, so it goes through
+// `$.command.run`, which runs it as if typed and starts its turn the same way
+// (./handoff.js commandOf has the measurements).
 //
 // THE CHANNEL IS A SPOOL DIRECTORY PER SESSION, polled (./handoff.js has the layout).
 // Claude Code's cross-session messaging was the other candidate and loses on each count
@@ -374,9 +378,15 @@ const POLL_MS = 500
 // How long a claimed prompt may take to reach its turn.start before it is written off: the
 // engine runs it "once idle", and a person's own turn can put that off.
 const START_MS = 120_000
+// How long a command run that resolved may take to start its turn before it is taken to have
+// started none. Measured: a skill's run resolves and its turn.start lands in the same
+// millisecond; a panel command (/cost) resolves once its panel closes, with no turn at all.
+const RAN_MS = 10_000
+// The slash commands this mod registers and answers itself (COMMANDS, LEDGER).
+const OWN_COMMANDS = ['fleet', 'inbox', 'ledger']
 
 let turnRunning = false
-let pending = null                         // { id, text, reply, at }: submitted, not started
+let pending = null                         // { id, text, command, reply, at }: submitted, not started
 let claiming = false
 let poll = null
 let spool = ''
@@ -392,10 +402,30 @@ async function writeSpool($, dir, name, text) {
   return moved?.exitCode === 0
 }
 
+// A failure also names the session it failed in, so fleet-inbox can put it in front of that
+// session's lead when no sender read it (lib/handoff-sweep.mjs): by then the session that
+// wrote it may have ended and taken its status record with it.
 async function receipt($, id, fields) {
   const nowMs = await $.clock.now()
-  await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, at: nowMs }))
+  let who = {}
+  if (failureOf(fields)) {
+    const rec = await readRecord($, `${await fleetDir($)}/${deliverSid}.json`)
+    if (rec && rec.sock && rec.slot) who = { sock: rec.sock, slot: rec.slot }
+  }
+  await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, ...who, at: nowMs }))
   await runBounded($, ['rm', '-f', `${spool}/${id}.taken`])
+}
+
+// Receipts past the hour go, except a failure: nobody read it (fleet-send removes the ones it
+// reported), so it is kept as <id>.failed for fleet-inbox to report and clear.
+async function clearReceipts($, dir, names) {
+  const gone = []
+  for (const n of names) {
+    const r = await readRecord($, `${dir}/${n}`)
+    if (failureOf(r)) await runBounded($, ['mv', '-f', `${dir}/${n}`, `${dir}/${entryId(n, '.done')}.failed`])
+    else gone.push(`${dir}/${n}`)
+  }
+  if (gone.length) await runBounded($, ['rm', '-f', ...gone])
 }
 
 // One at a time, and only while idle: a prompt claimed mid-turn would sit inside the
@@ -408,7 +438,7 @@ async function deliverTick($) {
     if (!entries) return
     const nowMs = await $.clock.now()
     const old = staleReceipts(entries, nowMs)
-    if (old.length) void runBounded($, ['rm', '-f', ...old.map(n => `${spool}/${n}`)])
+    if (old.length) await bounded($, clearReceipts($, spool, old), IO_MS * 2, null)
     const id = waiting(entries)[0]
     if (!id) return
     const took = await runBounded($, ['mv', `${spool}/${id}.json`, `${spool}/${id}.taken`])
@@ -418,8 +448,18 @@ async function deliverTick($) {
       await receipt($, id, { error: 'unreadable entry' })
       return
     }
+    const cmd = commandOf(entry.text)
+    // This mod's own commands cannot be run from here: the host runs a plugin's
+    // `$.command.run` through every hook but that plugin's own, so measured, `/fleet` ran
+    // and printed "no command.run hook answered it", and its receipt said it had run.
+    const own = cmd && OWN_COMMANDS.includes(cmd.command)
+      ? `/${cmd.command} is this session's own ghostfleet command, which its delivery cannot run (the host skips a plugin's own hooks on its own run); run fleet-${cmd.command === 'fleet' ? 'list' : cmd.command} instead` : ''
+    if (cmd && (cmd.refused || own)) {
+      await receipt($, id, { error: cmd.refused || own, head: headOf(entry.text) })
+      return
+    }
     // `kind: "nudge"`: a wake-up fleet-send was told is one (--nudge), never a request.
-    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
+    pending = { id, text: entry.text, command: cmd, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
     // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
     // hook but its own, so LEDGER's never sees it.
     await ledgerDelivery($, pending)
@@ -430,12 +470,24 @@ async function deliverTick($) {
     if (await maybeJarvis($).catch(() => false))
       await bounded($, guardRun($, [bin($, 'fleet-jarvis'), 'delivered'], { stdin: entry.text }), GUARD_MS + 500, null)
     // Settles once the turn started or the engine queued it; turn.start is what names the
-    // turn, so this is not awaited for that. A refusal is answered here.
+    // turn, so this is not awaited for that. A refusal is answered here. A command run that
+    // settles and starts no turn within RAN_MS ran without one (a panel, a local command):
+    // its receipt says it ran, which is a delivery, and its ledger item goes, as nothing
+    // will ever answer it.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
     const lost = async () => { if (pending?.ledgered?.length) await ledgerUndo($, pending.ledgered) }
-    Promise.resolve($.prompt.submit({ text: entry.text, asUser: true })).then(
-      async r => { const d = settled(r); if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, d) } },
-      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
+    const ranAlone = async () => {
+      await $.clock.sleep(RAN_MS)
+      if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { ran: `/${cmd.command}` }) }
+    }
+    const run = cmd ? $.command.run({ command: cmd.command, args: cmd.args }) : $.prompt.submit({ text: entry.text, asUser: true })
+    Promise.resolve(run).then(
+      async r => {
+        const d = settled(r)
+        if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, { ...d, head: headOf(entry.text) }) }
+        else if (cmd && pending?.id === id) await ranAlone()
+      },
+      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err), head: headOf(entry.text) }) } })
   } finally {
     claiming = false
   }
@@ -480,7 +532,7 @@ async function deliveryTurnStart($, e) {
     })(), IO_MS * 4, null)
   } else if (p && (await $.clock.now()) - p.at > START_MS) {
     pending = null
-    await bounded($, receipt($, p.id, { error: 'its turn never started' }), IO_MS * 2, null)
+    await bounded($, receipt($, p.id, { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
   }
 }
 
