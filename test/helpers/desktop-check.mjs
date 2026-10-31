@@ -494,6 +494,15 @@ try {
      await until(() => b.evaluate(() => /needs the fleet server/.test((document.querySelector('#app .term-screen .term-msg') || {}).textContent || '')), 3000));
   await press('`');
   is('...and ` goes back to the session it came from', 'api-fix', (await settle(x => x.session === 'api-fix')).session);
+  // Ctrl-a n is the desk's editor tab (its Ctrl-n, which the browser keeps): the SAME screen
+  // with the editor in it, saying so in its own words. term-check.mjs opens it for real.
+  await toWorker(); await press('a', { ctrl: true }); await press('n', { as: 'Ctrl-a n' });
+  is('session Ctrl-a n: the editor screen, in the right pane', true,
+     await until(() => b.evaluate(() => /^editor · /.test((document.querySelector('#app .term-screen .nm') || {}).textContent || '') && !!document.querySelector('#side .cards')), 3000));
+  is('...which with fixtures says there is no folder to open', true,
+     await until(() => b.evaluate(() => /the editor needs the fleet server/.test((document.querySelector('#app .term-screen .term-msg') || {}).textContent || '')), 3000));
+  await press('`');
+  is('...and ` goes back from the editor too', 'api-fix', (await settle(x => x.session === 'api-fix')).session);
 
   // Everything else goes to the agent — here, the composer.
   await toWorker(); await press('p');

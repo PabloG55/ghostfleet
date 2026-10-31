@@ -3243,12 +3243,22 @@ const termSize = (n, lo, hi, dflt) => (Number.isInteger(n) && n >= lo && n <= hi
 // The tab itself: bin/fleet-tab, not a second copy of its naming rule. -d because this
 // call has no client of its own to move — and without it fleet-tab's switch-client would
 // grab whoever IS attached to the fleet at the desk and drop them into the new tab.
-function openTermTab(t) {
+//   KIND IS term OR edit, AND NOTHING ELSE. The editor is the desk's Ctrl-n tab — neovim on
+// the folder, with lib/nvim-copy-on-select.lua — made by the same script, so it is a fleet
+// tab like the terminal and goes through every gate above it. It is not a second way to a
+// shell: `:terminal` inside nvim is one, which is exactly why it gets the terminal's gates
+// rather than lighter ones of its own.
+//   With no editor installed fleet-tab says so on the desk's status line, where nobody at a
+// phone will read it, and exits 1 with nothing on stderr — so the words are said here.
+const TERM_KINDS = { term: 'terminal', edit: 'editor' };
+function openTermTab(t, kind = 'term') {
+  const what = TERM_KINDS[kind];
   return new Promise((resolve) => {
-    execFile(path.join(BIN, 'fleet-tab'), ['term', t.sock, t.path, t.name, '-f', TMUX_CONF, '-d'],
+    execFile(path.join(BIN, 'fleet-tab'), [kind, t.sock, t.path, t.name, '-f', TMUX_CONF, '-d'],
       { encoding: 'utf8', timeout: 15000, env: { ...process.env, TMUX: '' } }, (err, stdout, stderr) => {
         const name = String(stdout || '').trim().split('\n').pop() || '';
-        if (err || !/^_term-/.test(name)) return resolve({ error: `could not open the terminal tab: ${(stderr || err?.message || 'fleet-tab said nothing').trim().split('\n')[0]}` });
+        const said = String(stderr || '').trim().split('\n')[0] || (kind === 'edit' && err ? 'no editor on this machine — the installer adds Neovim, or set CLAUDE_FLEET_EDITOR' : '');
+        if (err || !name.startsWith(`_${kind}-`)) return resolve({ error: `could not open the ${what} tab: ${said || err?.message || 'fleet-tab said nothing'}` });
         // THE LAST TO TYPE DECIDES THE SIZE, on this tab only. The fleet's servers run
         // `window-size largest` so a stack pane never crops a session open full screen at
         // the desk — but a phone sharing a tab with a 200-column desk client would then be
@@ -3298,10 +3308,12 @@ async function termRoutes(p, req, res, body, c, ip) {
     if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
     const rp = resolveProject(typeof body.project === 'string' ? body.project : '');
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const kind = body.kind == null ? 'term' : body.kind;
+    if (!Object.hasOwn(TERM_KINDS, kind)) return send(res, 400, { ok: false, text: `kind is 'term' or 'edit', not ${JSON.stringify(kind)}` });
     let mine = 0;
     for (const b of terms) if (b.client === cl.id) mine++;
     if (mine >= TERM_MAX_PER_CLIENT) return send(res, 429, { ok: false, text: `this device already has ${mine} terminals open — close one first` });
-    const tab = await openTermTab(rp.t);
+    const tab = await openTermTab(rp.t, kind);
     if (tab.error) return send(res, 502, { ok: false, text: tab.error });
     const ticket = rand(32);
     // Tagged with the listener that minted it: termUpgrade spends it only on that one.
@@ -3310,7 +3322,7 @@ async function termRoutes(p, req, res, body, c, ip) {
     for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
                   confirmed: `passkey:${assertion.purpose || 'unnamed'}`, result: 'ran', output: '' });
-    inboxRow(rp.t, tab.name, `terminal opened · from ${cl.id}@${ip}`);
+    inboxRow(rp.t, tab.name, `${TERM_KINDS[kind]} opened · from ${cl.id}@${ip}`);
     return send(res, 200, { ok: true, project: rp.t.name, session: tab.name, ticket, ttl: TERM_TICKET_TTL, idle: termIdle(c) });
   }
   return send(res, 405, { ok: false, text: `${req.method} is not how ${p} is asked` });

@@ -80,6 +80,7 @@ const S = {
   termOn: null,         // /api/term's answer for THIS device: may it open a terminal. null = not asked
   termBack: null,       // where the terminal screen was opened from, which is where back goes
   termSt: { state: 'checking', why: '' },   // what the terminal screen says (see termState)
+  termKind: 'term',     // which fleet tab that screen holds: 'term' (a shell) | 'edit' (the desk's Ctrl-n editor)
   // THE STACK (see "the stack"): what is in it, which column has the focus, the picker's own
   // state, and where back goes from either screen.
   stackSel: [],         // [{ project, session }] in column order — this device's, in localStorage
@@ -1020,7 +1021,7 @@ function projectsProps() {
     find: findSpec(),
     jarvis: jarvisBarSpec(),
     notify: notifySpec(),
-    confirm: confirmSpec(),
+    confirm: withClose(confirmSpec()),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
     // else about them; see web/src/screens.jsx.
@@ -1262,7 +1263,7 @@ function sheetReply(row) {
     need ? el('p', { text: `needs: ${need}` }) : null,
     field('reply', t),
     el('p', { text: 'sent to the master as a message quoting this item; it leaves the list when the master closes it.' }),
-    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -1352,7 +1353,7 @@ function sheetUsage() {
     ]));
   }
   kids.push(el('p', { text: 'read only — an account is switched at the desk: fleet-accounts use <profile> <name>' }));
-  kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
+  kids.push(el('div', { class: 'row' }, [btn('esc back', dismissSheet)]));
   openSheet(sheet('accounts', 'fleet-accounts list', kids), false);
 }
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
@@ -1445,7 +1446,7 @@ function gridProps() {
     // of the seam so that screens.jsx contains no hex at all.
     counts: G.countsSegments(counts).map(seg => ({ text: seg.text, color: seg.color ? G.COLORS[seg.color] : null })),
     strip: stripTiles(counts),
-    confirm: confirmSpec(),
+    confirm: withClose(confirmSpec()),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
     // else about them; see web/src/screens.jsx.
@@ -1505,9 +1506,11 @@ function gridProps() {
       { label: 'new', onClick: () => sheetPicker() },
       { label: 'worktrees', onClick: () => sheetWorktree() },
       { label: 'stack', onClick: () => openStackPicker() },
-      // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin.
-      // ABSENT for another machine's project, and the sheet's last line says why (below).
+      // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin — and
+      // its editor tab beside it, the desk's Ctrl-n. ABSENT for another machine's project,
+      // both of them, and the sheet's last line says why (below).
       isRemote(S.project) ? null : { label: 'terminal', onClick: () => openTerminal() },
+      isRemote(S.project) ? null : { label: 'editor', onClick: () => openEditor() },
       // Only when there is something for it to act on — see sheetMore on why a disabled
       // row earns a line in a footer and not in a sheet.
       sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
@@ -3623,7 +3626,7 @@ function stackKey(e, k, lk, ctrl) {
 // poll as often as every two seconds, and a terminal cannot be: rebuilding it would drop
 // the xterm instance, its scrollback and the keyboard's focus mid-word. So TS holds the
 // screen's root and render() only updates its words; leaving the screen is what disposes it.
-let TS = null;              // { project, root, host, msg, act, rowNode, h, state, why, session }
+let TS = null;              // { project, kind, root, host, msg, act, rowNode, h, state, why, session }
 let termLib = null;         // web/term.js, imported the first time a terminal opens
 const termWord = {
   fixtures: 'the terminal needs the fleet server — the fixture fleet has no shell to open',
@@ -3635,20 +3638,40 @@ const termWord = {
 };
 // fleet-serve's TERM_REMOTE_WHY, in the client's own words and one line: the shell is a
 // thing the host it runs on opens, never one proxied through a second machine.
-const TERM_REMOTE = 'no terminal for another machine\'s project — a shell is opened only on the machine it runs on';
+const TERM_REMOTE = 'no terminal or editor for another machine\'s project — a shell is opened only on the machine it runs on';
+// THE EDITOR IS THE SAME SCREEN WITH THE OTHER TAB IN IT: the desk's Ctrl-n, neovim on the
+// project's folder, opened by the same request with kind 'edit' and so behind the same four
+// gates — the device switch, a fresh passkey per open, the one-use ticket, the Origin check.
+// No gate of its own, because it needs none less: nvim's `:terminal` is a shell. Ctrl-n is
+// the browser's (a new window, and no page may take it), so the desk's own fallback is the
+// key here: Ctrl-a n, as `bind n` in tmux/cf.tmux.conf.
+const TERM_NOUN = { term: 'terminal', edit: 'editor' };
+const termNoun = (kind = S.termKind) => TERM_NOUN[kind] || 'terminal';
+function openEditor(project = S.project) { openTerminal(project, 'edit'); }
+// The editor's own words where they differ. OFF names the terminal's switch, because that
+// is the switch it is behind, and calling it anything else would send the reader looking
+// for a second one.
+const editWord = {
+  fixtures: 'the editor needs the fleet server — the fixture fleet has no folder to open',
+  checking: 'checking whether this device may open the editor…',
+  off: 'the editor is behind the terminal\'s switch, and it is off for this device. Settings turns it on — it asks for the passkey, and the Mac records which device did it.',
+  gate: 'the editor asks for the passkey every time it opens, as the terminal does',
+  opening: 'opening the editor…',
+};
+const termSays = (state, kind) => (kind === 'edit' && editWord[state]) || termWord[state] || '';
 function termTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
 // The tap. Everything the passkey needs happens BEFORE the first await, so WebKit still
 // counts this as the tap (passkey.js freshNow). Then the screen, then the rest.
-function openTerminal(project = S.project) {
+function openTerminal(project = S.project, kind = 'term') {
   if (!project) return;
   // Another machine's project has no terminal from here, by decision — and Ctrl-t is a key,
   // so this guard is for the key as much as for any button that forgot to hide.
   if (isRemote(project)) { toast(TERM_REMOTE, 'bad'); render(); return; }
   const asking = api.mode() === 'server' && S.termOn === true && pk.available() && pk.registered()
-    ? pk.freshNow(`terminal ${project}`) : null;
+    ? pk.freshNow(`${termNoun(kind)} ${project}`) : null;
   if (S.screen !== 'term') S.termBack = { screen: S.screen, session: S.session, view: S.view, entry: S.entry, sub: S.sub };
-  if (TS && TS.project !== project) disposeTerm();
-  S.project = project; S.screen = 'term'; S.srch = null;
+  if (TS && (TS.project !== project || TS.kind !== kind)) disposeTerm();
+  S.project = project; S.termKind = kind; S.screen = 'term'; S.srch = null;
   S.termSt = { state: asking ? 'asking' : 'checking', why: '' };
   if (S.termBack.screen !== 'term') pushNav();
   render();
@@ -3698,7 +3721,7 @@ async function startTerm(asking) {
         onLeave: () => { if (TS && TS.h) TS.h.blur(); try { (document.querySelector('#side .cards') || document.body).focus(); } catch {} },
       });
     }
-    const r = await api.termOpen(TS.project, TS.h.size(), a);
+    const r = await api.termOpen(TS.project, TS.h.size(), a, TS.kind);
     if (!TS) return;
     TS.session = r.session;
     TS.h.connect(r.ticket);
@@ -3740,10 +3763,10 @@ function termKeyBtn(k) {
 }
 function paintTerm(app = document.getElementById('app')) {
   if (!app) return;
-  if (!TS || TS.project !== S.project) {
+  if (!TS || TS.project !== S.project || TS.kind !== S.termKind) {
     disposeTerm();
     const r = termScreenRoot();
-    TS = { project: S.project, ...r, h: null, session: '' };
+    TS = { project: S.project, kind: S.termKind, ...r, h: null, session: '' };
   }
   if (TS.root.parentNode !== app) {
     if (preactUp) { screensUI.unmount(app); preactUp = false; }
@@ -3756,20 +3779,21 @@ function paintTerm(app = document.getElementById('app')) {
   // The row needs term.js's KEYS, which arrive with the first open.
   if (termLib && !TS.row.firstChild) for (const k of termLib.KEYS) TS.row.append(termKeyBtn(k));
   TS.row.hidden = !termTouch() || !TS.h;
-  TS.title.textContent = `terminal · ${TS.project}`;
+  const noun = termNoun(TS.kind);
+  TS.title.textContent = `${noun} · ${TS.project}`;
   const { state, why } = S.termSt;
   const live = state === 'open';
   TS.st.textContent = live ? ` ${TS.session}${termTouch() ? '' : ' · ⇧Esc leaves it'}` : '';
   const words = state === 'closed' ? `closed — ${why || 'the connection ended'}. The tab is still open on the desk.`
-    : (why && (state === 'gate' || state === 'off') ? why : termWord[state] || '');
+    : (why && (state === 'gate' || state === 'off') ? why : termSays(state, TS.kind));
   TS.msg.textContent = words;
   TS.msg.hidden = !words || live;
   TS.act.textContent = '';
   if (state === 'off') TS.act.append(btn('settings', () => sheetSettings()));
   if (state === 'gate' || state === 'closed')
-    TS.act.append(btn(state === 'closed' ? 'open it again — passkey' : 'open the terminal — passkey', () => {
+    TS.act.append(btn(state === 'closed' ? 'open it again — passkey' : `open the ${noun} — passkey`, () => {
       if (TS && TS.h) { TS.h.dispose(); TS.h = null; TS.host.textContent = ''; }
-      startTerm(pk.freshNow(`terminal ${S.project}`));
+      startTerm(pk.freshNow(`${noun} ${S.project}`));
     }, 'go'));
   TS.act.hidden = !TS.act.firstChild;
   TS.host.hidden = !TS.h && state !== 'opening';
@@ -5134,7 +5158,7 @@ function sheetMore(title, sub, verbs, hint, note = '') {
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     note ? el('p', { class: 'gest term-why', text: note }) : null,
     hint ? el('p', { class: 'gest', text: hint }) : null,
-    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
   ].filter(Boolean)), false);
 }
 
@@ -5161,6 +5185,7 @@ function sheetActions(name = S.session) {
     // The PROJECT's terminal, not this worker's worktree: one shell per project is what the
     // passkey and the per-device switch are guarding, and it is the tab the grid shows.
     isRemote(S.project) ? null : btn('terminal', go(() => openTerminal())),
+    isRemote(S.project) ? null : btn('editor', go(() => openEditor())),
     lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
     lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
@@ -5172,7 +5197,7 @@ function sheetActions(name = S.session) {
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself. Interrupting its turn is fine: it stays on" }) : null,
     isRemote(S.project) ? el('p', { class: 'gest term-why', text: TERM_REMOTE }) : null,
-    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
   ].filter(Boolean)), false);
 }
 
@@ -6174,7 +6199,7 @@ function navSettled() { const w = navWaiters; navWaiters = []; for (const f of w
 // The actual screen change. Called ONLY by popstate (and by the pop-less fallbacks below,
 // for a browser that gave us no history object at all).
 function popTo() {
-  if (S.sheet) { closeSheet(); return; }
+  if (S.sheet) { dismissSheet(); return; }
   if (S.confirm) { cancel(); return; }
   // THE STACK: a picker opened from the stack goes back to it, and a session opened from a
   // column (its pane) goes back to the column; otherwise out to where the stack was opened from.
@@ -6552,16 +6577,48 @@ function projectCard() {
 function srchFirst() { const m = srchMatches(); if (m.length) S.sel = m[0]; }
 function confirmBar() {
   const s = confirmSpec();
-  return s ? bar(s) : null;
+  return s ? bar(withClose(s)) : null;
+}
+// The X on a QUESTION, never on the `/` or Ctrl-f prompts that share the row: those are the
+// keyboard's and end with esc. Not while busy, when there is nothing left to cancel.
+function withClose(s) {
+  return s && S.confirm && !S.confirm.busy ? { ...s, close: cancel } : s;
 }
 function bar(s) {
   return el('div', { class: 'confirm ' + s.cls }, [
+    s.close ? closeX(s.close, 'sheet-x confirm-x') : null,
     el('span', { class: 'q', text: ' ' + s.q }),
     el('span', { class: 'keys', text: '  ' + s.keys }),
     s.buttons.length ? el('div', { class: 'row' }, s.buttons.map(b => btn(b.label, b.onClick, b.cls || ''))) : null,
   ]);
 }
 function cancel() { S.confirm = null; render(); }
+// THE CONFIRM BAR IS MODAL, AS ITS KEYS ALWAYS WERE: "y = yes · any other key = cancel". The
+// pointer had no such rule — a tap on a card while `kill session 'x'?` stood under the header
+// opened the card and left the question standing over a different screen. Now a press
+// anywhere outside the bar is that "any other key": it cancels, and it is EATEN, so the card,
+// the swipe or the button under it does not also act. Never a yes: the yes is a button in the
+// bar, and nothing outside it can reach confirmedKill().
+//   The whole gesture, not just its click. Cards act on pointerup (wire(): tap, long-press,
+// swipe, reorder), so stopping the click alone would cancel the question AND open the card.
+// So the press is stopped in the capture phase at the window, before any of that sees it, and
+// so are the release and the click that belong to it.
+//   A press that starts INSIDE the bar is the bar's, wherever it ends — a drag off its yes is
+// not a tap outside. While it is busy (a worktree being removed) a press outside is eaten and
+// cancels nothing: there is nothing left to cancel, the same as the keys then.
+let confirmEat = false;
+function confirmOutside(e) {
+  if (e.type === 'pointerdown') {
+    confirmEat = !!(S.confirm && !S.sheet && !(e.target && e.target.closest && e.target.closest('.confirm')));
+    if (!confirmEat) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!S.confirm.busy) cancel();
+    return;
+  }
+  if (!confirmEat) return;
+  e.preventDefault(); e.stopPropagation();
+  if (e.type === 'click') confirmEat = false;
+}
 
 // THE LEAD IS NOT A WORKER, and the card no longer looks any different from one — which
 // is the whole hazard of putting master on the grid at all. So every path into the two
@@ -6871,6 +6928,7 @@ function tryAutoUnlock() {
 // ── sheets (the TUI's forms) ──────────────────────────────────────────────
 function renderSheet() {
   const host = document.getElementById('sheet');
+  wireScrim();
   // Already mounted: leave it ALONE. Re-appending a live node moves it, and moving it
   // blurs whatever is focused inside — a toast arriving while you type a prompt would
   // otherwise throw the caret back to the first field mid-sentence.
@@ -6881,10 +6939,78 @@ function renderSheet() {
   const first = host.querySelector('input, textarea, select');
   if (first && S.sheet.focus !== false) first.focus();
 }
-function openSheet(node, focus = true) { S.sheet = { node, focus }; renderSheet(); }
-function closeSheet() { S.sheet = null; renderSheet(); render(); }
+// EVERY WAY OUT OF A SHEET THAT IS NOT ITS OWN ACTION IS ONE WAY: esc, back, the `esc back`
+// button, the X in its corner and a tap on the room behind it all call dismissSheet(), and
+// so all of them do the same thing. "Same as esc" is only true while it is the same call.
+//
+// AND NONE OF THEM THROWS TYPED TEXT AWAY. A tap beside a sheet is the easiest accident on a
+// phone, and before it closed anything the only way out was a button you had to mean. So a
+// dismissed sheet's text fields are kept — in memory, per sheet (its title and subject: one
+// session's schedule is not another's), for the page's life — and put back when the same
+// sheet opens again. Only fields the reader CHANGED: a rename box still holding the name it
+// was opened with is not a draft. The sheet's own action is what spends them (closeSheet),
+// so a sent answer does not come back. This is the one store for every sheet with a field:
+// the answer, send-a-prompt, schedule, session name, new worktree, rename, label, add
+// project, the question's own words and a paired machine's label. The queue answer ALSO
+// keeps row.draft, as it did, for the other way its words come back — a send that failed.
+const sheetDrafts = new Map();       // title \x1f subject -> the fields' values, in order
+const sheetFields = (node) => [...node.querySelectorAll('input[type=text], textarea')];
+function openSheet(node, focus = true) {
+  const key = node.dataset.key || '';
+  const fields = sheetFields(node);
+  S.sheet = { node, focus, key, start: fields.map(f => f.value) };
+  const kept = key && sheetDrafts.get(key);
+  if (kept && kept.length === fields.length) fields.forEach((f, i) => {
+    if (f.value === kept[i]) return;
+    f.value = kept[i];
+    f.dispatchEvent(new Event('input', { bubbles: true }));   // a preview, or row.draft, follows it
+  });
+  renderSheet();
+}
+// The sheet's own action, or a move to another sheet: what was typed was used.
+function closeSheet() { if (S.sheet && S.sheet.key) sheetDrafts.delete(S.sheet.key); shutSheet(); }
+function dismissSheet() {
+  const sh = S.sheet;
+  if (!sh) return;
+  if (sh.key) {
+    const now = sheetFields(sh.node).map(f => f.value);
+    if (now.some((v, i) => v !== sh.start[i])) sheetDrafts.set(sh.key, now); else sheetDrafts.delete(sh.key);
+  }
+  shutSheet();
+}
+function shutSheet() { S.sheet = null; renderSheet(); render(); }
+// THE ROOM BEHIND A SHEET CLOSES IT — a click with a mouse, a tap with a finger — and only a
+// press that STARTED there. A drag that begins inside (selecting a line of a prompt, a
+// scroll that overshoots) and lets go over the scrim is a click on the scrim as far as the
+// browser is concerned, because it fires click on the nearest common ancestor; it is not a
+// request to leave. So the press arms it and the click spends it.
+let scrimPressed = false;
+function wireScrim() {
+  const host = document.getElementById('sheet');
+  if (!host || host.dataset.wired) return;
+  host.dataset.wired = '1';
+  host.addEventListener('pointerdown', (e) => { scrimPressed = e.target === host; });
+  host.addEventListener('click', (e) => {
+    const armed = scrimPressed;
+    scrimPressed = false;
+    if (armed && e.target === host && S.sheet) dismissSheet();
+  });
+}
+// The X, one component for every sheet and the confirm bar. A stroked path (iconSvg), not
+// the character: a glyph is a different picture in every font, and the button carries the
+// name, "close", because the picture says nothing to a screen reader.
+const ICON_CLOSE = 'M6 6l12 12M18 6 6 18';
+function closeX(onclick, cls = 'sheet-x') {
+  const b = el('button', { type: 'button', class: cls, 'aria-label': 'close', title: 'close · esc', onclick });
+  b.append(iconSvg(ICON_CLOSE));
+  return b;
+}
 function sheet(title, sub, kids) {
-  const s = el('div', { class: 'sheet' });
+  const s = el('div', { class: 'sheet', role: 'dialog', 'aria-label': title });
+  s.dataset.key = title + '\x1f' + (sub || '');
+  // FIRST IN THE SHEET, so it is first in the tab order and sticks to the top corner while a
+  // long sheet (settings) scrolls under it.
+  s.append(closeX(dismissSheet));
   s.append(el('h2', {}, [document.createTextNode(title), sub ? el('span', { class: 'sub', text: ' — ' + sub }) : null]));
   for (const k of kids) if (k) s.append(k);
   return s;
@@ -6909,7 +7035,7 @@ async function sheetPicker() {
     list.append(el('p', { class: 'warn', text: 'no git checkouts found. looked in: ' + (data.roots || []).map(r => G.homeTilde(r)).join(', ') }));
     list.append(el('p', { text: 'fix: put one path per line in ~/.config/ghostfleet/checkouts' }));
   }
-  openSheet(sheet('new session', `pick a checkout under ~/${S.project || ''}`, [list, el('div', { class: 'row' }, [btn('esc back', closeSheet)])]), false);
+  openSheet(sheet('new session', `pick a checkout under ~/${S.project || ''}`, [list, el('div', { class: 'row' }, [btn('esc back', dismissSheet)])]), false);
 }
 
 // the naming screen: a live session with the same name gets -2/-3 appended automatically
@@ -6924,7 +7050,7 @@ function sheetName({ cwd, name, reuse }) {
     field('name', nm),
     el('p', { text: 'a live session with the same name gets -2/-3 appended automatically' }),
     el('p', { class: 'warn', text: 'spawn asks for the passkey — it creates a checkout and runs shell commands (§7).' }),
-    el('div', { class: 'row' }, [btn('⏎ create', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ create', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   nm.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
 }
@@ -6948,7 +7074,7 @@ function sheetWorktree() {
     field('name', name), field('branch  (blank = same as the name)', branch),
     field('from  (base ref for a new branch)', from), field('agent', agent),
     el('p', { class: 'warn', text: 'creating the worktree runs git and boots a session — the passkey prompt comes first.' }),
-    el('div', { class: 'row' }, [btn('⏎ create + open', go, 'go'), btn('esc cancel', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ create + open', go, 'go'), btn('esc cancel', dismissSheet)]),
   ]));
 }
 
@@ -6982,7 +7108,7 @@ function sheetSchedule(name, project = S.project) {
     existing ? el('p', { class: 'warn', text: `currently: @${G.clockLabel(existing.at)} "${existing.msg || ''}" — a new time replaces it; empty clears it` }) : null,
     field('send at', box), preview, msgLine,
     el('p', { text: 'examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>' }),
-    el('div', { class: 'row' }, [btn('⏎ schedule', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ schedule', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   update();
 }
@@ -7000,7 +7126,7 @@ function sheetSend(name) {
     // The trap from CLAUDE.md, where it can actually be read by the person about to
     // step in it.
     el('p', { text: 'a prompt sent to a BUSY session queues behind the turn already running.' }),
-    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -7030,7 +7156,7 @@ async function sheetAnswer(name, project = S.project) {
   if (!prompt) {
     openSheet(sheet('answer keys', `→ ${name}`, [
       el('p', { class: 'warn', text: 'no prompt on screen — keys sent now would land in its input box as a message. Nothing to answer.' }),
-      el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+      el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
     ]));
     return;
   }
@@ -7043,7 +7169,7 @@ async function sheetAnswer(name, project = S.project) {
     opts.length ? el('div', { class: 'rows' }, opts.map(b => el('div', { class: 'srow' }, [b]))) : null,
     field('or keys', t),
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
-    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', dismissSheet)]),
   ].filter(Boolean)));
 }
 
@@ -7127,7 +7253,7 @@ function sheetQuestion(name, project, prompt, note = '') {
     el('p', { class: 'q', text: prompt.question || '' }),
     el('div', { class: 'rows' }, rows),
     freeOpt ? field(`${freeOpt.n}. type an answer`, freeBox) : null,
-    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', closeSheet)].filter(Boolean)),
+    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', dismissSheet)].filter(Boolean)),
   ].filter(Boolean)), false);
 }
 
@@ -7148,7 +7274,7 @@ function sheetRename(name) {
     field('new name', nm),
     el('p', { text: 'renames the tmux session AND moves its worktree folder (git worktree move)' }),
     el('p', { class: 'warn', text: 'a destructive verb (§7) — the passkey prompt comes first.' }),
-    el('div', { class: 'row' }, [btn('⏎ rename', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ rename', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -7159,7 +7285,7 @@ function sheetLabel(name) {
   openSheet(sheet('label', `what the card calls ${name}`, [
     field('label', nm),
     el('p', { text: `Display only. The session is still '${name}' — that is what fleet-send addresses, and the card keeps showing it. Empty clears the label.` }),
-    el('div', { class: 'row' }, [btn('⏎ save', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ save', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -7234,7 +7360,7 @@ function sheetProjectAgent(p) {
   };
   openSheet(sheet(`agent · ${p.name}`, NEXT_MASTER, [
     pick.row, pick.note,
-    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -7254,7 +7380,7 @@ function sheetAddProject() {
     field('path', p), field('name  (default: the folder name)', nm),
     el('div', { class: 'field' }, [el('label', { text: "master's agent" }), pick.row, pick.note]),
     el('label', { class: 'field' }, [start, document.createTextNode(' also start its master session')]),
-    el('div', { class: 'row' }, [btn('add', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('add', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -7285,7 +7411,7 @@ function sheetEnrol() {
   openSheet(sheet(`enrol ${dev.noun}`, api.modeLabel(), [
     el('p', { text: `${dev.enrol} — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.` }),
     note, field('enrolment code', code), err,
-    el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   // Asked before anything is typed, and before Face ID: a closed window is knowable in
   // advance, and finding out afterwards means biometrics spent on a refusal.
@@ -7522,8 +7648,6 @@ async function sheetSettings() {
   if (!log.length) ul.append(el('li', { text: 'nothing yet. Every mutating call lands here, and on a server it also lands in fleet-inbox.' }));
   kids.push(ul);
 
-  kids.push(el('div', { class: 'absent' }, [el('div', { text: 'not here, on purpose (§7):' }),
-    el('div', { text: '· the Ctrl-n editor tab — it opens neovim in the session\'s folder. The terminal above can run nvim instead, in the project\'s.' })]));
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
@@ -7617,7 +7741,7 @@ async function sheetSettings() {
       btn('+ later', () => setQ(q + QUIET.STEP)),
     ]));
   }
-  kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
+  kids.push(el('div', { class: 'row' }, [btn('esc back', dismissSheet)]));
   // Last row, and deliberately plain: it is diagnostic, not a setting. `no worker` means
   // you are on the network rather than a cached shell; `unknown` means the worker serving
   // you is too old to answer, which is itself the thing you wanted to know.
@@ -7674,7 +7798,7 @@ function deskKeyFromComposer(e) {
 const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
 function onKey(e) {
   if (S.sheet) {                       // a form owns the keyboard while it is open
-    if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
+    if (e.key === 'Escape') { e.preventDefault(); dismissSheet(); }
     return;
   }
   if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
@@ -7754,7 +7878,8 @@ async function jumpTo(n, what, card = 0) {
 // ── a session: tmux's -n bindings, and the agent's input for the rest ─────────────────
 function sessionKey(e, k, lk, ctrl) {
   // Ctrl-a, then: g / d back · s the grid · p Projects · f the jump chord · ←/→ cycle.
-  // (x, t, n and < > { } are the stack and the tabs, which this client does not have.)
+  // t and n are the tabs — the terminal and the editor — and x is the stack. (< > { } move
+  // a stack column, which only the stack screen has.)
   if (S.prefix) {
     S.prefix = false;
     if (ctrl) return lk === 'a';           // Ctrl-a Ctrl-a: a literal Ctrl-a for the agent — nothing to send it to here
@@ -7763,6 +7888,7 @@ function sessionKey(e, k, lk, ctrl) {
     else if (lk === 'p') toProjects();
     else if (lk === 'f') startJump();
     else if (lk === 't' && !S.jarvisMode) openTerminal();
+    else if (lk === 'n' && !S.jarvisMode) openEditor();
     else if (lk === 'x') openStackPicker();
     else if (k === 'ArrowRight' && !S.jarvisMode) cycleSession(1);
     else if (k === 'ArrowLeft' && !S.jarvisMode) cycleSession(-1);
@@ -8058,6 +8184,7 @@ try {
 // what its ⏎ means — the first ⏎ from an iPad's keyboard sends.
 addEventListener('keydown', noteKeyboard, true);
 addEventListener('keydown', onKey);
+for (const t of ['pointerdown', 'pointerup', 'click']) addEventListener(t, confirmOutside, true);
 wireDrop();
 // NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
 // long after the tap; speak mode is gone, and the listener went on claiming the phone's

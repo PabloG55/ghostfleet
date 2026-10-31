@@ -308,6 +308,47 @@ is('...the server says the browser closed it', true, !!(await until(() => /termi
 is('...the control client is gone', 0, await until(() => controlClients() === 0 && 0, 5000) ?? controlClients());
 is('...and the tab stays for the desk', true, hasTab());
 
+// ── 9. THE EDITOR: the terminal's screen and gates, the other tab ───────────────────
+// The desk's Ctrl-n, from the same ⋯, through the same request with kind 'edit'. The device
+// is already switched on (section 2), so what is left to prove is the per-open passkey —
+// refused, then allowed — and that what opens is the EDITOR tab, not the shell again.
+const ETAB = `_edit-${PROJECT}`;
+const hasEdit = () => { try { execFileSync('tmux', ['-L', SOCK, 'has-session', '-t', `=${ETAB}`], { stdio: 'ignore' }); return true; } catch { return false; } };
+const termTitle = () => evaluate(() => ((document.querySelector('.term-screen .nm') || {}).textContent || '').trim());
+const opensBefore = openCount();
+await userVerified(false);
+await tap('.hdr button.more');
+is('term-ui: the grid\'s actions offer the editor, beside the terminal', true,
+   await evaluate(() => { const r = [...document.querySelectorAll('.sheet .rows button')].map(b => b.textContent.trim()); return r.indexOf('editor') === r.indexOf('terminal') + 1 && r.includes('editor'); }));
+await tap('.sheet button', 'editor');
+is('term-ui: it opens the editor screen', `editor · ${PROJECT}`, await until(() => termTitle().then(t => /^editor · /.test(t) && t), 6000) || await termTitle());
+const edRefused = await until(() => evaluate(() => { const b = document.querySelector('.term-act button'); return b && /open the editor — passkey/.test(b.textContent); }), 8000);
+await sleep(500);
+is('term-ui: an editor whose passkey does not verify opens nothing', true, !!edRefused);
+is('...no open request reached the server', opensBefore, openCount());
+is('...and no editor tab on the fleet', false, hasEdit());
+await userVerified(true);
+await tap('.term-act button', 'open the editor — passkey');
+if (!hasNvim) {
+  const said = await until(() => termMsg().then(t => /no editor on this machine/.test(t) && t), 8000);
+  is('term-ui: with no editor installed, the screen says so', true, !!said);
+  is('...and no editor tab exists', false, hasEdit());
+} else {
+  const edOpen = await until(() => evaluate(() => { const s = document.querySelector('.term-screen .term-host'); return s && !s.hidden && document.querySelectorAll('.term-host .xterm-rows > div').length > 0; }), 10000);
+  is('term-ui: with the passkey, the editor opens', true, !!edOpen);
+  is('...through one more open request, the terminal\'s own', opensBefore + 1, await until(() => openCount() === opensBefore + 1 && openCount(), 4000) || openCount());
+  is('...on the project\'s editor tab', true, hasEdit());
+  is('...running nvim with the copy-on-select Lua, as the desk\'s Ctrl-n does', true,
+     /nvim .*nvim-copy-on-select\.lua/.test(tmux('display-message', '-p', '-t', ETAB, '#{pane_start_command}')));
+  // What the browser draws is what nvim drew: a line of the pane, on the phone's screen.
+  const paneLine = () => tmux('capture-pane', '-p', '-t', ETAB).split('\n').map(l => l.trim()).filter(l => l.length > 3)[0] || '';
+  const shown = await until(async () => { const l = paneLine(); return l && (await screenText()).includes(l) && l; }, 8000);
+  is('...and the browser shows what nvim drew', true, !!shown);
+  await shot('phone-editor');
+}
+await tap('.sbar button', '‹');
+is('term-ui: back leaves the editor screen', true, !!(await until(() => evaluate(() => !document.querySelector('.term-screen')), 5000)));
+
 // ══ DESKTOP, 1280x800, a mouse and a keyboard ══════════════════════════════════════
 touching = false;
 await device(false);

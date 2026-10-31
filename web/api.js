@@ -816,7 +816,10 @@ async function termCall(path, method, body, assertion) {
 }
 export const getTerm = () => termCall('/api/term', 'GET');
 export const termEnable = (on, assertion = null) => termCall('/api/term/enable', 'POST', { on: !!on }, assertion);
-export const termOpen = (project, size, assertion) => termCall('/api/term/open', 'POST', { project, ...size }, assertion);
+// kind 'edit' is the desk's Ctrl-n editor tab instead of the shell: the same request, the
+// same gates. Left out for the terminal, so a daemon from before the editor still answers it.
+export const termOpen = (project, size, assertion, kind = 'term') =>
+  termCall('/api/term/open', 'POST', { project, ...size, ...(kind === 'term' ? {} : { kind }) }, assertion);
 export function termSocket(ticket) {
   const u = new URL(baseUrl() + '/api/term/ws');
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';

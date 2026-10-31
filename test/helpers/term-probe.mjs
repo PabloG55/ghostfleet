@@ -128,6 +128,33 @@ is('...which exists on the fleet\'s own server', true, hasTab(TAB));
 const replay = await open(used);
 is('term: the same assertion a second time is refused (single-use challenge)', 401, replay.status);
 
+// ── 2b. THE EDITOR IS THE SAME REQUEST, AND THE SAME GATES ───────────────────────
+// kind 'edit' is the desk's Ctrl-n tab (bin/fleet-tab edit). Nothing about the gates moves:
+// no passkey is still 401, before any tab exists; a kind the server does not know is a 400
+// and makes nothing; and with a fresh passkey it is the project's editor tab, made by
+// fleet-tab, running the editor with the copy-on-select Lua — or, with no editor installed,
+// a refusal that says so rather than one that blames fleet-tab.
+const ETAB = `_edit-${PROJECT}`;
+const ed = (assertion, kind = 'edit') => open(assertion, { project: PROJECT, cols: 90, rows: 25, kind });
+const edNo = await ed(null);
+is('term: the editor with no fresh passkey is refused', [401, 'passkey'], [edNo.status, edNo.json && edNo.json.needs]);
+is('...and no editor tab was made', false, hasTab(ETAB));
+const edOdd = await ed(await a.fresh(BASE, 'editor'), 'emacs-daemon');
+is('term: a kind that is neither term nor edit is refused', 400, edOdd.status);
+is('...and makes no tab of any name', false, hasTab(ETAB) || hasTab(`_emacs-daemon-${PROJECT}`));
+const hasNvim = (() => { try { execFileSync('nvim', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+const edYes = await ed(await a.fresh(BASE, 'editor'));
+if (hasNvim) {
+  is('term: the editor with a fresh passkey opens', 200, edYes.status);
+  is('...naming the project\'s editor tab, not the terminal', ETAB, edYes.json && edYes.json.session);
+  is('...which runs nvim with the copy-on-select Lua, as the desk\'s does', true,
+     /nvim .*nvim-copy-on-select\.lua/.test(tmux('display-message', '-p', '-t', ETAB, '#{pane_start_command}')));
+  is('...with a one-use ticket like the terminal\'s', true, !!(edYes.json && edYes.json.ticket));
+} else {
+  is('term: with no editor installed, the open is refused', 502, edYes.status);
+  is('...saying there is no editor, not that fleet-tab said nothing', true, /no editor on this machine/.test((edYes.json && edYes.json.text) || ''));
+}
+
 // ── 3. THE UPGRADE: origin, ticket, single use ──────────────────────────────────
 const tk = (r) => `/api/term/ws?ticket=${encodeURIComponent((r.json && r.json.ticket) || '')}`;
 const r2 = await open(await a.fresh(BASE, 'terminal'));

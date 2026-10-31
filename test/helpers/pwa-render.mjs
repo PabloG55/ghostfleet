@@ -232,6 +232,13 @@ class Node_ {
     };
     return hit(this);
   }
+  // ...and every match, for the sheets' text fields (sheetFields): a tag, or a tag with one
+  // `[attr=value]`, in a comma-separated list. A field built by input() carries type=text as
+  // an attribute here, exactly as el() sets it on a real one.
+  querySelectorAll(sel) {
+    const want = sel.split(',').map(s => /^(\w+)(?:\[(\w+)=([\w-]+)\])?$/.exec(s.trim())).filter(Boolean);
+    return this.all(n => want.some(([, tag, k, v]) => n.tag === tag && (!k || n.attrs[k] === v)));
+  }
   // for the assertions, not for app.js
   find(pred) {
     for (const k of this.kids) { if (pred(k)) return k; const d = k.find(pred); if (d) return d; }

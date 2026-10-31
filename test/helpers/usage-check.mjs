@@ -183,8 +183,9 @@ try {
        await b.evaluate(() => [...document.querySelectorAll('#sheet .u-acct')].map(n => (n.className.match(/\bu-(green|yellow|red|grey)\b/) || [])[1]).join(',')));
     // Its buttons named in full, and its width asked of a sheet that is there: an absence
     // asserted with no sheet open is true of a client that never drew one.
-    is(`${size}: ...and it offers no switch, only the way back`, ['esc back'],
-       await b.evaluate(() => [...document.querySelectorAll('#sheet .sheet button')].map(n => n.textContent.trim())));
+    // ...by its name: the X every sheet has is a way back too, and says so as "close".
+    is(`${size}: ...and it offers no switch, only the way back`, ['close', 'esc back'],
+       await b.evaluate(() => [...document.querySelectorAll('#sheet .sheet button')].map(n => n.getAttribute('aria-label') || n.textContent.trim())));
     is(`${size}: ...nor scrolls sideways`, false,
        await b.evaluate(() => { const s = document.querySelector('#sheet .sheet'); return s ? s.scrollWidth > s.clientWidth + 1 : 'no sheet'; }));
 

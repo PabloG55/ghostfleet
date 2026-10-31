@@ -238,6 +238,17 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 `send a prompt`, and a **`🔊`** beside it reads the newest assistant turn aloud
 (`SpeechSynthesis` — no network, and fenced code is announced rather than read out).
 
+**Every sheet closes the same five ways, and they are one call** (`dismissSheet`): `Esc`, the
+back gesture, its `esc back` button, the **X** in its top-right corner, and a **tap or click
+on the dimmed room behind it**. Only a press that *starts* on the scrim counts — a drag that
+begins inside a sheet and lets go outside it is not a request to leave. None of them throws
+typed text away: a sheet's changed fields are kept for the page's life and are back when the
+same sheet opens again, until its own action (send, schedule, create) spends them. The
+**confirm bar** (`kill session 'api-fix'?`, `remove 'acme-api' from projects?`) has the same X, and a press
+anywhere outside it is its "any other key": it cancels, and the press goes no further — the
+card under it does not open. Outside only ever cancels; the yes is only ever the bar's own
+button or `y`.
+
 §7's key-to-touch mapping:
 
 | terminal | phone |
@@ -253,14 +264,9 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
 desk's; see *On a desk* below for the whole map.
 
-**One thing is deliberately absent** (§7), and a substitute for it is the mistake:
-
-- **the `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
-  (below) can run nvim instead, in the project's.
-
-The settings sheet says so out loud, so the gap reads as a decision rather than as
-something half-built. The **terminal** and the **stack** were the other two, until the owner
-decided each was worth its surface; both are here now — see *The terminal* and *The stack*.
+**Nothing §7 named is absent any more.** The **editor**, the **terminal** and the **stack**
+were held back until the owner decided each was worth its surface; all three are here now —
+see *The terminal* (the editor is its other tab) and *The stack*.
 
 ## On a desk
 
@@ -396,8 +402,8 @@ added here without a row that presses it.
 | `s` | Projects, grid | schedule a message — to that project's master / to the selected session |
 | `,` | Projects, grid | settings |
 | `x` | Projects, grid | remove the project from the list / kill the session (or remove a free worktree), behind the desk's own question |
-| `y` · `any other key` | a question | yes / cancel. A refused worktree removal takes `f`, as at the desk |
-| `Esc` | a sheet | close it |
+| `y` · `any other key` | a question | yes / cancel — and so is a click anywhere outside the bar, which only ever cancels. A refused worktree removal takes `f`, as at the desk |
+| `Esc` | a sheet | close it — the same as its X and a click beside it, and what was typed in it is kept |
 | `⏎` | grid | open the selected card: a session on the right, a sub-lead's sub-grid, a name for a free worktree |
 | `/` | Projects, grid | find a project (by its name or its folder's) / an agent: every key types into the query, the cursor on the first match, the rest dimmed. On Projects a project the profile tab hides is not found. A touch screen gets the field instead |
 | `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | Projects, grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
@@ -416,10 +422,11 @@ added here without a row that presses it.
 | `Ctrl-a` | session | tmux's prefix: the next key is read from its table |
 | `Ctrl-a g` · `Ctrl-a d` · `Ctrl-a s` · `Ctrl-a p` · `Ctrl-a f` · `Ctrl-a →` · `Ctrl-a ←` | session | back · back · the grid · Projects · the jump chord · next session · previous session |
 | `Ctrl-a t` | session | the project's **terminal**, in the right pane — the desk's `Ctrl-a t`, which is its `Ctrl-t`. It asks for the passkey; inside it every key is the shell's and `⇧Esc` leaves (see *The terminal*) |
+| `Ctrl-a n` | session | the project's **editor** (neovim, LazyVim if that is the config) — the desk's `Ctrl-a n`, which is its `Ctrl-n`. The same screen, passkey and gates as the terminal |
 | `p` | session | any key tmux does not bind goes to the agent: typed into the composer, which keeps the focus |
 | `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
 | `` ` `` · `⇧←` · `⇧→` · `Ctrl-s` · `Ctrl-p` · `Ctrl-f` · `Ctrl-a` | composer, focused | the same as in the session row above: tmux answers these before the agent at the desk, so they act from inside the box; every other key is text |
-| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them). The terminal is `Ctrl-a t` here, the desk's other spelling of it; the editor is not in this client |
+| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them), so here they are `Ctrl-a t` and `Ctrl-a n`, the desk's other spelling of each, or `terminal` / `editor` behind a `⋯` |
 | `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |
 | `Ctrl-c Ctrl-c` | Projects | quit — no meaning in a browser: a page cannot close its own tab |
 | `Ctrl-a Ctrl-a` | session | a literal `Ctrl-a` for the agent — no meaning in a browser: there is no terminal to send it to |
@@ -623,6 +630,15 @@ browser attaches to it as a tmux **control-mode** client (`lib/web-term.mjs`). C
 browser, or the socket dropping, detaches; the tab stays.
 
 **Open it from** the grid's `⋯` (`terminal`), a session's `⋯`, or `Ctrl-a t` in a session.
+
+**The editor is the same screen with the other tab in it** — the desk's `Ctrl-n`: `bin/fleet-tab
+edit` opens `$EDITOR` (default `nvim .`, with `lib/nvim-copy-on-select.lua`) on the project's
+folder as `_edit-<project>`, so a LazyVim config is the editor you get. Open it with `editor`
+beside `terminal` behind either `⋯`, or `Ctrl-a n` in a session (`Ctrl-n` itself is the
+browser's). It is behind **every gate below, unchanged** — the same device switch, a fresh
+passkey per open, the one-use ticket, the Origin check — because nvim's `:terminal` is a
+shell, so it is no lesser surface. Like the terminal it is absent for another machine's
+project.
 
 **Four gates, all on the server** (`bin/fleet-serve.mjs`, TERMINAL):
 

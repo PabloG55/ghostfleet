@@ -646,10 +646,14 @@ and becomes about *proving who is doing it, and leaving a record*:
 Enforcement is **server-side on the tool name**, never on which buttons the client draws.
 A client-side restriction is a suggestion.
 
-### The thing that cannot transfer
+### The things that could not transfer
 
-- **The `Ctrl-n` editor tab** — it opens neovim in the session's folder. The terminal
-  (below) can run nvim in the project's folder, which covers what the tab is reached for.
+**The `Ctrl-n` editor tab was the first, and the owner has since asked for it** — the desk's
+LazyVim from the web. It is the terminal's screen with the editor tab in it (`bin/fleet-tab
+edit`, `_edit-<project>`), opened by the same request and behind the same four gates below:
+nvim's `:terminal` is a shell, so the editor is no lesser surface than the terminal and gets
+nothing lighter. `Ctrl-n` itself is the browser's, so on the web it is `Ctrl-a n` — the desk's
+own fallback — or `editor` beside `terminal` behind a `⋯`.
 
 **The stack was the second, and the owner has since asked for it** — several agents, across
 projects, on screen at once — so it is on the web as columns at a desk and as a swipe between

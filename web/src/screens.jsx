@@ -103,6 +103,9 @@ function Btn({ label, onClick, cls = '' }) {
 // This is a stroked path in the button's own currentColor.
 const ICONS = {
   more: ['M6 12h.01M12 12h.01M18 12h.01'],
+  // The confirm bar's X. The same path as app.js's ICON_CLOSE, which draws it on every sheet
+  // and on the bar the session screen renders: one picture of "close" across both renderers.
+  close: ['M6 6l12 12M18 6 6 18'],
 };
 function Icon({ name }) {
   const ds = ICONS[name];
@@ -216,6 +219,9 @@ function ConfirmBar({ confirm }) {
   if (!confirm) return null;
   return (
     <div class={'confirm ' + confirm.cls}>
+      {confirm.close
+        ? <button type="button" class="sheet-x confirm-x" aria-label="close" title="close · esc" onClick={confirm.close}><Icon name="close" /></button>
+        : null}
       <span class="q">{' ' + confirm.q}</span>
       <span class="keys">{'  ' + confirm.keys}</span>
       {confirm.buttons.length

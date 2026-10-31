@@ -173,7 +173,9 @@ try {
       s = await settle(x => x.sheet);
       // ...on the vm's grid: a ⋯ with no terminal row anywhere else proves nothing
       is(`${at}: ...its ⋯ has no terminal row`, [true, true, false], [onVm, s.sheetRows.length > 0, s.sheetRows.includes('terminal')]);
-      is(`${at}: ...and says why in one line`, true, /no terminal for another machine/.test(s.sheetWhy) && !/\n/.test(s.sheetWhy));
+      // ...nor the editor, which is the terminal's other tab and goes the same way (#99)
+      is(`${at}: ...nor an editor row`, false, s.sheetRows.includes('editor'));
+      is(`${at}: ...and says why in one line`, true, /no terminal or editor for another machine/.test(s.sheetWhy) && !/\n/.test(s.sheetWhy));
       // ...while this machine's project still has one, so the absence is about the machine
       await fresh({ ...size, paired: 'online' });
       await tap('.card.k-project[data-idx="0"] .c-name', 'acme-api');
@@ -181,6 +183,7 @@ try {
       await tap(`${hdr} > .hdr button.more`, '');
       s = await settle(x => x.sheet);
       is(`${at}: this machine's project keeps its terminal`, [true, ''], [s.sheetRows.includes('terminal'), s.sheetWhy]);
+      is(`${at}: ...and its editor, beside it`, [true, s.sheetRows.indexOf('terminal') + 1], [s.sheetRows.includes('editor'), s.sheetRows.indexOf('editor')]);
     });
 
     await step(`${at}: a machine that is down`, async () => {
