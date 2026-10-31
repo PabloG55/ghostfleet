@@ -331,6 +331,12 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   folded into a turn is read as a change of direction.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **A brief may start with a slash command.** `--prompt "/some-skill <the brief>"` runs that
+  skill in the worker as if typed, with the rest as its arguments, so there is no need to
+  reword it as "use the skill …". A brief that cannot be delivered is never silent:
+  `fleet-send` exits 1 with the reason, and a deferred `fleet-spawn` brief that fails lands
+  in your `fleet-inbox` as a `FAILED` row naming the worker and the error. Re-send it
+  reworded. A literal leading `/` cannot be sent, `//` included.
 - **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight
   axes — the UNIT (per line, per document, per policy) · PARITY with an existing surface ·
   REUSE rather than recreate · the GATE before advancing · COMPLETENESS of a list ·

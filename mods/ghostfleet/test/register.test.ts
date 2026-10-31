@@ -12,10 +12,10 @@ const ID = 'sess-1'
 const FILE = `${DIR}/${ID}.json`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; order: string[] }
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[] }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], order: [] }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [] }
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
@@ -52,6 +52,13 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   })
   on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); w.order.push(`submit ${e.text}`); return { text: e.text } })
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
+  // A slash command the plugin runs: it runs and answers no text, as a skill does (its turn
+  // follows). `no-such` is left unanswered, and the harness rejects that run as the host
+  // rejects an unknown name (measured: "$.command.run: no command named /x in this session").
+  on('command.run', (_$: any, e: any, next: any) => {
+    if (e.command === 'no-such') return next(e)
+    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim()); return {}
+  })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
   on('session.measure', (_$: any, e: any) => ({ changed: e.changed }))
@@ -204,6 +211,101 @@ test('an idle session takes a handed-over prompt and names the turn it started',
   expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't7' }))
   expect(w.files.has(`${SPOOL}/1000-1.taken`)).toBe(false)
   expect(rec(w).turnId).toBe('t7')
+})
+
+test('a plain prompt is submitted, never run as a command', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'fix the build, see /tmp/log for the error'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['fix the build, see /tmp/log for the error'])
+  expect(w.commands).toEqual([])
+})
+
+// A brief that opens with a skill. The host refuses `prompt.submit` for a text beginning
+// with "/", and that refusal used to be the receipt nobody read; the worker sat idle.
+const commandTurn = (name: string, args: string) =>
+  `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`
+
+test('a prompt that starts with a slash command runs as that command, and its receipt names the turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, {}, { ...BASE, transcript: '/t/sess-1.jsonl' })
+  await start($)
+  w.files.set(...entry('1000-1', '/some-skill redo the page\n\nkeep the colours  ', { sock: 'cf-toolbox', sess: 'master', dir: '/fleet' }))
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  expect(w.commands.map(e => [e.command, e.args])).toEqual([['some-skill', 'redo the page\n\nkeep the colours']])
+  // A person's own command in the same second is theirs, not this delivery's turn.
+  await $.turn.start({ text: commandTurn('other-skill', 'x'), turnId: 't1' })
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  await $.turn.complete(complete('answer') as any)
+  await $.turn.start({ text: commandTurn('some-skill', 'redo the page\n\nkeep the colours'), turnId: 't2' })
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't2' }))
+  expect(w.files.get(`${DIR}/cf-acme-api.w1.reply-to.armed`)).toBe('17\nturn t2\n')
+  await clock.advance(20_000)
+  expect(json(w, `${SPOOL}/1000-1.done`).ran).toBeUndefined()
+})
+
+test('a command that starts no turn is receipted as ran, not left to time out', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/compact'))
+  await clock.advance(500)
+  expect(w.commands.map(e => [e.command, e.args])).toEqual([['compact', '']])
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  await clock.advance(10_500)
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', ran: '/compact' }))
+  // ...and the spool is free again for the next prompt.
+  w.files.set(...entry('2000-1', 'next'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['next'])
+})
+
+test('a refused delivery names the error and the session it failed in', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/no-such arg'))
+  await clock.advance(500)
+  const r = json(w, `${SPOOL}/1000-1.done`)
+  expect(r).toEqual(expect.objectContaining({ id: '1000-1', sock: 'cf-acme-api', slot: 'w1' }))
+  expect(r.error).toContain('command.run')
+  expect(r.turnId).toBeUndefined()
+})
+
+test('a // or a bare / names no command: refused in words, nothing run or submitted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '//literal slash'))
+  await clock.advance(500)
+  expect(w.commands).toEqual([])
+  expect(w.submitted).toEqual([])
+  expect(json(w, `${SPOOL}/1000-1.done`).error).toContain('reword it')
+})
+
+test('the mod\'s own commands are refused, not reported as run: the host skips its own hooks', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/inbox'))
+  await clock.advance(500)
+  expect(w.commands).toEqual([])
+  expect(json(w, `${SPOOL}/1000-1.done`).error).toContain('run fleet-inbox instead')
+})
+
+test('past the hour a delivered receipt is cleared, a failed one is kept for the inbox', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const w = world(on)
+  w.files.set(`${SPOOL}/1000-1.done`, JSON.stringify({ id: '1000-1', turnId: 't1' }))
+  w.files.set(`${SPOOL}/1000-2.done`, JSON.stringify({ id: '1000-2', error: 'refused', sock: 'cf-acme-api', slot: 'w1' }))
+  await start($)
+  await clock.advance(500)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  expect(w.files.has(`${SPOOL}/1000-2.done`)).toBe(false)
+  expect(json(w, `${SPOOL}/1000-2.failed`).error).toBe('refused')
 })
 
 test('a running turn is never handed a prompt: it waits for the turn to end', async ($, on) => {

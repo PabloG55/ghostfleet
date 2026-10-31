@@ -1184,7 +1184,8 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
           [ "${CLAUDE_FLEET_MOD_DELIVER:-on}" != off ] && [ -f "$mt" ] \
             && node "$mt" "$FLEET_DIR" "$sock" "$slot" >/dev/null 2>&1 || continue
         fi
-        fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
+        # Its output goes nowhere, so a delivery the mod refused is filed in the inbox of the lead.
+        CLAUDE_FLEET_SEND_REPORT="a queued prompt" fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
         [ "$?" = 3 ] || exit 0
       done
     ' _ "$CLAUDE_FLEET_SOCK" "$SLOT" "$_qd" "${CLAUDE_FLEET_QUEUE_EVERY:-1}" \

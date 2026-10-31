@@ -650,6 +650,18 @@ _jarvis_delivered() {
     printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
   fi
 }
+# A FAILED DELIVERY NOBODY WOULD SEE. Filed as a `failed` row in the inbox of the worker's
+# lead, chosen as hooks/fleet-event.sh chooses it: a live parent named in <sock>.<slot>.parent,
+# else master. Only for a sender that set CLAUDE_FLEET_SEND_REPORT, because one whose output
+# is read (a lead's own Bash call) has already been told, and a second copy in the inbox
+# would read as a second failure.
+_report_failed() {
+  local _p _ib="$FLEET_DIR/$SOCK.inbox"
+  _p="$(head -1 "$FLEET_DIR/$SOCK.$SESSION.parent" 2>/dev/null)"
+  case "$_p" in ''|master|*[!A-Za-z0-9._~-]*) _p="" ;; esac
+  [ -n "$_p" ] && tmux -L "$SOCK" has-session -t "=$_p" 2>/dev/null && _ib="$FLEET_DIR/$SOCK.$_p.inbox"
+  printf '%s\t%s\tfailed\t%s\n' "$(date +%s)" "$SESSION" "$(printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-300)" >> "$_ib" 2>/dev/null || true
+}
 # THROUGH THE MOD. Handed over, then three outcomes, each told apart by a rename (the mod's
 # DELIVERY section has the protocol):
 #   claimed and its turn started: the receipt names the turn, and that is "→ <session>";
@@ -693,11 +705,21 @@ if [ "$USE_MOD" = 1 ]; then
         sleep 0.1
       done
       _turn="$(sed -n 's/.*"turnId":"\([^"]*\)".*/\1/p' <<< "$_rcpt")"
-      _why="$(sed -nE 's/.*"(dropped|error)":"([^"]*)".*/\2/p' <<< "$_rcpt")"
+      _ran="$(sed -n 's/.*"ran":"\([^"]*\)".*/\1/p' <<< "$_rcpt")"
+      _why="$(sed -nE 's/.*"(dropped|error)":"((\\.|[^"\\])*)".*/\2/p' <<< "$_rcpt" | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g')"
       if [ -n "$_turn" ]; then
         echo "fleet-send: → $SESSION"
+      elif [ -n "$_ran" ]; then
+        # A slash command that ran without a turn of its own (a panel, a local command).
+        echo "fleet-send: → $SESSION (ran $_ran; it started no turn)"
       elif [ -n "$_rcpt" ]; then
         echo "fleet-send: → $SESSION (not delivered: the mod could not submit it — ${_why:-no reason given})" >&2
+        # Read, so it is ours to report: a receipt left behind is one fleet-inbox reports as
+        # read by nobody (lib/handoff-sweep.mjs). A sender whose output goes nowhere (the
+        # queue's drain, fleet-spawn's deferred brief) says so, and the failure is filed
+        # where the worker's lead will read it.
+        rm -f "$_spool/$_hid.done" 2>/dev/null
+        [ -n "${CLAUDE_FLEET_SEND_REPORT:-}" ] && _report_failed "$CLAUDE_FLEET_SEND_REPORT not delivered — ${_why:-no reason given}"
         exit 1
       else
         # Claimed and not started yet. The mod still holds it and will submit it once the
