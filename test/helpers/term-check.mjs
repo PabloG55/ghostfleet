@@ -101,6 +101,14 @@ async function device(phone) {
       }
     };
     try { localStorage.setItem('gf.cred:${U.origin}', ${JSON.stringify(a.credentialId)}); } catch {}
+    // What the page puts on this device's clipboard, kept rather than written: a headless
+    // Chrome's clipboard is the machine's, and a suite must not overwrite the owner's.
+    window.__gfCopied = [];
+    try {
+      const cb = navigator.clipboard || {};
+      cb.writeText = (t) => { window.__gfCopied.push(String(t)); return Promise.resolve(); };
+      if (!navigator.clipboard) Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => cb, configurable: true });
+    } catch {}
   ` });
 }
 await device(true);
@@ -169,6 +177,40 @@ const termGeom = () => evaluate(() => {
   return rowsEl.length;
 });
 const focusedInTerm = () => evaluate(() => !!(document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea')));
+// THE PANE'S WIDTH IS THE COLUMN COUNT THAT MATTERS: what tmux was told, through #89's resize,
+// is what nvim lays its screen out in. And the font, as xterm drew it.
+const winWidth = () => Number(tmux('display-message', '-p', '-t', TAB, '#{window_width}').trim()) || 0;
+const fontPx = () => evaluate(() => { const r = document.querySelector('.term-host .xterm-rows'); return r ? parseFloat(getComputedStyle(r).fontSize) : 0; });
+const savedFont = () => evaluate(() => { try { return localStorage.getItem('gf.termFont'); } catch { return null; } });
+// The width once tmux has caught up with a change, or what it is when it never did.
+const widthAfter = async (pred) => (await until(() => { const w = winWidth(); return pred(w) && w; }, 5000)) || winWidth();
+// A FINGER, as CDP's touch emulation delivers one: raw touch points, no click waited for —
+// on the terminal a touch is not a click on an element, it is a gesture term.js reads.
+const touch = (type, pts) => call('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
+const fingerTap = async (p) => { await touch('touchStart', [[p.x, p.y]]); await touch('touchEnd', []); };
+async function fingerDrag(from, to, { hold = 0, steps = 12 } = {}) {
+  await touch('touchStart', [[from.x, from.y]]);
+  if (hold) await sleep(hold);
+  for (let i = 1; i <= steps; i++) {
+    await touch('touchMove', [[from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps]]);
+    await sleep(16);
+  }
+  await touch('touchEnd', []);
+}
+// The centre of the character at column `col` of the first screen row that starts with `text`.
+const rowPoint = (text, col = 0) => evaluate((text, col, cols) => {
+  const rows = [...document.querySelectorAll('.term-host .xterm-rows > div')];
+  const r = rows.find(d => d.textContent.startsWith(text));
+  const scr = document.querySelector('.term-host .xterm-screen');
+  if (!r || !scr || !cols) return null;
+  const b = r.getBoundingClientRect(), cw = scr.getBoundingClientRect().width / cols;
+  return { x: b.left + (col + 0.5) * cw, y: b.top + b.height / 2 };
+}, text, col, winWidth());
+const hostBox = () => evaluate(() => { const r = document.querySelector('.term-host').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: r.top, bottom: r.bottom }; });
+const cursorRow = () => evaluate(() => [...document.querySelectorAll('.term-host .xterm-rows > div')].findIndex(d => d.querySelector('.xterm-cursor')));
+const kbdOn = () => evaluate(() => { const b = [...document.querySelectorAll('.term-tools button')].find(x => x.textContent === '⌨'); return !!b && b.classList.contains('on'); });
+// Hex of everything the page wrote to the socket since `n` writes ago.
+const sentSince = (n) => evaluate((n) => window.__gfSent.slice(n).join(''), n);
 const termMsg = () => evaluate(() => { const m = document.querySelector('.term-screen .term-msg'); return m && !m.hidden ? m.textContent : ''; });
 const wsCount = () => evaluate(() => window.__gfWs || 0);
 // Counted from where THIS check began: the suite runs the probe against the same daemon first.
@@ -225,10 +267,23 @@ is('...showing the shell', true, !!prompt);
 // so a count taken at "opened" reads 0 for a socket that is about to exist.
 is('...on one socket', 1, await wsCount());
 is('...on the project\'s tab', true, hasTab());
+// ── 3b. THE PHONE'S VIEW: a default that fits ───────────────────────────────────────
+// At the desk's 13px the 390pt phone had 46 columns here and LazyVim 37 in the editor tab.
+// app.js picks floor(short side / 42)px — 9px here — for about seventy; 64 is the floor.
+const cols0 = await widthAfter((w) => w >= 64);
+is('term-ui (phone view): at the default size the tab is at least 64 columns at 390pt', 'yes', cols0 >= 64 ? 'yes' : `no: ${cols0}`);
+const font0 = await fontPx();
 
-// ── 4. typed input reaches the pane ──────────────────────────────────────────────────
+// ── 4. THE KEYBOARD BUTTON, and typed input reaches the pane ─────────────────────────
+// A tap on the terminal is a mouse click now and raises nothing, so the bar's ⌨ is the way
+// the keyboard comes up: it focuses xterm's textarea, which is what a phone raises it for.
+is('term-ui: the bar carries A−, A+ and the keyboard button', 'A− A+ ⌨',
+   await evaluate(() => [...document.querySelectorAll('.term-screen .term-tools button')].map(b => b.textContent).join(' ')));
+is('...and the keyboard is down until it is asked for', false, await focusedInTerm());
+await tap('.term-tools button', '⌨');
+is('term-ui: the keyboard button focuses the terminal (raises the keyboard)', true, !!(await until(() => focusedInTerm(), 3000)));
+is('...and shows that it is up', true, await kbdOn());
 const MARK = `phone-${crypto.randomBytes(3).toString('hex')}`;
-await tap('.term-host');
 await typeText(`echo ${MARK}-$((6*7))`);
 await key('Enter');
 is('term-ui: typed on the phone, it reaches the pane (capture-pane)', true, !!(await until(() => capture().includes(`${MARK}-42`))));
@@ -236,9 +291,15 @@ is('...and the shell\'s answer is on the phone\'s screen', true, !!(await until(
 
 // ── 5. THE KEY ROW ───────────────────────────────────────────────────────────────────
 const labels = await evaluate(() => [...document.querySelectorAll('.term-keys button')].map(b => b.textContent));
-is('term-ui: the key row carries Esc, Ctrl, Tab, the arrows and | ~ / -', 'Esc Ctrl Tab ← ↑ ↓ → | ~ / -', labels.join(' '));
+is('term-ui: the key row carries Esc, Ctrl, Alt, Tab, the leader, : and Enter over the arrows and | ~ / -',
+   'Esc Ctrl Alt Tab ␣ leader : ⏎ | ← ↑ ↓ → | ~ / -',
+   await evaluate(() => [...document.querySelectorAll('.term-keys .tk-band')].map(b => [...b.querySelectorAll('button')].map(x => x.textContent).join(' ')).join(' | ')));
 const rowVisible = await evaluate(() => { const r = document.querySelector('.term-keys'); return !!r && !r.hidden && r.getBoundingClientRect().height > 0; });
 is('...and it is on screen', true, rowVisible);
+is('...each band whole on a 390pt screen, nothing scrolled out of reach', true,
+   await evaluate(() => { const b = [...document.querySelectorAll('.term-keys .tk-band')]; return b.length === 2 && b.every(x => x.scrollWidth <= x.clientWidth + 1); }));
+is('...and below the terminal, never over it', true,
+   await evaluate(() => { const h = document.querySelector('.term-host').getBoundingClientRect(), r = document.querySelector('.term-keys').getBoundingClientRect(); return r.top >= h.bottom; }));
 // | from the row, inside a pipeline the shell then runs.
 await typeText(`echo ${MARK}x `);
 await tap('.term-keys button', '|');
@@ -261,6 +322,19 @@ await sleep(300);
 await typeText('T'); await tap('.term-keys button', 'Tab'); await typeText('T'); await key('Enter');
 await tap('.term-keys button', 'Ctrl'); await typeText('d');
 is('term-ui: Tab from the key row reaches the pane as a tab', true, !!(await until(() => /T\s+\\t\s+T\s+\\n/.test(capture()))));
+// STICKY Ctrl AND Alt, the leader, : and ⏎ — as the BYTES the pane reads. The tty is taken out
+// of canonical mode first, or its line discipline would eat ^W as word-erase before od saw it.
+await typeText('stty -icanon -isig -iexten -icrnl -echo; head -c 6 | od -An -tx1; stty sane'); await key('Enter');
+await sleep(500);
+await tap('.term-keys button', 'Ctrl'); await typeText('w');
+await tap('.term-keys button', 'Alt');
+is('term-ui: Alt latches, and shows it', true, await evaluate(() => { const b = [...document.querySelectorAll('.term-keys button')].find(x => x.textContent === 'Alt'); return !!b && b.classList.contains('on'); }));
+await typeText('x');
+await tap('.term-keys button', '␣ leader'); await tap('.term-keys button', ':'); await tap('.term-keys button', '⏎');
+const odLine = await until(() => (capture().match(/^\s*17\s+1b\s+78\s+20\s+3a\s+0d\s*$/m) || [])[0], 5000);
+if (!odLine) console.error('sticky keys: the pane said ' + JSON.stringify(capture().split('\n').filter(Boolean).slice(-4)));
+is('term-ui: sticky Ctrl then w is ^W, sticky Alt then x is ESC x, then ␣ leader, : and ⏎ (od of what the pane read)', true, !!odLine);
+is('...and both latches let go', 'false false', await evaluate(() => ['Ctrl', 'Alt'].map(l => { const b = [...document.querySelectorAll('.term-keys button')].find(x => x.textContent === l); return b ? b.classList.contains('on') : `no ${l} key`; }).join(' ')));
 
 // ── 6. RESIZE PROPAGATES ─────────────────────────────────────────────────────────────
 const winSize = () => tmux('display-message', '-p', '-t', TAB, '#{window_height}').trim();
@@ -271,6 +345,39 @@ const after = await until(async () => { const g = await termGeom(); return g && 
 is('term-ui: a shorter screen is fewer rows', true, !!after && after < before);
 is('...and tmux follows it', String(after), await until(() => winSize() === String(after) && winSize(), 5000) || winSize());
 await browser.viewport(390, 844);
+await until(async () => (await termGeom()) === before, 5000);
+
+// ── 6b. THE PHONE'S VIEW: A−/A+, a pinch, remembered, and landscape ──────────────────
+const tapUntil = async (label, pred, n = 30) => { for (let i = 0; i < n && !(await pred()); i++) await tap('.term-tools button', label); };
+await tap('.term-tools button', 'A+');
+const fontUp = await until(async () => { const f = await fontPx(); return f > font0 && f; }, 3000);
+is('term-ui (phone view): A+ makes the text larger', true, !!fontUp);
+const wUp = await widthAfter((w) => w < cols0);
+is('...and the pane narrower: tmux is resized to the new columns', 'yes', wUp < cols0 ? 'yes' : `no: ${cols0} -> ${wUp}`);
+is('...and the size is remembered on this device', String(fontUp), await savedFont());
+await tap('.term-tools button', 'A−'); await tap('.term-tools button', 'A−');
+const wDown = await widthAfter((w) => w > cols0);
+is('term-ui (phone view): A− makes the pane wider than the default', 'yes', wDown > cols0 ? 'yes' : `no: ${cols0} -> ${wDown}`);
+await tap('.term-tools button', 'A+');
+await widthAfter((w) => w === cols0);
+// Two fingers apart, from 40px to 120px: three times the distance, three times the font.
+const hb = await hostBox();
+await touch('touchStart', [[hb.x - 20, hb.y], [hb.x + 20, hb.y]]);
+for (let i = 1; i <= 8; i++) { await touch('touchMove', [[hb.x - 20 - 5 * i, hb.y], [hb.x + 20 + 5 * i, hb.y]]); await sleep(16); }
+await touch('touchEnd', []);
+const fontPinch = await until(async () => { const f = await fontPx(); return f >= font0 * 2 && f; }, 3000);
+is('term-ui (phone view): a pinch apart makes the text larger', 'yes', fontPinch ? 'yes' : `no: ${font0} -> ${await fontPx()}`);
+const wPinch = await widthAfter((w) => w < cols0 / 2 + 2);
+is('...and the pane follows it', 'yes', wPinch < cols0 / 2 + 2 ? 'yes' : `no: ${cols0} -> ${wPinch}`);
+is('...and the pinch is remembered too', String(fontPinch), await savedFont());
+await tapUntil('A−', async () => (await fontPx()) <= font0);
+await widthAfter((w) => w === cols0);
+await browser.viewport(844, 390);
+const wLand = await widthAfter((w) => w > cols0 * 1.5);
+is('term-ui (phone view): landscape is the same text with more columns', 'yes',
+   wLand > cols0 * 1.5 && (await fontPx()) === font0 ? 'yes' : `no: ${cols0} -> ${wLand} at ${await fontPx()}px`);
+await browser.viewport(390, 844);
+await widthAfter((w) => w === cols0);
 
 // ── 7. NVIM, AND THE SCREEN IT DRAWS ────────────────────────────────────────────────
 if (!hasNvim) skipGroup('nvim inside the web terminal', 'nvim is not installed');
@@ -299,6 +406,65 @@ else {
   const saved = await until(() => { try { return fs.readFileSync(`${REPO}/${FILE}`, 'utf8'); } catch { return ''; } }, 8000);
   is('term-ui: insert, Esc from the key row, :wq — and the file is written', 'hello from nvim\n', saved);
   is('...and the shell is back', true, !!(await until(() => screenText().then(t => /\$ *$/m.test(t) && !/^~\s*$/m.test(t)), 6000)));
+
+  // ── 7b. A FINGER IS A MOUSE ────────────────────────────────────────────────────────
+  // nvim --clean has mouse=nvi, as LazyVim's mouse=a does for these: a click moves the
+  // cursor, a double click selects a word, the wheel scrolls, a drag is a visual selection.
+  const TF = `touch-${MARK}.txt`;
+  fs.writeFileSync(`${REPO}/${TF}`, Array.from({ length: 200 }, (_, i) => `line${i + 1} word${i + 1}`).join('\n') + '\n');
+  await typeText(`nvim --clean -n ${TF}`); await key('Enter');
+  await until(() => screenText().then(t => t.includes('line5 word5')), 8000);
+  await until(() => evaluate(() => !!document.querySelector('.term-host .xterm.enable-mouse-events')), 6000);
+  await tap('.term-tools button', '⌨');
+  await until(async () => !(await focusedInTerm()), 3000);
+  is('term-ui (touch): the keyboard button hides the keyboard again', false, await focusedInTerm());
+  const sent1 = await evaluate(() => window.__gfSent.length);
+  const p3 = await rowPoint('line3 ', 2);
+  if (p3) await fingerTap(p3); else console.error('touch tap: no row starts with line3');
+  const tapRow = await until(async () => { const r = await cursorRow(); return r === 2 && r; }, 4000);
+  if (!tapRow) console.error(`touch tap: cursor on row ${await cursorRow()}, sent ${await sentSince(sent1)}`);
+  is('term-ui (touch): a tap is a click: nvim moves its cursor to the tapped line', 2, tapRow || await cursorRow());
+  // ESC [ < 0 ; … M then … m: an SGR press and release of button 1, the encoding nvim asked for.
+  is('...sent as the mouse press and release nvim asked for (SGR)', true, /1b5b3c303b(?:3[0-9]|3b)+4d.*1b5b3c303b(?:3[0-9]|3b)+6d/.test(await sentSince(sent1)));
+  is('...and the tap did not raise the keyboard', false, await focusedInTerm());
+  const p5 = await rowPoint('line5 ', 8);
+  if (p5) { await fingerTap(p5); await sleep(60); await fingerTap(p5); }
+  const visualWord = await until(() => screenText().then(t => t.includes('-- VISUAL --')), 4000);
+  is('term-ui (touch): two quick taps are a double click (nvim selects the word)', true, !!visualWord);
+  await tap('.term-keys button', 'Esc');
+  await until(() => screenText().then(t => !t.includes('-- VISUAL --')), 3000);
+  // Finger UP the screen is the text moving up: further down the file, as a wheel turned
+  // toward you would go.
+  const topLine = () => screenText().then(t => +((t.split('\n')[0].match(/^line(\d+)/) || [])[1] || 0));
+  const top0 = await topLine();
+  const hb2 = await hostBox();
+  await fingerDrag({ x: hb2.x, y: hb2.bottom - 40 }, { x: hb2.x, y: hb2.top + 60 });
+  const top1 = await until(async () => { const t = await topLine(); return t > top0 && t; }, 4000);
+  is('term-ui (touch): a finger drag up scrolls nvim down the file', 'yes', top1 ? 'yes' : `no: top line ${top0} -> ${await topLine()}`);
+  await fingerDrag({ x: hb2.x, y: hb2.top + 60 }, { x: hb2.x, y: hb2.bottom - 40 });
+  const top2 = top1 ? await until(async () => { const t = await topLine(); return t < top1 && t; }, 4000) : 0;
+  is('...and a drag down scrolls it back', 'yes', top2 ? 'yes' : top1 ? `no: top line stayed ${await topLine()}` : 'no: it never scrolled down');
+  is('...and no drag raised the keyboard', false, await focusedInTerm());
+  // A long press holds the button: from there, a drag is a mouse drag — a visual selection,
+  // which in the editor tab is what #74's copy-on-select copies on release.
+  const q2 = await rowPoint('line2 ', 0), q4 = await rowPoint('line4 ', 6);
+  if (q2 && q4) await fingerDrag(q2, q4, { hold: 650, steps: 6 });
+  const visualDrag = await until(() => screenText().then(t => t.includes('-- VISUAL --')), 4000);
+  is('term-ui (touch): a long press then a drag is a mouse drag (nvim selects, visually)', true, !!visualDrag);
+  await tap('.term-tools button', '⌨');
+  await tap('.term-keys button', 'Esc'); await typeText(':q!'); await key('Enter');
+  await until(() => screenText().then(t => /\$ *$/m.test(t) && !t.includes('line5 word5')), 6000);
+  // In the SHELL nothing holds the mouse, so the long press is xterm's own selection, and it
+  // is copied to this device's clipboard.
+  await typeText(`clear; echo copy${MARK}`); await key('Enter');
+  await until(() => screenText().then(t => t.split('\n').some(l => l.startsWith(`copy${MARK}`))), 4000);
+  await tap('.term-tools button', '⌨');
+  // To the cell AFTER the word: xterm's selection ends where the finger is, not after it.
+  const c0 = await rowPoint(`copy${MARK}`, 0), c1 = await rowPoint(`copy${MARK}`, `copy${MARK}`.length);
+  if (c0 && c1) await fingerDrag(c0, c1, { hold: 650, steps: 6 });
+  const copied = await until(() => evaluate(() => window.__gfCopied.join('\n')), 3000);
+  is('term-ui (touch): in the shell a long press and drag selects, and copies it to the phone', `copy${MARK}`, (copied || '').trim());
+  await tap('.term-tools button', '⌨');
 }
 
 // ── 8. A CLOSED SOCKET ENDS CLEANLY ─────────────────────────────────────────────────
@@ -344,6 +510,13 @@ if (!hasNvim) {
   const paneLine = () => tmux('capture-pane', '-p', '-t', ETAB).split('\n').map(l => l.trim()).filter(l => l.length > 3)[0] || '';
   const shown = await until(async () => { const l = paneLine(); return l && (await screenText()).includes(l) && l; }, 8000);
   is('...and the browser shows what nvim drew', true, !!shown);
+  // The view the owner reported from: LazyVim in this tab at 37 columns.
+  const eWin = () => tmux('display-message', '-p', '-t', ETAB, '#{window_width} #{window_height}').trim().split(' ').map(Number);
+  const eCols = (await until(() => eWin()[0] >= 64 && eWin()[0], 5000)) || eWin()[0];
+  is('term-ui (phone view): the editor opens at least 64 columns wide too', 'yes', eCols >= 64 ? 'yes' : `no: ${eCols}`);
+  const eRows = await termGeom();
+  is('...and as tall as the phone draws it', String(eRows), String((await until(() => eWin()[1] === eRows && eWin()[1], 5000)) || eWin()[1]));
+  await sleep(300);
   await shot('phone-editor');
 }
 await tap('.sbar button', '‹');
@@ -377,6 +550,7 @@ const deskOpen = await until(() => evaluate(() => {
 is('term-ui (desk): Ctrl-a t opens the terminal, after the passkey', true, !!deskOpen);
 is('...in the RIGHT pane, with the grid in the left one', true, await evaluate(() => !!document.querySelector('#app .term-screen') && !!document.querySelector('#side .cards')));
 is('...the key row is not drawn at a desk', true, await evaluate(() => { const r = document.querySelector('.term-keys'); return !r || r.hidden; }));
+is('...nor the phone\'s A− A+ ⌨, and the text stays the desk\'s 13px', 'hidden 13', `${await evaluate(() => { const t = document.querySelector('.term-tools'); return !t || t.hidden ? 'hidden' : 'shown'; })} ${await fontPx()}`);
 is('...and the terminal has the focus', true, !!(await until(() => focusedInTerm(), 4000)));
 await until(() => screenText().then(t => /\$ *$/m.test(t)), 6000);
 await shot('desk-open');

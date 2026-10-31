@@ -1509,20 +1509,38 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
 }
 /* xterm sizes itself to its own element; it must not size the column back. */
 .term-screen > .term-host .xterm { height: 100%; }
-.term-screen > .term-keys {
-  display: flex; gap: 3px; flex: 0 0 auto; overflow-x: auto; overscroll-behavior: contain;
+/* TWO BANDS, EACH ONE LINE: Esc Ctrl Alt Tab ␣ leader : ⏎ over the arrows and | ~ / -. At
+ * 390pt both fit whole, in equal shares; on a narrower phone a band scrolls sideways rather
+ * than wrap into a third line that would take the terminal's rows. Fifteen keys on ONE
+ * line was the alternative, and it hid the end of the line — measured on the first cut,
+ * `~ / -` were off screen at eleven. 40px tall is the thumb's target, not the label's. */
+.term-screen > .term-keys { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
+.term-screen > .term-keys > .tk-band {
+  display: flex; gap: 3px; overflow-x: auto; overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch; scrollbar-width: none;
 }
-.term-screen > .term-keys::-webkit-scrollbar { display: none; }
-/* ALL ELEVEN ON ONE ROW AT 390pt: equal shares of the width, shrinking to the label. A row
- * that scrolls sideways hides the keys at its end — measured, `~ / -` were off screen at
- * the first cut's 2.6em minimum. 40px tall is the thumb's target, not the label's. */
+.term-screen > .term-keys > .tk-band::-webkit-scrollbar { display: none; }
 .term-screen > .term-keys button.tk {
-  flex: 1 1 0; min-width: 0; min-height: 40px; padding: 0 1px; font-size: 13px; font-family: var(--font-mono);
+  flex: 1 0 auto; min-width: 2.6em; min-height: 40px; padding: 0 2px; font-size: 13px; font-family: var(--font-mono);
   border-radius: var(--r1);
   -webkit-user-select: none; user-select: none; touch-action: manipulation;
 }
+.term-screen > .term-keys button.tk.wide { flex-grow: 2; }
 .term-screen > .term-keys button.tk.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+/* The bar's A− A+ ⌨. The keyboard key reads as ON while the keyboard is up, as a latch does. */
+.sbar > .term-tools { display: flex; gap: 4px; flex: 0 0 auto; }
+.sbar > .term-tools > button.tt { min-width: 40px; min-height: 40px; padding: 0 .4em; font-size: 14px; border-radius: var(--r1);
+                                  touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+/* ⌨ is drawn small in every system font; at the bar's 14px it was a speck. */
+.sbar > .term-tools > button.tt.kbd { font-size: 24px; line-height: 1; }
+.sbar > .term-tools > button.tt.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+/* A FINGER ON THE TERMINAL IS term.js's, WHOLE: no pan, no pinch-zoom of the page, no
+ * callout or magnifier on a long press — each of those is a mouse gesture now (touchAsMouse).
+ * Coarse pointers only, and a thinner frame there, since every pixel of width is a column. */
+@media (pointer: coarse) {
+  .term-screen > .term-host { padding: 2px; touch-action: none; -webkit-user-select: none; user-select: none;
+                              -webkit-touch-callout: none; }
+}
 .term-screen [hidden] { display: none !important; }
 
 /* ── the phone's project search (screens.jsx FindField, app.js findSpec) ──────────────
