@@ -153,11 +153,15 @@ function restore() {
   if (S.screen === 'stack' || S.screen === 'stackpick') { S.project = null; S.session = null; }
   if (S.screen === 'grid' && !S.project) S.screen = 'projects';
   S.stale = j.at || 0;
-  // ...and give the back gesture the trail it would have had if you had walked here. A
-  // cold open is at the root of its own history, so without this the first swipe out of a
-  // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : 0);
+  // ...and the trail the back gesture would have had if you had walked here. A cold open is
+  // at the root of its own history, so without it the first swipe out of a restored session
+  // screen leaves the app. MEASURED HERE, PUSHED LATER (resumedSession): this runs while the
+  // lock screen is up, and an entry pushed under the lock screen is previewed AS the lock
+  // screen by a back swipe (see loggedIn). A login does not want it at all — it lands on
+  // Projects.
+  restoredDepth = S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : 0;
 }
+let restoredDepth = 0;
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
 // The card is 32 columns (CW + 2) and it should span the phone. Measured rather than
@@ -211,9 +215,11 @@ async function refreshOnce() {
   maybeSyncPush();
   maybePushOffer();
   // A tapped notification from Jarvis, once there is a session to open it with.
-  if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
+  // Not while an unwind is still on its way (setDepth): the entry a deep link pushes would
+  // land above the trail the pop is about to remove, and the pop would then take it back.
+  if (S.wantJarvis && !S.locked && !navSkip) { S.wantJarvis = false; openJarvis(); return; }
   // A tapped "waiting on you" opens the queue, wherever the app was left.
-  if (S.wantWaiting && !S.locked) { S.wantWaiting = false; if (S.screen !== 'queue') { openQueue(); return; } }
+  if (S.wantWaiting && !S.locked && !navSkip) { S.wantWaiting = false; if (S.screen !== 'queue') { openQueue(); return; } }
   try {
     // The queue is read by the same request as Projects, and in two panes Projects is
     // beside it, so the one read serves both.
@@ -6155,6 +6161,16 @@ function setDepth(d) {
     }
   } else while (navDepth < d) pushNav();
 }
+// ...and what has to wait for that pop to land: a push made before it would be pushed above
+// the entries it is about to remove. The timer is for a pop that never answers (a history the
+// platform clamped), which must not hold the caller forever.
+let navWaiters = [];
+function afterNav(fn) {
+  if (!navSkip) { fn(); return; }
+  navWaiters.push(fn);
+  setTimeout(navSettled, 600);
+}
+function navSettled() { const w = navWaiters; navWaiters = []; for (const f of w) { try { f(); } catch {} } }
 // The actual screen change. Called ONLY by popstate (and by the pop-less fallbacks below,
 // for a browser that gave us no history object at all).
 function popTo() {
@@ -6734,7 +6750,7 @@ function lockScreen() {
       // type the code into, which is the half that was missing.
       if (server) row.append(btn(`enrol ${pk.device().noun}`, () => sheetEnrol(), 'go'));
       else row.append(btn('register a passkey', async () => {
-        try { await pk.register(); S.locked = false; render(); refresh(); }
+        try { await pk.register(); loggedIn(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     } else if (pk.available()) {
@@ -6750,7 +6766,7 @@ function lockScreen() {
       }
     }
     if (pk.bypassAllowed()) {
-      row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
+      row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); loggedIn(); }));
     }
     // Only when the probe is the reason. A daemon started after this page was opened is
     // the ordinary way to be here, and it is one request to find out — not a reload,
@@ -6787,7 +6803,56 @@ function unlocked() {
   pk.release();
   S.unlockErr = '';
   if (!S.locked) return;
+  loggedIn();
+}
+// ── where a login lands ───────────────────────────────────────────────────
+// "When you log in it should always show you the main page." restore() puts back the screen
+// the app was left on, which is right for a reload that kept its session (resumedSession)
+// and wrong for a login: a face at the lock screen is a fresh start, and the session it
+// restored was whatever happened to be open an hour ago. So every way through the lock —
+// the sensor, an automatic attempt, enrolling (the Mac's localhost one included), the
+// fixture bypass — lands on Projects. A TAPPED NOTIFICATION is the one thing that goes
+// further, because it is the only thing that said where to go: it set wantJarvis or
+// wantWaiting before the lock came down, and the refresh below opens that ON TOP of
+// Projects, so back from it is Projects too.
+//   PAINT FIRST, THEN TOUCH THE HISTORY. A back swipe on iOS previews the entry it is going
+// to with a picture of that entry, taken as the page left it — so an entry pushed while the
+// lock screen is what is painted is previewed as the lock screen, for as long as the swipe
+// takes, and then the real screen replaces it: "you see the login page for a second and
+// then it takes you back". restore() used to seed the restored screen's trail at boot,
+// under the lock, so every entry below a restored screen held that picture. Now nothing is
+// pushed or popped until Projects has been drawn: a trail a relock left behind is unwound
+// from there, and only after that does a deep link push its one entry. The same rule keeps
+// the lock out of the slide (slideNav): a view transition's old snapshot is the last frame
+// painted, which used to be the lock screen when a notification opened the queue.
+function loggedIn() {
+  pk.release();
+  S.locked = false; S.unlockErr = ''; S.termOn = null; restoredDepth = 0;
+  S.screen = 'projects'; S.sel = 0; S.sub = ''; S.session = null; S.sess = null; S.pane = null; S.paneErr = '';
+  S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.fromStack = false; S.pick = null; S.pickBack = '';
+  S.draft = '';
+  save(); render();
+  afterPaint(() => { setDepth(0); afterNav(() => { if (!S.locked) refresh(); }); });
+}
+// A RELOAD THAT KEPT ITS SESSION IS NOT A LOGIN (pk.resume: the app took a new client in the
+// same page process). It goes back to the screen it was on, with the trail restore() measured
+// — pushed once that screen is what is painted, for loggedIn's reason.
+function resumedSession() {
+  pk.release();
+  S.unlockErr = '';
+  if (!S.locked) return;
   S.locked = false; S.termOn = null; render(); refresh();
+  const d = restoredDepth; restoredDepth = 0;
+  afterPaint(() => { if (!navDepth && !S.locked) seedNav(d); });
+}
+// After the frame that is being built now has been painted: a rAF callback runs just BEFORE
+// a paint, and a task it queues runs after it. The timer is for a page with no frames to
+// give (hidden, or a DOM without rAF), which must still get there.
+function afterPaint(fn) {
+  let done = false;
+  const go = () => { if (!done) { done = true; fn(); } };
+  try { requestAnimationFrame(() => setTimeout(go, 0)); } catch {}
+  setTimeout(go, 150);
 }
 // Whether the last hide was the Face ID sheet's (see the visibilitychange listener).
 let hidByCeremony = false;
@@ -7210,10 +7275,10 @@ function sheetEnrol() {
     err.textContent = '';
     try {
       await pk.register(code.value);
-      S.locked = false;
+      S.sheet = null; renderSheet();
+      loggedIn();
       toast('enrolled — the server minted this session', 'good');
-      closeSheet();
-      refresh();
+      render();
     } catch (e) { err.textContent = String((e && e.message) || e); }
   };
   const dev = pk.device();
@@ -8000,7 +8065,7 @@ wireDrop();
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
+addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; if (!navSkip) navSettled(); return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
@@ -8096,7 +8161,7 @@ api.ready().then(() => render());
 // 'offline' gets no attempt: an assertion that cannot be posted is a Face ID spent for nothing.
 pk.arm();
 pk.resume().then((r) => {
-  if (r === 'ok') return unlocked();
+  if (r === 'ok') return resumedSession();
   if (r !== 'offline') tryAutoUnlock();
 }).catch(() => {});
 

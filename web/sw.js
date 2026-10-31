@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 8378e6a7c624
+// CLIENT-HASH: 8afa91730a1e
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -417,7 +417,11 @@
 // only — a phone still on v86 works exactly as before, it just looks like v86.
 // v88 lets the grid's four count tiles wrap two by two below 375px, where four across cut
 // `need you` and `working` to an ellipsis. Stylesheet only; a phone on v87 keeps the cut.
-const VERSION = 'ghostfleet-v88';
+// v89 lands every login on Projects (a tapped notification still opens its screen on top of
+// it), and touches the history only once a screen is painted, so a back swipe never previews
+// the lock screen. A phone still on v88 reopens the last screen after Face ID, and can flash
+// the lock screen on the first back swipe after a cold open.
+const VERSION = 'ghostfleet-v89';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
