@@ -344,6 +344,21 @@ unset TMUX_PANE
 SUITE_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
 SUITE_HOME="$HOME"
 unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR TMUX
+#   A LIST OF FIVE WAS FIVE OF THE ONES THAT HAD BITTEN. A fleet session also exports its
+# project root, scope, profile, agent, model and projects file, and every one of them still
+# reached each fixture: a tmux server inherits the suite's environment, so a grid started on
+# a fixture socket drew the CALLER's project and profile in its header, and
+# CLAUDE_FLEET_PROJECTS pointed it at the owner's real projects file — which the Projects
+# screen WRITES when a project is added, removed or reordered. CI has none of them, so the
+# rule is the prefix, not a list: drop everything the caller's fleet exported, keep only
+# what this file set above. A group that wants one sets it on the command it runs.
+# The caller's own pairs are kept aside first, so a row can ask whether any of them still
+# reached a fixture — by value, because the suite exports some of these names itself.
+: > "$TMUX_TMPDIR/caller-fleet.env"
+for v in $(compgen -e | grep -E '^(CLAUDE_FLEET_|GHOSTFLEET_)'); do
+  [ "$v" = CLAUDE_FLEET_EXPERIMENTAL_DIR ] && continue
+  printf '%s=%s\n' "$v" "${!v}" >> "$TMUX_TMPDIR/caller-fleet.env"; unset "$v"
+done
 HOME="$TMUX_TMPDIR/home"; export HOME; mkdir -p "$HOME"
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
@@ -7940,6 +7955,72 @@ is "...and the sweep would see one"     "1" \
 # made it red: a sweep that cannot tell code from prose forbids explaining itself.
 is "...and not one in a comment"        "0" \
    "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
+# ── what made the suite green on a developer's Mac stays made ────────────────
+# A MERGE UNDID IT AND NOTHING SAID SO. A branch resolved against an old base put back the
+# version of three files from before a fix landed: the process-table read lost its buffer,
+# the build's region-comment rewrite lost the symlinked layout, and the park rows went back
+# to fixed sleeps. CI stayed green through all of it, because every one of those failures
+# needs a busy machine or a worktree to show, and CI is neither. So these rows pin the
+# fixes THEMSELVES, in a form that fails on a quiet runner too — each one was watched red
+# by re-applying that merge's revert.
+group "a merge cannot quietly undo the local-green fixes"
+# 1. The buffer. The default is 1 MB and a busy Mac's `ps -axo pid=,command=` passes it;
+# then execFileSync throws ENOBUFS, sh() returns '' and holders() says nobody holds
+# anything. The Q3 rows reproduce that by padding the table; this one reads the number, so
+# it is red on a machine where padding cannot get past the cap.
+is "slot-claim reads the process table with a buffer of at least 64 MB" "yes" \
+   "$(node -e '
+      const src = require("fs").readFileSync(process.argv[1], "utf8");
+      const line = src.split("\n").find((l) => /^const sh = .*execFileSync/.test(l));
+      if (!line) { console.log("no sh() line"); process.exit(); }
+      const m = line.match(/maxBuffer:\s*([0-9][0-9\s*]*)/);
+      if (!m) { console.log("no maxBuffer: the 1 MB default"); process.exit(); }
+      const v = m[1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
+      console.log(v >= 64 * 1024 * 1024 ? "yes" : `${v} bytes`);' "$ROOT/lib/slot-claim.mjs" 2>&1)"
+# 2. The rewrite. A worktree's node_modules is a symlink, vite follows it and labels each
+# region by the path relative to the root, so the committed bundle and a rebuild in a
+# worktree differ in comment lines only — and the row that compares them is red in every
+# worktree and green on CI, which has no symlink. Asked of the plugin itself, on the three
+# layouts, plus a code line that mentions node_modules and must be left alone.
+VREG="$(cd "$ROOT" && node --input-type=module -e '
+  const { default: cfg } = await import("./vite.config.mjs");
+  const p = cfg.plugins.flat().find((x) => x && x.name === "normalise-node-modules-paths");
+  if (!p) { console.log("no normalise-node-modules-paths plugin"); process.exit(); }
+  const code = [
+    "//#region ../acme-api/node_modules/preact/dist/preact.module.js",
+    "//#region node_modules/.pnpm/preact@10.29.8/node_modules/preact/hooks/dist/hooks.module.js",
+    "//#region node_modules/preact/dist/preact.module.js",
+    "const where = \"../acme-api/node_modules/preact\";",
+  ].join("\n");
+  const r = p.renderChunk(code);
+  console.log(r === null ? code : r.code);' 2>&1)"
+is "vite: a symlinked node_modules region is written as the flat path" \
+   "//#region node_modules/preact/dist/preact.module.js" "$(sed -n 1p <<< "$VREG")"
+is "vite: ...and so is pnpm's store path" \
+   "//#region node_modules/preact/hooks/dist/hooks.module.js" "$(sed -n 2p <<< "$VREG")"
+is "vite: ...the flat one is left as it is" \
+   "//#region node_modules/preact/dist/preact.module.js" "$(sed -n 3p <<< "$VREG")"
+is "vite: ...and code that names node_modules is never touched" \
+   'const where = "../acme-api/node_modules/preact";' "$(sed -n 4p <<< "$VREG")"
+# 3. The park rows wait on what they assert. A fixed sleep before a capture loses the race
+# only on a loaded machine, so the rows themselves cannot pin it; their source can. Every
+# sleep in the group is a poll interval, a key gap or the fixture pane's own linger — a
+# half-second or more anywhere else is a guess at how long the grid takes.
+PARK="$(awk '/pmark docs-pass "\$NP\/root\/acme-api-2"/ { on = 1 } on { print } on && /tmux -L cfpark kill-server/ { exit }' "$ROOT/test/run.sh")"
+is "park: the group is where this sweep looks for it" "yes" \
+   "$([ "$(grep -c . <<< "$PARK")" -ge 20 ] && echo yes || echo no)"
+is "park: the grid is waited for, not slept for" "yes" \
+   "$(grep -q 'pwait' <<< "$(awk '/^  pgrid\(\) \{/ { on = 1 } on { print } on && /^  \}/ { exit }' <<< "$PARK")" && echo yes || echo no)"
+is "park: no fixed sleep of half a second or more before a capture" "" \
+   "$(grep -v '^ *#' <<< "$PARK" | sed 's/"[^"]*"//g' | grep -oE 'sleep ([1-9][0-9.]*|0\.[5-9][0-9]*)' | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+# 4. The preamble clears the caller's fleet by PREFIX. A list of names was five of the ones
+# that had bitten while a fleet session exports about a dozen, and a fixture grid drew the
+# caller's project — and could write the owner's projects file. The behavioural row for it
+# (the fixture server's environment) is vacuous wherever the suite is not run from a fleet,
+# which includes CI, so the rule itself is pinned here.
+is "the preamble drops every CLAUDE_FLEET_* and GHOSTFLEET_* by prefix" "1" \
+   "$(awk '/^group "/ { exit } { print }' "$ROOT/test/run.sh" \
+      | grep -cE '^for v in \$\(compgen -e \| grep -E .\^\(CLAUDE_FLEET_\|GHOSTFLEET_\)' || true)"
 # ── 4a10b8. a dispatch leaves a trace ────────────────────────────────────────
 # SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
 # "the" and its real brief never arrived. From the receiving side that is indistinguishable
@@ -18696,6 +18777,26 @@ if [ -d "$ROOT/web" ]; then
   # Asked of cf-sync, the one place that decides it — including passing over a Windows
   # pnpm that WSL puts on PATH, which cannot build here.
   PMB="$("$ROOT/bin/cf-sync" --pm)"
+  # THE PACKAGES ON DISK MUST BE THE ONES THIS BRANCH LOCKS, or a mismatch is a statement
+  # about the install, not about the build. A worktree's node_modules is a symlink to the
+  # main checkout's (fleet-spawn links it), and the main checkout can sit parked at an older
+  # release — so the rebuild would use another commit's packages and report drift nobody
+  # introduced. pnpm keeps a copy of the lockfile it installed from; compare the resolved
+  # package SET, not the bytes, so a pnpm that only formats the file differently is not a
+  # reason to skip. With no such copy (an npm install) there is nothing to compare against,
+  # and the row runs as before.
+  lock_pkgs() { grep -E '^  [^ ].*@[^ ]+:$' "$1" 2>/dev/null | sort -u; }
+  stale_install=""
+  if [ -f "$ROOT/node_modules/.pnpm/lock.yaml" ] && [ -f "$ROOT/pnpm-lock.yaml" ] \
+     && [ "$(lock_pkgs "$ROOT/node_modules/.pnpm/lock.yaml")" != "$(lock_pkgs "$ROOT/pnpm-lock.yaml")" ]; then
+    # The fix differs by whose node_modules it is: installing into a LINK would rewrite the
+    # other checkout's packages under it, so a linked one is replaced with its own first.
+    if [ -L "$ROOT/node_modules" ]; then
+      stale_install="node_modules links to another checkout installed from a different lockfile — run: rm node_modules && $PMB install"
+    else
+      stale_install="node_modules was installed from a different lockfile — run: $PMB install"
+    fi
+  fi
   if [ ! -f "$ROOT/vite.config.mjs" ]; then
     skip "the committed build matches its source" "no vite.config.mjs"
   elif [ -z "$PMB" ]; then
@@ -18704,7 +18805,11 @@ if [ -d "$ROOT/web" ]; then
     skip "the committed build matches its source" "no node_modules — run: $PMB install"
   else
     BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
-    if ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
+    # Only THIS row is gated on the lockfile: the probe below asks whether the config keeps
+    # grid.js external, which any vite answers, so it goes on running.
+    if [ -n "$stale_install" ]; then
+      skip "the committed build matches its source" "$stale_install"
+    elif ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
       drift=""
       for f in screens.js preact.js; do
         cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
@@ -20313,40 +20418,73 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pmark scratch   "$NP/root/acme-web"   "$(date +%s)"
   pmark docs-pass "$NP/root/acme-api-2" "$(date +%s)"
   sleep 0.4
+  # A CAPTURE WAITS FOR THE SCREEN IT IS ABOUT TO JUDGE, never for a fixed time. This group
+  # slept 3s for the grid and 0.6s a key, and on a loaded machine that loses a race CI never
+  # runs: the grid has drawn its cards but not yet handled the queued `n` and Enter (`n`
+  # walks the checkouts and asks git for their worktrees), so the capture is the GRID. That
+  # reads as five reds with one shape — no name screen, no parked list, and `scratch` and
+  # `docs-pass` "leaking in", which are only their own cards. Measured: a full run on a dev
+  # Mac with sibling suites going, red on exactly those five; reproduced every time by
+  # capturing straight after the keys. Keys are never lost — the tty queues them and the
+  # grid takes them in order — so only the READ has to wait.
+  #   ...and an absence is only evidence on the screen it is about. "scratch is not listed"
+  # on a screen that never became the name screen is a row that cannot fail, so those rows
+  # answer "not on the name screen" instead of "no".
+  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
+  pwait() {   # ERE [want: yes|no] — the screen once the pattern is (or is no longer) on it
+    local i scr
+    for ((i = 0; i < 100; i++)); do
+      scr="$(pscreen)"
+      if grep -qE "$1" <<<"$scr"; then [ "${2:-yes}" = yes ] && break; else [ "${2:-yes}" = no ] && break; fi
+      sleep 0.2
+    done
+    printf '%s\n' "$scr"
+  }
+  cwait() {   # pattern — true once the grid has printed that choice
+    local i; for ((i = 0; i < 100; i++)); do grep -q "$1" "$NP/choice" 2>/dev/null && return 0; sleep 0.2; done; return 1; }
   pgrid() {
     tmux -L cfpark kill-session -t _grid 2>/dev/null; rm -f "$NP/choice"
     tmux -L cfpark new-session -d -s _grid -x 120 -y 40 -c "$NP/root" \
       -e CLAUDE_FLEET_DIR="$NP/fleet" -e HOME="$NP/home" -e CLAUDE_FLEET_ROOT="$NP/root" \
       "node '$ROOT/bin/fleet-grid.mjs' cfpark > '$NP/choice' 2>/dev/null ; sleep 20" 2>/dev/null
-    sleep 3
+    pwait '\+ new session' >/dev/null
   }
-  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.6; done; }
-  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
+  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.3; done; }
+  onname() { grep -qE "session name — .*/$1\$" <<<"$2"; }   # checkout scr
+  # THE FIXTURE SEES NOTHING OF THE CALLER'S FLEET. Asked of the fixture server's own
+  # environment, which is what the grid inherits — not of the suite's variables, which is the
+  # proxy — and by value, since the suite's own fleet-serve groups export GHOSTFLEET_SERVE_*. Run from inside a fleet session this listed the caller's root, scope, profile and
+  # projects file until the preamble dropped them by prefix.
+  pgrid
+  is "park: the fixture server carries none of the caller's fleet env" "" \
+     "$(tmux -L cfpark show-environment -g 2>/dev/null | grep -Fxf "$TMUX_TMPDIR/caller-fleet.env" \
+        | sed 's/=.*//' | tr '\n' ' ' | sed 's/ *$//')"
   # n -> the checkout picker (acme-api is first, sorted) -> Enter -> the name screen
-  pgrid; pkeys n Enter
-  scr="$(pscreen)"
-  is "park: the name screen is the one reached"            "yes" "$(grep -q 'session name' <<<"$scr" && echo yes || echo no)"
+  pkeys n Enter
+  scr="$(pwait 'session name')"
+  is "park: the name screen is the one reached"            "yes" "$(onname acme-api "$scr" && echo yes || echo no)"
   is "park: it lists the checkout's asleep session"        "yes" "$(grep -qE '1 +billing-svc +☾ asleep' <<<"$scr" && echo yes || echo no)"
   is "park: ...and its exited one"                         "yes" "$(grep -qE '2 +toolbox +⏹ exited' <<<"$scr" && echo yes || echo no)"
-  is "park: ...and nothing from another checkout"          "no"  "$(grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
-  is "park: ...nor from one whose name has it as a prefix" "no"  "$(grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and nothing from another checkout"          "no"  "$(onname acme-api "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
+  is "park: ...nor from one whose name has it as a prefix" "no"  "$(onname acme-api "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
   # A DIGIT ON THE NAME FIELD IS TYPING: `api-2` is a legal name.
   pkeys 2
   is "park: a digit typed in the name field is the name"   "yes:no" \
-     "$(grep -q 'name: *acme-api2' <<<"$(pscreen)" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
+     "$(grep -q 'name: *acme-api2' <<<"$(pwait 'name: *acme-api2')" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
   # ↓ moves onto the list; Enter reopens the row under it. The consumer wakes an asleep one.
-  pkeys BSpace Down Enter; sleep 1
+  pkeys BSpace Down Enter
   is "park: down + Enter reopens the first parked session" "yes" \
-     "$(grep -q "attach.billing-svc" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+     "$(cwait "attach.billing-svc" && echo yes || echo no)"
   # ...and on the list a digit picks that row.
-  pgrid; pkeys n Enter Down 2; sleep 1
+  pgrid; pkeys n Enter Down 2
   is "park: on the list, 2 reopens the second"             "yes" \
-     "$(grep -q "attach.toolbox" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+     "$(cwait "attach.toolbox" && echo yes || echo no)"
   # A checkout with nothing parked draws no list at all. Sorted: acme-api, acme-api-2,
   # acme-web, billing-svc — the fourth has nothing.
   pgrid; pkeys n Down Down Down Enter
+  scr="$(pwait 'session name — .*/billing-svc$')"
   is "park: a checkout with nothing parked shows no list"  "no" \
-     "$(grep -q 'reopen one parked here' <<<"$(pscreen)" && echo yes || echo no)"
+     "$(onname billing-svc "$scr" || { echo 'not on the name screen'; exit; }; grep -q 'reopen one parked here' <<<"$scr" && echo yes || echo no)"
 
   # ── F, at the desk: x on an asleep card leaves no card ──
   # Cards: 1 is _grid itself (the pane this runs in), 2 is toolbox, then the slept ones in
@@ -20355,10 +20493,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pgrid
   scr="$(pscreen)"
   is "stop: the asleep card is on the grid"                "yes" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
-  pkeys Right Right x y; sleep 1.5
+  pkeys Right Right x y
+  scr="$(pwait 'billing-svc' no)"
   is "stop: x on it clears its marker"                     "no" \
      "$([ -f "$NP/fleet/cfpark.billing-svc.asleep" ] && echo yes || echo no)"
-  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$(pscreen)" && echo yes || echo no)"
+  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
   tmux -L cfpark kill-server 2>/dev/null
   rm -rf "$NP"
 else
@@ -23161,6 +23300,28 @@ STUB
   sleep 0.2
   is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
   reap "$OCH"
+  # A BUSY MACHINE STILL HAS HOLDERS. The scan reads every argv on the machine, and past
+  # execFileSync's 1 MB default it threw, came back empty, and said nobody held anything —
+  # nine rows here red on a dev Mac whose process table had grown to 1.2 MB, and green on a
+  # quiet one. So the table is padded past the old cap on purpose, in 60 KB argvs.
+  #   PADDED BY MEASUREMENT, NOT BY A FIXED COUNT. A fixed 8 × 60 KB crossed the cap only
+  # because the Mac it was written on already had 730 KB of table; a CI runner has a tenth
+  # of that, so there the row stayed green with the cap back at 1 MB — and a later merge did
+  # put it back, and nothing here said so. So the pad is sized from the table as it is now,
+  # to 1.2 MB, and a row says the table really did go over: a pad that fell short is red,
+  # not a pass that proved nothing.
+  OCPAD=""; OCPADARG="pad-$(head -c 60000 /dev/zero | tr '\0' x)"
+  OCBASE="$(ps -axo pid=,command= 2>/dev/null | wc -c | tr -d ' ')"
+  for ((i = 0; i < (1200000 - ${OCBASE:-0}) / 60000 + 1; i++)); do
+    ( exec -a "$OCPADARG" sleep 60 ) & OCPAD="$OCPAD $!"; disown "$!"; done
+  ( exec -a "claude --resume $V" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "Q3: the padded process table is over 1 MB" "yes" \
+     "$(n="$(ps -axo pid=,command= 2>/dev/null | wc -c | tr -d ' ')"; [ "$n" -gt 1048576 ] && echo yes || echo "$n bytes")"
+  is "Q3: a holder is still seen when the process table is over 1 MB" "$OCH" \
+     "$(cd "$ROOT" && node -e 'import("./lib/slot-claim.mjs").then(m => console.log(m.holders({ cfgs: [] }).get(process.argv[1]) || ""))' "$V" 2>/dev/null)"
+  # shellcheck disable=SC2086
+  reap "$OCH" $OCPAD
 
   # A PATH WITH AN UNDERSCORE. claude-here names a transcript folder by turning only `/` and
   # `.` into `-`; lib/slot-claim.mjs once re-derived it turning everything non-alphanumeric,
