@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 3c51ea2c7205
+// CLIENT-HASH: 8378e6a7c624
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -415,7 +415,9 @@
 // v87 is the redesign: the same screens and the same colours, set in a UI face with the
 // terminal's kept for names, data and the pane, on one spacing and radius scale. Stylesheet
 // only — a phone still on v86 works exactly as before, it just looks like v86.
-const VERSION = 'ghostfleet-v87';
+// v88 lets the grid's four count tiles wrap two by two below 375px, where four across cut
+// `need you` and `working` to an ellipsis. Stylesheet only; a phone on v87 keeps the cut.
+const VERSION = 'ghostfleet-v88';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

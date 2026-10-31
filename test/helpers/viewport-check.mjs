@@ -1035,6 +1035,46 @@ async function sheetCeiling() {
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
 }
 
+// ── the grid's count tiles, every label whole ──────────────────────────────
+// The four tiles under the grid's header each set their label on one line and ellipsize
+// the rest — and four `flex: 1 1 0` tiles across a 320px phone leave each label about 42px,
+// so two of the four read "need …" and "worki…". Nothing in this file saw it: the page does
+// not pan, the strip does not exceed its own box, and an ellipsis is the clip working as
+// designed. The question that was missing is whether the WORD is visible, asked of each
+// label: its text needs no more than its box holds.
+//   At every rung of the ladder, because that is the sweep this file promises — even though
+// the tiles are set in px today and do not move with it, which is exactly the kind of thing
+// that stops being true without anyone looking here.
+//   And 390 stays ONE ROW: the labels fit there, and the fix for 320 must not reach it.
+async function countTiles(w, h) {
+  await viewport(w, h);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  for (const fs of [16, 24, 30, 38, 44, 53]) {
+    await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
+    await settle(`the count tiles at ${fs}px`);
+    const m = await evaluate(() => {
+      const d = document.documentElement;
+      const tiles = [...document.querySelectorAll('#app .strip .stat')];
+      return {
+        words: tiles.map(t => t.querySelector('.l')?.textContent.trim() || '').join(','),
+        clipped: tiles.map(t => t.querySelector('.l')).filter(l => l && l.scrollWidth > l.clientWidth)
+          .map(l => `${l.textContent.trim()} needs ${l.scrollWidth} in ${l.clientWidth}`).join(','),
+        past: tiles.filter(t => t.getBoundingClientRect().right > d.clientWidth + 0.5).length,
+        rows: new Set(tiles.map(t => Math.round(t.getBoundingClientRect().top))).size,
+        page: d.scrollWidth - d.clientWidth,
+      };
+    });
+    is(`${w}px/${fs} the grid's count tiles are the four words`, 'need you,working,ready,parked', m.words);
+    is(`${w}px/${fs} ...and every label is whole, not ellipsized`, '', m.clipped);
+    is(`${w}px/${fs} ...with no tile past the right edge`, 0, m.past);
+    is(`${w}px/${fs} ...and no sideways pan`, 0, m.page);
+    if (w >= 390) is(`${w}px/${fs} ...in one row`, 1, m.rows);
+  }
+  await evaluate(() => { document.body.style.fontSize = ''; return null; });
+}
+
 async function keyboard(w, h, { indicator = true } = {}) {
   await viewport(w, h);
   await fresh();
@@ -1241,6 +1281,8 @@ try {
   await placeholderSweep();
   await loadingSkeletons();
   await sheetCeiling();
+  await countTiles(320, 640);
+  await countTiles(390, 844);
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });
 
