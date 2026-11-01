@@ -1599,6 +1599,47 @@ test('a plain instruction the judge reads as done in its turn is never on the ba
   expect(nags(w)).toEqual([])
 })
 
+// The owner's words from the phone are `user` (ledger.js deliverySource), so they are turn-scoped
+// exactly like a typed message: made `inTurn` when DELIVERY records them, settled at the end of
+// the turn they start. A lead's brief is not: it is owed from the moment it arrives.
+test("an --owner delivery done in its turn is never on the record, the note or the held list; a brief is owed at once", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'fix the login redirect', kind: 'owner' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ source: 'user', inTurn: true, turnId: 't1' }))
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  // the note a delivered prompt gets on its turn's first tool result: nothing owed, so none
+  const first: any = await $.tool.call({ tool: ADD, text: '' } as any)
+  expect((first.context ?? []).join('\n')).not.toContain('fix the login redirect')
+  // nor is it held for the person, asked mid-turn
+  await type($, 'whats the status', 't1')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('fix the login redirect')
+  w.heard = ['fix the login redirect', 'whats the status']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Fixed the redirect in web/login.ts; nothing else is pending.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  expect(nags(w)).toEqual([])
+  await type($, 'and bump the version')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('fix the login redirect')
+  // the same words without the mark: a brief, owed (on the record) the moment its turn starts
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: 'add the acme-api export endpoint' }))
+  await $.turn.start({ text: 'and bump the version', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Bumped to 0.6.2.'))
+  await settle(clock)
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'add the acme-api export endpoint', turnId: 't3' })
+  const brief = book(w).items.find((i: any) => i.text === 'add the acme-api export endpoint')
+  expect(brief).toEqual(expect.objectContaining({ source: 'fleet', state: 'open' }))
+  expect(brief.inTurn).toBeUndefined()
+  expect(rec(w).ledger.open).toBeGreaterThanOrEqual(1)
+})
+
 test('one the judge leaves open is owed after its turn: on the record and the note, and re-prompted once', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
