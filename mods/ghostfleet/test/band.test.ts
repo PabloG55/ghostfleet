@@ -6,10 +6,10 @@ const DIR = '/fleet'
 const ID = 'sess-1'
 const NOW = 10_000_000
 
-type World = { files: Map<string, string>; runs: string[][]; alive: string; prs: string | null }
+type World = { files: Map<string, string>; mtimes: Map<string, number>; runs: string[][]; alive: string; prs: string | null }
 
 function world(on: any, slot: string): World {
-  const w: World = { files: new Map(), runs: [], alive: 'master\nw1\nw2\nw3\n_term-master\n', prs: '[]' }
+  const w: World = { files: new Map(), mtimes: new Map(), runs: [], alive: 'master\nw1\nw2\nw3\n_term-master\n', prs: '[]' }
   const rec = (id: string, s: string, extra: object) =>
     w.files.set(`${DIR}/${id}.json`, JSON.stringify({ session_id: id, sock: 'cf-acme-api', slot: s, ts: 5, ...extra }))
   rec(ID, slot, { status: 'ready' })
@@ -31,7 +31,7 @@ function world(on: any, slot: string): World {
   on('fs.write', (_$: any, e: any) => { w.files.set(e.path, e.text); return { value: undefined } })
   on('fs.list', (_$: any, e: any) => ({
     value: [...w.files.keys()].filter(k => k.startsWith(`${e.path}/`))
-      .map(k => ({ name: k.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: w.files.get(k)!.length, isLink: false })),
+      .map(k => ({ name: k.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: w.mtimes.get(k) ?? w.files.get(k)!.length, isLink: false })),
   }))
   on('process.run', (_$: any, e: any) => {
     const argv = [...e.argv]
@@ -119,4 +119,39 @@ test('a sub-lead sees its children only, and the PRs into its branch', async ($,
   ])
   const [terminal] = await band($, clock)
   expect(terminal).toBe('1 worker · 1 need you · 1 red')
+})
+
+// The age is drawn against a minute bucket (so the band redraws once a minute), in seconds.
+const MINUTE = Math.floor(NOW / 60_000) * 60
+
+// hooks/fleet-event.sh holds a wake it cannot paste (the lead's box never read empty) and
+// rewrites <sock>.<kind>.blocked on every retry. The band says so above the box that is the
+// cause, and only while the file is fresh: a retry killed without its trap says nothing.
+test('a held wake is drawn above the team, and a stale one is not', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = world(on, 'master')
+  const file = `${DIR}/cf-acme-api.notify.blocked`
+  w.files.set(file, `${MINUTE - 725}\x1f1\x1fmaster\n`)
+  w.mtimes.set(file, NOW - 5_000)
+  const [terminal] = await band($, clock, 120)
+  expect(terminal.startsWith('wake held 12m · this input box has unsent text')).toBe(true)
+  expect(terminal).toContain('3 workers')
+  w.mtimes.set(file, NOW - 600_000)
+  const [stale] = await band($, clock, 120)
+  expect(stale).not.toContain('held')
+})
+
+test("a sub-lead's held wake is its own, never master's", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = world(on, 'w1')
+  w.alive = 'master\nw1\nw1-a\n'
+  w.files.set(`${DIR}/cf-acme-api.w1-a.parent`, 'w1\n')
+  w.files.set(`${DIR}/cf-acme-api.notify.blocked`, `${MINUTE - 60}\x1f1\x1fmaster\n`)
+  w.mtimes.set(`${DIR}/cf-acme-api.notify.blocked`, NOW)
+  const [none] = await band($, clock, 120)
+  expect(none).not.toContain('held')
+  w.files.set(`${DIR}/cf-acme-api.w1.notify.blocked`, `${MINUTE - 60}\x1f2\x1fw1\n`)
+  w.mtimes.set(`${DIR}/cf-acme-api.w1.notify.blocked`, NOW)
+  const [mine] = await band($, clock, 120)
+  expect(mine).toContain('wake held 1m · no input box is showing')
 })

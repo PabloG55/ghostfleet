@@ -183,8 +183,9 @@ fleet-read fix-auth 3           # check progress
 
 The **inbox carries completion too**: a worker's turn ending shows as `DONE`, so
 you learn when a brief is ready to review/merge without polling — and with
-`CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken** on `done`/`need-you` (debounced)
-so it acts hands-off instead of polling at all (see [Config](../README.md#config)). A fresh worktree
+`CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken**, so it acts hands-off instead of polling at
+all (see [Config](../README.md#config)): a `need-you` at once, and finished workers in one wake
+once the fleet has been quiet for ten minutes ([When the lead is woken](OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits)). A fresh worktree
 gets the main checkout's `node_modules` symlinked in (workers can run
 lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases a
 branch on your **local** ref — falling back to the remote tip only when local is

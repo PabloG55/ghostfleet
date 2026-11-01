@@ -400,6 +400,7 @@ and `fleet-*` tools):
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
 | `CLAUDE_FLEET_AWAKE`  | `display` to keep the screen on as well as the machine; `off` to inhibit nothing. Default `on`. See [Staying awake](docs/OPERATIONS.md#staying-awake). |
 | `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead instead of it polling. See [docs/SHORTCUTS.md](docs/SHORTCUTS.md) for the per-project/per-session settings-page toggle and the full precedence rules. |
+| `CLAUDE_FLEET_NOTIFY_QUIET` | Seconds of quiet a worker's `done` waits for before it wakes the lead, in one wake for every `done` gathered. Default `600`; `0` wakes at once. Per fleet: `<fleet dir>/<sock>.notify-quiet`. A `need-you` never waits. See [When the lead is woken](docs/OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits). |
 
 `ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 

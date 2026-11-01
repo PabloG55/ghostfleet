@@ -143,10 +143,12 @@ passively into an inbox you drain in one call:
   ones it flags. A `done` → review and merge, or a same-PR follow-up; merged →
   `fleet-stop --reclaim`, and the next task to a new session; a `need-you` →
   `fleet-answer`. If the **push** is enabled for this fleet, you'll instead be
-  *woken* by a nudge — *"[fleet] a worker finished or needs you…"*. When you get it,
-  just drain `fleet-inbox` and act; it's an automated note, don't reply to it. (The
-  push is debounced — a burst of finishes wakes you once. If it's off, you're not
-  woken while idle, so drain the inbox whenever you next act.) A need-you comes as an
+  *woken* by a nudge — *"[fleet] 2 workers finished (api-fix, docs-pass) — run
+  fleet-inbox…"*. When you get it, just drain `fleet-inbox` and act; it's an automated
+  note, don't reply to it. (Finishes are gathered: you are woken once the fleet has been
+  quiet for ten minutes, for all of them, and a worker that went busy again in the
+  meantime is left out. If the push is off, you're not woken while idle, so drain the
+  inbox whenever you next act.) A need-you comes as an
   alert of its own, even mid-turn — *"[fleet] <worker> NEEDS YOU: permission · Bash
   command: …"*. Act on it: `fleet-answer <worker>` for what you may answer, and tell the
   owner what it wants in one line when it is an approval, which is theirs to give.

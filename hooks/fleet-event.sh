@@ -604,11 +604,24 @@ _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 # re-check that wakes up after a fresh event already nudged simply exits — the stamp it
 # reads is the other path's.
 #
-# BOUNDED, because a human who walks away mid-sentence would otherwise leave a process
-# polling forever. On giving up it writes a marker naming what went undelivered, so the
-# end state is still greppable rather than silent — the whole complaint about the old
-# behaviour was the absence of a trace, and a retry that expires quietly would recreate it
-# at a longer timescale.
+# HELD, NOT EXPIRED. This used to give up after ten minutes, write a marker and an inbox
+# row, and exit — and the person was never told: one fleet's master expired 14 wakes that
+# way in 13 days, while a stray character sat in its input box the whole time. The rows those
+# wakes were for stayed unannounced for as long as the character did. So the retry now goes
+# on past the timeout, at a slower pace, for as long as the target session exists, and the
+# timeout is the moment the hold becomes VISIBLE rather than the moment it is abandoned:
+#   - the marker and the inbox row are still written once, at the timeout (fleet-serve buzzes
+#     the phone off the marker growing, and fleet-inbox shows the row beside what it held);
+#   - <sock>.<kind>.blocked is rewritten on every poll after it — when the hold began, why
+#     (1 = text in the box, 2 = no box on screen), and the target — which the lead's band
+#     (mods/ghostfleet) and the phone's queue (fleet-serve /api/waiting) read. It is a
+#     HEARTBEAT, not a flag: a reader treats one older than a few polls as gone, because a
+#     sleeper killed with -9 runs no trap and would otherwise leave a hold up for ever.
+# NEVER CLEARED, NEVER SUBMITTED. What is in the box may be the person's half-typed message,
+# and Ctrl-U or Enter would destroy or send it. The fleet waits; the person decides.
+#   A LATER WAKE OF THE SAME KIND REPLACES THE WORDS of one already held (<kind>.msg), so the
+# wake that finally lands names the latest batch rather than the first; a need-you appends
+# instead, as before.
 #   IT TAKES A DIRECTORY, A KIND AND A MESSAGE, so the same machinery wakes Jarvis: another
 # profile's fleet is another directory, and Jarvis's stamp must not be the master nudge's —
 # either would swallow the other's wake. Called with the socket alone it is what it always
@@ -629,18 +642,29 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
   lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) if kill -0 "$p" 2>/dev/null; then
-    case "$kind" in needyou|*.needyou) printf '%s\n' "$msg" >> "$dir/$sock.$kind.more" 2>/dev/null ;; esac
+    case "$kind" in
+      needyou|*.needyou) printf '%s\n' "$msg" >> "$dir/$sock.$kind.more" 2>/dev/null ;;
+      *) printf '%s\n' "$msg" > "$dir/$sock.$kind.msg" 2>/dev/null ;;
+    esac
     return 0
   fi ;; esac
   export -f _pane_text _input_state _input_empty
+  rm -f "$dir/$sock.$kind.msg" 2>/dev/null
   FLEET_DIR="$dir" nohup bash -c '
-    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
+    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"; slow="${8:-30}"
+    case "$slow" in ""|*[!0-9]*) slow=30 ;; esac
     echo $$ > "$lock" 2>/dev/null
-    trap "rm -f \"$lock\"" EXIT
-    i=0
-    while [ "$i" -lt "$tries" ]; do
-      sleep "$every"; i=$((i + 1))
-      tmux -L "$sock" has-session -t "$to" 2>/dev/null || continue
+    blocked="$FLEET_DIR/$sock.$kind.blocked"
+    trap "rm -f \"$lock\" \"$blocked\"" EXIT
+    i=0; since="$(date +%s)"
+    while :; do
+      if [ "$i" -lt "$tries" ]; then sleep "$every"; else sleep "$slow"; fi
+      i=$((i + 1))
+      if ! tmux -L "$sock" has-session -t "$to" 2>/dev/null; then
+        # past the timeout, a target that is gone has nobody left to tell
+        [ "$i" -gt "$tries" ] && exit 0
+        continue
+      fi
       stamp="$FLEET_DIR/$sock.$kind.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"
       case "$last" in ""|*[!0-9]*) last=0 ;; esac
@@ -649,13 +673,16 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
       now="$(date +%s)"
       ny=0; case "$kind" in needyou|*.needyou) ny=1 ;; esac
       # a fresh event already woke it: nothing left to deliver
-      [ "$ny" = 1 ] || [ "$(( now - last ))" -ge "$win" ] || exit 0
-      if _input_empty "$sock" "$to"; then
+      [ "$ny" = 1 ] || [ "$last" -le "$since" ] || [ "$(( now - last ))" -ge "$win" ] || exit 0
+      _input_state "$sock" "$to"; why=$?
+      if [ "$why" = 0 ]; then
         printf "%s\n" "$now" > "$stamp" 2>/dev/null
         more="$FLEET_DIR/$sock.$kind.more"
         if [ "$ny" = 1 ] && [ -s "$more" ]; then
           nl="$(printf "\nx")"; msg="$msg${nl%x}$(cat "$more")"; rm -f "$more"
         fi
+        newer="$FLEET_DIR/$sock.$kind.msg"
+        if [ "$ny" = 0 ] && [ -s "$newer" ]; then msg="$(cat "$newer")"; rm -f "$newer"; fi
         # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
         # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
         # whole body is one single-quoted argument.)
@@ -666,22 +693,146 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
         fi
         exit 0
       fi
+      case "$why" in 1) said="the input box of $to has unsent text" ;; *) said="$to shows no input box (a dialog, or a scrolled-back pane)" ;; esac
+      if [ "$i" = "$tries" ]; then
+        printf "%s deferred wake held after %ss: %s\n" \
+          "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" "$said" \
+          >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
+        # ...AND A ROW IN THE INBOX THE WAKE WAS FOR. The marker alone was a trace nobody
+        # reads: a worker sat on a permission prompt behind four such expiries before anyone
+        # looked. The row lands beside the worker rows it failed to announce, so the next
+        # fleet-inbox (and every reader of the inbox) shows the gap; fleet-serve watches the
+        # marker above and buzzes the phone. The inbox is the one the TARGET reads: a sub-lead
+        # reads <sock>.<lead>.inbox, and master and Jarvis read the fleet inbox.
+        case "$to" in master) inbox="$FLEET_DIR/$sock.inbox" ;; *) inbox="$FLEET_DIR/$sock.$to.inbox" ;; esac
+        printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$to" undelivered \
+          "wake held after $(( every * tries ))s: $said, so the rows above are unannounced. It goes as soon as the box is empty; the fleet never clears or sends what is typed there" \
+          >> "$inbox" 2>/dev/null
+      fi
+      [ "$i" -ge "$tries" ] && printf "%s\037%s\037%s\n" "$since" "$why" "$to" > "$blocked" 2>/dev/null
     done
-    printf "%s deferred wake expired after %ss with the input box never clear\n" \
-      "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
-      >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
-    # ...AND A ROW IN THE INBOX THE WAKE WAS FOR. The marker alone was a trace nobody
-    # reads: a worker sat on a permission prompt behind four such expiries before anyone
-    # looked. The row lands beside the worker rows it failed to announce, so the next
-    # fleet-inbox (and every reader of the inbox) shows the gap; fleet-serve watches the
-    # marker above and buzzes the phone. The inbox is the one the TARGET reads: a sub-lead
-    # reads <sock>.<lead>.inbox, and master and Jarvis read the fleet inbox.
-    case "$to" in master) inbox="$FLEET_DIR/$sock.inbox" ;; *) inbox="$FLEET_DIR/$sock.$to.inbox" ;; esac
-    printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$to" undelivered \
-      "wake expired after $(( every * tries ))s: the input box never read empty, so the rows above went unannounced" \
-      >> "$inbox" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
-       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" >/dev/null 2>&1 &
+       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" "${CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY:-30}" >/dev/null 2>&1 &
+}
+
+# ── A WORKER'S DONE WAITS FOR A QUIET WINDOW, THEN WAKES THE LEAD ONCE ─────────
+# Measured on one busy fleet's master over 13 days: 64% of its turns (1,878) were started by
+# the "a worker finished" nudge, each one re-reading a context of ~500k tokens — 15% of the
+# whole fleet's spend — and 57% of those turns only looked (fleet-inbox, fleet-read,
+# fleet-list) and ended without acting. The nudges came a median 2.7 minutes apart, 726 of
+# them within two minutes of the one before, so the 30-second debounce above coalesced
+# almost nothing: it is a burst filter, and finishes do not arrive in bursts. They arrive in
+# a steady drip, and every drop was a full-price turn.
+#   So a DONE no longer wakes anybody. It is GATHERED (<sock>.<kind>.gather: when, who, and
+# the inbox line it was filed at), and ONE sleeper per wake target waits for a QUIET WINDOW
+# — no new DONE for $(_notify_quiet) seconds, 600 by default — then wakes the lead once for
+# everything gathered, naming the workers. The window trails, so a lead is not woken in the
+# middle of a run of finishes; and it is CAPPED (3× the window from the first DONE
+# gathered), because a fleet that finishes every 2.7 minutes would otherwise never fall
+# quiet and its lead would never be told at all — the silence this fleet keeps relearning
+# is the worst failure, and a slower wake is the price, not a missing one.
+#   RE-CHECKED AT FIRE TIME (_done_news), because ten minutes is long enough for a DONE to
+# stop being news: a background task's completion woke the worker, or the lead already
+# gave it its next prompt. A worker whose record says busy again is dropped — it will DONE
+# again, and that DONE is gathered on its own — and so is a DONE row the lead has already
+# read with fleet-inbox. If nothing is left, nobody is woken: a turn to read "nothing new"
+# is the cost this whole path exists to cut.
+#   ONLY A DONE WAITS. A need-you (_needyou_nudge), an ask relayed back to its asker, a held
+# wake's inbox row and a failed delivery each name something the lead must act on, and go
+# exactly as they did. A need-you that wakes the lead mid-window also lets it read the
+# gathered DONEs in the same look, and the re-check then drops them as read.
+#   PER FLEET: <sock>.notify-quiet holds the window in seconds (live, no restart), then
+# CLAUDE_FLEET_NOTIFY_QUIET, then 600. 0 is the old behaviour: wake at once, debounced.
+_notify_quiet() {                     # $1=socket $2=fleet dir -> the quiet window, in seconds
+  local q=""
+  [ -f "$2/$1.notify-quiet" ] && q="$(head -1 "$2/$1.notify-quiet" 2>/dev/null | tr -d '[:space:]')"
+  case "$q" in ''|*[!0-9]*) q="${CLAUDE_FLEET_NOTIFY_QUIET:-600}" ;; esac
+  case "$q" in ''|*[!0-9]*) q=600 ;; esac
+  printf '%s\n' "$q"
+}
+# 0 when a gathered DONE is still worth a wake. Fails toward news: a record that cannot be
+# read, or an inbox line that no longer holds this row (rotated), counts as unread and idle.
+_done_news() {                        # $1=socket $2=fleet dir $3=worker $4=done ts $5=inbox $6=its line
+  local sock dir slot at inbox line seen row st
+  sock="$1"; dir="$2"; slot="$3"; at="$4"; inbox="$5"; line="$6"
+  case "$line" in ''|*[!0-9]*) ;; *)
+    seen="$(cat "$inbox.seen" 2>/dev/null)"; case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+    if [ "$seen" -ge "$line" ]; then
+      row="$(sed -n "${line}p" "$inbox" 2>/dev/null)"
+      case "$row" in "$at"$'\t'"$slot"$'\t'done*) return 1 ;; esac
+    fi ;; esac
+  # The newest record under this name, read as the band reads one (band-shape.js
+  # recordState): the mod's live state while its heartbeat is fresh, else the hook's status.
+  st="$(jq -r --arg s "$sock" --arg n "$slot" '
+      select(type == "object" and .sock == $s and .slot == $n)
+      | [(.ts // 0), (if .source == "mod" and (.state // "") != "" and (now * 1000 - ((.mod.hb // 0) | tonumber? // 0)) <= 150000
+                      then .state else (.status // "") end)] | map(tostring) | join("\u001f")' \
+      "$dir"/*.json 2>/dev/null | sort -t $'\x1f' -k1,1n | tail -1)"
+  case "${st#*$'\x1f'}" in working|need-you) return 1 ;; esac
+  return 0
+}
+_gather_done() {                      # $1=socket $2=fleet dir $3=kind $4=target $5=worker $6=inbox
+  local sock dir kind to slot inbox g p line
+  sock="$1"; dir="$2"; kind="$3"; to="$4"; slot="$5"; inbox="$6"
+  g="$dir/$sock.$kind.gather"
+  line="$(wc -l < "$inbox" 2>/dev/null | tr -d '[:space:]')"
+  printf '%s\x1f%s\x1f%s\n' "${now:-$(date +%s)}" "$slot" "$line" >> "$g" 2>/dev/null || return 0
+  p="$(cat "$g.pid" 2>/dev/null)"
+  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
+  export -f _pane_text _input_state _input_empty _defer_nudge _notify_quiet _done_news _dbg
+  FLEET_DIR="$dir" nohup bash -c '
+    sock="$1"; kind="$2"; to="$3"; inbox="$4"; tick="${5:-15}"
+    case "$tick" in ""|*[!0-9]*|0) tick=15 ;; esac
+    g="$FLEET_DIR/$sock.$kind.gather"; lock="$g.pid"; sep="$(printf "\037")"
+    echo $$ > "$lock" 2>/dev/null
+    # only its own lock: a sleeper armed in the gap below must keep the one it wrote
+    trap "[ \"\$(cat \"$lock\" 2>/dev/null)\" = $$ ] && rm -f \"$lock\"" EXIT
+    while :; do
+    while [ -s "$g" ]; do
+      # a lead that is gone has nobody to wake; its rows are in the inbox for whoever comes
+      tmux -L "$sock" has-session -t "$to" 2>/dev/null || { rm -f "$g"; exit 0; }
+      q="$(_notify_quiet "$sock" "$FLEET_DIR")"
+      cap="${CLAUDE_FLEET_NOTIFY_QUIET_MAX:-$(( q * 3 ))}"; case "$cap" in ""|*[!0-9]*) cap=$(( q * 3 )) ;; esac
+      first="$(head -1 "$g" | cut -d "$sep" -f1)"; last="$(tail -1 "$g" | cut -d "$sep" -f1)"
+      case "$first" in ""|*[!0-9]*) first=0 ;; esac; case "$last" in ""|*[!0-9]*) last=0 ;; esac
+      now="$(date +%s)"; due=$(( last + q )); [ $(( first + cap )) -lt "$due" ] && due=$(( first + cap ))
+      if [ "$now" -lt "$due" ]; then
+        s=$(( due - now )); [ "$s" -gt "$tick" ] && s="$tick"; sleep "$s"; continue
+      fi
+      f="$g.firing.$$"; mv -f "$g" "$f" 2>/dev/null || exit 0
+      # newest row per worker: read backwards, keep the first sight of each name
+      n=0; names=""; dropped=""; met=" "
+      while IFS="$sep" read -r at who line; do
+        [ -n "$who" ] || continue
+        case "$met" in *" $who "*) continue ;; esac
+        met="$met$who "
+        if _done_news "$sock" "$FLEET_DIR" "$who" "$at" "$inbox" "$line"; then
+          n=$(( n + 1 )); names="$who${names:+, $names}"
+        else dropped="$dropped $who"
+        fi
+      done < <(awk "{ l[NR] = \$0 } END { for (i = NR; i > 0; i--) print l[i] }" "$f")
+      rm -f "$f"
+      [ -n "$dropped" ] && _dbg "gathered done for $sock/$to: dropped$dropped (busy again, or already read)"
+      [ "$n" -gt 0 ] || continue
+      if [ "$n" -gt 6 ]; then names="$(printf "%s" "$names" | cut -d, -f1-6), +$(( n - 6 )) more"; fi
+      if [ "$to" = master ]; then
+        w="workers"; [ "$n" = 1 ] && w="worker"
+        msg="[fleet] $n $w finished ($names) — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it."
+      else
+        msg="[fleet] $n of YOUR workers finished ($names) — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
+      fi
+      if _input_empty "$sock" "$to"; then
+        date +%s > "$FLEET_DIR/$sock.$kind.stamp" 2>/dev/null
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
+      else
+        _defer_nudge "$sock" "$FLEET_DIR" "$kind" "$msg" "$to"
+      fi
+    done
+    # A DONE filed while this sleeper was on its way out saw a live pid and armed nothing, so
+    # one more look after letting go: a row left behind has no other event to come for it.
+    rm -f "$lock"; [ -s "$g" ] || exit 0; echo $$ > "$lock" 2>/dev/null
+    done
+  ' _ "$sock" "$kind" "$to" "$inbox" "${CLAUDE_FLEET_NOTIFY_TICK:-15}" >/dev/null 2>&1 &
 }
 
 # Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
@@ -891,6 +1042,11 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     if [ "$_push" = 1 ] && [ "$ev" = need-you ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
       _needyou_nudge
+    elif [ "$_push" = 1 ] && [ "$ev" = done ] && [ "$(_notify_quiet "$CLAUDE_FLEET_SOCK" "$FLEET_DIR")" != 0 ] \
+       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
+      # gathered, not sent: the quiet window above decides when, and the re-check whether
+      _k=notify; [ -n "$_parent" ] && _k="$_parent.notify"
+      _gather_done "$CLAUDE_FLEET_SOCK" "$FLEET_DIR" "$_k" "$_to" "$SLOT" "$_inbox"
     elif [ "$_push" = 1 ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
       # One stamp per WAKE TARGET: a sub-lead's burst must not swallow master's next wake.

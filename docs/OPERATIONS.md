@@ -304,6 +304,61 @@ worked out (an unregistered project, or a position past 9, which the chord can't
 express) it's simply absent — a chord that sends you to the wrong session is worse than
 none.
 
+## When the lead is woken, and when it waits
+
+With the push on (`notify-lead`, see [SHORTCUTS](SHORTCUTS.md)), the lead is woken by a paste
+into its input box. Not every event is worth a turn, so the kinds are not treated alike:
+
+| event | when the lead hears |
+|---|---|
+| a worker **needs you** (permission, question, limit) | at once, mid-turn too, naming the worker and the ask |
+| an answer relayed to an asker, a failed delivery, a held wake (below) | at once, as before |
+| a worker **finished** (`DONE`) | once the fleet has been **quiet for 10 minutes**, in one wake for everything gathered |
+
+**Why finishes wait.** Measured on one busy fleet's master over 13 days: 64% of its turns were
+started by the "a worker finished" nudge, each re-reading its whole context, and more than half
+of those turns only looked and ended. The nudges came a median 2.7 minutes apart, so the old
+30-second debounce coalesced almost none of them. Now a `DONE` is gathered, and when no new
+one has arrived for the window, ONE nudge goes: *"[fleet] 3 workers finished (acme-api,
+toolbox, scratch) — run fleet-inbox…"*. The window trails, but is capped at three times its
+length from the first `DONE` gathered, so a fleet that never falls quiet still wakes its lead.
+A sub-lead's children are gathered the same way, for the sub-lead.
+
+**Re-checked when the window ends.** A `DONE` is dropped if its worker is busy again by then (a
+background task woke it, or it was given its next prompt; it will `DONE` again), or if the lead
+already read that row with `fleet-inbox`. If nothing is left, nobody is woken. The rows are in
+the inbox either way.
+
+**Setting the window, per fleet.** One number of seconds in `<fleet dir>/<sock>.notify-quiet`
+(read live, no restart), else `CLAUDE_FLEET_NOTIFY_QUIET`, else `600`. `0` restores the old
+behaviour: a finish wakes the lead at once, debounced by `CLAUDE_FLEET_NOTIFY_DEBOUNCE`.
+`CLAUDE_FLEET_NOTIFY_QUIET_MAX` overrides the cap.
+
+```bash
+echo 120 > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: two quiet minutes
+echo 0   > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: every finish at once
+```
+
+### A wake the input box keeps out
+
+A wake is pasted only into an **empty** input box. Anything else might be your half-typed
+message, and the fleet never clears it or sends it. So when the box holds text (or no box is on
+screen: a dialog, a scrolled-back pane), the wake waits and retries every 20 s. It used to give
+up after ten minutes and leave only a log line, and one fleet's master went 13 days with a
+stray character in its box and 14 wakes lost behind it. Now, at ten minutes the hold becomes
+visible, and the wake keeps waiting for as long as the lead's session exists:
+
+- **On the lead's band**, above the box that is the cause:
+  `wake held 12m · this input box has unsent text · the fleet will not touch it`.
+- **On the phone's queue** (`fleet-serve`), as a red `▲ wake held` card for that lead. Tapping
+  it opens the lead, so you can see what is typed. It is not a message: a message would queue
+  behind the same box.
+- **In the lead's inbox**, as an `UNDELIVERED` row, and as one push to the phone.
+
+Send or clear the box yourself, and the wake goes in on the next poll (every 30 s once held,
+`CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY`). The hold lives in `<sock>.<kind>.blocked`, rewritten on
+every poll; a file that has not been rewritten for two minutes is read as no hold.
+
 ## Profiles (work vs personal accounts)
 
 Claude Code keeps each account in its own config dir (`CLAUDE_CONFIG_DIR`) — that dir holds
@@ -859,6 +914,9 @@ A master, and a sub-lead (a worker with children), draws its team above the prom
   into its own branch. `PRs ?` means gh did not answer, never zero.
 - **Narrow panes.** Words shorten first, then `need you` moves to the front, then only the
   essentials stay: `1 need · 1 busy · 4w` at 28 columns, `1!` at the very end.
+- **A held wake** is a row of its own above the team's, while the fleet holds a wake for this
+  session because its input box never read empty
+  (see [A wake the input box keeps out](#a-wake-the-input-box-keeps-out)).
 - **Cost.** No turn, no model call. A redraw happens only when what the line says changes.
 
 ### The guards

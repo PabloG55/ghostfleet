@@ -40,7 +40,7 @@ import {
   SETTING_REFUSAL, failedClosed, answerCalls, JARVIS_TOOLS, fleetTool, callArgs, markerSock,
   jarvisMightAct,
 } from './guard-shape.js'
-import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
+import { teamOf, latestBySlot, summarize, prSummary, bandRuns, heldKinds, heldWake, heldRuns } from './band-shape.js'
 import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
@@ -969,8 +969,23 @@ async function refresh($) {
   lead = { sock: who.sock, me: who.slot, team, dir }
   if (!wasLead) refreshPrs($).catch(() => {})
   const bySlot = latestBySlot(await readTeamRecords($, dir, entries), who.sock)
-  const s = summarize(team, bySlot, await $.clock.now())
-  await publish($, { ...s, prs })
+  const nowMs = await $.clock.now()
+  const s = summarize(team, bySlot, nowMs)
+  await publish($, { ...s, prs, held: await heldOf($, dir, entries, who.sock, who.slot, nowMs) })
+}
+
+// A wake the fleet is holding because THIS session's input box never read empty
+// (band-shape.js heldWake). Its age is drawn against a minute bucket, like the ledger's, so
+// the band redraws once a minute while it lasts and not on every tick.
+async function heldOf($, dir, entries, sock, me, nowMs) {
+  const names = new Set(heldKinds(me).map(k => `${sock}.${k}.blocked`))
+  const files = []
+  for (const f of entries) {
+    if (f.kind !== 'file' || !names.has(f.name)) continue
+    files.push({ name: f.name, mtimeMs: f.mtimeMs, text: String(await soon($, $.fs.read(`${dir}/${f.name}`), '')) })
+  }
+  const held = heldWake(files, sock, me, nowMs)
+  return held ? { ...held, asOf: Math.floor(nowMs / 60_000) * 60_000 } : null
 }
 
 async function refreshPrs($) {
@@ -993,21 +1008,24 @@ async function refreshPrs($) {
   return refresh($)
 }
 
-// The team's row, then the ledger's (LEDGER, below), each only when it has something to say.
+// A held wake first (it is about the box right below), then the team's row, then the
+// ledger's (LEDGER, below), each only when it has something to say.
 async function onBandRender($, e, next) {
   if (e.props.hasSurvey) return next(e)
   const { value } = await $.state.get(BAND)
   const team = value ? bandRuns(value, value.prs, e.props.bodyColumns) : null
+  const hold = value && value.held ? heldRuns(value.held, value.held.asOf, e.props.bodyColumns) : null
   const led = (await $.state.get(LEDGER)).value
   const book = led ? ledgerRuns(led, led.asOf, e.props.bodyColumns) : null
-  if (!team && !book) return next(e)
+  if (!team && !hold && !book) return next(e)
   const { Box, Text } = $.ui.resolve(e)
   const row = (runs, k) => h(Box, { key: k, flexDirection: 'row' },
     ...runs.map((r, i) => h(Text, {
       key: String(i), wrap: 'truncate-end',
       ...(r.color ? { color: r.color } : {}), ...(r.dim ? { dimColor: true } : {}), ...(r.bold ? { bold: true } : {}),
     }, r.text)))
-  return h(Box, { flexDirection: 'column' }, ...(team ? [row(team, 'team')] : []), ...(book ? [row(book, 'ledger')] : []))
+  return h(Box, { flexDirection: 'column' }, ...(hold ? [row(hold, 'held')] : []), ...(team ? [row(team, 'team')] : []),
+    ...(book ? [row(book, 'ledger')] : []))
 }
 
 // Started from onSessionStart (one session.start hook per module), after the record exists.
