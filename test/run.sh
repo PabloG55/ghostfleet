@@ -9654,6 +9654,137 @@ else
   skip "the queue can be read, and a waiting prompt taken back out" "tmux missing"
 fi
 
+# A DRAIN THAT DIES MUST LOSE NOTHING. The drain used to cut the head off the queue BEFORE
+# delivering it, and write it back through a tmp on a busy answer — one fleet's directory
+# held three complete prompts in those tmps, in no queue, never delivered. The head now
+# stays queued until its delivery is confirmed, and a journal says how far a dead drain got.
+# Every kill here is a SIGKILL of the drain and its delivery, at a point the fixture holds
+# it: a stub fleet-agent that stalls only the DELIVERY (a --queued fleet-send asking which
+# agent runs the target), which is after the old code's cut and before anything is typed.
+group "a queued prompt survives the drain that dies delivering it"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  QK="$(mktemp -d "$TEST_RUNS.$$.qk.XXXXXX")"; QKF="$QK/fleet"; mkdir -p "$QKF" "$QK/shim"
+  # The target: a composer whose cursor sits in the box, logging each line it reads. With
+  # $log.hold it takes the line and never redraws, so the submit is never confirmed and
+  # the delivery stays in flight for as long as the test needs.
+  cat > "$QK/agent" <<'AGENT'
+#!/usr/bin/env bash
+log="$1"; rule='────────────────────────────────────────'
+while :; do
+  printf '\033[2J\033[H\n%s\n❯ \n%s\n  status' "$rule" "$rule"; printf '\033[3;3H'
+  IFS= read -r line || exit 0
+  printf '%s\n' "$line" >> "$log"
+  [ -f "$log.hold" ] && sleep 60
+done
+AGENT
+  cat > "$QK/shim/fleet-agent" <<'SHIM'
+#!/usr/bin/env bash
+if [ -f "$QK_STALL.on" ]; then
+  case "$(ps -o args= -p "$PPID" 2>/dev/null)" in
+    # $PPID may be the $(…) subshell fleet-send forked to run this, so its parent too
+    *--queued*) printf '%s %s %s\n' "$$" "$PPID" "$(ps -o ppid= -p "$PPID" | tr -d ' ')" > "$QK_STALL"; exec sleep 60 ;;
+  esac
+fi
+exit 1
+SHIM
+  chmod +x "$QK/shim/fleet-agent"
+  tmux -L cfqk kill-server 2>/dev/null
+  tmux -L cfqk new-session -d -x 120 -y 30 -s tgt "bash '$QK/agent' '$QK/got'" 2>/dev/null
+  tmux -L cfqk set-environment -t tgt CLAUDE_FLEET_DIR "$QKF" 2>/dev/null
+  QKQ="$QKF/cfqk.tgt.queue"
+  # An array, not a function: a backgrounded function is a subshell, and its $! would be
+  # that subshell — the kill would miss the drain and the test would pass on a live one.
+  QKENV=(env -u TMUX CLAUDE_FLEET_DIR="$QKF" PATH="$QK/shim:$ROOT/bin:$PATH" QK_STALL="$QK/stall")
+  QKS() { "${QKENV[@]}" "$ROOT/bin/fleet-send" -s cfqk "$@" 2>&1; }
+  qkrec() { printf '%s\x1f\x1f\x1f\x1f%s\n' "${2:-$(date +%s)}" "$(printf '%s' "$1" | base64 | tr -d '\n')"; }
+  qkgot() { grep -c -x -- "$1" "$QK/got" 2>/dev/null || true; }
+  qkfresh() { rm -f "$QK/got.hold"; tmux -L cfqk respawn-pane -k -t tgt "bash '$QK/agent' '$QK/got'" 2>/dev/null
+              for _ in $(seq 1 20); do grep -q '❯' <<< "$(tmux -L cfqk capture-pane -p -t tgt 2>/dev/null)" && break; sleep 0.1; done; }
+  qkfresh
+
+  # 1. Killed after the old cut, before delivery: the prompt is still the head, and the
+  #    next drain delivers it — once.
+  qkrec "run the acme-api suite" > "$QKQ"
+  : > "$QK/stall.on"; rm -f "$QK/stall"
+  "${QKENV[@]}" "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
+  for _ in $(seq 1 100); do [ -s "$QK/stall" ] && break; sleep 0.1; done
+  read -r qks qkc qkcc < "$QK/stall" 2>/dev/null
+  kill -9 "$qkp" ${qkcc:+"$qkcc"} ${qkc:+"$qkc"} ${qks:+"$qks"} 2>/dev/null; wait "$qkp" 2>/dev/null; rm -f "$QK/stall.on"
+  is "the drain was killed holding the delivery"     "1" "$([ -n "${qkc:-}" ] && echo 1 || echo 0)"
+  is "...and the prompt is still in the queue"       "1" "$(grep -c . "$QKQ" 2>/dev/null || echo 0)"
+  QKS --dequeue tgt >/dev/null
+  is "...the next drain delivers it"                 "1" "$(qkgot 'run the acme-api suite')"
+  is "...and it has left the queue, journal and all" "0 0" \
+     "$([ -s "$QKQ" ] && echo 1 || echo 0) $([ -e "$QKQ.sending" ] && echo 1 || echo 0)"
+
+  # 2. Killed AFTER it was typed in, before the drain could confirm it: at most once wins.
+  #    It is not re-sent; it is moved aside, and fleet-inbox says it may have landed.
+  : > "$QK/got"; : > "$QK/got.hold"
+  qkrec "and the billing-svc one" > "$QKQ"
+  "${QKENV[@]}" "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
+  for _ in $(seq 1 60); do [ "$(qkgot 'and the billing-svc one')" -ge 1 ] && break; sleep 0.1; done
+  kill -9 $(pgrep -P "$qkp" 2>/dev/null) "$qkp" 2>/dev/null; wait "$qkp" 2>/dev/null
+  qkfresh
+  QKS --dequeue tgt >/dev/null; sleep 0.5
+  is "a prompt killed mid-delivery is not sent twice" "1" "$(qkgot 'and the billing-svc one')"
+  is "...it is out of the queue"                     "0" "$([ -s "$QKQ" ] && echo 1 || echo 0)"
+  qkid="$(cd "$QKF" && ls cfqk.tgt.queue.*.indoubt 2>/dev/null | sed 's/^cfqk\.tgt\.queue\.//')"
+  is "...and set aside, in doubt"                    "1" "$(grep -c . <<< "$qkid" || true)"
+  qki="$(env -u TMUX CLAUDE_FLEET_DIR="$QKF" "$ROOT/bin/fleet-inbox" -s cfqk 2>&1)"
+  is "fleet-inbox reports it, naming the session"    "1" "$(grep -c "tgt .*23 bytes.*MAY have been typed in.*\[$qkid\]" <<< "$qki" || true)"
+  is "...never its words"                            "0" "$(grep -c 'billing-svc' <<< "$qki" || true)"
+  # Re-queued by the owner: back at the head, delivered now (the session is idle), and said.
+  qkr="$(QKS --requeue tgt "$qkid")"
+  is "--requeue puts it back, warning it may have run" "1 1" \
+     "$(grep -c 'back at the head' <<< "$qkr" || true) $(grep -c 'may already have been typed in' <<< "$qkr" || true)"
+  is "...and it is delivered again, by the owner's choice" "2" "$(qkgot 'and the billing-svc one')"
+  QKS --requeue tgt "$qkid" >/dev/null; qkrc=$?
+  is "...once: it is no longer stranded"             "4" "$qkrc"
+
+  # 3. A delivery that answers busy (3) leaves the head the head, exactly once: the mod
+  #    is handed it, never claims it, and the session goes busy before the take-back.
+  qkfresh; : > "$QK/got"
+  { qkrec "task-alpha"; qkrec "task-bravo"; } > "$QKQ"
+  sleep 120 & qkm=$!
+  mkdir -p "$QKF/qk-1.handoff"; printf '%s\n' "$qkm" > "$QKF/qk-1.handoff/.ready"
+  qkmod() { jq -n --arg s "$1" --argjson pid "$qkm" --argjson hb "$(( $(date +%s) * 1000 ))" \
+              '{session_id:"qk-1", sock:"cfqk", slot:"tgt", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+              > "$QKF/.qk.tmp" && mv -f "$QKF/.qk.tmp" "$QKF/qk-1.json"; }
+  qkmod ready
+  "${QKENV[@]}" CLAUDE_FLEET_MOD_CLAIM=2 "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
+  qkh=0; for _ in $(seq 1 50); do ls "$QKF/qk-1.handoff/"*.json >/dev/null 2>&1 && { qkh=1; break; }; sleep 0.1; done
+  qkmod working
+  wait "$qkp"; qkrc=$?
+  is "a delivery the session was too busy for answers 3" "1 3" "$qkh $qkrc"
+  is "...and the queue is as it was, head first, once" "task-alpha|task-bravo" \
+     "$(QKS --list-queue tgt | while IFS=$'\t' read -r _ b _; do printf '%s|' "$(printf '%s' "$b" | base64 -d 2>/dev/null || printf '%s' "$b" | base64 -D)"; done | sed 's/|$//')"
+  is "...with nothing set aside, and no journal"     "0 0" \
+     "$(ls "$QKF" | grep -cE '\.(indoubt|refused|tmp)$' || true) $([ -e "$QKQ.sending" ] && echo 1 || echo 0)"
+  kill "$qkm" 2>/dev/null; wait "$qkm" 2>/dev/null; rm -rf "$QKF/qk-1.json" "$QKF/qk-1.handoff"
+
+  # 4. What the OLD drain left behind: a tmp beside the queue holding a record. Reported
+  #    with its session and age, never its words; a copy of a record still queued says so.
+  rm -f "$QKQ"
+  qkrec "the old acme-web brief" "$(( $(date +%s) - 9 * 86400 ))" > "$QKF/cfqk.w9.queue.4242.tmp"
+  qkrec "still waiting anyway" > "$QKQ"; cp "$QKQ" "$QKF/cfqk.tgt.queue.777.tmp"
+  qki="$(env -u TMUX CLAUDE_FLEET_DIR="$QKF" "$ROOT/bin/fleet-inbox" -s cfqk 2>&1)"
+  is "a leftover queue tmp is reported"              "1" "$(grep -c 'stranded queued prompts (2)' <<< "$qki" || true)"
+  is "...with its session, age and length"           "1" "$(grep -c 'w9 .*22 bytes.*queued 9d ago.*never delivered.*\[4242.tmp\]' <<< "$qki" || true)"
+  is "...a copy of a waiting record, as a copy"      "1" "$(grep -c 'tgt .*\[777.tmp\]' <<< "$(grep 'a copy of one still queued' <<< "$qki")" || true)"
+  is "...and no prompt's words"                      "0" "$(grep -cE 'acme-web|still waiting' <<< "$qki" || true)"
+  QKS --requeue tgt 777.tmp >/dev/null
+  is "re-queueing a copy adds nothing: it runs once" "1" "$(qkgot 'still waiting anyway')"
+  QKS --discard w9 4242.tmp >/dev/null; qkrc=$?
+  is "--discard needs no live session, and removes it" "0 0" "$qkrc $(ls "$QKF" | grep -c '\.tmp$' || true)"
+  QKS --discard w9 ../../etc >/dev/null; qkrc=$?
+  is "...and refuses anything but a stranded id"     "1" "$qkrc"
+  is "nothing stranded, nothing said"                "0" \
+     "$(env -u TMUX CLAUDE_FLEET_DIR="$QKF" "$ROOT/bin/fleet-inbox" -s cfqk 2>&1 | grep -c 'stranded' || true)"
+  tmux -L cfqk kill-server 2>/dev/null; rm -rf "${QK:?}"
+else
+  skip "a queued prompt survives the drain that dies delivering it" "tmux/node/jq missing"
+fi
+
 # Interrupt is the Escape the desk presses: the turn ends and NOTHING ELSE happens — no
 # park marker, and the lead takes it like any worker. The pane is a perl loop that redraws
 # a spinner until it reads an Escape, so "the turn ended" is the pane going still because
@@ -10148,13 +10279,14 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
        printf \"{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"fq-qb\\\",\\\"cwd\\\":\\\"/\\\"}\" \
          | \"$ROOT/hooks/fleet-event.sh\" >/dev/null 2>&1
        cat >/dev/null'" 2>/dev/null
-  # Wait for the TEXT, not for the queue to shrink: --dequeue pops the record before it
-  # pastes, so a loop that stops on the pop reads the pane a moment too early.
+  # Wait for the TEXT, then for the queue to shrink: the record leaves the queue only once
+  # its delivery has returned, which on this pane is after the submit check gives up (~8s).
   for _ in $(seq 1 80); do
     grep -q 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" && break; sleep 0.25
   done
   is "after the rename, a Stop delivers the next one" "1" \
      "$(grep -c 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" || true)"
+  for _ in $(seq 1 60); do [ "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null)" = 2 ] || break; sleep 0.25; done
   is "...and leaves the other waiting"        "1" "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null || echo 0)"
   env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-stop" -s cfqm qb >/dev/null 2>&1
   is "a stop clears it"                       "0" "$([ -e "$QMF/cfqm.qb.queue" ] && echo 1 || echo 0)"

@@ -118,6 +118,11 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.relay.stamp"     "$FLEET_DIR/$SOCK.$NEW.relay.stamp
 # puts it. A drainer already waiting on the OLD name polls a session that no longer exists
 # and exits; the renamed session's next Stop starts one for the queue that moved.
 mv -f "$FLEET_DIR/$SOCK.$OLD.queue"           "$FLEET_DIR/$SOCK.$NEW.queue"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.queue.sending"   "$FLEET_DIR/$SOCK.$NEW.queue.sending"   2>/dev/null || true
+# ...and a prompt its drain stranded, so --requeue <new name> finds it where fleet-inbox says.
+for _sf in "$FLEET_DIR/$SOCK.$OLD".queue.*.tmp "$FLEET_DIR/$SOCK.$OLD".queue.*.indoubt "$FLEET_DIR/$SOCK.$OLD".queue.*.refused; do
+  [ -f "$_sf" ] && mv -f "$_sf" "$FLEET_DIR/$SOCK.$NEW.queue.${_sf##*.queue.}" 2>/dev/null
+done
 mv -f "$FLEET_DIR/$SOCK.$OLD.now"             "$FLEET_DIR/$SOCK.$NEW.now"             2>/dev/null || true
 [ -d "$FLEET_DIR/attach/$SOCK.$OLD" ] && [ ! -e "$FLEET_DIR/attach/$SOCK.$NEW" ] \
   && mv "$FLEET_DIR/attach/$SOCK.$OLD" "$FLEET_DIR/attach/$SOCK.$NEW" 2>/dev/null
