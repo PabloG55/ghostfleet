@@ -69,6 +69,37 @@ if [ -n "$_peer_proj" ] && [ -n "$_peer_sess" ]; then
   esac
 fi
 
+# --- the CONTEXT CEILING -------------------------------------------------------
+# Every call re-reads the whole context, so a session left to grow to the model's 1M window
+# pays for that size on every call after. lib/context-window.sh has the measurements, the
+# knob that actually does it (CLAUDE_CODE_AUTO_COMPACT_WINDOW) and where the value comes
+# from. Set HERE because every way the fleet starts a session ends in this file — spawn,
+# the grid, wake, resume and restart all exec it — so no route can launch without it.
+#
+# A WINDOW SOMEONE SET THEMSELVES IS THEIRS, AND ONE WE SET IS NOT. The variable we export
+# reaches everything the session starts, and a lead that starts another project's fleet
+# hands it to that fleet's tmux server — whose sessions would then run with the first
+# project's ceiling and never read their own. So what we set is marked in
+# CLAUDE_FLEET_CONTEXT_WINDOW: a window equal to the mark is recomputed for this session,
+# and only a window that differs from it (or has no mark) is a person's and left alone.
+_cw_lib="${BASH_SOURCE[0]}"
+while [ -L "$_cw_lib" ]; do _t="$(readlink "$_cw_lib")"; case "$_t" in /*) _cw_lib="$_t" ;; *) _cw_lib="$(dirname "$_cw_lib")/$_t" ;; esac; done
+_cw_lib="$(cd "$(dirname "$_cw_lib")/../lib" 2>/dev/null && pwd)/context-window.sh"
+if [ -f "$_cw_lib" ] && { [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ] \
+     || [ "${CLAUDE_CODE_AUTO_COMPACT_WINDOW}" = "${CLAUDE_FLEET_CONTEXT_WINDOW:-}" ]; }; then
+  . "$_cw_lib"
+  # The live server's socket before the inherited variable, as hooks/fleet-event.sh does: a
+  # pane opened by hand in a fleet inherits whichever CLAUDE_FLEET_SOCK the server started with.
+  _cw_sock="${CLAUDE_FLEET_SOCK:-}"
+  _t="${TMUX:-}"; case "${_t%%,*}" in */cf-*) _cw_sock="${_t%%,*}"; _cw_sock="${_cw_sock##*/}" ;; esac
+  IFS=$'\t' read -r _cw _ < <(context_window_resolve "$FLEET_DIR" "$_cw_sock")
+  if [ "$_cw" = off ]; then
+    unset CLAUDE_CODE_AUTO_COMPACT_WINDOW CLAUDE_FLEET_CONTEXT_WINDOW
+  else
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$_cw" CLAUDE_FLEET_CONTEXT_WINDOW="$_cw"
+  fi
+fi
+
 # THE OBSERVATION CONTRACT — the one standing instruction every fleet session carries.
 #
 # MEASURED, over a corpus of real work: of 172 build turns that changed a screen file,

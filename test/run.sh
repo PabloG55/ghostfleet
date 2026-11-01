@@ -10285,6 +10285,165 @@ is "...with the same name"            "acme-api/master" "$(NAMED cf-acme-api mas
 rm -rf "$CH"
 
 
+# ── 4c4. the context ceiling reaches every session the fleet launches ─────────
+# A session left to grow to the model's 1M window re-reads that much on every call; on one
+# measured fleet 54% of spend came from calls at 500k+. bin/claude-here exports
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW (lib/context-window.sh says why that one and not the two
+# that look like it) from <sock>.context-window, else the all-projects file, else 300k.
+#
+# Asserted on the ENVIRONMENT THE AGENT PROCESS GOT, not on the file or the code: a stand-in
+# claude prints what it was handed. And both directions, because `off` is a promise too —
+# it must launch exactly as before, with the variable absent, not set to something.
+group "context ceiling (CLAUDE_CODE_AUTO_COMPACT_WINDOW)"
+CW="$(mktemp -d)"; mkdir -p "$CW/bin" "$CW/cfg" "$CW/work" "$CW/fleet" "$CW/xdir"
+printf '#!/bin/sh\nprintf "%%s|%%s\\n" "${CLAUDE_CODE_AUTO_COMPACT_WINDOW-unset}" "${CLAUDE_FLEET_CONTEXT_WINDOW-unset}"\n' > "$CW/bin/claude"
+chmod +x "$CW/bin/claude"
+# The suite may itself be running inside a fleet session that already carries both
+# variables, so each case starts from neither unless it says otherwise.
+CWENV() {                       # $1 = CLAUDE_FLEET_SOCK, rest = extra env assignments
+  local sock="$1"; shift
+  ( cd "$CW/work" && env -u TMUX -u ZELLIJ_SESSION_NAME -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH \
+      -u CLAUDE_CODE_AUTO_COMPACT_WINDOW -u CLAUDE_FLEET_CONTEXT_WINDOW \
+      PATH="$CW/bin:$PATH" CLAUDE_CONFIG_DIR="$CW/cfg" CLAUDE_FLEET_DIR="$CW/fleet" \
+      CLAUDE_FLEET_EXPERIMENTAL_DIR="$CW/xdir" CLAUDE_FLEET_SOCK="$sock" "$@" \
+      /bin/bash "$ROOT/bin/claude-here" master 2>"$CW/err" ) | tail -n 1
+}
+is "no setting -> the 300k default"          "300000|300000" "$(CWENV cf-acme-api)"
+printf '400k\n' > "$CW/fleet/cf-acme-api.context-window"
+is "the project's own file"                  "400000|400000" "$(CWENV cf-acme-api)"
+# Scoped by socket: another project in the same fleet dir is not touched by it.
+is "...for that project only"                "300000|300000" "$(CWENV cf-acme-web)"
+printf '500k\n' > "$CW/xdir/context-window"
+is "the all-projects file"                   "500000|500000" "$(CWENV cf-acme-web)"
+is "...which the project's file beats"       "400000|400000" "$(CWENV cf-acme-api)"
+printf 'off\n' > "$CW/fleet/cf-acme-api.context-window"
+is "off -> the variable is not set at all"   "unset|unset"   "$(CWENV cf-acme-api)"
+# A session started by a lead whose own launch set the window: the value is OURS (it equals
+# the mark), so it is recomputed for this project — here `off`, so it must go, not linger.
+is "...even when inherited from another fleet's launch" "unset|unset" \
+   "$(CWENV cf-acme-api CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 CLAUDE_FLEET_CONTEXT_WINDOW=300000)"
+printf '400k\n' > "$CW/fleet/cf-acme-api.context-window"
+is "...and replaced when this project has its own" "400000|400000" \
+   "$(CWENV cf-acme-api CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 CLAUDE_FLEET_CONTEXT_WINDOW=300000)"
+# A window a PERSON exported (no mark, or a different value) is theirs.
+is "a window someone set themselves is kept" "650000|unset" \
+   "$(CWENV cf-acme-api CLAUDE_CODE_AUTO_COMPACT_WINDOW=650000)"
+is "...even with a stale mark beside it"     "650000|300000" \
+   "$(CWENV cf-acme-api CLAUDE_CODE_AUTO_COMPACT_WINDOW=650000 CLAUDE_FLEET_CONTEXT_WINDOW=300000)"
+# The live server's socket wins over an inherited CLAUDE_FLEET_SOCK, as in the hooks.
+is "the socket comes from \$TMUX when it is a fleet's" "400000|400000" \
+   "$(CWENV cf-acme-web TMUX=/tmp/tmux-0/cf-acme-api,123,0)"
+# MEASURED SHARP EDGES. A bare `300` would reach the CLI as 300 tokens; a typo must not
+# silently mean `off`; below 200k the CLI does not compact ahead of time at all.
+rm -f "$CW/xdir/context-window"
+printf '300\n' > "$CW/fleet/cf-acme-api.context-window"
+is "a bare 300 is refused, not read as 300 tokens" "300000|300000" "$(CWENV cf-acme-api)"
+is "...and says why"                         "1" "$(grep -c 'is not a size' "$CW/err" || true)"
+printf 'banana\n' > "$CW/fleet/cf-acme-api.context-window"
+is "a value that is not a size -> the default" "300000|300000" "$(CWENV cf-acme-api)"
+printf '150k\n' > "$CW/fleet/cf-acme-api.context-window"
+is "below 200k is raised to 200k"            "200000|200000" "$(CWENV cf-acme-api)"
+printf '2m\n' > "$CW/fleet/cf-acme-api.context-window"
+is "above 1M is held at 1M"                  "1000000|1000000" "$(CWENV cf-acme-api)"
+printf '0.35m\n' > "$CW/fleet/cf-acme-api.context-window"
+is "a fraction of a million"                 "350000|350000" "$(CWENV cf-acme-api)"
+# THE PATH A FLEET SESSION ACTUALLY TAKES is resume: set before the branch, not on one side.
+rm -f "$CW/fleet/cf-acme-api.context-window"
+enc="$(printf '%s' "$CW/work" | sed 's#[/.]#-#g')"; mkdir -p "$CW/cfg/projects/$enc"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' > "$CW/cfg/projects/$enc/abc123.jsonl"
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = --resume ] && r=1; done\nprintf "%%s|%%s|%%s\\n" "${CLAUDE_CODE_AUTO_COMPACT_WINDOW-unset}" "${CLAUDE_FLEET_CONTEXT_WINDOW-unset}" "${r:-fresh}"\n' > "$CW/bin/claude"
+is "a resumed session gets it too"           "300000|300000|1" "$(CWENV cf-acme-api)"
+
+# ── through the REAL spawn: fleet-spawn -> tmux -> agent-here -> claude-here -> claude ──
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  printf '#!/bin/sh\nprintf "%%s|%%s\\n" "${CLAUDE_CODE_AUTO_COMPACT_WINDOW-unset}" "${CLAUDE_FLEET_CONTEXT_WINDOW-unset}" > "$CW_OUT"\nsleep 30\n' > "$CW/bin/claude"
+  cwspawn() {
+    rm -rf "$CW/repo" "$CW/w1" "$CW/slots" "$CW/out"; mkdir -p "$CW/home/.config/ghostfleet"
+    git init -q -b main "$CW/repo" 2>/dev/null
+    git -C "$CW/repo" config user.email t@t; git -C "$CW/repo" config user.name t
+    : > "$CW/repo/f"; git -C "$CW/repo" add -A; git -C "$CW/repo" commit -qm init 2>/dev/null
+    ( cd "$CW/repo" && HOME="$CW/home" env -u TMUX -u CLAUDE_CODE_AUTO_COMPACT_WINDOW -u CLAUDE_FLEET_CONTEXT_WINDOW \
+        CW_OUT="$CW/out" CLAUDE_FLEET_SOCK=cf-ctxwin CLAUDE_FLEET_DIR="$CW/fleet" CLAUDE_CONFIG_DIR="$CW/cfg" \
+        CLAUDE_FLEET_EXPERIMENTAL_DIR="$CW/xdir" CLAUDE_FLEET_SLOTS="$CW/slots" PATH="$CW/bin:$ROOT/bin:$PATH" \
+        "$ROOT/bin/fleet-spawn" w1 --new >/dev/null 2>&1 )
+    local i; for i in $(seq 1 50); do [ -s "$CW/out" ] && break; sleep 0.1; done
+    tmux -L cf-ctxwin kill-server 2>/dev/null
+    cat "$CW/out" 2>/dev/null || echo none
+  }
+  is "a spawned worker starts with the default" "300000|300000" "$(cwspawn)"
+  printf '450k\n' > "$CW/fleet/cf-ctxwin.context-window"
+  is "...or with its project's setting"         "450000|450000" "$(cwspawn)"
+  printf 'off\n' > "$CW/fleet/cf-ctxwin.context-window"
+  is "...and with nothing at all when it is off" "unset|unset"  "$(cwspawn)"
+fi
+
+# ── fleet-project set/get: where a person changes it ──
+mkdir -p "$CW/home/.config/ghostfleet" "$CW/home/.claude/fleet"
+printf 'acme-api\t%s\twork\n' "$CW/work" > "$CW/home/.config/ghostfleet/projects"
+FP() { HOME="$CW/home" CLAUDE_FLEET_EXPERIMENTAL_DIR="$CW/xdir" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+FP set acme-api context-window 400k >/dev/null
+is "set writes the project's file"         "400k" "$(cat "$CW/home/.claude/fleet/cf-acme-api.context-window" 2>/dev/null)"
+is "get reads it back"                     "1" "$(FP get acme-api | grep -c '^context-window  *400k  *(context ceiling, from project' || true)"
+FP set acme-api context-window off >/dev/null
+is "set off"                               "1" "$(FP get acme-api | grep -c '^context-window  *off ' || true)"
+FP set acme-api context-window default >/dev/null
+is "set default drops the override"        "no" "$([ -f "$CW/home/.claude/fleet/cf-acme-api.context-window" ] && echo yes || echo no)"
+is "...and get says where 300k came from"  "1" "$(FP get acme-api | grep -c '^context-window  *300k  *(context ceiling, from default' || true)"
+FP set acme-api context-window banana >/dev/null; rc=$?
+is "a value that is not a size is refused" "1" "$rc"
+is "...and writes nothing"                 "no" "$([ -f "$CW/home/.claude/fleet/cf-acme-api.context-window" ] && echo yes || echo no)"
+rm -rf "$CW"
+
+# ── 4c5. fleet-meter --context: did the ceiling move the spend? ───────────────
+# The report the ceiling is judged by. Its corpus is built by hand (test/helpers/
+# context-corpus.mjs) so every number below can be worked out on paper: five priced calls
+# of 100k/200k/400k/600k/800k, each priced at its context x $0.20/MTok.
+group "fleet-meter --context"
+if command -v node >/dev/null 2>&1; then
+  CM="$(mktemp -d)"; mkdir -p "$CM/corpus"
+  node "$ROOT/test/helpers/context-corpus.mjs" "$CM/corpus"
+  node "$ROOT/bin/fleet-meter.mjs" --context --corpus "$CM/corpus" --json > "$CM/all.json" 2>"$CM/err"
+  node "$ROOT/bin/fleet-meter.mjs" --context --corpus "$CM/corpus" --json --since 2026-11-02 > "$CM/since.json" 2>/dev/null
+  node "$ROOT/bin/fleet-meter.mjs" --context --corpus "$CM/corpus" > "$CM/human.txt" 2>/dev/null
+  cj() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));let v=j;for(const k of process.argv[2].split("|"))v=v?.[k];process.stdout.write(String(v))' "$1" "$2"; }
+  # A call is a message id, once, across the corpus: its second content block and the forked
+  # copy of it are the SAME call. 3 would be a per-file dedupe; 7 none at all.
+  is "a call is counted once, fork and all"    "6"     "$(cj "$CM/all.json" 'observed|calls')"
+  is "...and the repeats are reported"         "2"     "$(cj "$CM/all.json" 'corpus|duplicate_records_skipped')"
+  is "every bucket boundary lands where it should" "2 1 1 1 1" \
+     "$(for b in '<200k' 200-300k 300-500k 500-700k '>=700k'; do cj "$CM/all.json" "observed|buckets|$b|calls"; printf ' '; done | sed 's/ $//')"
+  # Spend shares are the contexts' shares: 800/2100 of the priced total in the top bucket.
+  is "the >=700k share of spend"               "0.381" "$(cj "$CM/all.json" 'observed|buckets|>=700k|share_of_spend')"
+  is "the <200k share of spend"                "0.048" "$(cj "$CM/all.json" 'observed|buckets|<200k|share_of_spend')"
+  is "priced at list price"                    "0.42"  "$(cj "$CM/all.json" 'observed|usd')"
+  # A model the table does not know is counted, never priced as something else.
+  is "an unknown model is unpriced, not guessed" "1"   "$(cj "$CM/all.json" 'observed|unpriced|calls')"
+  is "subagent calls are spend, in their own row" "1"  "$(cj "$CM/all.json" 'labelled|by_trigger|subagent|calls')"
+  # ── what started each turn ──
+  is "a person's turns"                        "2"     "$(cj "$CM/all.json" 'labelled|by_trigger|person|turns')"
+  is "a [fleet] nudge"                         "1"     "$(cj "$CM/all.json" 'labelled|by_trigger|fleet-nudge|turns')"
+  is "a task notification"                     "1"     "$(cj "$CM/all.json" 'labelled|by_trigger|task-notification|turns')"
+  is "a ledger gate, through the plugin wrapper" "1"   "$(cj "$CM/all.json" 'labelled|by_trigger|ledger-gate|turns')"
+  # An interrupt marker followed by no call is not a turn; and a forked copy's prompt whose
+  # only call was already counted is not a second one.
+  is "a prompt no call followed is not a turn" "undefined" "$(cj "$CM/all.json" 'labelled|by_trigger|harness')"
+  is "the rules carry their digests"           "12"    "$(cj "$CM/all.json" 'labelled|rules|ledger-gate|digest' | tr -d '\n' | wc -c | tr -d ' ')"
+  is "a compaction and the size it cut from"   "1 812345" \
+     "$(cj "$CM/all.json" 'observed|compactions|auto|count') $(cj "$CM/all.json" 'observed|compactions|auto|pre_tokens_median')"
+  # ── the window, which is how before/after is asked ──
+  is "--since keeps only the later calls"      "2"     "$(cj "$CM/since.json" 'observed|calls')"
+  is "...and the later compaction"             "1"     "$(cj "$CM/since.json" 'observed|compactions|auto|count')"
+  node "$ROOT/bin/fleet-meter.mjs" --context --corpus "$CM/corpus" --since yesterday >/dev/null 2>&1
+  is "a --since that is not a date exits 2"    "2"     "$?"
+  # ── counts and digests, never content ──
+  is "no prompt text reaches --json"           "0"     "$(grep -c 'acme-api-secret-plan' "$CM/all.json" || true)"
+  is "...nor the summary"                      "0"     "$(grep -c 'acme-api-secret-plan' "$CM/human.txt" || true)"
+  is "...nor a project directory"              "0"     "$(grep -c 'work-acme-api' "$CM/all.json" "$CM/human.txt" | awk -F: '{s+=$2} END{print s+0}')"
+  is "the summary has the bucket table"        "1"     "$([ "$(grep -c '^  >=700k ' "$CM/human.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
+  rm -rf "$CM"
+fi
+
+
 # `node --check` proves the screen PARSES, not that it runs — a missing `let` is a
 # ReferenceError that only fires on the keystroke that reaches it, and it kills the
 # whole grid pane. So drive the real TUI in a scratch tmux pane and send it keys. The

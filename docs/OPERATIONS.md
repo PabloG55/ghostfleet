@@ -629,6 +629,91 @@ worktree still on disk. A kept reclaim now leaves the path in
 `<fleet dir>/<socket>.<session>.reclaim-kept`, and the manifest row is read before it is
 deleted.
 
+## The context ceiling
+
+**Every session ghostfleet starts gets a 300k-token context ceiling.** Masters and workers alike
+get it, through every route: spawn, the grid, wake, resume and restart. All of them start the
+session through `bin/claude-here`, which exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000`. Claude
+Code then compacts the conversation once it nears that size, instead of near the model's 1M window.
+
+**Why.** Each call re-reads the whole context from the prompt cache, so a long session costs more
+on every call it makes. One busy fleet was measured over 13 days (146 sessions, 68k model calls):
+
+- 83% of the token cost was cache reads.
+- The average call carried 420k tokens.
+- 54% of the spend was on calls at 500k+, and 30% on calls at 700k+.
+- Sessions only compacted near 965k.
+
+**How it behaves, measured on scratch sessions:**
+
+- A 300k window is 280k after Claude Code reserves 20k for output.
+- The compaction threshold works out to about 238k. A 172k session did not compact under it.
+- A 334k session compacted before its next call. That compaction cost one summary pass (334k
+  read, under 1k written), and the call after it read 14k tokens instead of 334k.
+
+Two other variables look like they do the same job and don't:
+
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` leaves the window at 1M, so the UI's "% left" stays wrong. It
+  is also a test override that forked agents ignore.
+- `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` is only the size floor for idle compaction, and a
+  server-side flag decides per account whether idle compaction runs at all. In a test on an
+  account with the flag on, two idle 172k sessions were left 58 minutes; neither compacted, even
+  with the floor at 100k. So masters get the same ceiling as workers.
+
+**Changing it.** Set it per project:
+
+```bash
+fleet-project set acme-api context-window 400k     # or 0.5m, 450000
+fleet-project set acme-api context-window off      # no ceiling: the model's whole window, as before
+fleet-project set acme-api context-window default  # drop the override
+fleet-project get acme-api                         # what it resolves to, and from where
+```
+
+That writes `<fleet dir>/<socket>.context-window`. To change the default for every project, put
+one value in `~/.config/ghostfleet/context-window`. A project's own file beats it, and the
+built-in 300k comes last.
+
+A few rules apply to the values:
+
+- Below 200k the value is raised to 200k. Claude Code does not compact ahead of time under that
+  size.
+- Above 1M the value is held at 1M.
+- A bare number under 1000 (`300`) is refused rather than read as 300 tokens.
+- A file that doesn't parse is skipped with a warning, not treated as `off`.
+
+Workers can't change it: the guard that stops a worker from loosening its own limits blocks every
+`fleet-project set`.
+
+**It applies when a session starts.** A running session keeps the window it started with until
+its next start: wake, restart, or the grid's reopen. To move a whole fleet now, restart its
+sessions.
+
+**If you exported `CLAUDE_CODE_AUTO_COMPACT_WINDOW` yourself, your value wins.** ghostfleet marks
+the values it sets itself (`CLAUDE_FLEET_CONTEXT_WINDOW`). An inherited value with that mark is
+recomputed for the project at hand. That matters because a lead that starts another project's
+fleet would otherwise pass its own ceiling to that fleet.
+
+**Did it work?** Ask the meter, over the weeks before and after the change:
+
+```bash
+fleet-meter --context --until 2026-11-02     # before
+fleet-meter --context --since 2026-11-02     # after
+```
+
+It prints:
+
+- the share of spend and calls in each context-size bucket (`<200k`, `200-300k`, `300-500k`,
+  `500-700k`, `>=700k`);
+- the compactions, with the median size each one cut from (about 250k once the ceiling is in
+  force, about 965k before);
+- turns, calls and spend by what started each turn: a person, a `[fleet]` nudge, a task
+  notification, or a ledger gate.
+
+Like the rest of `fleet-meter` it prints counts and digests, never content. Spend is priced at
+list price per model; `--json` also carries the raw token counts per bucket, so you can re-weight
+them with your own prices. It reads the corpus of the profile it runs under
+(`$CLAUDE_CONFIG_DIR/projects`), or `--corpus DIR`.
+
 ## Two ways to register a project, and what each one costs
 
 A project's `path` (2nd column of the projects file) is read as **either** the repo
