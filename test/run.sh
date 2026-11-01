@@ -4603,7 +4603,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     l = L.markProofAsked(l, ['1'], now)
     const again = L.proofTargets(judged(l, 't2'), now, 't2').map(i => i.id).join('') || '-'
     const listed = /\[answered, no proof\]/.test(L.listing(l, now))
-    console.log([first, gate, again, L.isGateTurn(nudge), /mcp__ghostfleet__ledger_close/.test(nudge), /proof/.test(nudge),
+    console.log([first, gate, again, L.isGateTurn(nudge), /fleet-ledger close <id> \"<proof>\"/.test(nudge) && !/mcp__/.test(nudge), /proof/.test(nudge),
       L.lastGateAt(l) === now, L.gateHold({ gateTurn: true, nowMs: now }), listed].join(' | '))" 2>&1)"
   is "ledger: the proof nudge names an answered brief once, never twice, never through the plain gate too; its turn is a gate turn" \
      "1 | - | - | true | true | true | true | gate-turn | true" "$ln"
@@ -5122,8 +5122,8 @@ is "an empty answer text still runs"       "0" "$(agf answer.empty)"
 
 # THE OTHER DIRECTION. Refusing must not cost the valid calls anything: each of these
 # reached its command, and with its arguments unchanged.
-is "a full send reaches fleet-send"        "1" "$(grep -cF 'fleet-send [w1] [the real work]' "$AG/ran" || true)"
-is "anyway reaches it as --anyway"         "1" "$(grep -cF 'fleet-send [--anyway] [w1] [same PR]' "$AG/ran" || true)"
+is "a full send reaches fleet-send"        "1" "$(grep -cF 'fleet-send [--] [w1] [the real work]' "$AG/ran" || true)"
+is "anyway reaches it as --anyway"         "1" "$(grep -cF 'fleet-send [--anyway] [--] [w1] [same PR]' "$AG/ran" || true)"
 is "optional n still defaults"             "1" "$(grep -cF 'fleet-read [w1] [1]' "$AG/ran" || true)"
 is "optional reclaim stays optional"       "1" "$(grep -cF 'fleet-stop [w1]' "$AG/ran" || true)"
 is "optional all stays optional"           "1" "$(grep -cF 'fleet-inbox [--all]' "$AG/ran" || true)"
@@ -5561,6 +5561,44 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "$MA"
 else
   skip "fleet_answer flag" "node missing"
+fi
+
+# THE OWNER'S MARK COMES THROUGH ONE DOOR. The owner's phone messages reached a session as a
+# lead's brief, held open for proof: 82 proof prompts in 14 days for questions answered in
+# prose. fleet-send --owner marks them as the person's, and the mark must be impossible to
+# reach by accident: only the phone daemon's opts.human adds it (its request carried a
+# passkey-minted token), never an argument, never the plain MCP door a worker's fleet_send
+# goes through, and a session of "--owner" goes after `--`.
+group "fleet_send marks the owner's words only for the phone's authenticated request"
+if command -v node >/dev/null 2>&1; then
+  MO="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$MO/mcp" "$MO/bin" "$MO/lib" "$MO/home"
+  cp "$ROOT"/lib/*.mjs "$MO/lib/"; cp "$ROOT"/mcp/*.mjs "$MO/mcp/"
+  printf '#!/bin/sh\nprintf "%%s" fleet-send >> "%s/ran"; for a in "$@"; do printf " [%%s]" "$a" >> "%s/ran"; done; printf "\\n" >> "%s/ran"\n' "$MO" "$MO" "$MO" > "$MO/bin/fleet-send"
+  chmod +x "$MO/bin/fleet-send"; : > "$MO/ran"
+  HOME="$MO/home" TMUX= CLAUDE_FLEET_SOCK=cfmoflag node --input-type=module -e "
+    const m = await import('$MO/mcp/fleet-dispatch.mjs');
+    m.callTool('fleet_send', { session: 'w1', prompt: 'run the acme-api suite' });
+    m.callTool('fleet_send', { session: '--owner', prompt: 'x' });
+    m.callTool('fleet_send', { session: 'w1', prompt: 'y', owner: true, kind: 'owner' });
+    await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'z' });
+    await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'the owner typed this' }, { human: true });" 2>/dev/null
+  is "a worker's send carries no mark"            "1" "$(grep -cxF 'fleet-send [--] [w1] [run the acme-api suite]' "$MO/ran" || true)"
+  is "a session of the flag goes after --"         "1" "$(grep -cxF 'fleet-send [--] [--owner] [x]' "$MO/ran" || true)"
+  is "an owner field in the arguments is ignored"  "1" "$(grep -cxF 'fleet-send [--] [w1] [y]' "$MO/ran" || true)"
+  is "the async door adds nothing on its own"      "1" "$(grep -cxF 'fleet-send [--] [w1] [z]' "$MO/ran" || true)"
+  is "only opts.human marks it"                    "1" "$(grep -cxF 'fleet-send [--owner] [--] [w1] [the owner typed this]' "$MO/ran" || true)"
+  is "...and on no other call"                     "1" "$(grep -c '^fleet-send \[--owner\]' "$MO/ran" || true)"
+  # the handoff keeps the mark the mod reads, and only the two it knows
+  node --input-type=module -e "
+    const { writeHandoff } = await import('$ROOT/lib/mod-target.mjs');
+    for (const [id, kind] of [['1-a', 'owner'], ['1-b', 'nudge'], ['1-c', ''], ['1-d', 'lead']]) writeHandoff('$MO/spool', id, 'hi', null, kind);" 2>/dev/null
+  is "the handoff carries owner and nudge, nothing else" "owner nudge - -" \
+     "$(for i in 1-a 1-b 1-c 1-d; do node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('$MO/spool/$i.json','utf8')).kind || '-'))"; printf ' '; done | sed 's/ $//')"
+  # the phone's daemon is the door that passes it, for every verb it runs
+  is "fleet-serve runs the phone's verbs as the human" "1" "$(grep -c "callToolAsync(tool, args, { timeout: 15 \* 60 \* 1000, human: true," "$ROOT/bin/fleet-serve.mjs" || true)"
+  rm -rf "${MO:?}"
+else
+  skip "fleet_send owner mark" "node missing"
 fi
 
 # JARVIS AND fleet-answer AGREE, because they read one detector. Jarvis already asks its
@@ -9708,6 +9746,14 @@ and report both|nudge:a worker finished — run fleet-inbox|-:and the billing-sv
   QLS --dequeue tgt >/dev/null 2>&1   # busy: 3, and the nudge stays
   is "...and the drain still sees what is left"   "1" "$(grep -c . "$QLF/cfql.tgt.queue" 2>/dev/null || echo 0)"
   is "an empty queue lists nothing"               "" "$(rm -f "$QLF/cfql.tgt.queue"; QLS --list-queue tgt)"
+  # The owner's words wait marked as theirs, so the drain hands them over as the owner's, and
+  # they stay the owner's to take back.
+  QLS --owner tgt "the owner asks for the acme-web preview" >/dev/null
+  is "the owner's words wait in the queue marked as theirs" "owner:the owner asks for the acme-web preview|" "$(ql_texts)"
+  QLS --unqueue tgt "the owner asks for the acme-web preview" >/dev/null; rc=$?
+  is "...and are the owner's to take back"        "0" "$rc"
+  is "the drain hands a marked record over with its mark" "1" \
+     "$(grep -c '\[ "${_q_kind:-}" = owner \] && _args+=(--owner)' "$ROOT/bin/fleet-send" || true)"
   tmux -L cfql kill-server 2>/dev/null; rm -rf "${QL:?}"
 else
   skip "the queue can be read, and a waiting prompt taken back out" "tmux missing"
@@ -12577,8 +12623,11 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   cp "$CY/m-1.ledger" "$CY/m-1.before"; cp "$CY/o-1.ledger" "$CY/o-1.before"
   cp "$CY/n-3.ledger" "$CY/n-3.before"; cp "$CY/n-4.ledger" "$CY/n-4.before"; cp "$CY/n-1.ledger" "$CY/n-1.before"
   tmux -L cfcarry kill-server 2>/dev/null
-  tmux -L cfcarry new-session -d -s api-fix 'sleep 90' 2>/dev/null
-  cystop() { env -u TMUX -u CLAUDE_FLEET_SLOT -u TMUX_PANE CLAUDE_FLEET_NOW_MS=$CYT CLAUDE_FLEET_DIR="$CY" "$ROOT/bin/fleet-stop" "$@" 2>&1; }
+  # Outside any repo, and with a gh that answers nothing: these workers have no branch or PR
+  # to look up, and the lookup fleet-stop now makes must never reach the network from here.
+  mkdir -p "$CY/stub"; printf '#!/bin/sh\nexit 1\n' > "$CY/stub/gh"; chmod +x "$CY/stub/gh"
+  tmux -L cfcarry new-session -d -s api-fix -c "$CY" 'sleep 90' 2>/dev/null
+  cystop() { env -u TMUX -u CLAUDE_FLEET_SLOT -u TMUX_PANE PATH="$CY/stub:$PATH" CLAUDE_FLEET_NOW_MS=$CYT CLAUDE_FLEET_DIR="$CY" "$ROOT/bin/fleet-stop" "$@" 2>&1; }
   out="$(cystop -s cfcarry api-fix)"
   is "a worker with open, waiting and not-done items: stopped, and says what it carried" "0|1" \
      "$(tmux -L cfcarry has-session -t api-fix 2>/dev/null && echo 1 || echo 0)|$(grep -c "carried 3 unfinished ledger items to 'master'" <<< "$out" || true)"
@@ -12621,6 +12670,195 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   tmux -L cfcarry kill-server 2>/dev/null; rm -rf "${CY:?}"
 else
   skip "fleet-stop carries a worker's unfinished ledger items to its lead" "node, jq or tmux missing"
+fi
+
+# ── the ledger: the owner's words, a day of waiting, a one-line rule, work that landed ──
+# Four measured leaks, over 14 days of real ledgers. The owner's phone messages arrived as a
+# lead's brief and were held for proof (82 proof prompts); waiting items were never woken by a
+# "1 a" or a "yes" and never expired (34 of 35 over a day old); every note spelled out three
+# tools no session had (0 uses against 3,305 closes from Bash); and a stopped worker's items
+# went to its lead even when its PR had merged (23 carried items open in one lead's ledger).
+# Each assertion here is the shape of one of those, in both directions.
+group "the ledger: the owner's words, a day of waiting, a one-line rule, carried work that landed"
+if command -v node >/dev/null 2>&1; then
+  lf="$(node --no-warnings --input-type=module - "$ROOT" <<'NODE' 2>&1
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const out = []
+const day = 86400000, h = 3600000, now = 20 * day
+// (a) whose words a delivery carries: only the owner's mark makes a delivery the person's
+out.push('source ' + ['owner', '', 'nudge', 'lead', undefined].map(k => String(L.deliverySource(k))).join(' '))
+// (b) one waiting item a day and an hour old, one an hour old, one open request
+const w = { ...L.emptyLedger(), seq: 3, items: [
+  { id: '1', text: 'open the app to load the new version', at: now - day - h, state: 'waiting', source: 'user', progress: { at: now - day - h, reason: 'waits on the person: reload' } },
+  { id: '2', text: 'pick CSV or JSON for the export', at: now - h, state: 'waiting', source: 'user', progress: { at: now - h, reason: 'waits on the person: their pick' } },
+  { id: '3', text: 'fix the login redirect', at: now - h, state: 'open', source: 'user' },
+] }
+out.push('held ' + L.heldItems(w, now).map(r => r.id).join(','))
+out.push('count ' + (L.listing(w, now).match(/\+(\d+) waiting/) || [, '0'])[1])
+const ex = L.expireDormant(w, now)
+out.push('expire ' + (ex ? ex.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
+out.push('closable ' + (ex && L.closeByHand(ex, '1', now) ? 'yes' : 'no') + ' ' + (ex && L.listing(ex, now, { all: true }).includes('open the app') ? 'listed' : 'gone'))
+// a reply no item shares a word with: only the person's own turn shows the judge the fresh one
+out.push('revisit ' + L.revisitTurn(w, now, 'Went with JSON.').map(i => i.id).join(',') + '|'
+  + L.revisitTurn(w, now, 'Went with JSON.', { person: true }).map(i => i.id).join(','))
+// (c) the note: eight items of 130 characters, and a ninth for the count
+let n = { ...L.emptyLedger(), seq: 1000 }
+for (let k = 0; k < 9; k++) n = L.addItem(n, { text: `rework the acme-web ${k} ` + 'x'.repeat(120), at: now, source: 'user', asIs: true })
+const note = L.contextNote(n, now)
+out.push('note ' + (note.length <= 1250 ? 'fits' : `over:${note.length}`) + ' ' + (/mcp__/.test(note) ? 'names-tools' : 'cli-only')
+  + ' ' + (/proof required/.test(note) && /fleet-ledger drop <id>/.test(note) ? 'rule' : 'no-rule'))
+const gate = L.gatePrompt([{ id: '4', text: 'bump the version', source: 'user' }]) + '\n' + L.proofPrompt([{ id: '5', text: 'add the export endpoint' }])
+out.push('gate ' + (/mcp__/.test(gate) ? 'names-tools' : 'cli-only'))
+// a reminder quoted back, as it reads today and as it read before, is never the request
+const OLD_NOTE = '[ghostfleet ledger: open items]\n1 (asked): fix it\nWhen one is finished, call mcp__ghostfleet__ledger_close with its id and the proof (a path, link, commit, PR number or command result). mcp__ghostfleet__ledger_drop with a reason if it is not a real ask or the person cancelled it (no such tools in this session? the same from Bash: fleet-ledger close <id> "<proof>", fleet-ledger drop <id> "<reason>", fleet-ledger add "<ask>"); mcp__ghostfleet__ledger_add for an ask this list missed.'
+const OLD_GATE = '[ghostfleet ledger] One request is still open from this session:\n1. "fix it"\nFinish each one now and close it with mcp__ghostfleet__ledger_close and its proof, or say for each that it is not done and why (mcp__ghostfleet__ledger_drop if it was not a real ask; no such tools in this session? the same from Bash: fleet-ledger close <id> "<proof>", fleet-ledger drop <id> "<reason>", fleet-ledger add "<ask>"). (Asked once per item; it will not be asked again.)'
+out.push('strip ' + [OLD_NOTE, note, OLD_GATE, gate].map(t => JSON.stringify(L.requestText(`${t}\nand bump the version`))).join(' '))
+// (d) a merged worker's items close where they are; a not-done one stays not-done
+const wk = { ...L.emptyLedger(), seq: 4, items: ['open', 'waiting', 'not-done', 'done'].map((state, k) => ({ id: String(k + 1), text: `ask ${k + 1}`, at: 1, state, source: 'fleet' })) }
+const cm = L.closeMerged(wk, { pr: 88, nowMs: now })
+out.push('merged ' + cm.items.map(i => `${i.id}:${i.state}:${i.proof || ''}:${i.closedBy || ''}`).join(','))
+out.push('merged-none ' + String(L.closeMerged(wk, { pr: '', nowMs: now })))
+// carried with its branch and open PR
+const c = L.carryItems(wk, L.emptyLedger(), { from: 'api-fix', sessionId: 'w-1', nowMs: now, branch: 'feat/export', pr: '89' })
+out.push('carried ' + c.lead.items.map(i => `${i.carried.branch}#${i.carried.pr}`).join(','))
+// closeLanded: by the PR number it carried; by branch only when no PR on it is open
+const lead = { ...L.emptyLedger(), seq: 6, items: [
+  { id: '1', text: '[api-fix] a', at: now, state: 'open', source: 'fleet', carried: { from: 'api-fix', branch: 'feat/export', pr: 89 } },
+  { id: '2', text: '[docs-pass] b', at: now, state: 'open', source: 'fleet', carried: { from: 'docs-pass', branch: 'feat/docs' } },
+  { id: '3', text: '[billing-svc] c', at: now, state: 'open', source: 'fleet', carried: { from: 'billing-svc', branch: 'feat/billing' } },
+  { id: '4', text: '[toolbox] d', at: now, state: 'open', source: 'fleet', carried: { from: 'toolbox', branch: 'feat/tb', pr: 95 } },
+  { id: '5', text: '[scratch] e', at: now, state: 'open', source: 'fleet', carried: { from: 'scratch' } },
+  { id: '6', text: 'the lead\'s own ask', at: now, state: 'open', source: 'user' },
+] }
+const prs = [
+  { branch: 'feat/export', number: 89, state: 'MERGED' }, { branch: 'feat/docs', number: 90, state: 'MERGED' },
+  { branch: 'feat/billing', number: 91, state: 'MERGED' }, { branch: 'feat/billing', number: 92, state: 'OPEN' },
+  { branch: 'feat/tb', number: 94, state: 'MERGED' }, { branch: 'feat/tb', number: 95, state: 'OPEN' },
+]
+const cl = L.closeLanded(lead, prs, { nowMs: now })
+out.push('landed ' + cl.items.map(i => `${i.id}:${i.state}${i.proof ? ':' + i.proof : ''}`).join(','))
+out.push('landed-none ' + String(L.closeLanded(lead, [], { nowMs: now })))
+// dropCarried: one worker's, with a reason, and nothing without one
+const dc = L.dropCarried(lead, 'docs-pass', 'moved to the docs worker', { nowMs: now })
+out.push('drop ' + dc.said + ' ' + dc.ledger.items.filter(i => i.state === 'dropped').map(i => i.id).join(','))
+out.push('drop-why ' + L.dropCarried(lead, 'docs-pass', '  ', { nowMs: now }).said)
+out.push('drop-none ' + L.dropCarried(lead, 'nobody', 'x', { nowMs: now }).said)
+console.log(out.join('\n'))
+NODE
+)"
+  lfv() { grep "^$1 " <<< "$lf" | head -1 | cut -d' ' -f2-; }
+  is "a delivery is the person's only when marked as the owner's; a nudge is nothing; any other mark is a brief" \
+     "user fleet null fleet fleet" "$(lfv source)"
+  is "a waiting item a day old is off the queue; one an hour old is on it" "2" "$(lfv held)"
+  is "...and off /ledger's waiting count" "1" "$(lfv count)"
+  is "...and the next judged turn retires it as expired, and only it" "1:expired,2:waiting,3:open" "$(lfv expire)"
+  is "...still listed by all, still closable" "yes listed" "$(lfv closable)"
+  is "a reply no item shares a word with: the person's own turn shows the judge their fresh waiting item, another turn does not" \
+     "|2" "$(lfv revisit)"
+  is "the note: eight items of 130 characters with four-digit ids fit in 1,250, name the CLI only, and keep the rule" \
+     "fits cli-only rule" "$(lfv note)"
+  is "...and so do the re-prompts" "cli-only" "$(lfv gate)"
+  is "a quoted note or re-prompt, old wording or new, is stripped from the request" \
+     '"and bump the version" "and bump the version" "and bump the version" "and bump the version"' "$(lfv strip)"
+  is "a worker whose PR merged: open and waiting close with the merge as proof; not-done and done stay" \
+     "1:done:PR #88 merged:fleet-stop,2:done:PR #88 merged:fleet-stop,3:not-done::,4:done::" "$(lfv merged)"
+  is "...and no PR number closes nothing" "null" "$(lfv merged-none)"
+  is "a carried item keeps the worker's branch and open PR" "feat/export#89,feat/export#89,feat/export#89" "$(lfv carried)"
+  is "carried work that landed closes: by its PR, or by its branch with no PR still open on it" \
+     "1:done:PR #89 merged,2:done:PR #90 merged,3:open,4:open,5:open,6:open" "$(lfv landed)"
+  is "...and nothing to read closes nothing" "null" "$(lfv landed-none)"
+  is "drop-carried drops one worker's items, with the reason" "ledger: dropped 1 item carried from docs-pass (2) 2" "$(lfv drop)"
+  is "...needs a reason" "ledger: nothing dropped: a reason is required" "$(lfv drop-why)"
+  is "...and says when that worker left nothing" "ledger: nothing carried from nobody is still owed" "$(lfv drop-none)"
+else
+  skip "the ledger: the owner's words, a day of waiting, a one-line rule, carried work that landed" "node missing"
+fi
+
+# ── a worker whose PR merged owes its lead nothing, and carried work closes when it lands ──
+# Measured: 23 items carried from stopped or paused workers sat open in one lead's ledger, many
+# for work already merged. Run for real: a repo with two worktrees, fleet-merged's cache seeded
+# (the PR state it would fetch), a gh that answers nothing, and the real fleet-stop, fleet-inbox
+# and fleet-ledger. Both directions: the merged worker carries nothing, the in-flight one carries
+# as before, and its items close only once ITS PR merges.
+group "fleet-stop closes a merged worker's items; fleet-inbox closes carried ones once their PR merges"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LM="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LM/fleet" "$LM/stub"
+  printf '#!/bin/sh\nexit 1\n' > "$LM/stub/gh"; chmod +x "$LM/stub/gh"     # never the network
+  git init -q -b main "$LM/repo" 2>/dev/null
+  git -C "$LM/repo" config user.email t@t; git -C "$LM/repo" config user.name t
+  : > "$LM/repo/f"; git -C "$LM/repo" add -A; git -C "$LM/repo" commit -qm i 2>/dev/null
+  git -C "$LM/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$LM/repo" worktree add -q "$LM/repo/.worktrees/landed" -b feat/landed 2>/dev/null
+  git -C "$LM/repo" worktree add -q "$LM/repo/.worktrees/inflight" -b feat/inflight 2>/dev/null
+  printf 'feat/inflight\x1f89\x1fOPEN\nfeat/landed\x1f88\x1fMERGED\n' > "$LM/fleet/prs.acme_widget"
+  LMT=1760000000000
+  lmrec() { printf '{"session_id":"%s","sock":"cflanded","slot":"%s","ts":5}' "$1" "$2" > "$LM/fleet/$1.json"; }
+  lmrec m-1 master; lmrec w-1 export-fix; lmrec w-2 docs-pass
+  node --no-warnings --input-type=module - "$ROOT" "$LM/fleet" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+const book = (id, rows) => {
+  let l = L.emptyLedger()
+  for (const [text, state, source] of rows) {
+    l = L.addItem(l, { text, at: 1, source: source || 'fleet', asIs: true })
+    l = { ...l, items: l.items.map((i, k) => (k === l.items.length - 1 ? { ...i, state } : i)) }
+  }
+  fs.writeFileSync(`${process.argv[3]}/${id}.ledger`, JSON.stringify(l))
+}
+book('m-1', [['review the export PR', 'open', 'user']])
+book('w-1', [['add the export endpoint', 'open'], ['pick the export format', 'waiting', 'user'], ['add a changelog line', 'not-done']])
+book('w-2', [['rewrite the setup docs', 'open']])
+NODE
+  cp "$LM/fleet/m-1.ledger" "$LM/m-1.before"
+  tmux -L cflanded kill-server 2>/dev/null
+  tmux -L cflanded new-session -d -s master -c "$LM/repo" 'sleep 90' 2>/dev/null
+  tmux -L cflanded new-session -d -s export-fix -c "$LM/repo/.worktrees/landed" 'sleep 90' 2>/dev/null
+  tmux -L cflanded new-session -d -s docs-pass -c "$LM/repo/.worktrees/inflight" 'sleep 90' 2>/dev/null
+  sleep 0.5
+  lmenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT PATH="$LM/stub:$PATH" CLAUDE_FLEET_NOW_MS=$LMT CLAUDE_FLEET_DIR="$LM/fleet" "$@"; }
+  out="$(lmenv "$ROOT/bin/fleet-stop" -s cflanded export-fix 2>&1)"
+  is "a worker whose PR merged: stopped, and says it closed its items rather than carrying them" "0|1|0" \
+     "$(tmux -L cflanded has-session -t '=export-fix' 2>/dev/null && echo 1 || echo 0)|$(grep -c "closed 2 unfinished ledger items of 'export-fix' as done: its PR #88 merged" <<< "$out" || true)|$(grep -c "carried [0-9]" <<< "$out" || true)"
+  is "...its open and waiting items are done with the merge as proof; the not-done one stays" \
+     "done:PR #88 merged:fleet-stop|done:PR #88 merged:fleet-stop|not-done::" \
+     "$(jq -r '.items[]|"\(.state):\(.proof // ""):\(.closedBy // "")"' "$LM/fleet/w-1.ledger" | paste -sd'|' -)"
+  is "...and the lead is handed none of them" "same" "$(cmp -s "$LM/fleet/m-1.ledger" "$LM/m-1.before" && echo same || echo changed)"
+  out="$(lmenv "$ROOT/bin/fleet-stop" -s cflanded docs-pass 2>&1)"
+  is "a worker whose PR is still open carries its items, with its branch and PR" \
+     "1|[docs-pass] rewrite the setup docs:open:feat/inflight:89" \
+     "$(grep -c "carried 1 unfinished ledger item to 'master'" <<< "$out" || true)|$(jq -r '.items[]|select(.carried)|"\(.text):\(.state):\(.carried.branch):\(.carried.pr)"' "$LM/fleet/m-1.ledger")"
+  # fleet-inbox while that PR is still open: nothing closes
+  out="$(cd "$LM/repo" && lmenv "$ROOT/bin/fleet-inbox" -s cflanded 2>&1)"
+  is "the inbox, while the carried item's PR is open: it stays open, and the inbox says nothing of it" "open|0" \
+     "$(jq -r '.items[]|select(.carried)|.state' "$LM/fleet/m-1.ledger")|$(grep -c 'carried item' <<< "$out" || true)"
+  printf 'feat/inflight\x1f89\x1fMERGED\nfeat/landed\x1f88\x1fMERGED\n' > "$LM/fleet/prs.acme_widget"
+  out="$(cd "$LM/repo" && lmenv "$ROOT/bin/fleet-inbox" -s cflanded 2>&1)"
+  is "once it merges, the inbox closes it with the merge as proof, and says so" "done:PR #89 merged:fleet|1" \
+     "$(jq -r '.items[]|select(.carried)|"\(.state):\(.proof):\(.closedBy)"' "$LM/fleet/m-1.ledger")|$(grep -c "ledger: closed 1 carried item of 'master' whose PR merged: 2 (PR #89 merged, from docs-pass)" <<< "$out" || true)"
+  out="$(cd "$LM/repo" && lmenv "$ROOT/bin/fleet-inbox" -s cflanded 2>&1)"
+  is "...and a second look closes nothing more, and says nothing" "0" "$(grep -c 'carried item' <<< "$out" || true)"
+  is "...the lead's own ask is untouched throughout" "open" "$(jq -r '.items[0].state' "$LM/fleet/m-1.ledger")"
+  # drop-carried, by hand: a worker stopped before the branch was kept, so nothing can close it
+  node --no-warnings --input-type=module - "$ROOT" "$LM/fleet/m-1.ledger" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+let l = L.parseLedger(fs.readFileSync(process.argv[3], 'utf8'))
+for (const t of ['[scratch] try the cache keys', '[scratch] measure the cold start']) {
+  l = L.addItem(l, { text: t, at: 1760000000000, source: 'fleet', asIs: true })
+  l = { ...l, items: l.items.map((i, k) => (k === l.items.length - 1 ? { ...i, carried: { from: 'scratch', sessionId: 'w-9', id: String(k), state: 'open' } } : i)) }
+}
+fs.writeFileSync(process.argv[3], JSON.stringify(l))
+NODE
+  out="$(lmenv "$ROOT/bin/fleet-ledger" -s cflanded master drop-carried scratch 2>&1; echo "rc=$?")"
+  is "fleet-ledger drop-carried needs a reason" "1|rc=1" "$(grep -c 'drop-carried needs a reason' <<< "$out" || true)|$(tail -1 <<< "$out")"
+  out="$(lmenv "$ROOT/bin/fleet-ledger" -s cflanded master drop-carried scratch "superseded by the cache rework" 2>&1)"
+  is "...drops every item still owed from that worker, with it" "ledger: dropped 2 items carried from scratch (3, 4)|dropped:superseded by the cache rework dropped:superseded by the cache rework|open" \
+     "$out|$(jq -r '[.items[]|select(.carried.from == "scratch")|"\(.state):\(.reason)"]|join(" ")' "$LM/fleet/m-1.ledger")|$(jq -r '.items[0].state' "$LM/fleet/m-1.ledger")"
+  is "...and fleet-ledger --help names it" "yes" \
+     "$([ "$("$ROOT/bin/fleet-ledger" --help 2>/dev/null | grep -c 'drop-carried <worker> <reason>' || true)" -ge 1 ] && echo yes || echo no)"
+  tmux -L cflanded kill-server 2>/dev/null; rm -rf "${LM:?}"
+else
+  skip "fleet-stop closes a merged worker's items; fleet-inbox closes carried ones once their PR merges" "git, tmux, node or jq missing"
 fi
 
 # ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────

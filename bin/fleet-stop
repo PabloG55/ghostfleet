@@ -47,6 +47,11 @@
 # has no record, or its file cannot be read or keeps changing, the stop goes on and says how
 # many items stayed in the worker's own ledger, with the `fleet-ledger --session` that reads
 # them. It runs on every stop, with or without --reclaim, and through the MCP fleet_stop.
+#   A WORKER WHOSE PR MERGED CARRIES NOTHING: its open and waiting items close in its own
+# ledger as done, with "PR #N merged" as the proof, and the lead is handed none of them. The
+# merge is the proof a carried brief would otherwise have asked the lead for. A worker whose PR
+# is still open carries as before, with its branch and PR number on each item, so the lead's
+# copy closes by itself once that PR merges (fleet-inbox reads it).
 #
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
@@ -168,6 +173,34 @@ if [ "$RECLAIM" = 1 ]; then
   [ -n "$WT" ] && WT="$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
 
+# ITS BRANCH AND ITS PR, for the ledger step below (2b), asked while the pane can still say
+# where it is. Only a LINKED worktree: a main checkout's branch is the integration branch, and
+# a release PR whose head it is would read as this session's work having merged. The PR's
+# state is fleet-merged's cached answer, then GitHub directly when that says anything but
+# MERGED: the moment a lead stops a worker is right after merging it, inside the ten minutes
+# the cache still says OPEN (fleet-clean has the same check, for the same reason). Silence or
+# an error is "I don't know", and the items are carried as they always were.
+_lbr=""; _lpr=""
+if [ "$SESSION" != master ]; then
+  _lwt="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  [ -n "$_lwt" ] || _lwt="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
+  if [ -n "$_lwt" ] && [ -d "$_lwt" ] \
+     && [ "$(git -C "$_lwt" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$_lwt" rev-parse --git-common-dir 2>/dev/null)" ]; then
+    _lbr="$(git -C "$_lwt" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+  fi
+  if [ -n "$_lbr" ]; then
+    _lpr="$("$(dirname "$0")/fleet-merged" --prs "$_lwt" 2>/dev/null | awk -F$'\x1f' -v b="$_lbr" \
+      '$1==b && $3=="OPEN"{o=$2} $1==b && $3=="MERGED"{m=$2} END{if(o!="")print "OPEN " o; else if(m!="")print "MERGED " m}')"
+    case "$_lpr" in
+      "MERGED "*) ;;
+      *) if command -v gh >/dev/null 2>&1; then
+           _lgh="$(cd "$_lwt" 2>/dev/null && gh pr view "$_lbr" --json state,number -q '.state + " " + (.number|tostring)' 2>/dev/null)"
+           case "$_lgh" in "MERGED "[0-9]*|"OPEN "[0-9]*) _lpr="$_lgh" ;; esac
+         fi ;;
+    esac
+  fi
+fi
+
 # 1) kill the schedule waiter first — it's a detached process group that outlives
 #    the tmux session, so killing the session alone would leave it to fire later.
 sched="$FLEET_DIR/$SOCK.$SESSION.sched"
@@ -197,7 +230,7 @@ fi
 if [ "$SESSION" != master ] && command -v node >/dev/null 2>&1 && [ -f "$LIB/ledger-carry.mjs" ]; then
   _lead="$(head -1 "$FLEET_DIR/$SOCK.$SESSION.parent" 2>/dev/null)"
   case "$_lead" in ''|*[!A-Za-z0-9._~-]*) _lead=master ;; esac
-  node --no-warnings "$LIB/ledger-carry.mjs" "$FLEET_DIR" "$SOCK" "$SESSION" "$_lead" 2>/dev/null </dev/null \
+  node --no-warnings "$LIB/ledger-carry.mjs" "$FLEET_DIR" "$SOCK" "$SESSION" "$_lead" "$_lbr" "$_lpr" 2>/dev/null </dev/null \
     | sed 's/^/fleet-stop: /'
 fi
 

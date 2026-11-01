@@ -1020,10 +1020,18 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
 
 - **What becomes an item.** Every message the person submits: typed at an idle prompt,
   typed over a running turn (`prompt.submit` fires at Enter, with that turn's id), or sent
-  from the phone. A message of two or more plain asks (list lines, questions, sentences that
+  from the phone. The phone's messages reach the session through `fleet-send`, and the one
+  sender that authenticated the owner says so: `fleet-serve` runs every phone verb as the
+  human (its request carried a passkey-minted token), and only that door adds
+  `fleet-send --owner`, which marks the handoff `kind: "owner"` (and the queue record, for a
+  busy session). A marked delivery is the person's message, split and judged exactly as if
+  typed; nothing else can mark one: the MCP `fleet_send` has no field for it and passes its
+  session and prompt after `--`. Measured before the mark: 82 proof prompts in 14 days, each
+  asking an agent to prove it had answered the owner's own question. A message of two or more plain asks (list lines, questions, sentences that
   open with a verb of work or "can you") is one item per ask, so each closes on its own
   proof; anything less plain, a paste, or a message over 4,000 characters stays one item. A
-  prompt `fleet-send` hands the mod (see above) is one item, never split. Not items: slash
+  prompt `fleet-send` hands the mod (see above) without that mark is a lead's brief: one
+  item, never split. Not items: slash
   commands, background-task notifications, `/loop` firings, the ledger's own re-prompt, and
   **the fleet's own wake-ups** ("a worker finished, run fleet-inbox", Jarvis's and the batch
   wake): `hooks/fleet-event.sh` sends those with `fleet-send --nudge`, which marks the
@@ -1051,10 +1059,16 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
 - **The note.** Each prompt carries a note to the model, never shown the person: the open
   items it owes (never the message it rides on, see above) with their ids, requests first and
   newest first, then promises, **eight at most** (each cut to 100 characters, so the note
-  stays under ~1.5k), `+N more open (/ledger lists them)` past that, and the rule: close with `ledger_close` and proof. No note when nothing
-  is open. A plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
+  stays under 1,250 characters), `+N more open (/ledger lists them)` past that, and the rule
+  in one line, in the form every session can run: `fleet-ledger close <id> "<proof>"` (proof
+  required), `fleet-ledger drop <id> "<reason>"`, `fleet-ledger add "<ask>"`. Measured over
+  14 days: 3,305 closes through `fleet-ledger` and none through the tools below, while every
+  note (~15,800, ~740 characters each) spelled out both. No note when nothing is open. A
+  plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
   gets its note on the first tool result of the turn it started instead.
-- **The agent's tools.** `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
+- **The agent's tools.** The reminders name only the `fleet-ledger` forms above; the mod
+  still registers its three tools and answers them, for a session that has them.
+  `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
   and non-empty (a path, link, commit, PR number, command result) and kept on the item.
   `ledger_drop(id, reason)`: not a real ask, or the person cancelled it; state `dropped`.
   `ledger_add(text)`: an ask the split missed, added to the latest prompt so the gate covers
@@ -1062,7 +1076,8 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   in a file written before this). Old ledgers need no migration: their items are closable
   by the tools as they are.
 - **A brief from the lead is done only with proof.** An item whose source is `fleet` (a
-  prompt `fleet-send` delivered) is closed as `done` by `ledger_close` with its proof, or by
+  prompt `fleet-send` delivered, not marked as the owner's) is closed as `done` by
+  `fleet-ledger close <id> "<proof>"` (or `ledger_close`) with its proof, or by
   the person by hand, and never by the judge. The judge reads a turn's prose, not its work:
   measured on one fleet, 40% of all closed items were judge-closed with no proof, and in one
   weekend every "done" across 23 workers was, with nothing merged. A brief the judge reads
@@ -1134,7 +1149,7 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   once.
   **The proof nudge.** A brief the judge reads as answered is never named by the re-prompt
   above; the same re-prompt instead asks for its proof ("a brief from the lead reads as
-  answered, but a brief counts as done only with proof: close it with `ledger_close` and a PR
+  answered, but a brief counts as done only with proof: close it with `fleet-ledger close` and a PR
   number, commit or file path, or say what is still missing"). It is bounded the same way and
   in the data: a brief carries `proofAskedAt` once asked and is **never asked again**, however
   many later turns the judge reads it as answered, across reloads too. The holds above apply
@@ -1151,7 +1166,15 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   or ok. The ledger is a nag, not a guard.
 - **Waiting on the person.** An item the judge reports `in-progress` because it waits on
   the person ("waits on the person: their pick between A and B") leaves the open list and the
-  gate as `waiting`, and comes back when the person's message speaks to it. A master's
+  gate as `waiting`, and comes back when the person's message speaks to it. A reply like
+  "1 a" or "yes" shares too few words with the item to wake it, so **a turn the person's own
+  message started** (typed, or marked as the owner's; never a nudge, the gate's re-prompt
+  or a lead's brief) shows the judge that session's waiting items, newest first, ten at
+  most, mentioned or not: done closes one, in progress reopens it, and one the turn did not
+  address stays waiting. **A waiting item untouched for 24 hours expires**: off the phone's
+  queue and the status note at once, written `expired` at the next judged turn, still in
+  `/ledger all` and still closable. Measured before it: of 35 waiting items within a week,
+  34 were over a day old and 27 had three or more messages from the person since. A master's
   waiting items are what an unattended run ends up holding, so they leave the session two
   ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
   and profile it lists; workers' items reach the owner through their master), Projects
@@ -1160,9 +1183,8 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   project, the ask, how long it has waited, and what the master said it needs. At a desk the
   queue opens in the right pane beside Projects; its `‹`, the same back control a conversation has, returns to Projects; a tapped "waiting on you" notification opens it. Beside them, an item the owner replied to that
   the master has not closed yet, and a request nobody has touched in four hours, but never one
-  that is only `[answered, no proof]`: the owner's phone messages reach a master as `fleet`
-  items, so each one answered in prose stays open for its proof, and what it still owes is the
-  agent's, not the owner's. An item carried from a stopped worker is the master's own request
+  that is only `[answered, no proof]`: what such a brief still owes is the agent's proof,
+  not anything the owner can give. An item carried from a stopped worker is the master's own request
   by then and is listed by the same rules; its row names the worker and what it last said. A tap replies
   with an ordinary message to that master quoting the item, which wakes it; the owner never
   closes one, and it leaves the list when the master closes or drops it. An item newly
@@ -1175,7 +1197,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   of the turn that asked.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
-  session, without a turn. `clear` closes every open item and keeps the history; `all` shows
+  session, without a turn. `fleet-ledger [session] drop-carried <worker> "<reason>"` drops
+  every item still owed that was carried from one stopped worker, with one reason: the
+  person's or the lead's call after reading them, never run on anyone's behalf. `clear` closes every open item and keeps the history; `all` shows
   who closed each and the proof or reason. Items older than 7 days drop off the band and
   the gate; the file keeps the newest 200.
 - **A stopped worker's unfinished items go to its lead.** `fleet-stop` (with or without
@@ -1195,6 +1219,22 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   stale items stay behind. In the worker's file each carried item becomes `carried`, with
   the lead's id, so a second stop never carries it twice. Not retroactive: ledgers of
   workers stopped before this are left as they are.
+  **A worker whose PR merged carries nothing.** Before the kill, `fleet-stop` reads the
+  worker's branch (a linked worktree only: a main checkout's branch is the integration
+  branch) and its PR's state, from `fleet-merged`'s cache and then from GitHub directly when
+  the cache says anything but merged (the usual stop comes right after the merge, inside the
+  cache's ten minutes). A merged PR closes the worker's open and waiting items in its own
+  ledger as `done`, `closedBy: fleet-stop`, with proof `PR #N merged`, and hands the lead
+  none of them; a `not-done` item stays as it is. Measured before it: 23 carried items open
+  in one lead's ledger, many for work already merged. A worker whose PR is still open (or
+  whose state could not be learned) carries as above, and each carried item keeps
+  `carried.branch` and `carried.pr`. **When that PR merges, the item closes**: `fleet-inbox`,
+  which already reads merges for its "finished & reclaimable" footer, closes the lead's
+  carried item as `done`, `closedBy: fleet`, proof `PR #N merged`, and says so in a footer
+  line. No model call, and the PR state comes from the same cached `fleet-merged` answer;
+  an item that carried only a branch closes when the branch has a merged PR and no open one.
+  Not retroactive: an item carried before the branch was kept has none, and is the
+  person's or the lead's to finish or `drop-carried`.
   When the lead cannot take them, the stop still completes and says so, naming the
   `fleet-ledger --session <id> all` that reads them where they stayed (the worker's own
   ledger, which a stop never deletes): the lead has no status record on that socket; it
