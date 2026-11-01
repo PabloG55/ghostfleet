@@ -37,6 +37,9 @@
 //   closedBy agent (ledger_close / ledger_drop, with `proof` or `reason`) | judge (never
 //            `done` on a fleet item) | person (/ledger close, fleet-ledger close; `hand` in a
 //            file written before)
+//   inTurn   true on a `user` item until the end of the turn that answers it (settleTurn): it
+//            is judged as any open item, but owed (on the band, the record, the note, the
+//            held list) only once it outlives that turn, or TURN_SCOPE_MS (see owed)
 
 export const LEDGER_VERSION = 1
 export const KEEP_ITEMS = 200                 // the file keeps the newest 200
@@ -183,6 +186,9 @@ export function requestAsks(text) {
 // over a running turn joins the window that turn belongs to, since that turn's end is not
 // gated (a queued message has started the next) and the next turn answers both.
 // `ids`, when given, is filled with the new items' ids.
+// The person's own items (`user`) are made turn-scoped (`inTurn`, see owed), and so is one a
+// resend folds into: the stopped turn settled it, and the resend is the same instruction
+// handed to a new turn. A brief from the lead is never turn-scoped.
 //
 // Before any item is made: a bare answer to the agent's own numbered question (`choiceTurn`,
 // the turn that asked) is folded into the item that turn was about (foldReply); a resend of a
@@ -199,6 +205,7 @@ export function addPrompt(ledger, { text, at, turnId, source, queued, whole = fa
   const prompt = (Number(ledger.prompt) || 0) + 1
   const window = queued && ledger.window ? ledger.window : prompt
   let next = { ...ledger, prompt, window }
+  const inTurn = source === 'user'
   for (const ask of asks) {
     const again = resendOf(next, ask, { at, source })
     if (again) {
@@ -206,14 +213,17 @@ export function addPrompt(ledger, { text, at, turnId, source, queued, whole = fa
         ...next,
         items: next.items.map(i => {
           if (i !== again) return i
-          const { interrupted, interruptedAt, turnId: _t, queued: _q, ...rest } = i
-          return { ...rest, text: ask, at, ...(turnId ? { turnId } : {}), ...(queued ? { queued: true } : {}), prompt, resent: (Number(i.resent) || 0) + 1 }
+          const { interrupted, interruptedAt, turnId: _t, queued: _q, inTurn: _m, ...rest } = i
+          return {
+            ...rest, text: ask, at, ...(turnId ? { turnId } : {}), ...(queued ? { queued: true } : {}), ...(inTurn ? { inTurn } : {}),
+            prompt, resent: (Number(i.resent) || 0) + 1,
+          }
         }),
       }
       ids.push(again.id)
       continue
     }
-    next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true })
+    next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true, inTurn })
     ids.push(next.items[next.items.length - 1].id)
     made.push(next.items[next.items.length - 1].id)
   }
@@ -317,23 +327,69 @@ export function stampTurn(ledger, text, turnId) {
 // `queued`: typed over a running turn. Such a message can still be pulled back out of the
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
 // `prompt`: the message it came from (addPrompt). `asIs`: the text is already an item's.
-export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, asIs }) {
+export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, asIs, inTurn }) {
   const seq = (Number(ledger.seq) || 0) + 1
   const words = asIs ? String(text) : source === 'promise' ? excerpt(text) : requestItem(text)
   const item = {
     id: String(seq), text: words, at, ...(turnId ? { turnId } : {}), state: 'open', source,
     ...(queued ? { queued: true } : {}), ...(prompt ? { prompt } : {}), ...(by ? { addedBy: by } : {}),
+    ...(inTurn ? { inTurn: true } : {}),
   }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
 }
 
 const fresh = (i, nowMs) => nowMs - (Number(i.at) || 0) <= BAND_DAYS * DAY_MS
+// Every open item, owed or not: what the judge reads and the gate picks from.
 export const openItems = (ledger, nowMs) => ledger.items.filter(i => i.state === 'open' && fresh(i, nowMs))
 
+// A PERSON'S REQUEST IS OWED ONLY ONCE IT OUTLIVES ITS TURN. A plain instruction the session
+// just carries out is not an open loop, and it was treated as one. Measured over fourteen days
+// of real ledgers: of 1,607 items made from the person's own messages, 1,204 (75%) were closed
+// before their next message. Each was still counted on the band ("ledger · 1 open"), listed in
+// the note every prompt carries, and closed by the agent with `fleet-ledger close` from Bash:
+// 3,305 such calls, each a main-model round trip of ~190 output tokens, for work the judge
+// would have read as done at the turn's end anyway. The note was injected ~15,800 times.
+//   So a `user` item is born `inTurn` (addPrompt) and, while the mark holds, is off the band
+// and the record (ledgerSummary), the note (contextNote) and the held list (heldItems). The
+// judge still reads it at its turn's end (openItems) and /ledger all still lists it. The end of
+// the turn that answers it settles it (settleTurn): done or not-done closes it as always; any
+// other verdict, a failed or skipped judge, or a stopped turn drops the mark, and from then on
+// it is owed exactly as before, gate included. A mark nothing settled (a crash, a reload, a
+// turn that never ended) stops counting after TURN_SCOPE_MS: it fails OPEN, never shut.
+export const TURN_SCOPE_MS = 30 * 60_000
+export const owed = (i, nowMs) => !i.inTurn || nowMs - (Number(i.at) || 0) >= TURN_SCOPE_MS
+const owedItems = (ledger, nowMs) => openItems(ledger, nowMs).filter(i => owed(i, nowMs))
+
+// The marks the end of turn `turnId` settles. `startedAt`: when it started (0 when not known,
+// a reload mid-turn: every mark settles, failing open). `movedOn`: a turn has started since
+// this one ended.
+//   A message typed over a running turn carries THAT turn's id (`queued`). When a turn started
+// since, the message is what started it, and it is answered there: its mark waits for that
+// turn's end. When none did, the turn folded the message in, and it settles here.
+//   Any other mark from before this turn started settles here, so a turn whose own end was
+// never judged (a judge busy with an older turn, a reload) leaves nothing marked behind it.
+// One made after it started belongs to a turn that has not ended yet.
+export function settleTurn(ledger, { turnId, startedAt = 0, movedOn = false }) {
+  const due = i => i.inTurn && (i.queued && i.turnId === turnId ? !movedOn : !startedAt || (Number(i.at) || 0) <= startedAt)
+  if (!ledger.items.some(due)) return null
+  return { ...ledger, items: ledger.items.map(i => { if (!due(i)) return i; const { inTurn, ...rest } = i; return rest }) }
+}
+
+// Did the agent close an item of its own in this turn? `closedTurn` says so for the tools,
+// which run inside the mod and know the turn. `fleet-ledger close` runs from Bash, outside it,
+// and writes no turn: measured, 3,305 closes that way in fourteen days against none through
+// the tools, so the turn's own closes were never seen and the judge was called on turns it
+// was built to skip. A close with no turn on it counts by its time: at or after the turn began.
+export function closedInTurn(ledger, { turnId, startedAt = 0 }) {
+  return ledger.items.some(i => i.closedBy === 'agent'
+    && (i.closedTurn ? i.closedTurn === turnId : startedAt > 0 && (Number(i.closedAt) || 0) >= startedAt))
+}
+
 // What the record and the band say: open requests, open promises, the oldest open of each.
+// Owed ones only (see owed).
 export function ledgerSummary(ledger, nowMs) {
-  const open = openItems(ledger, nowMs)
+  const open = owedItems(ledger, nowMs)
   const req = open.filter(i => i.source !== 'promise')
   const prom = open.filter(i => i.source === 'promise')
   const oldest = list => list.length ? { id: list[0].id, text: excerpt(list[0].text, 80), at: list[0].at } : null
@@ -905,11 +961,13 @@ export function addByAgent(ledger, text, { nowMs, turnId }) {
 // worked on), then promises; NOTE_ITEMS at most, each cut to NOTE_TEXT, so the note stays
 // under ~1.5k characters however long the backlog grows; the rest is a count and /ledger.
 // '' when nothing is open: a session with a clean ledger reads nothing extra.
+// Owed items only (see owed): the message this note rides on is turn-scoped, and naming it
+// told the agent to spend a tool call closing an instruction it was about to carry out.
 export const NOTE_ITEMS = 8
 export const NOTE_TEXT = 100
 export const NOTE_HEAD = '[ghostfleet ledger: open items]'
 export function contextNote(ledger, nowMs) {
-  const open = openItems(ledger, nowMs)
+  const open = owedItems(ledger, nowMs)
   if (!open.length) return ''
   const newest = (a, b) => Number(b.id) - Number(a.id)
   const req = open.filter(i => i.source !== 'promise').sort(newest)
@@ -961,11 +1019,12 @@ export const HELD_OPEN_MS = 4 * 3_600_000
 // item of its own, made from the same prompt at the same instant (`woke` is its `at`). Listed,
 // it is the same ask twice, the item as `replied` and the reply as `open` four hours on, and the
 // second is the person's own words handed back to them.
+// NOR an item still inside its turn (owed): nothing is held for the person mid-turn.
 export function heldItems(ledger, nowMs) {
   const rows = []
   const replies = new Set(ledger.items.filter(i => i.woke).map(i => Number(i.woke)))
   for (const i of ledger.items) {
-    if (!fresh(i, nowMs)) continue
+    if (!fresh(i, nowMs) || !owed(i, nowMs)) continue
     if (i.state === 'open' && replies.has(Number(i.at)) && !i.woke) continue
     const reason = i.progress && i.progress.reason ? excerpt(i.progress.reason, 160) : ''
     const c = i.carried
@@ -1095,11 +1154,16 @@ const ago = ms => {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`
 }
 
-// The listing both the CLI and /ledger print.
+// The listing both the CLI and /ledger print. The plain list is what the band counts (owed);
+// an item still inside its turn is a count under it, and `all` lists it, marked.
 export function listing(ledger, nowMs, { all = false } = {}) {
-  const rows = (all ? ledger.items : openItems(ledger, nowMs))
+  const rows = (all ? ledger.items : owedItems(ledger, nowMs))
   const held = all ? 0 : ledger.items.filter(i => i.state === 'waiting' && fresh(i, nowMs)).length
-  const waits = held ? [`+${held} waiting on the person (all lists them)`] : []
+  const inTurn = all ? 0 : openItems(ledger, nowMs).length - rows.length
+  const waits = [
+    ...(held ? [`+${held} waiting on the person (all lists them)`] : []),
+    ...(inTurn ? [`+${inTurn} in the turn answering ${inTurn === 1 ? 'it' : 'them'}, owed only if not done there (all lists them)`] : []),
+  ]
   const j = ledger.judge
   const judged = !j ? [] : [j.ok
     ? `last judge: ok${j.items ? `, ${j.items} item${j.items === 1 ? '' : 's'} in ${j.calls || 1} call${(j.calls || 1) === 1 ? '' : 's'}` : ''} (${ago(nowMs - j.at)} ago)`
@@ -1114,7 +1178,8 @@ export function listing(ledger, nowMs, { all = false } = {}) {
     const c = i.state === 'open' && i.carried
     const came = c ? `  [${c.from} stopped; it was ${c.state}${c.note ? `: ${excerpt(c.note, 60)}` : ''}]` : ''
     const unproven = i.state === 'open' && i.answered ? '  [answered, no proof]' : ''
-    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${came}${unproven}${why}`
+    const turn = i.state === 'open' && !owed(i, nowMs) ? '  [this turn]' : ''
+    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${came}${unproven}${turn}${why}`
   })
   return [...out, ...waits, ...judged].join('\n')
 }
