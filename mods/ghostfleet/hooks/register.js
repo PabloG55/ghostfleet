@@ -47,7 +47,8 @@ import {
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
-  revisit, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
+  revisitTurn, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
+  deliverySource,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -459,7 +460,9 @@ async function deliverTick($) {
       return
     }
     // `kind: "nudge"`: a wake-up fleet-send was told is one (--nudge), never a request.
-    pending = { id, text: entry.text, command: cmd, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
+    // `kind: "owner"`: the owner's own words, from a sender that authenticated them
+    // (fleet-send --owner; ledger.js deliverySource), recorded as the person's.
+    pending = { id, text: entry.text, command: cmd, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge', owner: entry.kind === 'owner' }
     // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
     // hook but its own, so LEDGER's never sees it.
     await ledgerDelivery($, pending)
@@ -528,7 +531,7 @@ async function deliveryTurnStart($, e) {
       // stamped with its turn here. A nudge is never an item.
       if (p.ledgered) await stampItems($, p.ledgered, e.turnId)
       if (p.ledgered && p.ledgered.length) noteDue = e.turnId
-      else if (!p.nudge) await ledgerFleetItem($, p.text, e.turnId)
+      else if (!p.nudge) await ledgerFleetItem($, p, e.turnId)
     })(), IO_MS * 4, null)
   } else if (p && (await $.clock.now()) - p.at > START_MS) {
     pending = null
@@ -1095,6 +1098,8 @@ let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
 let gateTurns = []       // the last few turns the gate's own re-prompt started
 let choiceTurn = ''      // the last turn, when it ended on a numbered question (ledger.js foldReply)
+let personTexts = []     // the person's own messages, submitted and not yet started as a turn
+let personTurns = []     // the last few turns one of those started (ledger.js revisitTurn)
 
 async function ledgerConfigOf($) {
   if (ledgerCfg) return ledgerCfg
@@ -1231,6 +1236,7 @@ async function onPromptSubmit($, e, next) {
   // waiting items are on neither the open list nor contextNote, so without it the answer
   // to "whats the status" was whatever the model remembered of the turn that asked.
   const notes = cur ? promptNotes(cur, e.text, at) : []
+  if (source) notePerson(e.text)
   const r = await next(notes.length ? { ...e, context: [...(e.context || []), ...notes] } : e)
   if (!ids.length) return r
   if (!r || r.drop !== undefined) {
@@ -1267,6 +1273,16 @@ async function onLedgerTool($, e) {
   return { result: said }
 }
 
+// WHICH TURNS THE PERSON STARTED: their own message, typed (sourceOf) or delivered as the
+// owner's (deliverySource), never a nudge, the gate's re-prompt or a lead's brief. Known by the
+// text, as stampTurn knows a turn: the message is noted when it is submitted (one typed over a
+// running turn starts its own turn later) and the turn.start that carries it is theirs. Its
+// judge is shown their waiting items (ledger.js revisitTurn).
+function notePerson(text) {
+  const t = String(text || '').trim()
+  if (t) personTexts = [...personTexts.filter(x => x !== t), t].slice(-6)
+}
+
 async function ledgerTurnStart($, e) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
@@ -1274,18 +1290,28 @@ async function ledgerTurnStart($, e) {
   while (turnStarts.size > 8) turnStarts.delete(turnStarts.keys().next().value)
   if (!e.text) return
   if (isGateTurn(e.text)) gateTurns = [...gateTurns, e.turnId].slice(-4)
+  const said = String(e.text).trim()
+  if (personTexts.includes(said)) {
+    personTexts = personTexts.filter(x => x !== said)
+    personTurns = [...personTurns, e.turnId].slice(-4)
+  }
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
 
-// A prompt fleet-send handed over, as DELIVERY claims it: one item (a brief is not split into
-// its sentences) in a window of its own, unless it is a nudge. Its turn.start stamps the item
-// with the turn and arms the note (ledgerNoteOnTool).
+// A prompt fleet-send handed over, as DELIVERY claims it: a lead's brief is one item (not
+// split into its sentences) in a window of its own; the owner's own words (`owner`) are the
+// person's, split into asks like a typed message; a nudge is nothing (ledger.js
+// deliverySource). Its turn.start stamps the items with the turn and arms the note
+// (ledgerNoteOnTool).
+const deliveryKind = p => (p.nudge ? 'nudge' : p.owner ? 'owner' : '')
 async function ledgerDelivery($, p) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const at = await $.clock.now()
   const ids = []
-  if (!p.nudge) await changeLedger($, l => addPrompt(l, { text: p.text, at, source: 'fleet', whole: true }, ids))
+  const source = deliverySource(deliveryKind(p))
+  if (source) await changeLedger($, l => addPrompt(l, { text: p.text, at, source, whole: source === 'fleet' }, ids))
+  if (source === 'user') notePerson(p.text)
   p.ledgered = ids
 }
 
@@ -1308,11 +1334,14 @@ async function ledgerNoteOnTool($, done) {
 }
 
 // Recorded at the turn it started, for a prompt DELIVERY claimed before this process did.
-async function ledgerFleetItem($, text, turnId) {
+async function ledgerFleetItem($, p, turnId) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
+  const source = deliverySource(deliveryKind(p))
+  if (!source) return
+  if (source === 'user') personTurns = [...personTurns, turnId].slice(-4)
   const at = await $.clock.now()
-  await changeLedger($, l => addPrompt(l, { text, at, turnId, source: 'fleet', whole: true }))
+  await changeLedger($, l => addPrompt(l, { text: p.text, at, turnId, source, whole: source === 'fleet' }))
 }
 
 // Kept for the last few turns only: a turn that never completes (a crash, a reload) must
@@ -1386,8 +1415,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const open = openItems(cur, nowMs)
   const closedOwn = closedInTurn(cur, { turnId: e.turnId, startedAt: turnStarts.get(e.turnId) || 0 })
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
-  // A stale or waiting item this turn mentions is judged with them (ledger.js revisit).
-  const back = revisit(cur, nowMs, blocks.join('\n'))
+  // A stale or waiting item this turn mentions is judged with them, and on a turn the person's
+  // own message started, every waiting item still inside its day (ledger.js revisitTurn).
+  const back = revisitTurn(cur, nowMs, blocks.join('\n'), { person: personTurns.includes(e.turnId) })
   if (!open.length && !back.length && (closedOwn || !promises)) return  // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
