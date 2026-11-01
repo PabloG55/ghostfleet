@@ -1002,6 +1002,49 @@ mod's own words.
 **Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet
 plugin`. The record's `turnId` and the handoff's `<id>.done` name the same turn.
 
+### A queued prompt the drain could not finish
+
+A prompt sent to a busy session waits in `<sock>.<session>.queue` until that session's Stop,
+and the drain (`fleet-send --dequeue`) delivers it. The drain used to cut the prompt off the
+queue *before* delivering it, and write it back through a `<queue>.<pid>.tmp` file when the
+session answered busy. A drain killed anywhere in between dropped the prompt. One fleet's
+directory held three such tmps, each one complete prompt, and nothing anywhere said so.
+
+Now the prompt stays at the head of the queue until its delivery is confirmed, and only
+then leaves. While it is out for delivery, `<queue>.sending` records how far the drain got.
+A drain that finds that file left by a dead one decides from it:
+
+| how far it got | what happens |
+|---|---|
+| nothing reached the session yet | the prompt is still the head, and is delivered next |
+| it may have been typed in | it is **not** sent again, so a prompt never runs twice. It moves to `<queue>.<id>.indoubt` |
+| the delivery is still running | the drain answers busy and tries again |
+
+A prompt that the session refused after receiving it (the mod could not submit it) also
+moves aside, to `<queue>.<id>.refused`, next to the `failed` row in the lead's inbox. The
+old drain's `.tmp` leftovers are the third kind.
+
+None of these is delivered on its own, because whether it is still wanted is the owner's
+call. `fleet-inbox` lists every one at the foot of each call until someone settles it. Each
+line gives the target session, how long ago the prompt was queued, its length in bytes, and
+its id. It never shows the prompt's words:
+
+```
+stranded queued prompts (2) — out of the queue, so nothing will deliver them:
+  master                     88 bytes  queued 9d ago — left by a drain that died — never delivered  [4242.tmp]
+  acme-api                  412 bytes  queued 2h ago — its drain died mid-delivery — it MAY have been typed in already  [1793573730-76105-2291.indoubt]
+  resolve: fleet-send -s cf-acme --requeue <session> <id>  (back to the head of its queue)
+       or: fleet-send -s cf-acme --discard <session> <id>
+```
+
+`--requeue` puts the prompt back at the head of its queue, where it was, and delivers it
+now if the session is idle. It skips any record that is already waiting, so a `.tmp` that
+was only a copy adds nothing. For an `.indoubt` prompt it warns that the prompt may run a
+second time. `--discard` deletes it, and works for a session that no longer exists.
+`fleet-send -s <sock> --stranded` prints the same list for scripts, one record per line,
+`\x1f` between fields. `fleet-stop` keeps a stopped session's stranded prompts, and
+`fleet-rename` moves them with the session.
+
 ### The request ledger
 
 A person types three messages while a turn runs. The prompt tells the model to treat each

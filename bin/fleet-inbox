@@ -256,7 +256,45 @@ finished_live() {
   echo "finished workers — task shipped, session still up (a new task is a new session):"
   printf '%s' "$out"
 }
-reclaim_hints() { finished_live; reclaimable; }
+
+# A QUEUED PROMPT NOBODY WILL DELIVER. A drain that died could leave a prompt outside the
+# queue — one fleet held three such, sent a week apart, and nothing anywhere said so — and
+# one that died mid-delivery leaves a prompt that may or may not have been typed in, which
+# the drain will not re-send (bin/fleet-send, "a prompt the drain stranded"). Either way
+# only a person can decide, so it is shown on every call until someone does. The prompt's
+# LENGTH, never its words: this output lands in transcripts.
+ago() {
+  local s=$(( $(date +%s) - $1 ))
+  if [ "$1" -le 0 ]; then echo '?'
+  elif [ "$s" -ge 86400 ]; then echo "$((s / 86400))d"
+  elif [ "$s" -ge 3600 ]; then echo "$((s / 3600))h"
+  else echo "$((s / 60))m"; fi
+}
+stranded() {
+  local out n sess id at len kind inq why f
+  # A glob first: this runs on every call, and almost always finds nothing.
+  for f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused; do
+    [ -f "$f" ] && break; f=""
+  done
+  [ -n "$f" ] || return 0
+  out="$(CLAUDE_FLEET_DIR="$FLEET_DIR" "$(dirname "$0")/fleet-send" -s "$SOCK" --stranded 2>/dev/null)" || return 0
+  [ -n "$out" ] || return 0
+  n="$(grep -c . <<< "$out")"
+  echo
+  echo "stranded queued prompts ($n) — out of the queue, so nothing will deliver them:"
+  while IFS=$'\x1f' read -r sess id at len kind inq; do
+    case "$kind" in
+      indoubt) why="its drain died mid-delivery — it MAY have been typed in already" ;;
+      refused) why="the session refused it" ;;
+      *)       why="left by a drain that died — never delivered" ;;
+    esac
+    [ "$inq" = 1 ] && why="a copy of one still queued — re-queueing skips it"
+    printf '  %-22s %6s bytes  queued %s ago — %s  [%s]\n' "${sess:0:22}" "$len" "$(ago "$at")" "$why" "$id"
+  done <<< "$out"
+  echo "  resolve: fleet-send -s $SOCK --requeue <session> <id>  (back to the head of its queue)"
+  echo "       or: fleet-send -s $SOCK --discard <session> <id>"
+}
+reclaim_hints() { stranded; finished_live; reclaimable; }
 
 # A PROMPT THE MOD REFUSED, THAT NO SENDER READ. fleet-send reports a failed handoff and
 # removes its receipt; one still on disk was read by nobody (fleet-send gave up waiting, or
