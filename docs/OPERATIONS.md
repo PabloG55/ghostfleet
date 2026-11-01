@@ -1031,10 +1031,27 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   nothing for a marked entry. The marker is the test, never the wording. A nudge that falls
   back to the paste (a lead whose mod is not delivering) arrives as typed text and is
   recorded like one. Only messages after the mod loaded: nothing is backfilled.
+- **A person's message is owed only once it outlives its turn.** A plain instruction the
+  session just carries out is not an open loop: measured over fourteen days of real ledgers,
+  75% of the items made from the person's own messages (1,204 of 1,607) were closed before
+  their next message, yet each was counted on the band, listed in the note, and closed by the
+  agent with `fleet-ledger close` from Bash (3,305 such calls, each a main-model round trip).
+  So an item from the person's own message (`source: user`: typed, idle or mid-turn, or from
+  the phone's bridge) is made `inTurn`. While the mark holds it is **not** on the band, in
+  the record's count, in the note, or in the list held for the person, and the agent spends
+  no tool call on it; it **is** judged at the turn's end like any open item, and
+  `/ledger all` lists it as `[this turn]` (`/ledger` counts it in a line of its own). The end
+  of the turn that answers it settles it: `done` or `not-done` closes it as before; any other
+  verdict, a judge that failed or never ran (`-p`, a crash), and an Esc drop the mark, and from
+  then on it is owed exactly as before, the gate included. A message typed over a running
+  turn is settled at the end of the turn that ran it: the next one when it started one, the
+  turn it was typed over when that turn folded it in. A mark nothing settled counts as owed
+  after 30 minutes. Briefs from the lead (`fleet`), promises and `ledger_add` are never
+  turn-scoped.
 - **The note.** Each prompt carries a note to the model, never shown the person: the open
-  items with their ids, requests first and newest first, then promises, **eight at most**
-  (each cut to 100 characters, so the note stays under ~1.5k), `+N more open (/ledger lists
-  them)` past that, and the rule: close with `ledger_close` and proof. No note when nothing
+  items it owes (never the message it rides on, see above) with their ids, requests first and
+  newest first, then promises, **eight at most** (each cut to 100 characters, so the note
+  stays under ~1.5k), `+N more open (/ledger lists them)` past that, and the rule: close with `ledger_close` and proof. No note when nothing
   is open. A plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
   gets its note on the first tool result of the turn it started instead.
 - **The agent's tools.** `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
@@ -1066,7 +1083,8 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   in `/ledger`, and is judged again on later turns. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. **A turn in which the agent closed items and left nothing
-  open makes no call at all**, promise wording or not (a brief the judge read as answered is
+  open makes no call at all** (a close from Bash, `fleet-ledger close`, counts by its time:
+  at or after the turn began), promise wording or not (a brief the judge read as answered is
   still open, so it is judged again each turn until it is closed with proof); otherwise the
   call is made only when
   something is open or the answer reads like a promise, so a quiet session costs nothing.

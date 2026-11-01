@@ -4531,6 +4531,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     const good = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"done\"},{\"id\":\"2\",\"status\":\"not-done\",\"reason\":\"release-managed\"},{\"id\":\"9\",\"status\":\"done\"}],\"promises\":[\"merge when green\"]}', ids)
     const prose = L.parseVerdict('Item 1 is done, item 2 too.', ids)
     l = L.applyVerdict(l, good, { nowMs: now, turnId: 't1', promises: 'show' })
+    l = L.settleTurn(l, { turnId: 't1' }) || l   // the turn's end, as judgeTurn's caller settles it
     const states = l.items.map(i => i.id + ':' + i.state + ':' + i.source).join(',')
     const t1 = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('')
     l = L.markGated(l, ['3'], now)
@@ -4716,6 +4717,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     const cut = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"in-progress\"},{\"id\":\"2\",\"st', ['1', '2'])
     const plain = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"open\"}],\"promises\":[]}', ['1'])
     l = L.applyVerdict(l, v, { nowMs: now, turnId: 't1', promises: 'show' })
+    l = L.settleTurn(l, { turnId: 't1' }) || l
     const states = l.items.map(i => i.id + ':' + i.state + ':' + (i.progress ? 'p' : '-')).join(',')
     const targets = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('')
     const listed = /\[in progress: worker building it\]/.test(L.listing(l, now))
@@ -4730,6 +4732,63 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       listed, waits, holds, gt, L.lastGateAt(L.markGated(l, ['2'], now - 5)) === now - 5].join(' | '))" 2>&1)"
   is "ledger: in-progress stays open and ungated; open is still gated; waiting is no promise; each hold says why" \
      "in-progress/open | true | false | false | 2 | 1:open:p,2:open:-,3:open:- | 2 | true | wwww--- | -,gate-turn,waiting,cooldown,-,workers | gg-- | true" "$lg"
+  # A PERSON'S REQUEST IS OWED ONLY ONCE IT OUTLIVES ITS TURN (owed, settleTurn). Measured over
+  # fourteen days: 75% of the person's own items closed before their next message, yet each was
+  # on the band, in the note, and closed by a Bash call of the agent's own. Each row in both
+  # directions: an instruction the judge reads as done in its turn is in none of the three
+  # (summary, note, held) and is done after; one judged open or waiting on the person is in all
+  # three once its turn settles, and the gate still names the open one, once; a failed judge
+  # settles it all the same (fail open); a message typed over a turn the next turn runs is not
+  # settled by the turn it was typed over; the ceiling owes what nothing settled; and a brief
+  # from the lead is noted in its own turn, as before.
+  lq="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000, H = 3600000
+    const t = (l, id) => [L.ledgerSummary(l, now).open, L.contextNote(l, now).includes(id + ' (asked)') ? 'n' : '-', L.heldItems(l, now).length].join('/')
+    const judged = (l, status, reason = 'r') => L.applyVerdict(l, { items: [{ id: '1', status, reason }], promises: [] }, { nowMs: now, turnId: 't1', promises: 'show' })
+    const one = L.addPrompt(L.emptyLedger(), { text: 'rename the toolbox flag', at: now - 60000, turnId: 't1', source: 'user' })
+    const during = t(one, '1') + ':' + one.items[0].inTurn
+    const done = L.settleTurn(judged(one, 'done'), { turnId: 't1', startedAt: now - 50000 })
+    const plain = t(done, '1') + ':' + done.items[0].state
+    const open = L.settleTurn(judged(one, 'open'), { turnId: 't1', startedAt: now - 50000 })
+    const gate = L.gateTargets(open, now, { promises: 'show' }).map(i => i.id).join('')
+    const again = L.gateTargets(L.markGated(open, ['1'], now), now, { promises: 'show' }).map(i => i.id).join('') || '-'
+    const waits = judged(one, 'in-progress', 'waits on the person: their pick')
+    const held = t(waits, '1') + '>' + t(L.settleTurn(waits, { turnId: 't1', startedAt: now - 50000 }), '1')
+    const failed = t(L.settleTurn(one, { turnId: 't1', startedAt: now - 50000 }) || one, '1')
+    // typed idle, then a message typed over its turn: the next turn ran it
+    let q = L.addPrompt(L.emptyLedger(), { text: 'list forty fruits', at: now - 60000, turnId: 't1', source: 'user' })
+    q = L.addPrompt(q, { text: 'and the capital of Australia', at: now - 30000, turnId: 't1', source: 'user', queued: true })
+    const marks = l => l.items.map(i => i.inTurn ? 'm' : '-').join('')
+    const movedOn = L.settleTurn(q, { turnId: 't1', startedAt: now - 50000, movedOn: true })
+    const ranNext = L.settleTurn(movedOn, { turnId: 't2', startedAt: now - 20000 })
+    const folded = L.settleTurn(q, { turnId: 't1', startedAt: now - 50000, movedOn: false })
+    // a later message, typed after t1 began, is not t1's to settle
+    const later = L.addPrompt(L.emptyLedger(), { text: 'bump the version', at: now - 10000, source: 'user' })
+    const notMine = L.settleTurn(later, { turnId: 't1', startedAt: now - 50000 }) === null
+    // the ceiling: nothing settled it
+    const ceil = [L.owed(one.items[0], now - 60000 + L.TURN_SCOPE_MS - 1), L.owed(one.items[0], now - 60000 + L.TURN_SCOPE_MS),
+      L.ledgerSummary(one, now - 60000 + L.TURN_SCOPE_MS).open].join(',')
+    const brief = L.addPrompt(L.emptyLedger(), { text: 'add the acme-api export endpoint', at: now - 60000, turnId: 't1', source: 'fleet', whole: true })
+    const fleet = [L.contextNote(brief, now).includes('1 (asked): add the acme-api export endpoint'), L.ledgerSummary(brief, now).open, Boolean(brief.items[0].inTurn)].join(',')
+    const added = L.addByAgent(one, 'and post the release note', { nowMs: now, turnId: 't1' }).ledger.items[1].inTurn === undefined
+    console.log([during, plain, t(open, '1'), gate + again, held, failed, marks(q) + '>' + marks(movedOn) + '>' + marks(ranNext), marks(folded),
+      notMine, ceil, fleet, added].join(' | '))" 2>&1)"
+  is "ledger: a person's instruction is owed only once it outlives its turn: done in it, never on the band, note or held list; left open, waiting or unjudged, owed after" \
+     "0/-/0:true | 0/-/0:done | 1/n/0 | 1- | 0/-/0>0/-/1 | 1/n/0 | mm>-m>-- | -- | true | false,true,1 | true,1,false | true" "$lq"
+  # A close from Bash (fleet-ledger) carries no turn: it counts as the turn's own by its time.
+  # The tools' closedTurn still counts, and only for its own turn.
+  lo="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    let l = L.addItem(L.emptyLedger(), { text: 'fix the login redirect', at: 100, source: 'user' })
+    const cli = at => L.closeByAgent(l, '1', 'PR #7', { nowMs: at, turnId: '' }).ledger
+    const tool = L.closeByAgent(l, '1', 'PR #7', { nowMs: 150, turnId: 't1' }).ledger
+    const hand = L.closeByHand(l, '1', 300)
+    console.log([L.closedInTurn(cli(300), { turnId: 't2', startedAt: 200 }), L.closedInTurn(cli(150), { turnId: 't2', startedAt: 200 }),
+      L.closedInTurn(cli(300), { turnId: 't2' }), L.closedInTurn(tool, { turnId: 't1', startedAt: 200 }),
+      L.closedInTurn(tool, { turnId: 't2', startedAt: 100 }), L.closedInTurn(hand, { turnId: 't2', startedAt: 200 })].join(','))" 2>&1)"
+  is "ledger: a close from Bash during the turn is the turn's own; one from before, a tool's close of another turn, or the person's is not" \
+     "true,false,false,true,false,false" "$lo"
   # One long lead session's shapes, replayed (placeholder words; the helper says what each
   # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
   # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.

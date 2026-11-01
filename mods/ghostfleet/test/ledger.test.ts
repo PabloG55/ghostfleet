@@ -97,7 +97,7 @@ const step = async ($: any, turnId: string, index: number, text: string, extra: 
 const COOLDOWN = 5 * 60_000 + 1000
 const nags = (w: World) => w.submitted.filter(e => e.origin?.kind === 'plugin' && !e.origin?.asUser)
 
-test('a task and two messages typed mid-turn are three open items, on the record and the band', async ($, on) => {
+test('a task and two messages typed mid-turn are three items, owed on the record and the band once their turn leaves them open', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
@@ -106,9 +106,15 @@ test('a task and two messages typed mid-turn are three open items, on the record
   await type($, 'also bump the version', 't1')
   await type($, 'and add a changelog line', 't1')
   const l = book(w)
-  expect(l.items.map((i: any) => [i.id, i.state, i.source, i.turnId ?? ''])).toEqual([
-    ['1', 'open', 'user', 't1'], ['2', 'open', 'user', 't1'], ['3', 'open', 'user', 't1'],
+  expect(l.items.map((i: any) => [i.id, i.state, i.source, i.turnId ?? '', Boolean(i.inTurn)])).toEqual([
+    ['1', 'open', 'user', 't1', true], ['2', 'open', 'user', 't1', true], ['3', 'open', 'user', 't1', true],
   ])
+  // inside their turn: nothing owed yet
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0, promises: 0 }))
+  w.heard = ['fix the login redirect', 'also bump the version', 'and add a changelog line']
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  expect(book(w).items.some((i: any) => i.inTurn)).toBe(false)
   expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 3, promises: 0 }))
   await clock.advance(10)
   const ui = await $.ui.mount({ plugin: 'ghostfleet', surface: 'terminal', component: 'AbovePrompt',
@@ -368,8 +374,12 @@ test('/ledger lists, closes by hand, and clears, without a turn', async ($, on) 
   await start($)
   await type($, 'fix the login redirect')
   await type($, 'also bump the version')
+  // inside their turn they are a count under the list, and `all` lists them, marked
   const list = await $.command.run({ command: 'ledger', args: '' } as any)
-  expect(list.text).toContain('fix the login redirect')
+  expect(list.text).toContain('+2 in the turn answering them')
+  expect(list.text).not.toContain('fix the login redirect')
+  const all = await $.command.run({ command: 'ledger', args: 'all' } as any)
+  expect(all.text).toContain('fix the login redirect  [this turn]')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: closed 1')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: no open item 1')
   expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'person' }))
@@ -838,19 +848,31 @@ test('decision 2: the prompt carries a note of the open items by id, requests fi
   // a notification with nothing open: no note at all
   await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
   expect(notes(w)).toEqual([''])
+  // a message is not noted in its own turn: the agent is about to carry it out
   await type($, THREE)
-  const note = notes(w)[1]
+  expect(notes(w)[1]).toBe('')
+  await $.turn.start({ text: THREE, turnId: 't1' })
+  w.heard = [THREE]
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  await type($, 'fix a')
+  const note = notes(w)[notes(w).length - 1]
   expect(note.split('\n')[0]).toBe('[ghostfleet ledger: open items]')
-  // its own three asks, newest first, by id
+  // the three asks its turn left open, newest first, by id; not the message it rides on
   expect(note).toContain('3 (asked): And send me the preview link when it is done.\n2 (asked): Can you add the pricing table under it?\n1 (asked): Shorten the intro to three lines.')
+  expect(note).not.toContain('fix a')
   expect(note).toContain(`call ${CLOSE} with its id and the proof`)
   // a promise sorts after every request, and past eight items the rest is a count
   const l = book(w)
-  l.items.push({ id: '4', text: 'merge once CI is green', at: 1_000_000, state: 'open', source: 'promise' })
-  l.seq = 4
+  l.items.push({ id: '5', text: 'merge once CI is green', at: 1_000_000, state: 'open', source: 'promise' })
+  l.seq = 5
   w.files.set(LEDGER, JSON.stringify(l))
-  for (const t of ['fix a', 'fix b', 'fix c', 'fix d', 'fix e', 'fix f']) await type($, t)
+  for (const t of ['fix b', 'fix c', 'fix d', 'fix e', 'fix f']) await type($, t)
+  // nothing settled those (no turn ran them): past the ceiling they are owed anyway
+  await clock.advance(30 * 60_000)
+  await type($, 'fix g')
   const last = notes(w)[notes(w).length - 1]
+  expect(last).not.toContain('fix g')
   const rows = last.split('\n').filter(r => /^\d+ \(/.test(r))
   expect(rows.length).toBe(8)
   expect(rows.every(r => r.includes('(asked)'))).toBe(true)
@@ -1289,13 +1311,14 @@ test('the reminders name the fleet-ledger command beside the tools, for a sessio
   await start($)
   await type($, 'fix the login redirect')
   await type($, 'and bump the version')
-  expect(notes(w)[1]).toContain('fleet-ledger close <id>')
   await $.turn.start({ text: 'and bump the version', turnId: 't1' })
   w.heard = ['fix the login redirect', 'and bump the version']
   w.judge = verdict(() => 'open')
   await $.turn.complete(done('t1', 'Looked at something else.'))
   await settle(clock)
   expect(nags(w)[0].text).toContain('fleet-ledger close <id>')
+  await type($, 'and one more thing')
+  expect(notes(w)[notes(w).length - 1]).toContain('fleet-ledger close <id>')
 })
 
 test('a bare answer to the agent\'s numbered question folds into the item that asked; the same words after no question are an ask', async ($, on) => {
@@ -1438,4 +1461,149 @@ test('a status question carries what waits on the person, with the instruction t
   await type($, 'qué falta?')
   expect(notes(w)[2]).toContain('merge #12 or wait for the review')
   await clock.advance(10)
+})
+
+// A PERSON'S REQUEST IS OWED ONLY ONCE IT OUTLIVES ITS TURN (ledger.js owed, settleTurn).
+// Measured over fourteen days: 75% of the person's own items closed before their next message,
+// yet each was counted on the band, listed in the note, and closed by the agent through a Bash
+// call of its own. Each row below fails if the mark is never set, never settled, or settled at
+// the wrong turn's end.
+test('a plain instruction the judge reads as done in its turn is never on the band, the record or the note', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  expect(notes(w)[0]).toBe('')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  // a message about it mid-turn is no note either
+  await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
+  expect(notes(w)[1]).toBe('')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Fixed the redirect in web/login.ts.'))
+  await settle(clock)
+  // the judge still read it, and closed it
+  expect(w.judged.length).toBe(1)
+  expect(w.judged[0]).toContain('1 [request to the agent]: fix the login redirect')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  expect(nags(w)).toEqual([])
+})
+
+test('one the judge leaves open is owed after its turn: on the record and the note, and re-prompted once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  w.heard = ['fix the login redirect']
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('1. "fix the login redirect"')
+  await type($, 'and bump the version')
+  expect(notes(w)[notes(w).length - 1]).toContain('1 (asked): fix the login redirect')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('bump the version')
+})
+
+test('a judge that fails leaves the turn-scoped item owed: it fails open, never shut', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  w.judge = () => ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: {} })
+  await $.turn.complete(done('t1', 'Refactored.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'open' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+})
+
+test('an Esc and a headless session settle the mark too: the item is owed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  await $.turn.complete(done('t1', '', { reason: 'aborted', isAborted: true }))
+  await settle(clock)
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  w.surfaces = []
+  await type($, 'rename the cache keys')
+  await $.turn.start({ text: 'rename the cache keys', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Renamed.'))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  expect(book(w).items.map((i: any) => Boolean(i.inTurn))).toEqual([false, false])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 2 }))
+})
+
+test('a message typed over a turn that the next turn runs is settled at THAT turn\'s end, not at the one it was typed over', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'list forty fruits')
+  await $.turn.start({ text: 'list forty fruits', turnId: 't1' })
+  await type($, 'and the capital of Australia', 't1')
+  let answer: (v: any) => void = () => {}
+  w.judge = () => new Promise(r => { answer = r })
+  await $.turn.complete(done('t1', 'Apple, banana, cherry...'))
+  await clock.advance(10)
+  // the queued message starts the next turn while t1's judge is out
+  await $.turn.start({ text: 'and the capital of Australia', turnId: 't2' })
+  answer(verdict(() => 'open')('1 [x\n2 [x'))
+  await settle(clock)
+  const at1 = book(w).items
+  expect(at1.map((i: any) => [i.id, Boolean(i.inTurn)])).toEqual([['1', false], ['2', true]])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t2', 'Canberra.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.inTurn)])).toEqual([['1', 'done', false], ['2', 'done', false]])
+})
+
+test('...and one the turn folded in, with no turn after it, is settled at that turn\'s end', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'list forty fruits')
+  await $.turn.start({ text: 'list forty fruits', turnId: 't1' })
+  await type($, 'and the capital of Australia', 't1')
+  w.heard = ['list forty fruits', 'and the capital of Australia']
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await $.turn.complete(done('t1', 'Apple, banana, cherry...'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.inTurn)])).toEqual([['1', 'done', false], ['2', 'open', false]])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+})
+
+// fleet-ledger closes from Bash, with no turn on the close: the judge-skip has to see it.
+test('a close from Bash during the turn skips the judge, as the tool\'s does; one from before the turn does not', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const cli = (id: string, at: number) => {
+    const l = book(w)
+    l.items = l.items.map((i: any) => (i.id === id ? { ...i, state: 'done', closedAt: at, closedBy: 'agent', proof: 'PR #7' } : i))
+    w.files.set(LEDGER, JSON.stringify(l))
+  }
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  cli('1', 1_000_000)
+  await $.turn.complete(done('t1', "Fixed. I'll keep the preview server running."))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  // the other direction: a close made before t2 began is not t2's own, and the promise is read
+  await clock.advance(60_000)
+  await type($, 'rename the cache keys')
+  cli('2', 1_000_000)
+  await $.turn.start({ text: 'rename the cache keys', turnId: 't2' })
+  await $.turn.complete(done('t2', "Renamed. I'll keep the preview server running."))
+  await settle(clock)
+  expect(w.judged.length).toBe(1)
 })

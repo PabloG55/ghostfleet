@@ -47,7 +47,7 @@ import {
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
-  revisit, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked,
+  revisit, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -1034,6 +1034,10 @@ function startBand($) {
 //
 //   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
 //            shape), its open count in the status record (`ledger`), the oldest on the band
+//   TURN     the person's own message is turn-scoped: judged at the end of the turn that
+//            answers it, but on the band, the record and the prompt's note only once it
+//            outlives that turn (ledger.js owed). Every turn end settles it, a failed or
+//            skipped judge and an Esc included, so it fails open (settleOf)
 //   JUDGE    at a main-loop turn.complete that ended with an answer, a small-model call per
 //            ten open items (when something is open, or the answer sounds like a promise):
 //            which open items the turn's text, all of it, addressed, and what its final text
@@ -1066,6 +1070,7 @@ let currentTurn = ''
 let judging = false
 let judgeNext = null     // a turn.complete that arrived while the judge was busy
 let turnsStarted = 0     // main-loop turn.starts, so a verdict can tell it went stale
+let turnStarts = new Map() // turnId -> when it started, for the last few turns (settleTurn, closedInTurn)
 let answers = []         // the last few judged turns: { at, turnId, blocks }
 let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrote, in order
 let ledgerShown = ''     // what the band and the record last said
@@ -1246,7 +1251,10 @@ async function onLedgerTool($, e) {
 
 async function ledgerTurnStart($, e) {
   const cfg = await ledgerConfigOf($)
-  if (!cfg.on || !e.text) return
+  if (!cfg.on) return
+  turnStarts.set(e.turnId, await $.clock.now())
+  while (turnStarts.size > 8) turnStarts.delete(turnStarts.keys().next().value)
+  if (!e.text) return
   if (isGateTurn(e.text)) gateTurns = [...gateTurns, e.turnId].slice(-4)
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
@@ -1313,7 +1321,7 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
   const at = await $.clock.now()
   choiceTurn = e.reason === 'answer' && endsOnChoice(blocks[blocks.length - 1]) ? e.turnId : ''
   if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
-  if (e.reason !== 'answer') return
+  if (e.reason !== 'answer') { await settleOf($, e.turnId, generation); return }
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
@@ -1324,12 +1332,21 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
   } finally {
     judging = false
   }
+  // Whatever the judge did (closed, kept open, failed, skipped, threw), the turn is over: what
+  // it left open is owed from here (ledger.js settleTurn). After the gate, which is unchanged.
+  await settleOf($, e.turnId, generation)
   const queued = judgeNext
   judgeNext = null
   if (queued) {
     answers = answers.filter(a => a.turnId !== queued.e.turnId)
     await ledgerTurnComplete($, queued.e, queued.blocks, queued.generation)
   }
+}
+
+// The end of turn `turnId` settles the turn-scoped marks it answers (ledger.js settleTurn).
+async function settleOf($, turnId, generation) {
+  const startedAt = turnStarts.get(turnId) || 0
+  await changeLedger($, l => settleTurn(l, { turnId, startedAt, movedOn: turnsStarted !== generation }))
 }
 
 // `blocks`: every text block the turn wrote. `generation`: how many turns had started when
@@ -1345,9 +1362,11 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // The judge is the backup: it reads only what is still open after the agent's own closes
   // (ledger_close, ledger_drop), and a turn whose agent closed everything costs no call at
   // all, not even the promise read: an agent that closes its items with proof is the one
-  // the hybrid is for, and a call per turn to second-guess it is the cost it removes.
+  // the hybrid is for, and a call per turn to second-guess it is the cost it removes. A close
+  // from Bash (fleet-ledger) carries no turn, and counts by its time (ledger.js closedInTurn).
+  // `open` is every open item, the turn's own turn-scoped ones too: the judge reads them.
   const open = openItems(cur, nowMs)
-  const closedOwn = cur.items.some(i => i.closedBy === 'agent' && i.closedTurn === e.turnId)
+  const closedOwn = closedInTurn(cur, { turnId: e.turnId, startedAt: turnStarts.get(e.turnId) || 0 })
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
   // A stale or waiting item this turn mentions is judged with them (ledger.js revisit).
   const back = revisit(cur, nowMs, blocks.join('\n'))
