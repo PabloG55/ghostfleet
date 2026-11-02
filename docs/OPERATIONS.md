@@ -9,6 +9,10 @@ Everything below is real, but you'll reach for it far less often than what's abo
 setups, migrating an existing scattered workflow, notification tuning, and the mechanics behind a
 couple of conveniences.
 
+Several sections here (the request ledger, the context ceiling, lead wakes and the send
+queue) were changed by the November 2026 flow audit. For what it found, what each PR fixed
+and what is still owed, see [FLOW-AUDIT-2026-11.md](FLOW-AUDIT-2026-11.md).
+
 ## Already running Claude by hand? Adopt it
 
 If you already work the scattered way — a Claude session per terminal tab or zellij
