@@ -147,7 +147,14 @@ async function applyPatch($, change) {
 // $TMUX, and carries the CLAUDE_FLEET_* of whichever session first started that daemon.
 // With $CLAUDE_JOB_DIR set and no $TMUX the environment names nobody, and only the
 // record, which the shell hook pointed at the conversation's predecessor, may answer.
+//
+// AN AGENT STARTED BY AN AGENT inherits that agent's environment whole — a probe a worker
+// runs from its Bash tool carries the worker's $TMUX, pane and slot. The shell hook sees it
+// in the process tree and writes the record with no slot and `nested_under` set, and that
+// mark is the answer here too: the environment would hand this session the worker's queue,
+// its inbox and its team.
 async function identity($, rec) {
+  if (rec && rec.nested_under) return { sock: '', slot: '' }
   if (rec && rec.sock && rec.slot) return { sock: String(rec.sock), slot: String(rec.slot) }
   const tmux = await $.env.get('TMUX')
   const job = await $.env.get('CLAUDE_JOB_DIR')

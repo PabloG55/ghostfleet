@@ -176,6 +176,17 @@ test('a backgrounded process with no record names no fleet, whatever its env say
   expect(w.runs.some(a => a[0].endsWith('/bin/fleet-list'))).toBe(false)
 })
 
+// A probe a worker started from its Bash tool: the worker's pane, server and slot in its env,
+// and a record the shell hook wrote with no slot because the process tree says it is nested.
+test('a nested agent names no fleet, though its env is the worker\'s whole', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { TMUX: '/tmp/tmux-1/cf-acme-api,1,0', TMUX_PANE: '%3', CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'w1' },
+    { ...BASE, sock: '', slot: '', pane: '', nested_under: 4242 })
+  const out = await $.command.run({ command: 'fleet', args: '' } as any)
+  expect(out.text).toContain('not in a fleet')
+  expect(w.runs.some(a => a[0].endsWith('/bin/fleet-list'))).toBe(false)
+})
+
 test('a stalled filesystem cannot hold a turn open', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on)

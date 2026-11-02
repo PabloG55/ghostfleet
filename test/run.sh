@@ -3965,6 +3965,73 @@ else
   skip "a conversation sent to the background keeps its card" "tmux/jq missing"
 fi
 
+# ── an agent started from another agent's tool shell is not that agent ──────
+# A worker ran nine probe sessions from its Bash tool; each inherited the worker's $TMUX,
+# pane and slot, and each probe's Stop filed a `done` under the worker's name and woke the
+# lead. The hook now reads its own process tree (hooks/fleet-event.sh, _host_agent).
+#   The tree is the subject, so it is built for real, in a pane of a real server: bash
+# under the name `claude` is what `ps` reports as an agent, and running each chain
+# inside the server is what ends it at the server — run straight from this suite, a chain
+# would climb into whatever agent is running the suite, and the answer would depend on
+# where the suite ran (CLAUDE.md: a test can pass because of where it ran).
+#   Three chains: the session (agent, then the launcher's shell), a probe (agent, tool
+# shell, agent), and a wrapper (agent directly under agent, no shell) — the last is the one
+# that keeps the check from silencing a launcher that happens to be agent-named.
+group "an agent started by an agent is not that agent"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  NA="$(cd "$(mktemp -d)" && pwd -P)"; NAF="$NA/fleet"; mkdir -p "$NAF" "$NA/cfg" "$NA/home" "$NA/bin" "$NA/w1"
+  # A symlink, not a copy: macOS kills a copied system binary on exec (137, measured), and
+  # `ps` names a process by the path it was exec'd through, so this is `claude` to the tree.
+  ln -s "$(command -v bash)" "$NA/bin/claude"
+  # The pane's environment is the server's, which is this suite's: every fleet variable is
+  # named, so nothing here can reach the fleet the suite runs in. `fire` is the hook's caller
+  # (a shell, as an agent's hook runner is); `drive` builds each chain above it.
+  { printf 'export HOME=%q CLAUDE_FLEET_DIR=%q CLAUDE_CONFIG_DIR=%q CLAUDE_FLEET_NOTIFIER=off\n' "$NA/home" "$NAF" "$NA/cfg"
+    printf 'unset CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_NOTIFY_LEAD CLAUDE_JOB_DIR\n'
+    printf 'H=%q W=%q A=%q F=%q NA=%q\n' "$ROOT/hooks/fleet-event.sh" "$NA/w1" "$NA/bin/claude" "$NA/fire" "$NA"; } > "$NA/env"
+  cat > "$NA/fire" <<'EOF'
+#!/usr/bin/env bash
+. "$(dirname "$0")/env"
+for ev in SessionStart Stop; do
+  printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}' "$ev" "$1" "$W" | "$H" >/dev/null 2>&1
+done
+EOF
+  cat > "$NA/drive" <<'EOF'
+#!/usr/bin/env bash
+. "$(dirname "$0")/env"
+case "$1" in
+  session) "$A" -c "$F $2; true" ;;                                 # agent <- launcher's shell
+  probe)   "$A" -c "bash -c '$A -c \"$F $2; true\"; true'; true" ;;  # agent <- tool shell <- agent
+  wrapper) "$A" -c "$A -c '$F $2; true'; true" ;;                   # agent <- agent, nothing between
+esac
+: > "$NA/$2.ran"
+EOF
+  chmod +x "$NA/drive" "$NA/fire"
+  tmux -L cf-nestk kill-server 2>/dev/null
+  tmux -L cf-nestk new-session -d -s w1 -c "$NA/w1" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  narun() {  # chain sid -> runs it in a window of w1 and waits for it
+    tmux -L cf-nestk new-window -d -t w1 "$NA/drive $1 $2" 2>/dev/null
+    for _ in $(seq 1 100); do [ -f "$NA/$2.ran" ] && break; sleep 0.1; done
+  }
+  narec() { jq -r "$2" "$NAF/$1.json" 2>/dev/null; }
+  narows() { grep -c $'\tw1\tdone\t' "$NAF/cf-nestk.inbox" 2>/dev/null || true; }
+  narun session s-own
+  is "the session itself is recorded under its slot"   "cf-nestk w1" "$(narec s-own '.sock + " " + .slot')"
+  is "...and its Stop files a done row"                "1" "$(narows)"
+  narun probe s-probe
+  is "a probe's record claims no slot"                 " " "$(narec s-probe '.sock + " " + .slot')"
+  is "...and says what it runs under"                  "1" "$(narec s-probe '.nested_under | numbers | 1')"
+  is "...and its Stop files no row"                    "1" "$(narows)"
+  is "...and the hook says why"                        "1" "$([ "$(grep -c "s-probe: an agent started under" "$NAF/hook-debug.log" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  narun wrapper s-wrap
+  is "an agent-named launcher is still the session"    "cf-nestk w1" "$(narec s-wrap '.sock + " " + .slot')"
+  is "...and its Stop files a done row"                "2" "$(narows)"
+  tmux -L cf-nestk kill-server 2>/dev/null
+  rm -rf "$NA"
+else
+  skip "an agent started by an agent is not that agent" "tmux/jq missing"
+fi
+
 # ── 4a4. never hand --order to a grid that predates it ───────────────────────
 # It doesn't error: an unknown flag is no flag, so the old grid falls through to
 # DRAWING THE TUI inside the control plane's command substitution — nothing reads it,
