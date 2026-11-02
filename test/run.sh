@@ -13583,6 +13583,59 @@ else
   skip "fleet-stop closes a merged worker's items; fleet-inbox closes carried ones once their PR merges" "git, tmux, node or jq missing"
 fi
 
+# ── a hung gh cannot hang fleet-stop ───────────────────────────────────────────
+# fleet-stop asks for the worker's PR twice, through fleet-merged (whose stale cache refreshes
+# with `gh pr list`) and through `gh pr view`, and neither call had a bound, so a gh stuck on
+# the network or on an auth prompt kept the stop from ever killing the worker or carrying
+# its items. This gh never answers. Each call is bounded (CLAUDE_FLEET_GH_TIMEOUT, here 1s),
+# and an unanswered one is "I don't know": the items are carried as before.
+group "a hung gh cannot hang fleet-stop: it gives up and carries the items as before"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  GT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$GT/fleet" "$GT/stub"
+  # a gh that hangs in a GRANDCHILD holding its stdout, as a git or credential helper under gh
+  # would, and writes down every pid it hung in, so the cleanup kills those and nothing else
+  cat > "$GT/stub/gh" <<STUB
+#!/bin/sh
+echo \$\$ >> "$GT/gh.pids"
+( sh -c 'sleep 20 & echo \$! >> "$GT/gh.pids"; wait' ; : )
+echo "MERGED 5"
+STUB
+  chmod +x "$GT/stub/gh"
+  git init -q -b main "$GT/repo" 2>/dev/null
+  git -C "$GT/repo" config user.email t@t; git -C "$GT/repo" config user.name t
+  : > "$GT/repo/f"; git -C "$GT/repo" add -A; git -C "$GT/repo" commit -qm i 2>/dev/null
+  git -C "$GT/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$GT/repo" worktree add -q "$GT/repo/.worktrees/slow" -b feat/slow 2>/dev/null
+  printf '{"session_id":"m-1","sock":"cfghhang","slot":"master","ts":5}' > "$GT/fleet/m-1.json"
+  printf '{"session_id":"w-1","sock":"cfghhang","slot":"slow-pr","ts":5}' > "$GT/fleet/w-1.json"
+  node --no-warnings --input-type=module - "$ROOT" "$GT/fleet" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+let l = L.emptyLedger()
+for (const t of ['add the acme-api export endpoint', 'add a changelog line']) l = L.addItem(l, { text: t, at: 1, source: 'fleet', asIs: true })
+fs.writeFileSync(`${process.argv[3]}/w-1.ledger`, JSON.stringify(l))
+fs.writeFileSync(`${process.argv[3]}/m-1.ledger`, JSON.stringify(L.emptyLedger()))
+NODE
+  tmux -L cfghhang kill-server 2>/dev/null
+  tmux -L cfghhang new-session -d -s master -c "$GT/repo" 'sleep 90' 2>/dev/null
+  tmux -L cfghhang new-session -d -s slow-pr -c "$GT/repo/.worktrees/slow" 'sleep 90' 2>/dev/null
+  sleep 0.5
+  t0=$SECONDS
+  out="$(env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT PATH="$GT/stub:$PATH" CLAUDE_FLEET_GH_TIMEOUT=1 CLAUDE_FLEET_NOW_MS=1760000000000 \
+         CLAUDE_FLEET_DIR="$GT/fleet" "$ROOT/bin/fleet-stop" -s cfghhang slow-pr 2>&1)"
+  took=$((SECONDS - t0))
+  is "gh was asked, and hung" "yes" "$([ -s "$GT/gh.pids" ] && echo yes || echo no)"
+  is "...the stop finished well inside the hang (under 12s of gh's 20)" "yes" "$([ "$took" -lt 12 ] && echo yes || echo "no (${took}s)")"
+  is "...killed the worker, and carried its items with no PR, as when GitHub cannot be asked" \
+     "0|1|0|2" \
+     "$(tmux -L cfghhang has-session -t '=slow-pr' 2>/dev/null && echo 1 || echo 0)|$(grep -c "carried 2 unfinished ledger items to 'master'" <<< "$out" || true)|$(grep -c 'closed .* as done' <<< "$out" || true)|$(jq '[.items[]|select(.carried and .carried.pr == null)]|length' "$GT/fleet/m-1.ledger")"
+  is "...and left no temp file of its own behind" "0" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'fleet-stop-gh.*' -newer "$GT/stub/gh" 2>/dev/null | wc -l | tr -d ' ')"
+  while read -r p; do [ -n "$p" ] && kill "$p" 2>/dev/null; done < "$GT/gh.pids"
+  tmux -L cfghhang kill-server 2>/dev/null; rm -rf "${GT:?}"
+else
+  skip "a hung gh cannot hang fleet-stop: it gives up and carries the items as before" "git, tmux, node or jq missing"
+fi
+
 # ── a worker that died without a fleet-stop: its owed items reach its lead ─────
 # fleet-stop is the only path that carried a worker's open, waiting and not-done items, so a
 # pane killed by hand, a crash or a reboot left them in a ledger nobody opens again.

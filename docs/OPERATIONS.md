@@ -1491,7 +1491,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   ledger as `done`, `closedBy: fleet-stop`, with proof `PR #N merged`, and hands the lead
   none of them; a `not-done` item stays as it is. Measured before it: 23 carried items open
   in one lead's ledger, many for work already merged. A worker whose PR is still open (or
-  whose state could not be learned) carries as above, and each carried item keeps
+  whose state could not be learned: each of the two lookups gives up after
+  `CLAUDE_FLEET_GH_TIMEOUT` seconds, 10 by default, so a gh hung on the network or a login
+  never hangs the stop) carries as above, and each carried item keeps
   `carried.branch` and `carried.pr`. **When that PR merges, the item closes**: `fleet-inbox`,
   which already reads merges for its "finished & reclaimable" footer, closes the lead's
   carried item as `done`, `closedBy: fleet`, proof `PR #N merged`, and says so in a footer

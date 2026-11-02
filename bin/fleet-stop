@@ -181,6 +181,35 @@ fi
 # the cache still says OPEN (fleet-clean has the same check, for the same reason). Silence or
 # an error is "I don't know", and the items are carried as they always were.
 _lbr=""; _lpr=""
+# BOUNDED, because a stop must finish. Both lookups below can reach GitHub (fleet-merged
+# refreshes a stale cache with `gh pr list`), and a gh that hangs on the network or on an
+# auth prompt hung the stop with it: the worker never killed, its items never carried. A
+# Mac has no timeout(1), so this is a watchdog of its own, the same on every OS. Output
+# goes through a file, not the caller's pipe: a descendant the kill does not reach (gh's
+# git or credential helper, a grandchild) inherits stdout and would hold a `$(...)` open
+# after the command itself was killed. Measured with a gh stub: killed at 1s, it held its
+# caller for the full 20s of its grandchild's sleep. On expiry the answer is 124 and
+# nothing, whatever the command printed: "I don't know", which carries the items as before.
+GH_TIMEOUT="${CLAUDE_FLEET_GH_TIMEOUT:-10}"
+case "$GH_TIMEOUT" in ''|*[!0-9]*|0) GH_TIMEOUT=10 ;; esac
+bounded() {   # bounded <seconds> <cmd...>
+  local s="$1" p w rc f; shift
+  f="$(mktemp "${TMPDIR:-/tmp}/fleet-stop-gh.XXXXXX")" || return 1
+  "$@" > "$f" 2>/dev/null </dev/null & p=$!
+  ( i=0; while kill -0 "$p" 2>/dev/null; do
+      if [ "$i" -ge $((s * 10)) ]; then
+        : > "$f.late"; kids="$(pgrep -P "$p" 2>/dev/null)"
+        kill -TERM "$p" $kids 2>/dev/null; sleep 1; kill -KILL "$p" $kids 2>/dev/null; exit 0
+      fi
+      sleep 0.1; i=$((i + 1))
+    done ) >/dev/null 2>&1 </dev/null &
+  w=$!
+  wait "$p"; rc=$?
+  kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
+  if [ -e "$f.late" ]; then rc=124; else cat "$f"; fi
+  rm -f -- "${f:?}" "${f:?}.late"
+  return "$rc"
+}
 if [ "$SESSION" != master ]; then
   _lwt="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$_lwt" ] || _lwt="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
@@ -189,12 +218,12 @@ if [ "$SESSION" != master ]; then
     _lbr="$(git -C "$_lwt" symbolic-ref --quiet --short HEAD 2>/dev/null)"
   fi
   if [ -n "$_lbr" ]; then
-    _lpr="$("$(dirname "$0")/fleet-merged" --prs "$_lwt" 2>/dev/null | awk -F$'\x1f' -v b="$_lbr" \
+    _lpr="$(bounded "$GH_TIMEOUT" "$(dirname "$0")/fleet-merged" --prs "$_lwt" | awk -F$'\x1f' -v b="$_lbr" \
       '$1==b && $3=="OPEN"{o=$2} $1==b && $3=="MERGED"{m=$2} END{if(o!="")print "OPEN " o; else if(m!="")print "MERGED " m}')"
     case "$_lpr" in
       "MERGED "*) ;;
       *) if command -v gh >/dev/null 2>&1; then
-           _lgh="$(cd "$_lwt" 2>/dev/null && gh pr view "$_lbr" --json state,number -q '.state + " " + (.number|tostring)' 2>/dev/null)"
+           _lgh="$(cd "$_lwt" 2>/dev/null && bounded "$GH_TIMEOUT" gh pr view "$_lbr" --json state,number -q '.state + " " + (.number|tostring)')"
            case "$_lgh" in "MERGED "[0-9]*|"OPEN "[0-9]*) _lpr="$_lgh" ;; esac
          fi ;;
     esac
