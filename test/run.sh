@@ -7122,6 +7122,12 @@ PYX
   # back into a productivity slogan.
   is "...and does not hold the turn open"     "1" "$(contracthas 'do not hold the turn open to wait')"
   is "...because ending it is what notifies"  "1" "$(contracthas 'Ending the turn is what notifies')"
+  # CI IS THE WAIT THAT HAPPENS MOST. Measured on one fleet over 13 days: 2,785 sleep/until
+  # commands across its workers, and 25% of the spend in turns woken by background-task
+  # notifications, mostly CI. Every wake re-reads the whole context, so a watch re-armed on
+  # each wake pays that over and over for a result one watch would have delivered once.
+  is "...and waits on CI with one watch"      "1" "$(contracthas 'Waiting on CI is ONE background watch')"
+  is "...or none, when the PR is the deliverable" "1" "$(contracthas 'When the done-criterion is an open PR, do not watch CI at all')"
   # AND IT NAMES THE INSTRUMENT. fleet-look was built to back the observe clause, shipped,
   # tested, and put on PATH — and nothing told a worker it existed. A mechanism nobody is
   # told about is never reached, and from outside it looks exactly like an instruction
@@ -10596,6 +10602,132 @@ FP set acme-api context-window banana >/dev/null; rc=$?
 is "a value that is not a size is refused" "1" "$rc"
 is "...and writes nothing"                 "no" "$([ -f "$CW/home/.claude/fleet/cf-acme-api.context-window" ] && echo yes || echo no)"
 rm -rf "$CW"
+
+# ── 4c4b. the model by KIND of task (lib/model-kind.sh) ──────────────────────
+# Opt-in per project: `fleet-spawn --kind verify` starts on the project's model-verify, an
+# explicit --model beats it, and a kind with NO entry launches exactly as a spawn without
+# --kind does — no --model at all. That last row is the one that matters most: the map must
+# never move anybody's fleet onto a model they did not choose.
+group "model by kind (fleet-spawn --kind)"
+MK="$(mktemp -d)"; mkdir -p "$MK/bin" "$MK/fleet" "$MK/cfg" "$MK/xdir" "$MK/home/.config/ghostfleet" "$MK/home/.claude/fleet"
+mkr() { ( . "$ROOT/lib/model-kind.sh"; model_kind_resolve "$@" ) 2>"$MK/err"; }
+is "a kind with no entry resolves to nothing" "" "$(mkr "$MK/fleet" cf-acme-api verify)"
+printf 'sonnet\n' > "$MK/fleet/cf-acme-api.model-verify"
+is "a mapped kind resolves to its model"      "sonnet" "$(mkr "$MK/fleet" cf-acme-api verify)"
+is "...and only that kind"                    "" "$(mkr "$MK/fleet" cf-acme-api docs)"
+is "...and only that project"                 "" "$(mkr "$MK/fleet" cf-acme-web verify)"
+printf 'son net"\n' > "$MK/fleet/cf-acme-api.model-verify"
+is "a file that is not a model name is ignored" "" "$(mkr "$MK/fleet" cf-acme-api verify)"
+is "...and says so"                           "1" "$(grep -c 'is not a model name' "$MK/err" || true)"
+rm -f "$MK/fleet/cf-acme-api.model-verify"
+
+# ── through the REAL spawn: fleet-spawn -> tmux -> agent-here -> claude-here -> claude ──
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  # The stub records the --model it was handed, or `none`. It stays up long enough for the
+  # live-session checks (fleet-ack, fleet-worktrees) to find the worker.
+  cat > "$MK/bin/claude" <<'STUB'
+#!/bin/sh
+m=none; prev=""
+for a in "$@"; do [ "$prev" = --model ] && m="$a"; prev="$a"; done
+printf '%s\n' "$m" > "$MK_OUT"
+sleep 30
+STUB
+  chmod +x "$MK/bin/claude"
+  mkenv() { env -u TMUX -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_SLOT \
+      HOME="$MK/home" MK_OUT="$MK/out" CLAUDE_FLEET_SOCK=cf-mkind CLAUDE_FLEET_DIR="$MK/fleet" \
+      CLAUDE_CONFIG_DIR="$MK/cfg" CLAUDE_FLEET_EXPERIMENTAL_DIR="$MK/xdir" CLAUDE_FLEET_SLOTS="$MK/slots" \
+      PATH="$MK/bin:$ROOT/bin:$PATH" "$@"; }
+  # mkspawn <live-check> <fleet-spawn args…> -> the model the stub saw. <live-check> 1 also
+  # acks from inside the worktree and lists the worktrees while the worker is still running.
+  mkspawn() {
+    local live="$1"; shift
+    rm -rf "$MK/repo" "$MK/w1" "$MK/slots" "$MK/out"
+    git init -q -b main "$MK/repo" 2>/dev/null
+    git -C "$MK/repo" config user.email t@t; git -C "$MK/repo" config user.name t
+    : > "$MK/repo/f"; git -C "$MK/repo" add -A; git -C "$MK/repo" commit -qm init 2>/dev/null
+    ( cd "$MK/repo" && mkenv "$ROOT/bin/fleet-spawn" w1 --new "$@" > "$MK/spawn.out" 2>&1 ); MKRC=$?
+    local i; for i in $(seq 1 50); do [ -s "$MK/out" ] && break; sleep 0.1; done
+    if [ "$live" = 1 ]; then
+      ( cd "$MK/repo" && mkenv "$ROOT/bin/fleet-worktrees" -s cf-mkind --here > "$MK/wt.before" 2>&1 )
+      cp "$MK/fleet/cf-mkind.manifest.tsv" "$MK/manifest.before" 2>/dev/null
+      ( cd "$MK/w1" && mkenv "$ROOT/bin/fleet-ack" "checking the diff" --from "verify only" >/dev/null 2>&1 )
+      ( cd "$MK/repo" && mkenv "$ROOT/bin/fleet-worktrees" -s cf-mkind --here > "$MK/wt.after" 2>&1 )
+    fi
+    tmux -L cf-mkind kill-server 2>/dev/null
+    cat "$MK/out" 2>/dev/null || echo "no session"
+  }
+  mkcol() { awk -F'\t' -v c="$1" '$2=="w1"{print $c; exit}' "$MK/fleet/cf-mkind.manifest.tsv" 2>/dev/null; }
+
+  is "no --kind, no map: no --model, as before"      "none"   "$(mkspawn 0)"
+  is "--kind with no map entry: still no --model"    "none"   "$(mkspawn 1 --kind verify)"
+  is "...and the spawn says it is the account default" "1" \
+     "$(grep -c "kind 'verify' has no model in this project's map" "$MK/spawn.out" || true)"
+  is "the manifest records the kind (column 7)"      "verify" "$(awk -F'\t' '$2=="w1"{print $7; exit}' "$MK/manifest.before" 2>/dev/null)"
+  is "...and leaves the ack columns empty"           "1" \
+     "$(awk -F'\t' '$2=="w1" && $5=="" && $6=="" && NF==7 {n++} END{print n+0}' "$MK/manifest.before" 2>/dev/null)"
+  is "fleet-worktrees shows it before the ack"       "1" "$(grep -c '\[verify\] -' "$MK/wt.before" || true)"
+  is "fleet-ack keeps the kind"                      "verify" "$(mkcol 7)"
+  is "...beside what the worker understood"          "checking the diff" "$(mkcol 5)"
+  is "fleet-worktrees still shows it after the ack"  "1" "$(grep -c '\[verify\]' "$MK/wt.after" || true)"
+
+  printf 'sonnet\n' > "$MK/fleet/cf-mkind.model-verify"
+  is "--kind with a map entry: that model"           "sonnet" "$(mkspawn 0 --kind verify)"
+  is "...and the spawn says where it came from"      "1" \
+     "$(grep -c "kind 'verify' runs on sonnet (this project's map)" "$MK/spawn.out" || true)"
+  is "an explicit --model beats the map"             "opus"   "$(mkspawn 0 --kind verify --model opus)"
+  is "...in either order"                            "opus"   "$(mkspawn 0 --model opus --kind verify)"
+  is "another kind is not touched by that entry"     "none"   "$(mkspawn 0 --kind build)"
+  is "THE DEFAULT DOES NOT MOVE: no --kind, map set" "none"   "$(mkspawn 0)"
+  is "...and its manifest row stays four columns"    "4"      "$(awk -F'\t' '$2=="w1"{print NF; exit}' "$MK/fleet/cf-mkind.manifest.tsv")"
+  # A model name is vendor-specific, so a worker on another agent keeps its kind and is NOT
+  # handed the claude map's model. The stub stands in for opencode, whose launcher passes
+  # CLAUDE_FLEET_MODEL on as --model exactly as claude's does.
+  cp "$MK/bin/claude" "$MK/bin/opencode"
+  is "a non-claude worker is not handed the map's model" "none" "$(mkspawn 0 --kind verify --agent opencode)"
+  is "...and the spawn says why"                     "1" "$(grep -c 'the model map is for claude workers' "$MK/spawn.out" || true)"
+  is "...while --model still reaches it"             "gpt-x" "$(mkspawn 0 --kind verify --agent opencode --model gpt-x)"
+  mkspawn 0 --kind verfiy >/dev/null
+  is "an unknown kind is refused"                    "1" "$MKRC"
+  is "...naming the kinds"                           "1" "$(grep -c "unknown --kind 'verfiy' (known: verify ci docs video build)" "$MK/spawn.out" || true)"
+  is "...before any worktree is made"                "no" "$([ -d "$MK/w1" ] && echo yes || echo no)"
+fi
+
+# ── fleet-project set/get: where a person sets the map ──
+printf 'acme-api\t%s\twork\n' "$MK/work" > "$MK/home/.config/ghostfleet/projects"
+MKP() { HOME="$MK/home" CLAUDE_FLEET_EXPERIMENTAL_DIR="$MK/xdir" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+is "get shows an unset kind as the account default" "1" \
+   "$(MKP get acme-api | grep -c '^model-verify  *-  *(verify workers: .*unset: the account default)' || true)"
+MKP set acme-api model-verify sonnet >/dev/null
+is "set writes the project's file"                 "sonnet" "$(cat "$MK/home/.claude/fleet/cf-acme-api.model-verify" 2>/dev/null)"
+is "get reads it back"                             "1" "$(MKP get acme-api | grep -c '^model-verify  *sonnet ' || true)"
+is "...and every kind has a row"                   "5" "$(MKP get acme-api | grep -c '^model-' || true)"
+MKP set acme-api model-ci claude-haiku-5-5 >/dev/null
+is "a full model id is a model name"               "claude-haiku-5-5" "$(cat "$MK/home/.claude/fleet/cf-acme-api.model-ci" 2>/dev/null)"
+MKP set acme-api model-verify default >/dev/null
+is "set default drops the entry"                   "no" "$([ -f "$MK/home/.claude/fleet/cf-acme-api.model-verify" ] && echo yes || echo no)"
+MKP set acme-api model-review sonnet >/dev/null; rc=$?
+is "an unknown kind is refused"                    "1" "$rc"
+is "...and writes nothing"                         "no" "$([ -f "$MK/home/.claude/fleet/cf-acme-api.model-review" ] && echo yes || echo no)"
+MKP set acme-api model-docs 'son net' >/dev/null; rc=$?
+is "a value that is not a model name is refused"   "1" "$rc"
+is "...and writes nothing"                         "no" "$([ -f "$MK/home/.claude/fleet/cf-acme-api.model-docs" ] && echo yes || echo no)"
+MKP set acme-api model-docs sonnet --session w1 >/dev/null; rc=$?
+is "the map is project-wide, not --session"        "1" "$rc"
+
+# ── the MCP door: a lead dispatching with fleet_spawn passes the kind through ──
+if command -v node >/dev/null 2>&1; then
+  mkplan() { HOME="$MK/home" node --input-type=module -e "
+    const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+    const p = m.plan('fleet_spawn', JSON.parse(process.argv[1]));
+    process.stdout.write((p.args || []).join(' '));" "$1" 2>/dev/null; }
+  is "fleet_spawn's kind becomes --kind"           "1" "$(grep -c -- '--kind verify' <<< "$(mkplan '{"name":"w1","kind":"verify"}')" || true)"
+  is "...and no kind passes none"                  "0" "$(grep -c -- '--kind' <<< "$(mkplan '{"name":"w1"}')" || true)"
+  is "...and the schema offers the five kinds"     "verify,ci,docs,video,build" \
+     "$(node --input-type=module -e "
+        const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+        process.stdout.write(m.TOOLS.find(t => t.name === 'fleet_spawn').inputSchema.properties.kind.enum.join(','));" 2>/dev/null)"
+fi
+rm -rf "$MK"
 
 # ── 4c5. fleet-meter --context: did the ceiling move the spend? ───────────────
 # The report the ceiling is judged by. Its corpus is built by hand (test/helpers/

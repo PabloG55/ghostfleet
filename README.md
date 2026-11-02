@@ -410,6 +410,12 @@ instead of about 965k. Change it per project with `fleet-project set <project> c
 (`off` keeps the model's whole window), and see where the spend goes with `fleet-meter --context`.
 Details: [The context ceiling](docs/OPERATIONS.md#the-context-ceiling).
 
+**Workers can run on a cheaper model by kind of task.** `fleet-spawn --kind verify` (or `ci`,
+`docs`, `video`, `build`) starts the worker on the model its project maps that kind to:
+`fleet-project set <project> model-verify sonnet`. The map is opt-in. A kind with no entry runs
+on the account default, as before, and an explicit `--model` always wins. Details:
+[A model for each kind of task](docs/OPERATIONS.md#a-model-for-each-kind-of-task).
+
 ### Several Claude accounts on one profile (experimental)
 
 Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and

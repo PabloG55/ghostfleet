@@ -769,6 +769,46 @@ list price per model; `--json` also carries the raw token counts per bucket, so 
 them with your own prices. It reads the corpus of the profile it runs under
 (`$CLAUDE_CONFIG_DIR/projects`), or `--corpus DIR`.
 
+## A model for each kind of task
+
+A worker spawned without `--model` runs on the account default. In one busy fleet over 13 days
+(146 sessions), that meant every worker ran on the most expensive model. That included workers
+that only read a diff, watched CI, wrote docs or put a video together. One verifier was 4.6% of
+the fleet's spend on its own, and two video workers came to about 5%.
+
+So a lead can say what kind of task a worker has, and the project can map each kind to a model:
+
+```bash
+fleet-project set acme-api model-verify sonnet     # read a PR or a diff and report
+fleet-project set acme-api model-ci haiku          # watch or fix a pipeline
+fleet-project set acme-api model-docs sonnet
+fleet-project set acme-api model-video sonnet
+fleet-project set acme-api model-verify default    # drop the entry: the account default again
+fleet-project get acme-api                         # every kind, and what it maps to
+
+fleet-spawn verify-142 --kind verify --prompt "…"  # starts on sonnet
+fleet-spawn fix-auth --kind build --prompt "…"     # no entry for build: the account default
+```
+
+The kinds are `verify`, `ci`, `docs`, `video` and `build`. A model is an alias (`sonnet`,
+`haiku`) or a full id (`claude-opus-5-5`). Any other kind is refused, and so is a value that
+can't be a model name.
+
+**Nothing changes until you set an entry.** A kind with no entry starts on the account default,
+exactly like a spawn without `--kind`. A spawn without `--kind` never reads the map. Setting
+one kind changes that kind only, in that project only.
+
+**An explicit `--model` always wins** over the map.
+
+**Claude workers only.** Model names are vendor-specific. A worker on another agent
+(`--agent opencode`) keeps its kind in the record and starts on that agent's own default.
+
+**Where it shows.** `fleet-spawn` prints which model the kind got and why. The kind is saved as
+the manifest's seventh column, and `fleet-worktrees` puts it in front of ASKED, as
+`[verify] <the task>`. The map is stored as `<fleet dir>/<socket>.model-<kind>`, one model name
+per file, and a worker reads it when it is spawned. Workers can't change it, because the guard
+blocks every `fleet-project set` from a worker.
+
 ## Two ways to register a project, and what each one costs
 
 A project's `path` (2nd column of the projects file) is read as **either** the repo
