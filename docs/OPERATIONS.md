@@ -1412,6 +1412,14 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   the band leads with `judge failing: <why>` while anything is open, the record carries
   `ledger.judge_failing`, and `fleet-ledger list` ends with the last judge's status, failing
   or ok. The ledger is a nag, not a guard.
+- **What the judge costs.** `judge` is the last judged turn only; `judged` keeps running
+  totals in the same file: `turns`, `calls`, `failedCalls`, `items` judged, and the
+  `inputTokens`/`outputTokens` the host reported, with `reported` saying how many calls
+  carried usage at all (a host that reports none reads as unreported, not as free).
+  `fleet-meter --ledger` sums them over every profile's fleet dir (`~/.claude/fleet`,
+  `~/.claude-*/fleet`, `$CLAUDE_FLEET_DIR`, each once by real path), beside the state of every
+  item and the age and sender of everything still owed. Counts only: no text, session,
+  branch or path. A ledger written before the counter is reported `untallied`.
 - **Waiting on the person.** An item the judge reports `in-progress` because it waits on
   the person ("waits on the person: their pick between A and B") leaves the open list and the
   gate as `waiting`, and comes back when the person's message speaks to it. A reply like
@@ -1443,6 +1451,14 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   only trace a waiting item left in any prompt was nothing: the open-items note lists open
   items, `/ledger` gave a count, and a status answer had whatever the model still remembered
   of the turn that asked.
+- **The same words again are the same item.** A message whose text (case, spacing and end
+  punctuation aside) equals an item from the same sender that is still `open`, sent within
+  ten minutes of that item's last send, is that item: `repeated` counts the sends, the item
+  is handed to the new turn, and its age is still its first send's. Two sends of the same
+  words more than ten minutes apart are two items, and so are the same words after the first
+  closed. Measured over 14 days: 101 exact repeats, 52 of them a lead's brief, 31 inside ten
+  minutes, each a second row for one ask. A delivery the session refuses undoes only the
+  items it created, never the one it folded into.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
   session, without a turn. `fleet-ledger [session] drop-carried <worker> "<reason>"` drops
@@ -1489,6 +1505,20 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   keeps no ledger (codex, an older Claude, `CLAUDE_FLEET_LEDGER=off`; none is created for
   it, since nobody would read it); its file is not readable JSON (never written over); or
   it changed under all five tries of the write.
+  **A worker that died without a stop carries the same way.** A pane killed by hand, a
+  crashed tmux server or a reboot runs no `fleet-stop`, so `fleet-inbox` does it, on every
+  look the lead takes, with no model call: `lib/ledger-orphans.mjs` finds a worker with no
+  session (and no pane) on the socket, no `asleep`, `exited` or `parked` marker, and no
+  status record newer than a day, and runs the same carry for it. The lead is its sub-lead
+  while that sub-lead is still on the fleet (live or asleep), else `master`, and the branch
+  rides along when the worker sat in a linked worktree, so the item closes when that branch
+  merges, on the same look if it already has. The inbox says
+  `ledger: '<worker>' is gone (no session on <socket>, last seen 2d ago): carried …`. Never
+  `master` and never a tab. If tmux cannot be asked, nobody is dead. A worker the grid still
+  offers to reopen (a "lost" card) counts once its record is a day old: reopened, it finds
+  those items `carried`, and the lead's copy closes on the merge.
+  `node lib/ledger-orphans.mjs <fleet dir> <socket> --dry-run` names who would be carried
+  for, and changes nothing.
 
 **The file is not a `*.json`.** `<session_id>.ledger` holds JSON, but eight readers glob
 `<fleet dir>/*.json` as status records (fleet-list, the governor, the grid, fleet-read,
@@ -1496,6 +1526,15 @@ fleet-stop, …), and a ledger named `.json` would be read as a session. It is w
 atomically, beside itself and renamed over, by the mod and by `fleet-ledger` alike; both
 re-read it before each change, so a close from outside is never undone by the mod's next
 write. It outlives the session, so `--resume` comes back to the same ledger.
+**Resumed under another profile** (the conversation copied into another account's config
+dir and reopened there, or resumed under another fleet dir), a session starts a ledger in
+that profile's fleet dir, and the old one held what it still owed: 16 session ids had a
+ledger in two profiles on one machine, 9 of the old copies with items still owed. So at
+session start the mod looks in every other `~/.claude*/fleet` for a `<session_id>.ledger`.
+Each item still owed there that this ledger lacks is added here with `movedFrom`, and
+becomes `moved` there with `movedTo`. Each dir is compared by real path, so a link to this
+fleet dir is not another profile. The old file is replaced only if nothing changed it since
+it was read, and no file is created or deleted in another profile.
 
 **For readers.** The status record's `ledger` field (`open`, `promises`, `oldest_at` in
 epoch seconds) is carried by the shell hook like the mod's other fields, so `fleet-list`,

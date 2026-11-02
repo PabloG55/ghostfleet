@@ -20738,6 +20738,52 @@ else
   skip "the utilization meter" "node missing"
 fi
 
+# ── fleet-meter --ledger: counts across every profile's fleet dir ────────────
+# Two profiles' fleet dirs, a third that is a LINK to the first (counted once, or every
+# ledger in it would count twice), a ledger written before the judge counter (`untallied`,
+# never summed as zero) and one session in both profiles. The output must name nothing: the
+# fixture's texts, session ids and the profile directory names are swept for in it.
+group "fleet-meter --ledger counts states, owed ages and judge calls, and names nothing"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LG="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LG/h/.claude/fleet" "$LG/h/.claude-acme/fleet" "$LG/h/.config"
+  ln -s "$LG/h/.claude/fleet" "$LG/h/.claude-alias"; mkdir -p "$LG/h/.claude-twin"; ln -s "$LG/h/.claude/fleet" "$LG/h/.claude-twin/fleet"
+  LGT=1760000000000
+  node --no-warnings --input-type=module - "$LG/h" "$LGT" <<'NODE' 2>/dev/null
+const fs = await import('node:fs')
+const [home, now] = [process.argv[2], Number(process.argv[3])]
+const H = 3600e3, D = 24 * H
+const item = (id, state, source, ago, extra = {}) => ({ id, text: `the toolbox task ${id}`, at: now - ago, state, source, ...extra })
+const put = (dir, sid, l) => fs.writeFileSync(`${home}/${dir}/fleet/${sid}.ledger`, JSON.stringify({ v: 1, seq: l.items.length, ...l }))
+put('.claude', 'sess-aaa', { items: [item('1', 'open', 'user', 10 * 60e3), item('2', 'waiting', 'fleet', 5 * H), item('3', 'done', 'user', 2 * D)],
+  judged: { since: now - 3 * D, at: now, turns: 4, calls: 5, failedCalls: 1, items: 9, reported: 3, inputTokens: 2700, outputTokens: 120 } })
+put('.claude', 'sess-bbb', { items: [item('1', 'not-done', 'promise', 3 * D, { repeated: 2 }), item('2', 'open', 'user', 9 * D, { repeated: 1 })] })
+put('.claude-acme', 'sess-aaa', { items: [item('1', 'moved', 'user', 10 * 60e3), item('2', 'dropped', 'fleet', 8 * D)],
+  judged: { since: now - 5 * D, at: now, turns: 1, calls: 1, failedCalls: 0, items: 1, reported: 0, inputTokens: 0, outputTokens: 0 } })
+put('.claude-acme', 'sess-ccc', { items: [] })
+fs.writeFileSync(`${home}/.claude-acme/fleet/sess-ddd.ledger`, '{not json')
+fs.writeFileSync(`${home}/.claude-acme/fleet/.sess-aaa.ledger.moved.tmp`, '{}')
+NODE
+  lgm() { env -u CLAUDE_FLEET_DIR HOME="$LG/h" CLAUDE_FLEET_NOW_MS=$LGT node --no-warnings "$ROOT/bin/fleet-meter.mjs" --ledger "$@" 2>&1; }
+  j="$(lgm --json)"
+  is "two profiles' dirs, the linked third counted once; ledgers, unreadable, empty, items, owed" "2|4|1|1|7|4" \
+     "$(jq -r '[.fleet_dirs,.ledgers,.unreadable,.empty,.items,.owed]|map(tostring)|join("|")' <<< "$j")"
+  is "...states, owed by age and by who asked" 'done:1,dropped:1,moved:1,not-done:1,open:2,waiting:1|<1h:1,1h-1d:1,1d-7d:1,>7d:1|user:2,fleet:1,promise:1' \
+     "$(jq -r '[(.states|to_entries|sort_by(.key)|map("\(.key):\(.value)")|join(",")), (.owed_by_age|to_entries|map("\(.key):\(.value)")|join(",")), (.owed_by_source|to_entries|map("\(.key):\(.value)")|join(","))]|join("|")' <<< "$j")"
+  is "...judge totals summed over the tallied, the untallied counted apart; repeats, moves, a session in two dirs" \
+     "2|1|5|6|1|10|3|2700|120|2025-10-04|3|2|1|1" \
+     "$(jq -r '[.tallied,.untallied,.judge.turns,.judge.calls,.judge.failedCalls,.judge.items,.judge.reported,.judge.inputTokens,.judge.outputTokens,.judge.since,.repeats,.repeated_items,.moved,.in_two_dirs]|map(tostring)|join("|")' <<< "$j")"
+  txt="$(lgm)"
+  is "the report says which calls reported tokens, and what untallied means" "1|1" \
+     "$(grep -c 'input 2700  output 120  (3 of 6 calls reported usage)' <<< "$txt" || true)|$(grep -c '1 untallied (written before the counter: spend unknown, not zero)' <<< "$txt" || true)"
+  leak=0; for w in toolbox sess-aaa sess-bbb acme alias twin "$LG"; do grep -qF -- "$w" <<< "$txt$j" && leak=$((leak + 1)); done
+  is "...and neither output names a text, a session, a profile or a path" "0" "$leak"
+  is "--fleet-dir reads only the dirs given" "1|2" \
+     "$(lgm --json --fleet-dir "$LG/h/.claude-acme/fleet" | jq -r '[.fleet_dirs,.ledgers]|map(tostring)|join("|")')"
+  rm -rf "${LG:?}"
+else
+  skip "fleet-meter --ledger counts states, owed ages and judge calls, and names nothing" "node or jq missing"
+fi
+
 # ── 6a4. the evaluator refuses a verdict it cannot support ───────────────────
 # Plan item #5 promotes a warning to a hard gate only where a failure mode SHOWS UP. Four
 # measurements decide it, and on the day it ships all four are unmeasurable: #3 and #4 are
