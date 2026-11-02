@@ -98,17 +98,21 @@ DECISIONS="$(oneline "$DECISIONS")"
 # records what the worker heard, and a worker that could edit the ask could make any
 # disagreement disappear. A worktree with no row yet (an adopted session, a checkout a
 # lead never spawned into) still gets one, with the ask left as "-" rather than invented.
-ASKED="-"; SESSION="${CLAUDE_FLEET_SLOT:-}"
+#   The KIND (column 7, fleet-spawn --kind) is carried across for the same reason: it is
+# what the lead asked for, not what the worker heard, and an ack that dropped it would make
+# a verify worker read as an unlabelled one the moment it said what it understood.
+ASKED="-"; SESSION="${CLAUDE_FLEET_SLOT:-}"; KIND=""
 if [ -f "$MANIFEST" ]; then
-  _row="$(awk -F'\t' -v w="$WT" '$1==w{print $4 "\x1f" $2; exit}' "$MANIFEST" 2>/dev/null)"
+  _row="$(awk -F'\t' -v w="$WT" '$1==w{print $4 "\x1f" $2 "\x1f" $7; exit}' "$MANIFEST" 2>/dev/null)"
   # \x1f and not tab to carry these two back: the ASK may be "-" but the SESSION can be
   # empty, and tab is IFS-whitespace — an empty second field would collapse and the ask
   # would land in the session variable. Our own wire, inside one process, so \x1f is
   # exactly the right choice (the tmux formatter that mangles it is nowhere near this).
   if [ -n "$_row" ]; then
-    IFS=$'\x1f' read -r _a _s <<<"$_row"
+    IFS=$'\x1f' read -r _a _s _k <<<"$_row"
     [ -n "${_a:-}" ] && ASKED="$_a"
     [ -n "${_s:-}" ] && SESSION="$_s"
+    KIND="${_k:-}"
   fi
 fi
 [ -n "$SESSION" ] || SESSION="$(basename "$WT")"
@@ -116,7 +120,11 @@ fi
 mkdir -p "$FLEET_DIR" 2>/dev/null
 mtmp="$MANIFEST.$$.tmp"
 { [ -f "$MANIFEST" ] && awk -F'\t' -v w="$WT" '$1!=w' "$MANIFEST"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$WT" "$SESSION" "$BRANCH" "$ASKED" "$UNDERSTOOD" "$DECISIONS"; } \
+  if [ -n "$KIND" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$WT" "$SESSION" "$BRANCH" "$ASKED" "$UNDERSTOOD" "$DECISIONS" "$KIND"
+  else
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$WT" "$SESSION" "$BRANCH" "$ASKED" "$UNDERSTOOD" "$DECISIONS"
+  fi; } \
   >"$mtmp" 2>/dev/null && mv -f "$mtmp" "$MANIFEST" 2>/dev/null \
   || { rm -f "$mtmp" 2>/dev/null; echo "fleet-ack: could not write $MANIFEST" >&2; exit 1; }
 

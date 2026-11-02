@@ -93,8 +93,10 @@ makes them the top lead's, and nothing ties them to you.
 
 **A worker is disposable.** When it finishes a task its context is full of that task —
 the files it read, the approach it settled on, the dead ends it half-remembers — and a
-second, unrelated brief gets worked *through* all of it. So a finished worker is retired,
-and the next task goes to a fresh session. What you may reuse is the **folder**:
+second, unrelated brief gets worked *through* all of it. It is also the expensive way: on
+one busy fleet, re-briefed sessions carried 300–900k tokens of an old task into new work,
+and every call re-reads all of it. So a finished worker is retired, and the next task goes
+to a fresh session. What you may reuse is the **folder**:
 
 1. A worker finished and its PR merged → **`fleet-stop --reclaim <session>`**. It stops
    the session and removes the worktree when that is safe (a squash-merged PR on a clean
@@ -240,7 +242,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | see live sessions + status | `fleet-list` |
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
 | a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
-| a NEW task | `fleet-spawn <name> [--reuse <free worktree>] --prompt "<self-contained brief>"` — always a new session |
+| a NEW task | `fleet-spawn <name> [--reuse <free worktree>] --kind <verify\|ci\|docs\|video\|build> --prompt "<self-contained brief>"` — always a new session |
 | a follow-up on the SAME PR (red CI, a review note) | `fleet-send <session> "<follow-up>"` — refused for a worker whose task already shipped; `--anyway` only for same-work follow-ups |
 | **record what you heard** (you are the worker) | `fleet-ack "<one line of what you understood>" --from "<the decisions you are working from>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
@@ -255,8 +257,17 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
 | stop a worker for good (or a dead orphan) | `fleet-stop <session>` |
 
-`fleet-spawn` accepts `--model opus` for heavier tracks (workers otherwise use the
-account default). It records each worker's task in a manifest, so `fleet-worktrees`
+**Pick the model by the KIND of task.** `fleet-spawn --kind <verify|ci|docs|video|build>`
+(MCP: `kind`) starts the worker on the model the project maps that kind to. Verify, CI,
+docs and video are the cheap kinds: reading a diff, watching a pipeline, writing docs or
+assembling a video does not need the model a build does. On one busy fleet every worker
+ran on the account default, and one verifier alone was 4.6% of the spend. The map is
+opt-in per project and a model choice is the owner's, so set it when they ask
+(`fleet-project set <project> model-verify sonnet`; `fleet-project get <project>` shows
+it). A kind with no entry starts on the
+account default, the same as no `--kind`, so pass `--kind` anyway: it is recorded, and
+`fleet-worktrees` shows it as `[verify]` in ASKED. An explicit `--model opus` always wins.
+`fleet-spawn` records each worker's task in a manifest, so `fleet-worktrees`
 shows *what each worktree is for* — that's how you rebuild your map after a restart
 instead of guessing. `--from` bases the branch on your **local** ref (use
 `--from HEAD` for the current one) and only falls back to the remote tip if local
@@ -317,7 +328,16 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 ## Rules
 
 - **A new task is a new session.** Never hand a finished worker a second task; retire it
-  with `fleet-stop --reclaim` and `fleet-spawn` the next one.
+  with `fleet-stop --reclaim` and `fleet-spawn` the next one (`--reuse <worktree>` keeps
+  the folder, never the conversation).
+- **Pick the model by kind.** `--kind verify|ci|docs|video` for the cheap work, `--kind
+  build` for the code. Say which in every spawn.
+- **Waiting on CI is one background watch, then end the turn.** Never a sleep or `until`
+  loop, and never a new watch armed on each wake: every wake re-reads the whole context. On
+  one fleet, workers ran 2,785 polling commands, and 25% of the spend was in turns woken by
+  background-task notifications, mostly CI. If the brief's done-criterion is "PR open and
+  CI triggered", the worker should not watch CI at all, so write it that way unless you
+  need the result.
 - **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree's folder; only
   `--new` when none fit.
 - **Stuck ≠ busy — reach for `fleet-answer`, not another `fleet-send`.** A worker

@@ -5,6 +5,7 @@
 # fleet-project rm <name>
 # fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
 # fleet-project set <name | -s SOCK> context-window <300k|off|default>
+# fleet-project set <name | -s SOCK> model-<verify|ci|docs|video|build> <model|default>
 # fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
@@ -31,6 +32,9 @@
 #           session of the project is launched with (lib/context-window.sh): 300k when
 #           unset, `off` for the model's whole window, `default` to drop the override.
 #           Sessions read it when they start, so a running one takes it at its next start.
+#           set <name> model-<kind> <model|default> — the model `fleet-spawn --kind <kind>`
+#           starts a worker on (lib/model-kind.sh). Unset, a kind gets the account default,
+#           exactly as a spawn without --kind does; an explicit --model always wins.
 #   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
@@ -306,6 +310,7 @@ case "$cmd" in
     [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
     SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
     . "$BIN_DIR/../lib/context-window.sh"
+    . "$BIN_DIR/../lib/model-kind.sh"
     if [ "$cmd" = get ]; then
       for b in $BOUNDARY_SETTINGS; do
         boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
@@ -314,6 +319,11 @@ case "$cmd" in
       IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
       printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
         context-window "$(context_window_label "$cw")" "$cwsrc"
+      for k in $MODEL_KINDS; do
+        m="$(model_kind_resolve "$DIR" "$SOCK" "$k")"
+        printf '%-15s %-4s  (%s; %s)\n' "model-$k" "${m:--}" "$(model_kind_label "$k")" \
+          "$([ -n "$m" ] && echo "fleet-spawn --kind $k uses it" || echo 'unset: the account default')"
+      done
       exit 0
     fi
     B="${POS[0]:-}"; V="${POS[1]:-}"
@@ -335,8 +345,28 @@ case "$cmd" in
       echo "fleet-project: context ceiling for project '$NAME': $(context_window_label "$cw") (from $cwsrc) — sessions pick it up when they next start"
       exit 0
     fi
+    # THE MODEL FOR A KIND OF TASK (lib/model-kind.sh): what `fleet-spawn --kind <kind>` starts
+    # a worker on. Project-wide, like the ceiling, and it changes no running session — a worker
+    # takes its model when it is spawned. `default` drops the entry, so that kind goes back to
+    # the account default; nothing here sets a model for a kind that was not asked about.
+    case "$B" in model-*)
+      k="${B#model-}"
+      model_kind_valid "$k" || { echo "fleet-project: unknown kind '$k' (known: $MODEL_KINDS)" >&2; exit 1; }
+      [ -z "$SESS" ] || { echo "fleet-project: model-$k is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.model-$k"
+        echo "fleet-project: '$NAME' $k workers start on the account default"
+      elif model_name_valid "$V"; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.model-$k"
+        echo "fleet-project: '$NAME' $k workers start on $V (fleet-spawn --kind $k; an explicit --model still wins)"
+      else
+        echo "fleet-project: model-$k takes a model name (sonnet, haiku, claude-opus-5-5, …) or default" >&2; exit 1
+      fi
+      exit 0 ;;
+    esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]  |  set <name|-s sock> context-window <300k|off|default>" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -386,6 +416,7 @@ case "$cmd" in
     echo "  fleet-project rm <name>" >&2
     echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
     echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
+    echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac
