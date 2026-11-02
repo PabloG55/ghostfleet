@@ -13583,6 +13583,91 @@ else
   skip "fleet-stop closes a merged worker's items; fleet-inbox closes carried ones once their PR merges" "git, tmux, node or jq missing"
 fi
 
+# ── a worker that died without a fleet-stop: its owed items reach its lead ─────
+# fleet-stop is the only path that carried a worker's open, waiting and not-done items, so a
+# pane killed by hand, a crash or a reboot left them in a ledger nobody opens again.
+# lib/ledger-orphans.mjs, run by fleet-inbox, carries for a worker that is DEAD by elimination:
+# no session on the socket, no asleep/exited/parked marker, no record for a day. Every one of
+# those exceptions is a fixture here, beside the two that are dead, and the same look closes
+# the carried item whose branch has merged, which is why the orphan pass runs first.
+group "fleet-inbox carries a dead worker's ledger to its lead, once, and never a sleeping one"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LO="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LO/fleet" "$LO/stub"
+  printf '#!/bin/sh\nexit 1\n' > "$LO/stub/gh"; chmod +x "$LO/stub/gh"     # never the network
+  git init -q -b main "$LO/repo" 2>/dev/null
+  git -C "$LO/repo" config user.email t@t; git -C "$LO/repo" config user.name t
+  : > "$LO/repo/f"; git -C "$LO/repo" add -A; git -C "$LO/repo" commit -qm i 2>/dev/null
+  git -C "$LO/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$LO/repo" worktree add -q "$LO/repo/.worktrees/old-api" -b feat/old-api 2>/dev/null
+  printf 'feat/old-api\x1f91\x1fMERGED\n' > "$LO/fleet/prs.acme_widget"
+  LOT=1760000000000; LOD=$((1760000000 - 2 * 86400)); LOH=$((1760000000 - 3600))
+  lorec() { printf '{"session_id":"%s","sock":"cforphan","slot":"%s","ts":%s,"cwd":"%s","branch":"%s"}' "$1" "$2" "$3" "$4" "$5" > "$LO/fleet/$1.json"; }
+  lorec m-1 master 1760000000 "$LO/repo" main
+  lorec w-1 old-api "$LOD" "$LO/repo/.worktrees/old-api" feat/old-api   # dead two days, linked worktree
+  lorec w-2 notes "$LOD" "$LO/repo" main                                # dead two days, main checkout
+  lorec w-3 kid "$LOD" "$LO/repo" main                                  # dead, reports to a live sub-lead
+  lorec w-4 fresh "$LOH" "$LO/repo" main                                # gone an hour: maybe restarting
+  lorec w-5 nap "$LOD" "$LO/repo" main;    : > "$LO/fleet/cforphan.nap.asleep"
+  lorec w-6 paused "$LOD" "$LO/repo" main; : > "$LO/fleet/cforphan.paused.parked"
+  lorec w-7 alive "$LOD" "$LO/repo" main                                # old record, live session
+  lorec w-8 sub "$LOD" "$LO/repo" main
+  printf 'sub\n' > "$LO/fleet/cforphan.kid.parent"
+  printf '{"session_id":"x-1","sock":"cfother","slot":"stray","ts":%s}' "$LOD" > "$LO/fleet/x-1.json"
+  node --no-warnings --input-type=module - "$ROOT" "$LO/fleet" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+const book = (id, rows) => {
+  let l = L.emptyLedger()
+  for (const [text, state] of rows) {
+    l = L.addItem(l, { text, at: 1, source: 'fleet', asIs: true })
+    l = { ...l, items: l.items.map((i, k) => (k === l.items.length - 1 ? { ...i, state } : i)) }
+  }
+  fs.writeFileSync(`${process.argv[3]}/${id}.ledger`, JSON.stringify(l))
+}
+book('m-1', [['review the export PR', 'open']])
+book('w-1', [['add the acme-api export endpoint', 'open'], ['pick the export format', 'waiting'], ['rename the flag', 'done']])
+book('w-2', [['write the billing-svc notes', 'not-done']])
+book('w-3', [['check the toolbox CI', 'open']])
+book('w-8', [])
+for (const id of ['w-4', 'w-5', 'w-6', 'w-7', 'x-1']) book(id, [['still owed by ' + id, 'open']])
+NODE
+  for f in w-4 w-5 w-6 w-7 x-1; do cp "$LO/fleet/$f.ledger" "$LO/$f.before"; done
+  tmux -L cforphan kill-server 2>/dev/null; tmux -L cfother kill-server 2>/dev/null
+  tmux -L cforphan new-session -d -s master -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s alive -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s paused -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s sub -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan kill-session -t '=paused' 2>/dev/null                  # parked marker, no session
+  loenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT PATH="$LO/stub:$PATH" CLAUDE_FLEET_NOW_MS=$LOT CLAUDE_FLEET_DIR="$LO/fleet" "$@"; }
+  dry="$(loenv node --no-warnings "$ROOT/lib/ledger-orphans.mjs" "$LO/fleet" cforphan --dry-run 2>&1)"
+  is "--dry-run names the three dead workers and changes nothing" "3|0" \
+     "$(grep -c 'would carry' <<< "$dry" || true)|$(jq '[.items[]|select(.carried)]|length' "$LO/fleet/m-1.ledger")"
+  out="$(cd "$LO/repo" && loenv "$ROOT/bin/fleet-inbox" -s cforphan 2>&1)"
+  is "the inbox says what it carried, naming the worker as gone" "1|1|1" \
+     "$(grep -c "ledger: 'old-api' is gone (no session on cforphan, last seen 2d ago): carried 2 unfinished ledger items to 'master'" <<< "$out" || true)|$(grep -c "'notes' is gone.*carried 1 unfinished ledger item to 'master'" <<< "$out" || true)|$(grep -c "'kid' is gone.*carried 1 unfinished ledger item to 'sub'" <<< "$out" || true)"
+  is "...the lead holds what was owed, the branch on the worktree's items only, and the merged one closed on the same look" \
+     "[old-api] add the acme-api export endpoint:done:feat/old-api|[old-api] pick the export format:done:feat/old-api|[notes] write the billing-svc notes:open:" \
+     "$(jq -r '[.items[]|select(.carried)|"\(.text):\(.state):\(.carried.branch // "")"]|join("|")' "$LO/fleet/m-1.ledger")"
+  is "...a sub-lead's child goes to the sub-lead, not the master" "[kid] check the toolbox CI:open" \
+     "$(jq -r '[.items[]|select(.carried)|"\(.text):\(.state)"]|join("|")' "$LO/fleet/w-8.ledger")"
+  is "...the dead workers' own copies are carried, and their done item is left alone" "carried carried done|carried|carried" \
+     "$(jq -r '[.items[].state]|join(" ")' "$LO/fleet/w-1.ledger")|$(jq -r '.items[0].state' "$LO/fleet/w-2.ledger")|$(jq -r '.items[0].state' "$LO/fleet/w-3.ledger")"
+  kept=0; for f in w-4 w-5 w-6 w-7 x-1; do cmp -s "$LO/fleet/$f.ledger" "$LO/$f.before" && kept=$((kept + 1)); done
+  is "...and nothing of a worker gone an hour, asleep, parked, live, or on another socket" "5" "$kept"
+  lead="$(cat "$LO/fleet/m-1.ledger")"
+  out="$(cd "$LO/repo" && loenv "$ROOT/bin/fleet-inbox" -s cforphan 2>&1)"
+  is "a second look carries nothing and says nothing" "0|same" \
+     "$(grep -c 'is gone' <<< "$out" || true)|$([ "$lead" = "$(cat "$LO/fleet/m-1.ledger")" ] && echo same || echo changed)"
+  # a socket whose server cannot be asked: nobody on it is dead
+  lorec y-1 lone "$LOD" "$LO/repo" main; sed -i.bak 's/"cforphan"/"cfnoserver"/' "$LO/fleet/y-1.json"; rm -f "$LO/fleet/y-1.json.bak"
+  printf '%s' "$(cat "$LO/fleet/w-4.ledger")" > "$LO/fleet/y-1.ledger"
+  is "a socket with no server reads as unknown, never as dead" "" \
+     "$(loenv node --no-warnings "$ROOT/lib/ledger-orphans.mjs" "$LO/fleet" cfnoserver --dry-run 2>&1)"
+  tmux -L cforphan kill-server 2>/dev/null; rm -rf "${LO:?}"
+else
+  skip "fleet-inbox carries a dead worker's ledger to its lead, once, and never a sleeping one" "git, tmux, node or jq missing"
+fi
+
 # ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────
 # Refused twice in one day, each time right after the worker's PR was squash-merged:
 # "remove it anyway with: --reclaim --force". Every gate fleet-clean had was blind to it
