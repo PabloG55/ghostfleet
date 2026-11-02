@@ -14,6 +14,8 @@
 //     fleet-meter --contract           what #3 and #4 must emit for #5 to be measurable
 //     fleet-meter --context            spend by context size and turns by what started them
 //                                      (--since/--until YYYY-MM-DD; reads $CLAUDE_CONFIG_DIR's corpus)
+//     fleet-meter --ledger             ledger states, owed-item ages and judge calls, every profile
+//                                      (--fleet-dir DIR, repeatable, reads only those)
 //
 // WHY THIS EXISTS. Every number in docs/improvement-plan.md was produced by hand, weeks
 // after the fact, by reading transcripts. Numbers gathered that way cannot be re-gathered:
@@ -1005,6 +1007,16 @@ if (has('--context')) {
   const day = (f) => { const v = val(f, null); if (v && !/^\d{4}-\d{2}-\d{2}/.test(v)) { console.error(`fleet-meter: ${f} takes YYYY-MM-DD`); process.exit(2); } return v; };
   const root = val('--corpus', path.join(process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || '', '.claude'), 'projects'));
   const rep = await measure(root, { since: day('--since'), until: day('--until') });
+  console.log(has('--json') ? JSON.stringify(rep, null, 2) : render(rep));
+  process.exit(0);
+}
+
+// THE LEDGER REPORT reads fleet dirs, not the transcript corpus, and is counts only
+// (lib/ledger-meter.mjs). It runs before anything below reads the corpus, as --context does.
+if (has('--ledger')) {
+  const { fleetDirs, measure, render } = await import(new URL('../lib/ledger-meter.mjs', import.meta.url));
+  const given = argv.flatMap((a, i) => (a === '--fleet-dir' && argv[i + 1] ? [argv[i + 1]] : []));
+  const rep = measure(given.length ? given : fleetDirs(), { nowMs: Number(process.env.CLAUDE_FLEET_NOW_MS) || Date.now() });
   console.log(has('--json') ? JSON.stringify(rep, null, 2) : render(rep));
   process.exit(0);
 }

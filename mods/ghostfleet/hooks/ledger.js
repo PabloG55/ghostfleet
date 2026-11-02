@@ -4,7 +4,11 @@
 //
 // <fleet dir>/<session_id>.ledger   (JSON, but deliberately NOT named *.json: eight readers
 //                                    glob <fleet dir>/*.json as status records)
-//   { v: 1, seq, prompt, window, items: [ { id, text, at, turnId, state, source, ... } ], judge? }
+//   { v: 1, seq, prompt, window, items: [ { id, text, at, turnId, state, source, ... } ], judge?, judged? }
+//
+//   judge    the LAST judged turn: what it cost and whether it failed (ledgerSummary reads it)
+//   judged   every judged turn since `since`, summed (countJudge): what the judge costs, which
+//            the last result alone could never say. fleet-meter --ledger adds these up
 //
 //   state    open | done | not-done | stale (a promise no judged turn addressed, see STALE_TURNS)
 //            | dropped (the agent said it was not a real ask, or the person cancelled it)
@@ -13,6 +17,8 @@
 //            | expired (stale and untouched for EXPIRE_DAYS, or waiting and untouched for
 //              WAITING_EXPIRE_MS: retired, not open, still listed by `all` and still closable)
 //            | carried (its session was stopped and the item went to its lead, see carryItems)
+//            | moved (its session went on under another profile's fleet dir, and the item with
+//              it: this file is the copy left behind, see adoptLedger)
 //            stale and waiting are DORMANT: not open, but a turn that mentions one has it
 //            judged again (revisit), so work that finished later still closes it
 //   source   user     typed at the prompt (or the phone's bridge), idle or mid-turn; or the
@@ -30,6 +36,8 @@
 //   queued   typed over a running turn; interrupted: its turn was stopped (Esc). Either may
 //            never have reached the model, and the gate asks the transcript first. A resend
 //            within RESEND_MS of the stop is folded into the interrupted item (resendOf)
+//   repeated how many more times the same words were sent while it was open, each within
+//            REPEAT_MS of the last (`repeatedAt`): one ask, not one item per send (repeatOf)
 //   replies  [{ at, text }]: bare answers to a numbered question the agent asked about it
 //   prompt   the number of the prompt that made it (ledger.prompt counts them); `window` is
 //            the first prompt of the latest one, and only items from `window` on are gated.
@@ -245,6 +253,24 @@ export function addPrompt(ledger, { text, at, turnId, source, queued, whole = fa
       ids.push(again.id)
       continue
     }
+    // The same words again while the first copy is open: that item, handed to this turn as a
+    // resend is (its `at` stays: the ask is as old as its first send).
+    const same = repeatOf(next, ask, { at, source })
+    if (same) {
+      next = {
+        ...next,
+        items: next.items.map(i => {
+          if (i !== same) return i
+          const { interrupted, interruptedAt, turnId: _t, queued: _q, inTurn: _m, ...rest } = i
+          return {
+            ...rest, ...(turnId ? { turnId } : {}), ...(queued ? { queued: true } : {}), ...(inTurn ? { inTurn } : {}),
+            prompt, repeated: (Number(i.repeated) || 0) + 1, repeatedAt: at,
+          }
+        }),
+      }
+      ids.push(same.id)
+      continue
+    }
     next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true, inTurn })
     ids.push(next.items[next.items.length - 1].id)
     made.push(next.items[next.items.length - 1].id)
@@ -266,6 +292,27 @@ export function resendOf(ledger, ask, { at, source }) {
     && Number(at) - (Number(i.interruptedAt) || Number(i.at) || 0) <= RESEND_MS && sameWords(i.text, ask))
   return near.length ? near[near.length - 1] : null
 }
+// THE SAME WORDS, SENT AGAIN. Measured over fourteen days of real ledgers in two profiles: 101
+// items repeated an earlier item's exact text in the same session, 52 of them a lead's brief,
+// in 43 sessions and up to 12 in one. 31 came within ten minutes of the first copy, and each
+// was an item of its own: two rows on the band for one ask, each judged, and a proof that
+// closed one left the other open. So a new ask whose normalized text EQUALS an open item of
+// the same source, within REPEAT_MS of that item's last send, is that item: `repeated` counts
+// the extra sends, `repeatedAt` is the last, and the item joins the new prompt's window.
+// Exact text, not sameWords: an edited resend is a stopped message (resendOf), and a near
+// match from a lead is as likely a second, different brief. Only an OPEN item: words that
+// repeat a closed one are asking again. And only inside the window: 54 of the 101 came more
+// than an hour apart, a new ask about the same thing, and those stay two items.
+export const REPEAT_MS = 10 * 60_000
+const normAsk = t => oneLine(t).toLowerCase().replace(/…/g, ' ').replace(/\s+/g, ' ').replace(/[\s.!?]+$/, '').trim()
+export function repeatOf(ledger, ask, { at, source }) {
+  const want = normAsk(ask)
+  if (!want) return null
+  const hit = ledger.items.filter(i => i.state === 'open' && i.source === source && normAsk(i.text) === want
+    && Number(at) - (Number(i.repeatedAt) || Number(i.at) || 0) <= REPEAT_MS)
+  return hit.length ? hit[hit.length - 1] : null
+}
+
 // Equal; one the start of the other; or sharing most of their opening; or most of their
 // words. An item's text is an excerpt ("head… tail"), so the cut is set aside first.
 export function sameWords(a, b) {
@@ -580,6 +627,30 @@ export function judgeBatches(items, n = JUDGE_BATCH) {
   const out = []
   for (let k = 0; k < newest.length; k += n) out.push(newest.slice(k, k + n))
   return out
+}
+
+// WHAT THE JUDGE COSTS, KEPT AS IT GOES. `judge` holds the last judged turn and nothing else,
+// so a fleet's judge spend could not be counted at all: every turn wrote over the one before.
+// `judged` adds each turn's calls to running totals in the same file: turns judged, model
+// calls, calls that failed open, items judged, and tokens, counted only from calls whose
+// result reported `usage` (`reported`), so a host that reports none reads as "not reported"
+// rather than as a free judge. Counts only: no text, no item ids. `since` is the first turn
+// counted; a ledger from before this field starts at zero, never at a guess.
+export function countJudge(totals, { at, calls = 0, failedCalls = 0, items = 0, usage = [] }) {
+  const t = totals && typeof totals === 'object' ? totals : {}
+  const n = v => Number(v) || 0
+  const rep = usage.filter(u => u && typeof u === 'object')
+  return {
+    since: n(t.since) || at,
+    at,
+    turns: n(t.turns) + 1,
+    calls: n(t.calls) + calls,
+    failedCalls: n(t.failedCalls) + failedCalls,
+    items: n(t.items) + items,
+    reported: n(t.reported) + rep.length,
+    inputTokens: n(t.inputTokens) + rep.reduce((k, u) => k + n(u.input_tokens), 0),
+    outputTokens: n(t.outputTokens) + rep.reduce((k, u) => k + n(u.output_tokens), 0),
+  }
 }
 
 // A promise is not gated by default, it is only shown, and one no turn ever addresses would
@@ -1204,6 +1275,64 @@ export function markCarried(worker, moved, { to, nowMs }) {
       ? { ...i, state: 'carried', closedAt: nowMs, closedBy: 'fleet-stop', carriedTo: { session: to, id: moved.get(i.id) }, reason: `carried to ${to} as ${moved.get(i.id)}` }
       : i)),
   }
+}
+
+// A SESSION THAT WENT ON UNDER ANOTHER PROFILE TAKES WHAT IT OWES WITH IT. A ledger is filed
+// under the session's id in the fleet dir the session runs under, and a conversation can be
+// resumed under another profile: its transcript copied into that profile's projects dir and
+// reopened there, where the mod writes <that profile's fleet dir>/<same id>.ledger. Measured:
+// 16 session ids with a ledger in two profiles' fleet dirs. In 13 the newer file began as a
+// copy of the older one (the same items, by id and time; 7 of them byte-identical to the
+// millisecond, a time-preserving copy taken with the transcript), and in 3 the newer one
+// started empty beside it. Either way the file the session stopped writing to was never read
+// again: in 9 of the 16 it still held open, waiting or not-done items, which nobody would see. The copy is made
+// outside ghostfleet, so the fix is where every path meets: the mod, when the session starts
+// under a fleet dir, asks every OTHER profile's fleet dir for a file of its own id.
+//   Each item owed there (CARRIED's states) that this ledger does not already hold, by its
+// time, source and words, is added here with its state as it was (`movedFrom`), and one this
+// ledger holds as `moved` (the session went there and came back) is that item again. In the
+// old file each becomes `moved`, with where it went (`movedTo`): no open item is left behind,
+// and a second start finds nothing to move. Its history stays; nothing is deleted. Written
+// here FIRST and there after, so a failure between the two leaves an item in both files,
+// never in neither, and the next start finds it here and only marks it there.
+//   Not `carried`: the item is still this session's own, so it keeps its source, its age and
+// its proof rule, and is not handed to anybody.
+const MOVE_KEY = i => `${Number(i.at) || 0}|${i.source || ''}|${normAsk(i.text)}`
+export function adoptLedger(here, old, { from, to, nowMs }) {
+  const owed = old.items.filter(i => CARRIED.has(i.state))
+  if (!owed.length) return null
+  const mine = new Map(here.items.map(i => [MOVE_KEY(i), i]))
+  let next = here
+  const moved = new Map()
+  let added = 0
+  let back = 0
+  for (const i of owed) {
+    const h = mine.get(MOVE_KEY(i))
+    if (h) {
+      if (h.state === 'moved') {
+        const { closedAt, closedBy, reason, movedTo, ...rest } = h
+        next = { ...next, items: next.items.map(x => (x === h ? { ...rest, state: i.state, ...(i.progress ? { progress: i.progress } : {}) } : x)) }
+        back++
+      }
+      moved.set(i.id, h.id)
+      continue
+    }
+    // Its old prompt number counts another file's prompts, and an inTurn mark belongs to a
+    // turn of a process that is gone: both dropped, so it is owed and never re-gated.
+    const { id, prompt, inTurn, ...rest } = i
+    next = addItem(next, { text: i.text, at: i.at, source: i.source, asIs: true })
+    const it = next.items[next.items.length - 1]
+    next = { ...next, items: next.items.map(x => (x === it ? { ...rest, id: it.id, movedFrom: { dir: from, id } } : x)) }
+    moved.set(i.id, it.id)
+    added++
+  }
+  const left = {
+    ...old,
+    items: old.items.map(i => (moved.has(i.id) && CARRIED.has(i.state)
+      ? { ...i, state: 'moved', closedAt: nowMs, closedBy: 'fleet', movedTo: { dir: to, id: moved.get(i.id) }, reason: `moved with its session to ${to}` }
+      : i)),
+  }
+  return { here: added || back ? next : null, old: left, added, back, moved: moved.size }
 }
 
 // A WORKER WHOSE PR MERGED OWES NOTHING. Carried, its items were the lead's to prove all over

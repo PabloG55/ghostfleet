@@ -13649,6 +13649,144 @@ else
   skip "fleet-stop closes a merged worker's items; fleet-inbox closes carried ones once their PR merges" "git, tmux, node or jq missing"
 fi
 
+# ── a hung gh cannot hang fleet-stop ───────────────────────────────────────────
+# fleet-stop asks for the worker's PR twice, through fleet-merged (whose stale cache refreshes
+# with `gh pr list`) and through `gh pr view`, and neither call had a bound, so a gh stuck on
+# the network or on an auth prompt kept the stop from ever killing the worker or carrying
+# its items. This gh never answers. Each call is bounded (CLAUDE_FLEET_GH_TIMEOUT, here 1s),
+# and an unanswered one is "I don't know": the items are carried as before.
+group "a hung gh cannot hang fleet-stop: it gives up and carries the items as before"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  GT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$GT/fleet" "$GT/stub"
+  # a gh that hangs in a GRANDCHILD holding its stdout, as a git or credential helper under gh
+  # would, and writes down every pid it hung in, so the cleanup kills those and nothing else
+  cat > "$GT/stub/gh" <<STUB
+#!/bin/sh
+echo \$\$ >> "$GT/gh.pids"
+( sh -c 'sleep 20 & echo \$! >> "$GT/gh.pids"; wait' ; : )
+echo "MERGED 5"
+STUB
+  chmod +x "$GT/stub/gh"
+  git init -q -b main "$GT/repo" 2>/dev/null
+  git -C "$GT/repo" config user.email t@t; git -C "$GT/repo" config user.name t
+  : > "$GT/repo/f"; git -C "$GT/repo" add -A; git -C "$GT/repo" commit -qm i 2>/dev/null
+  git -C "$GT/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$GT/repo" worktree add -q "$GT/repo/.worktrees/slow" -b feat/slow 2>/dev/null
+  printf '{"session_id":"m-1","sock":"cfghhang","slot":"master","ts":5}' > "$GT/fleet/m-1.json"
+  printf '{"session_id":"w-1","sock":"cfghhang","slot":"slow-pr","ts":5}' > "$GT/fleet/w-1.json"
+  node --no-warnings --input-type=module - "$ROOT" "$GT/fleet" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+let l = L.emptyLedger()
+for (const t of ['add the acme-api export endpoint', 'add a changelog line']) l = L.addItem(l, { text: t, at: 1, source: 'fleet', asIs: true })
+fs.writeFileSync(`${process.argv[3]}/w-1.ledger`, JSON.stringify(l))
+fs.writeFileSync(`${process.argv[3]}/m-1.ledger`, JSON.stringify(L.emptyLedger()))
+NODE
+  tmux -L cfghhang kill-server 2>/dev/null
+  tmux -L cfghhang new-session -d -s master -c "$GT/repo" 'sleep 90' 2>/dev/null
+  tmux -L cfghhang new-session -d -s slow-pr -c "$GT/repo/.worktrees/slow" 'sleep 90' 2>/dev/null
+  sleep 0.5
+  t0=$SECONDS
+  out="$(env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT PATH="$GT/stub:$PATH" CLAUDE_FLEET_GH_TIMEOUT=1 CLAUDE_FLEET_NOW_MS=1760000000000 \
+         CLAUDE_FLEET_DIR="$GT/fleet" "$ROOT/bin/fleet-stop" -s cfghhang slow-pr 2>&1)"
+  took=$((SECONDS - t0))
+  is "gh was asked, and hung" "yes" "$([ -s "$GT/gh.pids" ] && echo yes || echo no)"
+  is "...the stop finished well inside the hang (under 12s of gh's 20)" "yes" "$([ "$took" -lt 12 ] && echo yes || echo "no (${took}s)")"
+  is "...killed the worker, and carried its items with no PR, as when GitHub cannot be asked" \
+     "0|1|0|2" \
+     "$(tmux -L cfghhang has-session -t '=slow-pr' 2>/dev/null && echo 1 || echo 0)|$(grep -c "carried 2 unfinished ledger items to 'master'" <<< "$out" || true)|$(grep -c 'closed .* as done' <<< "$out" || true)|$(jq '[.items[]|select(.carried and .carried.pr == null)]|length' "$GT/fleet/m-1.ledger")"
+  is "...and left no temp file of its own behind" "0" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'fleet-stop-gh.*' -newer "$GT/stub/gh" 2>/dev/null | wc -l | tr -d ' ')"
+  while read -r p; do [ -n "$p" ] && kill "$p" 2>/dev/null; done < "$GT/gh.pids"
+  tmux -L cfghhang kill-server 2>/dev/null; rm -rf "${GT:?}"
+else
+  skip "a hung gh cannot hang fleet-stop: it gives up and carries the items as before" "git, tmux, node or jq missing"
+fi
+
+# ── a worker that died without a fleet-stop: its owed items reach its lead ─────
+# fleet-stop is the only path that carried a worker's open, waiting and not-done items, so a
+# pane killed by hand, a crash or a reboot left them in a ledger nobody opens again.
+# lib/ledger-orphans.mjs, run by fleet-inbox, carries for a worker that is DEAD by elimination:
+# no session on the socket, no asleep/exited/parked marker, no record for a day. Every one of
+# those exceptions is a fixture here, beside the two that are dead, and the same look closes
+# the carried item whose branch has merged, which is why the orphan pass runs first.
+group "fleet-inbox carries a dead worker's ledger to its lead, once, and never a sleeping one"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LO="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LO/fleet" "$LO/stub"
+  printf '#!/bin/sh\nexit 1\n' > "$LO/stub/gh"; chmod +x "$LO/stub/gh"     # never the network
+  git init -q -b main "$LO/repo" 2>/dev/null
+  git -C "$LO/repo" config user.email t@t; git -C "$LO/repo" config user.name t
+  : > "$LO/repo/f"; git -C "$LO/repo" add -A; git -C "$LO/repo" commit -qm i 2>/dev/null
+  git -C "$LO/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$LO/repo" worktree add -q "$LO/repo/.worktrees/old-api" -b feat/old-api 2>/dev/null
+  printf 'feat/old-api\x1f91\x1fMERGED\n' > "$LO/fleet/prs.acme_widget"
+  LOT=1760000000000; LOD=$((1760000000 - 2 * 86400)); LOH=$((1760000000 - 3600))
+  lorec() { printf '{"session_id":"%s","sock":"cforphan","slot":"%s","ts":%s,"cwd":"%s","branch":"%s"}' "$1" "$2" "$3" "$4" "$5" > "$LO/fleet/$1.json"; }
+  lorec m-1 master 1760000000 "$LO/repo" main
+  lorec w-1 old-api "$LOD" "$LO/repo/.worktrees/old-api" feat/old-api   # dead two days, linked worktree
+  lorec w-2 notes "$LOD" "$LO/repo" main                                # dead two days, main checkout
+  lorec w-3 kid "$LOD" "$LO/repo" main                                  # dead, reports to a live sub-lead
+  lorec w-4 fresh "$LOH" "$LO/repo" main                                # gone an hour: maybe restarting
+  lorec w-5 nap "$LOD" "$LO/repo" main;    : > "$LO/fleet/cforphan.nap.asleep"
+  lorec w-6 paused "$LOD" "$LO/repo" main; : > "$LO/fleet/cforphan.paused.parked"
+  lorec w-7 alive "$LOD" "$LO/repo" main                                # old record, live session
+  lorec w-8 sub "$LOD" "$LO/repo" main
+  printf 'sub\n' > "$LO/fleet/cforphan.kid.parent"
+  printf '{"session_id":"x-1","sock":"cfother","slot":"stray","ts":%s}' "$LOD" > "$LO/fleet/x-1.json"
+  node --no-warnings --input-type=module - "$ROOT" "$LO/fleet" <<'NODE' 2>/dev/null
+const L = await import(process.argv[2] + '/mods/ghostfleet/hooks/ledger.js')
+const fs = await import('node:fs')
+const book = (id, rows) => {
+  let l = L.emptyLedger()
+  for (const [text, state] of rows) {
+    l = L.addItem(l, { text, at: 1, source: 'fleet', asIs: true })
+    l = { ...l, items: l.items.map((i, k) => (k === l.items.length - 1 ? { ...i, state } : i)) }
+  }
+  fs.writeFileSync(`${process.argv[3]}/${id}.ledger`, JSON.stringify(l))
+}
+book('m-1', [['review the export PR', 'open']])
+book('w-1', [['add the acme-api export endpoint', 'open'], ['pick the export format', 'waiting'], ['rename the flag', 'done']])
+book('w-2', [['write the billing-svc notes', 'not-done']])
+book('w-3', [['check the toolbox CI', 'open']])
+book('w-8', [])
+for (const id of ['w-4', 'w-5', 'w-6', 'w-7', 'x-1']) book(id, [['still owed by ' + id, 'open']])
+NODE
+  for f in w-4 w-5 w-6 w-7 x-1; do cp "$LO/fleet/$f.ledger" "$LO/$f.before"; done
+  tmux -L cforphan kill-server 2>/dev/null; tmux -L cfother kill-server 2>/dev/null
+  tmux -L cforphan new-session -d -s master -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s alive -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s paused -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan new-session -d -s sub -c "$LO/repo" 'sleep 90' 2>/dev/null
+  tmux -L cforphan kill-session -t '=paused' 2>/dev/null                  # parked marker, no session
+  loenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT PATH="$LO/stub:$PATH" CLAUDE_FLEET_NOW_MS=$LOT CLAUDE_FLEET_DIR="$LO/fleet" "$@"; }
+  dry="$(loenv node --no-warnings "$ROOT/lib/ledger-orphans.mjs" "$LO/fleet" cforphan --dry-run 2>&1)"
+  is "--dry-run names the three dead workers and changes nothing" "3|0" \
+     "$(grep -c 'would carry' <<< "$dry" || true)|$(jq '[.items[]|select(.carried)]|length' "$LO/fleet/m-1.ledger")"
+  out="$(cd "$LO/repo" && loenv "$ROOT/bin/fleet-inbox" -s cforphan 2>&1)"
+  is "the inbox says what it carried, naming the worker as gone" "1|1|1" \
+     "$(grep -c "ledger: 'old-api' is gone (no session on cforphan, last seen 2d ago): carried 2 unfinished ledger items to 'master'" <<< "$out" || true)|$(grep -c "'notes' is gone.*carried 1 unfinished ledger item to 'master'" <<< "$out" || true)|$(grep -c "'kid' is gone.*carried 1 unfinished ledger item to 'sub'" <<< "$out" || true)"
+  is "...the lead holds what was owed, the branch on the worktree's items only, and the merged one closed on the same look" \
+     "[old-api] add the acme-api export endpoint:done:feat/old-api|[old-api] pick the export format:done:feat/old-api|[notes] write the billing-svc notes:open:" \
+     "$(jq -r '[.items[]|select(.carried)|"\(.text):\(.state):\(.carried.branch // "")"]|join("|")' "$LO/fleet/m-1.ledger")"
+  is "...a sub-lead's child goes to the sub-lead, not the master" "[kid] check the toolbox CI:open" \
+     "$(jq -r '[.items[]|select(.carried)|"\(.text):\(.state)"]|join("|")' "$LO/fleet/w-8.ledger")"
+  is "...the dead workers' own copies are carried, and their done item is left alone" "carried carried done|carried|carried" \
+     "$(jq -r '[.items[].state]|join(" ")' "$LO/fleet/w-1.ledger")|$(jq -r '.items[0].state' "$LO/fleet/w-2.ledger")|$(jq -r '.items[0].state' "$LO/fleet/w-3.ledger")"
+  kept=0; for f in w-4 w-5 w-6 w-7 x-1; do cmp -s "$LO/fleet/$f.ledger" "$LO/$f.before" && kept=$((kept + 1)); done
+  is "...and nothing of a worker gone an hour, asleep, parked, live, or on another socket" "5" "$kept"
+  lead="$(cat "$LO/fleet/m-1.ledger")"
+  out="$(cd "$LO/repo" && loenv "$ROOT/bin/fleet-inbox" -s cforphan 2>&1)"
+  is "a second look carries nothing and says nothing" "0|same" \
+     "$(grep -c 'is gone' <<< "$out" || true)|$([ "$lead" = "$(cat "$LO/fleet/m-1.ledger")" ] && echo same || echo changed)"
+  # a socket whose server cannot be asked: nobody on it is dead
+  lorec y-1 lone "$LOD" "$LO/repo" main; sed -i.bak 's/"cforphan"/"cfnoserver"/' "$LO/fleet/y-1.json"; rm -f "$LO/fleet/y-1.json.bak"
+  printf '%s' "$(cat "$LO/fleet/w-4.ledger")" > "$LO/fleet/y-1.ledger"
+  is "a socket with no server reads as unknown, never as dead" "" \
+     "$(loenv node --no-warnings "$ROOT/lib/ledger-orphans.mjs" "$LO/fleet" cfnoserver --dry-run 2>&1)"
+  tmux -L cforphan kill-server 2>/dev/null; rm -rf "${LO:?}"
+else
+  skip "fleet-inbox carries a dead worker's ledger to its lead, once, and never a sleeping one" "git, tmux, node or jq missing"
+fi
+
 # ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────
 # Refused twice in one day, each time right after the worker's PR was squash-merged:
 # "remove it anyway with: --reclaim --force". Every gate fleet-clean had was blind to it
@@ -20717,6 +20855,52 @@ MJSON
   rm -rf "$MTR"
 else
   skip "the utilization meter" "node missing"
+fi
+
+# ── fleet-meter --ledger: counts across every profile's fleet dir ────────────
+# Two profiles' fleet dirs, a third that is a LINK to the first (counted once, or every
+# ledger in it would count twice), a ledger written before the judge counter (`untallied`,
+# never summed as zero) and one session in both profiles. The output must name nothing: the
+# fixture's texts, session ids and the profile directory names are swept for in it.
+group "fleet-meter --ledger counts states, owed ages and judge calls, and names nothing"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LG="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LG/h/.claude/fleet" "$LG/h/.claude-acme/fleet" "$LG/h/.config"
+  ln -s "$LG/h/.claude/fleet" "$LG/h/.claude-alias"; mkdir -p "$LG/h/.claude-twin"; ln -s "$LG/h/.claude/fleet" "$LG/h/.claude-twin/fleet"
+  LGT=1760000000000
+  node --no-warnings --input-type=module - "$LG/h" "$LGT" <<'NODE' 2>/dev/null
+const fs = await import('node:fs')
+const [home, now] = [process.argv[2], Number(process.argv[3])]
+const H = 3600e3, D = 24 * H
+const item = (id, state, source, ago, extra = {}) => ({ id, text: `the toolbox task ${id}`, at: now - ago, state, source, ...extra })
+const put = (dir, sid, l) => fs.writeFileSync(`${home}/${dir}/fleet/${sid}.ledger`, JSON.stringify({ v: 1, seq: l.items.length, ...l }))
+put('.claude', 'sess-aaa', { items: [item('1', 'open', 'user', 10 * 60e3), item('2', 'waiting', 'fleet', 5 * H), item('3', 'done', 'user', 2 * D)],
+  judged: { since: now - 3 * D, at: now, turns: 4, calls: 5, failedCalls: 1, items: 9, reported: 3, inputTokens: 2700, outputTokens: 120 } })
+put('.claude', 'sess-bbb', { items: [item('1', 'not-done', 'promise', 3 * D, { repeated: 2 }), item('2', 'open', 'user', 9 * D, { repeated: 1 })] })
+put('.claude-acme', 'sess-aaa', { items: [item('1', 'moved', 'user', 10 * 60e3), item('2', 'dropped', 'fleet', 8 * D)],
+  judged: { since: now - 5 * D, at: now, turns: 1, calls: 1, failedCalls: 0, items: 1, reported: 0, inputTokens: 0, outputTokens: 0 } })
+put('.claude-acme', 'sess-ccc', { items: [] })
+fs.writeFileSync(`${home}/.claude-acme/fleet/sess-ddd.ledger`, '{not json')
+fs.writeFileSync(`${home}/.claude-acme/fleet/.sess-aaa.ledger.moved.tmp`, '{}')
+NODE
+  lgm() { env -u CLAUDE_FLEET_DIR HOME="$LG/h" CLAUDE_FLEET_NOW_MS=$LGT node --no-warnings "$ROOT/bin/fleet-meter.mjs" --ledger "$@" 2>&1; }
+  j="$(lgm --json)"
+  is "two profiles' dirs, the linked third counted once; ledgers, unreadable, empty, items, owed" "2|4|1|1|7|4" \
+     "$(jq -r '[.fleet_dirs,.ledgers,.unreadable,.empty,.items,.owed]|map(tostring)|join("|")' <<< "$j")"
+  is "...states, owed by age and by who asked" 'done:1,dropped:1,moved:1,not-done:1,open:2,waiting:1|<1h:1,1h-1d:1,1d-7d:1,>7d:1|user:2,fleet:1,promise:1' \
+     "$(jq -r '[(.states|to_entries|sort_by(.key)|map("\(.key):\(.value)")|join(",")), (.owed_by_age|to_entries|map("\(.key):\(.value)")|join(",")), (.owed_by_source|to_entries|map("\(.key):\(.value)")|join(","))]|join("|")' <<< "$j")"
+  is "...judge totals summed over the tallied, the untallied counted apart; repeats, moves, a session in two dirs" \
+     "2|1|5|6|1|10|3|2700|120|2025-10-04|3|2|1|1" \
+     "$(jq -r '[.tallied,.untallied,.judge.turns,.judge.calls,.judge.failedCalls,.judge.items,.judge.reported,.judge.inputTokens,.judge.outputTokens,.judge.since,.repeats,.repeated_items,.moved,.in_two_dirs]|map(tostring)|join("|")' <<< "$j")"
+  txt="$(lgm)"
+  is "the report says which calls reported tokens, and what untallied means" "1|1" \
+     "$(grep -c 'input 2700  output 120  (3 of 6 calls reported usage)' <<< "$txt" || true)|$(grep -c '1 untallied (written before the counter: spend unknown, not zero)' <<< "$txt" || true)"
+  leak=0; for w in toolbox sess-aaa sess-bbb acme alias twin "$LG"; do grep -qF -- "$w" <<< "$txt$j" && leak=$((leak + 1)); done
+  is "...and neither output names a text, a session, a profile or a path" "0" "$leak"
+  is "--fleet-dir reads only the dirs given" "1|2" \
+     "$(lgm --json --fleet-dir "$LG/h/.claude-acme/fleet" | jq -r '[.fleet_dirs,.ledgers]|map(tostring)|join("|")')"
+  rm -rf "${LG:?}"
+else
+  skip "fleet-meter --ledger counts states, owed ages and judge calls, and names nothing" "node or jq missing"
 fi
 
 # ── 6a4. the evaluator refuses a verdict it cannot support ───────────────────

@@ -301,6 +301,19 @@ stranded() {
 # here because this is where the lead already reads merges, from fleet-merged's shared cache:
 # no model call, and lib/ledger-landed.mjs asks nothing at all unless the lead holds such an
 # item. Measured before it: 23 carried items open in one lead's ledger, many for work merged.
+# ...AND WHAT A WORKER THAT DIED WITHOUT A STOP LEFT IT. A pane killed by hand, a crash or a
+# reboot runs no fleet-stop, so nothing carried its owed items anywhere. lib/ledger-orphans.mjs
+# finds a worker with no session on this socket, no asleep/exited/parked marker and no record
+# for a day, and carries for it exactly as fleet-stop does, at most once. Run first, so an item
+# carried here can close in ledger_landed on the same look.
+ledger_orphans() {
+  local lib out
+  lib="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/ledger-orphans.mjs"
+  [ -f "$lib" ] && command -v node >/dev/null 2>&1 || return 0
+  out="$(node --no-warnings "$lib" "$FLEET_DIR" "$SOCK" 2>/dev/null </dev/null)"
+  [ -n "$out" ] || return 0
+  echo; printf '%s\n' "$out"
+}
 ledger_landed() {
   local lib repo out
   lib="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/ledger-landed.mjs"
@@ -310,7 +323,7 @@ ledger_landed() {
   [ -n "$out" ] || return 0
   echo; printf '%s\n' "$out"
 }
-reclaim_hints() { stranded; ledger_landed; finished_live; reclaimable; }
+reclaim_hints() { stranded; ledger_orphans; ledger_landed; finished_live; reclaimable; }
 
 # A PROMPT THE MOD REFUSED, THAT NO SENDER READ. fleet-send reports a failed handoff and
 # removes its receipt; one still on disk was read by nobody (fleet-send gave up waiting, or
