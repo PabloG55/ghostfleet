@@ -45,7 +45,7 @@ import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
-  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
+  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn, countJudge, adoptLedger,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
   revisitTurn, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
   deliverySource,
@@ -485,7 +485,7 @@ async function deliverTick($) {
     // its receipt says it ran, which is a delivery, and its ledger item goes, as nothing
     // will ever answer it.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
-    const lost = async () => { if (pending?.ledgered?.length) await ledgerUndo($, pending.ledgered) }
+    const lost = async () => { const m = pending?.ledgerMade || pending?.ledgered; if (m?.length) await ledgerUndo($, m) }
     const ranAlone = async () => {
       await $.clock.sleep(RAN_MS)
       if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { ran: `/${cmd.command}` }) }
@@ -1215,8 +1215,54 @@ async function ledgerRefresh($) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const file = await ledgerPath($)
+  if (file && adoptedFor !== file) { adoptedFor = file; await bounded($, adoptMoved($, file), IO_MS * 6, null) }
   const l = file ? await readLedger($, file) : null
   if (l) await showLedger($, l)
+}
+
+// WHAT THIS SESSION LEFT UNDER ANOTHER PROFILE, BROUGHT HERE (ledger.js adoptLedger). Asked
+// once per session id per process, on the first band tick that knows the id: a resume under
+// another profile is a new process, so that is when the old file appears. Every other
+// profile's fleet dir is <HOME>/.claude or <HOME>/.claude-<name>, as fleet-open finds a
+// transcript. A dir is "this one" by its REAL path, never by its spelling: a fleet dir reached
+// through a link is the same dir, and taking this session's own file for the old copy would
+// mark every item it owes as moved. When either path cannot be resolved, that dir is skipped.
+// Nothing here makes a new ledger in another profile or deletes one; the old file is rewritten
+// only when nobody changed it while this read it, and a lost race is retried at the next start.
+let adoptedFor = ''
+async function adoptMoved($, file) {
+  const here = file.slice(0, file.lastIndexOf('/'))
+  const name = file.slice(here.length + 1)
+  const real = async p => { try { return (await $.fs.stat(p, { resolve: true })).realPath || '' } catch { return '' } }
+  const hereReal = await real(here)
+  const home = await $.env.get('HOME')
+  if (!hereReal || !home) return
+  const entries = await $.fs.list(home).catch(() => [])
+  const dirs = entries.filter(e => (e.kind === 'dir' || e.isLink) && /^\.claude(-[A-Za-z0-9._-]+)?$/.test(e.name))
+    .map(e => `${home}/${e.name}/fleet`)
+  for (const dir of dirs) {
+    const dirReal = await real(dir)
+    if (!dirReal || dirReal === hereReal) continue
+    const other = `${dir}/${name}`
+    if (!(await $.fs.exists(other).catch(() => false))) continue
+    const before = await $.fs.read(other).catch(() => null)
+    if (before === null) continue
+    let old
+    try { old = JSON.parse(before) } catch { continue }
+    if (!old || !Array.isArray(old.items)) continue
+    const nowMs = await $.clock.now()
+    let r = null
+    const wrote = await changeLedger($, l => { r = adoptLedger(l, parseLedger(before), { from: dir, to: here, nowMs }); return r && r.here })
+    // This ledger first: unread here (null, and the change never ran) leaves the old file as it is.
+    if (!r || (r.here && !wrote)) continue
+    const tmp = `${dir}/.${name}.moved.tmp`
+    await $.fs.write(tmp, JSON.stringify(r.old))
+    const now = await $.fs.read(other).catch(() => null)
+    const ok = now === before && (await $.process.run(['mv', '-f', tmp, other], { timeoutMs: IO_MS })).exitCode === 0
+    if (!ok) await $.process.run(['rm', '-f', tmp], { timeoutMs: IO_MS }).catch(() => {})
+    void $.ui.log(`ghostfleet ledger: ${r.moved} item(s) this session owed under ${dir} ${ok ? 'moved here' : 'copied here; the old file changed, marked next start'}`
+      + ` (${r.added} added, ${r.back} back)`, { to: 'debug' })
+  }
 }
 
 // Recorded BEFORE `next`, so the note the prompt carries can name its own items by id; the
@@ -1316,10 +1362,15 @@ async function ledgerDelivery($, p) {
   if (!cfg.on) return
   const at = await $.clock.now()
   const ids = []
+  const made = []
   const source = deliverySource(deliveryKind(p))
-  if (source) await changeLedger($, l => addPrompt(l, { text: p.text, at, source, whole: source === 'fleet' }, ids))
+  if (source) await changeLedger($, l => addPrompt(l, { text: p.text, at, source, whole: source === 'fleet' }, ids, made))
   if (source === 'user') notePerson(p.text)
+  // `ledgered` is every item it names (its turn stamps them); `ledgerMade` only the ones it
+  // created. A delivery that never lands undoes those alone: a brief sent twice folds into the
+  // first copy (ledger.js repeatOf), and undoing the second send must not delete the first.
   p.ledgered = ids
+  p.ledgerMade = made
 }
 
 async function ledgerUndo($, ids) {
@@ -1443,11 +1494,13 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const failed = []
   let answered = 0
   let waitingOnPerson = false
+  const usage = []         // each call's `usage`, as the host reports it (ledger.js countJudge)
   for (const [k, batch] of batches.entries()) {
     const r = await $.model.complete({
       model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
       maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
     })
+    if (r && r.usage) usage.push(r.usage)
     const verdict = r && r.isAnswered ? parseVerdict(r.text, batch.map(i => i.id)) : null
     if (!verdict) {
       failed.push(!r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for')
@@ -1462,7 +1515,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const judge = failed.length
     ? { at: nowMs, ok: false, why: failed[0], items: answered, calls: batches.length, failedCalls: failed.length }
     : { at: nowMs, ok: true, items: answered, calls: batches.length }
-  const kept = await changeLedger($, l => ({ ...l, judge }))
+  const kept = await changeLedger($, l => ({
+    ...l, judge, judged: countJudge(l.judged, { at: nowMs, calls: batches.length, failedCalls: failed.length, items: answered, usage }),
+  }))
   if (failed.length) {
     void $.ui.log(`ghostfleet ledger: judge failed open on ${failed.length} of ${batches.length} call(s) (${failed[0]}); ${open.length - answered} item(s) unjudged`, { to: 'debug' })
     // A batch that failed closes nothing and re-prompts nothing: no gate on this turn.

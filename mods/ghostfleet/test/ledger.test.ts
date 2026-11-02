@@ -17,6 +17,10 @@ type World = {
   heard: string[] | null
   unreadable: Set<string>
   tools: any[]
+  // a submit the session refuses ({ drop }); directories listed as given; real paths by fs.stat
+  refuse: boolean
+  lists: Record<string, any[]>
+  real: Record<string, string>
 }
 
 // What the judge model would answer: every item it is shown, with the status `status(id)`.
@@ -26,7 +30,7 @@ const verdict = (status: (id: string) => string, promises: string[] = []) => (pr
 }
 
 function world(on: any, env: Record<string, string> = {}): World {
-  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set(), tools: [] }
+  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set(), tools: [], refuse: false, lists: {}, real: {} }
   w.files.set(FILE, JSON.stringify(BASE))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   on('session.id', () => ({ value: ID }))
@@ -44,7 +48,12 @@ function world(on: any, env: Record<string, string> = {}): World {
     return { value: text }
   })
   on('fs.write', (_$: any, e: any) => { w.files.set(e.path, e.text); return { value: undefined } })
+  on('fs.stat', (_$: any, e: any) => {
+    if (!(e.path in w.real)) throw new Error(`ENOENT ${e.path}`)
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: w.real[e.path] } }
+  })
   on('fs.list', (_$: any, e: any) => {
+    if (w.lists[e.path]) return { value: w.lists[e.path] }
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
@@ -62,7 +71,7 @@ function world(on: any, env: Record<string, string> = {}): World {
   })
   on('model.complete', async (_$: any, e: any) => { w.judged.push(e.prompt); return { value: await w.judge(e.prompt, e) } })
   on('ui.log', () => ({ value: undefined }))
-  on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); return { text: e.text } })
+  on('prompt.submit', (_$: any, e: any) => { if (w.refuse) return { drop: 'refused' }; w.submitted.push(e); return { text: e.text } })
   on('command.register', (_$: any, e: any) => { w.registered.push(e.name); return { value: { command: e.name } } })
   on('tool.register', (_$: any, e: any) => { w.tools.push(e); return { value: { tool: `mcp__ghostfleet__${e.name}` } } })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
@@ -246,6 +255,77 @@ test('a judge that fails fails OPEN: nothing closes, nothing is re-prompted, the
   await settle(clock)
   expect(book(w).items[0].state).toBe('open')
   expect(nags(w)).toEqual([])
+})
+
+// WHAT THE JUDGE COSTS (ledger.js countJudge). `judge` is the last judged turn only; `judged`
+// sums every one, so a fleet's judge spend can be counted. Tokens only from calls that
+// reported usage: a host that reports none reads as unreported, never as zero cost.
+test('every judged turn adds to running totals: calls, failures, items, and the tokens the host reported', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  w.judge = (prompt: string) => ({ ...verdict(() => 'open')(prompt), usage: { input_tokens: 900, output_tokens: 40 } })
+  await $.turn.complete(done('t1', 'Started on it.'))
+  await settle(clock)
+  expect(book(w).judged).toEqual({ since: 1_000_000, at: 1_000_000, turns: 1, calls: 1, failedCalls: 0, items: 1, reported: 1, inputTokens: 900, outputTokens: 40 })
+  await clock.advance(60_000)
+  w.judge = () => ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: { input_tokens: 0, output_tokens: 0 } })
+  await $.turn.complete(done('t1', 'Still on it.'))
+  await settle(clock)
+  await clock.advance(60_000)
+  w.judge = (prompt: string) => { const r: any = verdict(() => 'done')(prompt); delete r.usage; return r }
+  await $.turn.complete(done('t1', 'Refactored: the parser is one pass now.'))
+  await settle(clock)
+  const j = book(w).judged
+  expect([j.turns, j.calls, j.failedCalls, j.items, j.reported, j.inputTokens, j.outputTokens]).toEqual([3, 3, 1, 2, 2, 900, 40])
+  expect(j.since).toBe(1_000_000)
+  // the last result is still the last result
+  expect(book(w).judge).toEqual(expect.objectContaining({ ok: true, items: 1, calls: 1 }))
+})
+
+// A SESSION RESUMED UNDER ANOTHER PROFILE (ledger.js adoptLedger). Its ledger in the other
+// profile's fleet dir holds what it still owed; the mod brings that here once and leaves the
+// old file with nothing open. A fleet dir that is THIS one through a link is never "another".
+test('what a session owed under another profile is brought here and marked moved there; a link to this dir is not another profile', async ($, on) => {
+  const clock = mock.clock(on, { now: 9_000_000 })
+  const w = world(on, { HOME: '/home/u' })
+  const OTHER = `/home/u/.claude/fleet/${ID}.ledger`
+  const ALIAS = `/home/u/.claude-alias/fleet/${ID}.ledger`
+  const item = (id: string, text: string, state: string, source: string, at: number, extra: object = {}) =>
+    ({ id, text, at, state, source, prompt: 1, ...extra })
+  // the old file: a brief it shares with this one (copied with the transcript), a closed ask,
+  // and a question waiting on the person that this file never had
+  w.files.set(OTHER, JSON.stringify({ v: 1, seq: 3, items: [
+    item('1', 'add the acme-api export endpoint', 'open', 'fleet', 1_000),
+    item('2', 'rename the flag', 'done', 'user', 2_000),
+    item('3', 'which branch holds the export?', 'waiting', 'user', 3_000, { progress: { at: 3_500, reason: 'waits on the person' } }),
+  ] }))
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, items: [
+    item('1', 'add the acme-api export endpoint', 'open', 'fleet', 1_000),
+    item('2', 'check the toolbox CI', 'open', 'user', 8_000_000),
+  ] }))
+  // the same dir reached through a link: its "file" is this one, and must be left alone
+  const SELF = JSON.stringify({ v: 1, seq: 1, items: [item('1', 'look at the billing-svc logs', 'open', 'user', 5_000)] })
+  w.files.set(ALIAS, SELF)
+  w.real = { '/fleet': '/fleet', '/home/u/.claude/fleet': '/home/u/.claude/fleet', '/home/u/.claude-alias/fleet': '/fleet' }
+  w.lists['/home/u'] = [{ name: '.claude', kind: 'dir' }, { name: '.claude-alias', kind: 'other', isLink: true }, { name: '.claude.json', kind: 'file' }, { name: 'Documents', kind: 'dir' }]
+  await start($)
+  await settle(clock)
+  const here = book(w).items
+  expect(here.map((i: any) => [i.id, i.text, i.state, i.source])).toEqual([
+    ['1', 'add the acme-api export endpoint', 'open', 'fleet'],
+    ['2', 'check the toolbox CI', 'open', 'user'],
+    ['3', 'which branch holds the export?', 'waiting', 'user'],
+  ])
+  expect(here[2]).toEqual(expect.objectContaining({ at: 3_000, movedFrom: { dir: '/home/u/.claude/fleet', id: '3' }, progress: { at: 3_500, reason: 'waits on the person' } }))
+  expect(here[2].prompt).toBeUndefined()
+  const old = JSON.parse(w.files.get(OTHER) ?? 'null').items
+  expect(old.map((i: any) => [i.id, i.state, i.movedTo?.id])).toEqual([['1', 'moved', '1'], ['2', 'done', undefined], ['3', 'moved', '3']])
+  expect(old[0].movedTo.dir).toBe('/fleet')
+  expect(w.files.get(ALIAS)).toBe(SELF)
+  expect([...w.files.keys()].filter(f => f.includes('.moved.tmp'))).toEqual([])
 })
 
 test('a message queued behind the turn starts the next one first: no re-prompt over it', async ($, on) => {
@@ -569,11 +649,13 @@ test('a message stopped before it was answered and sent again a minute later is 
   await $.turn.complete({ ...done('t1', ''), reason: 'aborted', isAborted: true })
   await settle(clock)
   expect(book(w).items[0].interrupted).toBe(true)
-  // sent again as it came back (the live resend added a few words past the excerpt's head)
+  // sent again with a word added at its end, as the live resend was: not the same words, so
+  // not one item by repeatOf, and past RESEND_MS the transcript decides
+  const AGAIN = `${RESENT} pls`
   await clock.advance(61_000)
-  await type($, RESENT)
-  await $.turn.start({ text: RESENT, turnId: 't2' })
-  w.heard = [RESENT]
+  await type($, AGAIN)
+  await $.turn.start({ text: AGAIN, turnId: 't2' })
+  w.heard = [AGAIN]
   w.judge = verdict(() => 'open')
   await step($, 't2', 0, 'It reads more like an orchestration layer than a harness.')
   await $.turn.complete(done('t2', 'It reads more like an orchestration layer than a harness.'))
@@ -584,7 +666,10 @@ test('a message stopped before it was answered and sent again a minute later is 
   expect(book(w).items[0].text).toContain('what do u think')
 })
 
-test('the same words sent twice a minute apart and both answered are two requests; a stopped message that reached the model stays (and, older, is not re-prompted)', async ($, on) => {
+// THE SAME WORDS AGAIN (ledger.js repeatOf). Inside REPEAT_MS of an open item they are that
+// item, counted; past it, a message of their own. Measured: 31 of 101 exact repeats in two
+// weeks came within ten minutes of the first copy, each a second item for one ask.
+test('the same words sent again a minute apart, the first still open, are ONE request: counted, re-prompted once', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
@@ -599,12 +684,66 @@ test('the same words sent twice a minute apart and both answered are two request
   w.judge = verdict(() => 'open')
   await $.turn.complete(done('t2', 'Looking at something else.'))
   await settle(clock)
-  expect(book(w).items.map((i: any) => [i.id, i.state])).toEqual([['1', 'open'], ['2', 'open']])
+  expect(book(w).items.map((i: any) => [i.id, i.state, i.repeated, i.turnId, Boolean(i.interrupted)])).toEqual([['1', 'open', 1, 't2', false]])
+  expect(book(w).items[0].at).toBe(1_000_000)
   expect(nags(w).length).toBe(1)
-  // the gate names the latest prompt's item only; the first send stays open, on the band
   expect(nags(w)[0].text).toContain('One request is')
-  expect(nags(w)[0].text).toContain('2. "run the tests"')
-  expect(nags(w)[0].text).not.toContain('1. "run the tests"')
+  expect(nags(w)[0].text).toContain('1. "run the tests"')
+})
+
+// One message, typed idle, answered with `answer`, judged.
+const asked = async ($: any, clock: any, turnId: string, text: string, answer: string) => {
+  await type($, text)
+  await $.turn.start({ text, turnId })
+  await $.turn.complete(done(turnId, answer))
+  await settle(clock)
+}
+
+test('the same words more than ten minutes apart are two requests, and so are the same words after the first closed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.judge = verdict(() => 'open')
+  await asked($, clock, 't1', 'run the tests', 'Not yet.')
+  await clock.advance(10 * 60_000 + 1_000)
+  await asked($, clock, 't2', 'run the tests', 'Not yet.')
+  expect(book(w).items.map((i: any) => [i.id, i.state, i.repeated ?? 0])).toEqual([['1', 'open', 0], ['2', 'open', 0]])
+  // inside the window again, against the NEWER copy: that one, not the first
+  await clock.advance(60_000)
+  await asked($, clock, 't3', 'Run the tests.', 'Not yet.')
+  expect(book(w).items.map((i: any) => [i.id, i.repeated ?? 0])).toEqual([['1', 0], ['2', 1]])
+  // closed, the same words a minute later are asking again
+  w.judge = verdict(() => 'done')
+  await asked($, clock, 't4', 'and the lint', 'Ran both: 41 pass.')
+  await clock.advance(60_000)
+  await asked($, clock, 't5', 'run the tests', 'Ran them again.')
+  expect(book(w).items.filter((i: any) => i.text === 'run the tests').length).toBe(3)
+})
+
+test('a brief delivered twice inside ten minutes is one fleet item; a second delivery that never lands leaves the first', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const BRIEF = 'add the acme-api export endpoint and open a PR against staging'
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: BRIEF }))
+  await clock.advance(500)
+  await $.turn.start({ text: BRIEF, turnId: 't1' })
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Started on the endpoint.'))
+  await settle(clock)
+  await clock.advance(4 * 60_000)
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: BRIEF }))
+  await clock.advance(500)
+  await $.turn.start({ text: BRIEF, turnId: 't2' })
+  expect(book(w).items.map((i: any) => [i.id, i.source, i.repeated, i.turnId])).toEqual([['1', 'fleet', 1, 't2']])
+  await $.turn.complete(done('t2', 'Still on it.'))
+  await settle(clock)
+  // a third send the session refuses: undone, and the item it folded into stays
+  w.refuse = true
+  w.files.set(`${SPOOL}/1000-3.json`, JSON.stringify({ id: '1000-3', text: BRIEF }))
+  await clock.advance(500)
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state])).toEqual([['1', 'open']])
 })
 
 test('a long message with an inline paste keeps the words typed after it', async ($, on) => {
@@ -1271,13 +1410,18 @@ test('a message stopped and resent within a minute is the SAME item, whether res
   const items = book(w).items
   expect(items.length).toBe(3)
   expect(items.map((i: any) => [i.text, i.turnId, Boolean(i.interrupted)])).toEqual(pairs.map(([, again], k) => [again, `b${k + 1}`, false]))
-  // a minute later is a message of its own again
+  // a minute later, the SAME words are still that item (repeatOf, inside REPEAT_MS); edited
+  // words a minute later are a message of their own again
   await type($, 'check the scratch branch')
   await $.turn.start({ text: 'check the scratch branch', turnId: 'c1' })
   await $.turn.complete({ ...done('c1', ''), reason: 'aborted', isAborted: true })
   await settle(clock)
   await clock.advance(61_000)
   await type($, 'check the scratch branch')
+  expect(book(w).items.length).toBe(4)
+  expect(book(w).items[3].repeated).toBe(1)
+  await clock.advance(61_000)
+  await type($, 'check the scratch branch and its CI')
   expect(book(w).items.length).toBe(5)
 })
 
