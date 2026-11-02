@@ -1077,7 +1077,7 @@ call is **refused**, with the reason:
 | guard | refuses | how it decides |
 |---|---|---|
 | Jarvis's confirm-list | the listed Bash commands and `fleet_*` MCP calls, from Jarvis's master | `lib/mod-gate.mjs` asks the same gate the MCP door and `hooks/jarvis-guard.sh` ask (`lib/jarvis.mjs`), under the same lock |
-| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
+| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree. Judged on what the command runs: the arguments of `fleet-ack`, `fleet-send`, `fleet-ledger` and `git commit` are data, so a message may name a merge; one chained after it, or inside its `$(…)` or backticks, is still refused | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
 | an agent does not approve another agent's tool call | an approving key from `fleet-answer` (Bash) or `fleet_answer` (MCP) into a permission dialog | `fleet-answer --check`: fleet-answer's own decision, sending nothing |
 
 Same switches, same defaults: "workers can merge" and "agents can approve tool calls" (off),
