@@ -130,6 +130,58 @@ if [ -z "$SOCK" ] && [ -n "${TMUX:-}" ]; then
   _s="${TMUX%%,*}"; _s="${_s##*/}"
   case "$_s" in cf-*) SOCK="$_s" ;; esac
 fi
+# ── AN AGENT STARTED BY AN AGENT IS NOT THAT AGENT ───────────────────────────
+# Everything above names a session from its ENVIRONMENT — $TMUX, $TMUX_PANE, CLAUDE_FLEET_* —
+# and a process inherits all of it from whoever started it. So a Claude that a worker starts
+# from its own Bash tool (a probe, a `claude -p` one-off) runs in the worker's pane, on the
+# worker's server, with the worker's slot, and every hook it fires reads as the worker's.
+# Measured on one fleet: a worker ran nine short probe sessions, each one's Stop filed a
+# `done` row under the worker's name in its lead's inbox, and each row woke the lead — nine
+# DONEs in a few minutes from a worker that had finished nothing. The records did the same
+# to the card: each probe wrote one claiming the worker's slot, and readers settle rival
+# records by `ts`, so the card showed whichever probe had stopped last.
+#   THE PROCESS TREE IS WHAT CANNOT BE INHERITED. The session's own agent is the first
+# agent-named process above this hook, and above IT there is only the launcher and the
+# multiplexer (agent-here's bash, then the tmux server, whose parent is init — a server
+# daemonises, so a session spawned from inside another one is still the server's child).
+# A probe has a second agent above it, and between the two the tool SHELL the outer one ran
+# it from. That shell is the part that makes it a probe and not a wrapper: an agent whose
+# launcher is itself agent-named (a shim, a native binary that re-execs) has nothing between
+# the two, so it is still the session. Only the gap counts.
+#   Checked here, before the pane lookups, because a cleared socket skips every one of them
+# and every writer below routes on it; the record is still written, unaddressable and marked
+# `nested_under`, so the mod (which falls back to the same inherited environment when a
+# record names no slot) can tell it is somebody else's environment and not its own.
+#   Never on the backgrounded path below: that process has no $TMUX and its parent is the
+# config dir's daemon, which is a different question with its own answer.
+#   Failure costs are lopsided, so the check is one-sided: no `ps`, a chain that ends early,
+# a name not on the list — each answers "this is the session", which is what it answered
+# before. Silence is the worse symptom here, and only a definite second agent produces it.
+_host_agent() {                       # -> "<pid>:<name>" of the agent this one runs under
+  local p="$PPID" pp comm inner="" gap="" n=0
+  while [ -n "$p" ] && [ "$n" -lt 40 ]; do
+    case "$p" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    read -r pp comm <<< "$(ps -o ppid=,comm= -p "$p" 2>/dev/null)"
+    [ -n "$pp" ] || return 1
+    comm="${comm##*/}"; comm="${comm#-}"          # /bin/zsh, -zsh (a login shell)
+    case "$comm" in
+      claude|claude.exe|codex|opencode|agy|cursor-agent)
+        if [ -n "$inner" ] && [ -n "$gap" ]; then printf '%s:%s\n' "$p" "$comm"; return 0; fi
+        [ -n "$inner" ] || inner="$p" ;;
+      sh|bash|zsh|dash|ksh|fish) [ -n "$inner" ] && gap=1 ;;
+      tmux*|zellij*|screen*|launchd|init|systemd) return 1 ;;
+    esac
+    p="$pp"; n=$((n + 1))
+  done
+  return 1
+}
+NESTED=""
+if [ -n "$SOCK" ] && { [ -z "${CLAUDE_JOB_DIR:-}" ] || [ -n "${TMUX:-}" ]; } \
+   && _host="$(_host_agent)"; then
+  NESTED="${_host%%:*}"
+  _dbg "$EVENT $SESSION: an agent started under ${_host} — the inherited $SOCK/${SLOT:-?} is not its identity; claims no slot, files no row"
+  SOCK=""; SLOT=""; CLAUDE_FLEET_SOCK=""; CLAUDE_FLEET_SLOT=""
+fi
 # ── THE SLOT IS THE PANE'S NAME NOW, NOT THE NAME IT WAS BORN WITH ───────────
 # CLAUDE_FLEET_SLOT is exported once, at launch, and a rename cannot reach into a running
 # process to change it. So after `x` was renamed `y`, every event went on writing
@@ -467,10 +519,12 @@ if jq -n \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
   --argjson mod "$_mod" --arg failure "$FAILURE" --arg fmsg "$FAILURE_MSG" --arg turn "$TURN" \
+  --arg nested "$NESTED" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
    + (if $from != "" then {continued_from:$from} else {} end)
    + (if $turn != "" then {turn:$turn} else {} end) + $mod
+   + (if $nested != "" then {nested_under:($nested | tonumber)} else {} end)
    + (if $failure != "" then {failure:({error:$failure, at:$ts} + (if $fmsg != "" then {message:$fmsg} else {} end))} else {} end)' \
   >"$tmp" 2>/dev/null
 then
@@ -479,6 +533,10 @@ else
   _dbg "write: jq could not build the record for $SESSION ($EVENT)"
   rm -f "$tmp" 2>/dev/null
 fi
+# A nested agent's record is the whole of what it gets (see _host_agent): every block below
+# is a row, a wake, a push or a popup, and each of those would be filed for the session whose
+# environment it inherited.
+[ -z "$NESTED" ] || exit 0
 
 # The pane as plain text with every DIM run removed — lib/undim.awk, shared with
 # fleet-hibernate's draft check, which the same suggestion fooled. Resolved through the hook's

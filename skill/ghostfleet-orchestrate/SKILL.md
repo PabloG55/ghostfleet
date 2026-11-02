@@ -216,6 +216,9 @@ A turn a resume prompt started is filed **RESUMED**, not DONE, unless it made a 
 moved a pushed branch, ran a PR command or closed a ledger item. It doesn't wake you,
 and every RESUMED row folds into one line (`3 workers RESUMED nothing new — …`). A DONE
 after a resume means that worker produced something.
+A Claude a worker starts from its own Bash tool (a probe, `claude -p`) files nothing under
+the worker's name: the hook sees it nested under another agent and drops its rows. A probe
+whose result you need in the inbox is a session — `fleet-spawn` it.
 Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 
 - **`fleet-pause <session>`** — reliably interrupt a worker and mark it OFF (zero

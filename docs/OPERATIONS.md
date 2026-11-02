@@ -339,6 +339,24 @@ echo 120 > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: two quiet m
 echo 0   > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: every finish at once
 ```
 
+### Only the session itself reports
+
+A Claude that a session starts from its own tool shell (a probe, a `claude -p` one-off, an
+agent a script runs) inherits that session's whole environment: its pane, its fleet's server,
+its name. Until now every hook it fired read as the session's, so each probe's Stop filed a
+`DONE` under the worker's name and woke the lead. Measured on one fleet: nine `DONE`s in a few
+minutes from a worker that had finished nothing.
+
+The hook now checks its own process tree. An agent whose parent chain reaches **another agent
+through a shell** is somebody's probe, whatever its environment says, and it gets no fleet
+identity: no inbox row, no wake, no phone push, no popup. Its record is still written, with no
+socket or slot and `nested_under` naming the agent it runs under, and `hook-debug.log` in the
+fleet dir has a line for each event it dropped (`an agent started under <pid>:claude`). An agent
+directly under an agent-named launcher, with no shell between, is still the session.
+
+A probe that **should** report is a session: start it with `fleet-spawn`, which gives it its own
+pane and name.
+
 ### A wake the input box keeps out
 
 A wake is pasted only into an **empty** input box. Anything else might be your half-typed
