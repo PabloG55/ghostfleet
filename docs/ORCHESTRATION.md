@@ -33,6 +33,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | record what you heard (as a worker) | `fleet-ack "<one line>" --from "<decisions>"` |
 | live sessions + status | `fleet-list` |
 | who needs you / what **finished** (drains since last look) | `fleet-inbox` — also names finished workers to `fleet-stop --reclaim` |
+| a queued prompt a dead drain left **stranded** (listed by `fleet-inbox`) | `fleet-send --requeue <session> <id>` or `--discard <session> <id>` — the owner's call |
 | a **new task** — always a new session | `fleet-spawn <name> [--reuse <wt>] --prompt "…"` |
 | a follow-up on the **same PR** (red CI, a review note) | `fleet-send <session> "…"` — refused for a worker whose task shipped; `--anyway` for same-work follow-ups only |
 | **ask** one and get the answer back | `fleet-send --reply-to me <session> "…"` |

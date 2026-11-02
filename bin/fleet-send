@@ -2,6 +2,8 @@
 # fleet-send [-s SOCKET] [--now] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
 #            [--anyway] <session> <prompt...>
 # fleet-send [-s SOCKET] --dequeue <session>        (what the Stop hook runs)
+# fleet-send [-s SOCKET] --stranded | --requeue <session> <id> | --discard <session> <id>
+#                                                   (a prompt a dead drain left out of the queue)
 #
 # --nudge marks the prompt as the fleet's own wake-up (hooks/fleet-event.sh's "a worker
 # finished, run fleet-inbox"), not something anyone asked of the session: the mod's ledger
@@ -80,6 +82,11 @@ while [ $# -gt 0 ]; do
     # Internal: the queue's own delivery (what --dequeue runs). Past the gate like --now,
     # but a turn of its own rather than a paste into one, so it may go through the mod.
     --queued)    MODE=queued;        shift ;;
+    # A prompt a dead drain left OUTSIDE the queue (see "a prompt the drain stranded"):
+    # list them, put one back at the head of its queue, or throw it away. The owner's call.
+    --stranded)  MODE=stranded;      shift ;;
+    --requeue)   MODE=requeue;       shift ;;
+    --discard)   MODE=discard;       shift ;;
     *) break ;;
   esac
 done
@@ -87,9 +94,14 @@ SESSION="${1:-}"; shift || true
 MSG="$*"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
-[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
-[ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
-tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
+# The drain's delivery records its own pid in the journal first thing, so a drain that took
+# over a dead one's lock can tell a delivery that is still running from one that died.
+[ "$MODE" = queued ] && [ -n "${CLAUDE_FLEET_QUEUE_JOURNAL:-}" ] \
+  && printf 'child %s\n' $$ >> "$CLAUDE_FLEET_QUEUE_JOURNAL" 2>/dev/null
+[ -n "$SESSION" ] || [ "$MODE" = stranded ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
+[ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || [ "$MODE" = stranded ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
+# A stranded prompt outlives its session often enough: listing and discarding need none.
+[ "$MODE" = stranded ] || [ "$MODE" = discard ] || tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 # A TAB IS NOT AN AGENT. fleet-tab's _term-*/_edit-* sessions live on this same socket
 # and run a shell, so a send would type the prompt at a shell prompt and press Enter —
@@ -156,6 +168,116 @@ _qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap - EXIT; }
 _b64()   { printf '%s' "$1" | base64 | tr -d '\n'; }
 _unb64() { printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null; }
 
+# --- a prompt the drain stranded -----------------------------------------------
+# THREE PROMPTS SAT IN NO QUEUE AT ALL. One fleet's directory held three leftover
+# <sock>.<session>.queue.<pid>.tmp files, each one complete record — two to a master, a
+# week apart, one to a worker — and none was ever delivered. The drain used to CUT the head
+# off the queue before delivering it, and write it back through that tmp when the delivery
+# answered busy: a drain killed or failing anywhere in between dropped the prompt, and
+# nothing anywhere said so.
+#   So the head now STAYS in the queue until its delivery is confirmed, and leaves it only
+# then. What a crash can still leave ambiguous is whether it reached the session, and that
+# is what the journal answers: <queue>.sending holds the record out for delivery, the
+# delivery appends `child <pid>` as it starts and `began` just before it first touches the
+# session (the mod's spool, or the paste). A drain that takes over a dead one's lock reads
+# it (_qrecover):
+#   no `began`     nothing reached the session: the record is still the head, delivered next;
+#   `began`        it may have been typed in — AT MOST ONCE wins, so it is not re-sent but
+#                  moved aside, to <queue>.<id>.indoubt, for a person to re-queue or discard;
+#   live child     the delivery is still running: busy (3), try again.
+# A delivery that ANSWERS "not delivered" after it began (the mod refused it) is moved aside
+# the same way, as .refused: it left the queue, and its words should not leave with it.
+# Every rewrite of the queue goes through a tmp INSIDE the lock dir, so a crash leaves it
+# where taking over the lock deletes it, and never a copy that could be mistaken for a lost
+# prompt. Only the old code leaves .tmp files beside the queue; --stranded reports those too.
+QJ="$QUEUE.sending"
+_qdrop_head() {
+  tail -n +2 "$QUEUE" > "$QUEUE.lock/q" 2>/dev/null && mv -f "$QUEUE.lock/q" "$QUEUE"
+  [ -s "$QUEUE" ] || rm -f "$QUEUE"
+}
+# Moves the head to a file only a person resolves: written first, then dropped, so a crash
+# between leaves it in both places rather than in neither. One drain can strand two in the
+# same second (a dead drain's head, then its own), so the name carries more than time and pid.
+_qstrand() {
+  head -n 1 "$QUEUE" > "$QUEUE.lock/s" 2>/dev/null \
+    && mv -f "$QUEUE.lock/s" "$QUEUE.$(date +%s)-$$-$RANDOM.$1" && _qdrop_head
+}
+# Under the lock. 1 = a delivery from a drain that died is still running.
+_qrecover() {
+  local rec="" hd="" cp
+  [ -f "$QJ" ] || return 0
+  { IFS= read -r rec < "$QJ"; } 2>/dev/null
+  cp="$(sed -n 's/^child \([0-9][0-9]*\)$/\1/p' "$QJ" 2>/dev/null | tail -n 1)"
+  if [ -n "$cp" ] && kill -0 "$cp" 2>/dev/null \
+     && grep -q fleet-send <<< "$(ps -o args= -p "$cp" 2>/dev/null)"; then
+    return 1
+  fi
+  { IFS= read -r hd < "$QUEUE"; } 2>/dev/null
+  # Not the head any more: its drain had already settled it and died before tidying up.
+  if [ -n "$rec" ] && [ "$rec" = "$hd" ] && grep -qx began "$QJ" 2>/dev/null; then
+    _qstrand indoubt
+  fi
+  rm -f "$QJ"
+}
+
+# --stranded: one line per stranded RECORD, \x1f between fields:
+#   <session> <id> <queued-at> <prompt bytes> <kind> <still queued: 1|0>
+# kind is tmp (left by the old drain or take-back), indoubt or refused. The prompt's LENGTH,
+# never its words: this is printed into inboxes and transcripts, and a prompt is the
+# owner's. "Still queued" is a copy whose original is waiting anyway — re-queueing skips it.
+# --requeue <session> <id>: back to the HEAD of its queue, where it was, skipping a record
+#   already waiting; then delivered at once if the session is idle. --discard <session> <id>.
+_stranded_id() {
+  case "$1" in *[!A-Za-z0-9.-]*|.*|*..*) return 1 ;; esac
+  case "$1" in *.tmp|*.indoubt|*.refused) return 0 ;; esac
+  return 1
+}
+if [ "$MODE" = stranded ]; then
+  for _f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused; do
+    [ -f "$_f" ] || continue
+    _n="${_f##*/}"; _n="${_n#"$SOCK".}"; _s="${_n%.queue.*}"; _id="${_n##*.queue.}"
+    _stranded_id "$_id" || continue
+    _live="$FLEET_DIR/$SOCK.$_s.queue"
+    while IFS= read -r _line; do
+      IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_kind _q_extra <<< "$_line"
+      [ -n "${_q_msg:-}" ] && [ -z "${_q_extra:-}" ] || continue
+      _len="$(_unb64 "$_q_msg" | wc -c | tr -d ' ')"
+      _in=0; [ -f "$_live" ] && grep -qxF -- "$_line" "$_live" && _in=1
+      case "$_q_at" in ''|*[!0-9]*) _q_at=0 ;; esac
+      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$_s" "$_id" "$_q_at" "$_len" "${_id##*.}" "$_in"
+    done < "$_f"
+  done
+  exit 0
+fi
+if [ "$MODE" = requeue ] || [ "$MODE" = discard ]; then
+  case "$SESSION" in *[!A-Za-z0-9._~-]*) echo "fleet-send: '$SESSION' is not a session name" >&2; exit 1 ;; esac
+  _stranded_id "$MSG" || { echo "fleet-send: '$MSG' is not a stranded prompt's id (see fleet-inbox)" >&2; exit 1; }
+  _f="$QUEUE.$MSG"
+  [ -f "$_f" ] || { echo "fleet-send: no stranded prompt $MSG for '$SESSION' (already resolved?)" >&2; exit 4; }
+  if [ "$MODE" = discard ]; then
+    rm -f "${_f:?}"; echo "fleet-send: discarded $SESSION's stranded prompt $MSG — it will not be delivered"; exit 0
+  fi
+  _qlock || { echo "fleet-send: queue for '$SESSION' is locked — try again in a moment" >&2; exit 1; }
+  _qrecover || { echo "fleet-send: '$SESSION' is being delivered to — try again in a moment" >&2; exit 1; }
+  _k=0
+  { while IFS= read -r _line; do
+      [ -n "$_line" ] || continue
+      [ -f "$QUEUE" ] && grep -qxF -- "$_line" "$QUEUE" && continue
+      printf '%s\n' "$_line"; _k=$((_k + 1))
+    done < "$_f"
+    [ -f "$QUEUE" ] && cat "$QUEUE"
+    :
+  } > "$QUEUE.lock/q" && mv -f "$QUEUE.lock/q" "$QUEUE" && rm -f "${_f:?}" \
+    || { _qunlock; echo "fleet-send: could not put $MSG back into $SESSION's queue — it is still stranded" >&2; exit 1; }
+  [ -s "$QUEUE" ] || rm -f "$QUEUE"
+  _qunlock
+  case "$MSG" in *.indoubt) echo "fleet-send: note — its drain died mid-delivery, so it may already have been typed in once" >&2 ;; esac
+  echo "fleet-send: put $SESSION's stranded prompt back at the head of its queue ($_k record(s))"
+  # Idle now: deliver it now, as a send to an idle session with a backlog does. Busy: the
+  # turn's Stop drains it.
+  exec "${BASH_SOURCE[0]}" --dequeue -s "$SOCK" "$SESSION"
+fi
+
 # --- reading and editing the queue ---------------------------------------------
 # A QUEUED PROMPT WAS INVISIBLE FROM THE PHONE. The send answered "queued #2" and the chat
 # drew one dim bubble that the next send replaced, so the owner lost sight of everything
@@ -184,7 +306,10 @@ if [ "$MODE" = list ]; then
 fi
 if [ "$MODE" = unqueue ]; then
   _qlock || { echo "fleet-send: queue for '$SESSION' is locked — try again in a moment" >&2; exit 1; }
-  _want="$(_b64 "$MSG")"; _hit=0; _qt="$QUEUE.$$.tmp"
+  # A head left in doubt by a dead drain is not "never delivered": settle it first.
+  _qrecover || { echo "fleet-send: '$SESSION' is being delivered to — try again in a moment" >&2; exit 1; }
+  # Inside the lock dir, like every rewrite (see "a prompt the drain stranded").
+  _want="$(_b64 "$MSG")"; _hit=0; _qt="$QUEUE.lock/q"
   : > "$_qt"
   if [ -s "$QUEUE" ]; then
     while IFS= read -r _line; do
@@ -320,28 +445,34 @@ SELF="${BASH_SOURCE[0]}"
 # finishing, so its first look often lands on the spinner.
 if [ "$MODE" = dequeue ]; then
   _qlock || { echo "fleet-send: queue for '$SESSION' is locked" >&2; exit 1; }
+  _qrecover || exit 3
   [ -s "$QUEUE" ] || { rm -f "$QUEUE"; exit 0; }
   busy && exit 3
   IFS= read -r _line < "$QUEUE"
-  _qt="$QUEUE.$$.tmp"
-  tail -n +2 "$QUEUE" > "$_qt" 2>/dev/null && mv -f "$_qt" "$QUEUE"
-  [ -s "$QUEUE" ] || rm -f "$QUEUE"
   IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_kind _q_extra <<< "$_line"
   _body="$(_unb64 "${_q_msg:-}")"
-  [ -n "$_body" ] && [ -z "${_q_extra:-}" ] \
-    || { echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1; }
+  if [ -z "$_body" ] || [ -n "${_q_extra:-}" ]; then
+    _qdrop_head; echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1
+  fi
   _args=(--queued --anyway -s "$SOCK")
   [ "${_q_kind:-}" = nudge ] && _args+=(--nudge)
   [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
   # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
-  # between this paste and the spinner, and fold the next prompt into this one.
-  "$SELF" "${_args[@]}" "$SESSION" "$_body"
+  # between this paste and the spinner, and fold the next prompt into this one. The head
+  # stays in the queue meanwhile; the journal says it is out for delivery.
+  printf '%s\n' "$_line" > "$QJ"
+  CLAUDE_FLEET_QUEUE_JOURNAL="$QJ" "$SELF" "${_args[@]}" "$SESSION" "$_body"
   _rc=$?
-  # 3 from the delivery is a turn that started in the gap (the mod did not take the
-  # prompt because the session went busy): it goes back to the HEAD, as it was.
-  if [ "$_rc" = 3 ]; then
-    { printf '%s\n' "$_line"; cat "$QUEUE" 2>/dev/null; } > "$_qt" && mv -f "$_qt" "$QUEUE"
-  fi
+  case "$_rc" in
+    0) _qdrop_head ;;
+    # 3 is a turn that started in the gap (the mod did not take the prompt because the
+    # session went busy): it is still the head, and nothing needs writing back.
+    3) ;;
+    # Answered "not delivered" once it had reached the session: aside, not lost. Refused
+    # before it got that far (the session is gone): still the head, for whoever drains next.
+    *) grep -qx began "$QJ" 2>/dev/null && _qstrand refused ;;
+  esac
+  rm -f "$QJ"
   exit "$_rc"
 fi
 
@@ -670,6 +801,10 @@ _report_failed() {
 #   not claimed and still idle (a mod that is stuck, or died a moment ago): taken back and
 #     pasted below, as if there were no mod at all.
 # A prompt the mod claimed is never pasted: the rename that would take it back fails.
+# The queue's drain marks the point after which this prompt may have reached the session
+# (see "a prompt the drain stranded"): a drain that dies past here must not re-send it.
+[ "$MODE" = queued ] && [ -n "${CLAUDE_FLEET_QUEUE_JOURNAL:-}" ] \
+  && printf 'began\n' >> "$CLAUDE_FLEET_QUEUE_JOURNAL" 2>/dev/null
 if [ "$USE_MOD" = 1 ]; then
   _spool="$MOD_DIR/$MOD_SID.handoff"
   _hid="${MOD_NOW:-$(date +%s)000}-$$"

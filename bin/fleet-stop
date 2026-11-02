@@ -231,8 +231,10 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.asleep" "$FLEET_DIR/$SOCK.$SESSION.exited" 2>/d
 # session that reuses this name must not start by working through a stranger's backlog.
 _qd="$FLEET_DIR/$SOCK.$SESSION.queue.drain"; _qp="$(cat "$_qd" 2>/dev/null)"
 case "$_qp" in ''|*[!0-9]*) ;; *) kill "$_qp" 2>/dev/null ;; esac
+# A prompt its drain STRANDED (<queue>.<id>.indoubt and the like) is kept: it never ran,
+# nothing delivers it on its own, and whether it is wanted is the owner's call (fleet-inbox).
 rm -rf "$FLEET_DIR/$SOCK.$SESSION.queue" "$FLEET_DIR/$SOCK.$SESSION.queue.lock" \
-       "$_qd" "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
+       "$FLEET_DIR/$SOCK.$SESSION.queue.sending" "$_qd" "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
 
 # The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
 # (the only thing that still knows which path this session held) is dropped. A slot left
