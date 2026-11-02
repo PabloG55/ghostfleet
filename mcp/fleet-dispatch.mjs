@@ -365,7 +365,9 @@ export function plan(name, a = {}) {
         args.push('--reply-to', `${me.sock}/${me.sess}`, '--reply-dir', me.dir);
       }
       if (a.anyway === true) args.push('--anyway');
-      args.push(String(a.session), String(a.prompt));
+      // `--` BEFORE THE POSITIONALS, as fleet_answer's: a session named "--owner" handed over
+      // bare would parse as the flag that marks the owner's words (asOwner).
+      args.push('--', String(a.session), String(a.prompt));
       return run('fleet-send', args, t);
     }
     case 'fleet_read': {
@@ -581,6 +583,16 @@ function firstCommand(d) {
 function withHuman(p) {
   return p.cmd === 'fleet-answer' ? { ...p, args: ['--human-approved', ...p.args] } : p;
 }
+// THE ONLY WAY --owner reaches fleet-send from here: opts.human, the phone's daemon, and
+// nothing else. What the owner types on the phone is the owner speaking (bin/fleet-serve.mjs
+// already records it as such for Jarvis), so the receiving session's ledger records it as the
+// person's message, not as a lead's brief that needs proof (mods/ghostfleet/hooks/ledger.js
+// deliverySource). NOT on the Jarvis grant that withHuman also honours: that is the owner's yes
+// to a call whose WORDS are Jarvis's own. And not from any argument: the MCP server's callTool
+// has no opts, so a worker's fleet_send cannot ask for it.
+function asOwner(p) {
+  return p.cmd === 'fleet-send' ? { ...p, args: ['--owner', ...p.args] } : p;
+}
 
 // The MCP server's entry point. Same signature and same return shape it always had: a
 // string for a call that RAN, fail()'s {isError,text} for one we refused to run.
@@ -601,5 +613,6 @@ export async function callToolAsync(name, a = {}, opts = {}) {
   if (p.kind === 'text') return p.text;
   const j = jarvisCheck(name, a, p);
   if (j.fail) return j.fail;
-  return execPlanAsync(j.granted || opts.human === true ? withHuman(p) : p, opts);
+  const q = j.granted || opts.human === true ? withHuman(p) : p;
+  return execPlanAsync(opts.human === true ? asOwner(q) : q, opts);
 }
