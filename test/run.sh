@@ -4472,9 +4472,10 @@ fi
 # view at all of them. The hooks themselves are the harness's (`claude plugin test`), above.
 group "the mod's guards agree with the shell guard; the band fits any width"
 if command -v node >/dev/null 2>&1; then
-  eval "$(sed -n '/^merges_a_pr() {/,/^}/p;/^changes_a_boundary() {/,/^}/p' "$ROOT/hooks/fleet-guard.sh")"
-  if ! command -v merges_a_pr >/dev/null 2>&1 || ! command -v changes_a_boundary >/dev/null 2>&1; then
-    bad "the shell guard's merge functions can be lifted out" "merges_a_pr and changes_a_boundary" "not found in hooks/fleet-guard.sh"
+  eval "$(sed -n '/^what_runs() {/,/^}/p;/^merges_a_pr() {/,/^}/p;/^changes_a_boundary() {/,/^}/p' "$ROOT/hooks/fleet-guard.sh")"
+  if ! command -v merges_a_pr >/dev/null 2>&1 || ! command -v changes_a_boundary >/dev/null 2>&1 \
+     || ! command -v what_runs >/dev/null 2>&1; then
+    bad "the shell guard's merge functions can be lifted out" "what_runs, merges_a_pr and changes_a_boundary" "not found in hooks/fleet-guard.sh"
   else
     GS="$(mktemp -d)" && GS="$(cd "${GS:?}" && pwd -P)"
     # one command per line; the expected verdict is whatever the SHELL says, so the table
@@ -4509,6 +4510,63 @@ EOF
     is "mod guard: every command judged as the shell guard judges it" "$sh_v" "$js_v"
     is "...and the table holds merges, boundary writes and neither" "1 1 1" \
        "$([ "$(grep -o '10' <<< "$sh_v" | wc -l)" -ge 3 ] && echo 1 || echo 0) $([ "$(grep -o '01' <<< "$sh_v" | wc -l)" -ge 2 ] && echo 1 || echo 0) $([ "$(grep -o '00' <<< "$sh_v" | wc -l)" -ge 3 ] && echo 1 || echo 0)"
+
+    # THE GUARD JUDGES WHAT A COMMAND RUNS, NOT WHAT IT SAYS (what_runs / whatRuns). A
+    # worker acknowledging a brief about merging restated it, and its fleet-ack was refused
+    # twice as a merge. So the arguments of fleet-ack, fleet-send, fleet-ledger and git
+    # commit are data — and every way of running a real merge beside one is still a merge:
+    # chained by && ; | or a newline, inside "$(…)", in backticks, a <(…), under bash -c or
+    # env, through a ./fleet-ack that is not the fleet's, after an unterminated quote. Here
+    # the expected verdict IS written down (merge, boundary write), unlike the table above,
+    # because the point is a change of answer; and both guards must give it. <NL> stands for
+    # a newline inside the command.
+    cat > "$GS/prose" <<'EOF'
+00	fleet-ack "I push and the lead runs gh pr merge on it" --from "never gh pr merge 5 myself"
+00	fleet-ack "no fleet-project set from a worker" --from "fleet-project set -s cf-x workers-merge on is the lead's"
+00	fleet-send w1 'run gh pr merge 7 when green'
+00	fleet-ledger close 3 "lead ran gh pr merge 12"
+00	fleet-ledger add "fleet-project set workers-merge for w2"
+00	git commit -m "guard: gh pr merge in prose is data"
+00	git -C /tmp/acme-api commit -q -m "touch ~/.claude/fleet/cf-x.w1.workers-merge is refused"
+00	GIT_EDITOR=true git commit -m "gh pr merge 4"
+00	fleet-ack $'the lead does gh pr merge 9\n' --from x
+00	fleet-ack "gh pr merge 5<NL>still the same argument" --from x
+00	fleet-ack "say \"gh pr merge 5\" twice"
+10	fleet-ack "x" && gh pr merge 5
+10	fleet-ack "x"; gh pr merge 5
+10	fleet-ack "x" | gh pr merge 5
+10	fleet-ack "x"<NL>gh pr merge 5
+10	fleet-ack "$(gh pr merge 5)"
+10	fleet-ack "`gh pr merge 5`"
+10	fleet-ack x `gh pr merge 5`
+10	fleet-ack x <(gh pr merge 5)
+01	fleet-ack "x" && fleet-project set -s cf-x workers-merge on
+01	fleet-ack "$(fleet-project set -s cf-x agents-approve on)"
+01	fleet-ack "x" && touch ~/.claude/fleet/cf-x.w1.agents-approve
+10	git commit -m x && gh pr merge 5
+10	git log --grep x; gh pr merge 5
+10	echo fleet-ack gh pr merge 5 | sh
+10	bash -c "fleet-ack x; gh pr merge 5"
+10	./fleet-ack "gh pr merge 5"
+10	env X=1 fleet-ack "gh pr merge 5"
+10	fleet-ack "unterminated gh pr merge 5
+10	git merge-base x y && gh pr merge 5
+EOF
+    want=""; got_sh=""; while IFS=$'\x1f' read -r v c; do
+      c="${c//<NL>/$'\n'}"; want="$want$v "
+      m=0; merges_a_pr <<< "$c" && m=1; b=0; changes_a_boundary <<< "$c" && b=1; got_sh="$got_sh$m$b "
+    done < <(tr '\t' '\037' < "$GS/prose")
+    got_js="$(node --no-warnings --input-type=module -e "
+      import { mergesAPr, changesABoundary } from '$ROOT/mods/ghostfleet/hooks/guard-shape.js'
+      import fs from 'node:fs'
+      const out = fs.readFileSync('$GS/prose', 'utf8').split('\n').filter(Boolean)
+        .map(l => l.slice(l.indexOf('\t') + 1).replaceAll('<NL>', '\n'))
+        .map(c => (mergesAPr(c) ? '1' : '0') + (changesABoundary(c) ? '1' : '0') + ' ').join('')
+      process.stdout.write(out)" 2>&1)"
+    is "shell guard: a message's words are not a merge, a merge beside a message still is" "$want" "$got_sh"
+    is "mod guard: the same, row for row" "$want" "$got_js"
+    is "...and the table holds prose, merges and boundary writes" "1 1 1" \
+       "$([ "$(grep -o '00' <<< "$want" | wc -l)" -ge 10 ] && echo 1 || echo 0) $([ "$(grep -o '10' <<< "$want" | wc -l)" -ge 10 ] && echo 1 || echo 0) $([ "$(grep -o '01' <<< "$want" | wc -l)" -ge 3 ] && echo 1 || echo 0)"
     rm -rf "${GS:?}"
   fi
   # THE MOD ASKS JARVIS'S GATE ONLY WHEN IT MIGHT SAY NO (guard-shape.js jarvisMightAct), so
@@ -6816,6 +6874,14 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     mg "$WM/wt-a" "$c" CLAUDE_FLEET_SOCK=cf-x
     is "a worker may still: $c"                 "0" "$MRC"
   done
+  # ...and SAY the words: the acknowledgement the contract requires restates the brief, and
+  # a brief about merging or fleet settings puts these words in it (refused twice, live).
+  mg "$WM/wt-a" 'fleet-ack "push, then the lead runs gh pr merge 12" --from "no fleet-project set from here"' CLAUDE_FLEET_SOCK=cf-x
+  is "a worker's fleet-ack may name the merge it will not run" "0" "$MRC"
+  mg "$WM/wt-a" 'fleet-ack "acked" && gh pr merge 12' CLAUDE_FLEET_SOCK=cf-x
+  is "...but a merge chained after it is refused" "2" "$MRC"
+  mg "$WM/wt-a" 'fleet-ack "$(fleet-project set -s cf-x workers-merge on)"' CLAUDE_FLEET_SOCK=cf-x
+  is "...and so is a setting smuggled into its quotes" "2" "$MRC"
   mg "$WM/wt-a" 'gh pr merge 12'
   is "outside any fleet it is not ours to refuse" "0" "$MRC"
 

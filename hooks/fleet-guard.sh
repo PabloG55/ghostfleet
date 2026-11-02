@@ -162,9 +162,83 @@ is_linked() {                          # $1 = a directory -> 0 when it is a LINK
   gcd="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
   [ -n "$gd" ] && [ "$gd" != "$gcd" ]
 }
+# WHAT THE COMMAND RUNS, not what it says. A worker's acknowledgement of a brief about
+# merging restates the brief — "I push, the lead runs gh pr merge" — and the patterns below
+# read that quoted sentence as a merge: the fleet-ack the contract requires was refused twice
+# before a reworded third got through. So the arguments of a messaging command (fleet-ack,
+# fleet-send, fleet-ledger, git commit), which reach a file or another session's input box and
+# never a shell, are taken out before matching. guard-shape.js whatRuns says the rules; this
+# is the same scan, and test/run.sh holds the two to one answer. In short: only a simple
+# command whose bare command word is one of those is trimmed; a `$(`, backtick, `<(` or `>(`
+# in it keeps the whole of it (the shell runs those inside double quotes too); an
+# unterminated quote returns the command unchanged; and `; & | ( )` and NEWLINE end a simple
+# command, which is why this runs BEFORE the fold — folded, a merge on the line after an ack
+# would become one of the ack's arguments.
+what_runs() {
+  awk '
+  { buf = buf (NR > 1 ? "\n" : "") $0 }
+  function endword() { if (inw) { nw++; w[nw] = cur }; cur = ""; inw = 0 }
+  function trimmed(   i, j, c) {
+    if (raw ~ /\$\(|`|[<>]\(/) return raw
+    i = 1
+    while (i <= nw && w[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) i++
+    c = (i <= nw) ? w[i] : ""          # w[] keeps the last segment past nw
+    if (c == "fleet-ack" || c == "fleet-send" || c == "fleet-ledger") return " " c " "
+    if (c == "git") {
+      for (j = i + 1; j <= nw; j++) {
+        if (w[j] == "-C" || w[j] == "-c") { j++; continue }
+        if (substr(w[j], 1, 1) == "-") continue
+        if (w[j] == "commit") return " git commit "
+        break
+      }
+    }
+    return raw
+  }
+  function endseg(op) { endword(); out = out trimmed() op; raw = ""; nw = 0 }
+  END {
+    s = buf; n = length(s); out = ""; raw = ""; nw = 0; cur = ""; inw = 0
+    Q = sprintf("%c", 39); BS = "\\"
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1); d = substr(s, i + 1, 1)
+      if (c == Q || (c == "$" && d == Q)) {
+        ansi = (c == "$"); j = i + (ansi ? 2 : 1); t = ""
+        while (j <= n && substr(s, j, 1) != Q) {
+          if (ansi && substr(s, j, 1) == BS && j < n) j++
+          t = t substr(s, j, 1); j++
+        }
+        if (j > n) { printf "%s", s; exit }
+        raw = raw substr(s, i, j - i + 1); cur = cur t; inw = 1; i = j; continue
+      }
+      if (c == "\"") {
+        j = i + 1; t = ""
+        while (j <= n && substr(s, j, 1) != "\"") {
+          if (substr(s, j, 1) == BS && j < n) j++
+          t = t substr(s, j, 1); j++
+        }
+        if (j > n) { printf "%s", s; exit }
+        raw = raw substr(s, i, j - i + 1); cur = cur t; inw = 1; i = j; continue
+      }
+      if (c == BS) {
+        if (i >= n) { printf "%s", s; exit }
+        raw = raw c d
+        if (d != "\n") { cur = cur d; inw = 1 }
+        i++; continue
+      }
+      if ((c == "$" || c == "<" || c == ">") && d == "(") {
+        raw = raw c d; cur = cur c d; inw = 1; i++; continue
+      }
+      if (index(";&|()\n", c)) { endseg(c); continue }
+      raw = raw c
+      if (c == " " || c == "\t") { endword(); continue }
+      cur = cur c; inw = 1
+    }
+    endseg("")
+    printf "%s", out
+  }'
+}
 merges_a_pr() {                        # the Bash command on stdin merges a pull request
   # Whitespace folded first, so a merge split across lines is still one.
-  tr '\n\t' '  ' | grep -Eq \
+  what_runs | tr '\n\t' '  ' | grep -Eq \
     -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?pr[[:space:]]+merge([[:space:]]|$)' \
     -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?api[[:space:]][^|;&]*pulls/[^[:space:]/]+/merge' \
     -e 'mergePullRequest|enablePullRequestAutoMerge'
@@ -173,7 +247,7 @@ merges_a_pr() {                        # the Bash command on stdin merges a pull
 # project or for one sub-master session. And a worker may not flip it — for itself or a
 # sibling — because a boundary the bounded session can lift is the brief again.
 changes_a_boundary() {                 # the Bash command on stdin writes a boundary setting
-  tr '\n\t' '  ' | grep -Eq \
+  what_runs | tr '\n\t' '  ' | grep -Eq \
     -e '(^|[^[:alnum:]_.-])fleet-project[[:space:]]+set([[:space:]]|$)' \
     -e '\.(workers-merge|agents-approve)(-off)?([^[:alnum:]_-]|$)'
 }
