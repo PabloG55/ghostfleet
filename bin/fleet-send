@@ -9,6 +9,13 @@
 # ledger never has to recognise a nudge by its wording. A nudge that falls back to the paste
 # arrives as typed text and carries nothing; that path records it as the person's.
 #
+# --owner marks the prompt as THE OWNER'S OWN WORDS, and is passed only by a sender that
+# authenticated the owner: the phone's server, whose request carried a passkey-minted token
+# (mcp/fleet-dispatch.mjs asOwner adds it for that door alone; the MCP tool has no field for
+# it). The mod's ledger then records it as the person's message, judged like one typed at the
+# prompt, instead of as a lead's brief that is done only with proof. A worker or a lead
+# dispatching work never passes it. It rides the handoff and the queue record like --nudge.
+#
 # To a session that is mid-turn the prompt is QUEUED and runs as its own turn after that
 # one ends (see "the queue" below); --now pastes it into the running turn instead.
 #
@@ -72,6 +79,7 @@ while [ $# -gt 0 ]; do
     --anyway)    ANYWAY=1;           shift ;;
     --now)       MODE=now;           shift ;;
     --nudge)     KIND=nudge;         shift ;;
+    --owner)     KIND=owner;         shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
     # What the phone reads and edits: the prompts still WAITING in the queue, and taking one
     # back out before it is delivered (see "reading and editing the queue" below).
@@ -80,6 +88,10 @@ while [ $# -gt 0 ]; do
     # Internal: the queue's own delivery (what --dequeue runs). Past the gate like --now,
     # but a turn of its own rather than a paste into one, so it may go through the mod.
     --queued)    MODE=queued;        shift ;;
+    # The end of the flags: what follows is the session and the prompt, whatever they spell.
+    # mcp/fleet-dispatch.mjs always passes it, so no session or prompt a caller hands the MCP
+    # tool can be read as --owner (or any other flag).
+    --)          shift; break ;;
     *) break ;;
   esac
 done
@@ -332,6 +344,7 @@ if [ "$MODE" = dequeue ]; then
     || { echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1; }
   _args=(--queued --anyway -s "$SOCK")
   [ "${_q_kind:-}" = nudge ] && _args+=(--nudge)
+  [ "${_q_kind:-}" = owner ] && _args+=(--owner)
   [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
   # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
   # between this paste and the spinner, and fold the next prompt into this one.
@@ -402,7 +415,8 @@ fi
 # Appends this prompt (the caller's words, before any preamble: the delivery adds that)
 # to the queue, under the lock the caller holds; sets _n to its place.
 _enqueue() {
-  # A sixth field only for a nudge, so every other record is the five fields it always was.
+  # A sixth field only for a nudge or the owner's words, so every other record is the five
+  # fields it always was.
   _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$RAW_MSG")")${KIND:+$'\x1f'$KIND}"
   # The same prompt already waiting is not a second task: the automated nudges (a
   # worker finished, an answer relayed) repeat word for word and would stack one turn

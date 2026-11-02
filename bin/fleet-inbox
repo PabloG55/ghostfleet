@@ -256,7 +256,22 @@ finished_live() {
   echo "finished workers — task shipped, session still up (a new task is a new session):"
   printf '%s' "$out"
 }
-reclaim_hints() { finished_live; reclaimable; }
+# ...AND WHAT A STOPPED WORKER LEFT ITS LEAD, ONCE IT LANDS. fleet-stop carries a worker's
+# unfinished ledger items to its lead when its PR is still open, with the branch and PR number
+# on each; when that PR merges, the merge is the proof the carried brief was waiting for. Read
+# here because this is where the lead already reads merges, from fleet-merged's shared cache:
+# no model call, and lib/ledger-landed.mjs asks nothing at all unless the lead holds such an
+# item. Measured before it: 23 carried items open in one lead's ledger, many for work merged.
+ledger_landed() {
+  local lib repo out
+  lib="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/ledger-landed.mjs"
+  [ -f "$lib" ] && command -v node >/dev/null 2>&1 || return 0
+  repo="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+  out="$(node --no-warnings "$lib" "$FLEET_DIR" "$SOCK" "${READER:-master}" "$(dirname "$0")/fleet-merged" "$repo" 2>/dev/null </dev/null)"
+  [ -n "$out" ] || return 0
+  echo; printf '%s\n' "$out"
+}
+reclaim_hints() { ledger_landed; finished_live; reclaimable; }
 
 # A PROMPT THE MOD REFUSED, THAT NO SENDER READ. fleet-send reports a failed handoff and
 # removes its receipt; one still on disk was read by nobody (fleet-send gave up waiting, or

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fleet-ledger [-s SOCKET] [--session ID] [session] [list|all|close <id> [proof]|drop <id> <reason>|add <ask>|clear]
+# fleet-ledger [-s SOCKET] [--session ID] [session] drop-carried <worker> <reason>
 #
 # A session's request LEDGER (the mod's LEDGER section, mods/ghostfleet/hooks/register.js):
 # every message submitted to it, held open until a final message answers it, and the
@@ -13,6 +14,10 @@
 #   drop <id> <reason> as ledger_drop: not a real ask, or the person cancelled it
 #   add <ask>          as ledger_add: an ask the ledger missed, in the latest prompt
 #   clear              close every open item by hand; the history stays in the file
+#   drop-carried <worker> <reason>
+#                      drop, with one reason, every item still owed that fleet-stop carried
+#                      here from <worker>: for the person or the lead clearing what one
+#                      stopped worker left, after reading it. Never run on anyone's behalf
 #
 # The last three are the mod's tools from Bash, for a session older than the tools: the mod
 # registers them once, at session start, and /reload-plugins does not register them again.
@@ -29,7 +34,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -s) SOCK="${2:-}"; shift 2 ;;
     --session) SESSION="${2:-}"; [ -n "$SESSION" ] || { echo "fleet-ledger: --session needs a session id" >&2; exit 1; }; shift 2 ;;
-    -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "fleet-ledger: unknown option $1" >&2; exit 1 ;;
     list|all|clear) [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }; VERB="$1"; shift ;;
     close|drop)
@@ -37,6 +42,11 @@ while [ $# -gt 0 ]; do
       VERB="$1"; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: $1 needs an item id" >&2; exit 1; }
       shift 2; WHY="$*"; set --
       [ "$VERB" = close ] || [ -n "$WHY" ] || { echo "fleet-ledger: drop needs a reason" >&2; exit 1; } ;;
+    drop-carried)
+      [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
+      VERB="$1"; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: drop-carried needs the worker's name" >&2; exit 1; }
+      shift 2; WHY="$*"; set --
+      [ -n "$WHY" ] || { echo "fleet-ledger: drop-carried needs a reason" >&2; exit 1; } ;;
     add)
       [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
       VERB=add; shift; WHY="$*"; set --
@@ -124,6 +134,7 @@ exec node --no-warnings --input-type=module -e '
       ? L.closeByAgent(l, arg, why, ctx)
       : (n => ({ ledger: n, said: n ? `closed ${arg}` : `fleet-ledger: no open item ${arg} in ${name}` }))(L.closeByHand(l, arg, now))),
     drop: l => L.dropByAgent(l, arg, why, ctx),
+    "drop-carried": l => L.dropCarried(l, arg, why, ctx),
     add: l => L.addByAgent(l, why, ctx),
     clear: l => { const n = L.openItems(l, now).length; return { ledger: L.clearOpen(l, now), said: `closed ${n} open item${n === 1 ? "" : "s"}` } },
   }[verb]
