@@ -82,6 +82,15 @@ is('a carried one says which worker it came from and what it last said', 'cache-
 const open = APP.waitingModel({ ...row, state: 'open', reason: '', since: nowS - 5 * 3600 }, nowS);
 is('an untouched open request is yellow, and says why it is listed', 'yellow/○ open, untouched/no word on it for hours', `${open.color}/${open.statusLabel}/${open.need}`);
 
+// A HELD WAKE (fleet-serve heldWakes) is not a ledger item and has no id to quote: the card
+// names the lead whose box is holding it and says what the owner can do, and never "#held".
+const hw = APP.waitingModel({ project: 'acme-api', profile: 'work', session: 'master', key: 'held:cf-acme-api/master', id: 'held',
+                              state: 'held', text: "master's input box has unsent text", reason: 'x', at: nowS - 900, since: nowS - 900 }, nowS);
+is('a held wake is red and says so', 'red/▲ wake held', `${hw.color}/${hw.statusLabel}`);
+is('...names the lead, not an item number', 'master', hw.where);
+is('...says what is in the way, unquoted', "master's input box has unsent text", hw.msg);
+is('...and that the box is the owner\'s to send or clear, never the fleet\'s', true, /send or clear/.test(hw.need) && /never/.test(hw.need));
+
 // ── the reply, and the ledger that reads it ───────────────────────────────
 // An answer that shares NO word with the ask, which is the common one ("yes", "go ahead",
 // "the second"): with words of its own in common the answer alone would wake the item, and

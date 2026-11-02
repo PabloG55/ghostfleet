@@ -7,6 +7,9 @@ export type Band = {
   need: number
   /** undefined: not read yet; null: gh could not say. */
   prs?: { green: number; red: number; pending: number } | null
+  /** A wake the fleet is holding because this session's input box never read empty
+   *  (band-shape.js heldWake): since when (epoch s), why, drawn against `asOf`, a minute. */
+  held?: { since: number; why: 'typed' | 'nobox'; asOf: number } | null
 }
 
 /** What the ledger's row draws (hooks/ledger.js ledgerSummary), against `asOf`, a minute. */

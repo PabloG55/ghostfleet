@@ -4507,6 +4507,16 @@ EOF
     const s = { workers: 3, working: 0, need: 0 }
     console.log(plain(bandRuns(s, null, 80)))" 2>&1)"
   is "band: gh failing reads 'PRs ?', never a count" "3 workers · PRs ?" "$bq"
+  # A HELD WAKE's row (hooks/fleet-event.sh holds a wake the lead's box keeps out): never wider
+  # than given from 8 columns up, and always starting with what it is
+  bh="$(node --no-warnings --input-type=module -e "
+    import { heldRuns, plain, width } from '$ROOT/mods/ghostfleet/hooks/band-shape.js'
+    const h = { since: 1000, why: 'typed' }
+    let over = 0, lost = 0
+    for (let c = 8; c <= 200; c++) { const r = heldRuns(h, 1000_000 + 725_000, c); if (width(r) > c) over++; if (!/^(wake )?held 1[0-9]m/.test(plain(r))) lost++ }
+    console.log(over, lost, plain(heldRuns(h, 1000_000 + 725_000, 60)), heldRuns(null, 0, 80) === null)" 2>&1)"
+  is "band: a held wake fits every width, and says so first" \
+     "0 0 wake held 12m · this input box has unsent text true" "$bh"
 else
   skip "the mod's guards and band" "node missing"
 fi
@@ -6035,7 +6045,9 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   tmux -L cfnl new-session -d -s docs-pass -c "$NL/docs-pass" "$NL/stub/agent-here"
   nlenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK_FORCE HOME="$NL/home" \
               CLAUDE_FLEET_SOCK=cfnl CLAUDE_FLEET_DIR="$NLF" CLAUDE_FLEET_SLOTS="$NL/slots" \
-              CLAUDE_FLEET_NOTIFIER=off PATH="$NL/stub:$ROOT/bin:$PATH" "$@"; }
+              CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_NOTIFY_QUIET=0 PATH="$NL/stub:$ROOT/bin:$PATH" "$@"; }
+  # QUIET=0 above: this group is WHO a finish wakes, read off the stamp the immediate path
+  # writes; WHEN a finish wakes (the quiet window) is "a worker's DONE waits for a quiet window"
   nlspawn() { local d="$1"; shift; ( cd "$d" && nlenv "$ROOT/bin/fleet-spawn" "$@" 2>&1 ); }
   # a count that is 0 for a file that does not exist: "no inbox yet" IS the answer zero
   nlc() { [ -f "$2" ] || { echo 0; return 0; }; grep -c -- "$1" "$2" || true; }
@@ -11996,6 +12008,7 @@ if command -v tmux >/dev/null 2>&1; then
   # AND THE OTHER DIRECTION: a box that never clears must not paste, and must not vanish
   # silently either — it leaves a trace naming what went undelivered.
   rm -f "$ND/sent.log" "$ND/cfnudge.notify.stamp"; echo 1 > "$ND/state"
+  export CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY=1    # a held retry polls fast, and exits soon after the server goes
   CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=2 PATH="$ND/bin:$PATH" \
     _defer_nudge cfnudge
   for i in $(seq 1 15); do [ -s "$ND/cfnudge.notify.undelivered" ] && break; sleep 1; done
@@ -12019,9 +12032,130 @@ if command -v tmux >/dev/null 2>&1; then
      "$(awk -F'\t' '$2 == "acme-lead" && $3 == "undelivered"' "$ND/cfnudge.acme-lead.inbox" 2>/dev/null | grep -c . || true)"
   is "...and not in master's"                      "1" \
      "$(grep -c undelivered "$ND/cfnudge.inbox" 2>/dev/null || true)"
-  tmux -L cfnudge kill-server 2>/dev/null; rm -rf "$ND"
+  tmux -L cfnudge kill-server 2>/dev/null; unset CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY; sleep 2; rm -rf "$ND"
 else
   skip "deferred wake" "tmux missing"
+fi
+
+# ── 4d5c2. a worker's DONE waits for a quiet window, and is re-checked when it ends ──
+# Measured on one busy fleet's master over 13 days: 1,878 of its turns (64%) were started by
+# the "a worker finished" nudge, a median 2.7 minutes apart, and 57% of those only looked and
+# ended. A DONE is now gathered (hooks/fleet-event.sh _gather_done) and one sleeper wakes the
+# lead once the fleet has been quiet for the window; at that moment each DONE is asked again
+# whether it is still news (_done_news). Driven here on the functions themselves, with the
+# composer guard stubbed as in the group above (its correctness is that group's), and the
+# window shrunk to seconds. The hook end of it — a need-you still going at once beside a
+# gathered finish, and a held box — is "a need-you names the worker and the ask".
+#   Every row was watched going red: the gatherer swapped for an immediate send (two wakes for
+# the pair), the cap removed (the capped row never fires), _done_news answering yes always
+# (the busy worker named, and a wake for nothing).
+group "a worker's DONE waits for a quiet window"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  QW="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$QW/bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$QW" > "$QW/bin/fleet-send"
+  chmod +x "$QW/bin/fleet-send"
+  for f in _dbg _defer_nudge _notify_quiet _done_news _gather_done; do
+    eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  done
+  export QW
+  _pane_text() { :; }
+  _input_state() { return "$(cat "$QW/state" 2>/dev/null || echo 2)"; }
+  _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
+  echo 0 > "$QW/state"
+  FLEET_DIR="$QW"; export FLEET_DIR
+  export CLAUDE_FLEET_NOTIFY_TICK=1 CLAUDE_FLEET_NOTIFY_QUIET=3 CLAUDE_FLEET_NOTIFY_QUIET_MAX=600
+  tmux -L cfquiet kill-server 2>/dev/null
+  tmux -L cfquiet new-session -d -s master 'sleep 120' 2>/dev/null
+  IB="$QW/cfquiet.inbox"
+  qw_rec() {                                   # $1 = worker, $2 = status, $3 = ts
+    printf '{"session_id":"qw-%s","sock":"cfquiet","slot":"%s","status":"%s","ts":%s}' "$1" "$1" "$2" "$3" > "$QW/qw-$1.json"
+  }
+  qw_done() {                                  # $1 = worker, $2 = ts: its row, as the hook files it, then the gather
+    printf '%s\t%s\tdone\tx\n' "$2" "$1" >> "$IB"; qw_rec "$1" ready "$2"
+    now="$2" PATH="$QW/bin:$PATH" _gather_done cfquiet "$QW" notify master "$1" "$IB"
+  }
+  qw_sent() { local n; n="$(grep -c . "$QW/sent.log" 2>/dev/null)"; echo "${n:-0}"; }
+  qw_reset() { : > "$QW/sent.log"; : > "$IB"; rm -f "$QW"/qw-*.json "$QW/cfquiet.inbox.seen"; }
+  qw_idle() { wait_for 15 "the sleeper to finish" '[ ! -e "$QW/cfquiet.notify.gather.pid" ]' || true; }
+
+  # ── two DONEs a minute apart are ONE wake ──
+  qw_reset; t="$(date +%s)"
+  qw_done acme-api "$(( t - 60 ))"
+  qw_done toolbox "$t"
+  sleep 1
+  is "inside the window nothing is sent"               "0" "$(qw_sent)"
+  wait_for 10 "the window to end" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "two DONEs a minute apart give ONE wake"          "1" "$(qw_sent)"
+  is "...naming both, oldest first"                    "1" "$(grep -cF '[fleet] 2 workers finished (acme-api, toolbox) — run fleet-inbox' "$QW/sent.log" || true)"
+  is "...to master, as a nudge (not --now)"            "1" "$(grep -c '^--nudge -s cfquiet master ' "$QW/sent.log" || true)"
+  is "...still the words the ledgers drop as the fleet's" "1" "$(grep -c 'no need to reply' "$QW/sent.log" || true)"
+  # and the other direction: a DONE after the window is a wake of its own, not swallowed
+  qw_done scratch "$(date +%s)"
+  wait_for 10 "the next window" '[ "$(qw_sent)" -ge 2 ]' || true
+  qw_idle
+  is "a DONE after the window is its own wake"         "2" "$(qw_sent)"
+
+  # ── the window trails, but is capped ──
+  # A fleet that never falls quiet must still be told: the first DONE gathered 30s ago with a
+  # cap of 4s fires on the first look, though the latest DONE is fresh.
+  qw_reset; t="$(date +%s)"
+  CLAUDE_FLEET_NOTIFY_QUIET=60 CLAUDE_FLEET_NOTIFY_QUIET_MAX=4 qw_done acme-api "$(( t - 30 ))"
+  CLAUDE_FLEET_NOTIFY_QUIET=60 CLAUDE_FLEET_NOTIFY_QUIET_MAX=4 qw_done toolbox "$t"
+  wait_for 6 "the capped wake" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "a window that never falls quiet still fires at the cap" "1" "$(qw_sent)"
+
+  # ── re-checked at fire time ──
+  qw_reset; t="$(date +%s)"
+  qw_done acme-api "$t"; qw_done toolbox "$t"
+  qw_rec toolbox working "$(( t + 1 ))"         # a background task woke it after its DONE
+  wait_for 10 "the window to end" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "a worker busy again at fire time is dropped"     "1" "$(grep -cF '[fleet] 1 worker finished (acme-api) —' "$QW/sent.log" || true)"
+  is "...and not named at all"                         "0" "$(grep -c toolbox "$QW/sent.log" || true)"
+  # the mod's live state counts the same as the hook's status (band-shape.js recordState)
+  qw_reset; t="$(date +%s)"
+  qw_done docs-pass "$t"
+  printf '{"session_id":"qw-docs-pass","sock":"cfquiet","slot":"docs-pass","status":"ready","ts":%s,"source":"mod","state":"working","mod":{"hb":%s000}}' \
+    "$t" "$t" > "$QW/qw-docs-pass.json"
+  # ...on THIS socket only: the same name busy in another fleet is somebody else
+  printf '{"session_id":"qw-other","sock":"cfother","slot":"acme-api","status":"working","ts":%s}' "$(( t + 5 ))" > "$QW/qw-other.json"
+  qw_done acme-api "$t"
+  wait_for 10 "the window to end" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "...a mod-reported busy worker is dropped too"    "0" "$(grep -c docs-pass "$QW/sent.log" || true)"
+  is "...and another fleet's busy namesake is not this one" "1" "$(grep -cF '(acme-api)' "$QW/sent.log" || true)"
+  rm -f "$QW/qw-other.json"
+  # a DONE the lead already read with fleet-inbox is not news either
+  qw_reset; t="$(date +%s)"
+  qw_done acme-api "$t"; qw_done toolbox "$t"
+  echo 1 > "$QW/cfquiet.inbox.seen"             # the lead read the first row
+  wait_for 10 "the window to end" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "a DONE the lead already read is dropped"         "1" "$(grep -cF '[fleet] 1 worker finished (toolbox) —' "$QW/sent.log" || true)"
+  # nothing left: nobody is woken
+  qw_reset; t="$(date +%s)"
+  qw_done acme-api "$t"
+  qw_rec acme-api working "$(( t + 1 ))"
+  sleep 5; qw_idle
+  is "nothing actionable left: the lead is not woken"  "0" "$(qw_sent)"
+  is "...and nothing is left gathered"                 "0" "$([ -s "$QW/cfquiet.notify.gather" ] && echo 1 || echo 0)"
+
+  # ── the window is per fleet, and 0 is the old immediate wake ──
+  printf '45\n' > "$QW/cfquiet.notify-quiet"
+  is "a fleet's own window beats the env"              "45" "$(_notify_quiet cfquiet "$QW")"
+  is "...and another fleet keeps the env's"            "3"  "$(_notify_quiet cfother "$QW")"
+  printf 'soon\n' > "$QW/cfquiet.notify-quiet"
+  is "...a window that is not a number is ignored"     "3"  "$(_notify_quiet cfquiet "$QW")"
+  rm -f "$QW/cfquiet.notify-quiet"
+  is "...and with nothing set it is ten minutes"       "600" "$(unset CLAUDE_FLEET_NOTIFY_QUIET; _notify_quiet cfquiet "$QW")"
+
+  tmux -L cfquiet kill-server 2>/dev/null
+  unset CLAUDE_FLEET_NOTIFY_TICK CLAUDE_FLEET_NOTIFY_QUIET CLAUDE_FLEET_NOTIFY_QUIET_MAX
+  rm -rf "$QW"
+else
+  skip "a worker's DONE waits for a quiet window" "tmux or jq missing"
 fi
 
 # ── 4d5d. a need-you says WHO and WHAT, and stays on top until it clears ─────
@@ -12089,8 +12223,12 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
       "$2" "$1" "$NY" "${3:-}" \
       | env -u TMUX -u TMUX_PANE HOME="$NY/home" CLAUDE_FLEET_SOCK=cfneed CLAUDE_FLEET_SLOT="$1" \
           CLAUDE_FLEET_DIR="$NY/fleet" CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 \
-          CLAUDE_FLEET_NOTIFY_RETRY_TRIES=20 PATH="$NY/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+          CLAUDE_FLEET_NOTIFY_RETRY_TRIES="${NY_TRIES:-20}" CLAUDE_FLEET_NOTIFY_QUIET="${NY_QUIET:-0}" \
+          CLAUDE_FLEET_NOTIFY_TICK=1 CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY=1 \
+          PATH="$NY/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
   }
+  # NY_QUIET=0 until the last section: the rows before it are about a need-you beside a
+  # finish's IMMEDIATE wake, and the last is the same pair under the quiet window
   ny_sent() { grep -cF -- "$1" "$NY/sent.log" 2>/dev/null || true; }
   : > "$NY/sent.log"
   # a finish first, which nudges and stamps the finish's debounce...
@@ -12182,6 +12320,57 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
      "$(ny_sent "profile-env NEEDS YOU: $PERM")|$(ny_sent "docs-pass NEEDS YOU: $QASK")"
   is "...in one --now paste"                              "1" \
      "$(grep -c '^--nudge --now -s cfneed master \[fleet\] profile-env NEEDS YOU' "$NY/sent.log" 2>/dev/null || true)"
+
+  # ── UNDER THE QUIET WINDOW: a finish is gathered, a need-you still goes at once ──
+  # The real hook and the real composer guard. One fleet's master spent 64% of its turns on
+  # finish nudges a median 2.7 minutes apart; a need-you is the one event that must not wait
+  # behind that fix, so the pair is asserted together, in both directions.
+  wait_for 10 "the earlier finish's retry to land" '[ ! -f "$NY/fleet/cfneed.notify.retry" ]' || true
+  rm -f "$NY/fleet/"*.needyou.sent "$NY/fleet/cfneed.notify.stamp" "$NY/fleet/cfneed.notify.gather"
+  ny_show profile-env "$FIX/claude-permission-dashed.txt"
+  wait_for 5 "the dialog to redraw" 'pane_has cfneed "Do you want to proceed" profile-env' || true
+  : > "$NY/sent.log"
+  NY_QUIET=3 nyfire billing-svc Stop
+  sleep 1
+  is "under the quiet window a finish wakes nobody yet"   "0" "$(ny_sent "finished")"
+  is "...it is gathered for the window instead"           "1" "$(grep -c 'billing-svc' "$NY/fleet/cfneed.notify.gather" 2>/dev/null || true)"
+  NY_QUIET=3 nyfire profile-env Notification 'Claude needs your permission'
+  wait_for 5 "the need-you inside the window" '[ "$(ny_sent "profile-env NEEDS YOU")" -ge 1 ]' || true
+  is "a need-you inside the window wakes at once"         "1" "$(ny_sent "profile-env NEEDS YOU: $PERM")"
+  is "...while the finish is still waiting its turn"      "0" "$(ny_sent "finished")"
+  wait_for 12 "the gathered wake" '[ "$(ny_sent "finished")" -ge 1 ]' || true
+  is "the window ends: ONE wake names the finished worker" "1" "$(ny_sent "[fleet] 1 worker finished (billing-svc)")"
+  is "...and only one"                                    "1" "$(ny_sent "finished")"
+
+  # ── A BOX THAT NEVER EMPTIES: reported, and never cleared ──
+  # The lead's pane draws a composer holding text, then reads its tty raw into keys.log:
+  # every byte the fleet could send it — a paste, a Ctrl-U, an Enter — would land there.
+  ny_keys() { tmux -L cfneed respawn-pane -k -t master \
+                "clear; cat '$NY/typed.txt'; stty raw -echo; exec dd bs=1 of='$NY/keys.log' 2>/dev/null" 2>/dev/null; }
+  : > "$NY/keys.log"; ny_keys
+  wait_for 5 "the typed composer to draw" 'pane_has cfneed "half a sentence" master' || true
+  : > "$NY/sent.log"; rm -f "$NY/fleet/cfneed.notify.stamp" "$NY/fleet/cfneed.notify.blocked"
+  NY_QUIET=1 NY_TRIES=2 nyfire billing-svc Stop
+  wait_for 15 "the hold to be reported" '[ -s "$NY/fleet/cfneed.notify.blocked" ]' || true
+  is "a wake the box keeps out is reported as held"       "1" "$([ -s "$NY/fleet/cfneed.notify.blocked" ] && echo 1 || echo 0)"
+  is "...as text in the box, not a missing box"           "1" "$(head -1 "$NY/fleet/cfneed.notify.blocked" 2>/dev/null | cut -d $'\x1f' -f2)"
+  is "...in master's inbox, saying the box has unsent text" "1" \
+     "$([ "$(awk -F'\t' '$3 == "undelivered" && /has unsent text/' "$NY/fleet/cfneed.inbox" 2>/dev/null | grep -c .)" -ge 1 ] && echo 1 || echo 0)"
+  sleep 2
+  is "...still pending past the timeout, not expired"     "1" \
+     "$(p=$(cat "$NY/fleet/cfneed.notify.retry" 2>/dev/null); kill -0 "$p" 2>/dev/null && echo 1 || echo 0)"
+  is "...nothing was pasted"                              "0" "$(ny_sent "finished")"
+  is "...and not one key reached the box"                 "0" "$(wc -c < "$NY/keys.log" | tr -d ' ')"
+  is "...whose text is still there"                       "1" "$(pane_has cfneed "half a sentence" master && echo 1 || echo 0)"
+  # the probe can see a key at all: without this the row above passes on a pane that reads nothing
+  tmux -L cfneed send-keys -t master C-u 2>/dev/null
+  wait_for 3 "the probe's own key" '[ -s "$NY/keys.log" ]' || true
+  is "(the probe does catch a Ctrl-U sent to that box)"   "1" "$([ -s "$NY/keys.log" ] && echo 1 || echo 0)"
+  ny_show master "$NY/empty.txt"
+  wait_for 12 "the held wake" '[ "$(ny_sent "finished")" -ge 1 ]' || true
+  is "the person empties the box: the held wake lands"    "1" "$(ny_sent "[fleet] 1 worker finished (billing-svc)")"
+  wait_for 5 "the hold to lift" '[ ! -e "$NY/fleet/cfneed.notify.blocked" ]' || true
+  is "...and the hold lifts"                              "0" "$([ -e "$NY/fleet/cfneed.notify.blocked" ] && echo 1 || echo 0)"
   tmux -L cfneed kill-server 2>/dev/null; rm -rf "$NY"
 else
   skip "a need-you names the worker and the ask" "tmux, node or jq missing"
@@ -14094,7 +14283,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
        + (if $p != "" then {prompt:$p} else {} end)' \
     | env -u TMUX -u TMUX_PANE HOME="$RS/home" CLAUDE_CONFIG_DIR="$RS/cfg" CLAUDE_FLEET_SOCK=cfres \
         CLAUDE_FLEET_SLOT=toolbox CLAUDE_FLEET_DIR="$RS/fleet" CLAUDE_FLEET_NOTIFIER=off \
-        CLAUDE_FLEET_NOTIFY_DEBOUNCE=0 PATH="$RS/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+        CLAUDE_FLEET_NOTIFY_DEBOUNCE=0 CLAUDE_FLEET_NOTIFY_QUIET=0 PATH="$RS/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
   }
   rs_turn() { jq -r '.turn // ""' "$RS/fleet/rs-toolbox.json" 2>/dev/null; }
   rs_last() { tail -1 "$RS/fleet/cfres.inbox" 2>/dev/null | cut -f3; }
@@ -18323,7 +18512,7 @@ else
 fi
 
 # ── an expired wake reaches the phone ────────────────────────────────────────
-# hooks/fleet-event.sh's deferred wake gives up after ten minutes of an occupied input box
+# hooks/fleet-event.sh's deferred wake, at ten minutes of an occupied input box (it goes on holding the wake),
 # and appends to <sock>.<kind>.undelivered. Nothing read that file: a worker sat on a
 # permission prompt behind four expiries until somebody found it by hand. fleet-serve now
 # treats the marker GROWING as a need-you for the lead the wake was for. Driven through the
@@ -18370,6 +18559,37 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "${UD:?}"
 else
   skip "undelivered push" "node missing"
+fi
+
+# ── a wake still held is a row in the owner's queue ──────────────────────────
+# The buzz above is one moment; a held wake goes on retrying, and rewrites
+# <sock>.<kind>.blocked on every poll. fleet-serve's heldWakes turns a FRESH one into a row
+# of /api/waiting, one per lead. Both directions: a stale file (a retry killed without its
+# trap) is no row, and another fleet's lead is not this one. Watched red with the staleness
+# check removed and with the per-lead merge removed.
+group "phone: a held wake is a row in the queue until it lands"
+if command -v node >/dev/null 2>&1; then
+  HW="$(cd "$(mktemp -d)" && pwd -P)"; t="$(date +%s)"
+  # the EARLIER hold is the one read first (needyou sorts before notify), so a merge that
+  # kept the last one read would show the later hold and go red
+  printf '%s\037%s\037master\n' "$(( t - 60 ))" 2 > "$HW/cf-acme-api.notify.blocked"
+  printf '%s\037%s\037master\n' "$(( t - 900 ))" 1 > "$HW/cf-acme-api.needyou.blocked"
+  printf '%s\037%s\037api-lead\n' "$(( t - 300 ))" 2 > "$HW/cf-acme-api.api-lead.notify.blocked"
+  printf '%s\037%s\037master\n' "$(( t - 300 ))" 1 > "$HW/cf-toolbox.notify.blocked"
+  touch -t "$(date -r $(( t - 3600 )) +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$(( t - 3600 ))" +%Y%m%d%H%M.%S)" "$HW/cf-toolbox.notify.blocked"
+  hw="$(node --input-type=module -e "
+    import { heldWakes } from '$ROOT/bin/fleet-serve.mjs';
+    const list = [{ name: 'acme-api', profile: 'work', sock: 'cf-acme-api' }, { name: 'toolbox', profile: 'work', sock: 'cf-toolbox' }];
+    for (const r of heldWakes(list, Date.now(), ['$HW'])) console.log([r.project, r.session, r.state, r.since, r.text].join('|'))" 2>&1)"
+  is "a fresh hold is a row, one per lead, the earliest hold" \
+     "acme-api|master|held|$(( t - 900 ))|master's input box has unsent text" "$(grep '|master|' <<< "$hw" | grep acme-api)"
+  is "...a sub-lead's is its own row, worded for a missing box" \
+     "acme-api|api-lead|held|$(( t - 300 ))|api-lead shows no input box" "$(grep '|api-lead|' <<< "$hw")"
+  is "...and a stale one (no poll for an hour) is no row" "0" "$(grep -c toolbox <<< "$hw" || true)"
+  is "...so two rows in all"                         "2" "$(grep -c . <<< "$hw" || true)"
+  rm -rf "${HW:?}"
+else
+  skip "held wake on the phone" "node missing"
 fi
 
 # ── what a master holds for the owner reaches the phone ──────────────────────

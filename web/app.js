@@ -1188,6 +1188,9 @@ const WAITING_LOOK = {
   waiting: { label: '● waiting on you', color: 'red' },
   open: { label: '○ open, untouched', color: 'yellow' },
   replied: { label: '↩ you replied', color: 'grey' },
+  // not a ledger item: a wake the fleet is holding because a lead's input box never read
+  // empty (fleet-serve heldWakes). Red, because the lead hears nothing until the owner acts.
+  held: { label: '▲ wake held', color: 'red' },
 };
 // "waits on the person: pick A or B" is the judge's sentence; the card already says whom.
 const needOf = (reason) => String(reason || '').replace(/^\s*(?:waits?|waiting)\s+on\s+(?:the\s+)?(?:person|user|owner|you)\s*[:,—-]?\s*/i, '').trim();
@@ -1199,9 +1202,11 @@ export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
     title: G.bareName(row.project), statusLabel: look.label,
     when: G.humanAge(Math.max(0, nowS - (Number(row.since) || nowS))),
     // the machine, once there are two (the daemon stamps `host` on every merged item)
-    where: `${row.host ? `${row.host} · ` : ''}master · #${row.id}`, path: '',
-    msg: `“${row.text}”`, one: true,
-    need: row.state === 'replied' ? 'you replied — the master has not closed it yet'
+    where: row.state === 'held' ? `${row.host ? `${row.host} · ` : ''}${row.session || 'master'}`
+      : `${row.host ? `${row.host} · ` : ''}master · #${row.id}`, path: '',
+    msg: row.state === 'held' ? row.text : `“${row.text}”`, one: true,
+    need: row.state === 'held' ? 'send or clear what is in that box — the fleet never will; its wake goes in once it is empty'
+        : row.state === 'replied' ? 'you replied — the master has not closed it yet'
         : need ? `needs: ${need}`
         // carried from a stopped worker (ledger.js carryItems): its text is the worker's ask,
         // so the row says whose, and what the worker last said about it
@@ -1218,7 +1223,7 @@ export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
 function queueRow() {
   const rows = S.waiting || [];
   if (!rows.length) return [];
-  const hot = rows.some((r) => r.state === 'waiting');
+  const hot = rows.some((r) => r.state === 'waiting' || r.state === 'held');
   const row = el('button', { class: 'queue-row' + (hot ? ' hot' : ''), type: 'button',
     'aria-label': `queue: ${rows.length} held for you${hot ? ', some waiting on you' : ''}`, onclick: openQueue }, [
     el('span', { class: 'qt', text: `queue · ${rows.length}` }),
@@ -1255,11 +1260,19 @@ function queueProps() {
     // The same cards, in the same order, with the same tap as on Projects before: the
     // answer sheet. Null is "not read yet" and gets the wait, as on Projects.
     cards: S.waiting == null ? skeletonCards(2)
-      : rows.length ? rows.map((r, i) => cardEl({ ...waitingModel(r), selected: i === S.qsel }, { tap: () => sheetReply(r) }, -1))
+      : rows.length ? rows.map((r, i) => cardEl({ ...waitingModel(r), selected: i === S.qsel }, { tap: () => (r.state === 'held' ? openHeld(r) : sheetReply(r)) }, -1))
       : [el('div', { class: 'sect', text: 'nothing is waiting on you' })],
     listRef: (list) => { if (list) watchScroll('queue', list); },
     toast: S.toast,
   };
+}
+// A HELD WAKE IS ANSWERED AT THE BOX, NOT BY A MESSAGE: a message to that lead would queue
+// behind the very box that is holding it. So the tap opens the lead, one level under
+// Projects as a master entered from there is, where the owner can see what is typed.
+function openHeld(row) {
+  if (S.project !== row.project) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  S.project = row.project; S.sub = ''; S.foundBack = null;
+  openSession(row.session || 'master', { depth: 1, entry: 'projects' });
 }
 // The reply is an ordinary message to that master, and it QUOTES the item: the master reads
 // which ask it answers, and its ledger wakes the item on the quoted words (wakeWaiting).
@@ -8291,7 +8304,7 @@ function queueKey(e, k, lk, ctrl) {
   switch (k) {
     case 'ArrowUp': case 'k': move(-1); break;
     case 'ArrowDown': case 'j': move(1); break;
-    case 'Enter': if (rows[S.qsel]) sheetReply(rows[S.qsel]); break;
+    case 'Enter': if (rows[S.qsel]) (rows[S.qsel].state === 'held' ? openHeld : sheetReply)(rows[S.qsel]); break;
     case 'q': case '`': back(); break;
     case 'Q': toProjects(); break;
     default: return false;

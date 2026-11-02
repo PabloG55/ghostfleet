@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 38f9e609ad38
+// CLIENT-HASH: ea528d04aac2
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -427,7 +427,10 @@
 // v91 makes the Projects search find sessions too, across every project and paired machine,
 // and gives a project's grid its own "find a session" field. A phone still on v90 finds
 // projects only, and its grid has no field.
-const VERSION = 'ghostfleet-v92';
+// v93 lists a held wake in the queue: a lead whose input box has kept the fleet's wake out
+// for ten minutes is a red `▲ wake held` card, and a tap opens that lead. A phone on v92
+// shows the queue without it.
+const VERSION = 'ghostfleet-v93';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

@@ -1617,8 +1617,9 @@ export function pushEvents(rows) {
 
 // ── A WAKE THAT NEVER LANDED IS A NEED-YOU FOR THE LEAD ─────────────────────
 // The worker's own need-you buzzes above; what nothing announced is that its lead was never
-// woken to deal with it. hooks/fleet-event.sh's deferred wake retries for ten minutes while
-// the lead's input box reads occupied, then appends a line to <sock>.<kind>.undelivered —
+// woken to deal with it. hooks/fleet-event.sh's deferred wake retries while the lead's input
+// box reads occupied, and at ten minutes appends a line to <sock>.<kind>.undelivered (and goes
+// on holding the wake: heldWakes, below) —
 // a file nobody reads, so a worker sat on a permission prompt behind four of them until it
 // was found by hand. That marker GROWING is the event: no status changes (the lead is
 // idle, as it was), so the transition rule above cannot see it.
@@ -1628,8 +1629,7 @@ export function pushEvents(rows) {
 // to, so the socket is matched against the ones the scan KNOWS, longest first.
 //   SAME BASELINE RULE: the first sight of a marker is its size, never a buzz — a daemon
 // starting next to a week of expiries must not ring for all of them.
-export function undeliveredTarget(name, socks) {
-  const suf = '.undelivered';
+export function undeliveredTarget(name, socks, suf = '.undelivered') {
   if (!name.endsWith(suf)) return null;
   const base = name.slice(0, -suf.length);
   const sock = [...socks].filter(s => base.startsWith(`${s}.`)).sort((a, b) => b.length - a.length)[0];
@@ -1663,6 +1663,48 @@ export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
   return events;
 }
 const undeliveredSizes = new Map();  // marker path -> its size at the last scan
+
+// ── A WAKE STILL HELD IS ON THE OWNER'S LIST UNTIL IT LANDS ──────────────────
+// The buzz above is one moment, at the timeout. The wake itself is not dropped there any more:
+// hooks/fleet-event.sh goes on retrying for as long as the lead's box holds something, and
+// rewrites <sock>.<kind>.blocked on every poll. One fleet's master sat 13 days with a stray
+// character in its box, 14 wakes expiring behind it, and nothing a person would look at said
+// so. So while the file is fresh the lead is a row in the queue (/api/waiting), worded as what
+// the person can do about it — the box is theirs, and the fleet never clears or sends it.
+//   ONE ROW PER LEAD, the earliest hold: a need-you and a finish held behind the same box are
+// one thing to go and fix. FRESH means rewritten within HELD_STALE_MS (four of the retry's
+// default polls): a retry killed without its trap leaves a file that is not a hold.
+export const HELD_STALE_MS = 120_000;
+export function heldWakes(list, nowMs = Date.now(), dirs = scanDirs(list)) {
+  const bySock = new Map(list.map(t => [t.sock, t]));
+  const socks = [...bySock.keys()];
+  const by = new Map();
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      const t = undeliveredTarget(n, socks, '.blocked');
+      if (!t) continue;
+      const p = path.join(dir, n);
+      let st, text;
+      try { st = fs.statSync(p); text = fs.readFileSync(p, 'utf8'); } catch { continue; }
+      if (nowMs - st.mtimeMs > HELD_STALE_MS) continue;
+      const [since, why] = text.split('\n')[0].split('\x1f');
+      const s = Number(since) || 0;
+      if (!s) continue;
+      const key = `${t.sock}/${t.session}`, prev = by.get(key);
+      if (prev && prev.since <= s) continue;
+      const proj = bySock.get(t.sock);
+      by.set(key, {
+        project: proj.name, profile: proj.profile, session: t.session, key: `held:${key}`, id: 'held', state: 'held',
+        text: why === '1' ? `${t.session}'s input box has unsent text` : `${t.session} shows no input box`,
+        reason: 'a fleet wake is waiting for that box to be empty; send or clear what is there yourself — the fleet never will',
+        at: s, since: s,
+      });
+    }
+  }
+  return [...by.values()].sort((a, b) => a.since - b.since);
+}
 
 // ── an account notice is a line in <fleet dir>/accounts.notify ──────────────
 // lib/accounts.mjs appends one JSON line per switch / exhausted / needs-login / blocked / resumed.
@@ -2850,12 +2892,13 @@ function agentCatalogue() {
   if (p === '/api/waiting' && req.method === 'GET') {
     const fan = fanOut('/api/waiting', req, 5000);
     if (!L && !peers().peers.length) return send(res, 503, { ok: false, text: ledgerWhy });
-    const { rows } = heldScan(shownToPhone());
-    return send(res, 200, mergeWaiting({ ok: true, at: now(), items: rows.map(r => ({
+    const shown = shownToPhone();
+    const { rows } = heldScan(shown);
+    return send(res, 200, mergeWaiting({ ok: true, at: now(), items: [...heldWakes(shown), ...rows.map(r => ({
       project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
       text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
-      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) })) }, await fan));
+      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
   }
 
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
