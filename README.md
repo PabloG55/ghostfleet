@@ -403,6 +403,12 @@ and `fleet-*` tools):
 
 `ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 
+**Every session starts with a 300k-token context ceiling.** A session left to grow to the model's
+1M window re-reads that much on every call. With the ceiling, Claude Code compacts at about 240k
+instead of about 965k. Change it per project with `fleet-project set <project> context-window <300k|off|default>`
+(`off` keeps the model's whole window), and see where the spend goes with `fleet-meter --context`.
+Details: [The context ceiling](docs/OPERATIONS.md#the-context-ceiling).
+
 ### Several Claude accounts on one profile (experimental)
 
 Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and

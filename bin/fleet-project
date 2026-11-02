@@ -4,6 +4,7 @@
 # fleet-project list
 # fleet-project rm <name>
 # fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
+# fleet-project set <name | -s SOCK> context-window <300k|off|default>
 # fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
@@ -26,6 +27,10 @@
 #           for the whole project, or with --session for ONE session — the sub-master of
 #           its task, while its siblings stay blocked. `inherit` (session only) drops the
 #           override. The grid's settings page calls this for the project-wide form.
+#           set <name> context-window <size|off|default> — the CONTEXT CEILING every
+#           session of the project is launched with (lib/context-window.sh): 300k when
+#           unset, `off` for the model's whole window, `default` to drop the override.
+#           Sessions read it when they start, so a running one takes it at its next start.
 #   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
@@ -300,16 +305,38 @@ case "$cmd" in
     done
     [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
     SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    . "$BIN_DIR/../lib/context-window.sh"
     if [ "$cmd" = get ]; then
       for b in $BOUNDARY_SETTINGS; do
         boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
         printf '%-15s %-4s  (%s)\n' "$b" "$v" "$(boundary_label "$b")"
       done
+      IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
+      printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
+        context-window "$(context_window_label "$cw")" "$cwsrc"
       exit 0
     fi
     B="${POS[0]:-}"; V="${POS[1]:-}"
+    # THE CONTEXT CEILING is a value, not a switch, and project-wide only: the measurement
+    # it answers is a fleet's whole bill, and a per-session override would be a second place
+    # to look when a session's size is a surprise. Read at launch by bin/claude-here, so it
+    # reaches a running session the next time that session is started (wake, restart).
+    if [ "$B" = context-window ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: context-window is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.context-window"
+      elif context_window_parse "$V" >/dev/null; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.context-window"
+      else
+        echo "fleet-project: context-window takes a size (300k, 400000, 0.5m), off, or default" >&2; exit 1
+      fi
+      IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
+      echo "fleet-project: context ceiling for project '$NAME': $(context_window_label "$cw") (from $cwsrc) — sessions pick it up when they next start"
+      exit 0
+    fi
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]  |  set <name|-s sock> context-window <300k|off|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -358,6 +385,7 @@ case "$cmd" in
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
     echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac
