@@ -9764,8 +9764,8 @@ and report both|nudge:a worker finished — run fleet-inbox|-:and the billing-sv
   is "the owner's words wait in the queue marked as theirs" "owner:the owner asks for the acme-web preview|" "$(ql_texts)"
   QLS --unqueue tgt "the owner asks for the acme-web preview" >/dev/null; rc=$?
   is "...and are the owner's to take back"        "0" "$rc"
-  is "the drain hands a marked record over with its mark" "1" \
-     "$(grep -c '\[ "${_q_kind:-}" = owner \] && _args+=(--owner)' "$ROOT/bin/fleet-send" || true)"
+  # (that the drain hands it over still marked is asserted end to end in "a queued prompt
+  # survives the drain that dies delivering it", against a live mod's handoff)
   tmux -L cfql kill-server 2>/dev/null; rm -rf "${QL:?}"
 else
   skip "the queue can be read, and a waiting prompt taken back out" "tmux missing"
@@ -9897,6 +9897,49 @@ SHIM
   is "...and refuses anything but a stranded id"     "1" "$qkrc"
   is "nothing stranded, nothing said"                "0" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$QKF" "$ROOT/bin/fleet-inbox" -s cfqk 2>&1 | grep -c 'stranded' || true)"
+
+  # 5. THE OWNER'S MARK RIDES EVERY QUEUE PATH. A prompt sent with --owner (the phone's words,
+  #    bin/fleet-send) is the person's to the receiving mod, but only if the mark survives the
+  #    queue: the record's sixth field, carried verbatim by the drain, by a strand and by a
+  #    re-queue, and turned back into --owner when the drain hands it over. Asked of the
+  #    handoff the mod would claim (its `kind`), with a live mod faked as in 3.
+  qkfresh; : > "$QK/got"; rm -f "$QKQ"
+  sleep 120 & qkm=$!
+  mkdir -p "$QKF/qk-1.handoff"; printf '%s\n' "$qkm" > "$QKF/qk-1.handoff/.ready"
+  qkkind() {   # the kind of the next handoff the drain writes, or "none"
+    local k=none
+    for _ in $(seq 1 50); do
+      for f in "$QKF/qk-1.handoff/"*.json; do [ -s "$f" ] && { k="$(jq -r '.kind // "-"' "$f" 2>/dev/null)"; break 2; }; done
+      sleep 0.1
+    done
+    printf '%s' "$k"
+  }
+  # Queued behind a busy session: the session reads as busy while the mod says working.
+  qkmod working
+  QKS --owner tgt "the owner asks for the acme-web preview" >/dev/null
+  is "an --owner prompt sent to a busy session waits, marked as the owner's" "owner" \
+     "$(QKS --list-queue tgt | cut -f3)"
+  qkmod ready
+  "${QKENV[@]}" CLAUDE_FLEET_MOD_CLAIM=1 "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
+  qkk="$(qkkind)"; wait "$qkp"
+  is "...and the drain hands it to the mod as the owner's" "owner" "$qkk"
+  is "...delivered once, and gone from the queue"   "1 0" "$(qkgot 'the owner asks for the acme-web preview') $([ -s "$QKQ" ] && echo 1 || echo 0)"
+  # A plain prompt down the same path carries no mark: the direction that must stay unmarked.
+  qkmod working; QKS tgt "run the billing-svc suite" >/dev/null; qkmod ready
+  "${QKENV[@]}" CLAUDE_FLEET_MOD_CLAIM=1 "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
+  qkk="$(qkkind)"; wait "$qkp"
+  is "...while a plain queued prompt is handed over unmarked" "-" "$qkk"
+  # Stranded mid-delivery and re-queued by the owner: still the owner's when it goes out again.
+  printf '%s\x1f\x1f\x1f\x1f%s\x1fowner\n' "$(date +%s)" "$(printf '%s' 'the owner asks for the toolbox notes' | base64 | tr -d '\n')" \
+    > "$QKF/cfqk.tgt.queue.$(date +%s)-1-1.indoubt"
+  qkid="$(cd "$QKF" && ls cfqk.tgt.queue.*.indoubt 2>/dev/null | sed 's/^cfqk\.tgt\.queue\.//')"
+  is "a stranded owner prompt is listed like any other" "1" "$(QKS --stranded | grep -c "^tgt.$qkid" || true)"
+  QKS --requeue tgt "$qkid" >/dev/null 2>&1 & qkp=$!
+  qkk="$(qkkind)"; wait "$qkp"
+  is "...and re-queued, the drain hands it over as the owner's still" "owner" "$qkk"
+  is "...delivered, and no longer stranded"         "1 0" \
+     "$(qkgot 'the owner asks for the toolbox notes') $(ls "$QKF" | grep -c '\.indoubt$' || true)"
+  kill "$qkm" 2>/dev/null; wait "$qkm" 2>/dev/null; rm -rf "$QKF/qk-1.json" "$QKF/qk-1.handoff"
   tmux -L cfqk kill-server 2>/dev/null; rm -rf "${QK:?}"
 else
   skip "a queued prompt survives the drain that dies delivering it" "tmux/node/jq missing"
