@@ -19,6 +19,7 @@
 // leftovers are still found.
 import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -140,6 +141,7 @@ const pb = new Authenticator({ rpId: 'localhost', origin: B.base });
 await pa.enroll(A.base, ca);
 await pb.enroll(B.base, cb);
 const names = (r) => ((r.json && r.json.projects) || []).map(p => p.name).sort().join(' ');
+const audit = (h) => { try { return fs.readFileSync(h.audit, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
 const ranLines = (h, re) => fs.readFileSync(h.ran, 'utf8').split('\n').filter(l => re.test(l));
 
 // ── before pairing: nothing changes for a machine on its own ────────────────────────
@@ -227,6 +229,64 @@ is('park crosses', 200, r.status);
 r = await pa.verb(A.base, 'fleet_resume', { project: 'toolbox@vm', session: 'w1' });
 is('resume crosses', 200, r.status);
 
+// ── a photo crosses where a send does ───────────────────────────────────────────────
+// One app drives both machines, so a photo for acme-api@vm has to land on the VM: the session
+// that reads it runs there, and a laptop path would name nothing on that disk. The laptop
+// forwards, the vm stores and answers with ITS path, and the send after it carries that path.
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const attachRoot = (h) => path.join(h.home, '.claude', 'fleet', 'attach');
+const filesUnder = (d) => { try { return fs.readdirSync(d, { recursive: true }).filter(n => fs.statSync(path.join(d, n)).isFile()); } catch { return []; } };
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'acme-api@vm', session: 'w1', data: PNG });
+const vmPath = String((r.json && r.json.path) || '');
+is('a photo for a remote session is stored', 201, r.status);
+is('...on the vm, under its own attach dir', true, vmPath.startsWith(attachRoot(B) + path.sep) && fs.existsSync(vmPath));
+is('...and the path handed back is the vm\'s, unchanged', true, !!vmPath && !vmPath.startsWith(A.home));
+is('...byte for byte what the phone sent', true, fs.existsSync(vmPath) && fs.readFileSync(vmPath).equals(Buffer.from(PNG, 'base64')));
+is('...and nothing was written on the laptop', 0, filesUnder(attachRoot(A)).length);
+is('...the answer says which machine holds it', 'vm', r.json && r.json.host);
+// The send after it names that path, and it is the vm's acme-api that gets it.
+r = await pa.verb(A.base, 'fleet_send', { project: 'acme-api@vm', session: 'w1', prompt: `${vmPath} what is on this screen?` });
+is('the send carrying the photo\'s path reaches the vm\'s session', 1,
+   vmPath ? ranLines(B, new RegExp(`^fleet-send .*\\[w1\\].*${vmPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} what is on this screen.*scope=acme-api root=.*/b/acme-api`)).length : 0);
+is('...and not the laptop\'s', 0, vmPath ? ranLines(A, new RegExp(vmPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).length : -1);
+// Bigger than the 1 MB every other signed POST is held to: a real 800x600 PNG, stored
+// uncompressed, so the pair's body cap has to be the photo cap for it to arrive at all.
+const bigPng = (() => {
+  const w = 800, h = 600, rowsB = Buffer.alloc((w * 3 + 1) * h);
+  crypto.randomFillSync(rowsB); for (let y = 0; y < h; y++) rowsB[y * (w * 3 + 1)] = 0;
+  const crcT = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c >>> 0; }
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(rowsB, { level: 0 })), chunk('IEND', Buffer.alloc(0))]);
+})();
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'acme-api@vm', session: 'w1', data: bigPng.toString('base64') });
+is('a photo over 1 MB crosses too', '201 on the vm',
+   `${r.status} ${r.json && String(r.json.path || '').startsWith(attachRoot(B) + path.sep) && fs.existsSync(r.json.path) ? 'on the vm' : (r.json && r.json.text || '').slice(0, 120)}`);
+// What the vm refuses for itself still comes back refused, with its own reason.
+const vmFiles = filesUnder(attachRoot(B)).length;
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'acme-api@vm', session: 'w1',
+                 data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>').toString('base64') });
+is('an SVG for a remote session is refused by the vm', '415 SVG', `${r.status} ${r.json && /SVG is refused/.test(r.json.text) ? 'SVG' : (r.json && r.json.text)}`);
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'acme-api@vm', session: '../w1', data: PNG });
+is('...and so is a session name that is a path', 400, r.status);
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'nope@vm', session: 'w1', data: PNG });
+is('...and a project the vm does not have', true, r.status === 400 && /unknown project 'nope'/.test(r.json && r.json.text));
+is('...none of which wrote anything on the vm', vmFiles, filesUnder(attachRoot(B)).length);
+// Audited on both: the laptop that it forwarded, the vm that it stored, naming the origin.
+const aAtt = audit(A).find(x => x.verb === 'attach') || {};
+const bAtt = audit(B).find(x => x.verb === 'attach') || {};
+is('the laptop audits the photo it forwarded', 'phone proxy vm acme-api@vm w1 ran',
+   `${aAtt.client} ${aAtt.via} ${aAtt.host} ${aAtt.project} ${aAtt.subject} ${aAtt.result}`);
+is('the vm audits the photo it stored, naming where it came from', 'laptop/phone pair laptop phone acme-api w1 ran',
+   `${bAtt.client} ${bAtt.via} ${bAtt.origin_host} ${bAtt.origin_client} ${bAtt.project} ${bAtt.subject} ${bAtt.result}`);
+// ONE RULE: a photo is allowed exactly where a send is, so a read-only pairing drops both.
+const { pairAllows } = await import(path.join(RT, 'bin', 'fleet-serve.mjs'));
+is('a photo crosses while a send does', 'true true', [pairAllows('POST', '/api/verb', { tool: 'fleet_send' }), pairAllows('POST', '/api/attach', {})].join(' '));
+is('...and a read-only pairing refuses both', 'false false',
+   [pairAllows('POST', '/api/verb', { tool: 'fleet_send' }, new Set()), pairAllows('POST', '/api/attach', {}, new Set())].join(' '));
+is('...while a pairing that kept wake but not send refuses the photo', false, pairAllows('POST', '/api/attach', {}, new Set(['fleet_wake'])));
+
 // What does NOT cross, refused on the home host with the reason, and nothing run anywhere.
 r = await pa.verb(A.base, 'fleet_stop', { project: 'toolbox@vm', session: 'w1' }, await pa.fresh(A.base, 'stop'));
 // 400 and never 403: the client reads a 403 as a dead session and locks the app.
@@ -249,7 +309,6 @@ is('usage is merged without failing on a host whose accounts are off', 200, r.st
 
 // Both audit logs: the laptop records that it forwarded, the vm that it ran, each naming the
 // originating host and client.
-const audit = (h) => { try { return fs.readFileSync(h.audit, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
 const aSend = audit(A).find(x => x.verb === 'fleet_send') || {};
 const bSend = audit(B).find(x => x.verb === 'fleet_send') || {};
 is('the laptop audits the send it forwarded', 'phone proxy vm toolbox@vm ran', `${aSend.client} ${aSend.via} ${aSend.host} ${aSend.project} ${aSend.result}`);
@@ -273,7 +332,7 @@ is('...and it can be renamed back from the terminal', 'vm', c.code === 0 ? row(r
 // ── identity: only a signature makes one ─────────────────────────────────────────────
 r = await pb.api(B.base, 'GET', '/api/projects', undefined, { headers: { 'x-fleet-on-behalf': 'someone-else' } });
 is('an identity header on a phone\'s own token is refused', 403, r.status);
-const signed = async (secret, method, pathq, body, onBehalf = 'phone', tamper = {}) => {
+const signed = async (secret, method, pathq, body, onBehalf = 'phone', tamper = {}, sendBody = body) => {
   const data = body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body));
   const ts = Math.floor(Date.now() / 1000), nonce = crypto.randomBytes(18).toString('base64url');
   const canon = ['ghostfleet-pair-v1', lapOnB.id || '-', method, pathq, String(ts), nonce, onBehalf || '-',
@@ -281,7 +340,7 @@ const signed = async (secret, method, pathq, body, onBehalf = 'phone', tamper = 
   const h = { 'x-fleet-pair': lapOnB.id || '-', 'x-fleet-pair-ts': String(ts), 'x-fleet-pair-nonce': nonce,
               'x-fleet-pair-sig': crypto.createHmac('sha256', secret || '-').update(canon).digest('hex'), 'x-fleet-on-behalf': onBehalf, ...tamper };
   const opts = { headers: h };
-  if (body !== undefined) opts.body = body;
+  if (sendBody !== undefined) opts.body = sendBody;
   return { headers: h, res: await request(B.base, method, pathq, opts) };
 };
 let s = await signed(vmOnA.out, 'GET', '/api/projects');
@@ -302,6 +361,20 @@ is('a signed spawn: refused', 403, s.res.status);
 s = await signed(vmOnA.out, 'GET', '/api/grid?project=toolbox@laptop');
 is('a signed request naming yet another host: refused, never forwarded', 403, s.res.status);
 is('...and none of it ran a spawn anywhere', 0, ranLines(B, /^fleet-spawn/).length + ranLines(A, /^fleet-spawn/).length);
+// A forwarded photo is a signed request like any other, and refused like one.
+const vmBefore = filesUnder(attachRoot(B)).length;
+const pic = { project: 'acme-api', session: 'w1', data: PNG };
+s = await signed(vmOnA.out, 'POST', '/api/attach', pic);
+is('a signed photo is stored by the vm', 201, s.res.status);
+r = await request(B.base, 'POST', '/api/attach', { body: pic });
+is('an unsigned photo: refused', 401, r.status);
+s = await signed(vmOnA.out, 'POST', '/api/attach', pic, 'phone', {}, { ...pic, session: 'w2' });
+is('a signed photo whose body was changed on the way: refused', 401, s.res.status);
+s = await signed(vmOnA.out, 'POST', '/api/attach', pic, 'phone', { 'x-fleet-pair-sig': 'f'.repeat(64) });
+is('a photo with a forged signature: refused', 401, s.res.status);
+s = await signed(vmOnA.out, 'POST', '/api/attach', { ...pic, project: 'acme-api@laptop' });
+is('a signed photo naming yet another host: refused, never forwarded', 403, s.res.status);
+is('...and only the one good photo was written', vmBefore + 1, filesUnder(attachRoot(B)).length);
 
 // ── a host that is down stays visible ───────────────────────────────────────────────
 await stop(B);
@@ -316,6 +389,10 @@ is('opening one of its projects says offline · last seen', true, r.status === 5
 r = await pa.verb(A.base, 'fleet_send', { project: 'toolbox@vm', session: 'w1', prompt: 'into the void' });
 is('a send to the down host fails loudly', 502, r.status);
 is('...and is audited as unreachable', 'unreachable', (audit(A).filter(x => x.verb === 'fleet_send').pop() || {}).result);
+r = await pa.api(A.base, 'POST', '/api/attach', { project: 'acme-api@vm', session: 'w1', data: PNG });
+// 502, never a 401/403: those make the phone throw its token away over another machine's nap.
+is('a photo for the down host fails, naming that machine', true, r.status === 502 && /^vm is offline .*· last seen/.test(r.json && r.json.text));
+is('...and the laptop audits it as unreachable', 'unreachable', (audit(A).filter(x => x.verb === 'attach').pop() || {}).result);
 await start(B);
 // BACK, AND SEEN TO BE BACK, before anything below reads the list: a host that just failed
 // is skipped by the poll for a few seconds, so an unpair asserted inside that window would

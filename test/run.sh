@@ -19219,7 +19219,10 @@ fi
 # session, merges the queue, refuses what does not cross (a passkey verb, the terminal, a
 # read outside the scope, a forged or replayed or reflected signature, an unsigned identity
 # header, a second hop), takes one host down and sees it listed offline, and unpairs from
-# each side. Watched red against staging's daemon (52 rows: no pair, no proxy, no merge),
+# each side. A photo for a remote session is forwarded and stored on the machine that runs
+# it, with that machine's path handed back and its own refusals (SVG, a path-shaped session,
+# an unknown project, a second hop, a changed body) intact. Watched red against staging's
+# daemon (52 rows: no pair, no proxy, no merge),
 # and the rows staging passes — the ones about a machine on its own, and the refusals that
 # a daemon with no pairing gives for nothing — against copies of this one broken on purpose
 # (listed in the PR).
@@ -19242,7 +19245,8 @@ fi
 # ...and what the phone and the desk DRAW of it, in fixture mode at 390x844 with touch and
 # 1600x900 with a mouse: tabs that carry the machine, a host on every row, the queue merged,
 # a machine that is down as a card saying since when, no terminal for another machine's
-# project (with the line that says why), and unpair from settings. Watched red against
+# project (with the line that says why), a photo for a remote session that goes to the upload
+# rather than to a refusal, and unpair from settings. Watched red against
 # staging's client (28 rows), and the one-machine rows against a copy that always prefixes.
 group "phone client: one app for every paired machine"
 PDC="$(mktemp -d "$TEST_RUNS.$$.paired.XXXXXX")"

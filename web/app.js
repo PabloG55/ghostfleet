@@ -4395,10 +4395,11 @@ export function pickInput() {
 // WHERE THE CARET WAS, taken at the tap. The box may still have focus (then it says), or
 // the tap took it (then the blur recorded it in S.caret), and with neither the photo goes
 // at the end, which is where a caret in a box nobody touched is anyway.
+//   ANOTHER MACHINE'S SESSION IS NO DIFFERENT. The home host forwards the photo to the
+// machine the session runs on and hands back THAT machine's path, which is the one the send
+// after it needs; a machine that does not answer comes back as an ordinary failed upload,
+// naming it, on the tile and in the toast like any other.
 function openPicker() {
-  // fleet-serve refuses a photo for another machine's session (it does not cross yet); said
-  // at the tap, before a picker opens and an upload goes nowhere.
-  if (isRemote(S.project)) { toast(`a photo does not cross machines yet — send it from ${hostLabelOf(S.project)}'s own app`, 'bad'); render(); return; }
   const box = composerNode;
   const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
     ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;

@@ -186,6 +186,35 @@ try {
       is(`${at}: ...and its editor, beside it`, [true, s.sheetRows.indexOf('terminal') + 1], [s.sheetRows.includes('editor'), s.sheetRows.indexOf('editor')]);
     });
 
+    // A PHOTO FOR ANOTHER MACHINE'S SESSION GOES TO THE UPLOAD, like a local one. The camera
+    // used to refuse at the tap with a toast; now the picker's file reaches api.attach, and in
+    // fixture mode api.attach answers every file with its own sentence — so a tile carrying
+    // that sentence is proof the photo took the local path, and a toast is proof it did not.
+    await step(`${at}: a photo for a remote session`, async () => {
+      await fresh({ ...size, paired: 'online' });
+      await tap('.card.k-project[data-idx="5"] .c-name', 'acme-api');
+      const head = (x) => (at === 'desk' ? x.side : x.main);
+      s = await settle(x => /^\[vm · /.test(head(x)));
+      const onVm = /^\[vm · [a-z]*:acme-api\]/.test(head(s));
+      await tap('.card .c-name', 'api-fix');
+      await until(() => b.evaluate(() => !!document.querySelector('#app .composer .cam')));
+      const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      await b.evaluate((png) => {
+        document.querySelector('#app .composer .cam')?.click();
+        const pick = document.querySelector('input.pick');
+        if (!pick) return null;
+        const bin = atob(png); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        const dt = new DataTransfer(); dt.items.add(new File([u8], 'shot.png', { type: 'image/png' }));
+        pick.files = dt.files; pick.dispatchEvent(new Event('change', { bubbles: true }));
+        return null;
+      }, PNG);
+      const tile = () => b.evaluate(() => ((document.querySelector('#app .composer .ph') || {}).title || ''));
+      await until(async () => /failed|ready/.test(await tile()) || /cross/.test((await look()).toast), 5000);
+      s = await look();
+      is(`${at}: a photo for the vm's acme-api goes to the upload, not to a refusal`, [true, true, false],
+         [onVm, /attachments need a real fleet/.test(await tile()), /does not cross/.test(s.toast)]);
+    });
+
     await step(`${at}: a machine that is down`, async () => {
       await fresh({ ...size, paired: 'offline' });
       s = await look();
