@@ -2248,7 +2248,8 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
 //   THE SCOPE           is this something a paired host may ask for at all (PAIR_READS,
 //                       PAIR_VERBS): never a passkey verb (a passkey is bound to the host it
 //                       was made on, so the remote could not check one), never the terminal,
-//                       never a photo, never another hop onwards
+//                       never another hop onwards. A photo crosses wherever a send does
+//                       (pairAllows below)
 //   THE ON-BEHALF NAME  which person on the home host asked. Taken ONLY from a signed
 //                       request; the host half of the identity comes from this host's own
 //                       record of the pairing, never from anything the request says
@@ -2262,7 +2263,28 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
 // and an address without an `@` is this host's, exactly as before.
 const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue and usage to read; send, wake, park and resume to act';
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue and usage to read; send (photos too), wake, park and resume to act';
+// WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
+// the remote asks it before it serves, so the two cannot drift into one forwarding what the
+// other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
+// crosses exactly where a send crosses, because a photo exists only to be named in a send:
+// the attach puts the file on the machine whose session will read it, and the fleet_send
+// after it hands that path over. So it is keyed on fleet_send being in PAIR_VERBS rather
+// than listed beside it: make the pairing read-only and the photo goes with the send, with
+// no second list for somebody to forget.
+// (`verbs` is a parameter only so the suite can ask what a read-only pairing would allow.)
+export function pairAllows(method, p, body, verbs = PAIR_VERBS) {
+  if (method === 'GET') return PAIR_READS.has(p);
+  if (method !== 'POST') return false;
+  if (p === '/api/verb') return verbs.has(body?.tool);
+  if (p === '/api/attach') return verbs.has('fleet_send');
+  return false;
+}
+// THE TIME A FORWARDED PHOTO GETS. The body can be ATTACH_BODY_CAP, and the remote may run a
+// converter on it before it answers, so a flat 15 s would cut a big photo off over a slow
+// link while the remote was still writing it. Budgeted at 256 KB/s plus half a minute for the
+// conversion: the 9 MB cap gets ~66 s, a small PNG the half minute.
+export const attachForwardTimeout = (bytes) => 30000 + Math.ceil(Math.max(0, bytes) / (256 * 1024)) * 1000;
 export const TERM_REMOTE_WHY = 'the terminal never crosses machines: a shell is opened only by the host it runs on — open that host\'s own app for one';
 const pairNonces = new Map();       // "<pid>:<nonce>" -> expiry: the replay table for signed requests
 const peerLive = new Map();         // key -> { online, why, at, down_until }: what the last call found
@@ -2360,7 +2382,12 @@ function mergeUsage(local, fan) {
 // answers the request itself and returns null.
 async function pairAuth(req, res, p, url, ip) {
   let raw;
-  try { raw = req.method === 'POST' ? await readBody(req, undefined, { raw: true }) : Buffer.alloc(0); }
+  // A FORWARDED PHOTO IS THE ONE BIG SIGNED BODY. The signature covers the bytes, so they
+  // have to be read before it can be checked — but only a pairing id this host actually
+  // holds gets the photo-sized cap; anybody else is held to the 1 MB every other POST is.
+  const pid = String(req.headers['x-fleet-pair'] || '');
+  const cap = p === '/api/attach' && pid && peers().peers.some(x => x.id === pid) ? ATTACH_BODY_CAP : undefined;
+  try { raw = req.method === 'POST' ? await readBody(req, cap, { raw: true }) : Buffer.alloc(0); }
   catch (e) { send(res, e.tooBig ? 413 : 400, { ok: false, text: e.message }); try { req.resume(); } catch {} return null; }
   const v = peers();
   const r = P.verifySigned(v, req, url.pathname + url.search, raw, pairNonces);
@@ -2371,16 +2398,16 @@ async function pairAuth(req, res, p, url, ip) {
   }
   let body = {};
   if (raw.length) { try { body = JSON.parse(raw.toString('utf8')); } catch { send(res, 400, { ok: false, text: 'body is not JSON' }); return null; } }
-  const inScope = (req.method === 'GET' && PAIR_READS.has(p)) || (req.method === 'POST' && (p === '/api/verb' || p === '/api/pair/revoke'));
-  if (!inScope) { send(res, 403, { ok: false, text: `${req.method} ${p} is not something a paired host may ask for — the pairing covers ${PAIR_SCOPE_WORDS}` }); return null; }
-  if (p === '/api/verb' && !PAIR_VERBS.has(body.tool)) {
-    send(res, 403, { ok: false, text: `${String(body.tool || 'that')} does not cross machines — the pairing covers ${PAIR_SCOPE_WORDS}. Do it from this host's own app` });
+  if (!pairAllows(req.method, p, body) && !(req.method === 'POST' && p === '/api/pair/revoke')) {
+    send(res, 403, { ok: false, text: req.method === 'POST' && p === '/api/verb'
+      ? `${String(body.tool || 'that')} does not cross machines — the pairing covers ${PAIR_SCOPE_WORDS}. Do it from this host's own app`
+      : `${req.method} ${p} is not something a paired host may ask for — the pairing covers ${PAIR_SCOPE_WORDS}` });
     return null;
   }
   // ONE HOP. A paired host asks about this host's own projects, by their bare names; an
   // address naming yet another host is refused rather than forwarded, so no chain of
   // pairings can be walked and two hosts can never bounce one request between them.
-  const named = url.searchParams.get('project') || (body.args && body.args.project) || '';
+  const named = url.searchParams.get('project') || (body.args && body.args.project) || (p === '/api/attach' && body.project) || '';
   if (P.splitAddr(named)) { send(res, 403, { ok: false, text: 'a paired host asks about this host\'s own projects; a request is never forwarded a second time' }); return null; }
   req.client = { id: `${r.peer.label}/${r.onBehalf || 'host'}`, pair: r.peer, onBehalf: r.onBehalf || '' };
   req.session = { exp: now(), purpose: 'pair' };
@@ -2455,20 +2482,25 @@ async function proxyRemote(req, res, p, url, body, ip) {
   // a verb as "this session is dead" and locks the app — a refusal about WHERE a project is
   // must not log the owner out of the machine he is on. (The terminal's 403 above is read by
   // its own caller, which tells a refusal from a dead session.)
-  if (p === '/api/attach') { send(res, 400, { ok: false, remote: true, text: `a photo does not cross machines yet — send it from ${peer.label}'s own app` }); return true; }
-  const verbOk = p === '/api/verb' && req.method === 'POST' && PAIR_VERBS.has(body.tool);
-  if (!(req.method === 'GET' && PAIR_READS.has(p)) && !verbOk) {
-    const what = p === '/api/verb' ? String(body.tool || 'that') : `${req.method} ${p}`;
+  if (!pairAllows(req.method, p, body)) {
+    const what = p === '/api/verb' ? String(body.tool || 'that') : p === '/api/attach' ? 'a photo' : `${req.method} ${p}`;
     const pk = p === '/api/verb' && TOOLS_ALLOWED[body.tool]?.passkey ? ' (it needs a passkey, and a passkey only works on the host it was made on)' : '';
     send(res, 400, { ok: false, remote: true, text: `${what} does not cross to ${peer.label}${pk} — what crosses: ${PAIR_SCOPE_WORDS}. Do it from ${peer.label}'s own app` });
     return true;
   }
   let pathq = p, out = null;
   if (req.method === 'GET') { const q = new URLSearchParams(url.searchParams); q.set('project', addr.project); pathq = `${p}?${q}`; }
+  // A PHOTO GOES TO THE MACHINE WHOSE SESSION WILL READ IT. The same body, with the bare
+  // name; the remote runs the whole local attach on it (its projects file, the session-name
+  // rule, the sniffing, the SVG refusal, the O_EXCL write, the path check) and answers with
+  // ITS path, which is passed back untouched — the send that follows goes to the same
+  // machine, so that path is the one that names the file where it will be read.
+  else if (p === '/api/attach') out = { ...body, project: addr.project };
   else out = { ...body, args: { ...(body.args || {}), project: addr.project } };
   const headers = req.headers['if-none-match'] ? { 'if-none-match': String(req.headers['if-none-match']) } : {};
   const r = await callPeer(peer, { method: req.method, pathq, body: out, onBehalf: req.client.id, headers,
-                                   timeout: p === '/api/verb' ? 15 * 60 * 1000 : 15000 });
+                                   timeout: p === '/api/verb' ? 15 * 60 * 1000
+                                     : p === '/api/attach' ? attachForwardTimeout(String(body.data || '').length) : 15000 });
   if (p === '/api/verb') {
     const args = Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
     auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
@@ -2476,6 +2508,13 @@ async function proxyRemote(req, res, p, url, body, ip) {
                   result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
                   output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
   }
+  // ...and the photo, the same way: this host records that it forwarded one and where, the
+  // remote that it stored it. Never the bytes, never more of the path than the remote said.
+  if (p === '/api/attach')
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: 'attach', project: named, subject: String(body.session || '').slice(0, 64),
+                  via: 'proxy', host: peer.label,
+                  result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
+                  output: String((r.json && (r.json.ok ? r.json.path : r.json.text)) || r.error || '').slice(0, 500) });
   if (!r.status) {
     const seen = seenAt(peer.key) || peer.created;
     send(res, 502, { ok: false, offline: true, host: peer.label, last_seen: seen,
@@ -3098,6 +3137,8 @@ function agentCatalogue() {
     // fleet's disk that were not there before. The subject is the session it is for.
     try {
       auditAppend({ ts: now(), client: req.client.id, ip, verb: 'attach', project: rp.t.name,
+        // A PAIRED HOST'S PHOTO, named like a paired send: which host, which of its clients.
+        ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf || 'host' } : {}),
         subject: session, result: 'ran',
         output: `${path.basename(out)} ${size} bytes from ${kind}${dropped ? `, ${dropped} older dropped` : ''}` });
     } catch {}

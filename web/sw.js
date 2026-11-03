@@ -430,7 +430,9 @@
 // v93 lists a held wake in the queue: a lead whose input box has kept the fleet's wake out
 // for ten minutes is a red `▲ wake held` card, and a tap opens that lead. A phone on v92
 // shows the queue without it.
-const VERSION = 'ghostfleet-v93';
+// v94 lets a photo go to another machine's session: the camera no longer refuses a project
+// on a paired machine. A phone on v93 still says a photo does not cross.
+const VERSION = 'ghostfleet-v94';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',

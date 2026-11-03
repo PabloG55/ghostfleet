@@ -457,10 +457,16 @@ server to server, signed with a credential the two exchanged once, at pairing.
 - **What crosses:** the projects list, grids, a conversation (read and send), the pane, the
   queue, usage, and wake, park and resume. Search covers both machines, because it searches
   the merged list.
+- **Photos cross where a send does.** The home host forwards the photo, signed, to the
+  machine the session runs on. That machine stores it and runs every check a local photo
+  gets. It answers with *its own* path, and the send that follows goes to the same machine,
+  so that path names the file where the agent will read it. Both audit logs record it. The
+  permission is not a separate setting: a photo is allowed only while `fleet_send` is. A
+  machine that does not answer shows as a failed upload that names it.
 - **What does not cross:** the web terminal (a shell is opened only by the machine it runs
   on; for another machine's project the control is absent, with one line saying why), any
-  passkey verb (a passkey only verifies on the machine it was made on), photos, and
-  project settings. Each is refused on the home host, by name.
+  passkey verb (a passkey only verifies on the machine it was made on), and project
+  settings. Each is refused on the home host, by name.
 
 **The credential.** Pairing leaves two secrets on each side, one per direction. Each side
 signs with the secret it uses to call the other, and checks the other's requests with the
