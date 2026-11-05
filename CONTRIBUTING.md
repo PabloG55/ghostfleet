@@ -1,7 +1,7 @@
 # Contributing
 
-Short version: **bugs are very welcome, features are often declined, and a test that
-cannot fail does not count.**
+Short version: **bugs are very welcome, a bigger feature goes in behind a switch that is
+off by default, and a test that cannot fail does not count.**
 
 ## What this project is, so the rest makes sense
 
@@ -30,14 +30,98 @@ screenshot of it publishes every client name on your machine. Read what you past
 
 ## Features
 
-They get declined more often than accepted, and that is not a verdict on the idea. Every
-option here has to keep working across four agents, three platforms and several tmux
-versions, and that maintenance budget is already spent. The feature-request form lists what
-tends to get through; the honest summary is that fixes and environment support are easy
-yeses and new surface area is usually a no.
+Fixes and environment support are easy yeses. A bigger feature is welcome too, on one
+condition: it goes in behind an experimental switch, and that switch is **off** by default.
 
-If you would rather not write it up for a likely no, open a short issue asking first. That
-is a completely reasonable thing to do and I will not think less of the idea for it.
+The condition is honest self-interest. This is my daily driver, and every option in it has
+to keep working across four agents, three platforms and several tmux versions. A feature
+that arrives switched off changes nothing for anybody who did not turn it on — me included —
+so it can land, be lived with by the people who want it, and earn its place before it costs
+everyone else anything. How that is done is the next section, and it is not optional.
+
+Before you build it, open a short issue that describes the shape: what it does, which routes
+it adds to `fleet-serve`, what it draws on the phone and in the terminal, and whether it
+needs anything new from the login. Agreeing on that first is much cheaper for both of us
+than agreeing on it in review, and a "let me ask before I write this" issue is a completely
+reasonable thing to open.
+
+## Adding an experimental feature
+
+The three features already behind a switch (`jarvis`, `shots`, `accounts`) follow these
+rules; they are written down here so the next one does not have to reverse-engineer them.
+`<feature>` below stands for your feature's name.
+
+**1. One switch, one entry.** Add one entry to `FEATURES` in
+[`lib/experimental.mjs`](lib/experimental.mjs) — a `name`, a one-line `what`, the `file`
+its switch lives in (under `cfgDir()`), a `used()` test, and optionally an `apply(on)` for
+whatever turning it on or off must do besides flipping the file. Never a copy of the switch
+logic: reading, defaulting and writing it down are `enabled()`, `set()` and `settle()`, once,
+for every feature. The rule that file states is that the switch is a file holding `on` or
+`off`; with no file yet, an install that has *already used* the feature resolves on and
+every other install resolves off, and the first deliberate ask (`install.sh`,
+`fleet-experimental`, the feature's own command) writes that answer down. A feature that is
+new has no users to protect, so make `used()` look for something only the feature itself can
+create, as the `accounts` entry does — then it is off on every install until somebody turns
+it on. One entry is all it takes to appear in `fleet-experimental list` and in the
+Experimental section of the settings page (`,` on the Projects screen).
+
+**2. Its own module.** The logic lives in `lib/<feature>.mjs`, and so do its HTTP routes:
+the module exports one function that takes the request and answers the routes that are its
+own, and [`bin/fleet-serve.mjs`](bin/fleet-serve.mjs) gains **one dispatch line** in `api()`
+that hands the request to it — not a block of routes. Jarvis predates this rule, and its
+routes still sit inline in `fleet-serve.mjs` under "Jarvis: the master of masters". That
+is where they happen to be, not a shape to copy.
+
+**3. No second server, no login of its own.** The feature is served by `fleet-serve` and
+takes the caller's identity from it. By the time `api()` reaches your dispatch line, the
+request has passed the passkey-minted token check and carries `req.client` and
+`req.session`; anything destructive asks for a fresh passkey assertion
+(`X-Fleet-Assertion`) the way the verbs in `TOOLS_ALLOWED` marked `passkey: true` do. A
+paired machine reaches only what `pairAllows()` lets through — `PAIR_READS` and
+`PAIR_VERBS` — so a new route is unreachable from another machine unless you add it there
+on purpose, and the issue should say why. A feature that needs a new *kind* of identity —
+a second person, a device that is not an enrolled phone, a credential no passkey minted —
+raises that in the issue before any code is written. That is the part I will most want to
+talk through.
+
+**4. Off means gone, not hidden** — the same promise as
+[docs/jarvis.md, "The switch"](docs/jarvis.md#the-switch). Switched off:
+
+- every route of the feature answers **404** with `disabled: true` (plus
+  `experimental: true` and a `text` saying how to enable it — `disabledWhy()` writes that
+  sentence), never a 200 that describes an absent feature, which a client would draw;
+- the phone draws nothing for it — no band, no card, no screen, no button;
+- the terminal shows nothing for it — no card, no row, no key, apart from its own row in
+  the settings page's Experimental section;
+- its own command, if it has one, refuses with that same sentence.
+
+The client learns the switch **from the server**, never from a build flag: a field on a
+payload it already polls (the way `jarvis_enabled` rides on `/api/projects`), or the 404.
+
+**5. Screens are Preact.** A screen for the feature is a Preact component under `web/src/`,
+built by vite (`vite.config.mjs`, `pnpm run build`) into the committed bundle.
+[web/README.md, "A build step, for one screen"](web/README.md#a-build-step-for-one-screen)
+explains why the build exists and what it costs, and the seam comment at the top of
+`web/src/screens.jsx` says where Preact ends and `app.js` begins — read both before adding
+a screen. Any client change bumps `VERSION` in `web/sw.js` and re-pins its `CLIENT-HASH`
+line; the suite goes red and prints the hash to paste (`test/helpers/pwa-check.mjs`). An
+installed phone keeps running its old client until it is relaunched — `CLAUDE.md`,
+"Deploying a change".
+
+**6. A test that proves the off state.** In `test/run.sh`, with the switch off: the
+feature's routes answer 404 with `disabled: true`, and nothing new is drawn — not in the
+payloads the client reads, not on the Projects screen. The suite keeps the switches in the
+run's own directory (`CLAUDE_FLEET_EXPERIMENTAL_DIR`), so a test flips them freely without
+touching yours. The group "Jarvis is experimental: off by default, and off means gone" is
+the model to follow. Then remove the gate in the code, watch the test go red, and only then
+trust it.
+
+**7. Graduating.** Once the feature has been stable for a while, it leaves
+`lib/experimental.mjs` and becomes an ordinary setting on the settings page. That happens in
+**a separate PR**, never folded into a change to the feature itself, so the moment it stops
+being experimental is one commit that can be found and reverted on its own — and that PR
+carries each install's existing answer over, so nobody's "on" silently becomes "off" or the
+other way round.
 
 ## Branches
 
