@@ -12,7 +12,8 @@ Jarvis is one of the fleet's experimental features (`lib/experimental.mjs`, whic
 already set up (its marker exists) resolves to **on**, so nothing changes for somebody using
 it; the first `fleet-jarvis` command — or `install.sh` — writes that answer down, and from
 then on the file is the answer. Three places show it, each with an `experimental` tag: the
-settings page, `fleet-jarvis status`, and Jarvis's own screen on the phone.
+settings page, `fleet-jarvis status`, and Jarvis's own screen on the phone. How a new
+feature joins them: [CONTRIBUTING.md, "Adding an experimental feature"](../CONTRIBUTING.md#adding-an-experimental-feature).
 
 Off means **gone, not hidden**:
 
