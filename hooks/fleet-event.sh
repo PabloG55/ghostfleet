@@ -642,6 +642,112 @@ _input_state() {                      # $1=socket $2=session -> 0 empty / 1 type
 }
 _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 
+# ── A WAKE IS SENT, CHECKED, AND ONLY THEN COUNTED ────────────────────────────
+# Every wake below used to be `fleet-send … >/dev/null 2>&1` with its exit status thrown
+# away, and most wrote the debounce stamp BEFORE sending. So a delivery that failed was
+# recorded as a wake that happened: the stamp swallowed the next one, nothing retried, and
+# nothing was filed. Measured on one lead: three wakes logged in <sock>.sent within an hour
+# of each other, none of them in its transcript, an empty handoff spool, and an eight-hour
+# gap until a person typed into it. Every earlier wake that night had landed at its logged
+# second; the lead had compacted while idle in between.
+#   So every wake goes through here: send, and stamp only on a zero exit. A failure is
+# RETRIED, by paste (CLAUDE_FLEET_MOD_DELIVER=off), because the failure that went unseen
+# lives on the mod's path — a refused receipt, or a claim that never became a turn — and a
+# second hand-over to the same mod would most likely fail the same way. The retries are
+# spread across the quiet window (_notify_quiet, 600s by default): 60s, then 180s more, so a
+# lead mid-reload or mid-compaction has time to come back, and the last attempt still lands
+# before the next gathered batch could fire. A retry never pastes over typing: with text in
+# the box it is skipped, and says so. A wake of the same kind that landed meanwhile settles
+# this one too: the rows it announces are the same inbox.
+#   And when every attempt failed, it is SAID, in the two places a person is told: a `failed`
+# row in the inbox the target reads (beside the rows it never announced), and a line in
+# <sock>.<kind>.undelivered, whose growth fleet-serve turns into a buzz on the phone.
+# CLAUDE_FLEET_SEND_REPORT is deliberately not set on the attempts: fleet-send files with it
+# from one of its failure paths only, and once per attempt, so a wake retried three times
+# would read as three failures while an exit 1 from any other path stayed silent.
+_wake() {                             # $1=fleet dir $2=socket $3=kind $4=target $5=message
+  local dir sock kind to msg now_flag gaps g n rc out why t0 last inbox
+  dir="$1"; sock="$2"; kind="$3"; to="$4"; msg="$5"
+  now_flag=""; case "$kind" in needyou|*.needyou) now_flag=--now ;; esac
+  gaps="${CLAUDE_FLEET_WAKE_RETRY:-60 180}"
+  n=0; why=""; t0="$(date +%s)"
+  for g in 0 $gaps; do
+    case "$g" in ''|*[!0-9]*) continue ;; esac
+    n=$(( n + 1 ))
+    if [ "$n" -gt 1 ]; then
+      sleep "$g"
+      tmux -L "$sock" has-session -t "$to" 2>/dev/null \
+        || { _dbg "wake $sock/$to ($kind): target gone after $(( n - 1 )) failed attempt(s): $why"; return 1; }
+      last="$(cat "$dir/$sock.$kind.stamp" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      [ "$last" -gt "$t0" ] && { _dbg "wake $sock/$to ($kind): another wake landed meanwhile; not retried"; return 0; }
+      if ! _input_empty "$sock" "$to"; then
+        why="the retry found text in the input box (or no box) and did not paste over it"
+        continue
+      fi
+      out="$(CLAUDE_FLEET_DIR="$dir" CLAUDE_FLEET_MOD_DELIVER=off fleet-send --nudge $now_flag -s "$sock" "$to" "$msg" 2>&1)"; rc=$?
+    else
+      out="$(CLAUDE_FLEET_DIR="$dir" fleet-send --nudge $now_flag -s "$sock" "$to" "$msg" 2>&1)"; rc=$?
+    fi
+    # An unconfirmed paste exits 0 too, and may be sitting unsent in the box: not a wake.
+    case "$out" in *"could not confirm submit"*) [ "$rc" = 0 ] && rc=5 ;; esac
+    if [ "$rc" = 0 ]; then
+      date +%s > "$dir/$sock.$kind.stamp" 2>/dev/null
+      [ "$n" -gt 1 ] && _dbg "wake $sock/$to ($kind) delivered on attempt $n"
+      case "$out" in *"queued #"*|*"already queued"*) _wake_follow "$dir" "$sock" "$kind" "$to" "$msg"; return $? ;; esac
+      return 0
+    fi
+    why="$(printf '%s\n' "$out" | tr '\t\r' '  ' | sed '/^ *$/d' | tail -n 1 | cut -c1-200)"
+    [ -n "$why" ] || why="fleet-send exited $rc and said nothing"
+    _dbg "wake $sock/$to ($kind) attempt $n failed (exit $rc): $why"
+  done
+  _wake_failed "$dir" "$sock" "$kind" "$to" "not delivered after $n attempts" "$why"
+}
+_wake_failed() {                      # $1=dir $2=socket $3=kind $4=target $5=what happened $6=why
+  local inbox
+  case "$4" in master) inbox="$1/$2.inbox" ;; *) inbox="$1/$2.$4.inbox" ;; esac
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$4" failed \
+    "wake $5, so the rows above are unannounced: $6" >> "$inbox" 2>/dev/null
+  printf '%s wake %s: %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$5" "$6" >> "$1/$2.$3.undelivered" 2>/dev/null
+  return 1
+}
+# A QUEUED WAKE IS NOT A DELIVERED ONE. A session that reads as mid-turn gets the wake put
+# in its queue, and only its Stop drains that queue. A compaction is a stretch of "working"
+# that ends with NO Stop. Reproduced in a scratch fleet: a wake sent during a `/compact` was
+# queued, the compaction finished, and the session sat idle with the wake still in its
+# queue until the next send happened to drain it. A fleet that has gone quiet sends
+# nothing else, so "until the next send" can be hours. So a queued wake is followed: on
+# the same gaps as the retries, it is looked for in the queue, and while it is still there
+# the head is drained here, as the Stop would have done (never over text in the box,
+# unless the mod takes it). A wake still queued behind a turn that is really running is
+# left to that turn's Stop. One that is still queued at an idle session is said, like any
+# other wake that did not land.
+_wake_follow() {                      # $1=dir $2=socket $3=kind $4=target $5=message
+  local dir sock kind to msg q b64 g drc mt
+  dir="$1"; sock="$2"; kind="$3"; to="$4"; msg="$5"
+  q="$dir/$sock.$to.queue"; b64="$(printf '%s' "$msg" | base64 | tr -d '\n')"; drc=0
+  mt="$(dirname "$(command -v fleet-send 2>/dev/null || echo .)")/../lib/mod-target.mjs"
+  for g in ${CLAUDE_FLEET_WAKE_RETRY:-60 180}; do
+    case "$g" in ''|*[!0-9]*) continue ;; esac
+    sleep "$g"
+    grep -qF -- "$b64" <<< "$(cat "$q" 2>/dev/null)" || return 0
+    tmux -L "$sock" has-session -t "$to" 2>/dev/null || return 1
+    if ! _input_empty "$sock" "$to"; then
+      [ -f "$mt" ] && node "$mt" "$dir" "$sock" "$to" >/dev/null 2>&1 || { drc=4; continue; }
+    fi
+    CLAUDE_FLEET_DIR="$dir" fleet-send -s "$sock" --dequeue "$to" >/dev/null 2>&1; drc=$?
+  done
+  grep -qF -- "$b64" <<< "$(cat "$q" 2>/dev/null)" || return 0
+  [ "$drc" = 3 ] && { _dbg "wake $sock/$to ($kind): still queued behind a running turn; its Stop drains it"; return 0; }
+  _wake_failed "$dir" "$sock" "$kind" "$to" "queued and never drained" \
+    "the session is not mid-turn, and its queue still holds the wake (fleet-send --dequeue exited $drc)"
+}
+# The hook-time wakes run detached: a failed one is retried for minutes, and the hook must
+# return at once. nohup, like every other sleeper here, so a pane closing does not take it.
+_wake_bg() {                          # same arguments as _wake
+  export -f _wake _wake_failed _wake_follow _dbg _pane_text _input_state _input_empty
+  FLEET_DIR="${FLEET_DIR:-}" nohup bash -c '_wake "$@"' _ "$@" >/dev/null 2>&1 &
+}
+
 # A SKIPPED WAKE MUST NOT VANISH.
 #
 # The skip used to leave nothing behind, on the reasoning that "the next event re-checks
@@ -706,7 +812,7 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
     esac
     return 0
   fi ;; esac
-  export -f _pane_text _input_state _input_empty
+  export -f _pane_text _input_state _input_empty _wake _wake_failed _wake_follow _dbg
   rm -f "$dir/$sock.$kind.msg" 2>/dev/null
   FLEET_DIR="$dir" nohup bash -c '
     sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"; slow="${8:-30}"
@@ -734,21 +840,17 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
       [ "$ny" = 1 ] || [ "$last" -le "$since" ] || [ "$(( now - last ))" -ge "$win" ] || exit 0
       _input_state "$sock" "$to"; why=$?
       if [ "$why" = 0 ]; then
-        printf "%s\n" "$now" > "$stamp" 2>/dev/null
         more="$FLEET_DIR/$sock.$kind.more"
         if [ "$ny" = 1 ] && [ -s "$more" ]; then
           nl="$(printf "\nx")"; msg="$msg${nl%x}$(cat "$more")"; rm -f "$more"
         fi
         newer="$FLEET_DIR/$sock.$kind.msg"
         if [ "$ny" = 0 ] && [ -s "$newer" ]; then msg="$(cat "$newer")"; rm -f "$newer"; fi
-        # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
-        # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
-        # whole body is one single-quoted argument.)
-        if [ "$ny" = 1 ]; then
-          CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge --now -s "$sock" "$to" "$msg" >/dev/null 2>&1
-        else
-          CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
-        fi
+        # _wake sends into FLEET_DIR, which is where fleet-send QUEUES a prompt for a busy
+        # target: the dir its own Stop drains. It stamps on success, retries a failure and
+        # files it (see _wake). (No apostrophes in here: this whole body is one
+        # single-quoted argument.)
+        _wake "$FLEET_DIR" "$sock" "$kind" "$to" "$msg"
         exit 0
       fi
       case "$why" in 1) said="the input box of $to has unsent text" ;; *) said="$to shows no input box (a dialog, or a scrolled-back pane)" ;; esac
@@ -837,7 +939,7 @@ _gather_done() {                      # $1=socket $2=fleet dir $3=kind $4=target
   printf '%s\x1f%s\x1f%s\n' "${now:-$(date +%s)}" "$slot" "$line" >> "$g" 2>/dev/null || return 0
   p="$(cat "$g.pid" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
-  export -f _pane_text _input_state _input_empty _defer_nudge _notify_quiet _done_news _dbg
+  export -f _pane_text _input_state _input_empty _defer_nudge _notify_quiet _done_news _dbg _wake _wake_failed _wake_follow
   FLEET_DIR="$dir" nohup bash -c '
     sock="$1"; kind="$2"; to="$3"; inbox="$4"; tick="${5:-15}"
     case "$tick" in ""|*[!0-9]*|0) tick=15 ;; esac
@@ -880,8 +982,7 @@ _gather_done() {                      # $1=socket $2=fleet dir $3=kind $4=target
         msg="[fleet] $n of YOUR workers finished ($names) — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
       fi
       if _input_empty "$sock" "$to"; then
-        date +%s > "$FLEET_DIR/$sock.$kind.stamp" 2>/dev/null
-        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        _wake "$FLEET_DIR" "$sock" "$kind" "$to" "$msg"
       else
         _defer_nudge "$sock" "$FLEET_DIR" "$kind" "$msg" "$to"
       fi
@@ -986,7 +1087,7 @@ _needyou_nudge() {
   msg="[fleet] $SLOT NEEDS YOU: $NEED_DETAIL — fleet-answer $SLOT, or tell the owner (approving a tool call is theirs to do). fleet-inbox says whether it is still pending. Automated alert, not a new task; no need to reply to it."
   kind=needyou; [ -n "$_parent" ] && kind="$_parent.needyou"
   if _input_empty "$CLAUDE_FLEET_SOCK" "$_to"; then
-    ( fleet-send --nudge --now -s "$CLAUDE_FLEET_SOCK" "$_to" "$msg" >/dev/null 2>&1 & )
+    _wake_bg "$FLEET_DIR" "$CLAUDE_FLEET_SOCK" "$kind" "$_to" "$msg"
   else
     _defer_nudge "$CLAUDE_FLEET_SOCK" "$FLEET_DIR" "$kind" "$msg" "$_to"
   fi
@@ -1118,12 +1219,11 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
         # away instead of waiting out the cooldown — and arm a re-check, because when the
         # LAST worker to finish is the skipped one there is no next event (_defer_nudge).
         if _input_empty "$CLAUDE_FLEET_SOCK" "$_to"; then
-          printf '%s\n' "$now" > "$stamp" 2>/dev/null
-          _sock="$CLAUDE_FLEET_SOCK"
+          # stamped by _wake once the send succeeded, never before it
           if [ -n "$_parent" ]; then
-            ( fleet-send --nudge -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
+            _wake_bg "$FLEET_DIR" "$CLAUDE_FLEET_SOCK" "$_parent.notify" "$_to" "$_submsg"
           else
-            ( fleet-send --nudge -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+            _wake_bg "$FLEET_DIR" "$CLAUDE_FLEET_SOCK" notify master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it."
           fi
         elif [ -n "$_parent" ]; then
           # its own kind, so the retry's lock and stamp are the sub-lead's and not master's
@@ -1184,11 +1284,11 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
       # the look starts with names all of them. Not running: the row waits in its inbox.
       if tmux -L "$j_sock" has-session -t master 2>/dev/null && [ "$(( now - j_last ))" -ge "$j_win" ]; then
         if _input_empty "$j_sock" master; then
-          printf '%s\n' "$now" > "$j_stamp" 2>/dev/null
           # Jarvis's dirs, not this session's: another profile's hook is running this, and
           # a busy Jarvis QUEUES the prompt under CLAUDE_FLEET_DIR — which must be the dir
-          # Jarvis's own Stop drains, or the wake waits in a file nothing reads.
-          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send --nudge -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
+          # Jarvis's own Stop drains, or the wake waits in a file nothing reads. _wake
+          # passes its dir as CLAUDE_FLEET_DIR and stamps <j_dir>/<j_sock>.jarvis.stamp.
+          CLAUDE_CONFIG_DIR="$j_cfg" _wake_bg "$j_dir" "$j_sock" jarvis master "$j_msg"
         else
           _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
         fi
@@ -1201,8 +1301,8 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
       j_p="$(cat "$j_lock" 2>/dev/null)"
       case "$j_p" in ''|*[!0-9]*) j_p="" ;; esac
       if [ -z "$j_p" ] || ! kill -0 "$j_p" 2>/dev/null; then
-        export -f _pane_text _input_state _input_empty
-        nohup bash -c '
+        export -f _pane_text _input_state _input_empty _wake _wake_failed _wake_follow _dbg
+        FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" nohup bash -c '
           sock="$1"; lock="$2"; stamp="$3"; after="$4"; armed="$5"; dir="$6"
           echo $$ > "$lock" 2>/dev/null; trap "rm -f \"$lock\"" EXIT
           sleep "$after"
@@ -1210,8 +1310,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           [ "$last" -ge "$armed" ] && exit 0
           tmux -L "$sock" has-session -t master 2>/dev/null || exit 0
           _input_empty "$sock" master || exit 0
-          date +%s > "$stamp" 2>/dev/null
-          CLAUDE_FLEET_DIR="$dir" fleet-send --nudge -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
+          _wake "$dir" "$sock" jarvis master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake."
         ' _ "$j_sock" "$j_lock" "$j_stamp" "$j_batch" "$now" "$j_dir" >/dev/null 2>&1 &
       fi
     fi

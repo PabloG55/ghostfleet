@@ -224,6 +224,43 @@ test('an idle session takes a handed-over prompt and names the turn it started',
   expect(rec(w).turnId).toBe('t7')
 })
 
+// A claim whose turn never comes, on a session that then sits idle: no turn.start will ever
+// arrive to notice it, so the poll does. Before, `pending` stayed set and every later handoff
+// waited out its claim window unclaimed, with no receipt saying why.
+test('a claim whose turn never starts is written off on the poll, and the spool takes the next', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up'])
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(60_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up'])
+  await clock.advance(61_000)
+  const r = json(w, `${SPOOL}/1000-1.done`)
+  expect(r.error).toBe('its turn never started')
+  expect(r.head).toBe('wake up')
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up', 'the next one'])
+})
+
+test('a claim the sender took back is let go without a failure receipt', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  // fleet-send gave up on it and renamed it away (a wake it then pasted)
+  w.files.delete(`${SPOOL}/1000-1.taken`)
+  await clock.advance(121_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up', 'the next one'])
+})
+
 test('a plain prompt is submitted, never run as a command', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on)

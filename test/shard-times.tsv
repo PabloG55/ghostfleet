@@ -170,6 +170,7 @@
 0	fleet-send can see the composer
 0	the wake finds the input box, not the last ❯
 11	a skipped wake comes back
+15	a wake that fails is retried, then said
 6	a need-you names the worker and the ask
 4	drag to copy
 8	drag to copy in the editor (real nvim)
