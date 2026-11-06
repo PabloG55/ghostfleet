@@ -549,6 +549,7 @@ while [ -L "$_cf_src" ]; do
   case "$_cf_t" in /*) _cf_src="$_cf_t" ;; *) _cf_src="$(dirname "$_cf_src")/$_cf_t" ;; esac
 done
 CF_UNDIM="$(cd "$(dirname "$_cf_src")" 2>/dev/null && pwd)/../lib/undim.awk"; export CF_UNDIM
+_cf_lib="$(cd "$(dirname "$_cf_src")/../lib" 2>/dev/null && pwd)"
 _pane_text() {                        # $1=socket $2=session -> the pane, dim runs removed
   if [ -r "${CF_UNDIM:-}" ]; then
     tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null | LC_ALL=C awk -f "$CF_UNDIM"
@@ -879,6 +880,22 @@ _gather_done() {                      # $1=socket $2=fleet dir $3=kind $4=target
       else
         msg="[fleet] $n of YOUR workers finished ($names) — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
       fi
+      # THE REVIEW GATE, in the wake itself: "finished" reads as "merge it", and under the
+      # gate that is true only of the rows the Stop hook marked READY. Read from the rows
+      # (the newest DONE of each name), so with the gate off no row carries a mark and the
+      # message is the one above, byte for byte.
+      rdy=""; unr=""; stk=""
+      for who in $(printf "%s" "$names" | tr -d ","); do
+        d="$(awk -F "\t" -v s="$who" "\$2 == s && \$3 == \"done\" { d = \$4 } END { print d }" "$inbox" 2>/dev/null)"
+        case "$d" in "READY to merge"*) rdy="$rdy${rdy:+, }$who" ;; unreviewed*) unr="$unr${unr:+, }$who" ;; "review STUCK"*) stk="$stk${stk:+, }$who" ;; esac
+      done
+      if [ -n "$rdy$unr$stk" ]; then
+        msg="${msg% Automated nudge; no need to reply to it.}"
+        [ -n "$rdy" ] && msg="$msg READY to merge (review passed at the PR head): $rdy."
+        [ -n "$unr" ] && msg="$msg NOT ready — unreviewed under the review gate: $unr."
+        [ -n "$stk" ] && msg="$msg Review STUCK, needs you: $stk."
+        msg="$msg Automated nudge; no need to reply to it."
+      fi
       if _input_empty "$sock" "$to"; then
         date +%s > "$FLEET_DIR/$sock.$kind.stamp" 2>/dev/null
         CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
@@ -1037,6 +1054,25 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   elif [ "$EVENT" = "Stop" ] && [ "$TURN" = resumed ]; then
                                         ev="resumed";   detail="nothing new · ${folder}${branch:+ · $branch}"
   elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
+  fi
+  # READY IS NOT DONE, when the review gate is on (lib/review-gate.sh). A DONE says a turn
+  # ended; under the gate the lead's next question is whether the PR may merge, and it must
+  # not have to open a pane to learn that it may not. So the row says which, from the
+  # record fleet-review keeps — read locally, because a Stop that went to GitHub on every
+  # turn would make every turn of every gated worker wait on the network. The event stays
+  # `done` so every reader of the inbox keeps working; the words up front are the news.
+  # Gate off: not one byte of this row changes.
+  if [ "$ev" = done ] && [ -n "$SLOT" ] && [ -f "$_cf_lib/review-gate.sh" ]; then
+    . "$_cf_lib/boundary.sh" 2>/dev/null; . "$_cf_lib/review-gate.sh" 2>/dev/null
+    if command -v review_gate_on >/dev/null 2>&1 && review_gate_on "$FLEET_DIR" "$CLAUDE_FLEET_SOCK" "$SLOT"; then
+      IFS=$'\t' read -r _rg_st _rg_pr _rg_sha < <(review_local_state "$FLEET_DIR" "$CLAUDE_FLEET_SOCK" "$SLOT" \
+        "$(git -C "${CWD:-.}" --no-optional-locks rev-parse -q --verify HEAD 2>/dev/null)")
+      case "$_rg_st" in
+        ready) detail="READY to merge — review passed at ${_rg_sha:0:7} (PR #$_rg_pr) · $detail" ;;
+        stuck) detail="review STUCK on PR #$_rg_pr — needs you (fleet-review status $_rg_pr) · $detail" ;;
+        *)     detail="unreviewed — not ready to merge (review gate on) · $detail" ;;
+      esac
+    fi
   fi
   if [ -n "$ev" ]; then
     printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \

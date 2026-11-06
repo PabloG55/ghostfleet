@@ -4543,6 +4543,12 @@ EOF
 01	fleet-ack "x" && fleet-project set -s cf-x workers-merge on
 01	fleet-ack "$(fleet-project set -s cf-x agents-approve on)"
 01	fleet-ack "x" && touch ~/.claude/fleet/cf-x.w1.agents-approve
+01	fleet-project set -s cf-x review-gate on
+01	touch ~/.claude/fleet/cf-x.w1.review-gate-off
+01	echo x >> ~/.claude/fleet/cf-x.reviews/acme~acme-api~12.tsv
+01	cat ~/.claude/fleet/cf-x.reviews/acme~acme-api~12.tsv
+00	fleet-review round 12 --findings /tmp/answer
+00	fleet-ack "the lead turned review-gate on" --from "fleet-review status 12 shows a pass"
 10	git commit -m x && gh pr merge 5
 10	git log --grep x; gh pr merge 5
 10	echo fleet-ack gh pr merge 5 | sh
@@ -5853,6 +5859,23 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   is "...which only that session resolves to"     "1" "$(fp get acme-api --session api-fix | grep -cE '^agents-approve +on' || true)"
   is "...and a sibling does not"                  "1" "$(fp get acme-api --session docs-pass | grep -cE '^agents-approve +off' || true)"
   is "a bad setting name is refused"              "1" "$(fp set acme-api merge-anything on | grep -c usage || true)"
+  # THE REVIEW GATE is the third of the family (lib/review-gate.sh), and its four values are
+  # project-wide. Counted where the CODE decides the number of lines — one per key.
+  fp set acme-api review-gate on >/dev/null
+  is "review-gate: project on writes the marker"  "1" "$([ -f "$BSF/cf-acme-api.review-gate" ] && echo 1 || echo 0)"
+  is "...get lists it with the other two"         "1" "$(fp get acme-api | grep -cE '^review-gate +on' || true)"
+  is "...and the reviewer's four defaults"        "4" "$(fp get acme-api | grep -cE '^review-(model +sonnet|level +medium|stalled +3|rounds +8) ' || true)"
+  fp set acme-api review-model opus >/dev/null; fp set acme-api review-rounds 5 >/dev/null
+  is "a review value is written and read back"    "2" "$(fp get acme-api | grep -cE '^review-(model +opus|rounds +5) ' || true)"
+  is "a model the Agent tool cannot take is refused" "1" "$([ "$(fp set acme-api review-model claude-opus-5-5 | grep -c 'sonnet, opus, haiku or fable')" -ge 1 ] && echo 1 || echo 0)"
+  is "...so is ultra, a billed cloud review"      "1" "$([ "$(fp set acme-api review-level ultra | grep -c 'low, medium, high, xhigh or max')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and a cap that is not a number"          "1" "$([ "$(fp set acme-api review-stalled lots | grep -c 'whole number')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and a value for one session"             "1" "$([ "$(fp set acme-api review-model haiku --session api-fix | grep -c 'whole project')" -ge 1 ] && echo 1 || echo 0)"
+  is "...none of which wrote anything"            "opus" "$(cat "$BSF/cf-acme-api.review-model" 2>/dev/null)"
+  fp set acme-api review-model default >/dev/null; fp set acme-api review-rounds default >/dev/null
+  is "default drops the value"                    "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.review-(model|rounds)$' || true)"
+  fp set acme-api review-gate off >/dev/null
+  is "...and off removes the gate"                "0" "$([ -f "$BSF/cf-acme-api.review-gate" ] && echo 1 || echo 0)"
   git init -q -b main "$BS/repo" 2>/dev/null
   git -C "$BS/repo" config user.email t@t; git -C "$BS/repo" config user.name t
   : > "$BS/repo/f"; git -C "$BS/repo" add f; git -C "$BS/repo" commit -qm init 2>/dev/null
@@ -5860,12 +5883,14 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   tmux -L cf-acme-api kill-server 2>/dev/null
   tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
   : > "$BSF/cf-acme-api.api-fix.workers-merge"
+  : > "$BSF/cf-acme-api.api-fix.review-gate-off"
   env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
   is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
   is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
+  is "...and the review-gate override"            "1" "$([ -f "$BSF/cf-acme-api.api-retry.review-gate-off" ] && echo 1 || echo 0)"
   is "...leaving nothing under the old name"      "0" "$(ls "$BSF" | grep -c '^cf-acme-api\.api-fix\.' || true)"
   env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-stop" -s cf-acme-api api-retry >/dev/null 2>&1
-  is "stop clears the session's overrides"        "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(workers-merge|agents-approve)' || true)"
+  is "stop clears the session's overrides"        "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(workers-merge|agents-approve|review-gate)' || true)"
   tmux -L cf-acme-api kill-server 2>/dev/null
   rm -rf "$BS"
 else
@@ -6957,6 +6982,180 @@ else
   skip "worker merge guard" "git or jq missing"
 fi
 
+# ── the REVIEW GATE: no merge without a pass at the PR's CURRENT head ────────
+# lib/review-gate.sh, refused in hooks/fleet-guard.sh, recorded by bin/fleet-review. Driven
+# with a stub `gh` whose PR head is whatever STUB_SHA says, so "a push moved the head" is one
+# variable. Both directions everywhere: off is the old behaviour to the byte (and asks
+# GitHub nothing), on refuses the unreviewed merge and lets the reviewed one through — for
+# the lead in the main checkout too, which the worker guard above never touched.
+group "the review gate: a merge needs a pass at the PR's current head"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  RG="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$RG/stub" "$RG/fleet"
+  RGF="$RG/fleet"
+  git init -q -b main "$RG/repo" 2>/dev/null
+  git -C "$RG/repo" config user.email t@t; git -C "$RG/repo" config user.name t
+  : > "$RG/repo/f"; git -C "$RG/repo" add f; git -C "$RG/repo" commit -qm init 2>/dev/null
+  git -C "$RG/repo" worktree add -q "$RG/api-fix" -b api-fix 2>/dev/null
+  # what fleet-spawn writes: path, session, branch — the author lookup reads it
+  printf '%s\tapi-fix\tapi-fix\t-\n' "$RG/api-fix" > "$RGF/cf-x.manifest.tsv"
+  cat > "$RG/stub/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+[ -n "${STUB_FAIL:-}" ] && exit 1
+n="${STUB_NUM:-12}"
+case "$*" in *"pr view"*) printf '%s\thttps://github.com/acme/acme-api/pull/%s\t%s\t%s\n' "$n" "$n" "$STUB_SHA" "${STUB_BRANCH:-api-fix}" ;; esac
+EOF
+  chmod +x "$RG/stub/gh"
+  export STUB_LOG="$RG/gh.log"
+  A1=aaa1111aaaa1111aaaa1111aaaa1111aaaa1111a; B2=bbb2222bbbb2222bbbb2222bbbb2222bbbb2222b
+  rg() { local cwd="$1" cmd="$2"; shift 2
+    ROUT="$(jq -nc --arg c "$cmd" --arg d "$cwd" '{hook_event_name:"PreToolUse",tool_name:"Bash",cwd:$d,tool_input:{command:$c}}' \
+      | env -u TMUX -u TMUX_PANE -u CLAUDE_PROJECT_DIR CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$RGF" CLAUDE_FLEET_SLOT=master \
+            PATH="$RG/stub:$PATH" "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; RRC=$?; }
+  rgm() { local sha="$1"
+    ROUT="$(jq -nc --arg d "$RG/repo" '{hook_event_name:"PreToolUse",tool_name:"mcp__github__merge_pull_request",cwd:$d,tool_input:{owner:"acme",repo:"acme-api",pullNumber:12}}' \
+      | env -u TMUX -u TMUX_PANE -u CLAUDE_PROJECT_DIR CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$RGF" CLAUDE_FLEET_SLOT=master \
+            PATH="$RG/stub:$PATH" STUB_SHA="$sha" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; RRC=$?; }
+  # frv VAR=value… <fleet-review args>: the assignments are the environment, the rest the command
+  frv() { local e=(); while [ "$#" -gt 0 ] && [[ "$1" == [A-Z]*=* ]]; do e+=("$1"); shift; done
+    FOUT="$(cd "$RG/api-fix" && env -u TMUX -u TMUX_PANE CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$RGF" CLAUDE_FLEET_SLOT=api-fix \
+            PATH="$RG/stub:$PATH" "${e[@]}" bash "$ROOT/bin/fleet-review" "$@" 2>&1)"; FRC=$?; }
+  has() { [ "$(grep -cF -- "$1" <<< "$ROUT")" -ge 1 ] && echo 1 || echo 0; }
+
+  # ── OFF: nothing changes, and nothing is asked ──
+  : > "$STUB_LOG"
+  rg "$RG/repo" 'gh pr merge 12 --squash' STUB_SHA="$A1"
+  is "gate off: the lead merges, unreviewed, as before"   "0" "$RRC"
+  is "...and the guard asked GitHub nothing"              "0" "$(grep -c . "$STUB_LOG" || true)"
+  rg "$RG/api-fix" 'gh pr merge 12' STUB_SHA="$A1" CLAUDE_FLEET_SLOT=api-fix
+  is "...a worker is refused as before"                   "2" "$RRC"
+  is "...with the old refusal, no word of a review gate"  "0" "$(has 'review gate')"
+
+  # ── ON: refused until a pass is recorded at the head ──
+  : > "$RGF/cf-x.review-gate"
+  rg "$RG/repo" 'gh pr merge 12 --squash' STUB_SHA="$A1"
+  is "gate on: the LEAD's unreviewed merge is refused"    "2" "$RRC"
+  is "...saying the gate is on"                           "1" "$(has 'the review gate is on')"
+  is "...naming the setting"                              "1" "$(has '(review-gate)')"
+  is "...and that nothing was recorded"                   "1" "$(has 'No review is recorded')"
+  is "...and how to see the record"                       "1" "$(has 'fleet-review status 12')"
+  frv STUB_SHA="$A1" pass 12
+  is "fleet-review pass records the head"                 "0" "$FRC"
+  rg "$RG/repo" 'gh pr merge 12 --squash' STUB_SHA="$A1"
+  is "a pass at the PR's head lets the lead merge"        "0" "$RRC"
+  rg "$RG/repo" 'gh pr merge 12 --squash' STUB_SHA="$B2"
+  is "a push after the pass voids it: refused"            "2" "$RRC"
+  is "...naming where the pass was"                       "1" "$(has 'The last pass was at aaa1111')"
+  frv STUB_SHA="$B2" status 12
+  is "status says the newer head is not passed (exit 1)"  "1" "$FRC"
+  is "...in words"                                        "1" "$([ "$(grep -c 'NOT passed at the current head bbb2222' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  frv STUB_SHA="$A1" status 12
+  is "...and the reviewed head is (exit 0)"               "0" "$FRC"
+  rg "$RG/repo" "gh pr merge 12 --match-head-commit $A1" STUB_SHA="$A1"
+  is "--match-head-commit at the passed head merges"      "0" "$RRC"
+  rg "$RG/repo" "gh pr merge 12 --match-head-commit $B2" STUB_SHA="$A1"
+  is "--match-head-commit naming another head is refused" "2" "$RRC"
+  : > "$STUB_LOG"
+  rg "$RG/repo" 'gh pr merge --squash --subject "fix two things" 12' STUB_SHA="$A1"
+  is "the PR is found past a quoted --subject"            "0" "$RRC"
+  is "...asked by its number, not a word of the subject"  "1" "$(grep -c '^pr view 12 ' "$STUB_LOG" || true)"
+  rg "$RG/repo" 'gh pr merge 12 --auto' STUB_SHA="$A1"
+  is "--auto is refused: it lands a head nobody reviewed" "2" "$RRC"
+  rg "$RG/repo" 'gh api -X PUT repos/acme/acme-api/pulls/12/merge' STUB_SHA="$B2"
+  is "the REST merge of an unreviewed head is refused"    "2" "$RRC"
+  rg "$RG/repo" 'gh api -X PUT repos/acme/acme-api/pulls/12/merge' STUB_SHA="$A1"
+  is "...and of the reviewed head allowed"                "0" "$RRC"
+  rgm "$B2"; is "the MCP merge tool: unreviewed head refused" "2" "$RRC"
+  rgm "$A1"; is "...reviewed head allowed"                 "0" "$RRC"
+  rg "$RG/repo" "gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'" STUB_SHA="$A1"
+  is "a GraphQL merge cannot be checked, so it is refused" "2" "$RRC"
+  rg "$RG/repo" 'gh pr merge 12' STUB_SHA="$A1" STUB_FAIL=1
+  is "GitHub unreachable: refused, not let through"       "2" "$RRC"
+  # a worker that MAY merge (workers-merge on) is still behind the gate
+  : > "$RGF/cf-x.workers-merge"
+  rg "$RG/api-fix" 'gh pr merge 12' STUB_SHA="$B2" CLAUDE_FLEET_SLOT=api-fix
+  is "a worker allowed to merge is still gated"           "2" "$RRC"
+  rg "$RG/api-fix" 'gh pr merge 12' STUB_SHA="$A1" CLAUDE_FLEET_SLOT=api-fix
+  is "...and merges the reviewed head"                    "0" "$RRC"
+  rm -f "$RGF/cf-x.workers-merge"
+  # WHOSE SETTING: the PR author's, found by head branch in the manifest
+  : > "$RGF/cf-x.api-fix.review-gate-off"
+  rg "$RG/repo" 'gh pr merge 12' STUB_SHA="$B2"
+  is "the author's session is off: its PR is not gated"   "0" "$RRC"
+  rg "$RG/repo" 'gh pr merge 12' STUB_SHA="$B2" STUB_BRANCH=docs-pass
+  is "...a PR no session owns falls back to the project"  "2" "$RRC"
+  rm -f "$RGF/cf-x.api-fix.review-gate-off" "$RGF/cf-x.review-gate"
+  : > "$RGF/cf-x.api-fix.review-gate"
+  rg "$RG/repo" 'gh pr merge 12' STUB_SHA="$B2"
+  is "on for one session only: its PR is gated"           "2" "$RRC"
+  rg "$RG/repo" 'gh pr merge 12' STUB_SHA="$B2" STUB_BRANCH=docs-pass
+  is "...and a sibling's is not"                          "0" "$RRC"
+  rm -f "$RGF/cf-x.api-fix.review-gate"; : > "$RGF/cf-x.review-gate"
+
+  # ── NOBODY IN A SESSION LIFTS IT — the lead included ──
+  rg "$RG/repo" 'fleet-project set -s cf-x review-gate off'
+  is "the lead cannot switch the gate off"                "2" "$RRC"
+  is "...and is told a human does"                        "1" "$(has 'no session turns the review gate off')"
+  rg "$RG/repo" 'fleet-project set -s cf-x review-gate inherit --session api-fix'
+  is "...nor drop a session to inherit"                   "2" "$RRC"
+  rg "$RG/repo" "touch $RGF/cf-x.api-fix.review-gate-off"
+  is "...nor write an -off marker by hand"                "2" "$RRC"
+  rg "$RG/repo" "rm -f $RGF/cf-x.review-gate"
+  is "...nor remove the project's marker"                 "2" "$RRC"
+  rg "$RG/repo" "printf x >> $RGF/cf-x.reviews/acme~acme-api~12.tsv"
+  is "...nor write a review record by hand"               "2" "$RRC"
+  rg "$RG/repo" 'fleet-project set -s cf-x review-gate on --session api-fix'
+  is "the lead MAY switch it on"                          "0" "$RRC"
+  rg "$RG/repo" "cat $RGF/cf-x.reviews/acme~acme-api~12.tsv"
+  is "reading a record is not writing one"                "0" "$RRC"
+  rg "$RG/api-fix" 'fleet-project set -s cf-x review-gate on' CLAUDE_FLEET_SLOT=api-fix
+  is "a worker changes no boundary, this one included"    "2" "$RRC"
+  rg "$RG/api-fix" "fleet-review round 12 --findings $RG/answer" CLAUDE_FLEET_SLOT=api-fix
+  is "...but runs the record's own writer"                "0" "$RRC"
+  rm -f "$RGF/cf-x.api-fix.review-gate"
+
+  # ── THE CAPS: a stalled round, counted; STUCK at the cap, with a need-you ──
+  # PR 21 for this, so the pass above (PR 12) is not in its series. S1..S3 are heads.
+  S1=1111111111111111111111111111111111111111; S2=2222222222222222222222222222222222222222; S3=3333333333333333333333333333333333333333
+  printf 'Two things.\nFINDING lib/x.sh:3 the loop is off by one\nFINDING lib/y.sh:9 divide by zero when n is 0\n' > "$RG/r1"
+  printf 'FINDING lib/x.sh:4 The loop is off by one!\nFINDING lib/y.sh:12 Divide by zero when n is 0.\n' > "$RG/r2"
+  printf 'FINDING lib/z.sh:1 a new problem\n' > "$RG/r3"
+  rr() { frv STUB_NUM=21 STUB_SHA="$2" round 21 --findings "$1"; }
+  rr "$RG/r1" "$S1"
+  is "round 1 with findings: CONTINUE"                    "1" "$([ "$(grep -c 'round 1/8 .* 2 findings .*stalled 0/3 → CONTINUE' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  rr "$RG/r2" "$S2"
+  is "the same findings reworded, lines moved: STALLED"   "1" "$([ "$(grep -c '2 repeated from the round before — STALLED · stalled 1/3' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  rr "$RG/r3" "$S2"
+  is "a new finding at an unchanged head: STALLED"        "1" "$([ "$(grep -c 'STALLED · stalled 2/3 → CONTINUE' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  : > "$RGF/cf-x.inbox"
+  rr "$RG/r3" "$S3"
+  is "the third stalled round: STUCK, exit 3"             "3" "$FRC"
+  is "...saying why"                                      "1" "$([ "$(grep -c 'STUCK: 3 stalled rounds (cap 3)' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  is "...a need-you is filed for the lead"                "1" "$(awk -F'\t' '$2 == "api-fix" && $3 == "need-you" && $4 ~ /review gate STUCK on PR #21/' "$RGF/cf-x.inbox" | grep -c . || true)"
+  is "...with the open finding in the output"             "1" "$([ "$(grep -c 'FINDING lib/z.sh:1 a new problem' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  printf 'NO FINDINGS\n' > "$RG/clean"
+  rr "$RG/clean" "$S3"
+  is "after STUCK a clean round starts afresh: PASS"      "1" "$([ "$(grep -c 'round 1 at 3333333 — no findings → PASS' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  printf 'The reviewer could not run.\n' > "$RG/junk"
+  n0="$(grep -c . "$RGF/cf-x.reviews/acme~acme-api~21.tsv")"
+  rr "$RG/junk" "$S3"
+  is "an answer with no verdict lines is refused (exit 1)" "1" "$FRC"
+  is "...and records nothing — it is no review, not a clean one" "$n0" "$(grep -c . "$RGF/cf-x.reviews/acme~acme-api~21.tsv")"
+  # the TOTAL cap, from the project's value: three rounds that each change something new
+  printf '3\n' > "$RGF/cf-x.review-rounds"
+  printf 'FINDING a.sh:1 first\n' > "$RG/t1"; printf 'FINDING b.sh:1 second\n' > "$RG/t2"; printf 'FINDING c.sh:1 third\n' > "$RG/t3"
+  frv STUB_NUM=22 STUB_SHA="$S1" round 22 --findings "$RG/t1"
+  frv STUB_NUM=22 STUB_SHA="$S2" round 22 --findings "$RG/t2"
+  is "round 2 of 3, nothing stalled: CONTINUE"            "1" "$([ "$(grep -c 'round 2/3 .*stalled 0/3 → CONTINUE' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  frv STUB_NUM=22 STUB_SHA="$S3" round 22 --findings "$RG/t3"
+  is "the total-rounds cap: STUCK at round 3 of 3"        "3" "$FRC"
+  is "...saying it was the round count"                   "1" "$([ "$(grep -c 'STUCK: 3 rounds (cap 3)' <<< "$FOUT")" -ge 1 ] && echo 1 || echo 0)"
+  rm -f "$RGF/cf-x.review-rounds"
+  rm -rf "${RG:?}"
+else
+  skip "the review gate" "git or jq missing"
+fi
+
 # ── 4a10b2. a subagent is not a worker ───────────────────────────────────────
 # The Agent tool (Task in older builds) does the work INSIDE the lead's own
 # conversation. It WORKS, which is why it goes unnoticed — and the fleet can see none
@@ -7325,6 +7524,53 @@ PYX
   ch CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1
   is "the opt-out really opts out"            "0" "$(argvhas '^--append-system-prompt$')"
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # ── THE REVIEW GATE CLAUSE: inside the ONE contract argument, and only when the gate is on
+  # for THIS session (lib/review-gate.sh). TMUX is emptied so the socket is the one named
+  # here and not the server the suite itself may be running under.
+  RGC="$OC/rgfleet"; mkdir -p "$RGC"
+  rgch() { ch TMUX= CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$RGC" CLAUDE_FLEET_SLOT="${1:-w1}" "${@:2}"; }
+  OCLEN="$(python3 - <<'PYX'
+import io,re
+s=io.open("bin/claude-here",encoding="utf-8").read()
+m=re.search(r"CONTRACT=\(--append-system-prompt '(.*?)'\) ;;", s, re.S)
+print(len(m.group(1)) if m else 0)
+PYX
+)"
+  rgch
+  is "review gate off: no clause"             "0" "$(contracthas 'REVIEW GATE')"
+  is "...and the contract is the source text, to the byte" "$OCLEN" "$(wc -c < "$OC/contract" 2>/dev/null | tr -d ' ')"
+  : > "$RGC/cf-x.review-gate"
+  rgch
+  is "review gate on: the clause is in the contract argument" "1" "$(contracthas 'REVIEW GATE: this project has the setting review gate on')"
+  is "...naming the reviewer: an Explore subagent on sonnet"  "1" "$(contracthas 'subagent_type Explore, model sonnet - never a fork')"
+  is "...the skill and its level"             "1" "$(contracthas 'skill code-review and args "medium <PR number>"')"
+  is "...the record"                          "1" "$(contracthas 'fleet-review round <PR number> --findings <that file>')"
+  is "...and both caps"                       "1" "$(contracthas '3 stalled rounds, or 8 rounds in all')"
+  is "...appended to the contract, not replacing it" "1" "$([ "$(wc -c < "$OC/contract" | tr -d ' ')" -gt "$OCLEN" ] && contracthas 'state what you OBSERVED' >/dev/null && echo 1 || echo 0)"
+  is "...still one argument: one --append-system-prompt" "1" "$(argvhas '^--append-system-prompt$')"
+  RGPOS="$(awk 'BEGIN { skip = 0 }
+    { if (skip) { skip = 0; next }
+      if ($0 ~ /^--?[A-Za-z]/) { if ($0 == "--name" || $0 == "--model" || $0 == "--append-system-prompt") skip = 1; next }
+      print $0 }' "$OC/argv" 2>/dev/null | head -4 | tr '\n' ' ')"
+  is "...and no bare word reaches claude"     "" "${RGPOS% }"
+  printf 'opus\n' > "$RGC/cf-x.review-model"; printf 'high\n' > "$RGC/cf-x.review-level"
+  printf '2\n' > "$RGC/cf-x.review-stalled"; printf '5\n' > "$RGC/cf-x.review-rounds"
+  rgch
+  is "the project's reviewer values reach the clause" "1" "$([ "$(contracthas 'model opus - never a fork')" = 1 ] && [ "$(contracthas 'args "high <PR number>"')" = 1 ] && [ "$(contracthas '2 stalled rounds, or 5 rounds in all')" = 1 ] && echo 1 || echo 0)"
+  printf 'claude-opus-5-5\n' > "$RGC/cf-x.review-model"
+  rgch
+  is "...a model the Agent tool cannot take falls back to sonnet" "1" "$(contracthas 'model sonnet - never a fork')"
+  rm -f "$RGC"/cf-x.review-model "$RGC"/cf-x.review-level "$RGC"/cf-x.review-stalled "$RGC"/cf-x.review-rounds
+  : > "$RGC/cf-x.w1.review-gate-off"
+  rgch w1
+  is "a session switched off gets no clause"  "0" "$(contracthas 'REVIEW GATE')"
+  rgch w2
+  is "...while its sibling does"              "1" "$(contracthas 'REVIEW GATE')"
+  rgch w2 CLAUDE_FLEET_FRESH=1
+  is "...on the parallel-session path too"    "1" "$(contracthas 'REVIEW GATE')"
+  rgch w2 CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1
+  is "...and the contract opt-out drops it with the rest" "0" "$(argvhas '^--append-system-prompt$')"
 
   # Every exec path in the file, counted rather than trusted: a fourth one added later
   # without the array is exactly the silent half-coverage described above.
@@ -12576,11 +12822,24 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "...naming both, oldest first"                    "1" "$(grep -cF '[fleet] 2 workers finished (acme-api, toolbox) — run fleet-inbox' "$QW/sent.log" || true)"
   is "...to master, as a nudge (not --now)"            "1" "$(grep -c '^--nudge -s cfquiet master ' "$QW/sent.log" || true)"
   is "...still the words the ledgers drop as the fleet's" "1" "$(grep -c 'no need to reply' "$QW/sent.log" || true)"
+  is "...and, with no review gate, no word of readiness" "0" "$(grep -cE 'READY|review gate' "$QW/sent.log" || true)"
   # and the other direction: a DONE after the window is a wake of its own, not swallowed
   qw_done scratch "$(date +%s)"
   wait_for 10 "the next window" '[ "$(qw_sent)" -ge 2 ]' || true
   qw_idle
   is "a DONE after the window is its own wake"         "2" "$(qw_sent)"
+
+  # ── THE REVIEW GATE in the wake: READY only for a row the Stop hook marked READY ──
+  qw_reset; t="$(date +%s)"
+  printf '%s\t%s\tdone\t%s\n' "$t" acme-api 'READY to merge — review passed at aaa1111 (PR #12) · acme-api · api-fix' >> "$IB"
+  qw_rec acme-api ready "$t"; now="$t" PATH="$QW/bin:$PATH" _gather_done cfquiet "$QW" notify master acme-api "$IB"
+  printf '%s\t%s\tdone\t%s\n' "$t" toolbox 'unreviewed — not ready to merge (review gate on) · toolbox · docs-pass' >> "$IB"
+  qw_rec toolbox ready "$t"; now="$t" PATH="$QW/bin:$PATH" _gather_done cfquiet "$QW" notify master toolbox "$IB"
+  wait_for 10 "the window to end" '[ "$(qw_sent)" -ge 1 ]' || true
+  qw_idle
+  is "the gate's wake names the READY worker as ready"  "1" "$(grep -cF 'READY to merge (review passed at the PR head): acme-api.' "$QW/sent.log" || true)"
+  is "...and the unreviewed one as NOT ready"          "1" "$(grep -cF 'NOT ready — unreviewed under the review gate: toolbox.' "$QW/sent.log" || true)"
+  is "...still one wake, still the fleet's words"      "1" "$(grep -c 'finished (acme-api, toolbox) — .* no need to reply' "$QW/sent.log" || true)"
 
   # ── the window trails, but is capped ──
   # A fleet that never falls quiet must still be told: the first DONE gathered 30s ago with a

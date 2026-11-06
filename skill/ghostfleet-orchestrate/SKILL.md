@@ -132,7 +132,9 @@ passively into an inbox you drain in one call:
   signal**: a dispatched brief is ready to review/merge. It is NOT "free for the
   next task" — once its PR merges, that worker is retired with `fleet-stop --reclaim`
   and the next task gets a new session. (A worker's autonomous turn ends once, so one
-  `done` per brief.)
+  `done` per brief.) Under the review gate a `done` says whether it is **READY to
+  merge** (review passed at its head), **unreviewed**, or **STUCK** — DONE alone is not
+  ready.
 - a worker **`need-you`** — permission / usage-limit / a real question. The row says
   WHAT it asks (the tool and command, the question and its options, the limit line), and
   whether it is still **`(pending)`** — the worker's pane still shows it — or
@@ -207,6 +209,15 @@ retry?", or a trust prompt, use:
   sub-master of its task while its siblings stay blocked. `fleet-project get <project>`
   shows them. Only you or the human set these — a worker's own attempt is refused. Jarvis
   ignores both: its confirm-list always asks the owner.
+- **The review gate is the third, and it runs the other way** (`review-gate on`): every PR
+  needs a pass from an independent reviewer at its CURRENT head before anyone merges it —
+  you too. You may switch it on; nobody in a session may switch it off. When it is on, a
+  worker's contract tells it to run the review itself and report READY; you run
+  `fleet-review status <PR>` (exit 0 means passed at the head) and merge with
+  `gh pr merge <PR> --match-head-commit <that sha>`. A push after the pass voids it. A
+  `need-you` reading *review gate STUCK on PR #N* means the rounds stopped converging: read
+  the open findings it lists and decide with the human — do not just send it back to loop.
+  Full flow: docs/ORCHESTRATION.md, "The review gate".
 
 ## Budget: one shared account
 
@@ -249,6 +260,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
 | **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
+| **see a PR's review-gate record** | `fleet-review status <PR>` — every round, and whether a pass stands at the current head (exit 0) or not (exit 1). `fleet-review round <PR> --findings <file>` / `pass <PR>` / `stuck <PR> "<why>"` are the worker's half |
 | **photograph a flow for a human to approve** *(experimental — off unless `fleet-experimental enable shots`)* | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |

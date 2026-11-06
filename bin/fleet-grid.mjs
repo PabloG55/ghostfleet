@@ -3741,7 +3741,7 @@ const SETCOLS = [
       const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
       return { on: !!a, label: (a || 'claude') + pos };
     } },
-  // THE TWO BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
+  // TWO OF THE BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
   // agent approving another session's permission dialog. Project-wide here; the one-session
   // form (the sub-master of its task) is `fleet-project set … --session <s>`. Written
   // through fleet-project, like AGENT, so the markers have one writer.
@@ -3751,6 +3751,18 @@ const SETCOLS = [
   { title: 'AGENTS APPROVE', onColor: C.red, toggle: p => toggleBoundary(p, 'agents-approve'),
     blurb: `${C.dim}agents can approve tool calls: ${C.reset}${C.bold}on${C.reset}${C.dim} = fleet-answer may send a yes to a worker's permission dialog · ${C.reset}${C.bold}off${C.reset}${C.dim} = a human approves (default). Jarvis always asks you.${C.reset}`,
     state: p => { const on = boundaryOn(p, 'agents-approve'); return { on, label: on ? 'on' : 'off' }; } },
+  // THE REVIEW GATE (lib/review-gate.sh): the boundary that DRAWS a line when on, so it is
+  // green rather than red — on is the careful state here. The cell names the reviewer model,
+  // because "on" alone hides which second opinion the project is paying for. Turning it off
+  // is a human's act, which is exactly what this page is: no session can (fleet-guard.sh).
+  { title: 'REVIEW GATE', onColor: C.green, toggle: p => toggleBoundary(p, 'review-gate'),
+    blurb: `${C.dim}review gate: ${C.reset}${C.bold}on${C.reset}${C.dim} = no PR merges until a reviewer subagent's code review passed at its head (fleet-review status <pr>) · ${C.reset}${C.bold}off${C.reset}${C.dim} = merge as before (default). Reviewer, level and caps: fleet-project set <p> review-model|review-level|review-stalled|review-rounds${C.reset}`,
+    state: p => {
+      const on = boundaryOn(p, 'review-gate');
+      let m = 'sonnet';
+      try { const v = fs.readFileSync(path.join(profileDir(p.profile), 'fleet', `${sockOf(p)}.review-model`), 'utf8').trim(); if (/^(sonnet|opus|haiku|fable)$/.test(v)) m = v; } catch {}
+      return { on, label: on ? `on · ${m}` : 'off' };
+    } },
 ];
 function boundaryOn(proj, b) {
   try { return fs.existsSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.${b}`)); } catch { return false; }

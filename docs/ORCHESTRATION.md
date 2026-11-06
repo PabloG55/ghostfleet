@@ -101,6 +101,68 @@ master (main checkout)
   fleet-clean's squash-aware gates, then the sub-lead. The grid's `x` and the phone's
   long-press ask the same question with the worker count in it.
 
+### The review gate — no merge without an independent review
+
+`fleet-project set <project> review-gate on` (or the grid's `,` page) makes every PR in that
+project pass a code review by another model before **anyone** may merge it, the lead
+included. OFF by default, and off means nothing changes: no clause, no `gh` call from the
+guard, no new wording anywhere. It is the third boundary of the `workers-merge` /
+`agents-approve` family — the same markers, the same `--session` override, most specific
+wins — with the polarity reversed: it draws a line rather than lifting one, so a lead may
+switch it **on**, and no session may switch it off or to `inherit`. Only a human does that,
+at the terminal or on the grid.
+
+```
+worker                                   lead
+──────                                   ────
+push; open the PR
+Agent(Explore, model sonnet):
+  Skill code-review "medium <PR>"
+  → FINDING <file>:<line> <summary>
+    or NO FINDINGS
+Write the answer to a file
+fleet-review round <PR> --findings <f>
+  CONTINUE → fix, push, review again
+  PASS     → report READY ──────────────▶ inbox: "READY to merge — review passed at <sha>"
+  STUCK    → stop; a need-you is filed ─▶ inbox: "review gate STUCK on PR #N …"
+                                         fleet-review status <PR>    (exit 0 = passed at head)
+                                         gh pr merge <PR> --match-head-commit <sha>
+```
+
+- **The reviewer** is an Explore subagent — read-only, and already allowed past the
+  subagent guard — on the project's `review-model` (default `sonnet`), running the
+  `code-review` skill at `review-level` (default `medium`; `ultra` is a billed cloud review
+  and is refused as a value). It is given the PR number and nothing else: no summary of the
+  change, no hint of what to look for, so its read is not anchored on the author's.
+- **The record** is `<fleet dir>/<sock>.reviews/<owner>~<repo>~<n>.tsv`, one row per round:
+  head sha, findings count and fingerprints, whether the round stalled, the verdict, the
+  reviewer model and level. Only `fleet-review` writes it; a hand-written row is refused by
+  the guard like any marker. An answer with neither a `FINDING` nor a `NO FINDINGS` line is
+  refused rather than read as clean — a reviewer that could not run is no review.
+- **The caps.** A round is **stalled** when the head did not move since the last round, or
+  when every finding repeats the last round's (compared without line numbers, case,
+  digits or punctuation, so a reworded repeat at a moved line still counts). After
+  `review-stalled` stalled rounds (default 3) or `review-rounds` rounds in all (default 8)
+  the series is **STUCK**: the worker stops and a `need-you` naming the open findings goes
+  to its lead. A pass or a STUCK ends a series; the next round starts at 1.
+- **The guard** (`hooks/fleet-guard.sh`) refuses a merge unless the LAST verdict recorded
+  at the PR's **current** head is a pass — so a push after the review voids it. It catches
+  `gh pr merge` in every spelling (`-R`, a quoted `--subject`, `--match-head-commit`, which
+  must name that same head), the REST `pulls/N/merge`, and the GitHub MCP merge tool; it
+  refuses `--auto` (it would land whatever head is there later) and a GraphQL merge (it
+  cannot tell which PR). If GitHub cannot be asked for the head, it refuses rather than
+  guess. **Whose setting:** the PR author's — the session whose branch is the PR's head in
+  the manifest — so `--session docs-pass review-gate off` exempts that worker's PRs whoever
+  merges them; a PR no session owns falls back to the merging session.
+- **READY is not DONE.** With the gate on, a worker's `done` row in the inbox says which it
+  is: `READY to merge — review passed at <sha7> (PR #N)` when this session's newest record
+  passed at its local head, `review STUCK on PR #N — needs you`, or `unreviewed — not ready
+  to merge`. The gathered wake lists them the same way. The Stop hook reads only the local
+  record — it never goes to the network — so the lead's `fleet-review status` is the check
+  before a merge, and the guard is what holds it.
+- **What it is not:** a sandbox. A merge from the GitHub web UI, a script outside a fleet
+  session, or a token used by hand is not seen. Branch protection is the server's half.
+
 ### Dev-stack slots — one integer per checkout
 
 Several checkouts of one repo each need their own local stack: an API port, a web port,

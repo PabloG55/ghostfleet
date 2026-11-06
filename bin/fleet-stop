@@ -272,7 +272,7 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
 rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-lead-off" 2>/dev/null
 # the boundary overrides (lib/boundary.sh): a sub-master's "may merge / may approve" is
 # about THAT worker's task, and a session that reuses the name must start blocked.
-for _b in workers-merge agents-approve; do
+for _b in workers-merge agents-approve review-gate; do
   rm -f "$FLEET_DIR/$SOCK.$SESSION.$_b" "$FLEET_DIR/$SOCK.$SESSION.$_b-off" 2>/dev/null
 done
 # a pending reply address (fleet-send --reply-to): the session that would have answered

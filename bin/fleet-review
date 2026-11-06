@@ -3,6 +3,7 @@
 #
 #     fleet-review [--agent A] [--base REF | --uncommitted | --commit SHA]
 #                  [--title T] [--dry-run]
+#     fleet-review round|pass|stuck|status <pr> …   the review gate's record (see below)
 #
 # WHY A COMMAND AND NOT A PARAGRAPH. The standing contract already tells a session to say
 # what it OBSERVED rather than what it ran, and the same gap that made `fleet-look`
@@ -25,6 +26,144 @@
 set -uo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── THE REVIEW GATE'S RECORD: round | pass | stuck | status ──────────────────────
+#
+#     fleet-review round  <pr> [--findings FILE]   one review round, the reviewer's answer
+#                                                  on stdin or in FILE
+#     fleet-review pass   <pr>                     a clean round (the same as NO FINDINGS)
+#     fleet-review stuck  <pr> "<why>"             give up on purpose, and file a need-you
+#     fleet-review status <pr>                     the rounds, and whether the PR's CURRENT
+#                                                  head has a pass (exit 0) or not (exit 1)
+#
+# What the merge guard reads when the project's "review gate" is on (lib/review-gate.sh).
+# A SUBCOMMAND OF THIS FILE, not a new one, because it is the same act — a second model
+# reading this one's work — and the two halves differ only in who the reviewer is: above,
+# another CLI; here, the subagent the gate's contract clause tells a worker to spawn.
+#
+# EVERY ROUND IS TAKEN AT THE PR'S HEAD AS GITHUB HAS IT, asked of `gh pr view`, never at
+# the local HEAD: the merge guard compares against GitHub's head, and a round recorded
+# against an unpushed commit would be a pass for code no reviewer of the PR ever saw.
+# The verdict is decided HERE, not by the worker — the caps are arithmetic over the rows,
+# so "one more round" is not a judgment a session in the loop gets to make.
+_rg_main() {
+  local sub="$1"; shift
+  . "$BIN_DIR/../lib/boundary.sh"; . "$BIN_DIR/../lib/review-gate.sh"
+  local pr="${1:-}" findings_file="" why=""
+  [ -n "$pr" ] && shift
+  case "$pr" in ''|-*) echo "fleet-review: usage: fleet-review $sub <pr-number>" >&2; return 1 ;; esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --findings) findings_file="${2:?--findings needs a file}"; shift 2 ;;
+      *) if [ "$sub" = stuck ] && [ -z "$why" ]; then why="$1"; shift
+         else echo "fleet-review: unexpected argument '$1'" >&2; return 1; fi ;;
+    esac
+  done
+  # Which fleet and which session: the live tmux server before the inherited variable, the
+  # pane before the env (a renamed session keeps its launch-time env) — as fleet-event does.
+  local sock="${CLAUDE_FLEET_SOCK:-}" t="${TMUX:-}" sess="" dir
+  case "${t%%,*}" in */cf-*) sock="${t%%,*}"; sock="${sock##*/}" ;; esac
+  dir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+  [ -n "${TMUX_PANE:-}" ] && [ -n "$sock" ] && sess="$(tmux -L "$sock" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+  [ -n "$sess" ] || sess="${CLAUDE_FLEET_SLOT:-}"
+  [ -n "$sock" ] || { echo "fleet-review: not in a fleet — review records are kept per fleet socket" >&2; return 1; }
+  [ -n "$sess" ] || sess=master
+
+  local info num url head hbranch key rec
+  local to=(); command -v timeout >/dev/null 2>&1 && to=(timeout 20)
+  info="$(${to[@]+"${to[@]}"} gh pr view "$pr" --json number,url,headRefOid,headRefName \
+            -q '[(.number|tostring), .url, .headRefOid, .headRefName] | join("\t")' 2>/dev/null)"
+  IFS=$'\t' read -r num url head hbranch <<< "$info"
+  if [ -z "$head" ] || ! key="$(review_key "$url")"; then
+    echo "fleet-review: could not read PR '$pr' from GitHub (gh pr view) — nothing recorded" >&2
+    return 1
+  fi
+  rec="$(review_file "$dir" "$sock" "$key")"
+  local short="${head:0:7}" now; now="$(date +%s)"
+  local model level cs cr
+  model="$(review_gate_value "$dir" "$sock" model)"; level="$(review_gate_value "$dir" "$sock" level)"
+  cs="$(review_gate_value "$dir" "$sock" stalled)"; cr="$(review_gate_value "$dir" "$sock" rounds)"
+
+  if [ "$sub" = status ]; then
+    local gate=off owner
+    owner="$(awk -F'\t' -v b="$hbranch" '$3 == b { print $2; exit }' "$dir/$sock.manifest.tsv" 2>/dev/null)"
+    review_gate_on "$dir" "$sock" "${owner:-$sess}" && gate=on
+    echo "PR #$num  head $short ($hbranch)  ·  review gate $gate${owner:+ for $owner}  ·  reviewer $model at $level, caps $cs stalled / $cr rounds"
+    if [ -f "$rec" ]; then
+      # no strftime: it is gawk's, and the awk a Mac ships has none
+      awk -F'\t' '{ printf "  %-9s round %-2s  %s  %-12s %s finding%s%s  %s/%s%s\n", $8, $3, substr($4,1,7), $2, $5, ($5 == 1 ? "" : "s"), ($7 == 1 ? " (stalled)" : ""), $9, $10, ($11 != "-" ? "  — " $11 : "") }' "$rec"
+    else
+      echo "  no review recorded"
+    fi
+    if review_passed_at "$rec" "$head"; then
+      echo "PASSED at the current head $short — the gate lets this PR merge"; return 0
+    fi
+    local lp; lp="$(review_last_pass "$rec")"
+    if [ -n "$lp" ]; then echo "NOT passed at the current head $short — the last pass was at ${lp:0:7}, and a push since voids it"
+    else echo "NOT passed at the current head $short"; fi
+    [ -s "${rec%.tsv}.open" ] && { echo "open findings:"; sed 's/^/  FINDING /' "${rec%.tsv}.open"; }
+    return 1
+  fi
+
+  # A round against a head that is not this checkout's means the fixes were not pushed, so
+  # the reviewer (which reads the PR) saw the old code. Recorded anyway, at GitHub's head —
+  # and it will count as "changed nothing" if that head is the previous round's.
+  local lh; lh="$(git rev-parse -q --verify HEAD 2>/dev/null)"
+  [ -n "$lh" ] && [ "$lh" != "$head" ] && \
+    echo "fleet-review: warning — this checkout is at ${lh:0:7} but PR #$num's head is $short; push before reviewing" >&2
+
+  local text="" list="" n=0 fps="-" verdict reason r stall tot rep
+  case "$sub" in
+    pass)  text="NO FINDINGS" ;;
+    round) if [ -n "$findings_file" ]; then text="$(cat "$findings_file" 2>/dev/null)" || { echo "fleet-review: cannot read $findings_file" >&2; return 1; }
+           else text="$(cat)"; fi ;;
+  esac
+  mkdir -p "${rec%/*}" 2>/dev/null || { echo "fleet-review: cannot write ${rec%/*}" >&2; return 1; }
+  if [ "$sub" = stuck ]; then
+    [ -n "$why" ] || { echo "fleet-review: usage: fleet-review stuck <pr> \"<why>\"" >&2; return 1; }
+    r="$(awk -F'\t' '{ if ($8 == "pass" || $8 == "stuck") k = 0; else k++ } END { print k + 1 }' "$rec" 2>/dev/null)"; r="${r:-1}"
+    verdict=stuck; reason="$why"; stall=0; tot=0
+    n="$(grep -c . "${rec%.tsv}.open" 2>/dev/null || echo 0)"
+  else
+    list="$(printf '%s\n' "$text" | review_findings)"
+    if [ -n "$list" ]; then n="$(grep -c . <<< "$list")"; fps="$(review_fingerprints <<< "$list")"; [ -n "$fps" ] || fps="-"
+    elif printf '%s\n' "$text" | review_says_clean; then n=0
+    else
+      echo "fleet-review: no FINDING lines and no NO FINDINGS line in the reviewer's answer — that is not a" >&2
+      echo "fleet-review: clean review, it is no review. Nothing recorded; run the round again." >&2
+      return 1
+    fi
+    IFS=$'\t' read -r r stall tot verdict reason rep < <(review_round_verdict "$rec" "$head" "$n" "$fps" "$cs" "$cr")
+  fi
+  local note="${reason:--}"; note="$(printf '%s' "$note" | tr '\t\n' '  ')"; [ "$verdict" = continue ] && note=-
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$sess" "$r" "$head" "$n" "$fps" "${stall:-0}" \
+    "$verdict" "$model" "$level" "$note" >> "$rec" || { echo "fleet-review: cannot write $rec" >&2; return 1; }
+  if [ "$verdict" = pass ]; then rm -f "${rec%.tsv}.open"
+  elif [ -n "$list" ]; then printf '%s\n' "$list" > "${rec%.tsv}.open"; fi
+
+  case "$verdict" in
+    pass)
+      echo "fleet-review: round $r at $short — no findings → PASS recorded for PR #$num at $short."
+      echo "fleet-review: report READY (PR #$num) and end the turn. A push after this voids the pass." ;;
+    continue)
+      echo "fleet-review: round $r/$cr at $short — $n finding$([ "$n" = 1 ] || echo s)$([ "${rep:-0}" -gt 0 ] && echo ", $rep repeated from the round before")$([ "$stall" = 1 ] && echo ' — STALLED') · stalled $tot/$cs → CONTINUE."
+      echo "fleet-review: fix what you agree with, push, and review again with a fresh subagent." ;;
+    stuck)
+      # THE NEED-YOU. Filed as a row in the inbox this session's events go to, so the lead
+      # reads it beside the DONE that ends this turn — whose detail also says STUCK (the
+      # Stop hook reads this record), because a need-you followed by a done reads as cleared.
+      local inbox; inbox="$(review_inbox "$dir" "$sock" "$sess")"
+      printf '%s\t%s\t%s\t%s\n' "$now" "$sess" need-you \
+        "review gate STUCK on PR #$num after $r round$([ "$r" = 1 ] || echo s): $reason — $n open finding$([ "$n" = 1 ] || echo s) · fleet-review status $num" \
+        >> "$inbox" 2>/dev/null
+      echo "fleet-review: round $r at $short — STUCK: $reason. A need-you is filed for the lead."
+      echo "fleet-review: stop here. Report the open findings below and end the turn; do not review again."
+      [ -s "${rec%.tsv}.open" ] && sed 's/^/  FINDING /' "${rec%.tsv}.open"
+      return 3 ;;
+  esac
+  return 0
+}
+case "${1:-}" in round|pass|stuck|status) _rg_main "$@"; exit $? ;; esac
 # Sibling first, for the reason busyReFor and installedAgents both do it: a PATH miss
 # would silently answer "no agent has a review" and the refusal above would fire for the
 # wrong reason, which reads exactly like codex not being installed.
@@ -43,7 +182,9 @@ while [ $# -gt 0 ]; do
     --commit)      MODE=commit; SHA="${2:?--commit needs a sha}"; shift 2 ;;
     --title)       TITLE="${2:?--title needs a string}"; shift 2 ;;
     --dry-run|-n)  DRY=1; shift ;;
-    -h|--help)     sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     { sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed '$d'
+                     awk '/^# ── THE REVIEW GATE/ { on = 1 } /^# What the merge/ { exit } on' "${BASH_SOURCE[0]}"; } \
+                     | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)            shift; EXTRA="$*"; break ;;
     *)             echo "fleet-review: unknown option '$1' (try --help)" >&2; exit 1 ;;
   esac
