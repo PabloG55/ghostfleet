@@ -1878,6 +1878,104 @@ async function readAtMac() {
 export function atMac(reading, limit) {
   return !!(reading && limit > 0 && Number.isFinite(reading.idle) && reading.idle < limit && !reading.locked);
 }
+
+// ── at the keyboard: tmux, and the paired host ───────────────────────────────
+// HID IS ONE KEYBOARD, AND A LINUX HOST HAS NONE. A fleet on a VM is typed into over SSH
+// from another machine, so the VM has no ioreg and its reading was null — every push went to
+// the phone while he was typing into that very fleet. Two more sources, and `here` is ANY of
+// them saying yes (keyboardStep below); each one that cannot be read is simply absent, so
+// atMac()'s rule holds for all three: no reading never holds.
+//
+// TMUX: the newest `client_activity` of an ATTACHED client on any socket this server serves.
+// Measured on 3.7b: it is set when the client attaches and moved by its KEYSTROKES only —
+// not by pane output, not by a resize, not by a command client like `display-message` — so a
+// build printing into a pane nobody is at does not read as somebody there. `list-clients`
+// lists attached clients and nothing else; no attached client is no reading, never "idle".
+// The two fields are split by a TAB, the one byte every tmux this repo supports prints
+// verbatim (CLAUDE.md, the tmux 3.4 vis(3) entry) — `\x1f` would come back as `\037`.
+//   THE PHONE'S OWN TERMINAL IS A TMUX CLIENT TOO (a `-C` control client per open web
+// terminal), and its keystrokes are the phone, not a keyboard. Its pid is left out, by pid:
+// "control mode" would also drop a desktop terminal's tmux integration, which IS a keyboard.
+//   No `locked` here: tmux cannot know, and an SSH session typing into a VM is a person at a
+// keyboard whatever any screen says.
+//
+// THE PAIRED HOST: GET /api/presence answers {idle, locked} from that host's OWN readings —
+// HID and tmux, never its own peers', so two hosts cannot answer each other in a circle, and
+// the threshold is the ASKER's (each host's serve.json has its own). Asked over the pairing's
+// signed request with a short timeout, cached like the HID reading, and a peer that does not
+// answer is a reading that could not be taken.
+const STACK_SOCK = process.env.CLAUDE_FLEET_STACK_SOCK || 'cf-stack';
+const PEER_PRESENCE_TIMEOUT = 1500;
+let tmuxCache = { at: 0, v: null };
+const peerPresence = new Map();     // peer key -> { at, v }
+export function parseClientActivity(out, skip = new Set()) {
+  let newest = null;
+  for (const line of String(out || '').split('\n')) {
+    const [pid, at] = line.split('\t');
+    if (!/^\d+$/.test(at || '') || skip.has(Number(pid))) continue;
+    newest = Math.max(newest ?? 0, Number(at));
+  }
+  return newest;
+}
+const tmuxOut = (args) => new Promise((resolve) => {
+  execFile('tmux', args, { encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024 }, (e, out) => resolve(e ? '' : out));
+});
+// The fleet sockets, plus the stack's: a stack's panes attach to the fleets, so a key typed
+// there reaches the fleet's own client as well — but the stack's client is the one he holds.
+async function readTmuxPresence() {
+  if (now() - tmuxCache.at < AT_MAC_CACHE) return tmuxCache.v;
+  const socks = [...new Set([...sockProjects().keys(), STACK_SOCK])];
+  const mine = new Set([...terms].map(b => b.pid).filter(Boolean));
+  const outs = await Promise.all(socks.map(s => tmuxOut(['-L', s, 'list-clients', '-F', '#{client_pid}\t#{client_activity}'])));
+  let newest = null;
+  for (const o of outs) { const n = parseClientActivity(o, mine); if (n != null) newest = Math.max(newest ?? 0, n); }
+  tmuxCache = { at: now(), v: newest == null ? null : { idle: Math.max(0, now() - newest), locked: false } };
+  return tmuxCache.v;
+}
+async function localPresence() {
+  const [mac, tmux] = await Promise.all([readAtMac(), readTmuxPresence()]);
+  return [mac && { source: 'mac', ...mac }, tmux && { source: 'tmux', ...tmux }].filter(Boolean);
+}
+// What /api/presence answers: the freshest unlocked reading; a locked screen only when that
+// is all there is; and nulls — which atMac() never counts — when nothing could be read.
+export function presenceAnswer(readings) {
+  const ok = readings.filter(r => r && Number.isFinite(r.idle));
+  const open = ok.filter(r => !r.locked);
+  if (open.length) return { idle: Math.min(...open.map(r => r.idle)), locked: false };
+  if (ok.length) return { idle: Math.min(...ok.map(r => r.idle)), locked: true };
+  return { idle: null, locked: null };
+}
+async function peerPresenceReadings(v = peers()) {
+  return (await Promise.all(v.peers.map(async (peer) => {
+    const hit = peerPresence.get(peer.key);
+    if (hit && now() - hit.at < AT_MAC_CACHE) return hit.v;
+    const r = await callPeer(peer, { pathq: '/api/presence', timeout: PEER_PRESENCE_TIMEOUT }, { fan: true });
+    const j = r.status === 200 && r.json ? r.json : null;
+    const val = j && Number.isFinite(j.idle) ? { source: 'peer', label: peer.label, idle: j.idle, locked: !!j.locked } : null;
+    peerPresence.set(peer.key, { at: now(), v: val });
+    return val;
+  }))).filter(Boolean);
+}
+async function presenceReadings() {
+  const [local, remote] = await Promise.all([localPresence(), peerPresenceReadings()]);
+  return [...local, ...remote];
+}
+// One reading in the words serve.log uses. The HID one keeps its old wording exactly —
+// "(idle 14s)" — so a log line from before this change reads the same after it.
+export function describeReading(r) {
+  const what = r.locked ? 'screen locked' : `idle ${Math.round(r.idle)}s`;
+  return r.source === 'tmux' ? `tmux, ${what}` : r.source === 'peer' ? `peer ${r.label}, ${what}` : what;
+}
+// THE PRESENCE HALF OF THE DECISION, PURE: whether any reading holds, which one, and how the
+// log line should name the place. "the Mac" only when the Mac's own HID is the reading that
+// speaks — a VM's tmux client is a keyboard, not a Mac.
+export function keyboardStep(readings, limit) {
+  const holder = readings.find(r => atMac(r, limit)) || null;
+  const macOnly = readings.length > 0 && readings.every(r => r.source === 'mac');
+  const place = holder ? (holder.source === 'mac' ? 'the Mac' : 'the keyboard') : macOnly ? 'the Mac' : 'the keyboard';
+  const why = holder ? ` (${describeReading(holder)})` : readings.length ? ` (${readings.map(describeReading).join(' · ')})` : '';
+  return { here: !!holder, holder, place, why };
+}
 // Whether the session has moved on from the event: a need-you that is no longer need-you
 // was answered (at the Mac, most likely), and an answer whose session is working again was
 // read and replied to. A session that is gone has nothing left to tell him about.
@@ -1900,7 +1998,8 @@ export function pushResolved(ev, status) {
 //   here     atMac() now          readAt   newest poll by any subscribed phone (seconds)
 //   status   (key) -> the session's status now, for pushResolved()
 // Returns what is still held, what to send now, and one log line per decision.
-export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
+//   place    how the log names where he is ('the Mac', or 'the keyboard' — keyboardStep)
+export function holdStep(held, { events, here, now: t, hold, readAt, status, place = 'the Mac' }) {
   const log = [], keep = [];
   let expired = 0, seen = 0;
   const key = (e) => `${e.sock}/${e.session}`;
@@ -1912,14 +2011,14 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
     if (readAt > h.at || pushResolved(h.ev, status(key(h.ev))) || newer.has(key(h.ev))) { seen++; continue; }
     keep.push(h);
   }
-  if (expired) log.push(`push: expired ${expired} held after ${hold}s at the Mac`);
+  if (expired) log.push(`push: expired ${expired} held after ${hold}s at ${place}`);
   if (seen) log.push(`push: dropped ${seen} held as seen`);
   if (here) {
     for (const ev of events) keep.push({ ev, at: t });
-    if (events.length) log.push(`push: held ${events.length} — at the Mac`);
+    if (events.length) log.push(`push: held ${events.length} — at ${place}`);
     return { held: keep, send: [], released: 0, log };
   }
-  if (keep.length) log.push(`push: released ${keep.length} held — left the Mac`);
+  if (keep.length) log.push(`push: released ${keep.length} held — left ${place}`);
   return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
 }
 let pushHeld = [];
@@ -1939,16 +2038,16 @@ async function pushTick() {
   const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
                  ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
   if (!fresh.length && !pushHeld.length) return;
-  // AT THE MAC: what would have been sent is held instead, and what was held goes when he
-  // leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  // AT THE KEYBOARD: what would have been sent is held instead, and what was held goes when
+  // he leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  // The keys keep their at_mac_ names: they are in owners' serve.json files, and on a host
+  // with no Mac in it they mean the same thing about whichever keyboard is there.
   const limit = Number(c.push.at_mac_idle) || 0;
-  const reading = limit > 0 ? await readAtMac() : null;
-  const here = atMac(reading, limit);
+  const kb = keyboardStep(limit > 0 ? await presenceReadings() : [], limit);
   const readAt = Math.max(0, ...subs.map(s => lastRead.get(s.client) || 0));
-  const step = holdStep(pushHeld, { events: fresh, here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
-                                    status: (k) => pushState.get(k) });
-  const why = !reading ? '' : reading.locked ? ' (screen locked)' : ` (idle ${Math.round(reading.idle)}s)`;
-  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + why : l);
+  const step = holdStep(pushHeld, { events: fresh, here: kb.here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
+                                    status: (k) => pushState.get(k), place: kb.place });
+  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + kb.why : l);
   pushHeld = step.held;
   const events = step.send;
   if (!events.length) return;
@@ -2261,9 +2360,15 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
 //
 // A machine with no peers is untouched by all of it: no field is added to any payload,
 // and an address without an `@` is this host's, exactly as before.
-const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage']);
+// /api/presence is here ON PURPOSE, and it is the one read that exists FOR a paired host
+// rather than for a phone it proxies: the push hold on each machine asks the other whether
+// he is at a keyboard, because he types into a VM's fleet from the Mac and its own phone
+// should not buzz about a screen he is looking at. It answers two fields, {idle, locked},
+// computed from this host's own readings — no project, no session, no name — so what it
+// tells a paired host is only "someone touched a key here N seconds ago".
+const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue and usage to read; send (photos too), wake, park and resume to act';
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage and whether someone is at a keyboard to read; send (photos too), wake, park and resume to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -2947,6 +3052,13 @@ function agentCatalogue() {
     return send(res, 200, mergeUsage(usageReport(), await fan));
   }
 
+  // Whether someone is at a keyboard HERE — the paired host's push hold asks it (see "at the
+  // keyboard" and PAIR_READS). Exactly two keys, and never this host's own peers' answers.
+  if (p === '/api/presence' && req.method === 'GET') {
+    const a = presenceAnswer(await localPresence());
+    return send(res, 200, { idle: a.idle, locked: a.locked });
+  }
+
   if (p === '/api/inbox' && req.method === 'GET') {
     const rp = resolveProject(url.searchParams.get('project') || '');
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
@@ -3499,6 +3611,7 @@ function termBridge(sock, t, ip) {
     onOutput: (bytes) => write(OP.binary, bytes),
     onExit: (why) => b.end(1000, /exit|ended|detached/i.test(why) ? 'the shell exited' : `tmux: ${why}`),
   });
+  b.pid = cc.pid;     // the phone typing here is not someone at a keyboard (readTmuxPresence)
   ctl({ t: 'hello', project: t.project, session: t.session, idle: termIdle() });
   (async () => {
     await cc.resize(t.cols, t.rows);
@@ -3859,7 +3972,7 @@ async function serve(argv) {
   if (ledgerWhy) log(`  waiting on you: OFF — ${ledgerWhy}`);
   {
     const n = allSubs().length, pc = loadConfig().push;
-    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? (process.platform === 'darwin' ? `held while at the Mac (input within ${pc.at_mac_idle}s, unlocked) for up to ${pc.at_mac_hold}s` : 'at-the-Mac hold off (not macOS)') : 'at-the-Mac hold off'}`
+    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? `held while at a keyboard (${process.platform === 'darwin' ? 'Mac input, unlocked, ' : ''}a fleet tmux keystroke${peers().peers.length ? ', or a paired host saying so' : ''} within ${pc.at_mac_idle}s) for up to ${pc.at_mac_hold}s` : 'at-the-keyboard hold off'}`
           : '  push: nothing subscribed — a home-screen PWA subscribes from its settings sheet (docs/mobile.md §9)');
   }
   // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
@@ -4075,7 +4188,16 @@ async function main() {
     console.log(`subject    ${vapidSubject(c)}${c.push.subject ? '' : '  (default — push.subject in the config overrides it)'}`);
     console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
     console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
-    console.log(`at the Mac ${!(c.push.at_mac_idle > 0) ? 'off (push.at_mac_idle is 0)' : process.platform !== 'darwin' ? 'off — macOS only' : `held while there was input within ${c.push.at_mac_idle}s and the screen is unlocked; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
+    // WHICH KEYBOARD, AND WHAT IT SAYS NOW: "why did that push wait" has an answer here, read
+    // the same way the watcher reads it — including a paired host's, over the pairing.
+    const limit = Number(c.push.at_mac_idle) || 0;
+    const srcs = [process.platform === 'darwin' || process.env.GHOSTFLEET_AT_MAC_FILE ? 'input on the Mac (screen unlocked)' : '',
+                  "a keystroke in a fleet's tmux", peers().peers.length ? 'a paired host saying either' : ''].filter(Boolean);
+    console.log(`keyboard   ${!(limit > 0) ? 'off (push.at_mac_idle is 0)' : `held while there was ${srcs.join(', or ')} within ${limit}s; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
+    if (limit > 0) {
+      const kb = keyboardStep(await presenceReadings(), limit);
+      console.log(`now        ${kb.why ? (kb.here ? `at ${kb.place}` : 'away') + kb.why : 'no reading — nothing would be held'}`);
+    }
     console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);
     console.log(`subscribed ${subs.length ? subs.map(x => `${x.client} ${new URL(x.endpoint).host}`).join(', ') : '(nobody — a home-screen PWA subscribes from its settings sheet)'}`);
     if (!argv.includes('--test')) return;

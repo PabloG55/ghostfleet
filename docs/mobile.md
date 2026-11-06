@@ -456,7 +456,9 @@ server to server, signed with a credential the two exchanged once, at pairing.
   left out. With one machine, nothing on any screen changes.
 - **What crosses:** the projects list, grids, a conversation (read and send), the pane, the
   queue, usage, and wake, park and resume. Search covers both machines, because it searches
-  the merged list.
+  the merged list. One read exists for the hosts themselves rather than for the phone:
+  `/api/presence`, two fields saying how long since someone typed there, which each host's
+  push hold asks the other ([§9](#9-push)).
 - **Photos cross where a send does.** The home host forwards the photo, signed, to the
   machine the session runs on. That machine stores it and runs every check a local photo
   gets. It answers with *its own* path, and the send that follows goes to the same machine,
@@ -1197,9 +1199,36 @@ LAN-only and does not help from a café.
 > is dropped. A newer event for the same session replaces the held one. Every decision is one
 > line in `serve.log`: `push: held 1 — at the Mac (idle 14s)`, `push: released 2 held — left
 > the Mac (screen locked)`, `push: dropped 1 held as seen`, `push: expired 1 held after 600s
-> at the Mac`. `push.at_mac_idle: 0` turns it off; on Linux and WSL it is off (there is no
-> reading, and no reading never counts as "at the Mac" — an unreadable sensor fails toward a
-> push, never toward silence). `fleet-serve push` prints which.
+> at the Mac`. `push.at_mac_idle: 0` turns it off. A reading that cannot be taken never counts
+> as "at the Mac" — an unreadable sensor fails toward a push, never toward silence.
+>
+> **Not while he is at ANY keyboard — a VM's too.** A Mac's HID is one keyboard, and a Linux
+> host (a VM typed into over SSH) has none, so that reading alone let a VM's phone buzz about
+> the fleet he was typing into. Two more readings count, and the push is held when **any** of
+> them says he is there:
+>
+> - **tmux**, on every platform: the newest `client_activity` of a client attached to any of
+>   this server's fleet sockets (and the stack's). tmux moves it on a keystroke and on attach —
+>   not on pane output, a resize or a command client — so a build printing to a pane nobody is
+>   at reads as nobody there. No attached client is no reading. The phone's own web terminal is
+>   a tmux client too and is left out, by its pid.
+> - **the paired host** ([several machines, one app](#several-machines-one-app-fleet-serve-pair)):
+>   each host asks every peer `GET /api/presence`, which answers exactly `{"idle": <seconds>,
+>   "locked": <bool>}` from that host's OWN HID and tmux readings — nothing else, and never its
+>   own peers' answers, so two hosts cannot answer each other in a circle. It is a pairing read
+>   on purpose (`PAIR_READS`), signed like every other one, asked with a 1.5s timeout and cached
+>   for five seconds. A peer that does not answer is a reading that could not be taken: it
+>   holds nothing.
+>
+> The threshold and the hold window are the asking host's own, under the same keys as before —
+> `push.at_mac_idle` and `push.at_mac_hold` mean "at this keyboard" on a host with no Mac in it
+> too, so a `serve.json` that already sets them keeps working unchanged. An owner who types
+> into a VM's fleet from a Mac and wants the phone to wait until he has been away for a quarter
+> of an hour sets `"at_mac_idle": 900` on both. The log names whichever reading held it:
+> `push: held 1 — at the keyboard (tmux, idle 12s)`, `push: held 1 — at the keyboard (peer vm,
+> idle 40s)`, and a release lists every reading it saw — `left the keyboard (tmux, idle 950s ·
+> peer vm, idle 1210s)`. The Mac's own HID keeps the words it always had (`at the Mac (idle
+> 14s)`). `fleet-serve push` prints which readings this host takes and what each says now.
 >
 > Native Claude Code push (below) is still worth having and is not replaced by this: it
 > fires on the permission prompts inside ONE session, and this says which of thirty
