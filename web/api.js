@@ -436,6 +436,121 @@ export async function getWaiting() {
   return { ...j, items };
 }
 
+// ── reviews: the runs fleet-shots recorded ──────────────────────────────────
+// fleet-serve /api/shots (lib/shots.mjs). EXPERIMENTAL, behind the `shots` switch, and off
+// is a 404 — which here is null, "no Reviews entry anywhere", not a broken Projects screen.
+// The same rule as the Jarvis band and the queue.
+export async function getShots() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/shots'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  // THE FIXTURE LIST IS DERIVED from the run files, as fleet-serve derives it from the
+  // manifests: one group per profile/project/branch, its newest run first. Stored as a list
+  // of ids so a verdict given in fixture mode moves the card it belongs to, and so the card
+  // and the run it opens cannot disagree about its state.
+  let r;
+  try { r = await fetch('./fixtures/shots.json', { cache: 'no-store' }); }
+  catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  if (r.status === 404) return null;
+  if (!r.ok) throw new OfflineError('fixture shots.json is not available');
+  const j = await r.json();
+  const runs = [];
+  for (const id of j.runs || []) { try { runs.push((await shotsFixtureRun(id)).run); } catch {} }
+  const by = new Map();
+  for (const run of runs) {
+    const key = `${run.profile}\x1f${run.project}\x1f${run.branch}`;
+    if (!by.has(key)) by.set(key, { key, profile: run.profile, project: run.project, branch: run.branch, runs: [] });
+    by.get(key).runs.push({ id: run.id, profile: run.profile, at: run.at, commit: run.provenance.commit, dirty: run.provenance.dirty,
+      kind: run.kind, steps: run.steps.length, flagged: run.steps.filter(s => s.notes && s.notes.length).length,
+      state: { label: run.state.label, cls: run.state.cls, text: run.state.text } });
+  }
+  const groups = [...by.values()].map(g => {
+    g.runs.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+    const [latest, ...earlier] = g.runs;
+    return { key: g.key, profile: g.profile, project: g.project, branch: g.branch, latest, earlier, waiting: latest.state.cls !== 'ok' };
+  }).sort((a, b) => Date.parse(b.latest.at) - Date.parse(a.latest.at));
+  const profiles = [...new Set(groups.map(g => g.profile))];
+  return { ok: true, profiles, multi: profiles.length > 1, groups, waiting: groups.filter(g => g.waiting).length };
+}
+// The fixture stores AGES (`at_ago`) for the reason waiting.json does: "40 minutes ago"
+// stays 40 minutes however long after the file was written the demo runs.
+async function shotsFixtureRun(id) {
+  const j = await fixture(`shots-run-${id}.json`);
+  const at = new Date(Date.now() - (Number(j.run.at_ago) || 0) * 1000).toISOString();
+  const { at_ago, ...run } = j.run;
+  const verdict = overlay.shots.has(`${run.profile}/${id}`) ? overlay.shots.get(`${run.profile}/${id}`) : (run.verdict || {});
+  return { ok: true, run: { ...run, at, provenance: { ...run.provenance, at }, verdict, state: shotsState(run, verdict) }, media: { ticket: '', exp: 0 } };
+}
+// One run: its steps, provenance and verdict, and a TICKET for its media — a <video> cannot
+// send the bearer the reads carry (lib/shots.mjs, "media tickets"). The URLs are built here,
+// once, so the screen never needs to know which backend answered: `videoSrc` and each
+// step's `src` are simply where the picture is.
+export async function getShotsRun(profile, id) {
+  const server = (await ready()).mode === 'server';
+  const j = server ? await get(`/api/shots/run?profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}`)
+                   : await shotsFixtureRun(id);
+  const k = (j.media && j.media.ticket) || '';
+  const src = (file) => !file ? null : server
+    ? `${baseUrl()}/api/shots/media?profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}&file=${encodeURIComponent(file)}&k=${encodeURIComponent(k)}`
+    : `./fixtures/shots/${encodeURIComponent(file)}`;
+  const run = j.run;
+  return { ...j, run: { ...run, videoSrc: src(run.video), steps: run.steps.map(s => ({ ...s, src: src(s.file) })) } };
+}
+// A verdict. NOT a verb: it runs nothing and goes through no tool, so it has its own route
+// and its own audit row on the Mac (verb `shots_verdict`). The body is the whole verdict
+// for that run, the way verdict.json holds it, and the answer carries the state it now
+// gives — which is what `fleet-shots --check` will say.
+export async function postShotsVerdict(body) {
+  if ((await ready()).mode === 'server') {
+    if (!haveToken()) throw new AuthError('no live session token');
+    let r;
+    try {
+      r = await fetch(baseUrl() + '/api/shots/verdict', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+      });
+    } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+    if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the verdict'); }
+    slid(r);
+    const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+    record('shots_verdict', { profile: body.profile, run: body.run }, j.ok ? `ok: ${j.state && j.state.label}` : `refused: ${j.text || r.status}`);
+    if (!j.ok) throw Object.assign(new Error(j.text || 'the verdict was not saved'), { body: j });
+    return j;
+  }
+  const { run } = await shotsFixtureRun(body.run);
+  const v = run.kind === 'recorded'
+    ? { flow: body.flow && body.flow.v ? { v: body.flow.v, note: String(body.flow.note || '') } : null,
+        chapters: Object.fromEntries(Object.entries(body.chapters || {}).filter(([, t]) => String(t || '').trim())) }
+    : Object.fromEntries(Object.entries(body.state || {}).filter(([, x]) => x && x.v));
+  overlay.shots.set(`${run.profile}/${body.run}`, v);
+  const state = shotsState(run, v);
+  record('shots_verdict', { profile: body.profile, run: body.run }, `ok (fixture — recorded, not written): ${state.label}`);
+  return { ok: true, verdict: v, state };
+}
+// lib/shots.mjs runState, for the FIXTURE backend only: on a server the state always comes
+// from the Mac. A second spelling of one rule is a rule that drifts, so
+// test/helpers/reviews-check.mjs gives both the same verdicts and compares what they say.
+export function shotsState(m, v) {
+  v = v || {};
+  const note = (n) => String(((v.chapters || {})[String(n)]) || '').trim();
+  if (m.video) {
+    const fv = (v.flow || {}).v || '';
+    const flagged = m.steps.filter(st => st.notes && st.notes.length && !note(st.n)).length;
+    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : flagged ? `${flagged} flagged` : 'approved';
+    return { total: 1, marked: fv ? 1 : 0, problem: fv === 'reject' ? 1 : 0, flagged, label,
+             cls: fv === 'reject' ? 'bad' : (!fv || flagged) ? 'warn' : 'ok',
+             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed' : flagged ? `${flagged} need a reason` : 'approved' };
+  }
+  const at = (n) => v[String(n)] || {};
+  const total = m.steps.length;
+  const marked = m.steps.filter(st => at(st.n).v).length;
+  const problem = m.steps.filter(st => at(st.n).v === 'problem').length;
+  const flagged = m.steps.filter(st => st.notes && st.notes.length && !(['ok', 'skip'].includes(at(st.n).v) && (at(st.n).note || '').trim())).length;
+  const label = problem ? `${problem} problem` : flagged ? `${flagged} flagged` : marked < total ? `${total - marked} unreviewed` : 'approved';
+  const text = problem ? `${problem} needs changes` : marked < total ? `${total - marked} unreviewed` : flagged ? `${flagged} need a reason` : 'approved';
+  return { total, marked, problem, flagged, label, text, cls: problem ? 'bad' : (marked < total || flagged) ? 'warn' : 'ok' };
+}
+
 // ── the Claude accounts each profile runs on ───────────────────────────────
 // fleet-serve /api/usage: `fleet-accounts list`'s data for the profiles the daemon lists. A
 // daemon older than the line answers 404, which is "no line", like the two above. The fixture
@@ -895,7 +1010,7 @@ export async function verb(tool, args, assertion = null) {
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
 const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
-                  unpaired: false, relabel: new Map() };
+                  shots: new Map(), unpaired: false, relabel: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start

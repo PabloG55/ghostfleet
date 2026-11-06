@@ -30,7 +30,7 @@ import * as screensUI from './screens.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
-  screen: 'projects',   // projects | queue | grid | session
+  screen: 'projects',   // projects | queue | reviews | review | grid | session
   project: null,        // the fleet being looked at
   session: null,        // the card opened on the session screen
   projects: null,       // last /api/projects payload
@@ -71,6 +71,14 @@ const S = {
   usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
   wantWaiting: false,   // a "waiting on you" notification was tapped; open the queue once unlocked
   qsel: 0,              // the queue's cursor, for the desk's keys (index into S.waiting)
+  shots: null,          // last /api/shots (fleet-shots' runs, by branch); null = not told, or the switch is off
+  wantReviews: false,   // opened on #reviews (where `fleet-shots serve` now points); open the list once unlocked
+  rvOpen: [],           // the branches whose earlier runs are unfolded (group keys)
+  rvsel: 0,             // the list's cursor, for the desk's keys (index into reviewStops())
+  rv: null,             // the run on the review screen: { profile, run }
+  rvRun: null,          // last /api/shots/run for it — the verdict being edited lives in .run.verdict
+  rvErr: '',            // why that run could not be read
+  rvSave: '',           // '' | 'saving' | 'saved' | 'failed' — the verdict's way to the Mac
   entry: '',            // 'projects' when this session is a master entered the desk's way (⏎ on a
                         // project, ` on its grid, Ctrl-f n m) — one level under Projects, not two
   srch: null,           // the grid's `/` search: { q, typing } — see "the keyboard" at the bottom
@@ -119,6 +127,7 @@ function save() {
       // while that screen was a card and a row of buttons; it is the whole viewport now.
       session: S.screen === 'stack' ? null : S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
       projects: S.projects, hosts: S.hosts, grid: S.grid, sub: S.sub,
+      rv: S.screen === 'review' ? S.rv : null,
     }));
   } catch {}
 }
@@ -154,6 +163,10 @@ function restore() {
   if (S.screen === 'stackpick') S.pick = { cur: '', q: null, typing: false, msg: '' };
   if (S.screen === 'stack' || S.screen === 'stackpick') { S.project = null; S.session = null; }
   if (S.screen === 'grid' && !S.project) S.screen = 'projects';
+  // A run is reopened by its address and read again; a list is read again. Neither payload
+  // is kept: a verdict changes from another device, and a stale one would be shown as now.
+  S.rv = S.screen === 'review' && j.rv && j.rv.profile && j.rv.run ? { profile: String(j.rv.profile), run: String(j.rv.run) } : null;
+  if (S.screen === 'review' && !S.rv) S.screen = 'reviews';
   S.stale = j.at || 0;
   // ...and the trail the back gesture would have had if you had walked here. A cold open is
   // at the root of its own history, so without it the first swipe out of a restored session
@@ -161,7 +174,7 @@ function restore() {
   // lock screen is up, and an entry pushed under the lock screen is previewed AS the lock
   // screen by a back swipe (see loggedIn). A login does not want it at all — it lands on
   // Projects.
-  restoredDepth = S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : 0;
+  restoredDepth = S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'reviews' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : S.screen === 'review' ? 2 : 0;
 }
 let restoredDepth = 0;
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
@@ -222,6 +235,8 @@ async function refreshOnce() {
   if (S.wantJarvis && !S.locked && !navSkip) { S.wantJarvis = false; openJarvis(); return; }
   // A tapped "waiting on you" opens the queue, wherever the app was left.
   if (S.wantWaiting && !S.locked && !navSkip) { S.wantWaiting = false; if (S.screen !== 'queue') { openQueue(); return; } }
+  // #reviews — the address `fleet-shots serve` prints now that it no longer serves.
+  if (S.wantReviews && !S.locked && !navSkip) { S.wantReviews = false; if (S.screen !== 'reviews' && S.screen !== 'review') { openReviews(); return; } }
   try {
     // The queue is read by the same request as Projects, and in two panes Projects is
     // beside it, so the one read serves both.
@@ -252,6 +267,8 @@ async function refreshOnce() {
         S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
         api.getWaiting().then((j) => { S.waiting = j && Array.isArray(j.items) ? j.items : null; },
                               (e) => { if (e instanceof api.AuthError) throw e; }),
+        // THE REVIEWS ROW: null is the switch off (or a daemon older than Reviews), and no row.
+        api.getShots().then((j) => { S.shots = j; }, (e) => { if (e instanceof api.AuthError) throw e; }),
         // THE ACCOUNTS LINE, on its own slower clock (readUsage), and allowed to fail like the rest.
         readUsage(),
         // THE SESSIONS A SEARCH FINDS, while there is a query: the picker's grid reads (every
@@ -259,6 +276,17 @@ async function refreshOnce() {
         // the search is up is found or dropped without retyping it.
         S.screen === 'projects' && S.srch && S.srch.q ? readGrids(foundProjects().map(p => p.name)) : null,
       ]);
+    }
+    else if (S.screen === 'reviews' || S.screen === 'review') {
+      const sh = await api.getShots();
+      // SWITCHED OFF WHILE IT WAS OPEN: there is no Reviews screen to stay on.
+      if (sh === null) { S.shots = null; S.rv = null; S.rvRun = null; toast('Reviews are switched off on the Mac'); toProjects(); return; }
+      S.shots = sh;
+      // Two panes: Projects is the list beside the reviews, and it is read by its own request.
+      if (S.screen === 'reviews' && wideNow()) { const j = await api.getProjects(); S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+      // A run is read when it is opened, NOT on every poll: the verdict on screen is being
+      // edited, and a poll that replaced it would take back what was just typed.
+      if (S.screen === 'review' && S.rv && !S.rvRun && !S.rvErr) await readReview();
     }
     else if (S.screen === 'grid') {
       termAsk();
@@ -433,10 +461,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'term', 'stack', 'stackpick']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'reviews', 'review', 'term', 'stack', 'stackpick']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, stackpick: 2, stack: 2, session: 2, term: 3 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, reviews: 1, grid: 1, review: 2, stackpick: 2, stack: 2, session: 2, term: 3 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -479,12 +507,16 @@ function slideNav() {
     if (typeof document.startViewTransition !== 'function' || matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
     navFrom = S.screen;                   // the render inside paints with no wipe of its own
     root.dataset.nav = d > 0 ? 'fwd' : 'back';
-    document.startViewTransition(() => render()).finished.finally(() => { try { delete root.dataset.nav; } catch {} });
+    const vt = document.startViewTransition(() => render());
+    // A transition cut short by the next one (back pressed mid-slide) rejects `ready` with
+    // an AbortError nobody is waiting on — a console error on every quick double step.
+    vt.ready.catch(() => {});
+    vt.finished.finally(() => { try { delete root.dataset.nav; } catch {} });
     return true;
   } catch { return false; }
 }
 // THE SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
-const PREACT_SCREENS = new Set(['projects', 'grid', 'queue']);
+const PREACT_SCREENS = new Set(['projects', 'grid', 'queue', 'reviews', 'review']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
@@ -520,21 +552,28 @@ function renderDuo(app, side) {
   navFrom = S.screen;
   // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
   const queue = S.screen === 'queue';
+  // Reviews too, and a run opens beside the LIST of runs — the way a session opens beside
+  // its grid — so the next branch is one click away rather than a back and a click.
+  const reviews = S.screen === 'reviews', review = S.screen === 'review';
   // The stack spans projects, so the list beside it is Projects too.
   const stacky = S.screen === 'stack' || S.screen === 'stackpick';
-  const left = (S.screen === 'projects' || queue || stacky || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
+  const left = review ? 'reviews'
+    : (S.screen === 'projects' || queue || reviews || stacky || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
   // The terminal is a right-pane screen like a session: its project's grid stays beside it.
   const inSession = S.screen === 'session' || S.screen === 'term' || stacky;
-  const props = left === 'grid' ? gridProps() : projectsProps();
+  const props = left === 'grid' ? gridProps() : left === 'reviews' ? reviewsProps() : projectsProps();
   // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
   // session's; drawn in both, a `y` would read as answering two questions.
-  if (inSession || queue) { props.confirm = null; props.toast = null; }
+  if (inSession || queue || reviews || review) { props.confirm = null; props.toast = null; }
+  // The list beside a run is not a screen of its own: it has nothing to go back to.
+  if (review) props.onBack = null;
   screensUI.mount(side, left, props);
   sideUp = true;
   if (inSession) { paintElScreen(app); return; }
   // THE QUEUE OPENS ON THE RIGHT, where a conversation would: it is the list of things to
   // answer, and Projects stays where it was beside it.
   if (queue) { mountPreact(app, 'queue', queueProps()); return; }
+  if (reviews || review) { mountPreact(app, S.screen, reviews ? reviewsProps() : reviewProps()); return; }
   if (preactUp) { screensUI.unmount(app); preactUp = false; }
   // The session's nodes leave with it: keepScreen() must not later take this line for a
   // chat it can patch, so its memory goes too.
@@ -591,7 +630,8 @@ function render() {
   // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
   // card list being the screen's scrolling region and let the whole page scroll.
   if (!S.locked && PREACT_SCREENS.has(S.screen)) {
-    mountPreact(app, S.screen, S.screen === 'grid' ? gridProps() : S.screen === 'queue' ? queueProps() : projectsProps());
+    mountPreact(app, S.screen, S.screen === 'grid' ? gridProps() : S.screen === 'queue' ? queueProps()
+      : S.screen === 'reviews' ? reviewsProps() : S.screen === 'review' ? reviewProps() : projectsProps());
     return;
   }
   // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
@@ -1043,6 +1083,7 @@ function projectsProps() {
     cards: S.projects == null ? skeletonCards(4) : [
       ...usageCards(),
       ...queueRow(),
+      ...reviewsRow(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
         dim(i, cardEl(G.projectModel(p, i, i === S.sel), {
@@ -1265,6 +1306,269 @@ function queueProps() {
     listRef: (list) => { if (list) watchScroll('queue', list); },
     toast: S.toast,
   };
+}
+// ── reviews: what fleet-shots recorded, and the verdict on it ─────────────────
+// THE REVIEW PAGE MOVED HERE FROM `fleet-shots serve`, which listened on loopback and so
+// could never be opened from the phone — the device a worker's "please review" reaches. It
+// is EXPERIMENTAL, behind the `shots` switch: off is a 404 (api.getShots → null), and then
+// there is no row on Projects, no screen and no key that reaches one.
+//   ONE CARD PER BRANCH, its newest run's state on the rail. The old index listed every run
+// of every branch flat, so six runs of one branch sat above the one run of another that was
+// actually waiting. The runs before the newest fold under the card as "N earlier".
+//   THE CARD IS THE CARD (cardEl), the same as the queue's: the hue is the fixed palette's —
+// green for approved, yellow for anything still owed (unreviewed, a flag with no reason),
+// red for rejected or a step marked a problem.
+const RV_HUE = { ok: 'green', warn: 'yellow', bad: 'red' };
+// A run's age in the unit that reads at a glance: G.humanAge's `72h0m` is right for a
+// session that has been idle a while and wrong for a recording from three days ago.
+export function rvAge(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m` : s < 48 * 3600 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
+}
+const rvAgeOf = (iso, nowS = Math.floor(Date.now() / 1000)) => rvAge(nowS - Math.floor((Date.parse(iso) || 0) / 1000));
+const rvWhere = (g) => `${g.project}${S.shots && S.shots.multi ? ` · ${g.profile}` : ''}`;
+const rvCommit = (r) => r.commit ? `${r.commit}${r.dirty ? '*' : ''}` : 'no commit';
+export function reviewModel(g, sel = false) {
+  const r = g.latest;
+  return {
+    kind: 'review', selected: sel, num: null, color: RV_HUE[r.state.cls] || 'grey',
+    title: g.branch || '(no branch)', statusLabel: r.state.label, when: rvAgeOf(r.at),
+    where: rvWhere(g), path: '',
+    msg: `${r.kind === 'recorded' ? 'video' : 'stills'} · ${r.steps} step${r.steps === 1 ? '' : 's'} · ${rvCommit(r)}`
+       + (r.flagged ? ` · ${r.flagged} flagged by the run` : ''),
+    one: true, need: '', placeholder: '', agent: '', pr: '', lead: false, exited: false,
+  };
+}
+// The line on Projects. n is the branches the page lists; the second word, while there is
+// one, is how many of them wait on a verdict — and that is what turns the row yellow.
+function reviewsRow() {
+  const sh = S.shots;
+  if (!sh) return [];
+  const n = sh.groups.length, w = sh.waiting || 0;
+  const row = el('button', { class: 'rv-row' + (w ? ' due' : ''), type: 'button',
+    'aria-label': `reviews: ${n} branch${n === 1 ? '' : 'es'}${w ? `, ${w} to review` : ''}`, onclick: openReviews }, [
+    el('span', { class: 'qt', text: `reviews · ${n}` }),
+    w ? el('span', { class: 'qn', text: `${w} to review` }) : null,
+    el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+  ].filter(Boolean));
+  try {
+    const a = document.activeElement;
+    if (a && a.classList && a.classList.contains('rv-row')) queueMicrotask(() => { try { if (row.isConnected) row.focus(); } catch {} });
+  } catch {}
+  return [row];
+}
+function openReviews() {
+  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.screen = 'reviews'; S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0;
+  S.rv = null; S.rvRun = null; S.rvErr = '';
+  setDepth(1);
+  save(); render(); refresh();
+}
+// One run, a level under the list — or, from the list beside it at a desk, in place of the
+// run that was open (the same depth: the right pane changes, the trail does not grow).
+function openReview(profile, run) {
+  const swap = S.screen === 'review';
+  rvFlushNow();
+  S.screen = 'review'; S.rv = { profile, run }; S.rvRun = null; S.rvErr = ''; S.rvSave = '';
+  if (!swap) pushNav();
+  save(); render();
+  readReview();
+}
+async function readReview() {
+  const want = S.rv;
+  if (!want) return;
+  try {
+    const j = await api.getShotsRun(want.profile, want.run);
+    if (S.rv !== want) return;                      // another run was opened meanwhile
+    S.rvRun = j; S.rvErr = '';
+  } catch (e) {
+    if (e instanceof api.AuthError) return lock();
+    if (S.rv !== want) return;
+    S.rvErr = e && e.status === 404 ? 'that run is not on this machine any more' : `could not read the run — ${e && e.message || e}`;
+  }
+  render();
+}
+// The cards, and the earlier runs under each. Flattened into one list of stops for the
+// desk's j/k: a branch card, then (while it is open) each of its earlier runs.
+function reviewStops() {
+  const out = [];
+  for (const g of (S.shots && S.shots.groups) || []) {
+    out.push({ g, r: g.latest });
+    if (S.rvOpen.includes(g.key)) for (const r of g.earlier) out.push({ g, r, old: true });
+  }
+  return out;
+}
+function rvToggle(key) {
+  S.rvOpen = S.rvOpen.includes(key) ? S.rvOpen.filter(k => k !== key) : [...S.rvOpen, key];
+  render();
+}
+function reviewsProps() {
+  const sh = S.shots;
+  const stops = reviewStops();
+  S.rvsel = Math.max(0, Math.min(S.rvsel, stops.length - 1));
+  // ONE highlighted row: the open run when there is one (the list beside it at a desk), else
+  // the keys' cursor — two lit cards would be two answers to "which one is this".
+  const selOf = (r) => !(S.screen === 'review' && S.rv) && stops[S.rvsel] && stops[S.rvsel].r === r;
+  const cur = S.screen === 'review' && S.rv ? S.rv : null;
+  const isCur = (g, r) => !!cur && cur.profile === g.profile && cur.run === r.id;
+  const groups = sh ? sh.groups : [];
+  return {
+    scope: `— reviews · ${groups.length}`,
+    mode: modeSpec(),
+    onBack: () => back(),
+    stale: S.stale,
+    confirm: null,
+    // A GROUP IS A CARD AND WHAT FOLDS UNDER IT, wrapped so the pair is ONE grid item: on a
+    // tablet the list is several tracks wide, and an "earlier" row that was its own item
+    // would land in the next column, under somebody else's branch.
+    cards: sh == null ? skeletonCards(2)
+      : groups.length ? groups.map((g) => {
+          const open = S.rvOpen.includes(g.key);
+          const kids = [cardEl({ ...reviewModel(g, selOf(g.latest) || isCur(g, g.latest)) }, { tap: () => openReview(g.profile, g.latest.id) }, -1)];
+          if (g.earlier.length) {
+            kids.push(el('button', { class: 'rv-more', type: 'button', 'aria-expanded': open ? 'true' : 'false',
+              onclick: () => rvToggle(g.key) }, [
+              el('span', { text: open ? `hide ${g.earlier.length} earlier` : `${g.earlier.length} earlier run${g.earlier.length === 1 ? '' : 's'}` }),
+            ]));
+            if (open) for (const r of g.earlier) {
+              kids.push(el('button', { class: 'rv-old' + (selOf(r) || isCur(g, r) ? ' sel' : ''), type: 'button',
+                style: `--c:${G.COLORS[RV_HUE[r.state.cls]] || G.COLORS.grey}`,
+                'aria-label': `${g.branch} run ${r.id}: ${r.state.label}`, onclick: () => openReview(g.profile, r.id) }, [
+                el('span', { class: 'rv-ol', text: r.state.label }),
+                el('span', { class: 'rv-ow', text: `${rvAgeOf(r.at)} · ${rvCommit(r)}` }),
+                el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+              ]));
+            }
+          }
+          return el('div', { class: 'rv-group' }, kids);
+        })
+      : [el('div', { class: 'sect', text: 'no runs recorded yet — `fleet-shots <flow>` records one' })],
+    listRef: (list) => { if (list) watchScroll('reviews', list); },
+    toast: S.toast,
+  };
+}
+// EVERY WORD ON THE RUN SCREEN, here and not in the component (screens.jsx, "the strings").
+const REVIEW_WORDS = {
+  loading: 'reading the run…', noBranch: '(no branch)', noPage: 'no page — the step threw',
+  chapters: 'chapters', provenance: 'recorded from', dirty: '(uncommitted changes)',
+  steps: (n) => `${n} step${n === 1 ? '' : 's'}`,
+  calls: (n) => `${n} call${n === 1 ? '' : 's'}`, failed: (n) => `${n} failed`, noneFailed: 'none failed',
+  noCalls: 'no calls of its own',
+  assets: (n, bad) => `${n} asset${n === 1 ? '' : 's'} · ${bad ? `${bad} failed` : 'all fine'}`,
+  expect: (x) => `${x.found ? 'found' : 'did not find'} “${x.text}”`,
+  playFrom: (name, at) => `play “${name}” from ${at}`,
+  marks: [{ v: 'ok', label: 'ok' }, { v: 'problem', label: 'problem' }, { v: 'skip', label: 'skip' }],
+  markLabel: (n) => `verdict on step ${n}`,
+  stepNoteLabel: (n) => `note on step ${n}`, chapterNoteLabel: (n) => `note on chapter ${n}`,
+  flowNoteLabel: 'note on the whole flow',
+  reasonPlaceholder: 'why is this acceptable? a note is what clears the flag',
+  chapterPlaceholder: 'a note on this chapter', notePlaceholder: 'note',
+  flowPlaceholder: 'a note on the whole flow — what to fix, or why it is fine',
+  reject: 'reject', approve: 'approve', approved: '✓ approved',
+  restOk: (n) => `mark the other ${n} ok`,
+  retry: 'not saved — retry',
+  save: { saving: 'saving…', saved: 'saved', failed: '' },
+  keys: { approve: 'a', reject: 'r' },
+  prov: { commit: 'commit', base: 'base', viewport: 'viewport', at: 'recorded', session: 'session', run: 'run' },
+  when: (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso; } },
+};
+// THE GATE LINE IS `fleet-shots --check`'s ANSWER, said as what to do next. A worker that
+// asked for a review waits on exactly this, so "2 need a reason" names the chapters.
+function rvGate(run) {
+  const st = run.state || {};
+  const v = run.verdict || {};
+  const pass = 'approved — fleet-shots --check passes this run';
+  if (run.kind === 'recorded') {
+    const fv = (v.flow || {}).v || '';
+    if (fv === 'reject') return { cls: 'bad', text: 'rejected — --check refuses this run' };
+    if (!fv) return { cls: 'warn', text: 'not reviewed — watch it, then approve or reject' };
+    const owed = run.steps.filter(s => s.notes && s.notes.length && !String((v.chapters || {})[String(s.n)] || '').trim()).map(s => s.n);
+    if (owed.length) return { cls: 'warn', text: `approved, but --check still refuses: chapter${owed.length === 1 ? '' : 's'} ${owed.join(', ')} need${owed.length === 1 ? 's' : ''} a reason` };
+    return { cls: 'ok', text: pass };
+  }
+  if (st.problem) return { cls: 'bad', text: `${st.problem} step${st.problem === 1 ? '' : 's'} need${st.problem === 1 ? 's' : ''} changes — --check refuses` };
+  if (st.marked < st.total) return { cls: 'warn', text: `${st.total - st.marked} unreviewed — mark each step` };
+  if (st.flagged) return { cls: 'warn', text: `${st.flagged} flagged step${st.flagged === 1 ? '' : 's'} need${st.flagged === 1 ? 's' : ''} a reason` };
+  return { cls: 'ok', text: pass };
+}
+function reviewProps() {
+  const j = S.rvRun, run = j && j.run;
+  const g = run && { project: run.project, profile: run.profile };
+  return {
+    scope: '— review',
+    mode: modeSpec(),
+    stale: S.stale,
+    onBack: () => back(), toast: S.toast,
+    t: REVIEW_WORDS, run: run || null, err: S.rvErr,
+    where: run ? `${rvWhere(g)} · ${rvAgeOf(run.at)} · ${run.kind === 'recorded' ? 'video' : 'stills'}` : '',
+    verdict: run ? run.verdict || {} : {},
+    gate: run ? rvGate(run) : { cls: 'warn', text: '' },
+    save: S.rvSave,
+    onFlow: (v) => rvEdit((x) => ({ ...x, flow: v ? { v, note: (x.flow || {}).note || '' } : { v: '', note: (x.flow || {}).note || '' } }), 0),
+    onFlowNote: (t) => rvEdit((x) => ({ ...x, flow: { v: (x.flow || {}).v || '', note: t } }), RV_TYPE_MS),
+    onChapterNote: (n, t) => rvEdit((x) => ({ ...x, chapters: { ...(x.chapters || {}), [n]: t } }), RV_TYPE_MS),
+    onStep: (n, v) => rvEdit((x) => ({ ...x, [n]: { ...(x[n] || {}), v } }), 0),
+    onStepNote: (n, t) => rvEdit((x) => ({ ...x, [n]: { v: (x[n] || {}).v || '', note: t } }), RV_TYPE_MS),
+    onRestOk: () => rvEdit((x) => {
+      const y = { ...x };
+      for (const s of run.steps) if (!(y[s.n] || {}).v) y[s.n] = { v: 'ok', note: (y[s.n] || {}).note || '' };
+      return y;
+    }, 0),
+    onRetry: () => rvFlushNow(),
+    onPlayer: (h) => { rvPlayer = h; },
+  };
+}
+// ── saving a verdict ────────────────────────────────────────────────────────
+// A TAP SAVES AT ONCE AND TYPING SAVES WHEN IT PAUSES. There is no save button: the old
+// page's "copy this text and paste it into a terminal" was the step that never happened
+// from a phone, and a note that waits for a button is a note lost to a back swipe. The
+// state on screen moves the moment the verdict does (api.shotsState, the same rule the Mac
+// runs), and the Mac's answer replaces it when it lands.
+//   ONE WRITE IN FLIGHT. A second edit while one is saving waits and sends the newer whole
+// verdict after it, so the file on the Mac is always the last thing on the screen.
+const RV_TYPE_MS = 700;
+let rvTimer = 0, rvBusy = false, rvAgain = false, rvPlayer = null;
+function rvEdit(fn, delay) {
+  const j = S.rvRun;
+  if (!j || !j.run) return;
+  const v = fn({ ...(j.run.verdict || {}) });
+  j.run.verdict = v;
+  j.run.state = api.shotsState(j.run, v);
+  S.rvSave = 'saving';
+  clearTimeout(rvTimer);
+  if (delay) rvTimer = setTimeout(rvFlush, delay); else rvFlush();
+  render();
+}
+function rvFlushNow() { if (rvTimer) { clearTimeout(rvTimer); rvTimer = 0; if (S.rvSave === 'saving') rvFlush(); } else if (S.rvSave === 'failed') rvFlush(); }
+async function rvFlush() {
+  rvTimer = 0;
+  const j = S.rvRun, want = S.rv;
+  if (!j || !want) return;
+  if (rvBusy) { rvAgain = true; return; }
+  rvBusy = true;
+  const run = j.run, v = run.verdict || {};
+  // Only what the Mac keeps: a flow with no choice is no flow (its note waits on screen for
+  // one), and a step with no mark is not a verdict. A run cleared of every mark sends an
+  // empty state, which is a real answer — "I take that back".
+  const body = run.kind === 'recorded'
+    ? { profile: want.profile, run: want.run, flow: (v.flow && v.flow.v) ? v.flow : { v: '' }, chapters: v.chapters || {} }
+    : { profile: want.profile, run: want.run, state: Object.fromEntries(Object.entries(v).filter(([, x]) => x && x.v)) };
+  try {
+    const r = await api.postShotsVerdict(body);
+    if (S.rvRun === j && r.state) j.run.state = r.state;
+    if (S.rvRun === j) S.rvSave = rvAgain || rvTimer ? 'saving' : 'saved';
+    // the card on the list beside it, and the row on Projects, follow the verdict
+    api.getShots().then((sh) => { S.shots = sh; render(); }, () => {});
+  } catch (e) {
+    rvBusy = false; rvAgain = false;
+    if (e instanceof api.AuthError) return lock();
+    if (S.rvRun === j) { S.rvSave = 'failed'; toast(`the verdict was not saved — ${e && e.message || e}`, 'bad'); }
+    render();
+    return;
+  }
+  rvBusy = false;
+  if (rvAgain) { rvAgain = false; return rvFlush(); }
+  render();
 }
 // A HELD WAKE IS ANSWERED AT THE BOX, NOT BY A MESSAGE: a message to that lead would queue
 // behind the very box that is holding it. So the tap opens the lead, one level under
@@ -6335,6 +6639,10 @@ function popTo() {
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; S.srch = null; }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; S.srch = null; }
   else if (S.screen === 'queue') S.screen = 'projects';
+  // A run goes back to the list it was opened from, its verdict saved on the way out rather
+  // than left on a timer that would fire after the screen it belongs to has gone.
+  else if (S.screen === 'review') { rvFlushNow(); S.screen = 'reviews'; S.rv = null; S.rvRun = null; S.rvErr = ''; S.rvSave = ''; }
+  else if (S.screen === 'reviews') S.screen = 'projects';
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
@@ -7993,10 +8301,10 @@ function onKey(e) {
     return;
   }
   if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
-  // ⏎ ON THE QUEUE'S ROW IS THE ROW'S: the browser turns it into the button's click. Taken
+  // ⏎ ON THE QUEUE'S ROW (and the Reviews row beside it) IS THE ROW'S: the browser turns it into the button's click. Taken
   // here it would be Projects' ⏎ and open the project under the cursor instead.
   if (S.screen === 'projects' && (e.key === 'Enter' || e.key === ' ') && e.target && e.target.classList
-      && e.target.classList.contains('queue-row')) return;
+      && (e.target.classList.contains('queue-row') || e.target.classList.contains('rv-row'))) return;
   const k = e.key;
   if (S.locked || !k || e.metaKey) return;
   // A modifier on its own is not a key: the chord arrives with the next event.
@@ -8030,6 +8338,8 @@ function onKey(e) {
   else if (S.screen === 'term') used = termKey(e, k, lk, ctrl);
   else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
   else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
+  else if (S.screen === 'reviews') used = reviewsKey(e, k, lk, ctrl);
+  else if (S.screen === 'review') used = reviewKey(e, k, lk, ctrl);
   else used = projectsKey(e, k, lk, ctrl);
   if (used) e.preventDefault();
 }
@@ -8312,6 +8622,51 @@ function queueKey(e, k, lk, ctrl) {
   }
   return true;
 }
+// The reviews list: j/k walk the cards and the unfolded runs, ⏎ opens one, space (or l)
+// folds a branch's earlier runs in and out.
+function reviewsKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  const stops = reviewStops();
+  const move = (d) => { const n = S.rvsel + d; if (n >= 0 && n < stops.length) { S.rvsel = n; render(); } };
+  const at = stops[S.rvsel];
+  switch (k) {
+    case 'ArrowUp': case 'k': move(-1); break;
+    case 'ArrowDown': case 'j': move(1); break;
+    case 'Enter': if (at) openReview(at.g.profile, at.r.id); break;
+    case ' ': case 'l': if (at && at.g.earlier.length) rvToggle(at.g.key); break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
+// A run: space plays, ← → step chapters, a approves, r rejects — the old page's keys, and
+// never while a note is being typed (onKey leaves a focused field alone).
+function reviewKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  const run = S.rvRun && S.rvRun.run;
+  const fv = run && ((run.verdict || {}).flow || {}).v || '';
+  switch (k) {
+    case ' ': if (rvPlayer) rvPlayer.toggle(); break;
+    case 'ArrowLeft': if (rvPlayer) rvPlayer.step(-1); break;
+    case 'ArrowRight': if (rvPlayer) rvPlayer.step(1); break;
+    case 'a': if (run && run.kind === 'recorded') reviewProps().onFlow(fv === 'approve' ? '' : 'approve'); else return false; break;
+    case 'r': if (run && run.kind === 'recorded') reviewProps().onFlow(fv === 'reject' ? '' : 'reject'); else return false; break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
 // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. The digit is an address — `5` opens
 // project 5 the way `Ctrl-f 5` does at the desk — so it counts the unfiltered list.
 // Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
@@ -8470,6 +8825,10 @@ if (location.hash === '#jarvis') {
 }
 if (location.hash === '#waiting') {
   S.wantWaiting = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
+if (location.hash === '#reviews') {
+  S.wantReviews = true;
   try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
 }
 markStandalone();

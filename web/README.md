@@ -268,6 +268,41 @@ desk's; see *On a desk* below for the whole map.
 were held back until the owner decided each was worth its surface; all three are here now —
 see *The terminal* (the editor is its other tab) and *The stack*.
 
+## Reviews
+
+What `fleet-shots` recorded for a branch is reviewed here. It used to be `fleet-shots serve`,
+a page on loopback that the phone could not reach, drawn for a desk, and listing every run
+of every branch flat. That command is retired: it prints where the screen lives (`#reviews`
+on this client's origin) and exits non-zero. `fleet-shots list`, `verdict` and `--check` are
+unchanged, and they read the same `verdict.json` this screen writes.
+
+- **A row on Projects**, `reviews · n`, with how many branches wait on a review. It is drawn
+  only while the `shots` switch is on: off, every `/api/shots*` answers 404 `disabled`, and
+  the client draws no row and no screen, and a `#reviews` link lands on Projects.
+- **One card per branch**, showing its newest run and that run's state; older runs fold away
+  under `N earlier runs`. Runs come from every profile's fleet dir, and a card names its
+  profile only when more than one profile has runs.
+- **A run**: the video with one chapter per step, each as wide as the step was long and the
+  steps the run flagged in the warning hue. A tap on one plays from there. Below it are the
+  steps, each with the URL it ended on and its requests (method, status, URL; assets folded),
+  then the provenance: commit, dirty, base, viewport, time and session. A run of stills has a
+  verdict per step (ok / problem / skip, each with a note) instead of a video.
+- **The verdict is pinned to the bottom**, as the composer is. Its line is `fleet-shots
+  --check`'s own answer for the run ("approved, but --check still refuses: chapter 3 needs a
+  reason"), so what the reviewer sees is what a worker's done-criterion will see.
+- **Saving.** A tap saves at once and typing saves 700ms after the last key. One write is in
+  flight at a time, and an edit made meanwhile goes after it. A failed save says so beside the
+  gate, with a retry. No passkey is asked: the write is audited and serialized, and a note
+  typed a word at a time could not stop for Face ID.
+- **At a desk** the list sits on the left and the run on the right, with only the open run
+  lit. The keys are under *On a desk*.
+
+The video comes through `/api/shots/media` with a ticket minted on the run read, because a
+`<video>` cannot send a bearer. It is served in ranges: a `<video>` cannot seek a file handed
+over whole, and iOS will not play one. The service worker leaves ranged requests and that
+route alone (`Cache.put` of a 206 throws). In fixture mode the run plays from
+`fixtures/shots/`, all of it placeholder.
+
 ## On a desk
 
 The same client in a desktop browser is a different shape and the same screens. Opened
@@ -415,6 +450,10 @@ added here without a row that presses it.
 | `` ` `` | session | back: a worker to its grid, a master to Projects |
 | `j` · `k` · `↓` · `↑` · `⏎` | queue | move the cursor through what the masters hold for you / answer the item under it |
 | `q` · `` ` `` | queue | back to Projects, as the `‹` in its top bar does |
+| `j` · `k` · `⏎` · `l` · `space` | reviews | move through the branches / open the run under the cursor / fold its earlier runs open or shut |
+| `space` · `→` · `←` | a run | play or pause / the next or previous chapter |
+| `a` · `r` | a recorded run | approve / reject the flow (again to take it back) |
+| `q` · `` ` `` | reviews, a run | back: a run to the list, the list to Projects |
 | `⇧→` · `⇧←` | session | the next / previous session — master first, then the cards in grid order, wrapping at both ends (`fleet-cycle`) |
 | `Ctrl-s` | session | the grid |
 | `Ctrl-f` | everywhere | the jump chord, with tmux's own prompt at each step |
@@ -523,6 +562,19 @@ POST /api/jarvis/hear   <audio/wav bytes>   -> the same as /api/voice/hear, for 
 GET  /api/voice                             -> { ok, voice: { ready, why? }, speak }   Jarvis on or off
 POST /api/voice/hear    <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE;
                                             503 { needs: 'voice' } without whisper.cpp
+GET  /api/shots                             -> { ok, profiles, multi, waiting, groups: [{ profile, project, branch,
+                                                 waiting, newest: <run>, earlier: [<run>] }] }   one per branch
+GET  /api/shots/run?profile=&run=           -> { ok, run: { id, profile, project, branch, at, kind: recorded|stills,
+                                                 video, duration, provenance, steps, verdict, state },
+                                                 media: { ticket, exp } }
+GET  /api/shots/media?profile=&run=&file=&k=<ticket>
+                                            the run's video or a still, Range/206. The ticket comes from
+                                            the run read (a <video> cannot send a bearer); the file must
+                                            resolve inside that run's own folder
+POST /api/shots/verdict { profile, run, flow, chapters } | { profile, run, state: { <n>: { v, note } } }
+                                            -> { ok, verdict, state }   Bearer token required; audited
+                                            every /api/shots* is 404 { ok:false, disabled:true } while
+                                            the `shots` switch is off
 ```
 
 ### Notifications

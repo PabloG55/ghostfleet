@@ -1,0 +1,170 @@
+{
+  "ok": true,
+  "run": {
+    "id": "2026-03-04_10-15-40",
+    "profile": "work",
+    "project": "acme-web",
+    "branch": "api-fix",
+    "at_ago": 90000,
+    "kind": "recorded",
+    "video": "flow.mp4",
+    "duration": 12,
+    "problems": 1,
+    "provenance": {
+      "commit": "3c9d2aa",
+      "dirty": true,
+      "base": "staging",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "session": "api-fix",
+      "slot": null
+    },
+    "steps": [
+      {
+        "n": 1,
+        "name": "open sign in",
+        "file": null,
+        "url": "https://acme-web.example/login",
+        "title": "Sign in · acme-web",
+        "expect": {
+          "text": "Sign in",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/login",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/app.css",
+            "type": "Stylesheet",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/app.js",
+            "type": "Script",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/logo.svg",
+            "type": "Image",
+            "status": 200
+          }
+        ],
+        "start": 0,
+        "end": 3
+      },
+      {
+        "n": 2,
+        "name": "sign in",
+        "file": null,
+        "url": "https://acme-web.example/dashboard",
+        "title": "Dashboard · acme-web",
+        "expect": {
+          "text": "Good morning",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "POST",
+            "url": "https://acme-web.example/api/session",
+            "type": "Fetch",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/dashboard",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/api/invoices/summary",
+            "type": "Fetch",
+            "status": 200
+          }
+        ],
+        "start": 3,
+        "end": 6
+      },
+      {
+        "n": 3,
+        "name": "open invoices",
+        "file": "web-invoices.png",
+        "url": "https://acme-web.example/invoices",
+        "title": "Invoices · acme-web",
+        "expect": {
+          "text": "Northwind",
+          "found": false
+        },
+        "notes": [
+          "GET https://acme-web.example/api/invoices?page=1 answered 404",
+          "expected text not on the page: Northwind"
+        ],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/invoices",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/api/invoices?page=1",
+            "type": "Fetch",
+            "status": 404
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/favicon.ico",
+            "type": "Other",
+            "status": 404
+          }
+        ],
+        "start": 6,
+        "end": 9
+      },
+      {
+        "n": 4,
+        "name": "settings",
+        "file": null,
+        "url": "https://acme-web.example/settings",
+        "title": "Settings · acme-web",
+        "expect": null,
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/settings",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://acme-web.example/api/org",
+            "type": "Fetch",
+            "status": 200
+          }
+        ],
+        "start": 9,
+        "end": 12
+      }
+    ],
+    "verdict": {
+      "flow": {
+        "v": "reject",
+        "note": "the invoices list is empty — the client asks for /api/invoices before the session cookie lands"
+      },
+      "chapters": {}
+    }
+  }
+}

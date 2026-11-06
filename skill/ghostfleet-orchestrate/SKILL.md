@@ -304,12 +304,15 @@ When you're done, produce a visual verification:
    flagged, say so explicitly.
 ```
 
-Then `fleet-shots serve` and review it — one step at a time, approve / changes / skip.
+Then review it in the phone app's **Reviews** screen (on Projects, or `<origin>/#reviews`):
+one card per branch, the run's video with a chapter per step, and approve / reject — or, for
+a run of stills, ok / problem / skip per step. `fleet-shots serve` is retired; it prints where
+the screen lives. `fleet-shots verdict <run>` still reads the verdict in a terminal.
 
 **Why each line is there:**
 
-- **Let `--out` default (4).** Both the run and `fleet-shots serve` default to
-  `$CLAUDE_FLEET_DIR/shots`, so they meet with no paths passed. The first real run went to
+- **Let `--out` default (4).** The run defaults to `$CLAUDE_FLEET_DIR/shots`, which is
+  where the Reviews screen reads, so they meet with no paths passed. The first real run went to
   the worker's own scratchpad and simply did not appear in the reviewer's list.
 - **Its OWN stack (3).** A worker found a sibling worktree's stack live on another port and
   refused it, unprompted — screenshots of somebody else's branch look exactly like yours,

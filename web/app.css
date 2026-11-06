@@ -548,12 +548,12 @@ button.usage { cursor: pointer; }
 /* THE QUEUE'S LINE ON PROJECTS (app.js queueRow): one row the list's full width, where the
  * list itself used to be. Red while anything waits on the owner; the TUI's grey when every
  * item is answered or untouched. The palette's own tokens, nothing new. */
-.cards > .queue-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px;
+.cards > :is(.queue-row, .rv-row) { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px;
                       text-align: left; font: inherit; font-size: 14px; background: var(--surface-1); cursor: pointer;
                       border: 1px solid transparent; border-radius: var(--r3); padding: 12px 16px; margin: 0;
                       color: var(--dim); scroll-snap-align: start; }
-.queue-row .qt { flex: 1 1 auto; min-width: 0; }
-.queue-row .qgo { flex: none; font-size: 18px; line-height: 1; }
+:is(.queue-row, .rv-row) .qt { flex: 1 1 auto; min-width: 0; }
+:is(.queue-row, .rv-row) .qgo { flex: none; font-size: 18px; line-height: 1; }
 .cards > .queue-row.hot { border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red); font-weight: 600;
                           background: color-mix(in srgb, var(--red) 9%, transparent); }
 .usage .u-line { display: flex; gap: 12px; min-width: 0; }
@@ -1615,3 +1615,118 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
 .pick-list > .sect.pick-proj { color: var(--white); }
 .card.pickrow.stacked { border-color: color-mix(in srgb, var(--green) 60%, transparent);
                          background: color-mix(in srgb, var(--green) 6%, transparent); }
+
+/* ── reviews (app.js "reviews", web/src/reviews.jsx) ────────────────────────────────
+ * What fleet-shots recorded, reviewed here instead of on a loopback page the phone could
+ * not reach. NOTHING NEW IN THE PALETTE: fleet-shots' own page had a light theme and a
+ * blue of its own, and none of it came along — a run is green, yellow or red in the TUI's
+ * hues, on the same surfaces as every card. */
+
+/* The list. A branch's card and the runs folded under it are ONE grid item, so on a tablet
+ * the earlier runs stay under their own branch instead of flowing into the next column. */
+.cards > .rv-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; scroll-snap-align: start; }
+.rv-group > .card { scroll-snap-align: none; }
+.rv-group > .rv-more { align-self: flex-start; display: inline-flex; gap: 8px; align-items: center; min-height: 40px;
+  background: transparent; color: var(--dim); font-size: 13px; padding: 6px 12px; }
+.rv-group > .rv-old { margin-left: 12px; width: calc(100% - 12px); display: flex; align-items: center; gap: 10px; min-height: 44px; text-align: left;
+  background: var(--surface-1); border-radius: var(--r2); padding: 8px 14px; font-size: 13px; }
+.rv-old .rv-ol { color: var(--c); font-weight: 600; flex: none; }
+.rv-old .rv-ow { color: var(--dim); font-family: var(--font-mono); font-size: 12px; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-old .qgo { color: var(--dim); font-size: 16px; flex: none; }
+.rv-old.sel { background: var(--surface-2); border-color: color-mix(in srgb, var(--cyan) 45%, transparent); }
+/* The row on Projects: the queue's row, with the count still owed in the yellow that means
+ * "something to do, nobody blocked". */
+.cards > .rv-row { color: var(--fg); }
+.rv-row .qn { flex: none; color: var(--yellow); font-size: 12px; font-weight: 600; line-height: 18px;
+  padding: 1px 8px; border-radius: var(--pill); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
+
+/* The run: a header, ONE scroller, and the verdict pinned under it like a composer. */
+:is(#app, #side).shell > .rv-body { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+:is(#app, #side).shell > .rv-bar { flex: 0 0 auto; }
+.rv-col { display: flex; flex-direction: column; gap: 12px; max-width: 880px; margin: 0 auto; padding: 4px 0 24px; min-width: 0; }
+.rv-wait { color: var(--dim); text-align: center; margin: 18vh auto 0; max-width: 30em; padding: 0 var(--s4); }
+.rv-head { padding: 0 4px; min-width: 0; }
+.rv-br { font-family: var(--font-mono); font-weight: 700; font-size: 18px; color: var(--white); overflow-wrap: anywhere; }
+.rv-meta { color: var(--dim); font-family: var(--font-mono); font-size: 12px; margin-top: 4px; }
+.rv-h { color: var(--dim); font-size: 13px; font-weight: 600; margin: 8px 4px 0; }
+
+.rv-player { background: var(--surface-1); border-radius: var(--r3); overflow: hidden; }
+.rv-video { display: block; width: 100%; max-height: 52dvh; background: var(--bg); }
+.rv-strip { display: flex; gap: 3px; padding: 8px 8px 6px; }
+.rv-strip .rv-ch { flex: 1 1 0; min-width: 28px; min-height: 40px; padding: 0; border-radius: var(--r1);
+  font-family: var(--font-mono); font-size: 12px; color: var(--dim); background: var(--surface-2); }
+.rv-strip .rv-ch.flag { box-shadow: inset 0 -3px 0 var(--yellow); }
+.rv-strip .rv-ch.on { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 18%, transparent); font-weight: 600; }
+.rv-now { padding: 0 12px 10px; color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-now b { font-family: var(--font-mono); color: var(--fg); margin-right: 4px; }
+.rv-now span { font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin-left: 6px; }
+
+/* 16px, as every field here, so focusing one does not zoom an iPhone. */
+.rv-note { font: inherit; font-size: 16px; width: 100%; color: var(--white); background: var(--surface-2);
+  border: 1px solid transparent; padding: .55em .75em; border-radius: var(--r2); resize: vertical; min-height: 2.8em;
+  line-height: 1.35; transition: border-color var(--t1) var(--ease); }
+.rv-note::placeholder { color: var(--dim); }
+.rv-note:focus { border-color: color-mix(in srgb, var(--cyan) 60%, transparent); box-shadow: none; }
+
+/* A step: the card's surface and, when the run flagged it, the card's rail in yellow. */
+.rv-step { position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  background: var(--surface-1); border: 1px solid transparent; border-radius: var(--r3); padding: 12px 16px; }
+.rv-step.flag::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--yellow); }
+.rv-step.cur { border-color: color-mix(in srgb, var(--cyan) 40%, transparent); }
+.rv-sh { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rv-n { color: var(--dim); font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; flex: none; }
+.rv-sn { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-weight: 600; font-size: 15px; color: var(--white); overflow-wrap: anywhere; }
+.rv-sh .rv-t { flex: none; font-family: var(--font-mono); font-size: 12px; padding: 6px 10px; min-height: 32px; color: var(--cyan); }
+.rv-url { font-family: var(--font-mono); font-size: 12px; color: var(--fg); overflow-wrap: anywhere; }
+.rv-ttl { color: var(--dim); font-size: 12px; margin-top: -4px; }
+.rv-line { font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.rv-line.ok { color: var(--green); } .rv-line.bad { color: var(--red); } .rv-line.warn { color: var(--yellow); }
+.rv-shot { display: block; width: 100%; height: auto; border-radius: var(--r2); border: 1px solid var(--hair); background: var(--bg); }
+
+.rv-reqs { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rv-cap { display: flex; gap: 10px; color: var(--dim); font-size: 12px; margin-bottom: 2px; }
+.rv-cap .bad { color: var(--red); font-weight: 600; }
+.rv-none { color: var(--dim); font-size: 12px; }
+.rv-req { display: grid; grid-template-columns: 3.4em 3.4em minmax(0, 1fr); gap: 8px; align-items: baseline;
+  font-family: var(--font-mono); font-size: 12px; padding: 2px 0; }
+.rv-req .m { color: var(--dim); }
+.rv-req .s { font-variant-numeric: tabular-nums; color: var(--green); }
+.rv-req.warn .s { color: var(--yellow); }
+.rv-req.bad .s, .rv-req.bad .u { color: var(--red); }
+.rv-req .u { color: var(--fg); overflow-wrap: anywhere; min-width: 0; }
+.rv-assets > summary { color: var(--dim); font-size: 12px; cursor: pointer; padding: 6px 0 2px; }
+
+/* ok / problem / skip: the app's segmented control, the chosen one in its verdict's hue
+ * rather than the cyan that means "this view". */
+.seg.rv-mark { align-self: flex-start; }
+.seg.rv-mark button { min-height: 36px; }
+.seg.rv-mark button.on.ok { color: var(--green); }
+.seg.rv-mark button.on.problem { color: var(--red); }
+.seg.rv-mark button.on.skip { color: var(--fg); }
+
+.rv-prov { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 0;
+  background: var(--surface-1); border-radius: var(--r3); padding: 12px 16px; }
+.rv-prov dt { color: var(--dim); font-size: 12px; }
+.rv-prov dd { margin: 0; font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+
+.rv-bar { display: flex; flex-direction: column; gap: 8px; padding: 10px 2px 2px; border-top: 1px solid var(--hair); }
+.rv-gate { display: flex; align-items: center; gap: 8px; font-size: 14px; min-width: 0; }
+.rv-gate.ok { color: var(--green); } .rv-gate.warn { color: var(--yellow); } .rv-gate.bad { color: var(--red); }
+.rv-dot { flex: none; width: 8px; height: 8px; border-radius: var(--pill); background: currentColor; }
+.rv-gt { flex: 1 1 auto; min-width: 0; }
+.rv-saved { flex: none; color: var(--dim); font-size: 12px; }
+.rv-gate .rv-retry { flex: none; font-size: 12px; padding: 4px 10px; color: var(--red); }
+.rv-acts { display: flex; gap: 8px; }
+.rv-acts > button { flex: 1 1 0; min-height: 44px; }
+.rv-acts > button.danger.on { color: var(--bg); background: var(--red); border-color: var(--red); font-weight: 600; }
+html.duo #app.shell > .rv-bar { padding-inline: max(2px, calc((100% - 880px) / 2)); }
+/* At a desk the verdict is one row — the gate, then the two choices at their own width —
+ * and the video leaves the first step in view rather than filling the pane. */
+html.duo #app.shell > .rv-bar { flex-direction: row; align-items: center; gap: 16px; padding-bottom: 6px; }
+html.duo .rv-bar > .rv-gate { flex: 1 1 auto; }
+html.duo .rv-acts > button { flex: 0 0 auto; min-width: 9em; }
+html.duo .rv-video { max-height: 44dvh; }
+html.duo .rv-shot { width: auto; max-width: 100%; max-height: 46dvh; }

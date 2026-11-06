@@ -74,6 +74,10 @@ import { useLayoutEffect, useRef } from 'preact/hooks';
 // vite.config.mjs. The specifier is '../' here because that is where the file is from this
 // one, and rollup rewrites it to './' in the output, which is where it is from there.
 import { clockLabel } from '../grid.js';
+// The Reviews screens (fleet-shots' runs). They import Header and CardScreen back from
+// here — a cycle, and a harmless one: vite emits both files into one chunk, and nothing is
+// called until mount() runs, long after both modules have finished evaluating.
+import { ReviewsScreen, ReviewScreen } from './reviews.jsx';
 
 // ── a button whose key letter stays in the label ──────────────────────────────────────
 // The TUI's footer is muscle memory, and a button that says "p pause" transfers where one
@@ -129,7 +133,7 @@ function Icon({ name }) {
 // screens now agree instead of one having a footer and the other a header button.
 //   The verbs did not go away and neither did the gestures: both are in the sheet, which
 // names what it is acting on before it offers anything destructive.
-function Header({ scope, mode, stale, counts, onMore, onBack }) {
+export function Header({ scope, mode, stale, counts, onMore, onBack }) {
   return (
     <Fragment>
       <div class="hdr">
@@ -279,7 +283,7 @@ function CardList({ nodes, listRef }) {
 // its position on screen, and the one place it must never be is over a control ("dont blok
 // the chat with toasts"). Two copies of this order is one screen where that is true and one
 // where it is true until somebody appends something.
-function CardScreen({ scope, mode, stale, counts, onMore, onBack, band, confirm, cards, listRef, toast }) {
+export function CardScreen({ scope, mode, stale, counts, onMore, onBack, band, confirm, cards, listRef, toast }) {
   return (
     <Fragment>
       <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} onBack={onBack} />
@@ -360,7 +364,7 @@ function QueueScreen(p) {
 // tears the old tree down and builds the new one, which is exactly what crossing between
 // two screens means. Preact would also tear down on the differing component type alone;
 // the key is here so that stays true if these two ever become one component with a prop.
-const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen };
+const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen, reviews: ReviewsScreen, review: ReviewScreen };
 export function mount(container, screen, props) {
   const S = SCREENS[screen];
   // Not a silent no-op: a typo here would leave the container holding the PREVIOUS screen

@@ -1,0 +1,125 @@
+{
+  "ok": true,
+  "run": {
+    "id": "2026-03-05_09-30-00",
+    "profile": "work",
+    "project": "acme-api",
+    "branch": "cache-keys",
+    "at_ago": 18000,
+    "kind": "stills",
+    "video": null,
+    "duration": null,
+    "problems": 0,
+    "provenance": {
+      "commit": "b81e4f0",
+      "dirty": false,
+      "base": "staging",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "session": "cache-keys",
+      "slot": null
+    },
+    "steps": [
+      {
+        "n": 1,
+        "name": "cache keys",
+        "file": "api-keys.png",
+        "url": "https://admin.acme-api.example/admin/cache",
+        "title": "Cache · acme-api admin",
+        "expect": null,
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/admin/cache",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/api/cache/keys?limit=50",
+            "type": "Fetch",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/app.css",
+            "type": "Stylesheet",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/app.js",
+            "type": "Script",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/logo.svg",
+            "type": "Image",
+            "status": 200
+          }
+        ]
+      },
+      {
+        "n": 2,
+        "name": "search a prefix",
+        "file": "api-search.png",
+        "url": "https://admin.acme-api.example/admin/cache?q=user%3A1042%3A",
+        "title": "Cache · acme-api admin",
+        "expect": {
+          "text": "user:1042:profile",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/api/cache/keys?prefix=user%3A1042%3A",
+            "type": "Fetch",
+            "status": 200
+          }
+        ]
+      },
+      {
+        "n": 3,
+        "name": "health",
+        "file": "api-health.png",
+        "url": "https://admin.acme-api.example/admin/health",
+        "title": "Health · acme-api admin",
+        "expect": null,
+        "notes": [
+          "GET https://admin.acme-api.example/api/health/slow answered 301"
+        ],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/admin/health",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/api/health",
+            "type": "Fetch",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://admin.acme-api.example/api/health/slow",
+            "type": "Fetch",
+            "status": 301
+          }
+        ]
+      }
+    ],
+    "verdict": {
+      "1": {
+        "v": "ok",
+        "note": ""
+      }
+    }
+  }
+}
