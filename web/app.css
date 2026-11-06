@@ -1657,8 +1657,17 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
 .rv-strip { display: flex; gap: 3px; padding: 8px 8px 6px; }
 .rv-strip .rv-ch { flex: 1 1 0; min-width: 28px; min-height: 40px; padding: 0; border-radius: var(--r1);
   font-family: var(--font-mono); font-size: 12px; color: var(--dim); background: var(--surface-2); }
-.rv-strip .rv-ch.flag { box-shadow: inset 0 -3px 0 var(--yellow); }
-.rv-strip .rv-ch.on { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 18%, transparent); font-weight: 600; }
+/* TWO MARKS THAT MUST NOT BE MISTAKEN FOR EACH OTHER. Current is the one FILLED tab — where
+ * the player is. Flagged is a property of the step, not a position: a warn dot in the corner
+ * and the number in the warn hue, so a flagged tab that is also current shows both. An
+ * underline used to mean flagged, and with nothing marked current at 0:00 it read as the
+ * current tab. */
+.rv-strip .rv-ch { position: relative; }
+.rv-strip .rv-ch.flag { color: var(--yellow); }
+.rv-strip .rv-ch.flag::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--yellow); box-shadow: 0 0 0 2px var(--surface-2); }
+.rv-strip .rv-ch.on { color: var(--bg); background: var(--cyan); font-weight: 700; }
+.rv-strip .rv-ch.on.flag::after { box-shadow: 0 0 0 2px var(--cyan); }
 .rv-now { padding: 0 12px 10px; color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rv-now b { font-family: var(--font-mono); color: var(--fg); margin-right: 4px; }
 .rv-now span { font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin-left: 6px; }

@@ -190,6 +190,7 @@ function Player({ run, t, video, cur, setCur, onSeek }) {
 					type: "button",
 					style: `flex-grow:${Math.max(.2, ((s.end ?? total) - s.start) / total)}`,
 					class: "rv-ch" + (s.notes && s.notes.length ? " flag" : "") + (s.n === cur ? " on" : ""),
+					"aria-current": s.n === cur ? "step" : void 0,
 					"aria-label": t.playFrom(s.name, clock(s.start)),
 					title: s.name,
 					onClick: () => onSeek(s),
@@ -281,7 +282,8 @@ function Bar({ run, t, v, gate, save, onFlow, onRestOk, onRetry }) {
 function ReviewScreen(p) {
 	const { run, t } = p;
 	const video = A(null);
-	const [cur, setCur] = d(0);
+	const [picked, setCur] = d(0);
+	const cur = picked || (run && run.kind === "recorded" ? (run.steps.find((s) => s.start != null) || {}).n || 0 : 0);
 	const body = A(null);
 	h(() => {
 		if (!p.onPlayer) return void 0;

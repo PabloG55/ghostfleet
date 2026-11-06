@@ -144,6 +144,7 @@ function Player({ run, t, video, cur, setCur, onSeek }) {
         {steps.map(s => (
           <button key={s.n} type="button" style={`flex-grow:${Math.max(0.2, ((s.end ?? total) - s.start) / total)}`}
                   class={'rv-ch' + (s.notes && s.notes.length ? ' flag' : '') + (s.n === cur ? ' on' : '')}
+                  aria-current={s.n === cur ? 'step' : undefined}
                   aria-label={t.playFrom(s.name, clock(s.start))} title={s.name} onClick={() => onSeek(s)}>
             {String(s.n)}
           </button>
@@ -203,7 +204,11 @@ function Bar({ run, t, v, gate, save, onFlow, onRestOk, onRetry }) {
 export function ReviewScreen(p) {
   const { run, t } = p;
   const video = useRef(null);
-  const [cur, setCur] = useState(0);
+  const [picked, setCur] = useState(0);
+  // A VIDEO AT 0:00 IS ON ITS FIRST CHAPTER. `picked` stays 0 until the player ticks or a
+  // chapter is tapped, and a strip with no current tab let the flagged one's mark read as
+  // "you are here" — so the first chapter is current until something says otherwise.
+  const cur = picked || (run && run.kind === 'recorded' ? ((run.steps.find(s => s.start != null) || {}).n || 0) : 0);
   const body = useRef(null);
   // ← → and space at a desk reach the video through here: app.js owns the keys, this owns
   // the element. Registered per mount, dropped on the way out.

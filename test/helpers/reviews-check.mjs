@@ -107,6 +107,8 @@ try {
       inline: vid ? vid.hasAttribute('playsinline') : false,
       chapters: chs.length,
       flagged: chs.map((c, i) => c.classList.contains('flag') ? i + 1 : 0).filter(Boolean),
+      // what a reader sees of each tab: its fill, and whether it carries the warn dot
+      tabLook: chs.map(c => [getComputedStyle(c).backgroundColor, getComputedStyle(c, '::after').content !== 'none']),
       on: chs.map((c, i) => c.classList.contains('on') ? i + 1 : 0).filter(Boolean),
       now: t('#app .rv-now'),
       steps: document.querySelectorAll('#app .rv-step').length,
@@ -234,6 +236,12 @@ try {
     is('a tap on a branch opens its newest run', ['— review', 'api-fix'], [s.main, s.branch]);
     is('...its video, inline (an iPhone otherwise takes it full screen)', [true, true], [/fixtures\/shots\/flow\.mp4$/.test(s.video), s.inline]);
     is('...one chapter per step, the step the run flagged marked', [4, [3], 4], [s.chapters, s.flagged, s.steps]);
+    // CURRENT IS NOT FLAGGED. At 0:00 the first chapter is the current one, and the flagged
+    // chapter is marked as a property, never drawn as the filled tab — the two once read alike.
+    is('...at 0:00 the FIRST chapter is current, not the flagged one', [[1], '01'], [s.on, s.now.slice(0, 2)]);
+    is('...drawn filled, unlike every other tab', true, !!s.tabLook[0] && s.tabLook.slice(1).every(t => t[0] !== s.tabLook[0][0]));
+    is('...and the flagged tab carries the warn dot without the fill', [false, true, false, false, true],
+       [s.tabLook[0][1], s.tabLook[2][1], s.tabLook[1][1], s.tabLook[3][1], s.tabLook[2][0] === s.tabLook[1][0]]);
     is('...its provenance', true, /7e41c09/.test(s.prov) && /\d+×\d+/.test(s.prov));
     is('...and the verdict pinned to the bottom of the screen', [true, true], [s.barPinned, s.barBottom >= 0 && s.barBottom < 40]);
     is('...unreviewed', ['warn', 'not reviewed — watch it, then approve or reject'], [s.gateCls, s.gate]);
