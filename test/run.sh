@@ -7422,12 +7422,20 @@ cat > "$FSH/flow.json" <<FLOW
     { "name": "a clean screen", "goto": "/clean", "expect": "All good" }
   ] }
 FLOW
-# CHROME COUNTED BEFORE AND AFTER, because a browser is ten processes holding a profile
-# open and this repo has already paid for a command that exited past its own cleanup —
-# 266 stranded Chromes. A leak here would be invisible in every other assertion.
-fschromes() { pgrep -fl 'gf-browser-' 2>/dev/null | grep -c . || true; }
-FSBEFORE="$(fschromes)"
-FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
+# CHROME COUNTED AFTERWARDS, because a browser is ten processes holding a profile open and
+# this repo has already paid for a command that exited past its own cleanup — 266 stranded
+# Chromes. A leak here would be invisible in every other assertion.
+#   COUNTED IN THIS GROUP'S OWN TMPDIR, never machine-wide. lib/browser.mjs makes its profile
+# under os.tmpdir(), so `pgrep gf-browser-` counted every browser every worktree and session on
+# the machine had open, and "the same number before and after" failed whenever a neighbour's
+# browser closed mid-group — measured: 15 before, 10 after, nothing of this run's left over,
+# on a Mac running sibling worktrees. Here the profiles land under a dir only this group
+# uses, so the number that means "none left" is 0, whoever else is running. The dir is under
+# $TEST_RUNS rather than FSH because Chrome puts its singleton socket under TMPDIR too, and
+# a /var/folders path is long enough to push that past the 104-byte socket limit.
+FST="$(cd "$(mktemp -d "$TEST_RUNS.$$.shots.XXXXXX")" && pwd -P)"
+fschromes() { pgrep -f "user-data-dir=$FST/gf-browser-" 2>/dev/null | grep -c . || true; }
+FSOUT="$(TMPDIR="$FST" node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
 if grep -q 'no chrome' <<< "$FSOUT"; then
   skip "fleet-shots against a real page" "no chrome to photograph in"
 else
@@ -7454,7 +7462,7 @@ else
             node -e 'const m=require(process.argv[1]);const d=Number(process.argv[2]);console.log(Math.abs(d-m.duration)<0.6?"yes":"no: file "+d+"s, manifest "+m.duration+"s")' "$FSH/run/manifest.json" "$d")"
     fi
     is "...and the page is the recorded-run page"  "yes" "$(grep -q '<video id="v"' "$FSH/run/index.html" && echo yes || echo no)"
-    node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
+    TMPDIR="$FST" node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
     is "--stills: a still per step and no video"   "4:no" \
        "$(ls "$FSH/stills"/*.png 2>/dev/null | grep -c .):$(ls "$FSH/stills"/flow.* >/dev/null 2>&1 && echo yes || echo no)"
   else
@@ -7514,12 +7522,18 @@ else
   is "the page loads nothing remote"      "0" \
      "$(grep -coE '(src|href)="https?://' "$FSH/run/index.html" || true)"
 
-  is "no chrome was left behind"          "$FSBEFORE" "$(fschromes)"
+  is "no chrome was left behind"          "0" "$(fschromes)"
+  # ...and the count is not blind: a process carrying one of this dir's profile flags is
+  # seen. Without this row a pattern that matched nothing would pass the one above forever.
+  bash -c "exec -a 'chrome --user-data-dir=$FST/gf-browser-decoy' sleep 30" &
+  FSDECOY=$!
+  is "...and the count would see one"     "1" "$(fschromes)"
+  { kill "$FSDECOY"; wait "$FSDECOY"; } 2>/dev/null || true
 fi
 # `wait` after the kill absorbs the shell's own "Terminated" notice, which otherwise lands
 # in the middle of the suite's output looking exactly like something went wrong.
 { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || true
-rm -rf "$FSH"
+rm -rf "$FSH" "${FST:?}"
 
 group "a fill that the framework ignores is not a fill"
 # REPORTED FROM A REAL RUN AGAINST A REAL APP, and it is the worst failure this tool can
