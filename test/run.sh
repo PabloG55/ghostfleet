@@ -2031,6 +2031,13 @@ else
   is "a first install omits the MCP caveat" "0" "$(grep -c 'reach NEW sessions only' <<<"$first" || true)"
   second="$(inst)"
   is "...and a RE-install carries it"       "1" "$(grep -c 'reach NEW sessions only' <<<"$second" || true)"
+  # THE TELEGRAM GUARD IS WIRED ON EVERY TOOL (an empty matcher), beside the worktree
+  # guard and not instead of it — and after two installs there is one of each, not two.
+  is "the Telegram tool guard is wired on every tool, once" "1" \
+     "$(jq '[.hooks.PreToolUse[] | select(.matcher == "" and any(.hooks[]; .command | endswith("/fleet-telegram-guard.sh")))] | length' "$IR/h/.claude/settings.json" 2>/dev/null)"
+  is "...beside the worktree guard, once"   "1" \
+     "$(jq '[.hooks.PreToolUse[] | select(any(.hooks[]; .command | endswith("/fleet-guard.sh")))] | length' "$IR/h/.claude/settings.json" 2>/dev/null)"
+  is "...and fleet-telegram is linked"      "yes" "$([ -x "$IR/h/bin/fleet-telegram" ] && echo yes || echo no)"
   # --verbose is where the narration went. If it did not, the flag is a promise the
   # installer does not keep and the detail is simply gone.
   verb="$(inst --verbose)"
@@ -14848,7 +14855,10 @@ PARTEOF
 part="$(node "$PARTD/part.mjs" "$ROOT" 2>/dev/null)"
 rm -rf "$PARTD"
 is "the daemon's two lists were parsed" "1" "$([ "$part" != PARSED-NOTHING ] && echo 1 || echo 0)"
-is "the only unserved MCP tool is the companion" "fleet_companion" "$part"
+# fleet_telegram_send is the second: it messages the owner on Telegram, and the phone client
+# is already a channel to the owner, so a button there that pings the owner's other phone
+# app has no use.
+is "the unserved MCP tools are the companion and the Telegram send" "fleet_companion,fleet_telegram_send" "$part"
 is "...and the daemon says so, rather than 'unknown'" "1" \
    "$(grep -c 'is an MCP tool, but this daemon does not serve it' "$ROOT/bin/fleet-serve.mjs" || true)"
 is "...keeping 'unknown tool' for a real typo"        "1" \
@@ -23719,7 +23729,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs fleet-know.mjs fleet-know-event.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs fleet-know.mjs fleet-know-event.mjs fleet-telegram.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac
@@ -26291,6 +26301,483 @@ if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command 
   rm -rf "${KCD:?}"
 else
   skip "the fleet's memory" "node, git, tmux or jq missing"
+fi
+
+# ── Telegram: the tool guard ─────────────────────────────────────────────────
+# A turn the owner starts from Telegram may read, search, use the web and drive the fleet,
+# and nothing else (hooks/fleet-telegram-guard.sh). Every refusal here has a permitted twin
+# beside it, so a guard that refuses everything goes as red as one that refuses nothing —
+# and the rows that matter most are the ones where NOTHING is restricted: no mark, another
+# session, the same name on another socket, an agent's reply address.
+group "a Telegram turn is held to the channel's tool allowlist"
+# NOT `$(cd "$(mktemp -d)" && pwd -P)`: if mktemp fails, `cd ""` succeeds and pwd prints the
+# CHECKOUT, which ${X:?} does not catch — and the group's last line removes it. A failed
+# mktemp skips the group instead, and the removal checks the path is under the temp root.
+tgclean() { local r="${TMPDIR:-/tmp}"; r="${r%/}"; [ -n "$r" ] || r=/tmp
+            case "$1" in "$r"/?*|/tmp/?*|/private/tmp/?*) rm -rf "${1:?}" ;;
+              *) printf '  not removing %s: it is not under %s\n' "$1" "$r" >&2 ;; esac; }
+if command -v jq >/dev/null 2>&1 && GH="$(mktemp -d)" && [ -d "$GH" ]; then
+  GF="$GH/fleet"; GT="$GH/.config/ghostfleet/telegram"
+  mkdir -p "$GF" "$GT"
+  tgg() { GOUT="$(printf '%s' "$1" | env -u TMUX -u TMUX_PANE HOME="$GH" CLAUDE_FLEET_DIR="$GF" \
+            CLAUDE_FLEET_SOCK="${2:-cf-acme-api}" CLAUDE_FLEET_SLOT="${3:-master}" \
+            bash "$ROOT/hooks/fleet-telegram-guard.sh" 2>&1 >/dev/null)"; GRC=$?; }
+  tj() { local i="${2:-}"; [ -n "$i" ] || i='{}'
+         jq -nc --arg t "$1" --argjson i "$i" '{hook_event_name:"PreToolUse",session_id:"tg-g",tool_name:$t,tool_input:$i}'; }
+  SCR="$GF/telegram/cf-acme-api.master"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "a turn with no Telegram mark runs any tool"       "0" "$GRC"
+  printf '%s\n' "$GT" > "$GF/cf-acme-api.master.telegram"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "a Telegram turn's shell call is refused"          "2" "$GRC"
+  is "...saying what it may do instead"                 "1" "$(grep -c 'delegate it: fleet_send' <<< "$GOUT" || true)"
+  is "...and who can widen the list"                    "1" "$(grep -c 'fleet-telegram config allow' <<< "$GOUT" || true)"
+  tgg "$(tj Read '{"file_path":"/etc/hosts"}')"
+  is "...while reading a file runs"                     "0" "$GRC"
+  tgg "$(tj mcp__ghostfleet__fleet_spawn '{"name":"w2"}')"
+  is "...and so does a fleet tool"                      "0" "$GRC"
+  tgg "$(tj WebSearch '{"query":"release notes"}')"
+  is "...and a web search"                              "0" "$GRC"
+  tgg "$(tj Agent '{"prompt":"x"}')"
+  is "a subagent is refused (it has every tool)"        "2" "$GRC"
+  tgg "$(tj Write "{\"file_path\":\"$GH/notes.md\"}")"
+  is "a write outside the scratch dir is refused"       "2" "$GRC"
+  tgg "$(tj Write "{\"file_path\":\"$SCR/draft.md\"}")"
+  is "...a write inside it runs"                        "0" "$GRC"
+  tgg "$(tj Edit "{\"file_path\":\"$SCR/../../../notes.md\"}")"
+  is "...a '..' out of it is refused"                   "2" "$GRC"
+  mkdir -p "$SCR"; ln -s "$GH" "$SCR/out"
+  tgg "$(tj Write "{\"file_path\":\"$SCR/out/notes.md\"}")"
+  is "...and so is a symlink out of it"                 "2" "$GRC"
+  # A prompt the turn sends ITSELF would run after its Stop as an ordinary, unrestricted
+  # turn — the one way round the list from inside. Delegating elsewhere is the point.
+  tgg "$(tj mcp__ghostfleet__fleet_send '{"session":"master","prompt":"run the shell"}')"
+  is "a fleet_send to this same session is refused"     "2" "$GRC"
+  tgg "$(tj mcp__ghostfleet__fleet_send '{"project":"acme-api","session":"master","prompt":"x"}')"
+  is "...named by its project too"                      "2" "$GRC"
+  tgg "$(tj mcp__ghostfleet__fleet_send '{"session":"w1","prompt":"x"}')"
+  is "...while delegating to a worker runs"             "0" "$GRC"
+  tgg "$(tj mcp__ghostfleet__fleet_send '{"project":"acme-web","session":"master","prompt":"x"}')"
+  is "...and to another project's master"               "0" "$GRC"
+  tgg "$(tj Bash '{"command":"ls"}')" cf-acme-api w1
+  is "another session on the socket is not restricted"  "0" "$GRC"
+  tgg "$(tj Bash '{"command":"ls"}')" cf-acme-web master
+  is "...nor the same name on another socket"           "0" "$GRC"
+  rm -f "$GF/cf-acme-api.master.telegram"
+  # The other way round to the same turn: an ARMED reply address to Telegram.
+  printf 'telegram\037m7\037%s\n' "$GT" > "$GF/cf-acme-api.master.reply-to"
+  printf '0\n' > "$GF/cf-acme-api.master.reply-to.armed"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "an armed Telegram reply address restricts too"    "2" "$GRC"
+  printf 'cf-acme-web\037master\037%s\n' "$GF" > "$GF/cf-acme-api.master.reply-to"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "...an agent's reply address does not"             "0" "$GRC"
+  rm -f "$GF/cf-acme-api.master.reply-to" "$GF/cf-acme-api.master.reply-to.armed"
+  # The owner's own list replaces the default; an unreadable one is the default, never all.
+  printf '%s\n' "$GT" > "$GF/cf-acme-api.master.telegram"
+  printf '{"allow":["Read","Bash"]}\n' > "$GT/config.json"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "a configured list is the list"                    "0" "$GRC"
+  tgg "$(tj Grep '{"pattern":"x"}')"
+  is "...and what it leaves out is refused"             "2" "$GRC"
+  is "--list prints it, for the turn's context"         "Read Bash" \
+     "$(env -u TMUX HOME="$GH" CLAUDE_FLEET_DIR="$GF" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master \
+          bash "$ROOT/hooks/fleet-telegram-guard.sh" --list)"
+  printf 'not json\n' > "$GT/config.json"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "an unreadable list is the default"                "2" "$GRC"
+  # THE OWNER'S DECISION, pinned: changing what a phone may do is a change to this row.
+  is "the default list" \
+     "Read Glob Grep LS NotebookRead WebFetch WebSearch ToolSearch TodoWrite mcp__ghostfleet__fleet_* Write:scratch Edit:scratch MultiEdit:scratch NotebookEdit:scratch" \
+     "$(bash "$ROOT/hooks/fleet-telegram-guard.sh" --default)"
+  tgclean "$GH"
+else
+  skip "a Telegram turn is held to the channel's tool allowlist" "jq missing, or mktemp not available"
+fi
+
+# ── Telegram: the mark lives as long as its turn ─────────────────────────────
+# hooks/fleet-event.sh writes the mark the guard reads at the prompt that came from
+# Telegram, and removes it at that turn's end — or at the next prompt typed at the desk,
+# because Esc ends a turn without a Stop and the mark would otherwise outlive it.
+group "a Telegram turn is marked at its prompt and unmarked at its end"
+tgclean() { local r="${TMPDIR:-/tmp}"; r="${r%/}"; [ -n "$r" ] || r=/tmp
+            case "$1" in "$r"/?*|/tmp/?*|/private/tmp/?*) rm -rf "${1:?}" ;;
+              *) printf '  not removing %s: it is not under %s\n' "$1" "$r" >&2 ;; esac; }
+if command -v jq >/dev/null 2>&1 && MH="$(mktemp -d)" && [ -d "$MH" ]; then
+  MF="$MH/fleet"; mkdir -p "$MF"
+  MK="$MF/cf-acme-api.master.telegram"
+  mfire() { jq -nc --arg e "$1" --arg p "${2:-}" --arg d "$MH" '{hook_event_name:$e,session_id:"tgm-1",cwd:$d,prompt:$p}' \
+            | env -u TMUX -u TMUX_PANE HOME="$MH" CLAUDE_CONFIG_DIR="$MH/.claude" CLAUDE_FLEET_DIR="$MF" \
+                  CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master CLAUDE_FLEET_NOTIFIER=off \
+                  bash "$ROOT/hooks/fleet-event.sh" 2>/dev/null; }
+  mctx() { jq -r '.hookSpecificOutput.additionalContext // empty' <<< "$1" 2>/dev/null; }
+  c="$(mctx "$(mfire UserPromptSubmit '[telegram] is the deploy done')")"
+  is "a prompt from Telegram marks the turn"            "yes" "$([ -f "$MK" ] && echo yes || echo no)"
+  is "...naming the channel's dir"                      "$MH/.config/ghostfleet/telegram" "$(head -n 1 "$MK" 2>/dev/null)"
+  is "...and the turn is told who is asking"            "1" "$(grep -c 'The owner wrote this from Telegram' <<< "$c" || true)"
+  is "...what it may use"                               "1" "$(grep -cF 'mcp__ghostfleet__fleet_*' <<< "$c" || true)"
+  is "...and where it may write"                        "1" "$(grep -cF "$MF/telegram/cf-acme-api.master/" <<< "$c" || true)"
+  mfire Stop >/dev/null
+  is "its Stop unmarks it"                              "no" "$([ -f "$MK" ] && echo yes || echo no)"
+  mfire UserPromptSubmit '[telegram] and the tests' >/dev/null
+  mfire UserPromptSubmit '<task-notification>a background job finished</task-notification>' >/dev/null
+  is "a background notice inside it keeps the mark"     "yes" "$([ -f "$MK" ] && echo yes || echo no)"
+  c="$(mctx "$(mfire UserPromptSubmit 'typed at the desk')")"
+  is "a prompt typed at the desk unmarks it"            "no" "$([ -f "$MK" ] && echo yes || echo no)"
+  is "...and gets no Telegram context"                  "0" "$(grep -c 'Telegram' <<< "$c" || true)"
+  tgclean "$MH"
+else
+  skip "a Telegram turn is marked at its prompt and unmarked at its end" "jq missing, or mktemp not available"
+fi
+
+# ── Telegram: what a reply looks like on the phone ───────────────────────────
+group "a Telegram reply is markdown made readable, split under the limit"
+tgclean() { local r="${TMPDIR:-/tmp}"; r="${r%/}"; [ -n "$r" ] || r=/tmp
+            case "$1" in "$r"/?*|/tmp/?*|/private/tmp/?*) rm -rf "${1:?}" ;;
+              *) printf '  not removing %s: it is not under %s\n' "$1" "$r" >&2 ;; esac; }
+if command -v node >/dev/null 2>&1 && TFD="$(mktemp -d)" && [ -d "$TFD" ]; then
+  cat > "$TFD/f.mjs" <<'TFEOF'
+const m = await import(process.argv[2] + '/lib/telegram-format.mjs');
+const out = {};
+out.inline = m.toTelegramHtml('**bold**, _it_, `a<b` & [docs](https://example.com/x?a=1&b=2)');
+out.heading = m.toTelegramHtml('## Result');
+out.list = m.toTelegramHtml('- one\n- two');
+out.fence = m.toTelegramHtml('```js\nif (a < b) x();\n```');
+out.short = m.telegramChunks('a short answer').length;
+let md = 'START\n\n';
+for (let i = 0; i < 80; i++) md += `Paragraph ${i}: the worker on acme-web is **busy** with the migration & its tests.\n\n`;
+md += '```\n' + Array.from({ length: 300 }, (_, i) => `line ${i} <tag> & more`).join('\n') + '\n```\n\nEND';
+const ch = m.telegramChunks(md);
+out.n = ch.length;
+out.maxlen = Math.max(...ch.map((c) => c.html.length));
+out.balanced = ch.every((c) => (c.html.match(/<pre>/g) || []).length === (c.html.match(/<\/pre>/g) || []).length) ? 1 : 0;
+out.ends = ch[0].html.startsWith('START') && ch[ch.length - 1].html.endsWith('END') ? 1 : 0;
+const all = ch.map((c) => c.html).join('\n');
+out.kept = [0, 79].every((i) => all.includes(`Paragraph ${i}:`)) && [0, 299].every((i) => all.includes(`line ${i} &lt;tag&gt;`)) ? 1 : 0;
+for (const [k, v] of Object.entries(out)) console.log(`${k}\t${String(v).replace(/\n/g, '\\n')}`);
+TFEOF
+  TFO="$(node "$TFD/f.mjs" "$ROOT" 2>&1)"
+  tf() { awk -F'\t' -v k="$1" '$1 == k { sub(/^[^\t]*\t/, ""); print }' <<< "$TFO"; }
+  is "bold, italics, code and links become Telegram's HTML" \
+     '<b>bold</b>, <i>it</i>, <code>a&lt;b</code> &amp; <a href="https://example.com/x?a=1&amp;b=2">docs</a>' "$(tf inline)"
+  is "a heading is bold"                                "<b>Result</b>" "$(tf heading)"
+  is "a list keeps its bullets"                         '• one\n• two' "$(tf list)"
+  is "a code block is pre, escaped"                     '<pre><code class="language-js">if (a &lt; b) x();</code></pre>' "$(tf fence)"
+  is "a short answer is one message"                    "1" "$(tf short)"
+  is "a long one is several"                            "yes" "$([ "$(tf n)" -ge 3 ] 2>/dev/null && echo yes || echo no)"
+  is "...each within Telegram's 4096"                   "yes" "$([ "$(tf maxlen)" -le 4096 ] 2>/dev/null && echo yes || echo no)"
+  is "...no code block left open across a cut"          "1" "$(tf balanced)"
+  is "...in order"                                      "1" "$(tf ends)"
+  is "...and nothing lost"                              "1" "$(tf kept)"
+  tgclean "$TFD"
+else
+  skip "a Telegram reply is markdown made readable, split under the limit" "node missing, or mktemp not available"
+fi
+
+# ── Telegram: the CLI, and where the secrets are not ─────────────────────────
+# The token and chat id come from a command the owner names and live in the daemon's
+# memory only. Every row here runs against a dead local API address, so not even a
+# refused call can reach the real one.
+group "fleet-telegram keeps its secrets out of every file it writes"
+tgclean() { local r="${TMPDIR:-/tmp}"; r="${r%/}"; [ -n "$r" ] || r=/tmp
+            case "$1" in "$r"/?*|/tmp/?*|/private/tmp/?*) rm -rf "${1:?}" ;;
+              *) printf '  not removing %s: it is not under %s\n' "$1" "$r" >&2 ;; esac; }
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && CH="$(mktemp -d)" && [ -d "$CH" ]; then
+  CT="$CH/.config/ghostfleet/telegram"
+  mkdir -p "$CH/.config/ghostfleet" "$CH/.claude" "$CH/acme-api" "$CH/keys"
+  printf 'acme-api\t%s\twork\n' "$CH/acme-api" > "$CH/.config/ghostfleet/projects"
+  CTOK="7$RANDOM$RANDOM:$(node -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
+  printf '%s\n' "$CTOK" > "$CH/keys/token"; printf '4242\n' > "$CH/keys/chat"
+  TGC() { env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u GHOSTFLEET_LAUNCH_AGENTS -u GHOSTFLEET_TELEGRAM_DIR \
+              -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR HOME="$CH" GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 \
+              GHOSTFLEET_TELEGRAM_SERVICE="${TGSVC:-pidfile}" "$ROOT/bin/fleet-telegram" "$@" 2>&1; }
+  out="$(TGC config secret-cmd "printf '%s' '$CTOK'")"; rc=$?
+  is "a secret command that holds the token is refused" "1" "$(grep -c 'not saved.*contains the token' <<< "$out" || true)"
+  is "...with an error"                                 "1" "$([ "$rc" != 0 ] && echo 1 || echo 0)"
+  is "...and not saved"                                 "0" "$(grep -rlF -- "$CTOK" "$CH/.config" 2>/dev/null | grep -c . || true)"
+  out="$(TGC config secret-cmd 'cat "$HOME/keys/$1"')"
+  is "a command that READS them is kept"                "1" "$(grep -c 'both resolve' <<< "$out" || true)"
+  is "...in a file only the owner can read"             "-rw-------" "$(ls -l "$CT/config.json" 2>/dev/null | cut -c1-10)"
+  out="$(TGC status)"
+  is "status checks them without printing them"         "1" "$(grep -c 'the token and the chat id both resolve' <<< "$out" || true)"
+  is "...not the token"                                 "0" "$(grep -cF -- "$CTOK" <<< "$out" || true)"
+  is "...not the chat id"                               "0" "$(grep -c '4242' <<< "$out" || true)"
+  is "...and says it is not linked yet"                 "1" "$(grep -c '^linked: *no' <<< "$out" || true)"
+  is "a link to no such project is refused"             "1" "$(TGC link acme-web/master | grep -c "no project 'acme-web'" || true)"
+  is "a session name that is a path is refused"         "1" "$(TGC link 'acme-api/..' | grep -c 'is not a session name' || true)"
+  out="$(TGC link acme-api/master)"
+  is "a link names the session"                         "1" "$(grep -c 'linked to acme-api/master (cf-acme-api)' <<< "$out" || true)"
+  is "...and warns while the guard is not wired"        "1" "$(grep -c 'nothing is delivered until it is' <<< "$out" || true)"
+  out="$(TGC start)"
+  # No settings.json at all here (the end-to-end group has one without the guard).
+  is "start refuses with the guard unwired"             "1" "$(grep -c 'not started — .*settings.json is missing.*run ./install.sh' <<< "$out" || true)"
+  is "...and starts nothing"                            "no" "$([ -e "$CT/daemon.pid" ] && echo yes || echo no)"
+  is "allow --only replaces the list"                   "allowlist: Read Grep" "$(TGC config allow --only Read Grep)"
+  is "...and the guard reads what it wrote"             "Read Grep" \
+     "$(env -u TMUX HOME="$CH" CLAUDE_FLEET_DIR="$CH/.claude/fleet" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master \
+          bash "$ROOT/hooks/fleet-telegram-guard.sh" --list)"
+  is "allow adds"                                       "allowlist: Read Grep WebFetch" "$(TGC config allow WebFetch)"
+  is "disallow takes away"                              "allowlist: Read WebFetch" "$(TGC config disallow Grep)"
+  is "a pattern that is not one is refused"             "1" "$(TGC config allow 'Bash;id' | grep -c 'is not a tool pattern' || true)"
+  is "...and so is a list with nothing left"            "1" "$(TGC config disallow Read WebFetch | grep -c 'nothing allowed' || true)"
+  is "--reset is the default again"                     "1" "$(TGC config allow --reset | grep -c '^allowlist: Read Glob Grep .*(the default)$' || true)"
+  # The unit files are plain files on disk — the place the token must never be.
+  pl="$(TGSVC=launchd TGC start --dry-run)"
+  is "the launchd job runs the daemon"                  "1" "$(grep -c '<string>run</string>' <<< "$pl" || true)"
+  is "...and carries no secret"                         "0" "$(grep -cF -- "$CTOK" <<< "$pl" || true)"
+  su="$(TGSVC=systemd TGC start --dry-run)"
+  is "the systemd unit runs the daemon"                 "1" "$(grep -c '^ExecStart=.*fleet-telegram.mjs" run$' <<< "$su" || true)"
+  is "...and restarts it"                               "1" "$(grep -c '^Restart=always$' <<< "$su" || true)"
+  is "...and carries no secret"                         "0" "$(grep -cF -- "$CTOK" <<< "$su" || true)"
+  is "a dry run writes no unit"                         "no" "$([ -e "$CH/Library" ] || [ -e "$CH/.config/systemd" ] && echo yes || echo no)"
+  is "nothing it wrote holds the token"                 "0" "$(grep -rlF -- "$CTOK" "$CH/.config" "$CH/.claude" 2>/dev/null | grep -c . || true)"
+  tgclean "$CH"
+else
+  skip "fleet-telegram keeps its secrets out of every file it writes" "node or jq missing, or mktemp not available"
+fi
+
+# ── Telegram: the whole loop, through a stub of the Bot API ──────────────────
+# bin/fleet-telegram, started the way a user starts it, against a local stand-in for the
+# Bot API (test/helpers/telegram-stub.mjs), linked to a Claude-shaped session that fires
+# the REAL event hook and the REAL tool guard. Nothing here contacts Telegram or holds a
+# real token: the token is random per run, and the last rows ask whether it reached any
+# process list, log, state file or request body.
+group "a Telegram chat talks to a fleet session, end to end"
+tgclean() { local r="${TMPDIR:-/tmp}"; r="${r%/}"; [ -n "$r" ] || r=/tmp
+            case "$1" in "$r"/?*|/tmp/?*|/private/tmp/?*) rm -rf "${1:?}" ;;
+              *) printf '  not removing %s: it is not under %s\n' "$1" "$r" >&2 ;; esac; }
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
+   && command -v curl >/dev/null 2>&1 && TG="$(mktemp -d)" && [ -d "$TG" ]; then
+  FH="$TG/home"; FF="$FH/.claude/fleet"; TD="$FH/.config/ghostfleet/telegram"
+  mkdir -p "$FF" "$FH/.config/ghostfleet" "$FH/acme-api" "$FH/keys" "$TG/s" "$TG/stub"
+  printf 'acme-api\t%s\twork\n' "$FH/acme-api" > "$FH/.config/ghostfleet/projects"
+  TGTOK="7$RANDOM$RANDOM:$(node -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
+  printf '%s\n' "$TGTOK" > "$FH/keys/token"; printf '4242\n' > "$FH/keys/chat"
+  printf '%s\n' "$TGTOK" > "$TG/stub/token"
+  # A session that behaves the way Claude Code does on the paths this crosses: it takes a
+  # pasted prompt (every line of it), fires UserPromptSubmit through the real hook, makes
+  # two tool calls through the real guard, appends its answer to the transcript and fires
+  # Stop. "slow" in a prompt keeps the turn busy for 4s; "long" makes the answer span
+  # several Telegram messages.
+  cat > "$TG/agent" <<'AGENT'
+#!/usr/bin/env bash
+L="$1"; TR="$L/transcript.jsonl"; : >> "$TR"; rule='────────────────────────────────────────'
+frame() { printf '\033[2J\033[H'
+          if [ "$1" = busy ]; then printf '✻ Working… (3s · esc to interrupt)\n'; else printf '\n'; fi
+          printf '%s\n❯ \n%s\n  status\n' "$rule" "$rule"; }
+n=0
+while :; do
+  frame idle
+  IFS= read -r line || exit 0
+  p="$line"
+  # a WHOLE second: macOS /bin/bash is 3.2, which refuses a fractional -t
+  while IFS= read -r -t 1 more; do p="$p"$'\n'"$more"; done
+  n=$((n + 1)); frame busy
+  printf '%s' "$p" > "$L/prompt.$n"
+  jq -nc --arg p "$p" --arg tr "$TR" --arg d "$PWD" \
+     '{hook_event_name:"UserPromptSubmit",session_id:"tg-1",cwd:$d,transcript_path:$tr,prompt:$p}' \
+    | "$HOOK" > "$L/context.$n" 2>/dev/null
+  for t in Bash Read; do
+    jq -nc --arg t "$t" '{hook_event_name:"PreToolUse",session_id:"tg-1",tool_name:$t,tool_input:{command:"ls",file_path:"/etc/hosts"}}' \
+      | "$GUARD" >/dev/null 2>"$L/refusal.$n.$t"
+    printf '%s %s\n' "$t" "$?" >> "$L/tools.$n"
+  done
+  case "$p" in *slow*) sleep 4 ;; esac
+  case "$p" in
+    *long*) a="$(for i in $(seq 1 60); do
+                   printf 'Paragraph %s: the worker on acme-web has the migration, and **this line** is padding so the answer runs past one message.\n\n' "$i"
+                 done; printf 'END-OF-LONG-ANSWER')" ;;
+    *) a="answer to: ${p%%$'\n'*}" ;;
+  esac
+  jq -nc --arg a "$a" --arg id "msg_$n" '{type:"assistant",message:{id:$id,role:"assistant",content:[{type:"text",text:$a}]}}' >> "$TR"
+  frame idle
+  jq -nc --arg tr "$TR" --arg d "$PWD" '{hook_event_name:"Stop",session_id:"tg-1",cwd:$d,transcript_path:$tr}' \
+    | "$HOOK" >/dev/null 2>&1
+  : > "$L/stop.$n"
+done
+AGENT
+  tgwire() {   # $1 = 1 wires the tool guard, 0 leaves it out
+    jq -n --arg ev "$ROOT/hooks/fleet-event.sh" --arg g "$ROOT/hooks/fleet-telegram-guard.sh" --argjson w "$1" \
+      '{hooks: ({UserPromptSubmit: [{hooks: [{type: "command", command: $ev}]}]}
+               + (if $w == 1 then {PreToolUse: [{matcher: "", hooks: [{type: "command", command: $g}]}]} else {} end))}' \
+      > "$FH/.claude/settings.json"; }
+  tgwire 0
+  node "$ROOT/test/helpers/telegram-stub.mjs" "$TG/stub" > "$TG/stub/out" 2>&1 &
+  TGSPID=$!
+  for _ in $(seq 1 50); do [ -s "$TG/stub/port" ] && break; sleep 0.1; done
+  TGPORT="$(cat "$TG/stub/port" 2>/dev/null)"
+  TGC() { env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u GHOSTFLEET_LAUNCH_AGENTS -u GHOSTFLEET_TELEGRAM_DIR \
+              -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT \
+              HOME="$FH" GHOSTFLEET_TELEGRAM_API="http://127.0.0.1:$TGPORT" GHOSTFLEET_TELEGRAM_POLL=1 \
+              GHOSTFLEET_TELEGRAM_SERVICE=pidfile PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-telegram" "$@" 2>&1; }
+  FSD() { env -u TMUX -u TMUX_PANE HOME="$FH" CLAUDE_CONFIG_DIR="$FH/.claude" CLAUDE_FLEET_DIR="$FF" \
+              PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cf-acme-api "$@" 2>&1; }
+  tgpost() { curl -s -m 5 -X POST -H 'content-type: application/json' -d "$2" "http://127.0.0.1:$TGPORT/$1" >/dev/null; }
+  tgmsg() { jq -nc --argjson id "$1" --argjson chat "$2" --arg t "$3" \
+              '{message:{message_id:$id,date:0,chat:{id:$chat,type:"private"},from:{id:$chat},text:$t}}'; }
+  tgmedia() { jq -nc --argjson id "$1" --argjson m "$2" '{message:({message_id:$id,date:0,chat:{id:4242,type:"private"}} + $m)}'; }
+  b64of() { node -e 'process.stdout.write(require("fs").readFileSync(process.argv[1]).toString("base64"))' "$1"; }
+  # What reached "Telegram": the body of every sendMessage the stub was sent, one a line.
+  # What REACHED the chat: a message the stub bounced (over the limit) is not one he got, so
+  # an unsplit answer cannot pass "several messages" on its HTML try plus its plain retry.
+  tgsent() { jq -c 'select(.method == "sendMessage" and .ok != false) | .body' "$TG/stub/requests.jsonl" 2>/dev/null; }
+  sent_has() { grep -qF -- "$1" <<< "$(tgsent)"; }
+  log_has() { grep -qF -- "$1" "$TD/log" 2>/dev/null; }
+  turned() { [ -e "$TG/s/stop.$1" ]; }
+  until_ok() { local n="$1" i; shift; for i in $(seq 1 "$n"); do "$@" && return 0; sleep 0.25; done; return 1; }
+  # The token must not reach a process list at ANY moment, including the ones when the
+  # secret command and fleet-send run — so the process table is sampled all through the
+  # loop, not once at the end. Matched by the shell's own `case`, never by a grep: a grep
+  # for the token would be a process with the token in its arguments. Killed by its pid.
+  ( while :; do _ps="$(ps -A -ww -o args= 2>/dev/null)"
+      case "$_ps" in *"$TGTOK"*) printf 'leak\n' >> "$TG/ps.leak" ;; esac
+      case "$_ps" in *"fleet-telegram.mjs run"*) printf 'seen\n' >> "$TG/ps.seen" ;; esac
+      sleep 0.2; done ) &
+  TGPS=$!
+
+  TGC link acme-api/master >/dev/null
+  TGC config secret-cmd 'cat "$HOME/keys/$1"' >/dev/null
+  out="$(TGC start)"
+  is "start refuses while the tool guard is not wired"  "1" "$(grep -c 'not started.*not wired' <<< "$out" || true)"
+  tgwire 1
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -x 220 -y 40 -s master -c "$FH/acme-api" \
+    "env HOME='$FH' CLAUDE_CONFIG_DIR='$FH/.claude' CLAUDE_FLEET_DIR='$FF' CLAUDE_FLEET_SOCK=cf-acme-api \
+         CLAUDE_FLEET_SLOT=master CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_QUEUE_EVERY=0.3 \
+         HOOK='$ROOT/hooks/fleet-event.sh' GUARD='$ROOT/hooks/fleet-telegram-guard.sh' \
+         PATH='$ROOT/bin':\"\$PATH\" bash '$TG/agent' '$TG/s'" 2>/dev/null
+  for _ in $(seq 1 20); do grep -q '❯' <<< "$(tmux -L cf-acme-api capture-pane -p -t master 2>/dev/null)" && break; sleep 0.1; done
+  out="$(TGC start)"
+  TGPID="$(tr -dc '0-9' < "$TD/daemon.pid" 2>/dev/null)"
+  is "with it wired, start runs the daemon"             "1" "$(grep -c 'started (pid' <<< "$out" || true)"
+
+  # Unwired after the start (an install that dropped it): refused at delivery, too.
+  tgwire 0
+  tgpost _push "$(tgmsg 5 4242 'are you there')"
+  until_ok 60 sent_has 'not wired'
+  is "a message while the guard is unwired is refused"  "1" "$(tgsent | grep -c 'not wired' || true)"
+  is "...and runs no turn"                              "0" "$(ls "$TG/s" | grep -c '^prompt\.' || true)"
+  tgwire 1
+  # Wired, but the session runs another agent, which never calls a Claude Code hook: the
+  # allowlist would not exist there, so the daemon delivers nothing to it.
+  printf 'codex\n' > "$FF/cf-acme-api.master.agent"
+  tgpost _push "$(tgmsg 7 4242 'are you there now')"
+  until_ok 60 sent_has 'it runs codex'
+  is "a session running another agent is refused"       "1" "$([ "$(tgsent | grep -c 'it runs codex')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and runs no turn either"                       "0" "$(ls "$TG/s" | grep -c '^prompt\.' || true)"
+  rm -f "$FF/cf-acme-api.master.agent"
+
+  tgpost _push "$(tgmsg 6 999 'let me in')"
+  until_ok 60 log_has 'dropped from 999'
+  is "a stranger's message is dropped, and logged"      "1" "$(grep -c 'dropped from 999' "$TD/log" 2>/dev/null || true)"
+  is "...answered with nothing"                         "0" "$(tgsent | jq -r '.chat_id' | grep -cx 999 || true)"
+  is "...and its words are not in the log"              "0" "$(grep -c 'let me in' "$TD/log" 2>/dev/null || true)"
+
+  tgpost _push "$(tgmsg 11 4242 'what is the status of acme-web')"
+  until_ok 80 sent_has 'answer to: [telegram] what is the status of acme-web'
+  is "an allowlisted message lands as the owner's words" "[telegram] what is the status of acme-web" "$(cat "$TG/s/prompt.1" 2>/dev/null)"
+  is "...the turn told it is him, on Telegram"          "1" "$(jq -r '.hookSpecificOutput.additionalContext // empty' "$TG/s/context.1" 2>/dev/null | grep -c 'The owner wrote this from Telegram' || true)"
+  is "...its shell call refused"                        "Bash 2" "$(grep '^Bash ' "$TG/s/tools.1" 2>/dev/null)"
+  is "...told what it may do instead"                   "1" "$(grep -c 'delegate it: fleet_send' "$TG/s/refusal.1.Bash" 2>/dev/null || true)"
+  is "...while its read ran"                            "Read 0" "$(grep '^Read ' "$TG/s/tools.1" 2>/dev/null)"
+  r1="$(tgsent | grep -m1 -F 'answer to: [telegram] what is the status')"
+  is "its answer went back to him"                      "4242" "$(jq -r '.chat_id' <<< "$r1" 2>/dev/null)"
+  is "...as a reply to his message"                     "11" "$(jq -r '.reply_parameters.message_id' <<< "$r1" 2>/dev/null)"
+  is "...in the HTML Telegram renders"                  "HTML" "$(jq -r '.parse_mode' <<< "$r1" 2>/dev/null)"
+
+  FSD master "a desk task for acme-api" >/dev/null
+  until_ok 80 turned 2
+  is "a turn typed at the desk is not restricted"       "Bash 0" "$(grep '^Bash ' "$TG/s/tools.2" 2>/dev/null)"
+  is "...gets no Telegram context"                      "0" "$(grep -c 'Telegram' "$TG/s/context.2" 2>/dev/null || true)"
+  sleep 1.5
+  is "...and its answer goes nowhere near Telegram"     "0" "$(tgsent | grep -c 'a desk task' || true)"
+
+  node -e 'process.stdout.write(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==","base64"))' > "$TG/dot.png"
+  tgpost _file "$(jq -nc --arg b "$(b64of "$TG/dot.png")" '{file_id:"ph1",b64:$b}')"
+  tgpost _push "$(tgmedia 12 '{"caption":"look at this","photo":[{"file_id":"ph1","file_unique_id":"u1","width":1,"height":1,"file_size":68}]}')"
+  until_ok 80 turned 3
+  pp="$(sed -n 's/^photo: //p' "$TG/s/prompt.3" 2>/dev/null)"
+  is "a photo arrives with its caption"                 "[telegram] look at this" "$(head -n 1 "$TG/s/prompt.3" 2>/dev/null)"
+  is "...as a file the session can open"                "yes" "$([ -n "$pp" ] && [ -r "$pp" ] && [ -s "$pp" ] && echo yes || echo no)"
+  is "...where the phone's photos go"                   "$FF/attach/cf-acme-api.master" "$(dirname "$pp" 2>/dev/null)"
+  is "...and it is the picture that was sent"           "89504e47" "$(head -c 4 "$pp" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  is "...in a turn as restricted as any from Telegram"  "Bash 2" "$(grep '^Bash ' "$TG/s/tools.3" 2>/dev/null)"
+
+  # THAT turn's answer: a message that arrives while the session is busy queues behind
+  # the running turn, and the running turn's Stop answers nobody on Telegram.
+  FSD master "a slow desk task" >/dev/null
+  until_ok 40 test -e "$TG/s/prompt.4"
+  tgpost _push "$(tgmsg 21 4242 'give me the long answer')"
+  until_ok 120 sent_has 'END-OF-LONG-ANSWER'
+  is "a message to a busy session is queued, and he is told" "1" "$(tgsent | grep -c 'your message is queued' || true)"
+  is "...the busy turn's answer is not sent to him"     "0" "$(tgsent | grep -c 'a slow desk task' || true)"
+  is "...nor was that turn restricted"                  "Bash 0" "$(grep '^Bash ' "$TG/s/tools.4" 2>/dev/null)"
+  is "...the message ran as its own turn"               "[telegram] give me the long answer" "$(cat "$TG/s/prompt.5" 2>/dev/null)"
+  is "...a restricted one"                              "Bash 2" "$(grep '^Bash ' "$TG/s/tools.5" 2>/dev/null)"
+  LONG="$(tgsent | grep -E 'Paragraph|END-OF-LONG-ANSWER')"
+  is "...and its answer came back in several messages"  "yes" "$([ "$(grep -c . <<< "$LONG")" -ge 2 ] && echo yes || echo no)"
+  is "...each within Telegram's limit"                  "0" "$(jq -c 'select(.method == "sendMessage" and (.body.text | length) > 4096)' "$TG/stub/requests.jsonl" 2>/dev/null | grep -c . || true)"
+  is "...the first a reply to his message"              "21" "$(head -n 1 <<< "$LONG" | jq -r '.reply_parameters.message_id' 2>/dev/null)"
+  is "...the markdown rendered"                         "yes" "$([ "$(grep -c '<b>this line</b>' <<< "$LONG")" -ge 1 ] && echo yes || echo no)"
+  is "...and none of it lost"                           "yes" "$(grep -q 'Paragraph 1:' <<< "$LONG" && grep -q 'Paragraph 60:' <<< "$LONG" && echo yes || echo no)"
+
+  node -e 'process.stdout.write(Buffer.concat([Buffer.from("OggS"), Buffer.alloc(60, 1)]))' > "$TG/voice.oga"
+  tgpost _file "$(jq -nc --arg b "$(b64of "$TG/voice.oga")" '{file_id:"vc1",b64:$b}')"
+  tgpost _push "$(tgmedia 31 '{"voice":{"file_id":"vc1","file_unique_id":"v1","duration":2,"mime_type":"audio/ogg"}}')"
+  until_ok 80 turned 6
+  vp="$(grep -o "$FF/attach/[^ ]*\.oga" "$TG/s/prompt.6" 2>/dev/null | head -n 1)"
+  is "a voice note with no transcriber is an audio file" "yes" "$([ -n "$vp" ] && [ -s "$vp" ] && echo yes || echo no)"
+  is "...and the turn is told so"                       "1" "$(grep -c 'no transcriber is set up' "$TG/s/prompt.6" 2>/dev/null || true)"
+  TGC config transcribe-cmd 'printf "%s" "buy milk on the way home"' >/dev/null
+  tgpost _push "$(tgmedia 32 '{"voice":{"file_id":"vc1","file_unique_id":"v1","duration":2,"mime_type":"audio/ogg"}}')"
+  until_ok 80 turned 7
+  is "with a transcriber, it arrives as words"          "[telegram] (voice note, transcribed) buy milk on the way home" "$(cat "$TG/s/prompt.7" 2>/dev/null)"
+
+  # An error that QUOTES the request — the token is in the URL path — reaches the log and
+  # the owner only through redaction.
+  tgpost _push "$(tgmedia 41 '{"photo":[{"file_id":"quote-url","file_unique_id":"q1","width":1,"height":1,"file_size":68}]}')"
+  until_ok 60 sent_has 'Bad Gateway'
+  is "an error that quoted the token reached him redacted" "yes" "$([ "$(tgsent | grep 'Bad Gateway' | grep -c 'redacted')" -ge 1 ] && echo yes || echo no)"
+
+  out="$(TGC send '**done**: the acme-web PR is open')"
+  is "fleet-telegram send reaches the chat"             "1" "$(grep -c 'sent (1 message)' <<< "$out" || true)"
+  is "...rendered"                                      "yes" "$([ "$(tgsent | grep -c '<b>done</b>: the acme-web PR is open')" -ge 1 ] && echo yes || echo no)"
+  out="$(TGC send 'the screenshot' --file "$TG/dot.png")"
+  is "...and a picture, as a photo"                     "yes" "$([ "$(jq -c 'select(.method == "sendPhoto") | .body' "$TG/stub/requests.jsonl" 2>/dev/null | grep -c '"caption":"the screenshot"')" -ge 1 ] && echo yes || echo no)"
+
+  # The MCP tool is that same command: what an agent calls when it has something to tell
+  # him unprompted. Through the MCP server's own entry point, so the schema, the argument
+  # check and the argv the dispatch builds are all on the path.
+  out="$(env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u GHOSTFLEET_TELEGRAM_DIR -u CLAUDE_CONFIG_DIR \
+           -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT \
+           HOME="$FH" GHOSTFLEET_TELEGRAM_API="http://127.0.0.1:$TGPORT" PATH="$ROOT/bin:$PATH" \
+           node --input-type=module -e "
+             const m = await import(process.argv[1]);
+             const r = m.callTool('fleet_telegram_send', { text: 'the _acme-api_ deploy is green' });
+             process.stdout.write(typeof r === 'string' ? r : 'FAILED ' + JSON.stringify(r));" \
+           "$ROOT/mcp/fleet-dispatch.mjs" 2>&1)"
+  is "the MCP tool sends it too"                        "1" "$(grep -c 'sent (1 message)' <<< "$out" || true)"
+  is "...rendered the same way"                         "yes" "$([ "$(tgsent | grep -c 'the <i>acme-api</i> deploy is green')" -ge 1 ] && echo yes || echo no)"
+
+  out="$(TGC stop)"
+  is "stop ends the daemon by its pid"                  "1" "$(grep -c "stopped (pid $TGPID)" <<< "$out" || true)"
+  for _ in $(seq 1 20); do kill -0 "$TGPID" 2>/dev/null || break; sleep 0.1; done
+  is "...and it is gone"                                "no" "$(kill -0 "$TGPID" 2>/dev/null && echo yes || echo no)"
+  kill "$TGPS" 2>/dev/null; wait "$TGPS" 2>/dev/null
+
+  is "the token was in no process's arguments"          "0" "$(cat "$TG/ps.leak" 2>/dev/null | wc -l | tr -d ' ')"
+  is "...over samples that saw the daemon"              "yes" "$([ "$(grep -c . "$TG/ps.seen" 2>/dev/null)" -ge 5 ] && echo yes || echo no)"
+  is "...in no file the channel or the fleet wrote"     "0" "$(grep -rlF -- "$TGTOK" "$FH/.config" "$FH/.claude" "$TG/s" 2>/dev/null | grep -c . || true)"
+  is "...in nothing sent to Telegram"                   "0" "$(grep -cF -- "$TGTOK" "$TG/stub/requests.jsonl" 2>/dev/null || true)"
+  is "...over a log that has something in it"           "yes" "$([ "$(grep -c . "$TD/log" 2>/dev/null)" -ge 8 ] && echo yes || echo no)"
+  is "...including the line redaction kept it out of"   "yes" "$([ "$(grep -c 'redacted' "$TD/log" 2>/dev/null)" -ge 1 ] && echo yes || echo no)"
+
+  kill -0 "$TGPID" 2>/dev/null && kill "$TGPID" 2>/dev/null
+  kill "$TGSPID" 2>/dev/null; wait "$TGSPID" 2>/dev/null
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tgclean "$TG"
+else
+  skip "a Telegram chat talks to a fleet session, end to end" "tmux, jq, node or curl missing, or mktemp not available"
 fi
 
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────

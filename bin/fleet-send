@@ -14,7 +14,9 @@
 # --owner marks the prompt as THE OWNER'S OWN WORDS, and is passed only by a sender that
 # authenticated the owner: the phone's server, whose request carried a passkey-minted token
 # (mcp/fleet-dispatch.mjs asOwner adds it for that door alone; the MCP tool has no field for
-# it). The mod's ledger then records it as the person's message, judged like one typed at the
+# it) — and bin/fleet-telegram, which delivers a message only from the one chat id the
+# owner's secret command names, and drops every other chat before anything is sent. The
+# mod's ledger then records it as the person's message, judged like one typed at the
 # prompt, instead of as a lead's brief that is done only with proof. A worker or a lead
 # dispatching work never passes it. It rides the handoff and the queue record like --nudge.
 #
@@ -682,7 +684,15 @@ if [ -n "$RSESS" ]; then
   # that dies takes the tool call with it — so the answer has to be in the last message too,
   # or the fallback relays "(no text)". The hook suppresses its row when it can PROVE the
   # SendMessage landed, so saying it twice does not answer twice.
-  if { [ -z "$_a" ] || [ "$_a" = claude ]; } && [ "$XPROF" = 0 ]; then
+  if [ "$RSOCK" = telegram ]; then
+    # THE OWNER, NOT AN AGENT. `telegram/<message>` is the address bin/fleet-telegram gives
+    # a message it delivers, so the answer rides this queue, the mod's handoff and the
+    # Stop relay unchanged, and hooks/fleet-event.sh sends it back to Telegram. Nothing is
+    # prepended: every preamble below tells the target it is talking to another AGENT and
+    # starts with [fleet], which is the prefix Jarvis's ledger drops as machine traffic —
+    # so the owner's yes, typed on his phone, would never be recorded as his.
+    :
+  elif { [ -z "$_a" ] || [ "$_a" = claude ]; } && [ "$XPROF" = 0 ]; then
     MSG="[fleet] This request comes from another agent ($RPEER), not a human, and it is
 waiting on the answer. Answer it BOTH ways, in this order:
   1. call SendMessage with to: \"$RPEER\" and the full answer as the message — that
@@ -1021,7 +1031,9 @@ fi   # the paste
 # A plain `[ -n … ] && echo` here would leave a FALSE exit status behind when there is no
 # reply address, and callers read fleet-send's status as "did the send work" (the MCP
 # server turns any nonzero into an error string).
-if [ -n "$RSESS" ]; then
+if [ -n "$RSESS" ] && [ "$RSOCK" = telegram ]; then
+  echo "fleet-send: its answer goes back to Telegram when the turn ends"
+elif [ -n "$RSESS" ]; then
   if [ -z "$_a" ] || [ "$_a" = claude ]; then
     # Name BOTH paths: the caller is about to wait, and "watch your inbox" alone would be
     # wrong now — the usual delivery is a message that arrives in this session directly.

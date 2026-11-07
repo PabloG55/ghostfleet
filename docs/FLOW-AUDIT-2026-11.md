@@ -44,7 +44,7 @@ stands in part) or **open**.
 | S6. Subagents took 6% of spend | open | — | Open by design: no waste found in subagent use |
 | S7. 4 prompts stranded in the send queue | fixed | #110 | Re-sending or discarding the 4 stranded prompts needs the owner's OK |
 | S8. 14 lead wakes expired because the input box held text | fixed | #112 | — (the held wake now shows on the band and the phone) |
-| S9. 2 of 4 messages relayed to the work lead through Telegram got no reply | in progress | — | Outside this repo: handed to the Telegram bot's owner (each relay asks for a reply) |
+| S9. 2 of 4 messages relayed to the work lead through Telegram got no reply | in progress | — | Outside this repo: handed to the Telegram bot's owner (each relay asks for a reply). In-repo replacement: `fleet-telegram` ([TELEGRAM.md](TELEGRAM.md)) makes the lead the bot, so the answer is its own turn's last message and there is no relay hop to drop it; it applies once the external relay is switched over to it |
 | S10. Leads re-brief finished sessions that carry huge contexts | improved | #115, #111 | #115 adds the skill rule |
 | S11. Scratch sessions inherit a worker's environment and report as that worker (9 false DONEs seen during this audit) | fixed | #114 | — |
 | S12. Stray text in the lead's input box can block its wakes | improved | #112 | #112 shows the held wake. Why not fixed: only the owner may clear the input box |

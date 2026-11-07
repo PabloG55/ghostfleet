@@ -211,6 +211,8 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_interrupt', description: "End a session's CURRENT TURN — the Escape the desk presses, retried until the spinner stops (one Escape is often swallowed mid tool-call). Nothing else: the session is not parked, not stopped and keeps taking work, so unlike fleet_pause this works on 'master' too. A prompt queued behind the turn stays queued (an interrupt fires no Stop) and the next send delivers it first.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_telegram_send', description: "Send the OWNER a message on Telegram, in the chat bin/fleet-telegram connects to this machine's fleet — for something the owner should see on their phone now (a result, a question, a finished PR), not for a reply to a message they sent from there: a Telegram turn's final message already goes back on its own. Markdown is converted to what Telegram shows (bold, italics, code, links) and long text is split. `file` sends a file as well (a JPEG or PNG as a photo, anything else as a document), with `text` as its caption. Fails, saying why, when the channel is not set up (fleet-telegram status).",
+    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'the message (markdown)' }, file: { type: 'string', description: 'absolute path of a file to send with it' } }, required: ['text'], additionalProperties: false } },
   { name: 'fleet_queue', description: "List the prompts still WAITING in a session's queue — sent with fleet_send while it was mid-turn and not delivered yet. One line per prompt: queued-at (epoch seconds), the prompt base64-encoded, and kind ('nudge' for the fleet's own wakes, else empty), tab-separated. Empty output is an empty queue.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_unqueue', description: "Take a prompt back OUT of a session's queue before it is delivered — the first waiting one whose text is exactly `prompt`. Refused, saying so, when it is no longer there: it has already been typed into the session and can no longer be edited.",
@@ -485,6 +487,13 @@ export function plan(name, a = {}) {
     case 'fleet_interrupt':
       return run('fleet-pause', ['--interrupt', String(a.session)], t);
     // The queue's format belongs to fleet-send, so both are fleet-send's own modes.
+    case 'fleet_telegram_send': {
+      // No project: the channel belongs to the machine, not to a fleet, and its own state
+      // (which bot, which chat) is resolved by fleet-telegram itself, never passed in here.
+      const args = ['send', String(a.text ?? '')];
+      if (a.file) args.push('--file', String(a.file));
+      return run('fleet-telegram', args, null);
+    }
     case 'fleet_queue':
       return run('fleet-send', ['--list-queue', String(a.session)], t);
     case 'fleet_unqueue':

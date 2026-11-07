@@ -114,6 +114,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
 | **[docs/MEMORY.md](docs/MEMORY.md)** | **The fleet's memory, `fleet-know`.** What every project is, where it stands and why, recorded as sessions, spawns, merges and ledger items happen — one page per project, across every profile and paired machine, so a lead answers from it instead of reading files. The three layers, the include/private/exclude switch, and the queries |
+| **[docs/TELEGRAM.md](docs/TELEGRAM.md)** | **A Telegram chat connected to a lead.** `fleet-telegram`: setting up the bot, keeping the token in your keychain, what a photo or a voice note arrives as, and the tool allowlist a Telegram turn runs under, and why |
 | **[docs/jarvis.md](docs/jarvis.md)** | **Jarvis, one session above every fleet** — *experimental, off by default; `fleet-experimental enable jarvis` turns it on.* `ghostfleet jarvis`, the digest it reads instead of polling, the confirm-list the tools enforce, conversation mode on the phone (transcribed on the Mac), and its fresh start once the conversation grows long |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex`, `opencode`, `agy` and `cursor` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
@@ -218,6 +219,21 @@ fleet-jarvis voice --kokoro --install   # verified download + a pinned Python 3.
 Without it nothing is missing: the phone reads with its own voice. `fleet-phone` and
 `fleet-jarvis status` say whether it is installed, not installed or broken.
 [docs/mobile.md](docs/mobile.md#the-macs-voice-kokoro-optional) has the details.
+
+**Or talk to a lead from Telegram:**
+
+```bash
+fleet-telegram link acme-api/master   # then config secret-cmd, start — docs/TELEGRAM.md
+```
+
+One chat, one session. Your message lands as your words. The answer is the final message
+of the turn your message started, sent back to the chat with its markdown rendered and
+split to Telegram's limit. Photos arrive as files the session can open. Voice notes arrive
+as words if you set a transcriber, otherwise as an audio file. The token never touches a
+file: it comes from a command you name, such as a keychain lookup. A Telegram turn may only
+read, look things up and delegate through the fleet tools, because a chat id on a phone is
+weaker proof than you at the keyboard. [docs/TELEGRAM.md](docs/TELEGRAM.md) covers the
+setup and the allowlist.
 
 Two things that cost people time, so they are in that command's output too: the passkey is
 enforced server-side, so until a phone is enrolled the app sits on its lock screen and the

@@ -684,6 +684,7 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 # Everything below points at the STAGED runtime, never the repo.
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
+TGGUARD="$FLEET_HOME/hooks/fleet-telegram-guard.sh"
 OBSERVE="$FLEET_HOME/hooks/fleet-observe.sh"
 
 mkdir -p "$BIN_DIR"
@@ -693,6 +694,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
          fleet-digest fleet-jarvis fleet-experimental fleet-accounts fleet-update fleet-mod fleet-ledger fleet-web fleet-know fleet-know-event
+         fleet-telegram
          agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
@@ -776,7 +778,7 @@ wire_hooks() {
   tmp="$(mktemp)"
   # Hooks belong in settings.json; MCP does NOT (see register_mcp). Wire the hooks
   # and strip any stale ghostfleet MCP entry an older installer wrote here.
-  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg observe "$OBSERVE" '
+  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg tgguard "$TGGUARD" --arg observe "$OBSERVE" '
     def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
     # STOP CARRIES TWO OF OURS: the status/notify hook, and the observation enforcer that
     # refuses a lead done-claim on a turn that changed a surface and never looked at it.
@@ -801,11 +803,18 @@ wire_hooks() {
     # Bash and the GitHub MCP merge tool are there for ONE question — is a worker in a
     # linked worktree merging its own PR — and the guard leaves a non-merge Bash call
     # before it has so much as started jq.
+    #   The Telegram guard is a SECOND stanza with an empty matcher, because the question it
+    # asks — did the owner start this turn from Telegram — is about every tool, and a regex
+    # of the ones to refuse would let through whatever tool shipped after it was written.
+    # It leaves before it has started a process unless a Telegram mark exists on the
+    # socket of the session (hooks/fleet-telegram-guard.sh).
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
-          | select([.hooks[]?.command] | index($guard) | not) ]
+          | select([.hooks[]?.command] | (index($guard) or index($tgguard)) | not) ]
         + [ { matcher: "EnterWorktree|Agent|Task|Bash|mcp__.*__merge_pull_request",
-              hooks: [ { type: "command", command: $guard } ] } ] )
+              hooks: [ { type: "command", command: $guard } ] },
+            { matcher: "",
+              hooks: [ { type: "command", command: $tgguard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
   ' "$settings" > "$tmp" && mv "$tmp" "$settings"

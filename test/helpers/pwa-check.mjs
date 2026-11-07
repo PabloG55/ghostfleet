@@ -196,10 +196,13 @@ is('...and the shell does not hand the scrollport back', false,
 // that refuses what the server would have taken is a feature that looks broken, and the
 // other way round is a wasted upload.
 {
+  // The server's number lives in lib/attach.mjs since the photo store became shared (the
+  // Telegram channel stores photos through it too); the body cap is still fleet-serve's own.
   const serveSrc = fs.readFileSync(path.join(ROOT, 'bin', 'fleet-serve.mjs'), 'utf8');
+  const attachSrc = fs.readFileSync(path.join(ROOT, 'lib', 'attach.mjs'), 'utf8');
   const nOf = (src, name) => (new RegExp(`${name} = ([0-9*\\s]+);`).exec(src) || [])[1];
   const ev = (x) => { try { return x ? Function(`return (${x})`)() : null; } catch { return null; } };
-  const server = ev(nOf(serveSrc, 'ATTACH_MAX_BYTES'));
+  const server = ev(nOf(attachSrc, 'ATTACH_MAX_BYTES'));
   const client = ev(nOf(JS['api.js'], 'ATTACH_MAX_BYTES'));
   is('the photo limit is a real number on the server', true, server > 0);
   is('...and the client refuses at exactly the same one', server, client);

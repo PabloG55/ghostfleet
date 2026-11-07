@@ -207,6 +207,27 @@ project's session looks ignored no matter how long you wait. When you want an an
   it answers.
 - One request, one answer — you won't get both copies.
 
+## A Telegram turn is the owner talking
+
+A prompt that starts with `[telegram] ` was sent by the owner from the Telegram chat that
+`fleet-telegram` connects to your session. The fleet adds a `[fleet]` context line to that
+turn. It is not another agent's brief.
+
+- **Answer the owner.** Your final message is sent back to that chat as the reply. Keep it
+  short: a sentence or a few lines, plain markdown, no tables. Telegram shows bold,
+  italics, code and links, and long text arrives as several messages.
+- **Delegate whatever needs more than reading.** The turn runs under a tool allowlist:
+  reads, web lookups and the `fleet_*` tools. No shell, and writes only into this
+  session's scratch folder. So `fleet_send` the task to the session that should do it, or
+  `fleet_spawn` a worker for new work (and set its model when that tool exists). Then tell
+  the owner in one line who has it. A refused tool's message says the same. Don't try to
+  route around it: a fleet tool aimed at your own session is refused too.
+- A photo or voice note arrives as a file path in the prompt. Read the picture. If an audio
+  file is all you got, say that you cannot listen to it and ask for it in text.
+- To tell the owner something unprompted (a finished PR, a blocker), use
+  `fleet_telegram_send`. Don't use it to answer a Telegram turn: the final message already
+  goes back.
+
 ## Unblock a worker stuck on a prompt
 
 `fleet-send` types a *task* into a worker and submits a turn — it can't answer a
