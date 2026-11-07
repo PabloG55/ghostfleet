@@ -130,6 +130,13 @@ const A = await host('a', [['acme-api', 'work'], ['scratch', 'personal']]);
 const B = await host('b', [['acme-api', 'work'], ['toolbox', 'work']]);
 plantWaiting(A, 'cf-acme-api', 'mh-a-master', 'the laptop ask');
 plantWaiting(B, 'cf-toolbox', 'mh-b-master', 'the vm ask');
+// WHETHER SOMEONE IS AT A KEYBOARD is injected on both, the way the push group injects it:
+// the VM says someone typed there 7s ago, the laptop has no reading at all (a missing file is
+// what a Linux host without HID looks like). Neither then reads the keyboard of the machine
+// running this.
+fs.writeFileSync(path.join(T, 'b-atmac.json'), '{"idle":7,"locked":false}');
+B.env.GHOSTFLEET_AT_MAC_FILE = path.join(T, 'b-atmac.json');
+A.env.GHOSTFLEET_AT_MAC_FILE = path.join(T, 'a-atmac-none.json');
 const code = (h) => (h.cli('enroll', 'phone').out.match(/[A-Z0-9]{5}-[A-Z0-9]{5}/) || [''])[0];
 const ca = code(A), cb = code(B);
 if (!(await start(A)) || !(await start(B))) {
@@ -282,6 +289,7 @@ is('the vm audits the photo it stored, naming where it came from', 'laptop/phone
    `${bAtt.client} ${bAtt.via} ${bAtt.origin_host} ${bAtt.origin_client} ${bAtt.project} ${bAtt.subject} ${bAtt.result}`);
 // ONE RULE: a photo is allowed exactly where a send is, so a read-only pairing drops both.
 const { pairAllows } = await import(path.join(RT, 'bin', 'fleet-serve.mjs'));
+is('whether someone is at a keyboard crosses, as a read', 'true false', [pairAllows('GET', '/api/presence'), pairAllows('POST', '/api/presence', {})].join(' '));
 is('a photo crosses while a send does', 'true true', [pairAllows('POST', '/api/verb', { tool: 'fleet_send' }), pairAllows('POST', '/api/attach', {})].join(' '));
 is('...and a read-only pairing refuses both', 'false false',
    [pairAllows('POST', '/api/verb', { tool: 'fleet_send' }, new Set()), pairAllows('POST', '/api/attach', {}, new Set())].join(' '));
@@ -356,6 +364,18 @@ s = await signed(vmOnA.in, 'GET', '/api/projects');
 is('a signature reflected with the other direction\'s secret: refused', 401, s.res.status);
 s = await signed(vmOnA.out, 'GET', '/api/audit');
 is('a signed request outside the scope: refused', 403, s.res.status);
+// /api/presence is in PAIR_READS on purpose: the push hold on each machine asks the other.
+// It is told two numbers' worth and nothing else, and only over the pairing.
+s = await signed(vmOnA.out, 'GET', '/api/presence');
+is('a paired host may ask whether someone is at a keyboard here', 200, s.res.status);
+is('...and is told idle and locked, and nothing else', '["idle","locked"]', JSON.stringify(Object.keys(s.res.json || {}).sort()));
+is('...from this host\'s own reading', '7 false', `${s.res.json && s.res.json.idle} ${s.res.json && s.res.json.locked}`);
+r = await request(B.base, 'GET', '/api/presence');
+is('...while nobody unpaired and unenrolled may ask it', 401, r.status);
+// THE ASKING HALF, through the real pairing: the laptop's `fleet-serve push` reads presence the
+// way its watcher does, so the VM's answer has to cross the signed request to appear here.
+c = A.cli('push');
+is('the laptop reads the vm\'s presence over the pairing', true, c.code === 0 && /^now +at the keyboard \(peer vm, idle 7s\)$/m.test(c.out));
 s = await signed(vmOnA.out, 'POST', '/api/verb', { tool: 'fleet_spawn', args: { project: 'toolbox', name: 'x' } });
 is('a signed spawn: refused', 403, s.res.status);
 s = await signed(vmOnA.out, 'GET', '/api/grid?project=toolbox@laptop');
@@ -382,6 +402,9 @@ r = await pa.api(A.base, 'GET', '/api/projects');
 const vmRow = ((r.json && r.json.hosts) || []).find(x => x.label === 'vm') || {};
 is('with the vm down, the laptop still answers', 200, r.status);
 is('...the vm is listed offline, not missing', false, vmRow.online);
+c = A.cli('push');
+is('with the vm down, its presence is no reading: nothing would be held', true, c.code === 0 && /^now +no reading — nothing would be held$/m.test(c.out));
+
 is('...with when it was last seen', true, Number(vmRow.last_seen) > 0 && /ago|just now/.test(String(vmRow.last_seen_ago)));
 is('...and its projects are not drawn as if they were there', 'acme-api scratch', names(r));
 r = await pa.api(A.base, 'GET', '/api/grid?project=toolbox@vm');

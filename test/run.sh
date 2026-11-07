@@ -7422,12 +7422,20 @@ cat > "$FSH/flow.json" <<FLOW
     { "name": "a clean screen", "goto": "/clean", "expect": "All good" }
   ] }
 FLOW
-# CHROME COUNTED BEFORE AND AFTER, because a browser is ten processes holding a profile
-# open and this repo has already paid for a command that exited past its own cleanup —
-# 266 stranded Chromes. A leak here would be invisible in every other assertion.
-fschromes() { pgrep -fl 'gf-browser-' 2>/dev/null | grep -c . || true; }
-FSBEFORE="$(fschromes)"
-FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
+# CHROME COUNTED AFTERWARDS, because a browser is ten processes holding a profile open and
+# this repo has already paid for a command that exited past its own cleanup — 266 stranded
+# Chromes. A leak here would be invisible in every other assertion.
+#   COUNTED IN THIS GROUP'S OWN TMPDIR, never machine-wide. lib/browser.mjs makes its profile
+# under os.tmpdir(), so `pgrep gf-browser-` counted every browser every worktree and session on
+# the machine had open, and "the same number before and after" failed whenever a neighbour's
+# browser closed mid-group — measured: 15 before, 10 after, nothing of this run's left over,
+# on a Mac running sibling worktrees. Here the profiles land under a dir only this group
+# uses, so the number that means "none left" is 0, whoever else is running. The dir is under
+# $TEST_RUNS rather than FSH because Chrome puts its singleton socket under TMPDIR too, and
+# a /var/folders path is long enough to push that past the 104-byte socket limit.
+FST="$(cd "$(mktemp -d "$TEST_RUNS.$$.shots.XXXXXX")" && pwd -P)"
+fschromes() { pgrep -f "user-data-dir=$FST/gf-browser-" 2>/dev/null | grep -c . || true; }
+FSOUT="$(TMPDIR="$FST" node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
 if grep -q 'no chrome' <<< "$FSOUT"; then
   skip "fleet-shots against a real page" "no chrome to photograph in"
 else
@@ -7454,7 +7462,7 @@ else
             node -e 'const m=require(process.argv[1]);const d=Number(process.argv[2]);console.log(Math.abs(d-m.duration)<0.6?"yes":"no: file "+d+"s, manifest "+m.duration+"s")' "$FSH/run/manifest.json" "$d")"
     fi
     is "...and the page is the recorded-run page"  "yes" "$(grep -q '<video id="v"' "$FSH/run/index.html" && echo yes || echo no)"
-    node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
+    TMPDIR="$FST" node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
     is "--stills: a still per step and no video"   "4:no" \
        "$(ls "$FSH/stills"/*.png 2>/dev/null | grep -c .):$(ls "$FSH/stills"/flow.* >/dev/null 2>&1 && echo yes || echo no)"
   else
@@ -7514,12 +7522,18 @@ else
   is "the page loads nothing remote"      "0" \
      "$(grep -coE '(src|href)="https?://' "$FSH/run/index.html" || true)"
 
-  is "no chrome was left behind"          "$FSBEFORE" "$(fschromes)"
+  is "no chrome was left behind"          "0" "$(fschromes)"
+  # ...and the count is not blind: a process carrying one of this dir's profile flags is
+  # seen. Without this row a pattern that matched nothing would pass the one above forever.
+  bash -c "exec -a 'chrome --user-data-dir=$FST/gf-browser-decoy' sleep 30" &
+  FSDECOY=$!
+  is "...and the count would see one"     "1" "$(fschromes)"
+  { kill "$FSDECOY"; wait "$FSDECOY"; } 2>/dev/null || true
 fi
 # `wait` after the kill absorbs the shell's own "Terminated" notice, which otherwise lands
 # in the middle of the suite's output looking exactly like something went wrong.
 { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || true
-rm -rf "$FSH"
+rm -rf "$FSH" "${FST:?}"
 
 group "a fill that the framework ignores is not a fill"
 # REPORTED FROM A REAL RUN AGAINST A REAL APP, and it is the worst failure this tool can
@@ -17029,6 +17043,7 @@ fi
 # test/helpers/push-probe.mjs decrypts the body with its own implementation of RFC 8291
 # and verifies the VAPID JWT, and these assert the PLAINTEXT.
 group "fleet-serve: push tells a phone about the two events, and shuts up otherwise"
+# needs: free_port answers in digits
 if ! command -v curl >/dev/null 2>&1; then
   skip "push" "curl is not installed"
 else
@@ -17266,6 +17281,76 @@ else
       bad "anonymous sends the count only" "1 push" "0"
     fi
     pu push --detail named >/dev/null 2>&1
+
+    # ── SIX-B: a Linux host has no HID — the hold reads tmux, and the paired host ──
+    # On a VM the HID reading is null, so before this every push went to the phone while he
+    # was typing into that VM's fleet over SSH. LINUX-SHAPED HERE BY CONSTRUCTION, on either
+    # leg: GHOSTFLEET_AT_MAC_FILE now names a file that is not there, which is exactly what
+    # readAtMac() returns on Linux — no reading. A 4s threshold so "he stopped typing" fits
+    # in a case; every reading is cached for 5s, so a release can take up to ~10s to land.
+    rm -f "$PU/atmac.json"
+    node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.push.at_mac_idle=4;fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PU/serve.json"
+    pu_until() {   # $1=seconds $2=command... — polls for a condition instead of sleeping for one
+      j=0; while [ "$j" -lt "$(($1 * 10))" ]; do "${@:2}" && return 0; j=$((j+1)); sleep 0.1; done; return 1
+    }
+    pu_logged() { grep -q -- "$1" "$PU/serve.log"; }
+    pu_pushed() { [ "$(pu_lines "$PU/ok.jsonl")" -ge "$1" ] 2>/dev/null; }
+    # A REAL ATTACHED CLIENT on the demo project's own socket, typed into through the pane of a
+    # second server — the way an SSH terminal is one — so client_activity moves by a keystroke
+    # and not because the test wrote a number somewhere. Both servers are this run's own, in
+    # its TMUX_TMPDIR; the fleet's never is.
+    tmux -L cf-demo -f /dev/null new-session -d -s api-2 -x 80 -y 24 'sleep 600'
+    tmux -L pu-desk -f /dev/null new-session -d -s desk -x 100 -y 30 "exec env -u TMUX TMUX_TMPDIR='$TMUX_TMPDIR' tmux -L cf-demo attach -t api-2"
+    pu_until 5 sh -c '[ -n "$(tmux -L cf-demo list-clients -F x 2>/dev/null)" ]' || true
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    tmux -L pu-desk send-keys -t desk x
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 2
+    is "linux: a tmux client typing now holds the push"   "0" "$(pu_lines "$PU/ok.jsonl")"
+    is "...and serve.log says tmux held it"                "1" "$(pu_logged 'push: held 1 — at the keyboard (tmux, idle [0-9]*s)' && echo 1 || echo 0)"
+    # Nobody types again: the client's last keystroke ages past the threshold, and it goes.
+    pu_until 15 pu_pushed 1 || true
+    is "linux: an old client_activity releases it"         "1" "$(pu_lines "$PU/ok.jsonl")"
+    is "...as the one held push, saying why"               "1" "$(pu_logged 'push: released 1 held — left the keyboard (tmux, idle [0-9]*s)' && echo 1 || echo 0)"
+    tmux -L pu-desk kill-server 2>/dev/null; tmux -L cf-demo kill-server 2>/dev/null
+
+    # THE PAIRED HOST: a fake one (presence-peer.mjs) that answers /api/presence from a file and
+    # verifies the pairing signature the way a real host does. Pairing is two secrets and an id
+    # in serve-peers.json beside the config, written here as `fleet-serve pair` would.
+    PPPORT="$(free_port)"; PPPORT="${PPPORT:-18904}"
+    PPOUT="$(node -e 'console.log(require("crypto").randomBytes(32).toString("base64url"))')"
+    printf '{"idle":3,"locked":false}' > "$PU/peer-answer.json"; : > "$PU/peer.log"
+    printf '{"self":"desk","peers":[{"id":"pr-presence","key":"vm","label":"vm","url":"http://127.0.0.1:%s","out":"%s","in":"%s","created":%s}]}\n' \
+      "$PPPORT" "$PPOUT" "unused-in-this-direction" "$(date +%s)" > "$PU/serve-peers.json"
+    node "$ROOT/test/helpers/presence-peer.mjs" --port "$PPPORT" --pid pr-presence --secret "$PPOUT" \
+      --answer "$PU/peer-answer.json" --log "$PU/peer.log" > /dev/null 2>&1 &
+    PPPID=$!; SERVE_PIDS="$SERVE_PIDS $PPPID"; sv_reg "$PPPID"
+    pu_until 5 grep -q '^listening' "$PU/peer.log" || true
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 2
+    is "a paired host reporting a fresh reading holds it"  "0" "$(pu_lines "$PU/ok.jsonl")"
+    is "...and serve.log names the peer"                   "1" "$(pu_logged 'push: held 1 — at the keyboard (peer vm, idle 3s)' && echo 1 || echo 0)"
+    is "...asked over the pairing's signed request"        "1" "$([ "$(grep -c '^GET /api/presence verified$' "$PU/peer.log")" -ge 1 ] && echo 1 || echo 0)"
+    # THE PEER GOES AWAY: killed by its captured pid. An unreachable peer is a reading that
+    # could not be taken, so what it was holding goes, and the next event is not held at all.
+    kill "$PPPID" 2>/dev/null; wait "$PPPID" 2>/dev/null
+    pu_until 15 pu_pushed 1 || true
+    is "an unreachable peer stops holding: the push goes"  "1" "$(pu_lines "$PU/ok.jsonl")"
+    is "...logged as released, with no reading named"      "1" "$(pu_logged 'push: released 1 held — left the keyboard$' && echo 1 || echo 0)"
+    held_before="$(grep -c 'push: held ' "$PU/serve.log")"
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    pu_until 8 pu_pushed 1 || true
+    is "...and a fresh event with the peer down is sent, not held" "1 $held_before" "$(pu_lines "$PU/ok.jsonl") $(grep -c 'push: held ' "$PU/serve.log")"
+    rm -f "$PU/serve-peers.json"
+    printf '{"idle":9999,"locked":false}' > "$PU/atmac.json"
 
     # ── SEVEN: --test proves the whole path from the Mac ───────────────────
     : > "$PU/ok.jsonl"
