@@ -1265,11 +1265,20 @@ building a chat client.
   composed here, which is why it cannot drift from what the desk sees. A conversation you
   can read is a rendering of `/api/session`; a conversation you can *unblock* is the pane,
   and the two are one tap apart with a banner between them.
-- **No routing.** The back gesture works by pushing history entries that reuse the current
-  href — the stack carries a depth, never a route. So there is no URL to parse on a cold
-  open, no link that can name a session that has since been reclaimed, and nothing to keep
-  in step with the screens. (*"can we not have urls? if I go back it takes me to the last
-  page I was, not back."*)
+- **No routing — but the address names the place.** The back gesture works by pushing
+  history entries that carry a depth, never a route, and popstate goes by that depth: no
+  URL is read on the way back, so a stale entry cannot send it anywhere. (*"can we not have
+  urls? if I go back it takes me to the last page I was, not back."*) What changed later is
+  the other half. The place you are on is restored from one stored state, which is the
+  origin's and not the tab's, so two desk tabs overwrote each other and nothing could be
+  linked to — *"we should start using url parameters for reload survival"*. So the address
+  now names the place (`web/place.js`): `?screen=session&tab=work&p=acme-api&s=api-fix`,
+  `?screen=reviews`, `?screen=review&host=vm&profile=work&run=…`. It is written as you move
+  (pushed only where an entry was already pushed, replaced for everything else) and read
+  ONCE, at boot, through the same clamps the stored state goes through — a link naming a
+  session that has gone lands where a stored one would. A link lands after the unlock,
+  never instead of it. The installed app opens `start_url`, which names no place, so it
+  restores from the stored state exactly as before.
 - **No terminal emulation.** `capture-pane` hands over a grid tmux has already laid out, so
   the client renders SGR attributes and drops everything else — cursor movement, scroll
   regions, wrapping. Re-deriving any of it would be a second answer to "what does this pane

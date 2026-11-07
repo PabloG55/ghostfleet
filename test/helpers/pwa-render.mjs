@@ -1713,10 +1713,12 @@ closeSheetFromTest();
 
 // ── the back gesture, which had nothing to pop before ───────────────────
 // Two forward moves were made to get here (project, then session), so there are two of our
-// entries on the stack and the system gesture has somewhere to go. No URL was ever set:
-// every push reuses the current href.
+// entries on the stack and the system gesture has somewhere to go. Each one is addressed
+// with the place it opened (web/place.js) — so a reload of it lands there — and with nothing
+// but a query on the same path: a push never leaves the page, it only names where it is.
 is('navigating pushed history entries', 2, histDepth);
-is('...and none of them set a url', true, histPushedUrls.every(u => u === location.href));
+is('...each addressed with the place it opened, on the same page', ['grid', 'session'],
+   histPushedUrls.slice(-2).map(u => /^\?/.test(u) ? new URLSearchParams(u).get('screen') : 'not a query: ' + u));
 // The gesture itself. popstate is the ONLY path backwards, so this is exactly what a swipe
 // does — not a second code path that happens to agree.
 swipeBack();
