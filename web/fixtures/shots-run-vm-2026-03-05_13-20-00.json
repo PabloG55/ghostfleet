@@ -1,0 +1,164 @@
+{
+  "ok": true,
+  "run": {
+    "id": "2026-03-05_13-20-00",
+    "profile": "work",
+    "project": "billing-svc",
+    "branch": "rotate-keys",
+    "at_ago": 1200,
+    "kind": "recorded",
+    "video": "flow.mp4",
+    "duration": 12,
+    "problems": 1,
+    "provenance": {
+      "commit": "4c2d9a1",
+      "dirty": false,
+      "base": "staging",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "session": "rotate-keys",
+      "slot": null
+    },
+    "steps": [
+      {
+        "n": 1,
+        "name": "open sign in",
+        "file": null,
+        "url": "https://billing-svc.example/login",
+        "title": "Sign in \u00b7 billing-svc",
+        "expect": {
+          "text": "Sign in",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/login",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/app.css",
+            "type": "Stylesheet",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/app.js",
+            "type": "Script",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/logo.svg",
+            "type": "Image",
+            "status": 200
+          }
+        ],
+        "start": 0,
+        "end": 3
+      },
+      {
+        "n": 2,
+        "name": "sign in",
+        "file": null,
+        "url": "https://billing-svc.example/dashboard",
+        "title": "Dashboard \u00b7 billing-svc",
+        "expect": {
+          "text": "Good morning",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "POST",
+            "url": "https://billing-svc.example/api/session",
+            "type": "Fetch",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/dashboard",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/api/invoices/summary",
+            "type": "Fetch",
+            "status": 200
+          }
+        ],
+        "start": 3,
+        "end": 6
+      },
+      {
+        "n": 3,
+        "name": "open invoices",
+        "file": "web-invoices.png",
+        "url": "https://billing-svc.example/invoices",
+        "title": "Invoices \u00b7 billing-svc",
+        "expect": {
+          "text": "Northwind",
+          "found": false
+        },
+        "notes": [
+          "GET https://billing-svc.example/api/invoices?page=1 answered 404",
+          "expected text not on the page: Northwind"
+        ],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/invoices",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/api/invoices?page=1",
+            "type": "Fetch",
+            "status": 404
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/favicon.ico",
+            "type": "Other",
+            "status": 404
+          }
+        ],
+        "start": 6,
+        "end": 9
+      },
+      {
+        "n": 4,
+        "name": "settings",
+        "file": null,
+        "url": "https://billing-svc.example/settings",
+        "title": "Settings \u00b7 billing-svc",
+        "expect": null,
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/settings",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://billing-svc.example/api/org",
+            "type": "Fetch",
+            "status": 200
+          }
+        ],
+        "start": 9,
+        "end": 12
+      }
+    ],
+    "verdict": {}
+  }
+}

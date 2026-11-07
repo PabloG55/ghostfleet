@@ -455,12 +455,19 @@ export async function getShots() {
   if (r.status === 404) return null;
   if (!r.ok) throw new OfflineError('fixture shots.json is not available');
   const j = await r.json();
+  // fleet-serve's paired merge, as fixtures: once a machine is paired every group carries its
+  // host, the peer's runs come from paired.json's `shots`, and a peer that is down is one
+  // `missing` entry and no runs of its own.
+  const pr = await pairedFixture();
   const runs = [];
-  for (const id of j.runs || []) { try { runs.push((await shotsFixtureRun(id)).run); } catch {} }
+  for (const id of j.runs || []) { try { runs.push({ ...(await shotsFixtureRun(id)).run, host: pr ? pr.label : undefined, host_key: '' }); } catch {} }
+  if (pr && pr.mode === 'online')
+    for (const id of pr.j.shots || []) { try { runs.push((await shotsFixtureRun(id, pr.j.peer.key)).run); } catch {} }
   const by = new Map();
   for (const run of runs) {
-    const key = `${run.profile}\x1f${run.project}\x1f${run.branch}`;
-    if (!by.has(key)) by.set(key, { key, profile: run.profile, project: run.project, branch: run.branch, runs: [] });
+    const key = `${run.host_key || ''}\x1f${run.profile}\x1f${run.project}\x1f${run.branch}`;
+    if (!by.has(key)) by.set(key, { key, profile: run.profile, project: run.project, branch: run.branch, runs: [],
+                                    ...(pr ? { host: run.host, host_key: run.host_key || '' } : {}) });
     by.get(key).runs.push({ id: run.id, profile: run.profile, at: run.at, commit: run.provenance.commit, dirty: run.provenance.dirty,
       kind: run.kind, steps: run.steps.length, flagged: run.steps.filter(s => s.notes && s.notes.length).length,
       state: { label: run.state.label, cls: run.state.cls, text: run.state.text } });
@@ -468,31 +475,44 @@ export async function getShots() {
   const groups = [...by.values()].map(g => {
     g.runs.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
     const [latest, ...earlier] = g.runs;
-    return { key: g.key, profile: g.profile, project: g.project, branch: g.branch, latest, earlier, waiting: latest.state.cls !== 'ok' };
+    return { key: g.key, profile: g.profile, project: g.project, branch: g.branch, latest, earlier, waiting: latest.state.cls !== 'ok',
+             ...(pr ? { host: g.host, host_key: g.host_key } : {}) };
   }).sort((a, b) => Date.parse(b.latest.at) - Date.parse(a.latest.at));
   const profiles = [...new Set(groups.map(g => g.profile))];
-  return { ok: true, profiles, multi: profiles.length > 1, groups, waiting: groups.filter(g => g.waiting).length };
+  const out = { ok: true, profiles, multi: profiles.length > 1, groups, waiting: groups.filter(g => g.waiting).length };
+  if (!pr) return out;
+  return { ...out, hosts: [{ key: '', label: pr.label, self: true }, { key: pr.j.peer.key, label: pr.peerLabel }],
+           missing: pr.mode === 'online' ? [] : [{ host: pr.peerLabel, host_key: pr.j.peer.key, why: 'did not answer' }] };
 }
 // The fixture stores AGES (`at_ago`) for the reason waiting.json does: "40 minutes ago"
 // stays 40 minutes however long after the file was written the demo runs.
-async function shotsFixtureRun(id) {
-  const j = await fixture(`shots-run-${id}.json`);
+// A paired machine's run is `shots-run-<host key>-<id>.json`: the same folder name can be on
+// both machines, as it can on two real ones.
+async function shotsFixtureRun(id, host = '') {
+  const j = await fixture(`shots-run-${host ? `${host}-` : ''}${id}.json`);
   const at = new Date(Date.now() - (Number(j.run.at_ago) || 0) * 1000).toISOString();
   const { at_ago, ...run } = j.run;
-  const verdict = overlay.shots.has(`${run.profile}/${id}`) ? overlay.shots.get(`${run.profile}/${id}`) : (run.verdict || {});
-  return { ok: true, run: { ...run, at, provenance: { ...run.provenance, at }, verdict, state: shotsState(run, verdict) }, media: { ticket: '', exp: 0 } };
+  const ov = `${host}/${run.profile}/${id}`;
+  const verdict = overlay.shots.has(ov) ? overlay.shots.get(ov) : (run.verdict || {});
+  const pr = host ? await pairedFixture() : null;
+  return { ok: true, run: { ...run, at, provenance: { ...run.provenance, at }, verdict, state: shotsState(run, verdict),
+                            ...(pr ? { host: pr.peerLabel, host_key: host } : {}) }, media: { ticket: '', exp: 0 } };
 }
 // One run: its steps, provenance and verdict, and a TICKET for its media — a <video> cannot
 // send the bearer the reads carry (lib/shots.mjs, "media tickets"). The URLs are built here,
 // once, so the screen never needs to know which backend answered: `videoSrc` and each
 // step's `src` are simply where the picture is.
-export async function getShotsRun(profile, id) {
+//   `host` is a paired machine's key ('' for this one). Its run is still read from, and its
+// media still fetched from, THIS origin — this host proxies both, signed — so the CSP's
+// `'self'` holds and the ticket is this host's.
+export async function getShotsRun(profile, id, host = '') {
   const server = (await ready()).mode === 'server';
-  const j = server ? await get(`/api/shots/run?profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}`)
-                   : await shotsFixtureRun(id);
+  const hq = host ? `host=${encodeURIComponent(host)}&` : '';
+  const j = server ? await get(`/api/shots/run?${hq}profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}`)
+                   : await shotsFixtureRun(id, host);
   const k = (j.media && j.media.ticket) || '';
   const src = (file) => !file ? null : server
-    ? `${baseUrl()}/api/shots/media?profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}&file=${encodeURIComponent(file)}&k=${encodeURIComponent(k)}`
+    ? `${baseUrl()}/api/shots/media?${hq}profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}&file=${encodeURIComponent(file)}&k=${encodeURIComponent(k)}`
     : `./fixtures/shots/${encodeURIComponent(file)}`;
   const run = j.run;
   return { ...j, run: { ...run, videoSrc: src(run.video), steps: run.steps.map(s => ({ ...s, src: src(s.file) })) } };
@@ -517,12 +537,12 @@ export async function postShotsVerdict(body) {
     if (!j.ok) throw Object.assign(new Error(j.text || 'the verdict was not saved'), { body: j });
     return j;
   }
-  const { run } = await shotsFixtureRun(body.run);
+  const { run } = await shotsFixtureRun(body.run, body.host || '');
   const v = run.kind === 'recorded'
     ? { flow: body.flow && body.flow.v ? { v: body.flow.v, note: String(body.flow.note || '') } : null,
         chapters: Object.fromEntries(Object.entries(body.chapters || {}).filter(([, t]) => String(t || '').trim())) }
     : Object.fromEntries(Object.entries(body.state || {}).filter(([, x]) => x && x.v));
-  overlay.shots.set(`${run.profile}/${body.run}`, v);
+  overlay.shots.set(`${body.host || ''}/${run.profile}/${body.run}`, v);
   const state = shotsState(run, v);
   record('shots_verdict', { profile: body.profile, run: body.run }, `ok (fixture — recorded, not written): ${state.label}`);
   return { ok: true, verdict: v, state };
