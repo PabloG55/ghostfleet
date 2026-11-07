@@ -429,6 +429,15 @@ spent the workers are parked until the earliest reset, then told to continue. Ro
 with Anthropic's terms of service; that is your responsibility. Details, and what happens when a
 saved login expires: [docs/OPERATIONS.md](docs/OPERATIONS.md#several-claude-accounts-on-one-profile-experimental).
 
+### Pictures beside the chat (experimental)
+
+Off by default. `fleet-experimental enable peek` shows a session's pictures inside Claude Code: a
+pasted `[Image #N]` and any picture path the conversation names. The newest one appears in a pane
+beside the chat, `/peek` lists the rest, and in the fullscreen layout a `▣` chip under the row
+pops the picture up when you point at it. Pictures are drawn as coloured cells, so they work
+inside tmux. PNG needs nothing installed; JPEG, GIF and WebP need `ffmpeg`. Details:
+[docs/OPERATIONS.md](docs/OPERATIONS.md#pictures-beside-the-chat-experimental).
+
 ---
 
 ## Updating

@@ -4648,6 +4648,37 @@ EOF
     console.log(over, lost, plain(heldRuns(h, 1000_000 + 725_000, 60)), heldRuns(null, 0, 80) === null)" 2>&1)"
   is "band: a held wake fits every width, and says so first" \
      "0 0 wake held 12m · this input box has unsent text true" "$bh"
+  # PEEK (hooks/peek-shape.js): which pictures a conversation showed, oldest first and each at
+  # its last mention. A paste is only a USER's [Image #N] (the model quoting one pastes nothing),
+  # pastes in one prompt order by number, a relative path resolves against the session's cwd,
+  # and a URL, a .txt and a word beside the extension are no picture.
+  is "peek: the pictures a conversation showed, in order" \
+     "[Image #3] | [Image #4] | /w/acme-api/shots/b.jpeg | /w/acme-web/c.webp | /tmp/look/e.png | /home/u/shots/a.png | /w/acme-api/space.png | /w/acme-api/f.GIF" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" find 2>&1)"
+  # The decoder with no dependency, against PNGs encoded here from a formula: every colour type,
+  # palette depths 1-8 with a transparent index, 16-bit, the five row filters, and deflate's
+  # stored, fixed and dynamic blocks. Exact to the sample; broken input is null, never a throw.
+  is "peek: the PNG decoder is exact on every kind, null on broken input" "15 exact nulls" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" png 2>&1)"
+  # The half-block cells at every width from 4 to 160: never larger than given, the picture's
+  # shape kept, and a transparent pixel left as the terminal's own background.
+  is "peek: the cells fit every width, keep the shape, leave transparency to the terminal" "0 0 37x12 hole=default" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" cells 2>&1)"
+  PK="$TMUX_TMPDIR/peek-ff"; mkdir -p "$PK"
+  # With no ffmpeg on PATH both decoders exit 127, which the mod reads as "say so in words".
+  is "peek: no ffmpeg is exit 127 from a file and from stdin" "127 127" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" noff "$PK" 2>&1)"
+  if command -v ffmpeg >/dev/null 2>&1; then
+    # JPEG and GIF through ffmpeg, by path and through stdin, sniffed to the same size; a
+    # 1200x2600 picture comes back inside the 240x480 thumb with its shape kept.
+    pf="$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" ffmpeg "$PK" 2>/dev/null)"
+    is "peek: JPEG and GIF decode through ffmpeg by path and by stdin; a big one is thumbed" \
+       "jpg:jpeg:37x23:file=37x23:stdin=37x23 gif:gif:37x23:file=37x23:stdin=37x23 big:222x480" \
+       "$(sed 's/ webp:[^ ]*//' <<< "$pf")"
+  else
+    skip "peek through ffmpeg" "ffmpeg missing"
+  fi
+  rm -rf "${PK:?}"
 else
   skip "the mod's guards and band" "node missing"
 fi
@@ -19703,6 +19734,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "the settings page has an Experimental section" "yes" "$(grep -q '^ Experimental' <<< "$scr" && echo yes || echo no)"
   is "...with jarvis off, and tagged"             "yes" "$(grep -qE 'jarvis +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...and shots, tagged"                       "yes" "$(grep -qE 'shots +[○●] (on|off) +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...and peek, off and tagged"                "yes" "$(grep -qE 'peek +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...with no project row for Jarvis's project" "no" "$(grep -qE '^ *(▸ )? *jarvis +work' <<< "$scr" && echo yes || echo no)"
   # acme-api is the only project row, so one ↓ is the jarvis row.
   tmux -L cfjxgrid send-keys j; sleep 0.5
@@ -19745,6 +19777,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # Counted against the features the module DECLARES, so a new one is not a red row here.
   is "list tags every feature"                    "$(node --input-type=module -e "import('$ROOT/lib/experimental.mjs').then(m => console.log(m.FEATURES.length))")" \
      "$(grep -c '\[experimental\]' <<< "$out" || true)"
+  is "peek is off on a new install"               "1"   "$(grep -cE '^  peek +off ' <<< "$out" || true)"
   is "an unknown feature is refused by name"      "2"   "$(fsx "$JX/bin/fleet-experimental" enable warp >/dev/null 2>&1; echo $?)"
   # The aliases, from OFF so the row cannot pass on a switch that was already on.
   is "fleet-jarvis disable is an alias of it"     "off" "$(fsx "$JX/bin/fleet-jarvis" disable >/dev/null; cat "$JXC/jarvis.enabled")"

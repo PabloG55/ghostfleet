@@ -47,7 +47,7 @@ reasonable thing to open.
 
 ## Adding an experimental feature
 
-The three features already behind a switch (`jarvis`, `shots`, `accounts`) follow these
+The features already behind a switch (`jarvis`, `shots`, `accounts`, `peek`) follow these
 rules; they are written down here so the next one does not have to reverse-engineer them.
 `<feature>` below stands for your feature's name.
 

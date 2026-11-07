@@ -513,7 +513,7 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     2) UNASKED+=("$what (the editor ^N opens)") ;;
   esac
 fi
-# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots) ARE OFF UNLESS SOMEBODY
+# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots, accounts, peek) ARE OFF UNLESS SOMEBODY
 # TURNS THEM ON. `fleet-experimental list` writes every switch down the first time: on for a
 # machine that already uses a feature, so an update changes nothing for somebody using it,
 # and off everywhere else. Jarvis is the one offered here, because it has a download behind it. Offering to turn it on is a step of its own, clearly labelled, with
