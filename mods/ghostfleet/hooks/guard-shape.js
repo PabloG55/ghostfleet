@@ -119,7 +119,11 @@ export const mergesAPr = cmd => MERGES.some(re => re.test(fold(whatRuns(cmd))))
 
 const BOUNDARY_WRITES = [
   /(^|[^A-Za-z0-9_.-])fleet-project\s+set(\s|$)/,
-  /\.(workers-merge|agents-approve)(-off)?([^A-Za-z0-9_-]|$)/,
+  /\.(workers-merge|agents-approve|review-gate)(-off)?([^A-Za-z0-9_-]|$)/,
+  // the review gate's records (lib/review-gate.sh), whose one writer is fleet-review. The
+  // gate itself — a merge with no pass at the PR's head — is the shell guard's alone: it is
+  // installed for every session, so this door passing a merge leaves the next one to judge.
+  /\.reviews(\/|[^A-Za-z0-9_-]|$)/,
 ]
 export const changesABoundary = cmd => BOUNDARY_WRITES.some(re => re.test(fold(whatRuns(cmd))))
 

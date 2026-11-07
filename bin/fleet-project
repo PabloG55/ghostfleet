@@ -3,7 +3,8 @@
 # fleet-project agent <name> [<agent>|--none] [--session S]
 # fleet-project list
 # fleet-project rm <name>
-# fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
+# fleet-project set <name | -s SOCK> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]
+# fleet-project set <name | -s SOCK> review-<model|level|stalled|rounds> <value|default>
 # fleet-project set <name | -s SOCK> context-window <300k|off|default>
 # fleet-project set <name | -s SOCK> model-<verify|ci|docs|video|build> <model|default>
 # fleet-project get <name | -s SOCK> [--session S]
@@ -22,9 +23,13 @@
 #           conversation that agent had (lib/agent-switch.sh). --session S switches that
 #           one session instead and leaves the column alone. Running workers keep theirs.
 #   rm      drop the list entry only — sessions, worktrees and history are untouched
-#   set     one of the two BOUNDARY settings (lib/boundary.sh), both OFF by default:
+#   set     one of the three BOUNDARY settings (lib/boundary.sh), all OFF by default:
 #             workers-merge   a worker in a linked worktree may merge a PR
 #             agents-approve  an agent may approve another session's permission dialog
+#             review-gate     no session merges a PR until a review passed at its head
+#           and the review gate's values, project-wide (lib/review-gate.sh):
+#             review-model sonnet|opus|haiku|fable, review-level low..max,
+#             review-stalled N (3), review-rounds N (8); `default` drops one
 #           for the whole project, or with --session for ONE session — the sub-master of
 #           its task, while its siblings stay blocked. `inherit` (session only) drops the
 #           override. The grid's settings page calls this for the project-wide form.
@@ -311,6 +316,7 @@ case "$cmd" in
     SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
     . "$BIN_DIR/../lib/context-window.sh"
     . "$BIN_DIR/../lib/model-kind.sh"
+    . "$BIN_DIR/../lib/review-gate.sh"
     if [ "$cmd" = get ]; then
       for b in $BOUNDARY_SETTINGS; do
         boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
@@ -323,6 +329,19 @@ case "$cmd" in
         m="$(model_kind_resolve "$DIR" "$SOCK" "$k")"
         printf '%-15s %-4s  (%s; %s)\n' "model-$k" "${m:--}" "$(model_kind_label "$k")" \
           "$([ -n "$m" ] && echo "fleet-spawn --kind $k uses it" || echo 'unset: the account default')"
+      done
+      # The review gate's four values (lib/review-gate.sh), shown whether or not the gate is
+      # on, so turning it on never surprises anyone with a reviewer they did not know about.
+      for k in $REVIEW_GATE_KEYS; do
+        v="$(review_gate_value "$DIR" "$SOCK" "$k" 2>/dev/null)"
+        case "$k" in
+          model)   d="the reviewer subagent's model" ;;
+          level)   d="the code-review skill's level" ;;
+          stalled) d="stalled rounds before a review is STUCK" ;;
+          rounds)  d="rounds in all before a review is STUCK" ;;
+        esac
+        printf '%-15s %-6s  (%s%s)\n' "review-$k" "$v" "$d" \
+          "$([ -f "$DIR/$SOCK.review-$k" ] || echo '; default')"
       done
       exit 0
     fi
@@ -365,8 +384,32 @@ case "$cmd" in
       fi
       exit 0 ;;
     esac
+    # THE REVIEW GATE'S VALUES (lib/review-gate.sh): project-wide, like the model map — the
+    # reviewer and its caps are a quality call for the project, and a per-session value would
+    # let one worker review itself more leniently than its siblings. Validated here, so a value
+    # that would become an instruction nobody can follow (a model the Agent tool will not take)
+    # never reaches the contract.
+    case "$B" in review-model|review-level|review-stalled|review-rounds)
+      k="${B#review-}"
+      [ -z "$SESS" ] || { echo "fleet-project: $B is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.$B"
+      elif review_gate_valid "$k" "$V"; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.$B"
+      else
+        case "$k" in
+          model) echo "fleet-project: review-model takes sonnet, opus, haiku or fable (the Agent tool's model names), or default" >&2 ;;
+          level) echo "fleet-project: review-level takes low, medium, high, xhigh or max, or default" >&2 ;;
+          *)     echo "fleet-project: $B takes a whole number from 1 to 99, or default" >&2 ;;
+        esac
+        exit 1
+      fi
+      echo "fleet-project: '$NAME' $B: $(review_gate_value "$DIR" "$SOCK" "$k")$([ "$V" = default ] && echo ' (default)') — read when a gated session next starts, and by fleet-review on its next round"
+      exit 0 ;;
+    esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -414,7 +457,8 @@ case "$cmd" in
     echo "  fleet-project agent <name> [<agent>|--none] [--session S]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
-    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project set <name|-s sock> review-<model|level|stalled|rounds> <value|default>" >&2
     echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
     echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
