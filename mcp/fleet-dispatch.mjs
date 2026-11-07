@@ -242,6 +242,18 @@ export const TOOLS = [
   // inboxes, the asleep/parked/exited markers — and costs no agent anything.
   { name: 'fleet_digest', description: "One rollup across EVERY fleet on EVERY profile, read from files: who needs you (with the note), what is working, what is ready, asleep, parked or exited, what finished or was answered since your last look, and the open PRs already known. Cheap — no session is asked anything. Call this FIRST when asked how everything is doing, or when woken; then act on ONE project with the per-fleet tools. A plain call advances the 'since last look' stamp; peek:true does not.",
     inputSchema: { type: 'object', properties: { json: { type: 'boolean', description: 'return the digest as data rather than as text' }, peek: { type: 'boolean', description: "look without advancing the 'since last look' stamp (for a poll, not for a read)" } }, additionalProperties: false } },
+  // THE FLEET'S MEMORY (docs/MEMORY.md), read: bin/fleet-know, the same queries. The project
+  // it briefs on is `about`, NOT `project` — every other tool's `project` names the FLEET to
+  // act in and is resolved against this machine's project list, while the memory answers
+  // about every profile and every paired machine at once (acme-api@vm is a project here).
+  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events. With none of them: every project it knows. at:<time> answers as it stood then. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
+    inputSchema: { type: 'object', properties: {
+      about: { type: 'string', description: 'a project to brief on: name, name@machine (a paired one) or name/profile' },
+      waiting: { type: 'boolean', description: 'everything waiting on the owner, every project' },
+      touched: { type: 'string', description: 'a file path (repo-relative, or its tail): which sessions touched it and the PRs it went into' },
+      find: { type: 'string', description: 'words to search the raw recorded events for (every word must appear)' },
+      at: { type: 'string', description: 'answer as it stood at this time: ISO, epoch, or "3d ago" (default now)' },
+      json: { type: 'boolean', description: 'return data rather than text' } }, additionalProperties: false } },
 ];
 
 // REFUSING A CALL, so the caller can see it was refused. MCP's error channel for a tool
@@ -353,6 +365,20 @@ export function plan(name, a = {}) {
       if (a.json) args.push('--json');
       if (a.peek) args.push('--peek');
       return run('fleet-digest', args);
+    }
+    // Across every fleet, like the digest: no target. One query per call, in the order the
+    // CLI reads them, so a caller who sets two gets the first rather than a silent mix.
+    case 'fleet_know': {
+      const args = [];
+      if (a.about) args.push(String(a.about));
+      else if (a.waiting) args.push('waiting');
+      else if (a.touched) args.push('touched', String(a.touched));
+      else if (a.find) args.push('find', '--', ...String(a.find).split(/\s+/).filter(Boolean));
+      if (a.at) args.push('--at', String(a.at));
+      if (a.json) args.push('--json');
+      // a leading '-' in `about` must not read as a flag
+      if (a.about && String(a.about).startsWith('-')) return { kind: 'fail', ...fail(`fleet_know: '${a.about}' is not a project name`) };
+      return run('fleet-know', args);
     }
     case 'fleet_list': return run('fleet-list', [], t);
     case 'fleet_send': {

@@ -151,6 +151,13 @@ merged="$(q merged)" || exit 0
 open="$(q open)"     || open=""
 out="$(printf '%s\n%s\n' "$open" "$merged" | grep -v '^$')"
 [ -n "$out" ] || exit 0
+# The cache as it WAS, for the memory (docs/MEMORY.md): the difference between two fetches is
+# what happened to the repo's PRs — opened, merged, closed — and this is the one place that
+# sees both. Asked only when something changed, so an unchanged refresh costs nothing. The
+# cache's own lines are untouched; the writer never fails, so neither can this.
+_was=""; [ -f "$cache" ] && _was="$(cat "$cache" 2>/dev/null)"
 printf '%s\n' "$out" > "$cache" 2>/dev/null
+[ "$_was" = "$out" ] || printf '%s\n' "$_was" \
+  | "$(dirname "$0")/fleet-know-event" prs "fleet=$FLEET_DIR" "repo=$slug" "new=$cache" "cwd=$REPO_DIR" >/dev/null 2>&1
 [ "$WARM" = 1 ] && exit 0
 printf '%s\n' "$out" | emit

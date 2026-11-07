@@ -127,6 +127,11 @@ mtmp="$MANIFEST.$$.tmp"
   fi; } \
   >"$mtmp" 2>/dev/null && mv -f "$mtmp" "$MANIFEST" 2>/dev/null \
   || { rm -f "$mtmp" 2>/dev/null; echo "fleet-ack: could not write $MANIFEST" >&2; exit 1; }
+# ...and the memory's copy (docs/MEMORY.md): the row above is REPLACED by the next ack into
+# this worktree, and what a worker said it was building from is a decision worth keeping
+# after that. The writer never fails, so neither can this.
+"$(dirname "$0")/fleet-know-event" ack "fleet=$FLEET_DIR" "sock=$SOCK" "cwd=$WT" \
+  "worker=$SESSION" "branch=$BRANCH" "understood=$UNDERSTOOD" "decisions=$DECISIONS" </dev/null >/dev/null 2>&1
 
 # `understood:` AT THE HEAD OF A LINE, and the decisions ON that line. This is the marker
 # the item #5 evaluator reads to tell which sessions were treated by the handshake, and it

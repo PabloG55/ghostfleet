@@ -28,6 +28,24 @@ lead starts blank, so **do not act from memory — read the real state first:**
 - **`fleet-digest`** (MCP `fleet_digest`) — every fleet on every profile at once, read
   from files: who needs the owner, what is working, what finished since the last look.
   For a question about *everything*; `--peek` looks without moving the "since" stamp.
+- **`fleet-know`** (MCP `fleet_know`) — the fleet's memory: what a project is, where it
+  stands and why, across every profile and paired machine (docs/MEMORY.md).
+
+## "Where does X stand?" — ask the memory before reading files
+
+When the owner (or a bot relaying the owner's messages) asks where a project stands, what
+was decided, what is waiting on them, or who touched a file, answer from **`fleet_know`
+first** (`about: "<project>"`, `waiting: true`, `touched: "<path>"`, `find: "<words>"`)
+and read worktrees, ledgers or transcripts only for what it does not hold. It is recorded
+as things happen — every session, spawn, merge and ledger item — so it knows about other
+profiles and paired machines that no file in this checkout does, and it costs no agent a
+turn. Its answer names its sources; quote them rather than re-deriving them.
+
+- `about` takes `acme-api`, `acme-api@vm` (a paired machine) or `acme-api/personal`.
+- `at: "3d ago"` answers as things stood then.
+- An item marked **`[private]`** is readable by you on this machine and must **not** be
+  pasted into a prompt for another model vendor.
+- A paired machine marked **stale** is its last fetched state — say so when you use it.
 
 ## "Start a worktree" means fleet-spawn — never EnterWorktree
 

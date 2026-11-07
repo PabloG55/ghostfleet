@@ -23719,7 +23719,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs fleet-know.mjs fleet-know-event.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac
@@ -26258,6 +26258,40 @@ is "...and new-session is never invoked"               "0" "$(grep -c '^new-sess
 is "...and still exactly one master"                   "1" "$(tmux -L cfmaster1 list-sessions -F '#{session_name}' | grep -cx master)"
 tmux -L cfmaster1 kill-server 2>/dev/null
 rm -rf "${EM:?}"
+
+# ── the fleet's memory: fleet-know ───────────────────────────────────────────
+# A lead asked "where does acme-api stand" and answered by reading files, so each answer cost
+# a context and was as stale as whoever last looked. Now every writer path appends one event
+# to the profile's know.jsonl, a graph is derived from that log by code, and fleet-know (and
+# the MCP tool fleet_know) answer from the graph. The helper drives each writer the way it
+# runs for real: the hook from a scratch transcript, fleet-spawn/ack/stop on a server of this
+# run's own, fleet-merged and fleet-ledger against stub gh's, and the mod's ledger verb. It
+# checks that each lands ONCE with its provenance, that a second Stop over the same
+# transcript adds a turn and no files, that a nudge the fleet sent itself is not a prompt,
+# and that KNOW=off and an `exclude` project write nothing. It checks the graph three ways:
+# a brief of a fixed fixture fleet, the same graph whether it is folded in three reads, with
+# a line landing late, or rebuilt (the fold is in TIME order: detached writers finish out of
+# order), and `--at`/`--known-at` before a merge still showing the PR open. `find` reaches a
+# prompt the graph has replaced, a `private` project is marked and never reaches the
+# inferred-fact call (a stub that counts its calls), and the Stop returns while a writer that
+# sleeps 3s is still running. Watched red: every section against a copy of this tree broken
+# on purpose, one break per copy (listed in the PR).
+group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost"
+if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  KCD="$(mktemp -d "$TEST_RUNS.$$.know.XXXXXX")"
+  node "$ROOT/test/helpers/know-check.mjs" "$KCD" > "$KCD/out" 2> "$KCD/err"
+  kcrc=$?
+  is "know-check ran"                 "0" "$kcrc"
+  is "...without complaining"         ""  "$(head -2 "$KCD/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 85 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$KCD/out"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "${KCD:?}"
+else
+  skip "the fleet's memory" "node, git, tmux or jq missing"
+fi
 
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────
 # A MARKER, NOT THE FIRST SUMMARY printf. cf_only used to take that printf as the end of the

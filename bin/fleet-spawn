@@ -964,6 +964,12 @@ mtmp="$MANIFEST.$$.tmp"
     printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"
   fi; } >"$mtmp" 2>/dev/null \
   && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
+# The memory's event (docs/MEMORY.md) for the same claim, kept after the row is replaced by
+# the next dispatch into this worktree — with the WHOLE brief, which the row cuts at 200
+# characters (the writer keeps 1500). The writer never fails, so neither can this.
+"$(dirname "$0")/fleet-know-event" spawn "fleet=${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" "sock=$SOCK" "cwd=$WT" \
+  "worker=$name" "branch=$BRANCH" "worktree=$WT" "task=${PROMPT:--}" "kind=$KIND" \
+  "parent=${PARENT_SESS:-${CLAUDE_FLEET_SLOT:-}}" "base=${FROM:-$PARENT_BRANCH}" "agent=$AGENT" </dev/null >/dev/null 2>&1
 #
 # THE KIND IS COLUMN SEVEN, written only when there is one, so a spawn without --kind still
 # writes the four-column row every reader was built for. Five and six are left EMPTY rather

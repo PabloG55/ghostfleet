@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# fleet-know — the fleet's memory, read (docs/MEMORY.md); `fleet-know --help` for the queries.
+# A launcher, like bin/fleet-digest: the reader is node, and this puts it on PATH with a
+# readable error when node is missing.
+set -uo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+command -v node >/dev/null 2>&1 || { echo "fleet-know: node is required (>=18)" >&2; exit 1; }
+exec node --no-warnings "$(cd "$(dirname "$src")" && pwd)/fleet-know.mjs" "$@"

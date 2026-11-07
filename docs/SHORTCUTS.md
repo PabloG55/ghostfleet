@@ -482,6 +482,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-worktrees` | inventory of worktrees + which are free |
 | `fleet-list` | live sessions + status |
 | `fleet-inbox` | who needs attention / who finished |
+| `fleet-know [<project>\|waiting\|touched <path>\|find <text>] [--at <time>]` | the fleet's memory: one page on where a project stands and why, across every profile and paired machine ([docs/MEMORY.md](MEMORY.md)); `fleet-know privacy` for its include/private/exclude switch |
 | `fleet-ledger [s] [list\|all\|close <id>\|clear]` | a Claude session's open requests and promises (the mod's ledger); `/ledger` inside the session |
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |

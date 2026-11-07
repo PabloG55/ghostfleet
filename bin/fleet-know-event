@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# fleet-know-event — the one writer of the fleet's memory (docs/MEMORY.md); the header of
+# fleet-know-event.mjs lists what it takes. A launcher, like bin/fleet-digest: the writer is
+# node, and this puts it on PATH. No node is no memory, never an error — every caller runs
+# it for its side effect and none may fail because of it.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+command -v node >/dev/null 2>&1 || exit 0
+exec node --no-warnings "$(cd "$(dirname "$src")" && pwd)/fleet-know-event.mjs" "$@"

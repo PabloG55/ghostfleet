@@ -40,6 +40,11 @@
 #           set <name> model-<kind> <model|default> — the model `fleet-spawn --kind <kind>`
 #           starts a worker on (lib/model-kind.sh). Unset, a kind gets the account default,
 #           exactly as a spawn without --kind does; an explicit --model always wins.
+#           set <name> know <include|private|exclude|default> — what the fleet's memory
+#           (fleet-know, docs/MEMORY.md) does with this project: include (the default)
+#           records it; private records it for this machine's leads only, never sends a
+#           turn of it to a model vendor and marks it in every answer; exclude records
+#           nothing. `default` drops the override (the profile's default, then include).
 #   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
@@ -314,6 +319,15 @@ case "$cmd" in
     done
     [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
     SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    # The memory's setting as it resolves: the project's marker, then the profile's default
+    # (<fleet-dir>/know.privacy, set by `fleet-know privacy --profile`), then include.
+    know_label() {
+      local v src=project
+      v="$(head -1 "$DIR/$SOCK.know" 2>/dev/null)"
+      case "$v" in include|private|exclude) ;; *) v="$(head -1 "$DIR/know.privacy" 2>/dev/null)"; src="profile default" ;; esac
+      case "$v" in include|private|exclude) ;; *) v=include; src=default ;; esac
+      printf '%s (from %s; fleet-know, docs/MEMORY.md)' "$v" "$src"
+    }
     . "$BIN_DIR/../lib/context-window.sh"
     . "$BIN_DIR/../lib/model-kind.sh"
     . "$BIN_DIR/../lib/review-gate.sh"
@@ -325,6 +339,7 @@ case "$cmd" in
       IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
       printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
         context-window "$(context_window_label "$cw")" "$cwsrc"
+      printf '%-15s %s\n' know "$(know_label)"
       for k in $MODEL_KINDS; do
         m="$(model_kind_resolve "$DIR" "$SOCK" "$k")"
         printf '%-15s %-4s  (%s; %s)\n' "model-$k" "${m:--}" "$(model_kind_label "$k")" \
@@ -346,6 +361,19 @@ case "$cmd" in
       exit 0
     fi
     B="${POS[0]:-}"; V="${POS[1]:-}"
+    # THE MEMORY'S PRIVACY (docs/MEMORY.md): one value in <sock>.know, beside the fleet's other
+    # markers, read by every writer of the memory as it writes — so it applies from the next
+    # event on, with no restart. Project-wide: a private project's sessions are all private.
+    if [ "$B" = know ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: know is set for the whole project, not --session" >&2; exit 1; }
+      case "$V" in
+        include|private|exclude) mkdir -p "$DIR" 2>/dev/null; printf '%s\n' "$V" > "$DIR/$SOCK.know" ;;
+        default) rm -f "$DIR/$SOCK.know" ;;
+        *) echo "fleet-project: know takes include, private, exclude or default" >&2; exit 1 ;;
+      esac
+      echo "fleet-project: memory for project '$NAME': $(know_label) — from the next event on"
+      exit 0
+    fi
     # THE CONTEXT CEILING is a value, not a switch, and project-wide only: the measurement
     # it answers is a fleet's whole bill, and a per-session override would be a second place
     # to look when a session's size is a surprise. Read at launch by bin/claude-here, so it
@@ -409,7 +437,7 @@ case "$cmd" in
       exit 0 ;;
     esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> know <include|private|exclude|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -461,6 +489,7 @@ case "$cmd" in
     echo "  fleet-project set <name|-s sock> review-<model|level|stalled|rounds> <value|default>" >&2
     echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
     echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
+    echo "  fleet-project set <name|-s sock> know <include|private|exclude|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac
