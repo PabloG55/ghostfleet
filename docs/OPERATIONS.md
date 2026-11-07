@@ -381,6 +381,42 @@ Send or clear the box yourself, and the wake goes in on the next poll (every 30 
 `CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY`). The hold lives in `<sock>.<kind>.blocked`, rewritten on
 every poll; a file that has not been rewritten for two minutes is read as no hold.
 
+### A wake that does not land
+
+A wake used to count as sent once `fleet-send` had been run. Its exit status was thrown away,
+and the stamp that holds back the next wake was written before the send. So a delivery that
+failed looked exactly like one that worked. Seen on one lead: three wakes logged within an
+hour, none of them reached it, and nothing anywhere said so until someone typed into it eight
+hours later. Every earlier wake that night had landed. The lead had compacted while idle in
+between.
+
+Now every wake (a gathered finish, a need-you, a held wake when it goes, Jarvis's) is sent
+the same way:
+
+- **Counted only when it lands.** The stamp is written after a zero exit, never before.
+- **Retried by paste.** A failed wake is tried again after 60 s, then after 180 s more, with
+  the mod bypassed, since the failures that went unseen were on the mod's path. A retry
+  never pastes over text in the box, and it stops if another wake reached the lead meanwhile.
+  Set the gaps with `CLAUDE_FLEET_WAKE_RETRY` (seconds, space-separated; default `60 180`).
+- **Said when it still fails.** You get a `FAILED` row in the inbox the lead reads (the
+  sub-lead's own, for a sub-lead), with the last error. A line also goes to
+  `<sock>.<kind>.undelivered`, the same file a held wake writes, which is what buzzes the
+  phone.
+- **A queued wake is followed until it lands.** A session that reads as mid-turn gets the
+  wake in its queue, and only a Stop drains a queue. A compaction ends with no Stop. In a
+  scratch fleet, a wake sent by paste during a `/compact` sat in the queue of an idle
+  session until the next send happened to drain it. Now the wake is looked for in the queue
+  on the same gaps as the retries, and while it is still there the queue is drained the way
+  a Stop drains it. A wake behind a turn that is really running is left to that turn's
+  Stop. One still queued at an idle session is filed as `wake queued and never drained`.
+- **A wake the mod claims and never starts is taken back.** `fleet-send --nudge` waits
+  `CLAUDE_FLEET_MOD_START` (20 s) for the turn, then renames the claim away and pastes the
+  wake instead (or queues it, if a turn is running). A second copy of a wake costs a
+  glance; a lost one can leave a lead idle for hours. Any other prompt is still left with
+  the mod, because taking it back could deliver it twice. The mod also writes off a claim
+  whose turn has not started after two minutes, on its own poll, instead of waiting for a
+  turn that an idle session will never start.
+
 ## Profiles (work vs personal accounts)
 
 Claude Code keeps each account in its own config dir (`CLAUDE_CONFIG_DIR`) — that dir holds
@@ -1200,7 +1236,17 @@ session of that name.
 
 **Who sent it.** Each `.sent` row carries a fifth field:
 `from=<sock>/<session> cwd=<dir> by=<parent command>`. The session comes from `$TMUX`, and
-is marked `env:` when it was only read from the environment. `-` means no fleet session. One new failure gets a code: a prompt the mod could not submit (a hook dropped it, the
+is marked `env:` when it was only read from the environment. `-` means no fleet session.
+
+**What became of it.** A sixth field gives the outcome. The row is written when `fleet-send`
+exits, stamped with the time of the attempt, and the first five fields are where they were.
+The values: `delivered` (a turn started, or the paste was seen to submit), `ran` (a slash
+command that started no turn), `queued` (handed back to the queue, to run after the turn in
+progress), `claimed` (the mod holds it and had not started it when `fleet-send` stopped
+waiting), `unconfirmed` (pasted, and no turn was seen to start), `failed`. `attempted` means
+the process exited 0 somewhere no outcome was named. A HUP, INT or TERM still writes the row;
+only a SIGKILL loses it. Rows written before this change have five fields and mean
+"attempted". One new failure gets a code: a prompt the mod could not submit (a hook dropped it, the
 host refused it, a command that does not exist) exits 1 with `not delivered` and the
 mod's own words.
 

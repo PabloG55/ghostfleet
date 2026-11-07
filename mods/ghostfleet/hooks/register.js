@@ -439,6 +439,7 @@ async function clearReceipts($, dir, names) {
 // One at a time, and only while idle: a prompt claimed mid-turn would sit inside the
 // engine, where fleet-send can no longer take it back and nothing shows it waiting.
 async function deliverTick($) {
+  if (!claiming && pending && !turnRunning) await expirePending($)
   if (claiming || pending || turnRunning || !spool) return
   claiming = true
   try {
@@ -540,10 +541,24 @@ async function deliveryTurnStart($, e) {
       if (p.ledgered && p.ledgered.length) noteDue = e.turnId
       else if (!p.nudge) await ledgerFleetItem($, p, e.turnId)
     })(), IO_MS * 4, null)
-  } else if (p && (await $.clock.now()) - p.at > START_MS) {
-    pending = null
-    await bounded($, receipt($, p.id, { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
-  }
+  } else if (p) await expirePending($)
+}
+
+// A CLAIM WHOSE TURN NEVER STARTED IS WRITTEN OFF ON THE POLL, NOT ONLY AT THE NEXT TURN.
+// This used to be checked at turn.start alone, and on a lead that sits idle no turn starts:
+// `pending` stayed set, deliverTick returned at its first line for as long as the session
+// lived, and every later handoff waited out its claim window and was taken back. The receipt
+// that would have said why was never written either. So the poll asks too, while no turn
+// runs. A claim the sender already took back (its `.taken` renamed away: fleet-send does
+// that to a wake it gave up on) is let go without a receipt, because that sender delivered
+// it another way and a failure written now would be reported as one nobody read.
+async function expirePending($) {
+  const p = pending
+  if (!p || (await $.clock.now()) - p.at <= START_MS) return
+  pending = null
+  const held = await bounded($, $.fs.exists(`${spool}/${p.id}.taken`), IO_MS, null)
+  if (held === false) return
+  await bounded($, receipt($, p.id, { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
 }
 
 function deliveryTurnComplete(e) {

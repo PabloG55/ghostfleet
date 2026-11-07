@@ -161,6 +161,29 @@ if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
 fi
 QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
 
+# WHAT BECAME OF A DISPATCH, on its row of <sock>.sent (see "what was actually sent"). The
+# row used to be written before delivery was even attempted, so it meant "attempted" and
+# nothing more: three wakes into one lead were logged at their second, none of them reached
+# it, and the log read exactly like a night on which all three had landed. So the row is
+# written as this process EXITS, with the attempt's own time, and a sixth field says what
+# happened: delivered, ran (a slash command with no turn of its own), queued (handed back to
+# the queue: it runs after the turn in progress), claimed (the mod holds it and had not
+# started it when this stopped waiting), unconfirmed (pasted, and no turn was seen to
+# start), failed. An exit nothing below named reads `attempted` on a zero status and
+# `failed` otherwise, and a HUP/INT/TERM still writes its row. Only a SIGKILL loses one.
+# Every earlier field is where it was, so a reader of the first five reads them unchanged.
+# Defined up here because the queue's lock shares the one EXIT trap.
+SENT_AT=""; SENT_OUT=""; SENT_LEN=""; SENT_DIG=""; SENT_BY=""
+_sent_log="$FLEET_DIR/$SOCK.sent"
+_sent_flush() {                    # $1 = the exit status, taken before anything resets it
+  local rc="${1:-0}" out
+  [ -n "$SENT_AT" ] || return 0
+  out="$SENT_OUT"; [ -n "$out" ] || { [ "$rc" = 0 ] && out=attempted || out=failed; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$SENT_AT" "$SESSION" "$SENT_LEN" "$SENT_DIG" "$SENT_BY" "$out" \
+    >> "$_sent_log" 2>/dev/null || true
+  SENT_AT=""
+}
+
 # mkdir is the lock because it is atomic everywhere this runs (flock is not on macOS).
 # The holder's pid goes inside, so one that died holding it is taken over rather than
 # waited on forever; a lock with no pid yet is only a race lost to a live holder.
@@ -174,9 +197,9 @@ _qlock() {
     sleep 0.1
   done
   echo $$ > "$QUEUE.lock/pid"
-  trap 'rm -rf "$QUEUE.lock" 2>/dev/null' EXIT
+  trap '_x=$?; rm -rf "$QUEUE.lock" 2>/dev/null; _sent_flush "$_x"' EXIT
 }
-_qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap - EXIT; }
+_qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap '_sent_flush $?' EXIT; }
 _b64()   { printf '%s' "$1" | base64 | tr -d '\n'; }
 _unb64() { printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null; }
 
@@ -744,7 +767,6 @@ fi
 #
 # The digest is written through whichever of the two usual tools this host has, and never
 # left blank: an empty field would look like a logged dispatch while answering nothing.
-_sent_log="$FLEET_DIR/$SOCK.sent"
 _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, else say so
   local h
   h="$(printf '%s' "$1" | shasum -a 256 2>/dev/null)" || h=""
@@ -770,10 +792,13 @@ _sent_by() {                       # "from=<sock>/<slot>|env:<sock>/<slot>|- cwd
   by="$(ps -o args= -p "$PPID" 2>/dev/null | tr '\t\n\r' '   ')"
   printf 'from=%s cwd=%s by=%s' "$from" "$(pwd -P 2>/dev/null | tr '\t\n' '  ')" "${by:0:160}"
 }
-{ printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" \
-    "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")" "$(_sent_by)"
-} >> "$_sent_log" 2>/dev/null || true
+# Taken now, written at exit with its outcome (_sent_flush, above).
+SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SENT_LEN="$(printf '%s' "$MSG" | wc -c | tr -d ' ')"
+SENT_DIG="$(_sent_digest "$MSG")"
+SENT_BY="$(_sent_by)"
+trap '_sent_flush $?' EXIT
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 # INTO JARVIS'S MASTER, SAY SO FIRST. Jarvis's confirm-list counts a yes only from the owner,
 # and the hook that records what was submitted cannot tell a paste from typing — so every
@@ -819,6 +844,17 @@ _report_failed() {
 # (see "a prompt the drain stranded"): a drain that dies past here must not re-send it.
 [ "$MODE" = queued ] && [ -n "${CLAUDE_FLEET_QUEUE_JOURNAL:-}" ] \
   && printf 'began\n' >> "$CLAUDE_FLEET_QUEUE_JOURNAL" 2>/dev/null
+# Taken back from the mod while the session is busy: queued, as if it had been busy at the
+# gate. The drain's own delivery is handed back to --dequeue instead, which keeps it the head.
+_mod_requeue() {
+  SENT_OUT=queued
+  [ "$MODE" = queued ] && exit 3
+  _qlock || { SENT_OUT=failed; echo "fleet-send: queue for '$SESSION' is locked — not sent (retry, or --now)" >&2; exit 1; }
+  _enqueue; _qunlock
+  echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
+  [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
+  exit 0
+}
 if [ "$USE_MOD" = 1 ]; then
   _spool="$MOD_DIR/$MOD_SID.handoff"
   _hid="${MOD_NOW:-$(date +%s)000}-$$"
@@ -836,13 +872,7 @@ if [ "$USE_MOD" = 1 ]; then
     if [ "$_claimed" = no ]; then
       rm -f "$_spool/$_hid.revoked" 2>/dev/null
       if busy; then
-        # The drain's own delivery: hand it back to --dequeue, which puts it at the head.
-        [ "$MODE" = queued ] && exit 3
-        _qlock || { echo "fleet-send: queue for '$SESSION' is locked — not sent (retry, or --now)" >&2; exit 1; }
-        _enqueue; _qunlock
-        echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
-        [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
-        exit 0
+        _mod_requeue
       fi
       echo "fleet-send: note — the mod in '$SESSION' did not take the prompt within ${_w}s; pasting it instead" >&2
       USE_MOD=0
@@ -857,11 +887,14 @@ if [ "$USE_MOD" = 1 ]; then
       _ran="$(sed -n 's/.*"ran":"\([^"]*\)".*/\1/p' <<< "$_rcpt")"
       _why="$(sed -nE 's/.*"(dropped|error)":"((\\.|[^"\\])*)".*/\2/p' <<< "$_rcpt" | sed -e 's/\\"/"/g' -e 's/\\\\/\\/g')"
       if [ -n "$_turn" ]; then
+        SENT_OUT=delivered
         echo "fleet-send: → $SESSION"
       elif [ -n "$_ran" ]; then
         # A slash command that ran without a turn of its own (a panel, a local command).
+        SENT_OUT=ran
         echo "fleet-send: → $SESSION (ran $_ran; it started no turn)"
       elif [ -n "$_rcpt" ]; then
+        SENT_OUT=failed
         echo "fleet-send: → $SESSION (not delivered: the mod could not submit it — ${_why:-no reason given})" >&2
         # Read, so it is ours to report: a receipt left behind is one fleet-inbox reports as
         # read by nobody (lib/handoff-sweep.mjs). A sender whose output goes nowhere (the
@@ -870,9 +903,28 @@ if [ "$USE_MOD" = 1 ]; then
         rm -f "$_spool/$_hid.done" 2>/dev/null
         [ -n "${CLAUDE_FLEET_SEND_REPORT:-}" ] && _report_failed "$CLAUDE_FLEET_SEND_REPORT not delivered — ${_why:-no reason given}"
         exit 1
+      elif [ "$KIND" = nudge ] && mv "$_spool/$_hid.taken" "$_spool/$_hid.revoked" 2>/dev/null; then
+        # A WAKE THE MOD CLAIMED AND NEVER STARTED IS TAKEN BACK. For any other prompt the
+        # wait below is right: the mod holds it and submits it once the session is idle, and
+        # taking it back could deliver it twice. For the fleet's own wake that trade is the
+        # other way round. A mod that claims and never submits used to hold every wake for as
+        # long as it stayed that way, each one exiting 0 here with a warning nobody read —
+        # the lead looked woken and was not. A second copy of a nudge costs a glance; a lost
+        # one is a lead idle for hours. So it is taken back by the same rename a claim races
+        # (one that started at this instant wrote its receipt first and is left alone), and
+        # goes the way an unclaimed prompt goes: queued if a turn is running, else pasted.
+        rm -f "$_spool/$_hid.revoked" 2>/dev/null
+        if [ -s "$_spool/$_hid.done" ]; then
+          SENT_OUT=delivered; echo "fleet-send: → $SESSION"
+        else
+          echo "fleet-send: note — the mod in '$SESSION' claimed this wake and had not started it after ${_s}s; taking it back" >&2
+          busy && _mod_requeue
+          USE_MOD=0
+        fi
       else
         # Claimed and not started yet. The mod still holds it and will submit it once the
         # session is idle; its reply address is armed by that turn, so nothing to take back.
+        SENT_OUT=claimed
         echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
       fi
     fi
@@ -936,6 +988,7 @@ if [ "$pre_busy" = yes ]; then
   # already mid-turn: the submit hands it to the running turn; one Enter is enough
   sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.4}"
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+  SENT_OUT=delivered
   echo "fleet-send: → $SESSION (into the running turn)"
 else
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
@@ -950,8 +1003,10 @@ else
     sleep 0.2
   done
   if [ "$ok" = yes ]; then
+    SENT_OUT=delivered
     echo "fleet-send: → $SESSION"
   else
+    SENT_OUT=unconfirmed
     echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
     # Take the reply address back. Unconfirmed means no turn is known to have started,
     # and a marker left behind would attach our question to whatever that session does

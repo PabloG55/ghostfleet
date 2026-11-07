@@ -6286,9 +6286,11 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   # The project's off-switch once sat above every per-session marker on this path only, so
   # a project switched off with all three sessions switched on filed four dones in the
   # sub-lead's inbox and never woke it. Each row sets the markers from scratch, fires one
-  # done, and reads the wake target's stamp — written synchronously at the moment of the
-  # decision, before the backgrounded fleet-send, so a row costs no wait in either
-  # direction. A row is "C:on L:off P:off": child, sub-lead, project; absent = no marker.
+  # done, and reads the wake target's stamp. The stamp is written once the backgrounded
+  # wake has landed (a stamp written before the send is how failed wakes passed for sent
+  # ones), so a row waits up to two seconds for it. A woken row is seen in a fraction of
+  # that, and a silent row costs the whole bound.
+  # A row is "C:on L:off P:off": child, sub-lead, project; absent = no marker.
   nlmark() {                                    # $1 = file prefix, $2 = on|off|''
     rm -f "$1.notify-lead" "$1.notify-lead-off"
     case "$2" in on) : > "$1.notify-lead" ;; off) : > "$1.notify-lead-off" ;; esac
@@ -6299,7 +6301,8 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
     nlmark "$NLF/cfnl.$slot" "$c"; nlmark "$NLF/cfnl.api-fix" "$l"; nlmark "$NLF/cfnl" "$pr"
     rm -f "$NLF/cfnl.api-fix.notify.stamp" "$NLF/cfnl.notify.stamp"
     nlfire "$slot" Stop
-    local st="$NLF/cfnl.notify.stamp"; [ "$slot" = api-fix-tests ] && st="$NLF/cfnl.api-fix.notify.stamp"
+    local st="$NLF/cfnl.notify.stamp" i; [ "$slot" = api-fix-tests ] && st="$NLF/cfnl.api-fix.notify.stamp"
+    for i in $(seq 1 20); do [ -s "$st" ] && break; sleep 0.1; done
     [ -s "$st" ] && echo 1 || echo 0
   }
   is "child: no markers anywhere wakes the sub-lead"          "1" "$(nlwake api-fix-tests)"
@@ -8695,6 +8698,9 @@ if command -v tmux >/dev/null 2>&1; then
   SNLOG="$SNL/sndlog.sent"
   is "the log exists after a send"        "1" "$([ -f "$SNLOG" ] && echo 1 || echo 0)"
   is "...one line per dispatch"           "3" "$(grep -c . "$SNLOG" 2>/dev/null || echo 0)"
+  # A pane with no composer: nothing confirms the submit, and the row says so rather than
+  # reading like a delivery.
+  is "...each saying no turn was seen to start" "3" "$(awk -F'\t' '$6 == "unconfirmed"' "$SNLOG" 2>/dev/null | grep -c . || true)"
   # THE POINT: a full brief and a one-word fragment must be told apart from the log alone,
   # because that is the comparison nobody could make when this happened.
   is "...a long brief records its length"  "1" "$(awk -F'\t' '$3>40' "$SNLOG" 2>/dev/null | grep -c . || true)"
@@ -10717,7 +10723,59 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'cwd=[^ ]*')"
   is "...and the process that ran it"                 "1" \
      "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -c 'by=.*bash' || true)"
-  is "...still one record of five fields"             "5" "$(awk -F'\t' '{print NF}' <<< "$xrow")"
+  # ...AND WHAT BECAME OF IT. The row used to be written before delivery, so it meant only
+  # "attempted": three wakes that never landed read exactly like three that did. The first
+  # five fields are where they were; the sixth is the outcome, written as fleet-send exits.
+  is "...one record of six fields, the first five where they were" "6" "$(awk -F'\t' '{print NF}' <<< "$xrow")"
+  # The pane is a `cat`, not an agent: the paste lands and no turn is ever seen to start.
+  # fleet-send has always warned so on this pane; now the row says it too.
+  is "...the sixth saying no turn was seen to start"  "unconfirmed" "$(cut -f6 <<< "$xrow")"
+  is "...and so does the mod's, once its turn started" "delivered" \
+     "$(awk -F'\t' '$3 == 10 {print $6}' "$XF/cfxsrv.sent" | tail -n 1)"
+  kill "$XCP" 2>/dev/null; wait "$XCP" 2>/dev/null
+
+  # A MOD THAT REFUSES, AND ONE THAT CLAIMS AND NEVER STARTS. The claimer stands in for the
+  # mod again, in two broken shapes. A refusal is an exit 1 and a `failed` row. A claim that
+  # never becomes a turn used to exit 0 with a warning nobody read, for every prompt — so a
+  # stuck mod swallowed the fleet's wakes for as long as it stayed stuck. A WAKE (--nudge) is
+  # now taken back and pasted; any other prompt is still left with the mod, which may yet
+  # submit it, because taking that back could deliver it twice.
+  xclaim() {         # $1 = refuse | hold
+    ( exec -a xs-claimer bash -c '
+        sp="$1"; log="$2"; mode="$3"; end=$((SECONDS + 60))
+        while [ "$SECONDS" -lt "$end" ]; do
+          for f in "$sp"/[0-9]*.json; do
+            [ -e "$f" ] || continue
+            id="${f##*/}"; id="${id%.json}"
+            mv "$f" "$sp/$id.taken" 2>/dev/null || continue
+            jq -r .text "$sp/$id.taken" >> "$log"
+            [ "$mode" = refuse ] && { printf "{\"id\":\"%s\",\"error\":\"refused here\"}" "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; }
+          done
+          sleep 0.1
+        done' _ "$XF/xs-1.handoff" "$XS/claimed" "$1" ) & XCP=$!
+    xrec "$xspid"; }
+  XNUDGE() { env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
+               CLAUDE_FLEET_MOD_CLAIM=2 CLAUDE_FLEET_MOD_START=2 \
+               "$ROOT/bin/fleet-send" -s cfxsrv --anyway "$@" 2>&1; echo "rc=$?"; }
+  xlast() { tail -n 1 "$XF/cfxsrv.sent" | cut -f6; }
+  : > "$XS/claimed"; xclaim refuse
+  out="$(XNUDGE --nudge master "wake-india")"
+  is "a mod that refuses a wake: fleet-send exits 1"  "1" "$(grep -c '^rc=1$' <<< "$out" || true)"
+  is "...and the sent log says failed"                "failed" "$(xlast)"
+  kill "$XCP" 2>/dev/null; wait "$XCP" 2>/dev/null
+  xclaim hold
+  out="$(XNUDGE --nudge master "wake-juliet")"
+  is "a wake the mod claimed and never started is taken back" "1" "$(grep -c 'taking it back' <<< "$out" || true)"
+  is "...its claim renamed away, so the mod cannot also submit it" "0" \
+     "$(ls "$XF/xs-1.handoff" | grep -c '\.taken$' || true)"
+  is "...and pasted instead"                          "1" \
+     "$(grep -cx 'wake-juliet' <<< "$(tmux -L cfxsrv capture-pane -p -t master 2>/dev/null)" || true)"
+  is "...logged as the paste it became"              "rc=0 unconfirmed" "$(grep -o '^rc=[0-9]*$' <<< "$out") $(xlast)"
+  out="$(XNUDGE master "brief-kilo")"
+  is "a brief the mod claimed is NOT taken back"      "1" "$(ls "$XF/xs-1.handoff" | grep -c '\.taken$' || true)"
+  is "...nor pasted"                                  "0" \
+     "$(grep -cx 'brief-kilo' <<< "$(tmux -L cfxsrv capture-pane -p -t master 2>/dev/null)" || true)"
+  is "...and its row says the mod holds it"           "claimed" "$(xlast)"
   kill "$XCP" 2>/dev/null; wait "$XCP" 2>/dev/null
   tmux -L cfxsrv kill-server 2>/dev/null; rm -rf "${XS:?}"
 else
@@ -12711,7 +12769,9 @@ if command -v tmux >/dev/null 2>&1; then
   # a fleet-send that records instead of pasting
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$ND" > "$ND/bin/fleet-send"
   chmod +x "$ND/bin/fleet-send"
-  eval "$(sed -n '/^_defer_nudge() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  for f in _dbg _wake _wake_failed _wake_follow _defer_nudge; do   # the deferral sends through _wake
+    eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  done
   # THE GUARD IS STUBBED HERE ON PURPOSE. Its correctness is the group above, against real
   # captured panes; what this group tests is the DEFERRAL — that a skip comes back. Feeding
   # it a scripted answer is also the only way to make "the box was busy, then it cleared"
@@ -12783,6 +12843,163 @@ else
   skip "deferred wake" "tmux missing"
 fi
 
+# ── 4d5c1. a wake that fails is retried, then said ───────────────────────────
+# Every wake used to be `fleet-send … >/dev/null 2>&1` with the exit status thrown away, and
+# the gathered-DONE sleeper wrote its stamp BEFORE sending. Measured on one lead: three wakes
+# logged in <sock>.sent within an hour, none in its transcript, an eight-hour gap until a
+# person typed, and nothing filed anywhere. hooks/fleet-event.sh _wake now sends, stamps only
+# on a zero exit, retries by paste, and files a `failed` row plus an .undelivered line.
+#   Driven on the real functions with a stub fleet-send that answers from a script, so "fails,
+# then succeeds" is deterministic. Watched red on the parent commit: there the gathered
+# sleeper stamps before a failing send, sends once, and files nothing.
+group "a wake that fails is retried, then said"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WF="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$WF/bin"
+  # One line of $WF/rc per call: the exit status, then what to print. Out of lines: exit 0.
+  cat > "$WF/bin/fleet-send" <<EOF
+#!/usr/bin/env bash
+printf '%s\t%s\n' "\${CLAUDE_FLEET_MOD_DELIVER:-on}" "\$*" >> "$WF/sent.log"
+# A drain, as the queue's own: \$WF/drain says whether it delivers, finds a turn running, or
+# delivers something else and leaves this wake where it was.
+case "\$*" in *--dequeue*)
+  case "\$(cat "$WF/drain" 2>/dev/null)" in deliver) rm -f "$WF/cfwake.master.queue"; exit 0 ;; busy) exit 3 ;; *) exit 0 ;; esac ;;
+esac
+line="\$(head -n 1 "$WF/rc" 2>/dev/null)"; tail -n +2 "$WF/rc" > "$WF/rc.n" 2>/dev/null; mv -f "$WF/rc.n" "$WF/rc"
+[ -n "\$line" ] || exit 0
+printf '%s\n' "\${line#* }" >&2; exit "\${line%% *}"
+EOF
+  chmod +x "$WF/bin/fleet-send"
+  for f in _dbg _wake _wake_failed _wake_follow _defer_nudge _notify_quiet _done_news _gather_done; do
+    eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  done
+  export WF
+  _pane_text() { :; }
+  _input_state() { return "$(cat "$WF/state" 2>/dev/null || echo 2)"; }
+  _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
+  echo 0 > "$WF/state"
+  FLEET_DIR="$WF"; export FLEET_DIR
+  export CLAUDE_FLEET_WAKE_RETRY="1 1"
+  tmux -L cfwake kill-server 2>/dev/null
+  tmux -L cfwake new-session -d -s master 'sleep 300' 2>/dev/null
+  tmux -L cfwake new-session -d -s acme-lead 'sleep 300' 2>/dev/null
+  wf_reset() { : > "$WF/sent.log"; : > "$WF/rc"; rm -f "$WF"/cfwake.*; }
+  wf_sends() { local n; n="$(grep -c . "$WF/sent.log" 2>/dev/null)"; echo "${n:-0}"; }
+  wf_failed() { awk -F'\t' -v s="$1" '$2 == s && $3 == "failed"' "$2" 2>/dev/null | grep -c . || true; }
+
+  # A WAKE THAT SUCCEEDS: one send, one stamp, nothing filed.
+  wf_reset
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake notify master "[fleet] wake"; rc=$?
+  is "a wake that lands returns 0"                   "0" "$rc"
+  is "...is sent once"                               "1" "$(wf_sends)"
+  is "...and stamped"                                "1" "$([ -s "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...and files nothing"                          "0" "$(wf_failed master "$WF/cfwake.inbox")"
+  is "...and marks nothing undelivered"              "0" "$([ -e "$WF/cfwake.notify.undelivered" ] && echo 1 || echo 0)"
+
+  # A WAKE THAT ALWAYS FAILS: three attempts, the retries by paste, no stamp, one row, one line.
+  wf_reset
+  printf '%s\n' "1 fleet-send: → master (not delivered: the mod could not submit it — refused)" \
+    "1 fleet-send: queue for 'master' is locked" "1 fleet-send: no session" > "$WF/rc"
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake notify master "[fleet] wake"; rc=$?
+  is "a wake that never lands returns non-zero"      "1" "$([ "$rc" != 0 ] && echo 1 || echo 0)"
+  is "...leaves NO stamp"                            "0" "$([ -e "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...was tried three times"                      "3" "$(wf_sends)"
+  is "...the first through the mod"                  "on" "$(head -n 1 "$WF/sent.log" | cut -f1)"
+  is "...the retries by paste"                       "off off" "$(tail -n +2 "$WF/sent.log" | cut -f1 | paste -sd' ' -)"
+  is "...all as nudges to master"                    "3" "$(grep -c $'\t--nudge -s cfwake master ' "$WF/sent.log" || true)"
+  is "...and ends as ONE failed row in master's inbox" "1" "$(wf_failed master "$WF/cfwake.inbox")"
+  is "...naming why the last attempt failed"         "1" "$(grep -c 'no session' "$WF/cfwake.inbox" || true)"
+  is "...and one line where the phone's buzz looks"  "1" "$(grep -c . "$WF/cfwake.notify.undelivered" 2>/dev/null || true)"
+
+  # FAILS ONCE, THEN LANDS: retried, stamped, nothing filed.
+  wf_reset
+  echo "1 fleet-send: → master (not delivered: the mod could not submit it — refused)" > "$WF/rc"
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake notify master "[fleet] wake"; rc=$?
+  is "a wake that lands on its retry returns 0"      "0" "$rc"
+  is "...after two sends"                            "2" "$(wf_sends)"
+  is "...stamped once it landed"                     "1" "$([ -s "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...with no failed row"                         "0" "$(wf_failed master "$WF/cfwake.inbox")"
+
+  # AN UNCONFIRMED PASTE EXITS 0 and may sit unsent in the box: not a wake. Its retry finds
+  # text in the box and does not paste over it.
+  wf_reset
+  echo "0 fleet-send: → master (warning: could not confirm submit — verify it landed)" > "$WF/rc"
+  echo 1 > "$WF/state"
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake notify master "[fleet] wake"; rc=$?
+  echo 0 > "$WF/state"
+  is "an unconfirmed paste is not counted as a wake" "0" "$([ -e "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...its retries never paste over typing"        "1" "$(wf_sends)"
+  is "...and it is filed"                            "1" "$(wf_failed master "$WF/cfwake.inbox")"
+
+  # A SUB-LEAD's failed wake is filed in the inbox it reads, with its own kind's marker.
+  wf_reset
+  printf '1 x\n1 x\n1 x\n' > "$WF/rc"
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake acme-lead.notify acme-lead "[fleet] wake"
+  is "a sub-lead's failed wake lands in ITS inbox"   "1" "$(wf_failed acme-lead "$WF/cfwake.acme-lead.inbox")"
+  is "...not in master's"                            "0" "$(wf_failed master "$WF/cfwake.inbox")"
+  is "...beside its own kind's marker"               "1" "$(grep -c . "$WF/cfwake.acme-lead.notify.undelivered" 2>/dev/null || true)"
+
+  # A QUEUED WAKE IS FOLLOWED TO ITS DELIVERY. The session read as mid-turn, so fleet-send
+  # queued the wake and exited 0, and only a Stop drains a queue. A compaction ends with no
+  # Stop: reproduced in a scratch fleet, where a wake sent during a `/compact` sat queued at
+  # an idle session until the next send. Three endings: the follow drains it, a real turn is
+  # still running (its Stop will), and a drain that leaves it there (filed).
+  wf_queued() {      # $1 = what the drain does
+    wf_reset; echo "$1" > "$WF/drain"
+    echo "0 fleet-send: → master (queued #1 — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)" > "$WF/rc"
+    printf '%s\x1f\x1f\x1f\x1f%s\x1fnudge\n' "$(date +%s)" "$(printf '%s' "[fleet] wake" | base64 | tr -d '\n')" > "$WF/cfwake.master.queue"
+    PATH="$WF/bin:$PATH" _wake "$WF" cfwake notify master "[fleet] wake"; rc=$?
+  }
+  wf_drains() { grep -c $'\t-s cfwake --dequeue master$' "$WF/sent.log" || true; }
+  wf_queued deliver
+  is "a queued wake at a session whose turn ended with no Stop is drained" "1" "$(wf_drains)"
+  is "...and counts as delivered"                    "0 0" "$rc $(wf_failed master "$WF/cfwake.inbox")"
+  wf_queued busy
+  is "a wake queued behind a turn still running is left to its Stop" "0 0" "$rc $(wf_failed master "$WF/cfwake.inbox")"
+  is "...after a drain on each gap"                  "2" "$(wf_drains)"
+  wf_queued other
+  is "a wake still queued at an idle session is filed" "1" "$(wf_failed master "$WF/cfwake.inbox")"
+  is "...as never drained"                           "1" "$(grep -c 'wake queued and never drained' "$WF/cfwake.inbox" || true)"
+  is "...beside the phone's marker"                  "1" "$(grep -c 'never drained' "$WF/cfwake.notify.undelivered" 2>/dev/null || true)"
+  rm -f "$WF/drain" "$WF/cfwake.master.queue"
+
+  # A NEED-YOU keeps going --now, through the same helper.
+  wf_reset
+  PATH="$WF/bin:$PATH" _wake "$WF" cfwake needyou master "[fleet] w1 NEEDS YOU"
+  is "a need-you wake still goes --now"              "1" "$(grep -c $'\t--nudge --now -s cfwake master ' "$WF/sent.log" || true)"
+
+  # THE SITE THE INCIDENT WAS: a gathered DONE whose send fails. Driven end to end through
+  # the quiet-window sleeper, which used to stamp first and send once.
+  wf_reset
+  printf '1 x\n1 x\n1 refused by the mod\n' > "$WF/rc"
+  export CLAUDE_FLEET_NOTIFY_TICK=1 CLAUDE_FLEET_NOTIFY_QUIET=1 CLAUDE_FLEET_NOTIFY_QUIET_MAX=600
+  printf '{"session_id":"wf-w1","sock":"cfwake","slot":"acme-api","status":"ready","ts":%s}' "$(date +%s)" > "$WF/wf-w1.json"
+  printf '%s\tacme-api\tdone\tx\n' "$(date +%s)" >> "$WF/cfwake.inbox"
+  PATH="$WF/bin:$PATH" _gather_done cfwake "$WF" notify master acme-api "$WF/cfwake.inbox"
+  for i in $(seq 1 30); do [ "$(wf_failed master "$WF/cfwake.inbox")" -ge 1 ] && break; sleep 0.5; done
+  is "a gathered DONE whose wake fails leaves no stamp" "0" "$([ -e "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...is retried"                                 "3" "$(wf_sends)"
+  is "...and ends as a failed row beside the DONE"   "1" "$(wf_failed master "$WF/cfwake.inbox")"
+  # ...and the same sleeper, whose wake lands, stamps once and files nothing extra.
+  for i in $(seq 1 20); do [ -e "$WF/cfwake.notify.gather.pid" ] || break; sleep 0.5; done
+  wf_reset
+  printf '%s\ttoolbox\tdone\tx\n' "$(date +%s)" >> "$WF/cfwake.inbox"
+  printf '{"session_id":"wf-w2","sock":"cfwake","slot":"toolbox","status":"ready","ts":%s}' "$(date +%s)" > "$WF/wf-w2.json"
+  PATH="$WF/bin:$PATH" _gather_done cfwake "$WF" notify master toolbox "$WF/cfwake.inbox"
+  for i in $(seq 1 30); do [ -s "$WF/cfwake.notify.stamp" ] && break; sleep 0.5; done
+  is "a gathered DONE whose wake lands is sent once"  "1" "$(wf_sends)"
+  is "...stamps"                                      "1" "$([ -s "$WF/cfwake.notify.stamp" ] && echo 1 || echo 0)"
+  is "...and files nothing extra"                     "0" "$(wf_failed master "$WF/cfwake.inbox")"
+  unset CLAUDE_FLEET_NOTIFY_TICK CLAUDE_FLEET_NOTIFY_QUIET CLAUDE_FLEET_NOTIFY_QUIET_MAX CLAUDE_FLEET_WAKE_RETRY
+
+  # EVERY WAKE SITE GOES THROUGH THE HELPER: no `fleet-send --nudge` left anywhere in the hook
+  # but inside _wake itself. A sixth copy is how the first five came to differ.
+  is "no wake in the hook bypasses _wake"            "0" \
+     "$(sed '/^_wake() {/,/^}/d' "$ROOT/hooks/fleet-event.sh" | grep -v '^[[:space:]]*#' | grep -c 'fleet-send[^|]*--nudge' || true)"
+  tmux -L cfwake kill-server 2>/dev/null; sleep 1; rm -rf "${WF:?}"
+else
+  skip "a wake that fails" "tmux or jq missing"
+fi
+
 # ── 4d5c2. a worker's DONE waits for a quiet window, and is re-checked when it ends ──
 # Measured on one busy fleet's master over 13 days: 1,878 of its turns (64%) were started by
 # the "a worker finished" nudge, a median 2.7 minutes apart, and 57% of those only looked and
@@ -12800,7 +13017,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   QW="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$QW/bin"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$QW" > "$QW/bin/fleet-send"
   chmod +x "$QW/bin/fleet-send"
-  for f in _dbg _defer_nudge _notify_quiet _done_news _gather_done; do
+  for f in _dbg _wake _wake_failed _wake_follow _defer_nudge _notify_quiet _done_news _gather_done; do
     eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
   done
   export QW
