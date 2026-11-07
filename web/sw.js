@@ -438,10 +438,14 @@
 // v96 lists every paired machine's runs in Reviews, each card naming its machine, and opens,
 // plays and judges one through this host — the verdict lands on the machine that recorded
 // it. A phone on v95 lists this machine's runs only.
-const VERSION = 'ghostfleet-v97';
+// v98 keeps a tab's place in its address: a reload lands where it was, each desk tab on its
+// own, and a link (?screen=session&p=…&s=…) opens its screen after the unlock. The installed
+// app still opens start_url and restores from the stored state. A phone on v97 ignores the
+// query and reopens whatever the last tab stored.
+const VERSION = 'ghostfleet-v98';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js', './md.js', './grid-search.js',
+  './ansi.js', './md.js', './grid-search.js', './place.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
@@ -677,10 +681,16 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  // A PLACE IN THE ADDRESS IS THE PAGE'S, NOT THE SERVER'S. `?screen=session&p=…` is read by
+  // app.js from location; every server answers it with the same index.html. Keyed by the
+  // query, each address a tab had ever reloaded on was a cache miss — the cache-first shell
+  // became network-first exactly for a reload — and then a copy of the shell of its own.
+  // So a navigation is looked up, and kept, without its query.
+  const key = req.mode === 'navigate' && url.search ? url.origin + url.pathname : req;
   e.respondWith((async () => {
     const c = await caches.open(VERSION);
-    const hit = await c.match(req, { ignoreSearch: false });
-    const net = fetch(req).then(r => { if (r.ok) c.put(req, r.clone()); return r; });
+    const hit = await c.match(key, { ignoreSearch: false });
+    const net = fetch(req).then(r => { if (r.ok) c.put(key, r.clone()); return r; });
     if (hit) { net.catch(() => {}); return hit; }       // revalidate behind the paint
     try { return await net; }
     catch (err) {

@@ -21045,6 +21045,56 @@ else
   skip "phone client" "web/ not present"
 fi
 
+group "phone client: a reload keeps the tab's place, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
+  # ── where the app is, in the address ─────────────────────────────────────────
+  # The client restored from ONE stored state, and localStorage is the origin's, not the
+  # tab's: two desk tabs overwrote each other's place on every poll, a reload put back
+  # whatever tab wrote last, and no screen could be linked to. The place is in the URL now
+  # (web/place.js), read once at boot, and the stored state is the fallback for an address
+  # that names none — every open of the installed app, which launches start_url.
+  #   place-check is the codec and the clamps with no DOM: every screen's round trip, only
+  # place keys in the query, a hand-written hole landing where the stored state with the
+  # same hole lands, the URL winning, and no URL leaving the stored state as it was.
+  # WATCHED GOING RED: against staging (no place.js: the import row), and against copies of
+  # place.js with the cross-project grid kept (1 row), the stored place leaking through a
+  # field the URL left out (8), and the tab clamp dropped (1).
+  #   place-nav-check drives the real client at 390x844 through the lock on every load:
+  # reload on a session (and its pane) stays there; a tab and the pane switch replace the
+  # address and add no entry; two tabs of one browser, one store, each reload to their own
+  # place; a link opens on the lock with nothing of it drawn, then its screen, and back walks
+  # the trail a walk would have left — and only then leaves; `#reviews` still opens Reviews;
+  # a bare address still lands on Projects. WATCHED GOING RED: against staging's client (25
+  # of 34 — the 9 it passes are the invariants: depth, the lock first, the shared store, no
+  # place), against a copy that does not seed the trail after a link (8), and one that
+  # pushes where it should replace (4).
+  PLC="$(mktemp -d "$TEST_RUNS.$$.place.XXXXXX")"
+  node "$ROOT/test/helpers/place-check.mjs" > "$PLC/unit" 2> "$PLC/unit.err"
+  is "place-check ran"                "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PLC/unit.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PLC/unit")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PLC/unit") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PLC/unit"
+  node "$ROOT/test/helpers/place-nav-check.mjs" > "$PLC/out" 2> "$PLC/err"
+  plcrc=$?
+  if grep -q 'no chrome' "$PLC/out" 2>/dev/null; then
+    skip "a place in the address" "no chrome to reload in"
+  else
+    is "place-nav-check ran"            "0" "$plcrc"
+    is "...without complaining"         ""  "$(head -2 "$PLC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PLC/out")" -ge 34 ] && echo yes || echo "no: $(wc -l < "$PLC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$PLC/out"
+  fi
+  rm -rf "${PLC:?}"
+else
+  skip "phone client" "web/ not present"
+fi
+
 group "phone client: the owner's music keeps playing, in a real browser"
 if [ -d "$ROOT/web" ]; then
 

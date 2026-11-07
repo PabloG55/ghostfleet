@@ -231,8 +231,11 @@ one and pages back over the whole transcript, the pane is the only place a permi
 dialog exists at all. A **blocked** session says so in the chat, in red, with a button to
 the pane — that banner is what makes the chat safe as the default (§7a).
 
-The **back gesture** works: navigating pushes a history entry that reuses the current href,
-so a swipe walks session → grid → projects and **no URL ever appears**.
+The **back gesture** works: navigating pushes a history entry, so a swipe walks session →
+grid → projects. Each entry's **address names the place** — `?screen=session&p=acme-api&s=api-fix`,
+`?screen=reviews` — so a reload lands where that tab was, every tab on its own, and a link
+opens its screen once the lock is passed (`place.js`). Back still goes by depth, never by
+reading the address. The installed app opens `start_url` and restores the stored place.
 
 The session screen's ten footer buttons are one **`⋯` actions sheet**. The composer replaced
 `send a prompt`, and a **`🔊`** beside it reads the newest assistant turn aloud

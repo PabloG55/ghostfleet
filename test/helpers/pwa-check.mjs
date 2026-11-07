@@ -1073,12 +1073,15 @@ is('...by the call that does both halves', true,
 is('the shell owns the viewport', true, /document\.documentElement\.classList\.toggle\('shell', shell\)/.test(APP));
 is('...and the pane stops measuring under it', true, /classList\.contains\('shell'\)\) return;/.test(APP));
 
-// ── 5d. the back gesture, and no URLs ─────────────────────────────────────
+// ── 5d. the back gesture, and the address ─────────────────────────────────
 // "if I go back it takes me to the last page I was, not back." The app had nothing on the
-// history stack, so the system gesture left it. The entries carry a DEPTH and reuse the
-// current href — no routes to invent, nothing to parse on a cold open, and no URL ever
-// appears (there is no address bar in standalone mode anyway).
-is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', location\.href\)/.test(APP));
+// history stack, so the system gesture left it. The entries carry a DEPTH; their address is
+// the place they were pushed at (web/place.js), written by the app and read only at boot —
+// popstate goes by depth. Under the lock an entry keeps the address it had: the lock screen
+// is not a place. What the address SAYS is test/helpers/place-check.mjs's; what it does to
+// a reload and to back is place-nav-check.mjs's.
+is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', S\.locked \? location\.href : placeHref\(\)\)/.test(APP));
+is('...and everything else replaces the current one', true, /history\.replaceState\(history\.state, '', placeHref\(\)\)/.test(APP));
 is('...and never a url of its own', 0,
    (APP.match(/pushState\([^)]*,\s*'\/[^']*'\)/g) || []).length);
 // The listener also records whether the platform already animated the move (slideNav), so

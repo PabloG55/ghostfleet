@@ -19,6 +19,8 @@ import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+// Where the app is, as an address, and the clamps a restored place goes through (see the file).
+import * as PL from './place.js';
 // The desk's own matcher for `/` — one answer to "which cards does `bil` mean" (see the file).
 import { matchIndices, stepMatch, sessionMatches } from './grid-search.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
@@ -131,50 +133,46 @@ function save() {
     }));
   } catch {}
 }
+// THE PLACE THIS TAB'S ADDRESS NAMES, read once, at boot: null when it names none — which is
+// every open of the installed home-screen app, since it launches start_url and never the
+// address it was on, and so keeps restoring from the stored state exactly as it did. When
+// there is one it wins over the stored state, which is the origin's and so whichever tab
+// wrote last (web/place.js). Spent by the first unlock: see loggedIn.
+const bootPlace = (() => { try { return PL.fromQuery(location.search); } catch { return null; } })();
+let linkPlace = !!bootPlace;
+// A tab the address names but the cached projects cannot vouch for, because there is no
+// cache yet (a link opened in a fresh browser). The clamp sends it to `all`, as it would a
+// stored one; the first projects read puts it back if the tab is real (spendTabWant).
+let tabWant = '';
 function restore() {
   loadStack();
-  let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { return; }
-  if (!j) return;
+  let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { j = null; }
+  if (!j && !bootPlace) return;
+  // The URL's place over the stored one; the payloads stay, to paint before the network answers.
+  j = PL.overlay(j || {}, bootPlace);
   S.projects = j.projects || null; S.grid = j.grid || null;
   S.hosts = Array.isArray(j.hosts) ? j.hosts : null;
-  S.project = j.project || null; S.screen = j.screen || 'projects';
-  S.session = j.session || null;
-  // the sub-grid you were in; the next grid read falls back to the top if it has gone
-  S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
-  S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
-  S.entry = j.entry === 'projects' && S.screen === 'session' ? 'projects' : '';
+  // THE CLAMPS, in place.js since there are two ways in — a stored state and an address —
+  // and both must land where the other would with the same hole in it.
+  const c = PL.clamp(j, { tabs: profileTabs(S.projects || []), stackLen: S.stackSel.length });
+  S.screen = c.screen; S.project = c.project; S.session = c.session; S.sub = c.sub;
+  S.jarvisMode = c.jarvisMode; S.entry = c.entry; S.view = c.view; S.profile = c.profile; S.rv = c.rv;
+  if (bootPlace && !S.projects && bootPlace.profile !== c.profile) tabWant = bootPlace.profile;
   // ...and what was being typed there, which a relaunch used to throw away.
   if (S.screen === 'session' && S.session) S.draft = draftGet(draftKey());
-  // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
-  // falls to the default rather than rendering neither.
-  S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
-  // THE SAME CLAMP, FOR THE SAME REASON. A profile is free text and a projects file is
-  // edited between opens, so the stored tab can name something that no longer exists —
-  // and a tab matching nothing would draw an empty screen over a fleet that has projects
-  // in it. Unknown falls to `all`, which is also the default: hiding projects on a first
-  // run would be a surprise, and "is anything blocked on me" must not need two looks.
-  const tabs = profileTabs(S.projects || []);
-  S.profile = (j.profile && (j.profile === PROFILE_ALL || tabs.includes(j.profile))) ? j.profile : PROFILE_ALL;
-  // A CLAMP, not a trust. Half-written state is how the screen above happened, and the
-  // rule is simple enough to state: you cannot be on a screen whose subject is missing.
-  if (S.screen === 'session' && !S.session) S.screen = S.project ? 'grid' : 'projects';
-  // The stack reopens as it was left — the picker, or the columns if there is a stack to show.
-  if (S.screen === 'stack' && !S.stackSel.length) S.screen = 'stackpick';
   if (S.screen === 'stackpick') S.pick = { cur: '', q: null, typing: false, msg: '' };
-  if (S.screen === 'stack' || S.screen === 'stackpick') { S.project = null; S.session = null; }
-  if (S.screen === 'grid' && !S.project) S.screen = 'projects';
-  // A run is reopened by its address and read again; a list is read again. Neither payload
-  // is kept: a verdict changes from another device, and a stale one would be shown as now.
-  S.rv = S.screen === 'review' && j.rv && j.rv.profile && j.rv.run ? { host: String(j.rv.host || ''), profile: String(j.rv.profile), run: String(j.rv.run) } : null;
-  if (S.screen === 'review' && !S.rv) S.screen = 'reviews';
   S.stale = j.at || 0;
   // ...and the trail the back gesture would have had if you had walked here. A cold open is
   // at the root of its own history, so without it the first swipe out of a restored session
-  // screen leaves the app. MEASURED HERE, PUSHED LATER (resumedSession): this runs while the
-  // lock screen is up, and an entry pushed under the lock screen is previewed AS the lock
-  // screen by a back swipe (see loggedIn). A login does not want it at all — it lands on
-  // Projects.
-  restoredDepth = S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue' || S.screen === 'reviews' || S.screen === 'stack' || S.screen === 'stackpick') ? 1 : S.screen === 'review' ? 2 : 0;
+  // screen leaves the app. MEASURED HERE, PUSHED LATER (resumedSession, loggedIn): this runs
+  // while the lock screen is up, and an entry pushed under the lock screen is previewed AS
+  // the lock screen by a back swipe (see loggedIn).
+  restoredDepth = c.depth;
+}
+function spendTabWant() {
+  if (!tabWant || !S.projects) return;
+  if (S.profile === PROFILE_ALL && profileTabs(S.projects).includes(tabWant)) S.profile = tabWant;
+  tabWant = '';
 }
 let restoredDepth = 0;
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
@@ -247,6 +245,7 @@ async function refreshOnce() {
       // tell that apart from a machine with one agent installed.
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
+      spendTabWant();
       // Another machine paired: the hosts it answers for, online or not (PAIRED HOSTS in
       // fleet-serve). Absent is one machine, and every screen draws exactly as before.
       S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null;
@@ -588,6 +587,8 @@ function renderDuo(app, side) {
   syncPanePoll(); syncChatPoll();
 }
 function render() {
+  // The address follows the screen — replaced, never pushed (see "back, and what the address is for").
+  syncUrl();
   // Leaving the terminal's screen, by any route, closes its socket; the tab stays in tmux.
   if (TS && S.screen !== 'term') disposeTerm();
   // ...and leaving the stack by one that did not go through leaveStackState (Ctrl-f, a card
@@ -907,7 +908,7 @@ function modeChip() {
 //   (docs/OPERATIONS.md said the project digit was "its position in its profile's list".
 // It was not, and that sentence is corrected in this change: it is exactly the belief
 // that would turn this into a per-tab index.)
-const PROFILE_ALL = 'all';
+const PROFILE_ALL = PL.PROFILE_ALL;
 // `profile || 'work'` is readProjects()'s own default (bin/fleet-grid.mjs), so a project
 // whose column is blank lands in the same tab the desk puts it in. The field is free
 // text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
@@ -923,7 +924,7 @@ const profileOf = (p) => (p && p.profile) || 'work';
 // never wraps between its machine and its profile, and a short label (`vm`) is not read as
 // a key letter by btn()'s `^(\S+) (.+)$` — which would draw `vm` in bold like the `p` of
 // `p pause`, as if it were a key to press.
-const tabOf = (p) => (S.hosts && p && p.host ? `${p.host}\u00a0·\u00a0${profileOf(p)}` : profileOf(p));
+const tabOf = (p) => (S.hosts && p && p.host ? `${p.host}${PL.TAB_SEP}${profileOf(p)}` : profileOf(p));
 // The machine a project ADDRESS names, by its label; '' for this one.
 function hostLabelOf(name) {
   const k = G.hostKeyOf(name);
@@ -1014,7 +1015,7 @@ function visibleProjects() {
   return mine.length ? mine : rows;
 }
 function setProfile(name) {
-  S.profile = name;
+  S.profile = name; tabWant = '';
   // The cursor is a GLOBAL index too, so switching tabs has to move it to something that
   // is on screen — otherwise `⏎ open` and `x remove` act on a card nobody can see.
   const vis = visibleProjects();
@@ -6574,17 +6575,21 @@ function resumeChat(fresh) {
   readChat({ fresh }).finally(() => armChatPoll());
 }
 
-// ── back, and why there are no URLs ─────────────────────────────────────────
+// ── back, and what the address is for ───────────────────────────────────────
 // "if I go back it takes me to the last page I was, not back." An installed PWA gets the
 // system back gesture, and this app had nothing on the history stack — so back left the
 // app entirely (or returned to whatever page the tab held before it), skipping every
 // screen you had actually walked through.
 //
-// The fix is history ENTRIES WITHOUT A URL. pushState is called with the CURRENT href, so
-// the stack gains a step the gesture can pop while the address never changes: no routes to
-// invent, nothing to parse on a cold open, no way for a stale link to name a session that
-// is gone. In standalone mode there is no address bar to show a URL anyway; what the user
-// asked for and what the platform wants are the same thing here.
+// The fix is history entries that carry a DEPTH, not a route: the stack gains a step the
+// gesture can pop, and popTo() decides where that step goes from the app's own state. No
+// URL is read on the way back — a stale address in an old entry cannot send it anywhere.
+//
+// THE ADDRESS IS WRITTEN, AND READ ONCE. It names the place (web/place.js) so a reload or a
+// link lands there and each tab keeps its own; it is read at boot (restore) and never again.
+// Writing it never changes how deep the history is: pushNav() pushes exactly where it always
+// did, now with the new place as that entry's address, and everything else — a tab, the
+// pane/chat switch, a pop landing — REPLACES the current entry's (syncUrl, from render()).
 //
 // ONE DIRECTION OF TRUTH: going deeper pushes, and every backward move goes through
 // popstate. The app's own `‹`/`q` calls history.back() rather than changing the screen
@@ -6592,7 +6597,32 @@ function resumeChat(fresh) {
 let navDepth = 0;
 function pushNav() {
   navDepth++;
-  try { history.pushState({ gf: navDepth }, '', location.href); } catch {}
+  try { history.pushState({ gf: navDepth }, '', S.locked ? location.href : placeHref()); } catch {}
+}
+// The place on screen, for the address. The terminal is not a place a URL may name (a
+// passkey at every open), so it is written as where back from it goes.
+function placeOf() {
+  if (S.screen === 'term') {
+    const b = S.termBack || { screen: 'grid' };
+    const scr = b.screen === 'session' && b.session ? 'session' : b.screen === 'projects' ? 'projects' : 'grid';
+    return { screen: scr, project: S.project, session: b.session, sub: b.sub || '', view: b.view, entry: b.entry, profile: profileForUrl() };
+  }
+  return { screen: S.screen, project: S.project, session: S.session, sub: S.sub, view: S.view,
+           profile: profileForUrl(), entry: S.entry, jarvisMode: S.jarvisMode, rv: S.rv };
+}
+// A tab the link named and nothing has ruled on yet (tabWant) stays in the address, or a
+// reload before the first projects read would forget it.
+function profileForUrl() { return S.profile === PROFILE_ALL && tabWant ? tabWant : S.profile; }
+function placeHref() { return (location.pathname || '') + PL.toQuery(placeOf()) + (location.hash || ''); }
+// The current entry's address brought into line with the screen, without a new entry. Only
+// when it differs — render() runs on every poll, and WebKit refuses a page that replaces its
+// state a hundred times in ten seconds. Never under the lock: the address there is the
+// place the unlock will land on, and the lock screen is not a place.
+function syncUrl() {
+  if (S.locked || typeof history === 'undefined' || typeof history.replaceState !== 'function') return;
+  const want = PL.toQuery(placeOf());
+  if (location.search === want) return;
+  try { history.replaceState(history.state, '', placeHref()); } catch {}
 }
 // MOVE TO A DEPTH WITHOUT WALKING IT. The desk's keys jump across the stack — Ctrl-p from
 // a session, Ctrl-s from a master, Ctrl-f from anywhere — so the screen is changed by the
@@ -7402,8 +7432,15 @@ function unlocked() {
 // from there, and only after that does a deep link push its one entry. The same rule keeps
 // the lock out of the slide (slideNav): a view transition's old snapshot is the last frame
 // painted, which used to be the lock screen when a notification opened the queue.
+//   A LINK IS THE OTHER THING THAT SAYS WHERE TO GO. An address naming a place — a link
+// opened, or a desk tab reloaded after its session ran out — was read at boot (bootPlace)
+// and restore() is already on it, clamped; so the FIRST unlock of that page lands there, with
+// the trail a walk would have left, pushed by the same paint-first rule. The lock screen is
+// not skipped and nothing of the place is drawn under it. Spent once: a relock later in the
+// same page is a login like any other and lands on Projects.
 function loggedIn() {
   pk.release();
+  if (linkPlace) { linkPlace = false; landOnLink(); return; }
   S.locked = false; S.unlockErr = ''; S.termOn = null; restoredDepth = 0;
   S.screen = 'projects'; S.sel = 0; S.sub = ''; S.session = null; S.sess = null; S.pane = null; S.paneErr = '';
   S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.fromStack = false; S.pick = null; S.pickBack = '';
@@ -7414,9 +7451,17 @@ function loggedIn() {
 // A RELOAD THAT KEPT ITS SESSION IS NOT A LOGIN (pk.resume: the app took a new client in the
 // same page process). It goes back to the screen it was on, with the trail restore() measured
 // — pushed once that screen is what is painted, for loggedIn's reason.
+function landOnLink() {
+  S.locked = false; S.unlockErr = ''; S.termOn = null;
+  S.srch = null; S.wantCard = 0; S.fromStack = false; S.pickBack = '';
+  const d = restoredDepth; restoredDepth = 0;
+  save(); render();
+  afterPaint(() => { setDepth(0); afterNav(() => { if (S.locked) return; if (!navDepth) seedNav(d); refresh(); }); });
+}
 function resumedSession() {
   pk.release();
   S.unlockErr = '';
+  linkPlace = false;     // restore() already put this page's address back: nothing left to land on
   if (!S.locked) return;
   S.locked = false; S.termOn = null; render(); refresh();
   const d = restoredDepth; restoredDepth = 0;
@@ -8770,8 +8815,12 @@ wireDrop();
 // audio session on every first tap — which paused the owner's music. See unlockAudio().
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
-// this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; if (!navSkip) navSettled(); return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
+// this is what answers). No URL is read here: the entries carry a depth, not a route.
+// The entry it lands on keeps the address it was given when it was pushed, which is not the
+// screen popTo() now draws — a trail seeded for a link holds the link's address all the way
+// down — so the address is brought into line on every landing, a counted-out one included,
+// and before a waiter pushes anything above it.
+addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; if (!navSkip) { syncUrl(); navSettled(); } return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; syncUrl(); } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
