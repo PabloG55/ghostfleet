@@ -396,8 +396,40 @@ s = await signed(vmOnA.out, 'POST', '/api/attach', { ...pic, project: 'acme-api@
 is('a signed photo naming yet another host: refused, never forwarded', 403, s.res.status);
 is('...and only the one good photo was written', vmBefore + 1, filesUnder(attachRoot(B)).length);
 
+// ── the fleet's memory crosses as a read (docs/MEMORY.md) ──────────────────────────
+// The vm records through the writer every path uses (fleet-know-event), with toolbox set
+// private THERE first; the laptop then asks its own fleet-know about acme-api@vm, which can
+// only be answered by fetching the vm's events over the signed pairing.
+const know = (h, bin, ...args) => { try { return { code: 0, out: execFileSync('node', [path.join(RT, 'bin', bin), ...args], { env: h.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }) }; }
+                                    catch (e) { return { code: e.status ?? 1, out: String(e.stdout || '') + String(e.stderr || '') }; } };
+const bFleet = path.join(B.home, '.claude', 'fleet');
+fs.writeFileSync(path.join(bFleet, 'cf-toolbox.know'), 'private\n');
+know(B, 'fleet-know-event.mjs', 'spawn', `fleet=${bFleet}`, 'sock=cf-acme-api', `cwd=${path.join(B.dir, 'acme-api')}`, 'worker=api-fix', 'branch=fix/vm-only', 'task=Retry the vm-only webhook backoff', 'parent=master');
+know(B, 'fleet-know-event.mjs', 'spawn', `fleet=${bFleet}`, 'sock=cf-toolbox', `cwd=${path.join(B.dir, 'toolbox')}`, 'worker=docs-pass', 'branch=docs/private-only', 'task=A private toolbox task', 'parent=master');
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+const kev = (s.res.json && s.res.json.events) || [];
+is('a paired host may read this host\'s memory', 200, s.res.status);
+is('...which carries the acme-api spawn, with its task', true, kev.some(e => e.kind === 'spawn' && e.project === 'acme-api' && /vm-only webhook/.test(e.f && e.f.task)));
+is('...and nothing of the project that is private here', false, JSON.stringify(kev).includes('private toolbox task'));
+r = await request(B.base, 'GET', '/api/know/events?after=0');
+is('...while an unsigned, unenrolled ask is refused', 401, r.status);
+c = know(A, 'fleet-know.mjs', 'acme-api@vm', '--json');
+const kb = (() => { try { return JSON.parse(c.out); } catch { return {}; } })();
+is('the laptop\'s fleet-know answers about acme-api@vm, fetched over the pairing', 'vm fix/vm-only', `${kb.machine} ${((kb.branches || [])[0] || {}).name}`);
+is('...and reads the vm as fresh', 'false', String(((kb.peers || []).find(x => x.key === 'vm') || {}).stale));
+c = know(A, 'fleet-know.mjs', 'find', 'webhook', 'backoff');
+is('...and `find` searches the vm\'s raw events too', true, c.code === 0 && /acme-api@vm .*vm-only webhook backoff/.test(c.out));
+c = know(A, 'fleet-know.mjs', 'toolbox@vm');
+is('...but holds nothing of the vm\'s private project', true, c.code === 1 && !/private toolbox task/.test(c.out));
+
 // ── a host that is down stays visible ───────────────────────────────────────────────
 await stop(B);
+// The memory: a peer that does not answer is its last fetched state, marked stale — an
+// answer, never an error.
+c = know(A, 'fleet-know.mjs', 'sync');
+is('with the vm down, fleet-know sync says it was not reached', true, c.code === 0 && /^vm +not reached .*marked stale$/m.test(c.out));
+c = know(A, 'fleet-know.mjs', 'acme-api@vm');
+is('...and a brief still answers from its last fetched state, marked stale', true, c.code === 0 && /branch fix\/vm-only/.test(c.out) && /^\(vm: stale — last fetched /m.test(c.out));
 r = await pa.api(A.base, 'GET', '/api/projects');
 const vmRow = ((r.json && r.json.hosts) || []).find(x => x.label === 'vm') || {};
 is('with the vm down, the laptop still answers', 200, r.status);

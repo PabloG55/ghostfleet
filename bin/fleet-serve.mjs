@@ -53,6 +53,7 @@ import * as X from '../lib/experimental.mjs';
 import * as shots from '../lib/shots.mjs';
 import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
 import * as P from '../lib/peers.mjs';
+import * as K from '../lib/know.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -717,6 +718,10 @@ const TOOLS_ALLOWED = {
   // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
   // the 'since last look' stamp.
   fleet_digest:          { fields: ['json', 'peek'], noProject: true },
+  // The fleet's memory: a read across every fleet and paired machine, so noProject — and its
+  // project is `about`, which this daemon does not resolve or forward (acme-api@vm is
+  // answered HERE, from the events this host already fetched over the pairing).
+  fleet_know:            { fields: ['about', 'waiting', 'touched', 'find', 'at', 'json'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
@@ -785,7 +790,7 @@ const NOT_YET = {
   fleet_project_order: 'the projects order is written by the Projects screen',
 };
 
-const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek']);
+const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting']);
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
@@ -2383,8 +2388,12 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
 //                     pattern and resolved inside THAT run's own dir on this host — the same
 //                     checks a ticketed phone request gets, with the signature standing in for
 //                     the ticket. It is a read of a file this host made to be watched
+//   /api/know/events  the fleet's memory (docs/MEMORY.md): this host's recorded events after
+//                     a time, so the other side's fleet-know can answer about this machine's
+//                     projects. Never a private or excluded project's (eventsForPeer), and
+//                     never a third host's: what this host fetched from ITS peers stays here
 const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
-                            '/api/shots', '/api/shots/run', '/api/shots/media']);
+                            '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
@@ -2395,7 +2404,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
 const PAIR_POSTS = new Set(['/api/shots/verdict']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -3103,6 +3112,16 @@ function agentCatalogue() {
   if (p === '/api/usage' && req.method === 'GET') {
     const fan = fanOut('/api/usage', req, 5000);
     return send(res, 200, mergeUsage(usageReport(), await fan));
+  }
+
+  // THE FLEET'S MEMORY, as a paired host reads it (docs/MEMORY.md, PAIR_READS): this host's
+  // events after `after` (ms), oldest first, a page at a time. Read from the logs on each ask —
+  // no cache to go stale — and filtered by the privacy setting as it is NOW, so a project made
+  // private after its events were written stops crossing from that moment.
+  if (p === '/api/know/events' && req.method === 'GET') {
+    const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
+    const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 5000));
+    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit }) });
   }
 
   // Whether someone is at a keyboard HERE — the paired host's push hold asks it (see "at the

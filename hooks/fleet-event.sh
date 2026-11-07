@@ -82,9 +82,37 @@ if [ -n "$CURSOR_V" ]; then
   exit 0
 fi
 
+# ── the fleet's memory (docs/MEMORY.md) ──────────────────────────────────────
+# One DETACHED call per event into bin/fleet-know-event, with the payload on stdin as Claude
+# handed it. Everything slow — reading the turn's transcript for the files it edited and the
+# PRs and deploys it ran, asking git which repo — happens there, after this hook has exited;
+# what a Stop pays here is the fork. Measured on a scratch fleet (a Stop whose turn made 40
+# edits), five interleaved rounds of 20 spaced 0.8s apart: median of the round medians 195ms
+# before, 204ms after, inside the 183-206 the rounds spread over on their own. Back to back
+# with no gap it is 212 -> 226 (p90 299 -> 410): the writer, ~70ms of its own, then competes
+# with the next hook for the CPU. test/run.sh holds the property rather than the number — a
+# writer that sleeps does not hold the hook up. CLAUDE_FLEET_KNOW=off is the kill switch,
+# and the writer itself decides privacy (an excluded project writes nothing).
+_know() {                             # $1 = event, rest = key=value for the writer
+  [ "${CLAUDE_FLEET_KNOW:-}" = off ] && return 0
+  local s="${BASH_SOURCE[0]}" t d
+  while [ -L "$s" ]; do
+    t="$(readlink "$s")"
+    case "$t" in /*) s="$t" ;; *) s="${s%/*}/$t" ;; esac
+  done
+  case "$s" in */*) d="${s%/*}" ;; *) d=. ;; esac
+  [ -x "$d/../bin/fleet-know-event" ] || return 0
+  nohup "$d/../bin/fleet-know-event" hook "event=$1" "fleet=$FLEET_DIR" "${@:2}" <<< "$input" >/dev/null 2>&1 &
+  return 0
+}
+
 # SessionEnd: deregister and stop here — and say who did it, since a removed record is the
 # one outcome nothing else on disk records.
 if [ "$EVENT" = "SessionEnd" ]; then
+  # Only a session the fleet tracked, and not an agent nested inside one (see _host_agent):
+  # its end is not a fleet session ending.
+  [ -f "$FLEET_DIR/$SESSION.json" ] && ! jq -e '.nested_under' "$FLEET_DIR/$SESSION.json" >/dev/null 2>&1 \
+    && _know SessionEnd "sock=${CLAUDE_FLEET_SOCK:-}" "slot=${CLAUDE_FLEET_SLOT:-}"
   [ -f "$FLEET_DIR/$SESSION.json" ] && _dbg "SessionEnd $SESSION reason=$(printf '%s' "$input" | jq -r '.reason // "?"' 2>/dev/null) job=${CLAUDE_JOB_DIR##*/} tmux=${TMUX_PANE:-} — record removed"
   # .wait too: a watcher waiting on this session's background job (see _wait_watch) reads
   # the file going as "the session moved on", which an ended session has.
@@ -649,6 +677,14 @@ while [ -L "$_cf_src" ]; do
 done
 CF_UNDIM="$(cd "$(dirname "$_cf_src")" 2>/dev/null && pwd)/../lib/undim.awk"; export CF_UNDIM
 _cf_lib="$(cd "$(dirname "$_cf_src")/../lib" 2>/dev/null && pwd)"
+
+# The memory's event for this one (see _know): after the record, so it names the branch and
+# the status the record does. A Notification is news only when it is a need-you.
+case "$EVENT" in
+  SessionStart|UserPromptSubmit|Stop|StopFailure|Notification)
+    [ "$EVENT" = Notification ] && [ "$status" != need-you ] || \
+      _know "$EVENT" "sock=$SOCK" "slot=$SLOT" "branch=$branch" "status=$status" "turn=$TURN" ;;
+esac
 _pane_text() {                        # $1=socket $2=session -> the pane, dim runs removed
   if [ -r "${CF_UNDIM:-}" ]; then
     tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null | LC_ALL=C awk -f "$CF_UNDIM"

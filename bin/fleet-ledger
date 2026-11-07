@@ -94,9 +94,15 @@ LEDGER_JS="$(cd "$(dirname "$src")/.." 2>/dev/null && pwd)/mods/ghostfleet/hooks
 [ -f "$LEDGER_JS" ] || { echo "fleet-ledger: $LEDGER_JS is missing" >&2; exit 1; }
 
 exec node --no-warnings --input-type=module -e '
-  const [js, dir, id, name, verb, arg, why] = process.argv.slice(1)
+  const [js, dir, id, name, verb, arg, why, knowJs] = process.argv.slice(1)
   const L = await import(js)
   const fs = await import("node:fs")
+  // The memory (docs/MEMORY.md) hears every change this makes, from here: imported before the
+  // write and called in the same tick as the rename, because this process exits right after.
+  // A runtime without it (or a broken one) costs the fact, never the write.
+  let K = null
+  if (verb !== "list" && verb !== "all") { try { K = await import(knowJs) } catch {} }
+  const know = (b, a) => { try { K && K.noteLedger(dir, id, L.ledgerChanges(L.parseLedger(b), a), "fleet-ledger") } catch {} }
   const file = L.ledgerFile(dir, id)
   let text = null
   try { text = fs.readFileSync(file, "utf8") } catch {}
@@ -123,7 +129,7 @@ exec node --no-warnings --input-type=module -e '
       fs.writeFileSync(tmp, JSON.stringify(r.ledger))
       let now2 = null
       try { now2 = fs.readFileSync(file, "utf8") } catch {}
-      if (now2 === before) { fs.renameSync(tmp, file); return r }
+      if (now2 === before) { fs.renameSync(tmp, file); know(before, r.ledger); return r }
       fs.rmSync(tmp, { force: true })
     }
     return { ledger: null, said: "ledger: the file kept changing under this write; nothing changed" }
@@ -141,4 +147,4 @@ exec node --no-warnings --input-type=module -e '
   const r = change(act)
   if (!r.ledger) { console.error(r.said); process.exit(1) }
   console.log(r.said); process.exit(0)
-' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$VERB" "$ARG" "$WHY"
+' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$VERB" "$ARG" "$WHY" "$(dirname "$LEDGER_JS")/../../../lib/know.mjs"

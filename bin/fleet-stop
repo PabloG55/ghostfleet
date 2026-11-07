@@ -249,6 +249,12 @@ elif [ -f "$FLEET_DIR/$SOCK.$SESSION.asleep" ]; then
 else
   echo "fleet-stop: no live session '$SESSION' on $SOCK — clearing any leftover state" >&2
 fi
+# The memory's event (docs/MEMORY.md): the worker is retired, its branch no longer worked on
+# — before 2b, so the items it carries land after it. Its PR is NOT closed here; that is the
+# PR's own event, seen where it merges. The writer never fails, so neither can this.
+"$(dirname "$0")/fleet-know-event" retire "fleet=$FLEET_DIR" "sock=$SOCK" "cwd=${_lwt:-${WT:-}}" \
+  "worker=$SESSION" "branch=$_lbr" "worktree=${_lwt:-${WT:-}}" "reason=$([ "$RECLAIM" = 1 ] && echo reclaim || echo stop)${_lpr:+, PR ${_lpr}}" \
+  </dev/null >/dev/null 2>&1
 
 # 2b) what it still owed goes to its lead's ledger. After the kill, so its mod cannot add or
 #     close anything behind the carry; before step 3, which deletes the records that name

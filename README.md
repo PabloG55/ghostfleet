@@ -113,6 +113,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)** | **A lead session driving workers.** Dispatching briefs to siblings, watching them, unblocking them, reusing worktrees before making more, and metering cost with the governor |
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
+| **[docs/MEMORY.md](docs/MEMORY.md)** | **The fleet's memory, `fleet-know`.** What every project is, where it stands and why, recorded as sessions, spawns, merges and ledger items happen — one page per project, across every profile and paired machine, so a lead answers from it instead of reading files. The three layers, the include/private/exclude switch, and the queries |
 | **[docs/jarvis.md](docs/jarvis.md)** | **Jarvis, one session above every fleet** — *experimental, off by default; `fleet-experimental enable jarvis` turns it on.* `ghostfleet jarvis`, the digest it reads instead of polling, the confirm-list the tools enforce, conversation mode on the phone (transcribed on the Mac), and its fresh start once the conversation grows long |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex`, `opencode`, `agy` and `cursor` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
@@ -373,6 +374,12 @@ window — and if you use zellij, it stays a single pane instead of commandeerin
   own fourth source (`<sock>.order`, rewritten by `⇧hjkl`) — and the single one, since
   `ghostfleet` counts `Ctrl-f <p> <s>` through `fleet-grid.mjs --order` rather than re-deriving
   it, and `fleet-cycle` reads the copy mirrored onto the tmux server as `@cf_order`.
+- **`fleet-know`** is the fleet's memory ([docs/MEMORY.md](docs/MEMORY.md)): the hooks, `fleet-spawn`,
+  `fleet-merged` and the ledger writers append what happened to a log per profile, and
+  `fleet-know <project>` (MCP `fleet_know`) answers "where does it stand" from the graph derived
+  from it — `waiting`, `touched <path>` and `find <text>` across every project, `--at` for any past
+  moment. `fleet-know privacy <project> private|exclude` (also a project setting, `know`) keeps a
+  project from a model vendor or out of the record.
 - **`claude-here`** is what each session runs, so sessions resume by checkout. If a
   conversation was registered as a Claude Code **background agent** (e.g. it was
   backgrounded, or created by a bg workflow), a plain `--resume` is refused with

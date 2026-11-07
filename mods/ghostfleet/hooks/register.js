@@ -50,8 +50,9 @@ import {
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn, countJudge, adoptLedger,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
   revisitTurn, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
-  deliverySource,
+  deliverySource, ledgerChanges,
 } from './ledger.js'
+import { inferFacts, INFER_MODEL, INFER_TOKENS, INFER_MS } from './know-shape.js'
 import {
   pastesIn, sameIds, sessionDirs, storedImage, EXT, pairPastes, pastesFromApi, fromBase64, sniff, decodePng, thumb,
   ffmpegFileArgv, NO_FFMPEG, parsePam, fitCells, rasterOf, caption, WHY, platformOf, previewMode, WINDOW, openArgv,
@@ -235,7 +236,11 @@ async function onTurnComplete($, e, next) {
   if (e.agentId === undefined) await setState($, stateAfterTurn(e.reason))
   deliveryTurnComplete(e)
   // Not awaited: the judge is a model call, and the turn's end must not wait on it.
-  if (e.agentId === undefined) void ledgerTurnComplete($, e, takeSteps(e)).catch(() => {})
+  if (e.agentId === undefined) {
+    const blocks = takeSteps(e)
+    void ledgerTurnComplete($, e, blocks).catch(() => {})
+    void knowTurnComplete($, e, blocks).catch(() => {})       // KNOW: also never awaited
+  }
   if (e.agentId === undefined) await peekTurnComplete($)
   return done
 }
@@ -1192,8 +1197,48 @@ async function applyLedger($, change) {
   await $.fs.write(tmp, JSON.stringify(next))
   const moved = await $.process.run(['mv', '-f', tmp, file], { timeoutMs: IO_MS })
   if (moved.exitCode !== 0) return null
+  knowLedger($, dir, file, ledgerChanges(cur, next))
   await showLedger($, next)
   return next
+}
+
+// ── KNOW: the fleet's memory (docs/MEMORY.md) ──────────────────────────────
+// Two things only, and neither may slow a turn: what a ledger write changed goes to
+// bin/fleet-know-event (the one writer), and — behind fleet-experimental's know-infer, OFF by
+// default — a finished turn is read by a small model for the decisions in it. Both are fired
+// and not awaited; a failure costs a fact, never the write or the turn.
+function knowLedger($, dir, file, changes) {
+  if (!changes.length) return
+  const sid = file.slice(dir.length + 1).replace(/\.ledger$/, '')
+  void $.process.run([bin($, 'fleet-know-event'), 'ledger', `session=${sid}`, `fleet=${dir}`, 'via=mod'],
+    { stdin: JSON.stringify(changes), timeoutMs: KNOW_MS }).catch(() => {})
+}
+const KNOW_MS = 5000
+async function knowInferOn($) {
+  const dir = (await $.env.get('CLAUDE_FLEET_EXPERIMENTAL_DIR')) || `${await $.env.get('HOME')}/.config/ghostfleet`
+  const text = await soon($, $.fs.read(`${dir}/know-infer.enabled`), '')
+  return /^\s*on\s*$/.test(String(text))
+}
+// The privacy answer comes from the writer itself (`fleet-know-event privacy`), the same code
+// that decides what the log records, so the gate here and the log can never disagree. Its
+// absence, a timeout or a non-zero exit is the empty answer, and know-shape.js refuses it.
+async function knowTurnComplete($, e, blocks) {
+  if (e.reason !== 'answer') return
+  const enabled = await knowInferOn($)
+  if (!enabled) return
+  const sid = await $.session.id()
+  if (!sid) return
+  const dir = await fleetDir($)
+  const asked = await bounded($, $.process.run([bin($, 'fleet-know-event'), 'privacy', `session=${sid}`, `fleet=${dir}`], { timeoutMs: KNOW_MS }), KNOW_MS + 500, null)
+  const mode = asked && asked.exitCode === 0 ? String(asked.stdout || '').trim() : ''
+  const r = await inferFacts({
+    enabled, mode, turn: blocks.join('\n\n'),
+    call: prompt => $.model.complete({ model: INFER_MODEL, prompt, maxTokens: INFER_TOKENS, effort: 'low', timeoutMs: INFER_MS }),
+  })
+  if (r.failed) void $.ui.log(`ghostfleet know: inferred pass failed (${r.failed}); nothing recorded`, { to: 'debug' })
+  if (!r.facts.length) return
+  await bounded($, $.process.run([bin($, 'fleet-know-event'), 'infer', `session=${sid}`, `turn=${e.turnId}`, `fleet=${dir}`],
+    { stdin: JSON.stringify(r.facts), timeoutMs: KNOW_MS }), KNOW_MS + 500, null)
 }
 
 // The band's row and the record's count, rewritten only when what they say changed. The

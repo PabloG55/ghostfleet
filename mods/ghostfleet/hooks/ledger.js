@@ -1484,3 +1484,24 @@ export function ledgerRuns(s, nowMs, columns) {
   }
   return runs
 }
+
+// ── what one write changed, for the fleet's memory (docs/MEMORY.md) ─────────
+// An item that was not there before (opened) and an item whose state moved (waiting, closed
+// one of the ledger's ways, opened again). Made where each write is made — the mod's
+// applyLedger, fleet-ledger, lib/ledger-landed.mjs, lib/ledger-carry.mjs — so the memory
+// never has to watch the files, and spelled once, here, because the mod can import only
+// this directory and lib/ can import it too. `t` is the ledger's own time for the change:
+// when the item was asked, or closed.
+export function ledgerChanges(before, after) {
+  const was = new Map(((before && before.items) || []).map(i => [String(i.id), i]))
+  const out = []
+  for (const i of (after && after.items) || []) {
+    const o = was.get(String(i.id))
+    if (!o) out.push({ op: 'open', id: String(i.id), text: i.text, source: i.source, state: i.state, t: Number(i.at) || 0 })
+    else if (o.state !== i.state) {
+      out.push({ op: 'state', id: String(i.id), text: i.text, state: i.state, proof: i.proof, reason: i.reason,
+                 by: i.closedBy, t: Number(i.closedAt || i.expiredAt) || 0 })
+    }
+  }
+  return out
+}
