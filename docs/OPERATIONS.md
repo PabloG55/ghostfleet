@@ -947,6 +947,7 @@ every Claude session and reports from there. It does three things:
 | **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
 | **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
 | **ledger** | `prompt.submit` (every message, mid-turn ones too, and the note it carries), `tool.call` (`ledger_close`, `ledger_drop`, `ledger_add`) and `turn.complete` (the turn's text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
+| **peek** *(experimental)* | the conversation's text, `[Image #N]` pastes and picture paths, at session start and after each turn | a pane beside the chat and hover chips under the rows; nothing on disk. See "Pictures beside the chat" |
 
 **Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
 take the mod's `state` over the pane while it is still being written: the pid that wrote
@@ -1149,6 +1150,49 @@ installs (this one), then the settings hooks of every other file, `hooks/fleet-g
 guards only refuse, so nothing changes there. An organization that sets
 `allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
 guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
+
+### Pictures beside the chat (experimental)
+
+*Off by default; `fleet-experimental enable peek` turns it on, `disable` turns it off. A running
+session picks the switch up at its next turn end. Off means nothing: no pane, no `/peek`, no
+chips, and the conversation is not read for pictures.*
+
+A fleet session shows `[Image #N]` for a picture the person pasted, and a path for a screenshot
+an agent made (`fleet-look`, a test run, a build). Neither could be seen without leaving the
+session. With `peek` on, the mod shows them inside it:
+
+- **A pane beside the chat** with the newest picture, opened by itself when a new one turns up.
+  In the fullscreen layout it docks beside the transcript from 110 columns; opened unasked it
+  takes its place from 144, and below that it waits until `/peek` opens it, inline above the
+  prompt. Under the picture is a numbered list of the session's pictures, newest first: a digit
+  (or a click) picks one, `0` goes back to following the newest.
+- **Hover chips.** A row that names a picture gets a `▣ name` chip under it. Pointing at the chip
+  pops the picture up above it; clicking it puts it in the pane. This needs the fullscreen layout
+  (`"tui": "fullscreen"` in Claude Code's settings), because only there does the terminal report
+  the pointer to Claude. On the main screen the pane and `/peek` still work.
+- **`/peek`** lists the pictures, `/peek <n>` shows one, `/peek image <N>` shows a paste by its
+  number, `/peek follow` goes back to the newest. It runs without starting a turn.
+
+**What it reads.** Only what the conversation showed: an `[Image #N]` a *person* typed (the
+model quoting one pastes nothing), and a `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` path in a
+message, a tool call or its output, resolved against the session's directory. A path is read
+only if it is a regular file: a symbolic link is not followed, a directory or a missing file is
+named as such in the pane. A paste's bytes come from the prompt as it is sent, else from the
+copy the engine keeps under `$CLAUDE_CODE_TMPDIR` (or `/tmp`)`/claude-<uid>/<project>/<session>/images/<N>.png`,
+else from the transcript. The engine's copy is incomplete (one long session kept 2 of about 80),
+so the transcript is the answer that always works. The last 24 pictures are kept; every read and
+every decode has a time limit.
+
+**How it draws.** As half-block cells (`▀`, two pixels to a cell, each with its own colour). That
+works in any true-colour terminal and through every tmux the fleet supports, with nothing to
+turn on. The engine's `Image` element (kitty or iTerm2 pixels) is not used: inside tmux it needs
+`allow-passthrough`, and the fleet always runs inside tmux. The Claude apps have no cell
+element, so there the pane gives the caption and says the picture is drawn in the terminal.
+
+**How it decodes, without a dependency.** PNG is decoded in the mod itself (`hooks/peek-shape.js`
+has its own inflate). JPEG, GIF, WebP and any picture over 4 MiB go through `ffmpeg` when it is on
+`PATH`, scaled down to 240×480 at most before they come back. Without `ffmpeg` the pane names
+the file, its size and its kind, and says it has no decoder.
 
 ### Delivering prompts through the mod
 

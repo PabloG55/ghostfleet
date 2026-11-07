@@ -24,8 +24,27 @@ export type Ledger = {
   asOf: number
 }
 
+/** One picture the session showed (hooks/peek-shape.js picturesIn), as PEEK draws it. */
+export type PeekPicture = {
+  key: string
+  kind: 'paste' | 'file'
+  label: string
+  /** The N of `[Image #N]`, for a paste. */
+  n?: number
+  /** The resolved absolute path, for a file. */
+  path?: string
+  caption: string
+  /** Decoded and ready to draw; the pixels stay in the module, never in $.state. */
+  ready: boolean
+  /** Why it is words and not a picture (peek-shape.js WHY). */
+  why?: string
+}
+/** PEEK's pane and chips: the session's pictures, oldest first, and the one picked
+ *  (null follows the newest). `gen` moves when a picture is decoded, to redraw. */
+export type Peek = { pictures: PeekPicture[]; selected: string | null; gen: number }
+
 declare module 'claude-code' {
   interface PluginState {
-    ghostfleet: { band: Band | null; ledger: Ledger | null }
+    ghostfleet: { band: Band | null; ledger: Ledger | null; peek: Peek | null; peekOn: boolean }
   }
 }
