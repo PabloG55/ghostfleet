@@ -1800,6 +1800,7 @@ let peekTool = ''            // the shrinker that worked here
 let peekSid = ''             // whose pictures these are: /clear starts the numbers again
 let peekFolder = ''          // the session's temp folder, once found
 let peekPoll = null
+let peekFresh = true         // this copy of the module has not begun yet (peekBegin)
 let peekDraftIds = []
 let peekWin = null           // { target, isOpen }: the window program running now
 let peekChanging = Promise.resolve()
@@ -1822,6 +1823,9 @@ const peekVal = (got, fallback) => (got && got.value !== undefined && got.value 
 // looking at the box; off stops that, closes a window and forgets the pictures. Asked at the
 // start and again at every turn's end, so `fleet-experimental disable peek` needs no restart.
 async function peekSync($) {
+  // A copy of the module that is asked before any session.start reached it: the engine replaced
+  // the one that had (its hooks worker was lost), and this one learns where it runs on its own.
+  if (peekFresh) await peekBegin($, ((await soon($, $.session.surfaces(), [])) || []).includes('terminal'))
   const on = await peekSwitch($)
   const was = peekOn
   peekOn = on
@@ -1849,6 +1853,27 @@ async function peekSync($) {
   }
   if (!on && was) await peekForget($)
   return on
+}
+
+// A RELOAD KEEPS $.state AND STARTS THE MODULE OVER, and the pictures were in both. PEEK_PICS
+// says which pastes were read; the pixels a card is drawn from, the bytes a prompt handed over
+// and the window a hover opened lived in the module, and went with it. So a paste read before
+// /reload-plugins was still "read" after it, never read again, and its card said loading for as
+// long as the session ran; the new code never saw the file, and wrote nothing beside it. The
+// same for a paste an older mod read and recorded in its own shape, which is what a reload
+// after a deploy meets. A new copy of the module starts its pictures again: each paste in the
+// box, or in a sent prompt, is read on the next look, by this code.
+//   The look itself was never the fault, though it was the first suspect: measured on 2.1.319,
+// a reload's session.start says isInteractive like the first one, the new copy arms its poll on
+// the switch's edge, and only that poll ticks (the engine drops the old copy's timers). One
+// copy would miss it: one the engine starts in place of a lost hooks worker, whose first event
+// can be a turn's end with no session.start before it, so it never learns it is in a terminal
+// and never looks. It asks the session instead.
+async function peekBegin($, interactive) {
+  peekFresh = false
+  peekInteractive = interactive
+  await soon($, $.state.set(PEEK_PICS, {}), null)
+  await soon($, $.state.set(PEEK_SHOWN, null), null)
 }
 
 async function peekForget($) {
@@ -2097,7 +2122,8 @@ async function peekOpenImage($, n) {
 // ── the hooks ──
 
 async function peekStart($, e) {
-  peekInteractive = Boolean(e && e.isInteractive)
+  if (peekFresh) await peekBegin($, Boolean(e && e.isInteractive))
+  else peekInteractive = Boolean(e && e.isInteractive)
   await peekFollow($)
   await peekSync($)
 }
