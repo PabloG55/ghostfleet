@@ -318,6 +318,8 @@ into its input box. Not every event is worth a turn, so the kinds are not treate
 | a worker **needs you** (permission, question, limit) | at once, mid-turn too, naming the worker and the ask |
 | an answer relayed to an asker, a failed delivery, a held wake (below) | at once, as before |
 | a worker **finished** (`DONE`) | once the fleet has been **quiet for 10 minutes**, in one wake for everything gathered |
+| a worker's turn ended with its own background job running (`WAITING`) | never: its next turn's `DONE` is the news ([ORCHESTRATION](ORCHESTRATION.md)) |
+| the same worker's `DONE` again, with nothing new since | never: it is folded into the first one |
 
 **Why finishes wait.** Measured on one busy fleet's master over 13 days: 64% of its turns were
 started by the "a worker finished" nudge, each re-reading its whole context, and more than half

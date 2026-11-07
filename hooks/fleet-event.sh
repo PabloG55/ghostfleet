@@ -86,7 +86,10 @@ fi
 # one outcome nothing else on disk records.
 if [ "$EVENT" = "SessionEnd" ]; then
   [ -f "$FLEET_DIR/$SESSION.json" ] && _dbg "SessionEnd $SESSION reason=$(printf '%s' "$input" | jq -r '.reason // "?"' 2>/dev/null) job=${CLAUDE_JOB_DIR##*/} tmux=${TMUX_PANE:-} — record removed"
-  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" "$FLEET_DIR/$SESSION.resume" 2>/dev/null
+  # .wait too: a watcher waiting on this session's background job (see _wait_watch) reads
+  # the file going as "the session moved on", which an ended session has.
+  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" "$FLEET_DIR/$SESSION.resume" \
+        "$FLEET_DIR/$SESSION.chain" "$FLEET_DIR/$SESSION.donemark" "$FLEET_DIR/$SESSION.wait" 2>/dev/null
   exit 0
 fi
 
@@ -291,20 +294,25 @@ _resume_refs() {                      # the remote-tracking refs of the branch i
   git -C "$CWD" --no-optional-locks for-each-ref --format='%(objectname) %(refname)' refs/remotes 2>/dev/null \
     | awk -v b="/$b" 'length($2) > length(b) && substr($2, length($2) - length(b) + 1) == b { printf "%s ", $0 }'
 }
-_resume_mark() {                      # the baseline a resume turn is judged against
-  local tl=0
+# Both take the baseline's file, the resume one by default: a DONE that repeats the last one
+# is judged against the same four facts (_done_again), and keeps its row's detail as a fifth.
+_resume_mark() {                      # [$1=file $2=detail] the baseline a turn is judged against
+  local f="${1:-$_resf}" tl=0
   [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
   case "$tl" in ''|*[!0-9]*) tl=0 ;; esac
-  printf '%s\x1f%s\x1f%s\x1f%s\n' "$now" "$tl" \
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$now" "$tl" \
     "$(git -C "${CWD:-.}" --no-optional-locks rev-parse -q --verify HEAD 2>/dev/null)" "$(_resume_refs)" \
-    > "$_resf" 2>/dev/null
+    "$(printf '%s' "${2:-}" | tr '\037\n' '  ')" > "$f" 2>/dev/null
 }
 # 0 when the turn since the baseline made something a lead would want to look at. A baseline
 # that cannot be read says yes: hiding a real result is the failure that costs, a DONE too
 # many is the one this replaces.
+#   `_d` is the detail column, named so it cannot land inside `refs` (CLAUDE.md, "the leftover
+# lands on the last variable"): glued on, refs would never compare equal and every turn
+# would read as having produced something.
 _resume_produced() {
-  local at="" line="" head="" refs=""
-  IFS=$'\x1f' read -r at line head refs < "$_resf" 2>/dev/null || return 0
+  local f="${1:-$_resf}" at="" line="" head="" refs="" _d=""
+  IFS=$'\x1f' read -r at line head refs _d < "$f" 2>/dev/null || return 0
   case "$at" in ''|*[!0-9]*) return 0 ;; esac
   case "$line" in ''|*[!0-9]*) line=0 ;; esac
   [ "$(git -C "${CWD:-.}" --no-optional-locks rev-parse -q --verify HEAD 2>/dev/null)" = "$head" ] || return 0
@@ -325,6 +333,73 @@ _resume_produced() {
   return 1
 }
 
+# ── A TURN THAT ENDS WITH ITS OWN JOB STILL RUNNING IS NOT DONE ─────────────────
+# A worker is told never to hold a turn open, so it starts the suite in a background shell
+# and ends its turn; Claude Code re-invokes it when the shell exits, and it pushes, opens
+# the PR and ends a second turn. Every turn end is a Stop, and every Stop was a DONE row and
+# a "worker finished" wake. Measured on one fleet: one worker filed DONE four times in six
+# minutes and another twice in the same minute, and the lead was woken for each while no PR
+# existed yet. So a Stop asks first whether this session still has a background job of its
+# own running; if it has, the row is WAITING and nobody is woken. The job's end starts the
+# worker's next turn, and THAT turn's Stop, with nothing left running, is the DONE.
+#   TWO SOURCES, BECAUSE NEITHER IS ENOUGH ALONE. The transcript says which jobs this session
+# started: a Bash call run in the background comes back as a tool result whose structured
+# `toolUseResult` carries `"backgroundTaskId":"<id>"`, and whose text names the job's output
+# file. Its end is a `<task-notification>` carrying `<task-id><id></task-id>`, written the
+# moment the job exits. But a job killed with its session (a restart, a crash) never gets
+# that line, so the transcript alone would hold a dead job "running" for ever. The output
+# file is the other source: while the job runs, its shell and every process it started hold
+# that file open for WRITING (measured on 2.1.319: the job's zsh and its `sleep` on fd 1 and
+# 2, mode w; nothing once it exited, and lsof answers 1). So a job counts only when the
+# transcript has its start, has no end, and lsof finds a writer on its file.
+#   The structured key is matched unescaped on purpose: the same words inside a command or a
+# tool's output are JSON-escaped (\"backgroundTaskId\"), so a session that greps for the key
+# cannot make itself look busy. A `<task-id>` quoted in prose can make a job look ENDED,
+# which is today's behaviour, the safe direction.
+#   SCOPED TO THE TURN CHAIN: from the line where the last prompt somebody actually sent began
+# (<session>.chain, written on that submit). A dev server left running three tasks ago is not
+# what this turn waits for, and would otherwise hold every later DONE back.
+#   FAILS TOWARD WAKING. No transcript, no lsof, nothing parseable: the Stop is a DONE, as it
+# was before this existed. A missed DONE costs a lead that never looks; an extra one costs a
+# turn. CLAUDE_FLEET_LSOF names the lsof to ask, for the suite.
+_bg_alive() {                         # stdin: output files, one per line -> 0 if one has a writer
+  local o
+  while IFS= read -r o; do
+    [ -n "$o" ] && [ -e "$o" ] || continue
+    grep -q '^a[wu]' <<< "$("${CLAUDE_FLEET_LSOF:-lsof}" -Fa -- "$o" 2>/dev/null)" && return 0
+  done
+  return 1
+}
+# Prints "<output file>\x1f<tool_use id>" for each job of this turn chain still running.
+# 0 = looked (the list may be empty), 2 = cannot tell.
+_bg_running() {
+  local from=1 c hits o t
+  [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] || return 2
+  command -v "${CLAUDE_FLEET_LSOF:-lsof}" >/dev/null 2>&1 || return 2
+  c="$(head -1 "$FLEET_DIR/$SESSION.chain" 2>/dev/null)"
+  case "$c" in ''|*[!0-9]*) ;; *) from=$(( c + 1 )) ;; esac
+  # grep first: a transcript runs to 100MB+, and grep finds the few lines this needs far
+  # faster than awk reads them all. Into a variable, never a pipe (CLAUDE.md, pipefail).
+  hits="$(grep -nF -e '"backgroundTaskId":"' -e '<task-id>' "$TRANSCRIPT" 2>/dev/null)"
+  [ -n "$hits" ] || return 0
+  while IFS=$'\x1f' read -r o t; do
+    [ -n "$o" ] || continue
+    _bg_alive <<< "$o" && printf '%s\x1f%s\n' "$o" "$t"
+  done < <(LC_ALL=C awk -v from="$from" '
+    { n = $0; sub(/:.*/, "", n); if (n + 0 < from) next }
+    index($0, "\"backgroundTaskId\":\"") {
+      s = $0; sub(/.*"backgroundTaskId":"/, "", s); sub(/".*/, "", s)
+      o = ""; if (match($0, /written to: [^ "]+\.output/)) o = substr($0, RSTART + 12, RLENGTH - 12)
+      t = ""; if (match($0, /"tool_use_id":"[^"]+"/)) t = substr($0, RSTART + 15, RLENGTH - 16)
+      if (s != "" && o != "") { k++; id[k] = s; out[k] = o; tu[k] = t }
+    }
+    { r = $0
+      while (match(r, /<task-id>[^<]+<\/task-id>/)) {
+        ended[substr(r, RSTART + 9, RLENGTH - 19)] = 1; r = substr(r, RSTART + RLENGTH) } }
+    END { for (i = 1; i <= k; i++) if (!(id[i] in ended)) printf "%s\037%s\n", out[i], tu[i] }' <<< "$hits")
+  return 0
+}
+
 # --- a prompt typed into a RUNNING turn is the next task, not a replacement ----
 # Claude Code folds a message submitted mid-turn into the turn in progress, and the agent
 # reads it as a change of direction: task A is dropped for task B and nothing says so.
@@ -343,9 +418,15 @@ _resume_produced() {
 if [ "$EVENT" = "UserPromptSubmit" ]; then
   _prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
   _taskf="$FLEET_DIR/$SESSION.task"
+  # Any turn starting, the machine's own included (a job's <task-notification> is exactly
+  # the turn a WAITING Stop is waiting for), ends the wait: that turn's Stop decides.
+  rm -f "$FLEET_DIR/$SESSION.wait" 2>/dev/null
   case "$_prompt" in
     "<task-notification>"*|"<local-command"*|"") ;;
     *)
+      # Somebody asked for something: a new turn chain, so the next DONE is news whatever
+      # the last one said (_done_again).
+      rm -f "$FLEET_DIR/$SESSION.donemark" 2>/dev/null
       _prev="$(jq -r '.status // ""' "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
       _t_at=""; _t_line=""
       [ -f "$_taskf" ] && IFS=$'\x1f' read -r _t_at _t_line < "$_taskf"
@@ -415,6 +496,9 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
           && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
         case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
         printf '%s\x1f%s\n' "$_tl" "${_first:0:160}" > "$_taskf" 2>/dev/null
+        # Where this turn chain starts, for _bg_running. A prompt folded into a running turn
+        # keeps the chain it joined.
+        printf '%s\n' "$_tl" > "$FLEET_DIR/$SESSION.chain" 2>/dev/null
       fi ;;
   esac
   # ── JARVIS'S LEDGER: what the OWNER said, which is how a yes is proven ────────
@@ -444,6 +528,19 @@ if [ -f "$_resf" ]; then
     *)           TURN=resume ;;
   esac
 fi
+# ...and `waiting` for a Stop whose session still runs a background job of its own
+# (_bg_running). A resume verdict stands as it is: that turn made nothing either way.
+#   CLAUDE_FLEET_WAIT_FIRE is set only by the watcher (_wait_watch) when it files the DONE a
+# waiting Stop held back and no later Stop came to file: its run writes no record (the
+# session may be gone, and a record written now would bring it back) and asks nothing again.
+_WFIRE="${CLAUDE_FLEET_WAIT_FIRE:-}"
+WAIT_JOBS=""
+if [ "$EVENT" = Stop ] && [ -z "$TURN" ] && [ -z "$_WFIRE" ] && [ -z "$NESTED" ]; then
+  WAIT_JOBS="$(_bg_running)"
+  [ -n "$WAIT_JOBS" ] && { TURN=waiting; _dbg "Stop $SESSION: $(printf '%s\n' "$WAIT_JOBS" | grep -c .) background job(s) still running — WAITING, not DONE"; }
+fi
+# A Stop with nothing left running settles any wait still armed.
+[ "$EVENT" = Stop ] && [ "$TURN" != waiting ] && rm -f "$FLEET_DIR/$SESSION.wait" 2>/dev/null
 
 case "$EVENT" in
   UserPromptSubmit) status="working"                       # any new prompt un-parks the session
@@ -513,7 +610,9 @@ if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$FLEET_DIR/$SESSION.json" ]; then
 fi
 case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
-if jq -n \
+if [ -n "$_WFIRE" ]; then
+  :                                   # the watcher's DONE: the record is the session's, not ours
+elif jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
@@ -1110,6 +1209,83 @@ _needyou_nudge() {
   fi
 }
 
+# ── A WAIT THAT NOTHING ENDS STILL ENDS IN A DONE ─────────────────────────────
+# A WAITING Stop holds the DONE back on the promise of a next turn: the job exits, Claude
+# Code starts a turn with its <task-notification>, and that turn's Stop is the DONE. Two
+# things break the promise, and each would be the worst failure here, a lead never told:
+#   - the job never exits (a dev server, a watch left running) — no next turn, ever;
+#   - the session dies with the job (a crash, a killed pane) — the job is gone, and so is
+#     whoever would have been re-invoked.
+# So a WAITING Stop arms one watcher per session. It polls the jobs' output files
+# (_bg_alive) and stands down the moment a turn starts — every UserPromptSubmit, the
+# notification's own included, removes <session>.wait, and so does a Stop with nothing
+# running and the session's end. If the jobs are gone and no turn followed within
+# CLAUDE_FLEET_WAIT_GRACE seconds (90), or they are still running after CLAUDE_FLEET_WAIT_MAX
+# (1800), it files the DONE itself, by running this hook again with CLAUDE_FLEET_WAIT_FIRE
+# set and the same payload: the same row, gate wording, coalescing and wake as a Stop's,
+# with the reason in front of the detail. Not the hook's record: see _WFIRE.
+#   A later WAITING Stop rewrites the file the live watcher reads, so the deadline is counted
+# from the latest wait, not the first.
+_wait_watch() {                       # $1=the jobs, as _bg_running printed them
+  local f="$FLEET_DIR/$SESSION.wait" p
+  { printf '%s\n' "$now"; printf '%s\n' "$1" | cut -d $'\x1f' -f1; } > "$f" 2>/dev/null || return 0
+  p="$(cat "$f.pid" 2>/dev/null)"
+  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
+  export -f _dbg _bg_alive
+  FLEET_DIR="$FLEET_DIR" nohup bash -c '
+    f="$1"; hook="$2"; payload="$3"; every="$4"; grace="$5"; max="$6"
+    for v in "$every" "$grace" "$max"; do case "$v" in ""|*[!0-9]*) exit 0 ;; esac; done
+    [ "$every" -gt 0 ] || every=15
+    echo $$ > "$f.pid" 2>/dev/null
+    trap "[ \"\$(cat \"$f.pid\" 2>/dev/null)\" = $$ ] && rm -f \"$f.pid\"" EXIT
+    gone=0; why=""
+    while :; do
+      sleep "$every"
+      [ -f "$f" ] || exit 0
+      armed="$(head -1 "$f" 2>/dev/null)"; case "$armed" in ""|*[!0-9]*) exit 0 ;; esac
+      now="$(date +%s)"
+      if _bg_alive <<< "$(tail -n +2 "$f" 2>/dev/null)"; then gone=0
+      elif [ "$gone" = 0 ]; then gone="$now"; fi
+      if [ "$gone" != 0 ] && [ $(( now - gone )) -ge "$grace" ]; then why=gone; break; fi
+      if [ $(( now - armed )) -ge "$max" ]; then why=timeout; break; fi
+    done
+    [ -f "$f" ] || exit 0
+    rm -f "$f"
+    _dbg "wait: $f — $why after $(( now - armed ))s; filing the DONE its Stop held back"
+    printf "%s" "$payload" | CLAUDE_FLEET_WAIT_FIRE="$why:$(( now - armed ))" CLAUDE_FLEET_NOTIFIER=off \
+      bash "$hook" >/dev/null 2>&1
+  ' _ "$f" "$_cf_src" "$input" "${CLAUDE_FLEET_WAIT_EVERY:-15}" "${CLAUDE_FLEET_WAIT_GRACE:-90}" \
+       "${CLAUDE_FLEET_WAIT_MAX:-1800}" >/dev/null 2>&1 &
+}
+
+# ── A DONE THAT SAYS NOTHING NEW IS THE SAME DONE ─────────────────────────────
+# The same worker can still Stop twice with nothing between: a job's notification turn that
+# only reads the result and ends, or a turn that ends while its last job is exiting. Each
+# was a row and a wake. So a DONE leaves a baseline (<session>.donemark: the resume turn's
+# four facts, _resume_mark, plus the row's detail), and the next DONE is the SAME one, with
+# no row and no wake, when all of these hold:
+#   - nobody has sent the session a prompt since (any real prompt removes the baseline);
+#   - its detail is identical, so a review-gate change (unreviewed -> READY) is always news;
+#   - nothing was produced since: no commit, no moved pushed branch, no PR verb, no ledger
+#     item closed (_resume_produced, the check a resume turn already uses);
+#   - it falls inside the fleet's existing wake window: the quiet window (_notify_quiet),
+#     or the debounce when that is 0 — the same window that already folds one worker's
+#     DONEs into one wake. Past it, a DONE is a reminder worth its row.
+# Any doubt is a new row: an unreadable baseline reads as "produced", as it does for a resume.
+_done_again() {                       # $1=baseline file $2=this row's detail
+  local at="" line="" head="" refs="" d="" win
+  [ -f "$1" ] || return 1
+  IFS=$'\x1f' read -r at line head refs d < "$1" 2>/dev/null || return 1
+  case "$at" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$d" = "$(printf '%s' "$2" | tr '\037\n' '  ')" ] || return 1
+  win="$(_notify_quiet "$CLAUDE_FLEET_SOCK" "$FLEET_DIR")"
+  [ "$win" = 0 ] && win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"
+  case "$win" in ''|*[!0-9]*) win=30 ;; esac
+  [ $(( now - at )) -lt "$win" ] || return 1
+  _resume_produced "$1" && return 1
+  return 0
+}
+
 # --- push worker events into the lead's inbox (see fleet-inbox) ---------------
 # Event-driven, zero polling: the lead can't be interrupted, so it drains this
 # feed with `fleet-inbox` instead of polling every sibling. Emit the two events a
@@ -1154,7 +1330,26 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   if   [ "$status" = "need-you" ]; then ev="need-you"; detail="$NEED_DETAIL"
   elif [ "$EVENT" = "Stop" ] && [ "$TURN" = resumed ]; then
                                         ev="resumed";   detail="nothing new · ${folder}${branch:+ · $branch}"
+  elif [ "$EVENT" = "Stop" ] && [ "$TURN" = waiting ]; then
+    # Reads as "toolbox  WAITING  on its background job (Run the suite) · …" in fleet-inbox.
+    # The job is named by the description its Bash call carried, when it carried one.
+    _wn="$(printf '%s\n' "$WAIT_JOBS" | grep -c .)"
+    _wt="$(printf '%s\n' "$WAIT_JOBS" | head -1 | cut -d $'\x1f' -f2)"
+    _wd=""
+    case "$_wt" in ''|*[!A-Za-z0-9_-]*) ;; *)
+      _wd="$(grep -F "\"id\":\"$_wt\"" "$TRANSCRIPT" 2>/dev/null | head -1 | jq -r --arg t "$_wt" \
+        '.message.content[]? | select(.type == "tool_use" and .id == $t) | .input.description // empty' 2>/dev/null \
+        | head -1 | tr '\t\037\r' '   ')" ;;
+    esac
+    if [ "$_wn" -gt 1 ]; then _wj="on $_wn background jobs${_wd:+ (${_wd:0:80}, …)}"
+    else _wj="on its background job${_wd:+ (${_wd:0:80})}"; fi
+                                        ev="waiting";   detail="$_wj · ${folder}${branch:+ · $branch}"
   elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
+    # The watcher's DONE says why it came from the watcher and not from a Stop.
+    case "$_WFIRE" in
+      gone:*)    detail="its background job ended and no turn followed · $detail" ;;
+      timeout:*) detail="its background job is still running after $(( ${_WFIRE#timeout:} / 60 ))m; counted as finished · $detail" ;;
+    esac
   fi
   # READY IS NOT DONE, when the review gate is on (lib/review-gate.sh). A DONE says a turn
   # ended; under the gate the lead's next question is whether the PR may merge, and it must
@@ -1173,6 +1368,20 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
         stuck) detail="review STUCK on PR #$_rg_pr — needs you (fleet-review status $_rg_pr) · $detail" ;;
         *)     detail="unreviewed — not ready to merge (review gate on) · $detail" ;;
       esac
+    fi
+  fi
+  # A DONE with nothing new since the last one is that one (_done_again): no row, no wake.
+  # Judged on the finished detail, gate words included, so READY after unreviewed is news.
+  # Any other row from this worker since its last DONE is news the next DONE answers: a
+  # need-you is cleared by the DONE after it (fleet-inbox reads the later row), and a
+  # WAITING means a job ran. So those rows drop the baseline; only a bare repeat folds.
+  case "$ev" in need-you|waiting) rm -f "$FLEET_DIR/$SESSION.donemark" 2>/dev/null ;; esac
+  if [ "$ev" = done ]; then
+    if _done_again "$FLEET_DIR/$SESSION.donemark" "$detail"; then
+      _dbg "Stop $SESSION: DONE again with nothing new since the last one — no row, no wake"
+      ev=""
+    else
+      _resume_mark "$FLEET_DIR/$SESSION.donemark" "$detail"
     fi
   fi
   if [ -n "$ev" ]; then
@@ -1234,6 +1443,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # A resume that produced nothing is in the inbox for whoever reads it, and wakes nobody:
     # waking a lead to read "nothing new" is the noise the row exists to fold away.
     [ "$ev" = resumed ] && _push=0
+    # A WAITING worker has not finished, so it wakes nobody either; its watcher makes sure a
+    # DONE still comes when no later Stop does (_wait_watch).
+    if [ "$ev" = waiting ]; then _push=0; _wait_watch "$WAIT_JOBS"; fi
     if [ "$_push" = 1 ] && [ "$ev" = need-you ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
       _needyou_nudge
@@ -1329,7 +1541,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
         fi
       fi
-    elif [ "$j_batch" -gt 0 ] && [ "$TURN" != resumed ]; then
+    elif [ "$j_batch" -gt 0 ] && [ "$TURN" != resumed ] && [ "$TURN" != waiting ]; then
       # ONE SLEEPER PER JARVIS, armed by the first finish after a quiet spell. When it wakes it
       # nudges only if nothing else woke Jarvis in the meantime — a need-you already made it
       # look, and that look read the whole digest.
