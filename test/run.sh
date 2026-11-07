@@ -7886,8 +7886,9 @@ group "the stepper: one at a time, and a flag needs a reason"
 # static markup and drew perfectly. Then the checkbox-era toggle survived into the stepper,
 # so pressing approve on an already-approved step UNSET it and refused to advance: the button
 # appeared dead on exactly the second press.
-#   The helper spawns the real `serve` and clicks the real page, rather than rendering a copy
-# of the generator — a test with its own renderer passes against code nobody ships.
+#   The helper has `fleet-shots page` write the real page and clicks it over file://, rather
+# than rendering a copy of the generator — a test with its own renderer passes against code
+# nobody ships.
 STEPO="$(mktemp -d "$TEST_RUNS.$$.st.XXXXXX")"
 node "$ROOT/test/helpers/stepper-check.mjs" > "$STEPO/out" 2> "$STEPO/err"
 if grep -q 'no chrome' "$STEPO/out" "$STEPO/err" 2>/dev/null; then
@@ -7976,30 +7977,26 @@ else
 fi
 rm -rf "$FRC"
 
-# ── a manifest.json that is not OURS must not take the review server down ──────────────
-# `serve` and `list` find runs by looking for a `manifest.json` in each subdirectory of
-# --dir, and `manifest.json` is one of the most common filenames in computing. --dir is
-# routinely a directory we do not own.
+# ── a manifest.json that is not OURS is not a run ─────────────────────────────
+# `list` — and the app's Reviews routes, through the same lib/shots.mjs — find runs by looking
+# for a `manifest.json` in each subdirectory, and `manifest.json` is one of the most common
+# filenames in computing. A shots dir is not always one we own exclusively.
 #
-# SEEN LIVE, AND IT KILLED THE SERVER RATHER THAN SKIPPING A ROW. A browser update unpacked
-# its components into the directory being served — one directory per component, each with a
-# manifest.json of a completely unrelated schema: valid JSON, no `steps`. The only guard was
-# a try/catch around JSON.parse, which asks whether the bytes are JSON — a PROXY for "is this
-# one of ours" that anything well-formed walks straight past. The next request read
-# m.steps.length, threw inside the request handler, and node exited 1. From the client:
-# connection refused. From test/helpers/stepper-check.mjs, which was serving that shared
-# directory: six rows about a stepper that had never loaded, and the server's stack trace
-# discarded with its stderr. Green at 16:43, red at 16:57, nothing in the repo changed, and
-# 6,092 entries in the directory by then.
+# SEEN LIVE, AND IT KILLED A SERVER RATHER THAN SKIPPING A ROW. A browser update unpacked
+# its components into a directory being served as a review index — one directory per
+# component, each with a manifest.json of a completely unrelated schema: valid JSON, no
+# `steps`. The only guard was a try/catch around JSON.parse, which asks whether the bytes are
+# JSON — a PROXY for "is this one of ours" that anything well-formed walks straight past. The
+# next request read m.steps.length, threw inside the request handler, and node exited 1.
+# Green at 16:43, red at 16:57, nothing in the repo changed, and 6,092 entries in the
+# directory by then. lib/shots.mjs decides by CONTENT (isOurs), and reviews-api-check asks the
+# same of the routes, on a live fleet-serve.
 #
-# THE FIXTURE IS NAMED FOR THE SHAPE, NOT FOR THE PROGRAM THAT DID IT. This test creates the
-# directory, so nothing has to match a real vendor's path — and the next person to hit this
-# will hit it with some other program's leftovers. What has to be faithful is the CONTENT: a
-# manifest.json that parses cleanly and has no `steps`.
+# THE FIXTURE IS NAMED FOR THE SHAPE, NOT FOR THE PROGRAM THAT DID IT. What has to be
+# faithful is the CONTENT: a manifest.json that parses cleanly and has no `steps`.
 #
-# Both directions, because "the server stayed up" is what a server with nothing to serve
-# says too: the foreign manifest is ignored AND the real run beside it is still listed.
-group "a foreign manifest.json does not take the review server down"
+# Both directions: the foreign manifest is ignored AND the real run beside it is still listed.
+group "a foreign manifest.json is not a run"
 FMD="$(mktemp -d "$TEST_RUNS.$$.fm.XXXXXX")"
 mkdir -p "$FMD/run1" "$FMD/some-other-program-unpacker.aA1bB2"
 cat > "$FMD/run1/manifest.json" <<'MANI'
@@ -8011,34 +8008,12 @@ MANI
 # Exactly the shape the real one had: parses cleanly, and has no `steps`.
 printf '{"manifest_version":3,"name":"Some Component","version":"1.0.0"}\n' \
   > "$FMD/some-other-program-unpacker.aA1bB2/manifest.json"
-
-# `list` first: no browser needed, and it had the same bug one exit code quieter.
 FM_LIST="$(node "$ROOT/bin/fleet-shots.mjs" list --dir "$FMD" 2>&1)"; fm_rc=$?
 is "list survives a foreign manifest"   "0"   "$fm_rc"
 is "...and still names the real run"    "1"   "$(printf '%s' "$FM_LIST" | grep -c 'run1' || true)"
 is "...and never mentions the stranger" "0"   "$(printf '%s' "$FM_LIST" | grep -c "some-other-program" || true)"
-
-FMP="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
-node "$ROOT/bin/fleet-shots.mjs" serve --dir "$FMD" --port "$FMP" > "$FMD/srv.log" 2>&1 &
-FMPID=$!
-# Poll rather than sleep: the crash is on the FIRST request, so the question is what the
-# first request gets, and a fixed sleep would only choose how long to wait to ask it.
-for _ in $(seq 1 60); do
-  curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$FMP/" 2>/dev/null && break
-  sleep 0.1
-done
-FM_CODE="$(curl -s -o "$FMD/body.html" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FMP/" 2>/dev/null || echo 000)"
-is "the index answers"                  "200" "$FM_CODE"
-# THE ROW THIS GROUP EXISTS FOR. Before the fix the process was gone by now.
-is "...and the server is still alive"   "yes" "$(kill -0 "$FMPID" 2>/dev/null && echo yes || echo no)"
-is "...and did not throw"               "0"   "$(grep -c 'TypeError' "$FMD/srv.log" || true)"
-# PRESENCE, NOT A COUNT. The run's name legitimately appears twice in the index — once as
-# the link and once in the row beside it — and pinning 1 makes this row fail on a layout
-# change that broke nothing. It is the trap CLAUDE.md records as having bitten four times,
-# and it caught this line on the way in: measured got=2 against a want of 1.
-is "...and the real run is listed"      "yes" \
-   "$([ "$(grep -c 'run1' "$FMD/body.html" 2>/dev/null || echo 0)" -ge 1 ] && echo yes || echo no)"
-{ kill "$FMPID"; wait "$FMPID"; } 2>/dev/null || true
+is "...and counts only the real run"    "yes" "$(grep -q 'waiting on you\|approved' <<< "$FM_LIST" && grep -q ' of 1 \|all 1 ' <<< "$FM_LIST" && echo yes || echo no)"
+is "--check on the stranger is refused"  "1"  "$(node "$ROOT/bin/fleet-shots.mjs" --check "$FMD/some-other-program-unpacker.aA1bB2" >/dev/null 2>&1; echo $?)"
 rm -rf "$FMD"
 
 group "the installer arms the pre-push guard"
@@ -8206,22 +8181,26 @@ is "...and README says how to arm it" "1" \
    "$([ "$(grep -c 'core.hooksPath' "$ROOT/CONTRIBUTING.md" 2>/dev/null || echo 0)" -ge 1 ] && echo 1 || echo 0)"
 rm -rf "$PPO"
 
-group "the review server answers every page it links to"
-# A TEMPORAL DEAD ZONE IS INVISIBLE UNTIL SOMETHING RENDERS, and then it is not a wrong
-# pixel, it is a DEAD PROCESS: `serve` parks the module with `await new Promise(() => {})`
-# so it can hold the port, which means every module-level `const` written below that point
-# is never initialised and the first request that touches one throws "cannot access X before
-# initialization" and takes the server with it. It happened three times in one file — the
-# verdict helpers, then the stylesheet, then the per-step URL reader — and each time the
-# command started, printed its URL, and died on the first page anyone opened.
-#   Selective enough to read as random, too: `function esc(){}` below the park is fine,
-# because function declarations are hoisted AND initialised while `const` is hoisted into a
-# dead zone. So the guard cannot be "read the file carefully". It has to be: ask the server
-# for every page it links to, and require a 200.
-SRV="$(cd "$(mktemp -d)" && pwd -P)"
-mkdir -p "$SRV/root/2026-01-01_00-00-00"
-printf '\x89PNG\r\n\x1a\n' > "$SRV/root/2026-01-01_00-00-00/01-a.png"
-cat > "$SRV/root/2026-01-01_00-00-00/manifest.json" <<'MAN'
+group "fleet-shots serve is retired, and says where reviews went"
+# THE LOOPBACK SERVER IS GONE: reviews are the app's Reviews screen, behind fleet-serve's
+# passkey (lib/shots.mjs). A script or a habit that still runs `serve` must fail where it can
+# be seen — non-zero, naming the app — rather than wait on a URL that never prints. And it
+# must not quietly still be a server: nothing in the command binds a port any more.
+RTD="$(cd "$(mktemp -d "$TEST_RUNS.$$.rt.XXXXXX")" && pwd -P)"
+printf '{"port":18787,"origins":["https://fleet.example.ts.net:18787"]}\n' > "$RTD/serve.json"
+rt_out="$(GHOSTFLEET_SERVE_CONFIG="$RTD/serve.json" node "$ROOT/bin/fleet-shots.mjs" serve --port 0 2>&1)"; rt_rc=$?
+is "serve exits non-zero"                 "2"   "$rt_rc"
+is "...saying reviews are in the app"     "yes" "$(grep -q 'reviews live in the app' <<< "$rt_out" && echo yes || echo no)"
+is "...at the URLs fleet-serve answers on" "yes" \
+   "$(grep -qF 'https://fleet.example.ts.net:18787/#reviews' <<< "$rt_out" && grep -qF 'http://localhost:18787/#reviews' <<< "$rt_out" && echo yes || echo no)"
+is "...and the commands that stay, stay"  "yes" "$(grep -q 'list.*verdict.*--check' <<< "$rt_out" && echo yes || echo no)"
+is "fleet-shots binds no port any more"   "0" \
+   "$(grep -cE 'createServer|\.listen\(' "$ROOT/bin/fleet-shots.mjs" || true)"
+# The page a run folder opens on still carries its own styling and loads nothing remote: it
+# opens over file:// from a copied folder, where a linked stylesheet is a silently unstyled
+# page. Written with `fleet-shots page`, from this checkout's generator.
+mkdir -p "$RTD/run"
+cat > "$RTD/run/manifest.json" <<'MAN'
 { "provenance": { "commit": "0123456789abcdef0123456789abcdef01234567", "branch": "b",
                   "dirty": false, "base": "http://x", "slot": 7,
                   "viewport": { "width": 800, "height": 600 }, "at": "2026-01-01T00:00:00.000Z" },
@@ -8231,41 +8210,55 @@ cat > "$SRV/root/2026-01-01_00-00-00/manifest.json" <<'MAN'
                              { "method": "GET", "url": "http://x/f.woff2", "status": 404, "type": "Font" } ] } ],
   "problems": 0 }
 MAN
+node "$ROOT/bin/fleet-shots.mjs" page "$RTD/run" >/dev/null 2>&1
+is "page writes the run's index.html"     "yes" "$([ -s "$RTD/run/index.html" ] && echo yes || echo no)"
+is "...carrying its own css"              "1"   "$(grep -c '<style>' "$RTD/run/index.html" 2>/dev/null || true)"
+is "...and loading nothing remote"        "0"   "$(grep -coE '(src|href)="https?://' "$RTD/run/index.html" 2>/dev/null || true)"
+# A FONT 404 IS AN ASSET, NOT A CALL. The display partition has to match the flagging
+# partition, or the caption says "1 failed" over something nothing flagged.
+is "...an asset failure is not a call"    "1"   "$(grep -c '1 call' "$RTD/run/index.html" 2>/dev/null || true)"
+rm -rf "$RTD"
+
+group "fleet-serve: Reviews — off is gone, runs by branch, video by range, a verdict is the gate's"
+# THE APP'S REVIEWS SCREEN, server half (lib/shots.mjs), on a real daemon with a real passkey
+# ceremony over runs in two profiles. Its OWN switch directory, because the probe flips
+# `shots` off and on under the running daemon — which reads the switch per request — and the
+# run's shared one is ON for every other shots group. Rows: test/helpers/reviews-api-check.mjs.
+#   WATCHED GOING RED: with the gate line in lib/shots.mjs's api() removed, every `off:` row
+# failed (200 where a 404 belongs, and a verdict written while switched off).
 if command -v node >/dev/null 2>&1; then
-  SRVP="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
-  node "$ROOT/bin/fleet-shots.mjs" serve --dir "$SRV/root" --port "$SRVP" > "$SRV/log" 2>&1 &
-  SRVPID=$!
-  sv_reg "${SRVPID}"
-  i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 -o /dev/null "http://127.0.0.1:$SRVP/" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
-  code() { curl -s -m2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SRVP$1" 2>/dev/null; }
-  is "the index renders"            "200" "$(code /)"
-  is "a run page renders"           "200" "$(code /r/2026-01-01_00-00-00/)"
-  is "its screenshot is served"     "200" "$(code /r/2026-01-01_00-00-00/01-a.png)"
-  # ...and it is still ALIVE after all of that, which is the half a status code alone does
-  # not tell you: a TDZ throw kills the process, so the next request would fail to connect.
-  is "and the process survived"     "0" "$(kill -0 "$SRVPID" 2>/dev/null; echo $?)"
-  is "...still answering"           "200" "$(code /)"
-  # LOOPBACK ONLY, asserted rather than trusted, because this serves screenshots of whatever
-  # the author was building and there is deliberately no --bind to reconsider later.
-  is "it binds no other address"    "0" \
-     "$(grep -c "flag('--bind'" "$ROOT/bin/fleet-shots.mjs" || true)"
-  is "...and names 127.0.0.1"       "1" \
-     "$(grep -c "server.listen(want, '127.0.0.1'" "$ROOT/bin/fleet-shots.mjs" || true)"
-  # The page must carry its own styling: it opens over file:// from a copied folder, where a
-  # linked stylesheet is a silently unstyled page.
-  is "the page carries its own css"  "1" \
-     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '<style>' || true)"
-  is "...and loads nothing remote"   "0" \
-     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -coE '(src|href)="https?://' || true)"
-  # A FONT 404 IS AN ASSET, NOT A CALL. The display partition has to match the flagging
-  # partition, or the caption says "1 failed" over something nothing flagged.
-  is "an asset failure is not a call" "1" \
-     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '1 call' || true)"
-  { kill "$SRVPID"; wait "$SRVPID"; } 2>/dev/null || true
+  RVS="$TMUX_TMPDIR/rvsrv"; mkdir -p "$RVS/home" "$RVS/xd"
+  printf 'on\n' > "$RVS/xd/shots.enabled"
+  node "$ROOT/test/helpers/reviews-api-check.mjs" build "$RVS/home"
+  RPORT="$(free_port)"; RPORT="${RPORT:-18913}"
+  RBASE="http://localhost:$RPORT"
+  rv_env() { env GHOSTFLEET_SERVE_CONFIG="$RVS/serve.json" GHOSTFLEET_SERVE_AUDIT="$RVS/audit.jsonl" HOME="$RVS/home" TMUX= \
+                 CLAUDE_FLEET_EXPERIMENTAL_DIR="$RVS/xd" CLAUDE_FLEET_AWAKE=off "$@"; }
+  rv_env node "$ROOT/bin/fleet-serve.mjs" init --bind 127.0.0.1 --port "$RPORT" >/dev/null 2>&1
+  rcode="$(rv_env node "$ROOT/bin/fleet-serve.mjs" enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
+  rv_env node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$RVS/log" 2>&1 &
+  rvp=$!
+  SERVE_PIDS="${SERVE_PIDS:-} $rvp"; sv_reg "${rvp}"
+  i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do
+    kill -0 "$rvp" 2>/dev/null || break
+    i=$((i+1)); sleep 0.1
+  done
+  if curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; then
+    rv_env node "$ROOT/test/helpers/reviews-api-check.mjs" probe "$RBASE" "$rcode" "$RVS/home" "$RVS/xd" "$RVS/audit.jsonl" > "$RVS/out" 2> "$RVS/err"
+    is "reviews-api-check ran"            "" "$(head -2 "$RVS/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$RVS/out")" -ge 60 ] && echo yes || echo "no: $(wc -l < "$RVS/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$RVS/out"
+  else
+    bad "the daemon comes up (reviews)" "listening on $RBASE" "$(tr '\n' ' ' < "$RVS/log" 2>/dev/null | cut -c1-180)"
+  fi
+  reap "$rvp"; wait "$rvp" 2>/dev/null || true
+  # PAIR B'S, NOT THIS ONE'S: a paired machine reads none of this yet. Asked of the source
+  # because the sets are the whole of what a paired host may do.
+  is "no shots route is a paired host's read"  "0" "$(grep -E '^const PAIR_(READS|VERBS) = ' "$ROOT/bin/fleet-serve.mjs" | grep -c 'shots' || true)"
+  rm -rf "$RVS"
 else
-  skip "the review server" "node missing"
+  skip "the Reviews routes" "node missing"
 fi
-rm -rf "$SRV"
 
 group "a review that cannot say no is a ceremony"
 # THE GATE. Marking steps in the page and copying the text was useful and stopped nothing:
@@ -19732,17 +19725,9 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "shots on a fresh install: refused"          "1"   "$rc"
   is "...with the sentence that says how"         "fleet-shots: fleet-shots is experimental and disabled — enable with: fleet-experimental enable shots" "$out"
   is "...and written down as off"                 "off" "$(cat "$JX/xd/shots.enabled" 2>/dev/null)"
-  # SERVE IS ASKED WITH A DEADLINE: a broken gate would start a server that never exits,
-  # and a row that hangs the suite is worse than one that fails. Still alive after 3s is
-  # "it served", which is the wrong answer, and it is killed by its own pid.
-  env -u CLAUDE_FLEET_JARVIS_DIR CLAUDE_FLEET_EXPERIMENTAL_DIR="$JX/xd" CLAUDE_FLEET_DIR="$JX/xf" HOME="$JX/home" \
-    node "$JX/bin/fleet-shots.mjs" serve --port 0 >/dev/null 2>&1 & fsp=$!      # env execs: $! is node
-  i=0; while [ "$i" -lt 30 ] && kill -0 "$fsp" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
-  if kill -0 "$fsp" 2>/dev/null; then kill "$fsp" 2>/dev/null; wait "$fsp" 2>/dev/null; fsrc=served; else wait "$fsp"; fsrc=$?; fi
-  is "...and so is: fleet-shots serve"            "1"   "$fsrc"
   # The SENTENCE, not the exit status: --check and verdict exit 1 on an empty folder anyway,
   # so a status row would pass with the gate gone.
-  for sub in "list" "--check DIR" "verdict DIR"; do
+  for sub in "list" "--check DIR" "verdict DIR" "serve" "page DIR"; do
     is "...and so is: fleet-shots ${sub% DIR}"    "1"   "$(fsx node "$JX/bin/fleet-shots.mjs" ${sub/DIR/$JX} </dev/null | grep -c 'experimental and disabled' || true)"
   done
   is "--help still answers"                       "0"   "$(fsx node "$JX/bin/fleet-shots.mjs" --help >/dev/null 2>&1; echo $?)"
@@ -20924,6 +20909,42 @@ if [ -d "$ROOT/web" ]; then
     done < "$QUE/out"
   fi
   rm -rf "$QUE"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: Reviews, in a real browser"
+if [ -d "$ROOT/web" ]; then
+
+  # ── a branch's recorded flows are reviewed on the phone ──────────────────────
+  # fleet-shots serve was loopback-only, so the review it drew could not be reached from the
+  # phone the agents report to. The screen now lives in the app: one row on Projects, one
+  # card per branch with its newest run (older ones folded), the run with its video and a
+  # chapter per step, and the verdict --check reads, pinned at the bottom. Driven with touch
+  # at 390x844 and a mouse and keys at 1280x900, against a server that can throw the
+  # `shots` switch: off answers the index 404, and the client must draw no row and no screen.
+  #   The chapter rows need a server that serves Range: a <video> cannot seek a file handed
+  # over whole, and a tap on chapter 3 set 6s and played on from 0:00 — which is how
+  # fleet-serve's own static path was found serving the fixture video that way.
+  #   WATCHED GOING RED: against staging's client (14 of 19), and against copies of this one
+  # broken on purpose — the off 404 read as a list (3 rows), the seek dropped (1), the
+  # phone's state copy drifting from lib/shots.mjs (1), and the cursor lit beside the open
+  # run at a desk (1).
+  RVC="$(mktemp -d "$TEST_RUNS.$$.reviews.XXXXXX")"
+  node "$ROOT/test/helpers/reviews-check.mjs" > "$RVC/out" 2> "$RVC/err"
+  rvcrc=$?
+  if grep -q 'no chrome' "$RVC/out" 2>/dev/null; then
+    skip "the reviews screen" "no chrome to tap in"
+  else
+    is "reviews-check ran"              "0" "$rvcrc"
+    is "...without complaining"         ""  "$(head -2 "$RVC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$RVC/out")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$RVC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$RVC/out"
+  fi
+  rm -rf "${RVC:?}"
 else
   skip "phone client" "web/ not present"
 fi

@@ -960,6 +960,26 @@ try {
   await tap('api-fix'); await settle(x => x.session === 'api-fix'); await slid();
   is('focus: an iPhone with a keyboard attached opens a chat focused', true, (await settle(x => x.typing)).typing);
 
+  // ── Reviews: space is two keys — fold a branch's earlier runs, play the open run ──────
+  // The rest of the Reviews keys are rows in reviews-check.mjs; space is pressed here as
+  // well because the table below is this file's to keep, and space means something else on
+  // every other screen (nothing, or the page scrolling).
+  await fresh();
+  await b.evaluate(() => { const r = document.querySelector('#side .rv-row'); if (r) r.focus(); return null; });
+  await press('Enter');
+  await until(() => b.evaluate(() => !!document.querySelector('#app .rv-group')));
+  await press(' ', { as: 'space' });
+  is("reviews: space folds open the branch's earlier runs", 2, await until(() => b.evaluate(() => document.querySelectorAll('#app .rv-old').length), 3000));
+  await press('Enter');
+  await until(() => b.evaluate(() => { const v = document.querySelector('#app video'); return !!v && v.readyState > 0 || !!(v && v.error); }), 5000);
+  await press(' ', { as: 'space' });
+  // A Chrome built without H.264 cannot play the fixture at all (the <video> carries a
+  // MEDIA_ERR_SRC_NOT_SUPPORTED): there the key has nothing to start, and that is the media,
+  // not the key.
+  is('reviews: space plays the open run', true, !!(await until(() => b.evaluate(() => {
+    const v = document.querySelector('#app video'); return !!v && (!v.paused || !!v.error);
+  }), 3000)));
+
   // ════════════════════════════════════════════════════════════════════════════════════
   // THE TABLE: every desk key in web/README.md has a row above
   // ════════════════════════════════════════════════════════════════════════════════════

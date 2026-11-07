@@ -640,6 +640,15 @@ const BINARY_REVIEWED = new Set([
   '37954347dcba219e',   // web/icons/apple-touch-icon.png
   '3c5c79f7450c7e04',   // web/icons/icon-192.png
   '162cb00d56e8857e',   // web/icons/icon-512.png
+  // The Reviews fixtures: drawn from placeholder pages (acme-web, acme-api, toolbox,
+  // *.example, a TEST-NET address), every still and four frames of the video opened.
+  '72d6c581c8b6063c',   // web/fixtures/shots/api-health.png
+  '51b451e45c3a4073',   // web/fixtures/shots/api-keys.png
+  '934e42773585d7ee',   // web/fixtures/shots/api-search.png
+  '10c8bc9691972f34',   // web/fixtures/shots/docs-config.png
+  'cb9ac55c5cc13cb5',   // web/fixtures/shots/docs-install.png
+  '68234ec7e201e78f',   // web/fixtures/shots/flow.mp4
+  '32a065ac00c98c87',   // web/fixtures/shots/web-invoices.png
 ]);
 {
   const unreviewed = skipped.filter(f => {
@@ -656,6 +665,7 @@ const BINARY_EXPECTED = [
   'docs/mobile/statuses.png', 'docs/stack-demo.gif', 'docs/stack-demo.mp4',
   'docs/worktree-demo.gif', 'docs/worktree-demo.mp4',
   'web/icons/apple-touch-icon.png', 'web/icons/icon-192.png', 'web/icons/icon-512.png',
+  'web/fixtures/shots/api-health.png', 'web/fixtures/shots/api-keys.png', 'web/fixtures/shots/api-search.png', 'web/fixtures/shots/docs-config.png', 'web/fixtures/shots/docs-install.png', 'web/fixtures/shots/flow.mp4', 'web/fixtures/shots/web-invoices.png',
 ].sort().join(' ');
 is('...skipping binaries by content, and naming them', BINARY_EXPECTED, skipped.sort().join(' '));
 // ...and none of them is source. A .mjs or a .sh in that list is a file nobody is sweeping.

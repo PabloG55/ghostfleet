@@ -50,6 +50,7 @@ import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 import * as A from '../lib/accounts.mjs';
 import * as X from '../lib/experimental.mjs';
+import * as shots from '../lib/shots.mjs';
 import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
 import * as P from '../lib/peers.mjs';
 
@@ -1244,7 +1245,7 @@ function nudgeSettings(t, sessionNames) {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png',
-  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
+  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.mp4': 'video/mp4' };
 
 function send(res, status, obj, extra = {}) {
   const body = Buffer.from(JSON.stringify(obj) + '\n');
@@ -2132,8 +2133,13 @@ function serveStatic(req, res, pathname) {
   // a blank page — and a blank page looks like the server is fine. MIME above has the
   // .js and .webmanifest types the client needs; anything not in it falls back to
   // octet-stream rather than to a guess.
+  // A VIDEO IS READ IN RANGES. The Reviews screen's fixture recording comes through here
+  // when fixtures are forced, and a file served whole with no Accept-Ranges cannot be
+  // seeked: a tap on chapter 3 set currentTime to 6s and the player went on from 0:00. iOS
+  // goes further and will not play it at all. The media route's own Range handling serves it.
+  if (req.headers.range) return shots.serveFile(req, res, full, MIME[path.extname(full)] || 'application/octet-stream');
   res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream',
-    'content-length': st.size, 'cache-control': 'no-cache' });
+    'content-length': st.size, 'cache-control': 'no-cache', 'accept-ranges': 'bytes' });
   fs.createReadStream(full).pipe(res);
 }
 
@@ -2679,7 +2685,7 @@ async function api(req, res, url, ip) {
     const pa = await pairAuth(req, res, p, url, ip);
     if (!pa) return;
     pairBody = pa.body;
-  } else if (!OPEN.has(p)) {
+  } else if (!OPEN.has(p) && !shots.TICKETED.has(p)) {
     // AN IDENTITY HEADER WITHOUT A SIGNATURE IS A FORGERY, whoever sends it. The on-behalf
     // name is honoured only inside a paired host's signed request; on a phone's own token it
     // would be a way to write somebody else's name into the audit log, so it is refused
@@ -3279,6 +3285,9 @@ function agentCatalogue() {
   // SWITCHED OFF, EVERY JARVIS ROUTE IS A 404 and says why — not a 200 that describes an
   // absent Jarvis, which a client would draw as a band. /api/speak and /api/voice are NOT
   // among them: the play button and every session's talk are the phone's own features.
+  // REVIEWS (lib/shots.mjs). /api/shots/media is the one route past the token gate above: a
+  // <video> cannot send a bearer, so it carries the ticket the run read minted instead.
+  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.client || null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; } });
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 3b04a201f65d
+// CLIENT-HASH: 81b7ebe4291b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -432,7 +432,10 @@
 // shows the queue without it.
 // v94 lets a photo go to another machine's session: the camera no longer refuses a project
 // on a paired machine. A phone on v93 still says a photo does not cross.
-const VERSION = 'ghostfleet-v94';
+// v95 adds Reviews: fleet-shots' runs, one card per branch, a run's video by chapter, its
+// steps and requests, and the verdict saved to the Mac. A phone on v94 has no Reviews row,
+// and `fleet-shots serve` — which used to be where reviews lived — is retired.
+const VERSION = 'ghostfleet-v95';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -461,6 +464,10 @@ const SHELL = [
   './fixtures/waiting.json',
   './fixtures/usage.json',
   './fixtures/paired.json',
+  './fixtures/shots.json',
+  './fixtures/shots-run-2026-03-05_14-02-11.json', './fixtures/shots-run-2026-03-04_10-15-40.json',
+  './fixtures/shots-run-sign-in-flow.json', './fixtures/shots-run-2026-03-05_09-30-00.json',
+  './fixtures/shots-run-2026-03-03_16-45-12.json',
 ];
 
 self.addEventListener('install', e => {
@@ -639,6 +646,13 @@ self.addEventListener('fetch', e => {
     e.respondWith(caches.open(VERSION).then(c => c.match(req)).then(r => r || new Response('', { status: 404 })));
     return;
   }
+  // A BYTE RANGE IS THE NETWORK'S, ALWAYS. A <video> asks for its file in ranges — one per
+  // seek — and a range answers 206, which the Cache API refuses outright: c.put() of a
+  // partial response throws, and the shell path below would turn that into a failed fetch,
+  // which iOS shows as a player that never starts. A run's media is also ticketed and
+  // per-run (/api/shots/media), so a cached copy would be a stale ticket's bytes kept for
+  // nobody. Left to the browser, untouched.
+  if (req.headers.has('range') || url.pathname === '/api/shots/media' || url.pathname.includes('/fixtures/shots/')) return;
   const isApi = url.pathname.startsWith('/api/');
 
   if (isApi) {

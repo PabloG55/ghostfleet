@@ -7,9 +7,11 @@
 // does a two-column layout that overflows a phone sideways. Each is one keystroke or one
 // resize away, and none of them is findable by reading.
 //
-// THE REAL SERVER, THE REAL PAGE. `fleet-shots serve` is spawned and the page it serves is
-// the page clicked — the same reason stepper-check does it: a test with its own renderer
-// passes against code nobody ships. The video is synthetic (ffmpeg's test pattern) because
+// THE REAL PAGE, OVER file://, which is how a run folder is opened now that the loopback
+// server is retired (reviews in the app are reviews-check's). `fleet-shots page` writes it
+// with this checkout's generator, so a test with its own renderer cannot pass against code
+// nobody ships. Seeking over file:// is the browser's own; byte ranges on the served path
+// are asserted against fleet-serve by reviews-api-check. The video is synthetic (ffmpeg's test pattern) because
 // the page's job is to play whatever the recorder wrote; the recorder itself is exercised
 // by "fleet-shots walks a flow".
 //
@@ -17,7 +19,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { launch, findChrome, sleep } from '../../lib/browser.mjs';
 
 const US = '\x1f';
@@ -32,8 +34,7 @@ catch { skip('ffmpeg is not installed, so there is no video to play'); }
 const x264 = /\blibx264\b/.test(enc);
 if (!x264 && !/\blibvpx-vp9\b/.test(enc)) skip('ffmpeg is here, but its h264 and vp9 encoders are not available');
 
-// A ROOT THIS FILE OWNS, for stepper-check's reason: `serve` lists a directory by its
-// manifest.json files, and a shared temp dir holds other programs' too.
+// A ROOT THIS FILE OWNS, so the run is the only thing in it and the cleanup takes it all.
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gf-flowrev-'));
 const dir = path.join(root, 'run1');
 fs.mkdirSync(dir);
@@ -55,18 +56,19 @@ fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
 }));
 
 const bin = new URL('../../bin/fleet-shots.mjs', import.meta.url).pathname;
-const srv = spawn(process.execPath, [bin, 'serve', '--dir', root, '--port', '0'], { stdio: ['ignore', 'pipe', 'ignore'] });
-let base = '';
-srv.stdout.on('data', (d) => { const m = String(d).match(/http:\/\/127\.0\.0\.1:\d+\//); if (m && !base) base = m[0]; });
-for (let i = 0; i < 100 && !base; i++) await sleep(50);
+execFileSync(process.execPath, [bin, 'page', dir], { stdio: 'ignore' });
+const url = 'file://' + path.join(dir, 'index.html');
 
 const verdict = () => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'verdict.json'), 'utf8')); } catch { return {}; } };
+// THE CHANNEL OVER file:// IS THE PASTE: the page builds the text, `fleet-shots verdict` stores
+// it. So every verdict row below goes through both halves, exactly as a reviewer's would.
+const paste = () => b.evaluate(() => (document.getElementById('verdicttext') || {}).value || '');
+const record = async () => { const t = await paste(); try { execFileSync(process.execPath, [bin, 'verdict', dir], { input: t, stdio: ['pipe', 'ignore', 'ignore'] }); } catch {} return t; };
 const check = () => { try { execFileSync(process.execPath, [bin, '--check', dir], { stdio: 'ignore' }); return 0; } catch (e) { return e.status ?? 9; } };
 const KEYS = { ArrowRight: [39, 'ArrowRight'], ArrowLeft: [37, 'ArrowLeft'], ' ': [32, 'Space'], a: [65, 'KeyA'], r: [82, 'KeyR'] };
 
 let b = null;
 try {
-  if (!base) throw new Error('serve printed no address');
   b = await launch({ width: 1440, height: 900, scale: 1 });
   const key = async (k) => {
     const [code, name] = KEYS[k];
@@ -79,7 +81,7 @@ try {
   const at = () => b.evaluate(() => ({ t: document.getElementById('v').currentTime, n: (document.querySelector('.ch.here') || {}).dataset?.n }));
   const near = (t, want) => Math.abs(t - want) < 0.35;
 
-  await b.call('Page.navigate', { url: base + 'r/run1/' });
+  await b.call('Page.navigate', { url });
   const loaded = await until(() => document.getElementById('v') && document.getElementById('v').readyState >= 1 && document.getElementById('v').duration);
   is('the video loads, at its real length', 'yes', loaded && Math.abs(loaded - 9) < 0.5 ? 'yes' : `no: duration ${loaded}`);
   is('the page wears the phone client\'s background', 'rgb(11, 13, 16)', await b.evaluate(() => getComputedStyle(document.body).backgroundColor));
@@ -89,7 +91,7 @@ try {
   await key('ArrowRight'); await until(() => !document.getElementById('v').seeking);
   let p = await at();
   is('→ moves to chapter 2', '2', String(p.n));
-  is('...and the video is at its start (byte ranges work)', 'yes', near(p.t, 3.2) ? 'yes' : `no: ${p.t.toFixed(2)}s`);
+  is('...and the video is at its start', 'yes', near(p.t, 3.2) ? 'yes' : `no: ${p.t.toFixed(2)}s`);
   await key('ArrowRight'); await until(() => !document.getElementById('v').seeking);
   p = await at();
   is('→ again moves to chapter 3, at 6.1s', '3:yes', `${p.n}:${near(p.t, 6.1) ? 'yes' : p.t.toFixed(2)}`);
@@ -111,7 +113,8 @@ try {
   // THE VERDICT. `a` over a flagged chapter with no reason is recorded, the gate says it
   // will still refuse, and the cursor is taken to where the reason goes.
   await key('a'); await sleep(300);
-  is('a approves the flow, into verdict.json', 'approve', String((verdict().flow || {}).v));
+  is('a approves the flow, into the text to paste', 'yes', /^- \[approve\] flow/m.test(await record()) ? 'yes' : 'no');
+  is('...which fleet-shots verdict stores', 'approve', String((verdict().flow || {}).v));
   is('...but the gate says a flagged chapter needs a reason', 'yes', (await b.evaluate(() => /still refuses/.test(document.getElementById('gate').textContent))) ? 'yes' : 'no');
   is('...and the note box of that chapter has the cursor', '2', String(await b.evaluate(() => document.activeElement?.closest?.('.ch')?.dataset.n)));
   is('...so --check refuses', '1', String(check()));
@@ -119,15 +122,18 @@ try {
   await b.call('Input.insertText', { text: 'r' });
   await key('r');
   await sleep(300);
+  await record();
   is('typing r into a note does not reject', 'approve', String((verdict().flow || {}).v));
   await b.evaluate(() => { const t = document.activeElement; t.value = 'the 404 is the fixture'; t.dispatchEvent(new Event('input', { bubbles: true })); });
   await sleep(400);
+  await record();
   is('the chapter note lands in verdict.json', 'the 404 is the fixture', String((verdict().chapters || {})['2'] || ''));
   is('...and now --check passes', '0', String(check()));
   await b.evaluate(() => document.activeElement.blur());
   await key('r'); await sleep(300);
+  await record();
   is('r rejects the flow', 'reject:1', `${(verdict().flow || {}).v}:${check()}`);
-  // A RELOAD OPENS ON THE FILE, not on a blank review.
+  // A RELOAD KEEPS THE REVIEW, not a blank one (over file:// it is this browser's own copy).
   await b.call('Page.reload'); await until(() => document.getElementById('state'));
   await sleep(300);
   is('a reload shows the stored verdict', 'rejected', String(await b.evaluate(() => document.getElementById('state').textContent)));
@@ -148,7 +154,6 @@ try {
   is('flow-review-check ran', 'yes', `no: ${String(e.message || e).slice(0, 200)}`);
 } finally {
   if (b) { try { await b.close(); } catch {} }
-  try { srv.kill('SIGTERM'); } catch {}
   fs.rmSync(root, { recursive: true, force: true });
 }
 console.log(rows.join('\n'));
