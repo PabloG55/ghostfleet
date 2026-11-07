@@ -10506,6 +10506,12 @@ while :; do
     if [ "$text" = RANME ]; then
       printf '{"id":"%s","ran":"/cost"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
     fi
+    # A mod from before slash-command delivery: it submits everything as text, and the host
+    # refuses a leading "/" in these words (the plugin's name first, as the host prefixes it).
+    if [ -f "$dir/oldmod" ] && [ "${text#/}" != "$text" ]; then
+      printf '{"id":"%s","error":"%s"}' "$id" 'ghostfleet: $.prompt.submit submits a prompt to the model; a text beginning with / would run a command as the user; run one with $.command.run({ command })' > "$sp/$id.done"
+      rm -f "$sp/$id.taken"; continue
+    fi
     st=working; rec
     printf 'TURN %s%s%s\n' "$text" "${rs:+ reply=$rs}" "${k:+ kind=$k}" >> "$log"
     printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
@@ -10601,6 +10607,17 @@ MOD
   mready
   mx="$(MS w1 "RANME")"; mxc=$?
   is "a command that ran with no turn: delivered"     "0 1" "$mxc $(grep -c '→ w1 (ran /cost; it started no turn)' <<< "$mx" || true)"
+  # A mod that cannot run slash text (it predates `$.command.run`): the host's refusal is not a
+  # failure of the prompt, which never ran, so it is pasted, with the fix named. The other
+  # direction is ERRME above: any other refusal is still a failure, exit 1.
+  mready; : > "$M/turns"; touch "$MF/oldmod"
+  mbg "$M/mo" "/probe-skill now" w1 "/probe-skill now"
+  is "slash text an old mod refuses is pasted into the pane" "1" "$(grep -c '/probe-skill now' <<< "$(mpane)" || true)"
+  is "...saying why, and naming the fix"              "1" "$(grep -c 'older than slash-command delivery.*/reload-plugins' "$M/mo" || true)"
+  is "...not reported as a failure"                    "0" "$(grep -c 'not delivered' "$M/mo" || true)"
+  is "...its receipt consumed, so nothing is filed"    "0" "$(grep -l 'would run a command' "$MF"/fm-1.handoff/*.done 2>/dev/null | grep -c . || true)"
+  is "...and never ran through the mod"                "" "$(mturns)"
+  rm -f "$MF/oldmod"
   # Refused from the QUEUE: the drain sends with its output going nowhere, so the failure
   # is filed in the lead's inbox, naming the worker and the host's words.
   mready; : > "$M/turns"
@@ -17196,9 +17213,12 @@ else
     # fleet-send exits 1 with "(not delivered: the mod could not submit it — …)" when the
     # mod's receipt says it refused, and the daemon used to drop that status: 200, ok:true,
     # the composer cleared and the owner believed it sent. A stand-in mod answers the
-    # handoff here exactly as the real one did — the claim, then a receipt — once with the
-    # refusal it gave for a prompt beginning with `/`, and once with a started turn, so the
-    # assertion is proven in both directions through the same daemon and the same fleet-send.
+    # handoff here the way the real one does — the claim, then a receipt — once with a
+    # refusal, and once with a started turn, so the assertion is proven in both directions
+    # through the same daemon and the same fleet-send. (The refusal that first showed this,
+    # the host's for slash text an older mod hands to prompt.submit, is no longer one: that
+    # prompt is pasted into the pane instead, as the mod group's rows show. Any other refusal
+    # still fails the send.)
     rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
     hq_rec idle
     hq_mod() {   # $1 = the receipt the stand-in writes for every handoff it claims
@@ -17217,13 +17237,13 @@ else
       if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
       const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: process.argv[2] });
       console.log(JSON.stringify({ status: r.status, ok: r.json.ok, text: r.json.text }));" "$1" "$2"; }
-    hq_mod '{"error":"prompt.submit: refused — a text beginning with / would run a command as the user"}'
-    out="$(hq_verb "$(pn_cli enroll phone-held3 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "/review the acme-api routes")"
+    hq_mod '{"error":"prompt.submit: refused — the session is closing and takes no prompt"}'
+    out="$(hq_verb "$(pn_cli enroll phone-held3 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "review the acme-api routes")"
     kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
     is "a send the mod refused is not ok"        "false" "$(jq -r '.ok' <<< "$out" 2>/dev/null)"
     is "...and is not a 200"                     "400"   "$(jq -r '.status' <<< "$out" 2>/dev/null)"
     is "...saying it did not reach the session"  "1"     "$([ "$(grep -c 'did not reach held' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
-    is "...and why, in the mod's words"          "1"     "$([ "$(grep -c 'would run a command' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and why, in the mod's words"          "1"     "$([ "$(grep -c 'takes no prompt' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
     hq_mod '{"turnId":"t-1"}'
     out="$(hq_verb "$(pn_cli enroll phone-held4 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the billing-svc jobs")"
     kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null

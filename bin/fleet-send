@@ -894,6 +894,20 @@ if [ "$USE_MOD" = 1 ]; then
         # A slash command that ran without a turn of its own (a panel, a local command).
         SENT_OUT=ran
         echo "fleet-send: → $SESSION (ran $_ran; it started no turn)"
+      elif [ -n "$_rcpt" ] && [[ "$_why" == *"a text beginning with / would run a command"* ]]; then
+        # A MOD OLDER THAN THE FLEET THAT SENDS TO IT. Slash text is run by the mod as the
+        # command it is only since the delivery learned `$.command.run`; a session that loaded
+        # its mod before that, and never reloaded, still hands every prompt to
+        # `$.prompt.submit`, which the host refuses for a leading "/" in exactly these words.
+        # That refusal comes before anything ran, so the prompt is whole and unsent, and this
+        # was reported as "the mod could not submit it" and given up on: a `/reload-plugins`
+        # sent to bring such a session up to date was refused BY the staleness it was sent to
+        # cure. The pane takes slash text as typed, so that is where it goes, with the fix said
+        # once for whoever reads this.
+        rm -f "$_spool/$_hid.done" 2>/dev/null
+        echo "fleet-send: note — the mod in '$SESSION' is older than slash-command delivery and refused this as text; pasting it instead (/reload-plugins in that session, or fleet-mod reload --apply, brings it up to date)" >&2
+        busy && _mod_requeue
+        USE_MOD=0
       elif [ -n "$_rcpt" ]; then
         SENT_OUT=failed
         echo "fleet-send: → $SESSION (not delivered: the mod could not submit it — ${_why:-no reason given})" >&2
