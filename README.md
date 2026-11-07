@@ -429,14 +429,18 @@ spent the workers are parked until the earliest reset, then told to continue. Ro
 with Anthropic's terms of service; that is your responsibility. Details, and what happens when a
 saved login expires: [docs/OPERATIONS.md](docs/OPERATIONS.md#several-claude-accounts-on-one-profile-experimental).
 
-### Pictures beside the chat (experimental)
+### Pasted pictures on hover (experimental)
 
-Off by default. `fleet-experimental enable peek` shows a session's pictures inside Claude Code: a
-pasted `[Image #N]` and any picture path the conversation names. The newest one appears in a pane
-beside the chat, `/peek` lists the rest, and in the fullscreen layout a `▣` chip under the row
-pops the picture up when you point at it. Pictures are drawn as coloured cells, so they work
-inside tmux. PNG needs nothing installed; JPEG, GIF and WebP need `ffmpeg`. Details:
-[docs/OPERATIONS.md](docs/OPERATIONS.md#pictures-beside-the-chat-experimental).
+Off by default. `fleet-experimental enable peek` lets you look at a pasted `[Image #N]` again
+without leaving Claude Code. While you write, a row above the prompt lists the draft's pictures:
+point at one to preview it, click it to open it in the system's viewer. After sending, pointing
+at the `[Image #N]` in the sent prompt does the same. On macOS the preview is a borderless window
+by the pointer with the picture's own pixels, needing nothing installed; Ghostty and kitty outside
+tmux draw it themselves; anywhere else (Linux, WSL, over SSH) it is a card of coloured cells. It
+needs the fullscreen layout, the one that reports the pointer. Details:
+[docs/OPERATIONS.md](docs/OPERATIONS.md#pasted-pictures-on-hover-experimental). The hover
+behaviour and the macOS window follow the Image Preview mod in
+[midudev/better-claude](https://github.com/midudev/better-claude) (MIT, © Miguel Ángel Durán).
 
 ---
 

@@ -24,27 +24,33 @@ export type Ledger = {
   asOf: number
 }
 
-/** One picture the session showed (hooks/peek-shape.js picturesIn), as PEEK draws it. */
+/** A pasted `[Image #N]` as PEEK read it (register.js peekLoad), or why it has no preview.
+ *  Pixels for the cells stay in the module, never in $.state. */
 export type PeekPicture = {
-  key: string
-  kind: 'paste' | 'file'
   label: string
-  /** The N of `[Image #N]`, for a paste. */
-  n?: number
-  /** The resolved absolute path, for a file. */
-  path?: string
-  caption: string
-  /** Decoded and ready to draw; the pixels stay in the module, never in $.state. */
-  ready: boolean
-  /** Why it is words and not a picture (peek-shape.js WHY). */
+  /** The file a window or a viewer opens: Claude Code's copy, or PEEK's from the prompt's bytes. */
+  file?: string
+  format?: string
+  bytes?: number
+  width?: number
+  height?: number
+  /** A PNG the terminal draws itself (kitty graphics). */
+  png?: string
+  ready?: boolean
+  /** Why it is words and not a picture (peek-shape.js WHY); `retry` when it may come yet. */
   why?: string
+  retry?: boolean
 }
-/** PEEK's pane and chips: the session's pictures, oldest first, and the one picked
- *  (null follows the newest). `gen` moves when a picture is decoded, to redraw. */
-export type Peek = { pictures: PeekPicture[]; selected: string | null; gen: number }
+/** The preview open now: paste `n`, opened by the chip `target` (`<requestId>/<chip key>`),
+ *  as a card above the prompt or as a window of its own. */
+export type PeekShown = { n: number; target: string; edge: 'card' | 'window' }
 
 declare module 'claude-code' {
   interface PluginState {
-    ghostfleet: { band: Band | null; ledger: Ledger | null; peek: Peek | null; peekOn: boolean }
+    ghostfleet: {
+      band: Band | null; ledger: Ledger | null
+      /** PEEK: the switch; the draft's `[Image #N]` numbers; each paste read, by N; the preview open. */
+      peekOn: boolean; peekDraft: number[]; peekPics: Record<string, PeekPicture>; peekShown: PeekShown | null
+    }
   }
 }

@@ -947,7 +947,7 @@ every Claude session and reports from there. It does three things:
 | **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
 | **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
 | **ledger** | `prompt.submit` (every message, mid-turn ones too, and the note it carries), `tool.call` (`ledger_close`, `ledger_drop`, `ledger_add`) and `turn.complete` (the turn's text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
-| **peek** *(experimental)* | the conversation's text, `[Image #N]` pastes and picture paths, at session start and after each turn | a pane beside the chat and hover chips under the rows; nothing on disk. See "Pictures beside the chat" |
+| **peek** *(experimental)* | the prompt box's `[Image #N]` (`prompt.edit`, and a look every 500 ms), the sent prompt's, and the pointer on them | a chip row above the prompt and a preview on hover; a paste the engine kept no copy of is written once into `ghostfleet-peek/` in the session's temp folder. See "Pasted pictures on hover" |
 
 **Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
 take the mod's `state` over the pane while it is still being written: the pid that wrote
@@ -1151,48 +1151,55 @@ guards only refuse, so nothing changes there. An organization that sets
 `allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
 guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
 
-### Pictures beside the chat (experimental)
+### Pasted pictures on hover (experimental)
 
 *Off by default; `fleet-experimental enable peek` turns it on, `disable` turns it off. A running
-session picks the switch up at its next turn end. Off means nothing: no pane, no `/peek`, no
-chips, and the conversation is not read for pictures.*
+session picks the switch up at its next turn end. Off means nothing: no row, no preview, the
+prompt box is not looked at, and no picture is read.*
 
-A fleet session shows `[Image #N]` for a picture the person pasted, and a path for a screenshot
-an agent made (`fleet-look`, a test run, a build). Neither could be seen without leaving the
-session. With `peek` on, the mod shows them inside it:
+A picture pasted into Claude Code becomes `[Image #N]` in the prompt box and in the transcript,
+and nothing there lets you look at it again. With `peek` on:
 
-- **A pane beside the chat** with the newest picture, opened by itself when a new one turns up.
-  In the fullscreen layout it docks beside the transcript from 110 columns; opened unasked it
-  takes its place from 144, and below that it waits until `/peek` opens it, inline above the
-  prompt. Under the picture is a numbered list of the session's pictures, newest first: a digit
-  (or a click) picks one, `0` goes back to following the newest.
-- **Hover chips.** A row that names a picture gets a `▣ name` chip under it. Pointing at the chip
-  pops the picture up above it; clicking it puts it in the pane. This needs the fullscreen layout
-  (`"tui": "fullscreen"` in Claude Code's settings), because only there does the terminal report
-  the pointer to Claude. On the main screen the pane and `/peek` still work.
-- **`/peek`** lists the pictures, `/peek <n>` shows one, `/peek image <N>` shows a paste by its
-  number, `/peek follow` goes back to the newest. It runs without starting a turn.
+- **While writing**, a row above the prompt lists the draft's pastes as chips, followed by
+  *hover to preview · click to open*. Pointing at a chip opens the preview; moving off closes it;
+  a click opens the picture in the system's viewer (`open -a Preview` on macOS, `xdg-open`
+  elsewhere). The row follows the box as you type, and a paste, which puts the placeholder in
+  the box without an edit, is picked up within half a second. Typing closes a preview the row
+  opened, and sending takes the row away.
+- **After sending**, the `[Image #N]` on a sent prompt's first line and each `⎿ [Image #N]` row
+  Claude Code lists under it take the pointer too, with the text left exactly as Claude Code drew
+  it. A click on the first line's `[Image #N]` opens the viewer.
 
-**What it reads.** Only what the conversation showed: an `[Image #N]` a *person* typed (the
-model quoting one pastes nothing), and a `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` path in a
-message, a tool call or its output, resolved against the session's directory. A path is read
-only if it is a regular file: a symbolic link is not followed, a directory or a missing file is
-named as such in the pane. A paste's bytes come from the prompt as it is sent, else from the
-copy the engine keeps under `$CLAUDE_CODE_TMPDIR` (or `/tmp`)`/claude-<uid>/<project>/<session>/images/<N>.png`,
-else from the transcript. The engine's copy is incomplete (one long session kept 2 of about 80),
-so the transcript is the answer that always works. The last 24 pictures are kept; every read and
-every decode has a time limit.
+Both need the fullscreen layout (`"tui": "fullscreen"` in Claude Code's settings), because only
+there does the terminal report the pointer. On the main screen the mod draws nothing.
 
-**How it draws.** As half-block cells (`▀`, two pixels to a cell, each with its own colour). That
-works in any true-colour terminal and through every tmux the fleet supports, with nothing to
-turn on. The engine's `Image` element (kitty or iTerm2 pixels) is not used: inside tmux it needs
-`allow-passthrough`, and the fleet always runs inside tmux. The Claude apps have no cell
-element, so there the pane gives the caption and says the picture is drawn in the terminal.
+**What the preview is**, decided once per session:
 
-**How it decodes, without a dependency.** PNG is decoded in the mod itself (`hooks/peek-shape.js`
-has its own inflate). JPEG, GIF, WebP and any picture over 4 MiB go through `ffmpeg` when it is on
-`PATH`, scaled down to 240×480 at most before they come back. Without `ffmpeg` the pane names
-the file, its size and its kind, and says it has no decoder.
+| where | preview |
+|---|---|
+| macOS, local (a fleet session in tmux included) | a borderless window by the pointer, with the picture's own pixels at the screen's scale: shrunk to 800 points and 70% of the screen at most, never enlarged. It never takes the focus or the pointer, stands over every window (full-screen spaces too), closes when the pointer leaves, and lives two minutes at most. It is a JavaScript for Automation program run by `osascript`, so nothing needs installing. |
+| Ghostty or kitty, **outside** tmux | the terminal draws the picture itself (the kitty graphics protocol, the engine's `Image`), in a card above the prompt. Inside tmux that would need `allow-passthrough`, so a fleet session gets the window instead. |
+| Linux, WSL, any other terminal, and anything over SSH | a card of half-block cells (`▀`, two pixels to a cell) above the prompt. It works through tmux in any true-colour terminal, and shows a picture's layout rather than text you can read. There is no native window on Linux or WSL. Over SSH a window would open on the other machine, which is why SSH always gets cells. |
+
+A card in the terminal is drawn above the prompt, over the chips, whichever `[Image #N]` opened
+it, and the transcript moves up while it shows: the prompt's slot clips anything drawn outside
+it, and a card floated over the transcript is painted over by the rows after it.
+`CLAUDE_FLEET_PEEK=cells` asks for the cells on a Mac; `=window` and `=kitty` are honoured only
+where that preview can open. If the window program ends without showing a window, the rest of the
+session uses cells.
+
+**What it reads.** Only the session's own pastes. First Claude Code's copy, under
+`$CLAUDE_CODE_TMPDIR` (or `/tmp`)`/claude-<uid>/<project>/<session>/images/<N>.<ext>`, which must
+be a regular file and not a symbolic link. Claude Code does not keep a copy of every paste, so
+for one it did not, the mod writes the bytes once into `ghostfleet-peek/` beside that folder:
+they come from the prompt as it is sent, or else from the transcript. Bytes that do not sniff as
+PNG, JPEG, GIF or WebP are named as such and never shown or converted. Every read, write and
+conversion has a time limit.
+
+**What it needs.** Nothing on macOS: the window reads every format itself, and `sips` shrinks a
+picture for the cells. PNG is decoded in the mod (`hooks/peek-shape.js` has its own inflate). On
+Linux, JPEG, GIF and WebP go through ImageMagick (`magick` or `convert`), else `ffmpeg`. With
+neither, the preview names the paste and says nothing here can shrink it.
 
 ### Delivering prompts through the mod
 

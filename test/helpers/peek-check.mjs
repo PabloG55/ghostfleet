@@ -2,9 +2,12 @@
 // asks them. Every picture here is made on the spot from a formula: no fixture image, and
 // nothing from anybody's screen.
 //
-//   node peek-check.mjs find       which pictures a conversation showed, and in what order
+//   node peek-check.mjs mode       how a session shows a picture, per system and terminal
+//   node peek-check.mjs targets    where the hover targets go over a sent prompt
+//   node peek-check.mjs stored     which file in the session's temp folder a paste is
+//   node peek-check.mjs shrink DIR the shrinkers' argv, and sips run for real where it is
 //   node peek-check.mjs png        the decoder against every PNG kind, filter and deflate mode
-//   node peek-check.mjs ffmpeg DIR JPEG/GIF/WebP through ffmpeg, from a file and from stdin
+//   node peek-check.mjs ffmpeg DIR JPEG/GIF/WebP through ffmpeg
 //   node peek-check.mjs noff DIR   the same with no ffmpeg on PATH: exit 127, never a hang
 //   node peek-check.mjs cells      the half-block Raster at every width from 4 to 160
 import fs from 'node:fs'
@@ -100,17 +103,63 @@ function packed(ctype, depth, zopts, sample) {
 
 const cmd = process.argv[2]
 
-if (cmd === 'find') {
-  const cwd = '/w/acme-api', home = '/home/u'
-  const msgs = [
-    { role: 'user', text: 'here [Image #4] and [Image #3], also ~/shots/a.png', toolUses: [] },
-    { role: 'assistant', text: 'Saved to shots/b.jpeg. See `../acme-web/c.webp`, not file:///x/d.png', toolUses: [
-      { input: { command: 'fleet-look http://localhost:3000' }, text: 'wrote /tmp/look/e.png\n' }] },
-    { role: 'assistant', text: 'quoting [Image #9] is no paste; and ~/shots/a.png again.', toolUses: [] },
-    { role: 'user', text: 'what is /w/acme-api/notes.txt or a /path with space.png', toolResults: [{ text: 'f.GIF' }] },
+if (cmd === 'mode') {
+  // One letter per case: w(indow), k(itty), c(ells).
+  const TMUX = '/tmp/tmux-501/cf-acme-api,1,0', SSH = '10.0.0.2 51000 10.0.0.1 22'
+  const rows = [
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX }],                                  // a fleet session
+    ['macos', { TERM_PROGRAM: 'Apple_Terminal' }],
+    ['macos', { TERM_PROGRAM: 'ghostty', TERM: 'xterm-ghostty' }],
+    ['macos', { TERM: 'xterm-kitty', KITTY_WINDOW_ID: '1' }],
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX, KITTY_WINDOW_ID: '1' }],            // inherited into tmux
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX, SSH_CONNECTION: SSH }],
+    ['macos', { TERM_PROGRAM: 'ghostty', SSH_TTY: '/dev/ttys004' }],
+    ['linux', { TERM: 'xterm-256color' }],
+    ['linux', { TERM: 'xterm-kitty' }],
+    ['other', { TERM: 'xterm-256color' }],
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX, CLAUDE_FLEET_PEEK: 'cells' }],
+    ['linux', { TERM: 'xterm-256color', CLAUDE_FLEET_PEEK: 'window' }],          // not drawable here
   ]
-  const refs = P.picturesIn(msgs, { cwd, home })
-  console.log(refs.map(r => r.kind === 'paste' ? r.label : r.path).join(' | '))
+  const letters = rows.map(([platform, env]) => P.previewMode({ platform, env })[0]).join('')
+  // A session nobody is looking at (`claude -p`) opens no window.
+  const headless = P.previewMode({ platform: 'macos', env: {}, isInteractive: false })[0]
+  console.log(letters, headless, P.platformOf('Darwin\n'), P.platformOf('Linux'), P.platformOf('FreeBSD'),
+    P.openArgv('macos', '/x/1.png').join(' '), P.openArgv('linux', '/x/1.png').join(' '))
+} else if (cmd === 'targets') {
+  const has = n => n !== 7
+  const t = P.tokenTargets('look at [Image #1] and [Image #2] [Image #1] [Image #7]\nthen [Image #9]', 120, has)
+  // A target that would run past the line's end, or after a wide glyph, is left out.
+  const narrow = P.tokenTargets('a long line before it, and then [Image #1]', 30)
+  const wide = P.tokenTargets('漢字 [Image #1]', 120)
+  const l = P.listedTargets([2, 1, 7, 1], has)
+  console.log(t.map(x => `${x.n}@${x.left}+${x.width}`).join(','), narrow.length, wide.length,
+    l.map(x => `${x.n}@${x.bottom}:${x.left}`).join(','),
+    ['chip:3', 'sent:12', 'token:4', 'chip:', 'x:1', 'chip:1/../2'].map(k => (P.chipOf(k) || { where: '-' }).where).join(','))
+} else if (cmd === 'stored') {
+  const dirs = P.sessionDirs({ tmp: '/var/t/', uid: '501', root: '/w/acme-api', cwd: '/w/acme-api/web', sessionId: 's1' })
+  const same = P.sessionDirs({ uid: '501', root: '/w/acme-api', cwd: '/w/acme-api', sessionId: 's1' })
+  const none = P.sessionDirs({ uid: '', root: '/w/acme-api', sessionId: 's1' }).length
+  const names = ['13.png', '3.txt', '3.png.lnk', '../3.png', '3.JPG', '30.png', 'x3.png']
+  console.log(dirs.join(' '), same.length, none, P.storedImage(names, 3), P.storedImage(names, 13), P.storedImage(names, 4))
+} else if (cmd === 'shrink') {
+  const a = P.shrinkArgv('sips', '/x/a.jpg', '/y/a.png', 800).join(' ')
+  const b = P.shrinkArgv('sips', '/x/a.jpg', '/y/a.png').join(' ')
+  const c = P.shrinkArgv('magick', '/x/a.jpg', '/y/a.png', 800).join(' ')
+  let real = 'no-sips'
+  const dir = process.argv[3]
+  if (dir && spawnSync('sips', ['--help']).status === 0) {
+    // Run for real: a big picture comes down to the side, a small one stays as it is.
+    const big = path.join(dir, 'big.png'), small = path.join(dir, 'small.png')
+    const solid = (w, h) => png({ width: w, height: h, depth: 8, ctype: 2, rows: Array.from({ length: h }, () => new Uint8Array(w * 3).fill(90)) })
+    fs.writeFileSync(big, solid(1600, 400)); fs.writeFileSync(small, solid(100, 50))
+    const size = f => { const s = P.sniff(new Uint8Array(fs.readFileSync(f))); return s ? `${s.width}x${s.height}` : 'unread' }
+    for (const [f, side] of [[big, 800], [small, undefined]]) {
+      const o = f.replace('.png', '.out.png'), argv = P.shrinkArgv('sips', f, o, side)
+      spawnSync(argv[0], argv.slice(1))
+    }
+    real = `${size(big.replace('.png', '.out.png'))} ${size(small.replace('.png', '.out.png'))}`
+  }
+  console.log(`${a} | ${b} | ${c} | ${real}`)
 } else if (cmd === 'png') {
   const bad = []
   let n = 0
@@ -136,8 +185,7 @@ if (cmd === 'find') {
   const env = cmd === 'noff' ? { ...process.env, PATH: path.join(dir, 'no-such-bin') } : process.env
   const run = (argv, input) => spawnSync(argv[0], argv.slice(1), { input, env, timeout: 10_000 })
   if (cmd === 'noff') {
-    const a = run(P.ffmpegFileArgv(src)), b = run(P.ffmpegStdinArgv(), fs.readFileSync(src).toString('base64'))
-    console.log(a.status, b.status)
+    console.log(run(P.ffmpegFileArgv(src)).status)
   } else {
     const out = []
     for (const ext of ['jpg', 'gif', 'webp']) {
@@ -145,10 +193,9 @@ if (cmd === 'find') {
       try { execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', src, f], { timeout: 10_000 }) } catch { out.push(`${ext}:no-encoder`); continue }
       const bytes = new Uint8Array(fs.readFileSync(f))
       const s = P.sniff(bytes)
-      const a = run(P.ffmpegFileArgv(f)), b = run(P.ffmpegStdinArgv(), Buffer.from(bytes).toString('base64'))
+      const a = run(P.ffmpegFileArgv(f))
       const pa = a.status === 0 ? P.parsePam(P.fromBase64(a.stdout.toString())) : null
-      const pb = b.status === 0 ? P.parsePam(P.fromBase64(b.stdout.toString())) : null
-      out.push(`${ext}:${s && s.format}:${s && s.width}x${s && s.height}:file=${pa ? pa.width + 'x' + pa.height : a.status}:stdin=${pb ? pb.width + 'x' + pb.height : b.status}`)
+      out.push(`${ext}:${s && s.format}:${s && s.width}x${s && s.height}:file=${pa ? pa.width + 'x' + pa.height : a.status}`)
     }
     // A large picture comes back no larger than the thumb, its shape kept.
     const big = path.join(dir, 'big.png')
@@ -176,6 +223,6 @@ if (cmd === 'find') {
   const hole = [v.getUint32(mid, true), v.getUint32(mid + 4, true), v.getUint32(mid + 8, true)]
   console.log(over, unsquare, `${r.cols}x${r.rows}`, hole[0] === 0x20 && hole[1] === P.DEFAULT_COLOR && hole[2] === P.DEFAULT_COLOR ? 'hole=default' : `hole=${hole.map(x => x.toString(16))}`)
 } else {
-  console.error('usage: peek-check.mjs find|png|ffmpeg DIR|noff DIR|cells')
+  console.error('usage: peek-check.mjs mode|targets|stored|shrink DIR|png|ffmpeg DIR|noff DIR|cells')
   process.exit(2)
 }
