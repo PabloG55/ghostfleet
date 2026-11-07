@@ -75,6 +75,8 @@ function world(on: any, env: Record<string, string> = {}): World {
   on('command.register', (_$: any, e: any) => { w.registered.push(e.name); return { value: { command: e.name } } })
   on('tool.register', (_$: any, e: any) => { w.tools.push(e); return { value: { tool: `mcp__ghostfleet__${e.name}` } } })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+  // The engine's own AbovePrompt, empty: the band always passes the slot on (band.test.ts).
+  on('ui.render', ($: any, e: any) => { const { Box } = $.ui.resolve(e); return h(Box, {}) })
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   // The model's side of a step: what the step's response said, as the engine returns it.

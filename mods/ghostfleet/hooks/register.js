@@ -15,10 +15,11 @@
 //   GUARDS    the fleet's refusals in front of Bash and the MCP tools, failing CLOSED
 //   BAND      a lead's team above its prompt
 //   LEDGER    every request made of the session, held open until a final message answers it
-//   PEEK      the session's pictures beside the chat, and on hover (experimental: `peek`)
+//   PEEK      a pasted [Image #N] previewed on hover, while writing and after (experimental: `peek`)
 // What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js, ./band-shape.js,
-// ./ledger.js and ./peek-shape.js, plain functions the suite can run with node. The engine follows `$` only into functions
-// declared in this file, never across an import, which is why the hooks are one file and not six.
+// ./ledger.js and ./peek-shape.js, plain functions the suite can run with node (./peek-window.js
+// is a string, the program PEEK runs; ./peek-chip.js is a surface module, which the engine loads
+// apart and which has no `$`). The engine follows `$` only into functions declared in this file, never across an import, which is why the hooks are one file and not six.
 //
 // THE OBSERVERS DECIDE NOTHING, THE GUARDS DECIDE AND FAIL CLOSED. STATE, BUDGET, COMMANDS,
 // BAND and PEEK only observe: a hook of theirs that throws or runs out of time is skipped and the
@@ -52,9 +53,11 @@ import {
   deliverySource,
 } from './ledger.js'
 import {
-  picturesIn, keysInText, pastesIn, pairPastes, pastesFromApi, pasteFile, fromBase64, sniff, decodePng, thumb,
-  ffmpegFileArgv, ffmpegStdinArgv, NO_FFMPEG, parsePam, rasterOf, caption, WHY, listing as peekListing, peekArgs,
+  pastesIn, sameIds, sessionDirs, storedImage, EXT, pairPastes, pastesFromApi, fromBase64, sniff, decodePng, thumb,
+  ffmpegFileArgv, NO_FFMPEG, parsePam, fitCells, rasterOf, caption, WHY, platformOf, previewMode, WINDOW, openArgv,
+  SHRINKERS, shrinkArgv, tokenTargets, listedTargets, chipOf,
 } from './peek-shape.js'
+import { PEEK_WINDOW } from './peek-window.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
   commandOf, failureOf, headOf,
@@ -271,7 +274,6 @@ async function onToolCheck($, e, next) {
 async function onToolCall($, e, next) {
   const done = await next(e)
   if (state === 'need-you') await setState($, 'working')
-  peekToolCall($, e, done)
   return ledgerNoteOnTool($, done)
 }
 
@@ -282,6 +284,7 @@ async function onToolCall($, e, next) {
 // and, by the rule above, writes nothing.
 async function onSessionEnd($, e, next) {
   if (e.reason !== 'clear' && heartbeat) { heartbeat.cancel(); heartbeat = null }
+  peekEnd()
   state = ''
   await deliveryEnd($)
   const done = await next(e)
@@ -612,7 +615,7 @@ async function onSessionStart($, e, next) {
   await ledgerStart($)
   startBand($)
   await deliveryStart($)
-  await peekStart($)
+  await peekStart($, e)
   return started
 }
 
@@ -631,20 +634,21 @@ export const register = on => {
   // GUARDS and BAND, below the wiring so each is one section of its own.
   on('tool.call', { tool: 'Bash' }, onBash).catch(bashFailedClosed)
   on('tool.call', { tool: /^mcp__/ }, onMcp).catch(mcpFailedClosed)
-  on('ui.render', { component: 'AbovePrompt' }, onBandRender)
+  // One AbovePrompt hook for the band and PEEK's row: the band's rows, then PEEK's, then the slot
+  // as the hooks beneath left it (onBandRender says why it is always passed on).
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => onBandRender($, e, ee => onPeekBand($, ee, next)))
   on('prompt.submit', onPromptSubmit)
   on('command.run', { command: 'ledger' }, onLedgerCommand)
   // Spelled out, not TOOL.*: `claude plugin validate` reads a matcher only from its literal.
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_close' }, onLedgerTool)
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_drop' }, onLedgerTool)
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_add' }, onLedgerTool)
-  // PEEK: every hook answers `next(e)` untouched while the switch is off. Its turn.complete,
-  // tool.call and prompt.submit parts ride in the hooks above (one per event without a matcher).
-  on('command.run', { command: 'peek' }, onPeekCommand)
-  on('ui.render', { component: 'Pane', requestId: 'peek' }, onPeekPane)
-  on('ui.render', { component: 'AssistantMessage' }, onPeekRow)
-  on('ui.render', { component: 'UserMessage' }, onPeekRow)
-  on('ui.render', { component: 'ToolUse' }, onPeekRow)
+  // PEEK: every hook answers `next(e)` untouched while the switch is off. Its session.start,
+  // session.end, turn.complete and prompt.submit parts ride in the hooks above, and its
+  // AbovePrompt row in the band's hook.
+  on('prompt.edit', onPeekEdit)
+  on('ui.message', onPeekMessage)
+  on('ui.render', { component: 'UserMessage' }, onPeekSent)
 }
 
 // ── GUARDS ──────────────────────────────────────────────────────────────────
@@ -1049,7 +1053,10 @@ async function refreshPrs($) {
 }
 
 // A held wake first (it is about the box right below), then the team's row, then the
-// ledger's (LEDGER, below), each only when it has something to say.
+// ledger's (LEDGER, below), each only when it has something to say, and then whatever the
+// hooks beneath put in the slot. AbovePrompt is ONE slot shared by every mod and by this
+// mod's own PEEK row: a tree answered without `next(e)` is the whole slot, so the band
+// showing its team used to make every other row above the prompt disappear.
 async function onBandRender($, e, next) {
   if (e.props.hasSurvey) return next(e)
   const { value } = await $.state.get(BAND)
@@ -1057,7 +1064,8 @@ async function onBandRender($, e, next) {
   const hold = value && value.held ? heldRuns(value.held, value.held.asOf, e.props.bodyColumns) : null
   const led = (await $.state.get(LEDGER)).value
   const book = led ? ledgerRuns(led, led.asOf, e.props.bodyColumns) : null
-  if (!team && !hold && !book) return next(e)
+  const below = await next(e)
+  if (!team && !hold && !book) return below
   const { Box, Text } = $.ui.resolve(e)
   const row = (runs, k) => h(Box, { key: k, flexDirection: 'row' },
     ...runs.map((r, i) => h(Text, {
@@ -1065,7 +1073,7 @@ async function onBandRender($, e, next) {
       ...(r.color ? { color: r.color } : {}), ...(r.dim ? { dimColor: true } : {}), ...(r.bold ? { bold: true } : {}),
     }, r.text)))
   return h(Box, { flexDirection: 'column' }, ...(hold ? [row(hold, 'held')] : []), ...(team ? [row(team, 'team')] : []),
-    ...(book ? [row(book, 'ledger')] : []))
+    ...(book ? [row(book, 'ledger')] : []), ...(below ? [below] : []))
 }
 
 // Started from onSessionStart (one session.start hook per module), after the record exists.
@@ -1301,7 +1309,7 @@ async function adoptMoved($, file) {
 async function onPromptSubmit($, e, next) {
   await peekPrompt($, e)
   const r = await ledgerPromptSubmit($, e, next)
-  if (peekOn) void peekRefresh($)
+  await peekSubmitted($, e)
   return r
 }
 
@@ -1638,48 +1646,62 @@ async function onLedgerCommand($, e) {
 
 // ── PEEK ────────────────────────────────────────────────────────────────────
 //
-// The pictures a session shows, seen from inside it. A pasted picture is `[Image #28]` in the
-// transcript and an agent's screenshot is a path; neither can be looked at without leaving
-// the session. EXPERIMENTAL (lib/experimental.mjs `peek`): switched off, none of this
-// registers a command, opens a pane or touches a row.
+// A pasted picture is `[Image #N]` in the prompt box and in the transcript, and nothing in the
+// session lets it be looked at again. PEEK opens it on hover. EXPERIMENTAL (lib/experimental.mjs
+// `peek`): switched off, no hook here changes anything, no image is read, nothing is started.
 //
-// TWO WAYS TO LOOK, because a terminal says where the pointer is only in one layout.
-//   HOVER  In the fullscreen layout (`"tui": "fullscreen"`, which every fleet profile sets)
-//          the terminal reports the pointer, and the surface applies a Box's `hover` styles
-//          itself: no hook runs on a hover, so nothing can be decoded at that moment. Each
-//          transcript row that names a picture gets a row of chips under it, and each chip
-//          carries its picture already drawn, `display: none` until the pointer rests on
-//          the chip. A click on a chip puts it in the pane.
-//   PANE   Beside the transcript (docked from 110 columns in fullscreen, above the prompt
-//          elsewhere): the newest picture, opened the first time a picture appears, and a
-//          numbered list to pick an earlier one by key or click. `/peek` lists them and
-//          `/peek <n>` shows one, which is the whole of it on the main-screen layout.
+// WHERE THE POINTER GOES. Only the fullscreen layout (`"tui": "fullscreen"`) reports the
+// pointer, so off it nothing here draws a target.
+//   WHILE WRITING  the prompt box's text can be coloured by a mod but not hovered, so a row
+//                  above the prompt lists the draft's `[Image #N]` as chips (./peek-chip.js).
+//                  The draft is followed by `prompt.edit` and by a look at the box every
+//                  PEEK_POLL_MS: a paste puts the placeholder in the box with no edit event.
+//   AFTER SENDING  an unpainted chip over each `[Image #N]` on the sent prompt's first line
+//                  (also a click target), and over each `  ⎿  [Image #N]` row Claude Code lists
+//                  under it (hover only: a click there stays Claude Code's).
+// A chip posts when the pointer comes onto it, moves on it and leaves it, and when it is
+// clicked; `ui.message` opens the preview, closes it, or opens the picture in the viewer.
 //
-// WHAT IT MAY OPEN. Only what the session's own conversation named: a `[Image #N]` in a
-// prompt of the person's, or a picture path in a message, a tool call or its result. A path
-// is resolved against the session's directory, stat'ed, and opened only if it is a regular
-// file and not itself a symbolic link (a link would show a picture nobody named); its bytes
-// must then sniff as PNG, JPEG, GIF or WebP. Nothing is followed from inside a picture.
+// WHAT THE PREVIEW IS, decided once a session (peek-shape.js previewMode): on macOS a panel by
+// the pointer (./peek-window.js), in Ghostty or kitty outside tmux the terminal's own picture,
+// anywhere else a card of cells. Both of those are a card drawn above the prompt, over the
+// chips, whatever target opened it: the one place in the terminal a card lays out whole. A
+// window program that ends without showing hands the rest of the session to cells.
 //
-// AN OBSERVER, like STATE and BAND: every call bounded (IO_MS, FF_MS for ffmpeg), the work
-// done off the hook that asked for it, and a picture that cannot be had is its caption and
-// one line saying why. Decoding is ./peek-shape.js: PNG there, the rest by ffmpeg.
+// WHAT IT MAY OPEN. Only a paste of this session: Claude Code's own copy in the session's temp
+// folder, or the bytes the prompt carried (at submit, or from the transcript) written into
+// PEEK's folder beside it. A stored file must be a regular file and not a symbolic link, and
+// its bytes must sniff as PNG, JPEG, GIF or WebP before anything is shown or converted.
+//
+// AN OBSERVER, like STATE and BAND: every call bounded, the work done off the hook that asked
+// for it, and a picture that cannot be had is a line saying why.
 
-const PEEK = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peek' })
 const PEEK_ON = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekOn' })
-const PEEK_PANE = 'peek'
-const PEEK_MAX = 24          // pictures kept, newest first; older ones drop off the list
-const PEEK_CHIPS = 4         // chips under one row
-const PEEK_LIST = 6          // rows of the pane's list
-const FF_MS = 5_000
-const API_MS = 8_000         // the transcript's image blocks: the one large read
+const PEEK_DRAFT = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekDraft' })
+const PEEK_PICS = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekPics' })
+const PEEK_SHOWN = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekShown' })
+const PEEK_POLL_MS = 500
+const PEEK_WAIT_MS = 200          // the engine writes a paste's file just after the placeholder lands
+const PEEK_WAIT_TRIES = 10
+const PEEK_SHRINK_MS = 8_000
+const PEEK_API_MS = 8_000         // the transcript's image blocks: the one large read
+const PEEK_READ_MAX = 4 * 1024 * 1024
+const PEEK_CELL_SIDE = 800        // the side a picture is shrunk to before it is sampled into cells
+const PEEK_DIR = 'ghostfleet-peek'
 
 let peekOn = false
-let peekRegistered = false
-let peekBusy = null          // the refresh in flight
-let peekAgain = false        // another was asked for while it ran
-let peekNewest = ''          // the newest key the pane was last opened for
-const peekPics = new Map()   // key -> { pic, info, why }: decoded, kept small (thumb)
+let peekInteractive = false
+let peekMode = 'cells'       // 'window' | 'kitty' | 'cells' (peek-shape.js previewMode)
+let peekPlatform = ''
+let peekTool = ''            // the shrinker that worked here
+let peekSid = ''             // whose pictures these are: /clear starts the numbers again
+let peekFolder = ''          // the session's temp folder, once found
+let peekPoll = null
+let peekDraftIds = []
+let peekWin = null           // { target, isOpen }: the window program running now
+let peekChanging = Promise.resolve()
+const peekPixels = new Map() // N -> picture, kept small (thumb), for cells
+const peekLoading = new Set()
 const peekPastes = new Map() // N -> { mediaType, base64 }: bytes a prompt handed over
 
 async function peekSwitch($) {
@@ -1688,153 +1710,307 @@ async function peekSwitch($) {
   return /^\s*on\s*$/.test(String(text))
 }
 
-// Read the switch and make the session match it: on registers /peek and looks for pictures;
-// off closes the pane and forgets them. Asked at the start and again at every turn's end, so
-// `fleet-experimental disable peek` takes effect without restarting anything.
+// A state read's value, or `fallback` where there is none. (The read itself is written out at
+// each call: `claude plugin validate` holds every $.state key to the contract only from a
+// reference it can read there.)
+const peekVal = (got, fallback) => (got && got.value !== undefined && got.value !== null ? got.value : fallback)
+
+// Read the switch and make the session match it: on decides how pictures show here and starts
+// looking at the box; off stops that, closes a window and forgets the pictures. Asked at the
+// start and again at every turn's end, so `fleet-experimental disable peek` needs no restart.
 async function peekSync($) {
   const on = await peekSwitch($)
   const was = peekOn
   peekOn = on
-  const cur = await soon($, $.state.get(PEEK_ON), null)
-  if (!cur || cur.value !== on) await soon($, $.state.set(PEEK_ON, on), null)
-  if (on && !peekRegistered) {
-    const r = await soon($, $.command.register({ name: 'peek', description: "This session's pictures: /peek lists them, /peek <n> shows one beside the chat", immediate: true }), null)
-    peekRegistered = Boolean(r)
+  if ((await peekVal(await soon($, $.state.get(PEEK_ON), null), null)) !== on) await soon($, $.state.set(PEEK_ON, on), null)
+  if (on && !was) {
+    const uname = await soon($, $.process.run(['uname', '-s'], { timeoutMs: IO_MS }), null)
+    peekPlatform = platformOf(uname && uname.exitCode === 0 ? uname.stdout : '')
+    // Each name written out: `claude plugin validate` lists what a module reads from literals.
+    const env = {
+      TERM_PROGRAM: await $.env.get('TERM_PROGRAM'), TERM: await $.env.get('TERM'),
+      KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'), TMUX: await $.env.get('TMUX'),
+      SSH_CONNECTION: await $.env.get('SSH_CONNECTION'), SSH_TTY: await $.env.get('SSH_TTY'),
+      CLAUDE_FLEET_PEEK: await $.env.get('CLAUDE_FLEET_PEEK'),
+    }
+    peekMode = previewMode({ platform: peekPlatform, env, isInteractive: peekInteractive })
+    if (peekInteractive) {
+      if (peekPoll) peekPoll.cancel()
+      // A look that fails (the module unloading under it) waits for the next one.
+      peekPoll = $.clock.every(PEEK_POLL_MS, () => {
+        void $.prompt.read().then(box => peekTrack($, box.text)).catch(() => {})
+      })
+      const box = await soon($, $.prompt.read(), null)
+      if (box) await peekTrack($, box.text)
+    }
   }
-  if (!on && was) {
-    peekPics.clear(); peekPastes.clear(); peekNewest = ''
-    await soon($, $.state.set(PEEK, null), null)
-    await soon($, $.ui.close({ id: PEEK_PANE }), null)
-  }
+  if (!on && was) await peekForget($)
   return on
 }
 
-// One refresh at a time; one more after it if anything asked meanwhile.
-function peekRefresh($) {
-  if (!peekOn) return Promise.resolve()
-  if (peekBusy) { peekAgain = true; return peekBusy }
-  peekBusy = (async () => {
-    do { peekAgain = false; await peekScan($).catch(() => {}) } while (peekAgain && peekOn)
-  })().finally(() => { peekBusy = null })
-  return peekBusy
+async function peekForget($) {
+  if (peekPoll) { peekPoll.cancel(); peekPoll = null }
+  peekCloseWindow()
+  peekPixels.clear(); peekPastes.clear(); peekDraftIds = []; peekFolder = ''
+  await soon($, $.state.set(PEEK_DRAFT, []), null)
+  await soon($, $.state.set(PEEK_PICS, {}), null)
+  await soon($, $.state.set(PEEK_SHOWN, null), null)
 }
 
-async function peekScan($) {
-  const msgs = await soon($, $.session.messages(), null, IO_MS * 2)
-  if (!Array.isArray(msgs)) return
-  const cwd = await soon($, $.session.cwd(), '')
-  const home = (await $.env.get('HOME')) || ''
-  const refs = picturesIn(msgs, { cwd, home }).slice(-PEEK_MAX)
-  // Newest first: the picture the pane is about to show is the one worth the time.
-  let api = null
-  for (const ref of [...refs].reverse()) {
-    if (!peekOn) return
-    const had = peekPics.get(ref.key)
-    if (had && (had.pic || !had.retry)) continue
-    if (ref.kind === 'paste' && !peekPastes.has(ref.n) && !(await peekPasteOnDisk($, ref.n)) && api === null) {
-      // The transcript holds every paste; read it once per scan, and only when it must.
-      const full = await soon($, $.session.messages({ as: 'api' }), [], API_MS)
-      api = Array.isArray(full) ? pastesFromApi(full) : new Map()
-      for (const [n, img] of api) if (!peekPastes.has(n)) peekPastes.set(n, img)
-    }
-    peekPics.set(ref.key, await peekLoad($, ref))
-  }
-  for (const k of [...peekPics.keys()]) if (!refs.some(r => r.key === k)) peekPics.delete(k)
-  const cur = (await soon($, $.state.get(PEEK), null))?.value || null
-  const pictures = refs.map(r => {
-    const got = peekPics.get(r.key) || {}
-    return { key: r.key, kind: r.kind, label: r.label, ...(r.n !== undefined ? { n: r.n } : {}), ...(r.path ? { path: r.path } : {}),
-      caption: caption(r, got.info || {}), ready: Boolean(got.pic), ...(got.why ? { why: got.why } : {}) }
-  })
-  const selected = cur && cur.selected && pictures.some(p => p.key === cur.selected) ? cur.selected : null
-  const next = { pictures, selected, gen: (cur ? cur.gen : 0) + 1 }
-  if (!cur || JSON.stringify({ ...cur, gen: 0 }) !== JSON.stringify({ ...next, gen: 0 })) await soon($, $.state.set(PEEK, next), null)
-  // A new newest picture opens the pane, once per picture: closing it is the person's answer
-  // until the session shows another.
-  const newest = pictures.at(-1)
-  if (newest && newest.key !== peekNewest) {
-    peekNewest = newest.key
-    await soon($, $.ui.open({ id: PEEK_PANE, title: 'Picture' }), null)
+// After /clear the numbers start again from 1: what was read belongs to the session before.
+async function peekFollow($) {
+  const sid = await soon($, $.session.id(), '')
+  if (sid === peekSid) return
+  const had = peekSid !== ''
+  peekSid = sid
+  peekFolder = ''
+  peekPixels.clear(); peekPastes.clear()
+  if (had) {
+    await soon($, $.state.set(PEEK_PICS, {}), null)
+    await peekChange($, () => null)
   }
 }
 
-// The engine's own copy of a paste, where it kept one (peek-shape.js pasteFile).
-async function peekPasteOnDisk($, n) {
+// ── finding a paste ──
+
+// The session's temp folder (peek-shape.js sessionDirs): the one holding `images`, else the
+// first candidate, which is where PEEK's own folder goes even before Claude Code made one.
+async function peekSessionFolder($) {
+  if (peekFolder) return peekFolder
   const out = await soon($, $.process.run(['id', '-u'], { timeoutMs: IO_MS }), null)
   const uid = out && out.exitCode === 0 ? String(out.stdout).trim() : ''
-  const file = pasteFile({ tmp: (await $.env.get('CLAUDE_CODE_TMPDIR')) || '/tmp', uid,
-    root: await soon($, $.session.root(), ''), sessionId: await soon($, $.session.id(), ''), n })
-  if (!file) return false
-  const st = await soon($, $.fs.stat(file), null)
-  if (!st || st.kind !== 'file' || st.isLink || st.size > 4 * 1024 * 1024) return false
-  const got = await soon($, $.fs.read(file, { as: 'bytes' }), null)
-  if (!got || !got.base64) return false
-  peekPastes.set(n, { mediaType: 'image/png', base64: got.base64 })
-  return true
-}
-
-// ref -> { pic, info, why, retry }: a thumb to draw, or why not.
-async function peekLoad($, ref) {
-  if (ref.kind === 'paste') {
-    const img = peekPastes.get(ref.n)
-    if (!img) return { why: WHY.noBytes, retry: true }
-    const bytes = fromBase64(img.base64)
-    return peekDecode($, bytes, { size: bytes.length, stdin: img.base64 })
+  const tmp = (await $.env.get('CLAUDE_CODE_TMPDIR')) || '/tmp'
+  const dirs = sessionDirs({ tmp, uid, root: await soon($, $.session.root(), ''), cwd: await soon($, $.session.cwd(), ''), sessionId: peekSid })
+  for (const d of dirs) {
+    if (await soon($, $.fs.list(`${d}/images`), null)) return (peekFolder = d)
   }
-  const st = await soon($, $.fs.stat(ref.path), null)
-  if (!st) return { why: WHY.missing, retry: true }
-  if (st.isLink) return { why: WHY.link }
-  if (st.kind !== 'file') return { why: WHY.notFile }
-  const info = { size: st.size }
-  // A file the engine will not read whole (over 4 MiB) is ffmpeg's to open, by its path.
-  if (st.size > 4 * 1024 * 1024) return peekFfmpeg($, ffmpegFileArgv(ref.path), undefined, info)
-  const got = await soon($, $.fs.read(ref.path, { as: 'bytes' }), null)
-  if (!got || !got.base64) return { why: WHY.missing, retry: true, info }
-  return peekDecode($, fromBase64(got.base64), { size: st.size, path: ref.path })
-}
-
-async function peekDecode($, bytes, { size, stdin, path }) {
-  const s = sniff(bytes)
-  if (!s) return { why: WHY.notImage, info: { size } }
-  const info = { ...s, size }
-  if (s.format === 'png') {
-    const pic = decodePng(bytes)
-    if (pic) return { pic: thumb(pic), info }
+  // A project path too long for one folder name has a hash after it: look for the session.
+  if (dirs.length) {
+    const base = dirs[0].slice(0, dirs[0].lastIndexOf('/', dirs[0].lastIndexOf('/') - 1))
+    for (const entry of (await soon($, $.fs.list(base), null)) || []) {
+      if (entry.kind !== 'dir') continue
+      const d = `${base}/${entry.name}/${peekSid}`
+      if (await soon($, $.fs.list(`${d}/images`), null)) return (peekFolder = d)
+    }
   }
-  return peekFfmpeg($, path ? ffmpegFileArgv(path) : ffmpegStdinArgv(), path ? undefined : stdin, info)
+  return dirs[0] || ''
 }
 
-async function peekFfmpeg($, argv, stdin, info) {
-  const out = await soon($, $.process.run(argv, { timeoutMs: FF_MS, ...(stdin ? { stdin } : {}) }), null, FF_MS + 1000)
-  if (!out) return { why: WHY.failed, info, retry: true }
-  if (out.exitCode === NO_FFMPEG) return { why: WHY.noDecoder, info }
-  const pic = out.exitCode === 0 && !out.isStdoutTruncated ? parsePam(fromBase64(out.stdout)) : null
-  return pic ? { pic: thumb(pic), info } : { why: WHY.failed, info }
+// Paste N as a file: { file, size } or { why }. Claude Code's copy first; else the prompt's or
+// the transcript's bytes, written once into PEEK's folder.
+async function peekFile($, n) {
+  const folder = await peekSessionFolder($)
+  if (!folder) return { why: WHY.noBytes }
+  const names = ((await soon($, $.fs.list(`${folder}/images`), null)) || []).map(x => x.name)
+  const name = storedImage(names, n)
+  if (name) {
+    const file = `${folder}/images/${name}`
+    const st = await soon($, $.fs.stat(file), null)
+    if (st && st.isLink) return { why: WHY.link }
+    if (st && st.kind === 'file') return { file, size: st.size }
+  }
+  const mine = `${folder}/${PEEK_DIR}`
+  for (const ext of ['png', 'jpg', 'gif', 'webp']) {
+    const st = await soon($, $.fs.stat(`${mine}/${n}.${ext}`), null)
+    if (st && st.kind === 'file' && !st.isLink) return { file: `${mine}/${n}.${ext}`, size: st.size }
+  }
+  if (!peekPastes.has(n)) {
+    const full = await soon($, $.session.messages({ as: 'api' }), [], PEEK_API_MS)
+    for (const [k, img] of pastesFromApi(Array.isArray(full) ? full : [])) if (!peekPastes.has(k)) peekPastes.set(k, img)
+  }
+  const img = peekPastes.get(n)
+  if (!img) return { why: WHY.noBytes }
+  const kind = sniff(fromBase64(img.base64.slice(0, 64 * 1024)))
+  if (!kind) return { why: WHY.notImage }
+  const file = `${mine}/${n}.${EXT[kind.format]}`
+  // The bytes ride on stdin and the path as $1: neither is ever inside the script's text.
+  const wrote = await soon($, $.process.run(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && base64 -d > "$1"', 'peek', file],
+    { stdin: img.base64, timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+  if (!wrote || wrote.exitCode !== 0) return { why: WHY.failed }
+  return { file, size: Math.floor(img.base64.length * 3 / 4) }
+}
+
+// The first shrinker that works here, remembered: `file` as a PNG at `out`, at most `side`.
+async function peekShrink($, file, out, side) {
+  const tools = peekTool ? [peekTool] : SHRINKERS[peekPlatform] || SHRINKERS.other
+  await soon($, $.process.run(['mkdir', '-p', out.slice(0, out.lastIndexOf('/'))], { timeoutMs: IO_MS }), null)
+  for (const tool of tools) {
+    const r = await soon($, $.process.run(shrinkArgv(tool, file, out, side), { timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+    if (r && r.exitCode === 0) { peekTool = tool; return true }
+  }
+  return false
+}
+
+// Reads paste N once into PEEK_PICS: its file, kind and size, and for the terminal what it
+// draws (a PNG for kitty, pixels for cells). A window needs only the file.
+async function peekLoad($, n) {
+  if (!peekOn || peekLoading.has(n)) return
+  const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  const had = pics[n]
+  if (had && (had.ready || !had.retry)) return
+  peekLoading.add(n)
+  const sid = peekSid
+  let pic
+  try {
+    let got = await peekFile($, n)
+    for (let i = 0; got.why === WHY.noBytes && i < PEEK_WAIT_TRIES; i++) {
+      await $.clock.sleep(PEEK_WAIT_MS)
+      got = await peekFile($, n)
+    }
+    pic = got.why ? { label: `[Image #${n}]`, why: got.why, retry: got.why === WHY.noBytes } : await peekRead($, n, got.file, got.size)
+  } catch {
+    pic = { label: `[Image #${n}]`, why: WHY.failed, retry: true }
+  } finally {
+    peekLoading.delete(n)
+  }
+  if (!peekOn || sid !== peekSid) return
+  const now = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  await soon($, $.state.set(PEEK_PICS, { ...now, [n]: pic }), null)
+}
+
+async function peekRead($, n, file, size) {
+  const label = `[Image #${n}]`
+  let bytes = null
+  if (size <= PEEK_READ_MAX) {
+    const got = await soon($, $.fs.read(file, { as: 'bytes' }), null)
+    bytes = got && got.base64 ? fromBase64(got.base64) : null
+  } else {
+    const head = await soon($, $.process.run(['/bin/sh', '-c', 'head -c 65536 "$1" | base64', 'peek', file], { timeoutMs: IO_MS }), null)
+    bytes = head && head.exitCode === 0 ? fromBase64(head.stdout) : null
+  }
+  const kind = bytes && sniff(bytes)
+  if (!kind) return { label, why: bytes ? WHY.notImage : WHY.missing, retry: !bytes }
+  const base = { label, file, format: kind.format, bytes: size, width: kind.width, height: kind.height }
+  if (peekMode === 'window') return { ...base, ready: true }
+  const larger = !kind.width || Math.max(kind.width, kind.height) > PEEK_CELL_SIDE
+  const cache = `${file.slice(0, file.lastIndexOf('/images/') >= 0 ? file.lastIndexOf('/images/') : file.lastIndexOf('/'))}/${PEEK_DIR}`
+  if (peekMode === 'kitty') {
+    if (kind.format === 'png') return { ...base, png: file, ready: true }
+    const out = `${cache}/${n}.view.png`
+    return (await peekShrink($, file, out)) ? { ...base, png: out, ready: true } : { ...base, why: WHY.noDecoder }
+  }
+  // Cells: a PNG small enough decodes here; anything else is shrunk to one first.
+  let pixels = kind.format === 'png' && bytes.length === size && !larger ? decodePng(bytes) : null
+  if (!pixels) {
+    const out = `${cache}/${n}.cells.png`
+    if (await peekShrink($, file, out, larger ? PEEK_CELL_SIDE : undefined)) {
+      const got = await soon($, $.fs.read(out, { as: 'bytes' }), null)
+      pixels = got && got.base64 ? decodePng(fromBase64(got.base64)) : null
+    }
+  }
+  if (!pixels) {
+    const ff = await soon($, $.process.run(ffmpegFileArgv(file), { timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+    if (ff && ff.exitCode === NO_FFMPEG) return { ...base, why: WHY.noDecoder }
+    pixels = ff && ff.exitCode === 0 && !ff.isStdoutTruncated ? parsePam(fromBase64(ff.stdout)) : null
+  }
+  if (!pixels) return { ...base, why: WHY.failed }
+  peekPixels.set(n, thumb(pixels))
+  return { ...base, width: kind.width || pixels.width, height: kind.height || pixels.height, ready: true }
+}
+
+// ── the draft, the preview ──
+
+// Keeps the row above the prompt in step with the box.
+async function peekTrack($, text) {
+  if (!peekOn) return
+  await peekFollow($)
+  const ids = pastesIn(text)
+  if (!sameIds(ids, peekDraftIds)) {
+    peekDraftIds = ids
+    await soon($, $.state.set(PEEK_DRAFT, ids), null)
+    await peekChange($, peekCloseChip)
+  }
+  for (const n of ids) void peekLoad($, n)
+}
+
+// A preview the row above the prompt opened (`.../chip:N`) closes when the box changes: the
+// box may grow and move the chip from under the pointer, which would then say nothing.
+const peekCloseChip = now => (now && /\/chip:\d+$/.test(now.target) ? null : now)
+
+// Opens, moves or closes (null) the preview, one change at a time, each handed the one before:
+// leaving one chip and entering the next are two changes that can arrive in either order.
+function peekChange($, next) {
+  const run = peekChanging.then(async () => {
+    const last = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
+    const to = next(last)
+    if (last === to || (last && to && last.n === to.n && last.target === to.target && last.edge === to.edge)) return
+    await soon($, $.state.set(PEEK_SHOWN, to), null)
+    if (to && to.edge === 'window') void peekOpenWindow($, to.n, to.target)
+    else peekCloseWindow()
+  })
+  peekChanging = run.catch(() => {})
+  return run
+}
+
+const peekPlace = (n, target) => ({ n, target, edge: peekMode === 'window' ? 'window' : 'card' })
+
+// The window by the pointer, till peekCloseWindow. The program ticks ten times a second, so
+// the loop wakes to find it closed, and leaving the loop ends the program (./peek-window.js).
+// One that ends without having said `shown` cannot show a window here: cells from now on.
+async function peekOpenWindow($, n, target) {
+  if (peekWin && peekWin.target === target && peekWin.isOpen) return
+  peekCloseWindow()
+  const me = { target, isOpen: true }
+  peekWin = me
+  await peekLoad($, n)
+  const pic = (await peekVal(await soon($, $.state.get(PEEK_PICS), null), {}))[n]
+  if (!pic || !pic.file || !me.isOpen) { if (peekWin === me) peekWin = null; return }
+  let shown = false, said = ''
+  try {
+    const child = $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', PEEK_WINDOW],
+      env: { PEEK_FILE: pic.file, PEEK_SIZE: String(WINDOW.size), PEEK_LIFE: String(WINDOW.life) } })
+    for await (const piece of child) {
+      if (said.length < 2000 && piece.text) said += piece.text
+      if (/^shown$/m.test(piece.text || '')) shown = true
+      if (!me.isOpen) break
+    }
+  } catch (err) {
+    said += String(err && err.message ? err.message : err)
+  }
+  if (peekWin === me) peekWin = null
+  if (shown || !me.isOpen) return
+  void $.ui.log(`ghostfleet peek: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'osascript did not start'}); cells from now on`, { to: 'debug' })
+  peekMode = 'cells'
+  peekPixels.delete(n)
+  const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  const { [n]: _gone, ...rest } = pics
+  await soon($, $.state.set(PEEK_PICS, rest), null)
+  void peekLoad($, n)
+  await peekChange($, now => (now && now.edge === 'window' ? null : now))
+}
+
+function peekCloseWindow() {
+  if (peekWin) peekWin.isOpen = false
+  peekWin = null
+}
+
+async function peekOpenImage($, n) {
+  await peekLoad($, n)
+  const pic = (await peekVal(await soon($, $.state.get(PEEK_PICS), null), {}))[n]
+  if (!pic || !pic.file) return
+  await soon($, $.process.run(openArgv(peekPlatform, pic.file), { timeoutMs: IO_MS }), null)
 }
 
 // ── the hooks ──
 
-async function peekStart($) {
-  if (await peekSync($)) void peekRefresh($)
+async function peekStart($, e) {
+  peekInteractive = Boolean(e && e.isInteractive)
+  await peekFollow($)
+  await peekSync($)
 }
 
-// From onTurnComplete, the main loop's end: the switch again, then the pictures.
+// From onTurnComplete, the main loop's end: the switch again.
 async function peekTurnComplete($) {
-  if (await peekSync($)) void peekRefresh($)
+  await peekSync($)
 }
 
-// From onToolCall: a call whose input or result names a picture (a screenshot just taken)
-// is looked at now, mid-turn, rather than at the turn's end. Never awaited.
-function peekToolCall($, e, done) {
-  if (!peekOn) return
-  let text = ''
-  try { text = JSON.stringify([e, done && done.result]) } catch {}
-  if (/\.(png|jpe?g|gif|webp)\b/i.test(text)) void peekRefresh($)
+function peekEnd() {
+  if (peekPoll) { peekPoll.cancel(); peekPoll = null }
+  peekCloseWindow()
 }
 
 // From onPromptSubmit, before `next`: the prompt's own pastes, while the engine still hands
-// their bytes over. After this hook they are only in the transcript, which is the expensive
-// place to read them from.
+// their bytes over. After this hook they are only in the transcript, the expensive place.
 async function peekPrompt($, e) {
   if (!peekOn || !Array.isArray(e.attachments) || !e.attachments.length) return
   const images = e.attachments.filter(a => a && a.type === 'image' && a.id)
@@ -1850,116 +2026,126 @@ async function peekPrompt($, e) {
   }
 }
 
-async function peekSelect($, key) {
-  const cur = (await soon($, $.state.get(PEEK), null))?.value
-  if (!cur) return
-  await soon($, $.state.set(PEEK, { ...cur, selected: key }), null)
+// From onPromptSubmit, after `next`: the draft is gone, and so are its chips and preview.
+async function peekSubmitted($, e) {
+  if (!peekOn || !e.origin || e.origin.kind !== 'composer') return
+  peekDraftIds = []
+  await soon($, $.state.set(PEEK_DRAFT, []), null)
+  await peekChange($, () => null)
+  for (const n of pastesIn(e.text)) void peekLoad($, n)
 }
 
-async function onPeekCommand($, e) {
-  if (!(await peekSync($))) return { text: disabledPeek }
-  await peekRefresh($)
-  const cur = (await soon($, $.state.get(PEEK), null))?.value
-  const pics = cur ? cur.pictures : []
-  const want = peekArgs(e.args)
-  if (want.bad) return { text: `peek: no picture "${want.bad}" — /peek lists them, /peek <n> shows one, /peek new follows the newest` }
-  let key = cur ? cur.selected : null
-  if (want.follow) key = null
-  if (want.show) { const p = pics[pics.length - want.show]; if (!p) return { text: `peek: there is no picture ${want.show}.\n${peekListing(pics, key)}` }; key = p.key }
-  if (want.image) { const p = pics.find(x => x.n === want.image); if (!p) return { text: `peek: [Image #${want.image}] is not in this session's prompts.` }; key = p.key }
-  if (!want.list) await peekSelect($, key)
-  if (pics.length) await soon($, $.ui.open({ id: PEEK_PANE, title: 'Picture' }), null)
-  const shown = pics.find(p => p.key === key) || pics.at(-1)
-  return { text: want.list ? peekListing(pics, key) : `peek: showing ${shown ? shown.caption : 'nothing'}${key ? '' : ' (the newest, as it changes)'}` }
+async function onPeekEdit($, e, next) {
+  const box = await next(e)
+  if (!peekOn) return box
+  await peekChange($, peekCloseChip)
+  await peekTrack($, box.text)
+  return box
 }
 
-const disabledPeek = 'peek is experimental and disabled — enable with: fleet-experimental enable peek'
-
-// The pane: the picture in view, its caption, and the list to pick from.
-async function onPeekPane($, e, next) {
-  const on = (await $.state.get(PEEK_ON)).value
-  const cur = (await $.state.get(PEEK)).value
-  const { Box, Text, Raster, Button } = $.ui.resolve(e)
-  if (!on) return h(Text, { dimColor: true }, disabledPeek)
-  const pics = cur ? cur.pictures : []
-  if (!pics.length) return h(Text, { dimColor: true }, 'No pictures in this session yet.')
-  const shown = pics.find(p => p.key === cur.selected) || pics.at(-1)
-  const cols = Math.max(8, e.props.bodyColumns)
-  const list = [...pics].reverse().slice(0, PEEK_LIST)
-  const room = Math.max(4, (e.props.scroll?.bodyRows || 24) - list.length - 3)
-  const got = peekPics.get(shown.key)
-  const pic = got && got.pic ? peekPicture(e, Raster, `pic-${shown.key}`, got.pic, cols, room) : null
-  return h(Box, { flexDirection: 'column' },
-    h(Text, { key: 'cap', bold: true, wrap: 'truncate-end' }, shown.caption),
-    pic || h(Text, { key: 'why', dimColor: true, wrap: 'wrap' }, shown.why || (got && got.pic ? 'drawn in the terminal' : 'decoding…')),
-    h(Text, { key: 'sep', dimColor: true }, cur.selected ? 'picked · 0 follows the newest' : 'the newest · pick another:'),
-    ...list.map((p, i) => h(Button, {
-      key: `pick-${p.key}`, plain: true, hotkey: String((i + 1) % 10),
-      onPress: () => peekSelect($, p.key),
-    }, p.key === shown.key ? `▸ ${p.label}` : `  ${p.label}`)),
-    ...(cur.selected ? [h(Button, { key: 'pick-newest', plain: true, hotkey: '0', onPress: () => peekSelect($, null) }, '  follow the newest')] : []),
-  )
-}
-
-// Under a transcript row that names a picture: its chips, each a picture on hover and a pick
-// on click. Fullscreen only, where the pointer is reported; the rest of the time a row is
-// the engine's own.
-async function onPeekRow($, e, next) {
-  if (!e.viewport || e.viewport.isFullscreen !== true) return next(e)
-  if (!(await $.state.get(PEEK_ON)).value) return next(e)
-  const text = peekRowText(e)
-  if (!/\.(png|jpe?g|gif|webp)\b|\[Image #\d+\]/i.test(text)) return next(e)
-  const cwd = await soon($, $.session.cwd(), '')
-  const keys = keysInText(text, { cwd, home: (await $.env.get('HOME')) || '', role: e.component === 'UserMessage' ? 'user' : 'assistant' })
-  const cur = (await $.state.get(PEEK)).value
-  const pics = (cur ? cur.pictures : []).filter(p => keys.includes(p.key)).slice(0, PEEK_CHIPS)
-  if (!pics.length) return next(e)
-  const row = await next(e)
-  const { Box, Text, Raster, Button } = $.ui.resolve(e)
-  const cardCols = Math.max(12, Math.min(64, e.viewport.columns - 6))
-  // The card opens ABOVE its chip. A card taller than the room above is moved back onto the
-  // screen by the surface, and the rows after the chip then draw over its lower half; measured
-  // live with an 18-row card under a chip on the 17th line. A third of the screen keeps the
-  // card above its chip for any chip in the lower two thirds, where the newest rows are.
-  const cardRows = Math.max(4, Math.min(12, Math.floor((e.viewport.rows || 30) / 3) - 3))
-  const chips = pics.map((p, i) => {
-    const got = peekPics.get(p.key)
-    const drawn = got && got.pic ? peekPicture(e, Raster, `chip-${p.key}`, got.pic, cardCols, cardRows) : null
-    // Unkeyed: the chip's Box above is the hover scope, and a keyed Box drawn `display:
-    // none` would be a scope the pointer can never be over.
-    const card = h(Box, {
-      position: 'absolute', top: -((drawn ? drawn.props.rows : 1) + 3), left: 0, display: 'none', hover: { display: 'flex' },
-      flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', backgroundColor: 'black',
-    },
-    drawn || h(Text, { dimColor: true }, p.why || 'decoding…'),
-    h(Text, { dimColor: true, wrap: 'truncate-end' }, p.caption))
-    return h(Box, { key: `c${i}`, flexDirection: 'row', marginRight: 1 },
-      h(Button, { key: `peek-${p.key}`, plain: true, onPress: () => peekChipPress($, p.key) },
-        h(Text, { color: 'cyan' }, `▣ ${p.label}`)),
-      card)
-  })
-  return h(Box, { flexDirection: 'column' }, row, h(Box, { key: 'peek-chips', flexDirection: 'row', paddingLeft: 2 }, ...chips))
-}
-
-// One picture in at most cols x rows cells, as half-block cells: they need nothing of the
-// terminal or of tmux. Only the terminal's element table has a Raster; an app draws the
-// caption and the line under it, nothing it would have to fake.
-function peekPicture(e, Raster, key, pic, cols, rows) {
-  if (e.surface !== 'terminal' || !Raster) return null
-  const r = rasterOf(pic, cols, rows)
-  return r ? h(Raster, { key, columns: r.cols, rows: r.rows, cells: r.cells }) : null
-}
-
-async function peekChipPress($, key) {
-  await peekSelect($, key)
-  await soon($, $.ui.open({ id: PEEK_PANE, title: 'Picture' }), null)
-}
-
-// What a row says, as text the picture finder can read.
-function peekRowText(e) {
-  const p = e.props || {}
-  if (e.component === 'ToolUse') {
-    try { return JSON.stringify([p.input, p.output]) } catch { return '' }
+async function onPeekMessage($, e, next) {
+  const result = await next(e)
+  if (!peekOn) return result
+  const chip = chipOf(e.element)
+  if (!chip) return result
+  const target = `${e.requestId}/${e.element}`
+  const data = e.data && typeof e.data === 'object' ? e.data : {}
+  if (data.isClicked === true) {
+    // The viewer opens over where a preview would stand: close it first.
+    await peekChange($, () => null)
+    void peekOpenImage($, chip.n)
+    return result
   }
-  return String(p.text || '')
+  const isOver = data.isOver === true
+  if (isOver) void peekLoad($, chip.n)
+  await peekChange($, now => (!isOver ? (now && now.target === target ? null : now)
+    : now && now.target === target ? now : peekPlace(chip.n, target)))
+  return result
+}
+
+// The fullscreen layout is the one that reports the pointer.
+const peekPointer = e => e.surface === 'terminal' && !(e.viewport && e.viewport.isFullscreen === false)
+
+// The card, in the terminal: the picture in a round border, its caption under it, every line
+// written to the card's full width so the transcript under it does not show through.
+function peekCard(ui, pic, n, cols, rows) {
+  const { Box, Text, Raster, Image } = ui
+  const label = `[Image #${n}]`
+  const line = (t, w) => h(Text, { dimColor: true, wrap: 'truncate-end' }, t.padEnd(w))
+  // { card, rows }: the element, and how many rows it takes (border and caption included).
+  const frame = (w, inner, ...kids) => ({ rows: inner + 2 + kids.length - 1,
+    card: h(Box, { key: `card-${n}`, flexDirection: 'column', borderStyle: 'round', borderDimColor: true, flexShrink: 0, width: w + 2 }, ...kids) })
+  if (!pic || (!pic.ready && !pic.why)) return frame(cols, 1, line(`${label} loading…`, cols))
+  if (pic.why) return frame(cols, 1, line(`${label} no preview: ${pic.why}`, cols))
+  const cap = caption({ label }, { width: pic.width, height: pic.height, format: pic.format, size: pic.bytes })
+  let inner = null, w = 0, hgt = 0
+  // Shrunk to fit, never enlarged: a picture smaller than the room is drawn at its own size.
+  if (pic.width && pic.height) { cols = Math.min(cols, pic.width); rows = Math.min(rows, Math.ceil(pic.height / 2)) }
+  if (pic.png && Image) {
+    const fit = fitCells(pic.width || 1, pic.height || 1, cols, rows)
+    w = fit.cols; hgt = fit.rows
+    inner = h(Image, { key: `image-${n}`, source: { file: pic.png, format: 'png' }, columns: w, rows: hgt, alt: label })
+  } else if (peekPixels.has(n) && Raster) {
+    const r = rasterOf(peekPixels.get(n), cols, rows)
+    if (r) { w = r.cols; hgt = r.rows; inner = h(Raster, { key: `image-${n}`, columns: w, rows: hgt, cells: r.cells }) }
+  }
+  if (!inner) return frame(cols, 1, line(`${label} loading…`, cols))
+  const width = Math.max(w, Math.min(cap.length, cols))
+  const left = Math.floor((width - w) / 2), right = width - w - left
+  const side = (k, m) => m > 0 ? [h(Text, { key: k }, Array.from({ length: hgt }, () => ' '.repeat(m)).join('\n'))] : []
+  return frame(width, hgt + 1, h(Box, { key: 'pic', flexDirection: 'row' }, ...side('l', left), inner, ...side('r', right)), line(cap, width))
+}
+
+// Above the prompt: the card a hover opened, over a chip each for the draft's pastes. The card
+// is drawn here whichever target opened it, a chip of this row or an `[Image #N]` of a sent
+// prompt, because this is the one place in the terminal it lays out (see onPeekSent). Called
+// from the band's AbovePrompt hook, beneath its rows; what is beneath it is drawn after.
+async function onPeekBand($, e, next) {
+  if (e.props.hasSurvey || !peekPointer(e) || !(await peekVal(await soon($, $.state.get(PEEK_ON), null), false))) return next(e)
+  const ids = await peekVal(await soon($, $.state.get(PEEK_DRAFT), null), [])
+  const now = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
+  const showing = Boolean(now && now.edge === 'card')
+  const below = await next(e)
+  if (!ids.length && !showing) return below
+  const ui = $.ui.resolve(e)
+  const { Box, Text, Client } = ui
+  const cols = Math.max(12, Math.min(96, e.props.bodyColumns - 2))
+  // In the flow: the slot is a window of at most `maxRows` that clips what is floated out of
+  // it (measured: a card at `bottom: 1` was in the tree and never on the screen). So the card
+  // takes the slot's rows while it shows, less the chips' row, its own border and caption, and
+  // room for the band's rows above it.
+  const rows = Math.max(3, Math.min(24, (e.props.maxRows || 12) - 8))
+  const pics = showing ? peekVal(await soon($, $.state.get(PEEK_PICS), null), {}) : {}
+  return h(Box, { flexDirection: 'column' },
+    ...(showing ? [peekCard(ui, pics[now.n], now.n, cols, rows).card] : []),
+    ...(ids.length ? [h(Box, { key: 'peek-chips', flexDirection: 'row', columnGap: 1 },
+      ...ids.map(n => h(Client, { key: `chip:${n}`, module: './peek-chip.js', props: { label: `[Image #${n}]` } })),
+      h(Text, { key: 'hint', dimColor: true }, 'hover to preview · click to open'))] : []),
+    ...(below ? [below] : []))
+}
+
+// A sent prompt: an unpainted chip over each `[Image #N]` of its first line and over each row
+// Claude Code lists its images in. Targets only: a card floated from here was drawn under the
+// rows the transcript lays out after it, and clamped to the screen's top (measured), so the
+// card a hover here opens is drawn above the prompt (onPeekBand), or is the window.
+async function onPeekSent($, e, next) {
+  if (!peekPointer(e) || !e.props.origin || e.props.origin.kind !== 'composer') return next(e)
+  const ns = pastesIn(e.props.text)
+  if (!ns.length || !(await peekVal(await soon($, $.state.get(PEEK_ON), null), false))) return next(e)
+  const pics = peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  for (const n of ns) if (!pics[n]) void peekLoad($, n)
+  const drawn = await next(e)
+  const has = n => Boolean(pics[n] && !pics[n].why)
+  const { Box, Client } = $.ui.resolve(e)
+  const over = []
+  for (const t of listedTargets(ns, has)) {
+    over.push(h(Box, { key: `listed-${t.n}`, position: 'absolute', bottom: t.bottom, left: t.left },
+      h(Client, { key: `sent:${t.n}`, module: './peek-chip.js', width: t.width, height: 1 })))
+  }
+  for (const t of tokenTargets(e.props.text, e.viewport && e.viewport.columns, has)) {
+    over.push(h(Box, { key: `token-${t.n}`, position: 'absolute', top: 1, left: t.left },
+      h(Client, { key: `token:${t.n}`, module: './peek-chip.js', width: t.width, height: 1 })))
+  }
+  if (!over.length) return drawn
+  return h(Box, { flexDirection: 'column' }, drawn, ...over)
 }

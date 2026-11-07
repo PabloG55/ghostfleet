@@ -4648,13 +4648,39 @@ EOF
     console.log(over, lost, plain(heldRuns(h, 1000_000 + 725_000, 60)), heldRuns(null, 0, 80) === null)" 2>&1)"
   is "band: a held wake fits every width, and says so first" \
      "0 0 wake held 12m · this input box has unsent text true" "$bh"
-  # PEEK (hooks/peek-shape.js): which pictures a conversation showed, oldest first and each at
-  # its last mention. A paste is only a USER's [Image #N] (the model quoting one pastes nothing),
-  # pastes in one prompt order by number, a relative path resolves against the session's cwd,
-  # and a URL, a .txt and a word beside the extension are no picture.
-  is "peek: the pictures a conversation showed, in order" \
-     "[Image #3] | [Image #4] | /w/acme-api/shots/b.jpeg | /w/acme-web/c.webp | /tmp/look/e.png | /home/u/shots/a.png | /w/acme-api/space.png | /w/acme-api/f.GIF" \
-     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" find 2>&1)"
+  # PEEK (hooks/peek-shape.js): how a session shows a pasted picture. One letter a case
+  # (Window, Kitty, Cells), in the helper's order: a fleet session in tmux on a Mac and a plain
+  # Mac terminal get the window; Ghostty and kitty draw it themselves, but not from inside tmux
+  # (an inherited KITTY_WINDOW_ID there is a window); SSH is cells, since both the window and
+  # the file would be the other machine's; Linux and anything else are cells, and kitty there
+  # draws it; CLAUDE_FLEET_PEEK=cells is honoured on a Mac, =window is not where none can open.
+  is "peek: the preview is a window on macOS, kitty's own in Ghostty/kitty outside tmux, cells elsewhere and over SSH" \
+     "wwkkwccckccc c macos linux other open -a Preview /x/1.png xdg-open /x/1.png" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" mode 2>&1)"
+  # The hover targets over a sent prompt: each [Image #N] of its FIRST line once, after the
+  # two-column prompt mark, only where the session has the picture (#7 here it has not), none
+  # past the line's end or after a wide glyph; and one per listed row under it, by number.
+  is "peek: a sent prompt's targets sit on its first line's [Image #N] and its listed rows" \
+     "1@10+10,2@25+10 0 0 1@-1:5,2@-2:5 chip,sent,token,-,-,-" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" targets 2>&1)"
+  # Where a paste is stored: the temp folder per project slug (root, then cwd, each once), none
+  # without a uid; and the paste's file is <N>.<picture ext> exactly: not 13 for 3, not a .txt,
+  # not a name with a separator in it.
+  is "peek: a paste's stored file is found by its number and nothing looser" \
+     "/var/t/claude-501/-w-acme-api/s1 /var/t/claude-501/-w-acme-api-web/s1 1 0 3.JPG 13.png null" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" stored 2>&1)"
+  PK="$TMUX_TMPDIR/peek-ff"; mkdir -p "$PK"
+  # `sips -Z` ENLARGES a small picture to the side it is given, so the side is passed only
+  # for a larger one; run for real on a Mac: 1600x400 comes down to 800x200, 100x50 stays.
+  pks="$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" shrink "$PK" 2>&1)"
+  is "peek: a shrink is never an enlargement" \
+     "sips -s format png -Z 800 /x/a.jpg --out /y/a.png | sips -s format png /x/a.jpg --out /y/a.png | magick /x/a.jpg -resize 800x800> PNG:/y/a.png" \
+     "${pks% | *}"
+  if command -v sips >/dev/null 2>&1; then
+    is "peek: sips shrinks a big picture to the side and leaves a small one as it is" "800x200 100x50" "${pks##* | }"
+  else
+    skip "peek through sips" "sips missing (not macOS)"
+  fi
   # The decoder with no dependency, against PNGs encoded here from a formula: every colour type,
   # palette depths 1-8 with a transparent index, 16-bit, the five row filters, and deflate's
   # stored, fixed and dynamic blocks. Exact to the sample; broken input is null, never a throw.
@@ -4664,16 +4690,15 @@ EOF
   # shape kept, and a transparent pixel left as the terminal's own background.
   is "peek: the cells fit every width, keep the shape, leave transparency to the terminal" "0 0 37x12 hole=default" \
      "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" cells 2>&1)"
-  PK="$TMUX_TMPDIR/peek-ff"; mkdir -p "$PK"
-  # With no ffmpeg on PATH both decoders exit 127, which the mod reads as "say so in words".
-  is "peek: no ffmpeg is exit 127 from a file and from stdin" "127 127" \
+  # With no ffmpeg on PATH the decoder exits 127, which the mod reads as "say so in words".
+  is "peek: no ffmpeg is exit 127" "127" \
      "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" noff "$PK" 2>&1)"
   if command -v ffmpeg >/dev/null 2>&1; then
-    # JPEG and GIF through ffmpeg, by path and through stdin, sniffed to the same size; a
-    # 1200x2600 picture comes back inside the 240x480 thumb with its shape kept.
+    # JPEG and GIF through ffmpeg, sniffed to the same size; a 1200x2600 picture comes back
+    # inside the 240x480 thumb with its shape kept.
     pf="$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" ffmpeg "$PK" 2>/dev/null)"
-    is "peek: JPEG and GIF decode through ffmpeg by path and by stdin; a big one is thumbed" \
-       "jpg:jpeg:37x23:file=37x23:stdin=37x23 gif:gif:37x23:file=37x23:stdin=37x23 big:222x480" \
+    is "peek: JPEG and GIF decode through ffmpeg; a big one is thumbed" \
+       "jpg:jpeg:37x23:file=37x23 gif:gif:37x23:file=37x23 big:222x480" \
        "$(sed 's/ webp:[^ ]*//' <<< "$pf")"
   else
     skip "peek through ffmpeg" "ffmpeg missing"

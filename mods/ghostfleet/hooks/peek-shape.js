@@ -1,33 +1,28 @@
-// What PEEK (register.js) draws, as plain functions the suite runs with node: which pictures a
-// session's conversation showed, which bytes a `[Image #N]` placeholder stands for, and how a
-// picture becomes terminal cells.
+// What PEEK (register.js) decides, as plain functions the suite runs with node: which pastes a
+// draft or a prompt names, where a preview of one opens on this machine, which program shrinks
+// or opens it, where Claude Code keeps a session's pasted images, where a hover target goes
+// over a sent prompt, and how a picture becomes terminal cells when it is drawn in the terminal.
 //
-// THE CELL IS THE PICTURE. A pane is drawn as a `Raster`: every cell one character with a
-// foreground and a background colour. Drawn as `▀`, the foreground paints the cell's top half
-// and the background its bottom half, so one cell is two square pixels. That is a 24-bit
-// colour and a character, which every terminal the fleet runs in draws, inside tmux 3.4 as
-// inside 3.7b, with no passthrough to switch on and nothing the terminal must support beyond
-// true colour. The engine's `Image` element would draw a sharper picture through kitty or
-// iTerm2's own protocol, but inside tmux only with `allow-passthrough` on, and elsewhere it
-// draws its `alt` text: a picture that is there for some terminals and a line of text for
-// the rest is not the default this needs.
+// THREE WAYS TO SHOW A PICTURE, picked once a session (previewMode):
+//   window  macOS, not over SSH: a borderless panel by the pointer (./peek-window.js). The
+//           picture's own pixels, so a screenshot's text reads; nothing to install.
+//   kitty   Ghostty or kitty, NOT inside tmux: the terminal draws the PNG itself through the
+//           kitty graphics protocol (the engine's `Image`). Inside tmux that needs
+//           `allow-passthrough`, and every fleet session runs inside tmux with the outer
+//           terminal's variables still in its environment, which is why TMUX rules it out.
+//   cells   everywhere else, over SSH, and on Linux and WSL (no native window there yet): a
+//           card of half-block cells, `▀`, two pixels a cell, each with its own colour. Any
+//           true-colour terminal draws it, through tmux too; it shows a screenshot's layout,
+//           not text you can read.
 //
-// NO DEPENDENCY. PNG is decoded here (zlib's inflate included), because the two pictures that
-// matter most are PNGs: the screenshots agents take, and most pasted images. Anything else
-// (a JPEG paste, a GIF, a WebP) goes through ffmpeg, asked for one frame as PAM, which carries
-// its own size, so the caller never has to know the picture's dimensions first. With no
-// ffmpeg the picture is a line of text: its name, its size, its format.
+// NO DEPENDENCY. PNG is decoded here (zlib's inflate included). Anything else is shrunk to a
+// PNG by what the machine already has (sips on macOS, ImageMagick elsewhere), and failing that
+// read through ffmpeg as PAM, which carries its own size. With none of them the card is a line
+// of text: the picture's name, size and format.
 
-// ── what the conversation showed ────────────────────────────────────────────
+// ── what a draft or a prompt names ──────────────────────────────────────────
 
-export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
 const PASTE_RE = /\[Image #(\d+)\]/g
-// A path is a run of path characters ending in an image extension, standing alone: after a
-// space, a quote, a bracket or `=`/`:` (a key, a JSON field), and before one or before the
-// end of a sentence. A `file://` URL is not a path the person saw as one, and the leading
-// `//` keeps it out. No spaces: a path with one is ambiguous in prose, and guessing where it
-// begins would mean opening a file nobody named.
-const PATH_RE = /(?:^|[\s`'"(\[<=:])((?:~|\.{1,2})?\/?(?:[\w@%+,.-]+\/)*[\w@%+,.-]+\.(?:png|jpe?g|gif|webp))(?=$|[\s`'")\]>,;:!?.])/gim
 
 // The `[Image #N]` numbers a text names, in the order it names them, each once.
 export function pastesIn(text) {
@@ -39,97 +34,37 @@ export function pastesIn(text) {
   return out
 }
 
-// The picture paths a text names, as written, each once.
-export function pathsIn(text) {
-  const out = []
-  for (const m of String(text || '').matchAll(PATH_RE)) {
-    const p = m[1]
-    if (p.startsWith('//') || out.includes(p)) continue
-    out.push(p)
-  }
-  return out
-}
-
-// `raw` as an absolute path: `~/` against home, a relative one against the session's
-// directory, `.` and `..` folded. Null where it cannot be one (no home, a NUL).
-export function resolvePath(raw, cwd, home) {
-  let p = String(raw || '')
-  if (!p || p.includes('\0')) return null
-  if (p === '~' || p.startsWith('~/')) { if (!home) return null; p = home + p.slice(1) }
-  else if (!p.startsWith('/')) { if (!cwd) return null; p = `${cwd}/${p}` }
-  const parts = []
-  for (const seg of p.split('/')) {
-    if (!seg || seg === '.') continue
-    if (seg === '..') parts.pop()
-    else parts.push(seg)
-  }
-  return `/${parts.join('/')}`
-}
-
-const baseName = p => p.slice(p.lastIndexOf('/') + 1)
-
-// The texts of one SessionMessage, in the order the person saw them: its prose, then each
-// tool call's input and what came back, then the tool results it carries.
-function textsOf(m) {
-  const out = [String(m.text || '')]
-  for (const u of m.toolUses || []) {
-    try { out.push(JSON.stringify(u.input ?? '')) } catch {}
-    if (u.text) out.push(String(u.text))
-  }
-  for (const r of m.toolResults || []) if (r && r.text) out.push(String(r.text))
-  return out
-}
-
-// Every picture the conversation showed, oldest first, each once, placed where it was LAST
-// named: the picture somebody just mentioned again is the newest, whenever it was taken.
-//   { key, kind: 'paste', n, label }            a `[Image #N]` in a prompt of the person's
-//   { key, kind: 'file', path, raw, label }     a picture path in any message, resolved
-// Only a prompt's placeholder is a paste: an assistant quoting `[Image #3]` shows no bytes.
-export function picturesIn(messages, { cwd = '', home = '' } = {}) {
-  const at = new Map()
-  let seq = 0
-  ;(messages || []).forEach(m => {
-    if (!m || typeof m !== 'object') return
-    // Within one prompt the later paste is the higher number, wherever the text puts it.
-    if (m.role === 'user') for (const n of pastesIn(m.text).sort((a, b) => a - b)) at.set(`img-${n}`, { at: seq++, ref: { key: `img-${n}`, kind: 'paste', n, label: `[Image #${n}]` } })
-    for (const t of textsOf(m)) for (const raw of pathsIn(t)) {
-      const path = resolvePath(raw, cwd, home)
-      if (!path) continue
-      const key = fileKey(path)
-      at.set(key, { at: seq++, ref: { key, kind: 'file', path, raw, label: baseName(path) } })
-    }
-  })
-  return [...at.values()].sort((a, b) => a.at - b.at).map(x => x.ref)
-}
-
-// A file's key: short, stable for one absolute path, and a legal hover scope (1-64 chars).
-export function fileKey(path) {
-  let h = 0x811c9dc5
-  for (let i = 0; i < path.length; i++) { h ^= path.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0 }
-  return `file-${h.toString(36)}-${baseName(path).replace(/[^\w.-]/g, '').slice(0, 40)}`
-}
-
-// What a transcript row of the person's own shows: the pictures it names, for the hover mark.
-export function keysInText(text, { cwd = '', home = '', role = 'user' } = {}) {
-  const keys = role === 'user' ? pastesIn(text).map(n => `img-${n}`) : []
-  for (const raw of pathsIn(text)) { const p = resolvePath(raw, cwd, home); if (p) keys.push(fileKey(p)) }
-  return [...new Set(keys)]
-}
+// Two lists of numbers that say the same, in the same order.
+export const sameIds = (a, b) => a.length === b.length && a.every((n, i) => n === b[i])
 
 // ── which bytes a `[Image #N]` is ────────────────────────────────────────────
 //
-// Three places, cheapest first. (1) The prompt being submitted: `prompt.submit` lists its
-// images and the engine hands their bytes over. (2) The engine's own copy on disk,
-// <tmp>/claude-<uid>/<project root, every non-alphanumeric a '-'>/<session id>/images/<N>.png,
-// which it writes for some pastes and not others (one session measured: two files for about
-// eighty pastes), so it is a shortcut and never the answer. (3) The transcript, whose user
-// message carries every paste as an image block: complete, and the most expensive to read.
+// Three places, cheapest first. (1) Claude Code's own copy, in the session's temp folder,
+// <CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>/<project path, every non-alphanumeric a '-'>/
+// <session id>/images/<N>.<ext>: what the reference behaviour reads, and a file the preview
+// window can open as it is. It is not always there (one long session measured: two files for
+// about eighty pastes). (2) The prompt being submitted: `prompt.submit` lists its images and
+// the engine hands their bytes over. (3) The transcript, whose user message carries every
+// paste as an image block: complete, and the most expensive to read. Bytes from (2) or (3) are
+// written once into PEEK's own folder beside the session's images, so all three end as a file.
 
 export const projectSlug = root => String(root || '').replace(/[^A-Za-z0-9]/g, '-')
-export const pasteFile = ({ tmp = '/tmp', uid, root, sessionId, n }) =>
-  uid === '' || uid === undefined || !root || !sessionId ? null
-    : `${String(tmp).replace(/\/+$/, '')}/claude-${uid}/${projectSlug(root)}/${sessionId}/images/${n}.png`
-//
+// The folders the session's images can be in: the project root's slug, then the cwd's. A
+// project path too long for one folder name gets a hash appended by Claude Code, so a caller
+// that finds neither looks through the temp folder for the session id instead.
+export function sessionDirs({ tmp = '/tmp', uid, root, cwd, sessionId }) {
+  if (uid === '' || uid === undefined || !sessionId) return []
+  const base = `${String(tmp || '/tmp').replace(/\/+$/, '')}/claude-${uid}`
+  return [...new Set([root, cwd].filter(Boolean).map(projectSlug))].map(slug => `${base}/${slug}/${sessionId}`)
+}
+// The stored image of paste N among a folder's names: `<N>.<ext>` and nothing else (no `..`, no
+// separator, nothing a name in the folder could smuggle in).
+export function storedImage(names, n) {
+  return (names || []).find(name => new RegExp(`^${Number(n)}\\.(png|jpe?g|gif|webp)$`, 'i').test(name)) || null
+}
+// The extension bytes of a known kind are written under.
+export const EXT = { png: 'png', jpeg: 'jpg', gif: 'gif', webp: 'webp' }
+
 // The transcript stores a prompt's pastes as image blocks after its text, in paste order, and
 // the placeholders in the text are numbered in paste order too, so the k-th smallest number
 // is the k-th image block. The text order is NOT the paste order once the person moves a
@@ -418,7 +353,6 @@ const HAS_FF = 'command -v ffmpeg >/dev/null 2>&1 || exit 127'
 // argv for a file on disk: the path rides as $1, never inside the script's text.
 export const ffmpegFileArgv = path => ['/bin/sh', '-c', `${HAS_FF}; ${FF('"$1"')}`, 'peek', path]
 // argv for bytes handed over as base64 on stdin (a pasted image). No temporary file.
-export const ffmpegStdinArgv = () => ['/bin/sh', '-c', `${HAS_FF}; base64 -d | ${FF('pipe:0').replace('-nostdin ', '')}`]
 // Exit 127 from either: there is no ffmpeg, and the picture is words.
 export const NO_FFMPEG = 127
 
@@ -521,21 +455,88 @@ export function rasterOf(pic, cols, rows) {
   return { cols: fit.cols, rows: fit.rows, cells: toBase64(bytes) }
 }
 
-// The ANSI text a Raster draws, for the suite and for a capture to be read without the engine.
-export function rasterText({ cols, rows, cells }) {
-  const b = fromBase64(cells)
-  const view = new DataView(b.buffer, b.byteOffset, b.byteLength)
-  const sgr = (c, fg) => c === DEFAULT_COLOR ? (fg ? '39' : '49') : `${fg ? 38 : 48};2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`
-  const lines = []
-  for (let y = 0; y < rows; y++) {
-    let line = ''
-    for (let x = 0; x < cols; x++) {
-      const i = (y * cols + x) * 12
-      line += `\x1b[${sgr(view.getUint32(i + 4, true), true)};${sgr(view.getUint32(i + 8, true), false)}m${String.fromCodePoint(view.getUint32(i, true))}`
-    }
-    lines.push(`${line}\x1b[0m`)
+// ── where a preview opens, and with what ────────────────────────────────────
+
+// The session's system, from `uname -s`.
+export const platformOf = uname => {
+  const u = String(uname || '').trim()
+  return u === 'Darwin' ? 'macos' : u === 'Linux' ? 'linux' : 'other'
+}
+
+// How this session shows a picture: 'window' | 'kitty' | 'cells' (the header says what each
+// is). `env` is the session's environment. CLAUDE_FLEET_PEEK names one outright, for a person
+// who wants the cells on a Mac (or the window off): a mode this machine cannot draw is not
+// taken from it, so `window` off macOS is still cells.
+export function previewMode({ platform, env = {}, isInteractive = true }) {
+  const remote = Boolean(env.SSH_CONNECTION || env.SSH_TTY)
+  const kitty = !remote && !env.TMUX && (env.TERM_PROGRAM === 'ghostty' || env.TERM === 'xterm-ghostty'
+    || env.TERM === 'xterm-kitty' || Boolean(env.KITTY_WINDOW_ID))
+  // Over SSH a window would open on the other machine, and the terminal there cannot read a
+  // file of this one: both are this machine's, so both are out.
+  const window = !remote && isInteractive && platform === 'macos'
+  const asked = String(env.CLAUDE_FLEET_PEEK || '').trim().toLowerCase()
+  if (asked === 'cells') return 'cells'
+  if (asked === 'window') return window ? 'window' : 'cells'
+  if (asked === 'kitty') return kitty ? 'kitty' : 'cells'
+  return kitty ? 'kitty' : window ? 'window' : 'cells'
+}
+
+// What the window is told: its longest side in points, and how long it may stay up even with
+// the pointer still on the chip (move off and back on to open it again).
+export const WINDOW = { size: 800, life: 120 }
+
+// The argv that opens a picture in the system's viewer, for a click.
+export const openArgv = (platform, file) => platform === 'macos' ? ['open', '-a', 'Preview', file] : ['xdg-open', file]
+
+// The shrinkers each system is tried with, in order, and the argv of each: `file` written to
+// `out` as a PNG whose longest side is at most `side` pixels (never enlarged). The first that
+// works is remembered for the session.
+export const SHRINKERS = { macos: ['sips', 'magick', 'convert'], linux: ['magick', 'convert'], other: ['magick', 'convert'] }
+export function shrinkArgv(tool, file, out, side) {
+  // `sips -Z` is a target, not a bound: measured, it ENLARGES a 100x50 picture to 800x400. So
+  // the caller passes `side` only for a picture larger than it, and none means "as it is".
+  if (tool === 'sips') return ['sips', '-s', 'format', 'png', ...(side ? ['-Z', String(side)] : []), file, '--out', out]
+  return [tool, file, ...(side ? ['-resize', `${side}x${side}>`] : []), `PNG:${out}`]
+}
+
+// ── where the pointer targets go over a sent prompt ─────────────────────────
+//
+// Claude Code draws a sent prompt as a blank row, then `❯ ` and the text, and lists the images
+// it carried under it, one row each, `  ⎿  [Image #N]`, in paste order. A hover target is an
+// unpainted region laid over that text, so it has to know where the text is drawn.
+
+// Columns before the text on the prompt's first line, and before `[Image #N]` in a listed row.
+export const PROMPT_AT = 2
+export const LISTED_AT = 5
+
+// The `[Image #N]` on the prompt's FIRST line that can take a target: [{ n, left, width }].
+// Past that line, or past where it could wrap, the place is a guess, so there is none; and
+// only after text of one cell a character (no wide glyphs, no emoji before it).
+export function tokenTargets(text, columns, has = () => true) {
+  const line = String(text || '').split('\n')[0]
+  const width = Math.max(0, (columns || 80) - 1)
+  const out = []
+  for (const m of line.matchAll(/\[Image #(\d+)\]/g)) {
+    const n = Number(m[1]), left = PROMPT_AT + m.index
+    if (out.some(t => t.n === n) || !has(n)) continue
+    if (!/^[\u0020-\u02ff]*$/.test(line.slice(0, m.index)) || left + m[0].length > width) continue
+    out.push({ n, left, width: m[0].length })
   }
-  return lines.join('\n')
+  return out
+}
+
+// The listed rows under a sent prompt, in the order Claude Code lists them (by number):
+// [{ n, bottom, left, width }], `bottom` the row's offset under the prompt's box.
+export function listedTargets(ns, has = () => true) {
+  return [...new Set(ns)].sort((a, b) => a - b).filter(n => has(n))
+    .map((n, i) => ({ n, bottom: -1 - i, left: LISTED_AT, width: `[Image #${n}]`.length }))
+}
+
+// A chip's key back to the paste it stands for: `chip:N` (the row above the prompt), `sent:N`
+// (a listed row under a sent prompt), `token:N` (the sent prompt's first line).
+export function chipOf(element) {
+  const m = /^(chip|sent|token):(\d+)$/.exec(String(element || ''))
+  return m ? { n: Number(m[2]), where: m[1] } : null
 }
 
 // ── words ───────────────────────────────────────────────────────────────────
@@ -554,30 +555,9 @@ export function caption(ref, info = {}) {
 // Why a picture is words and not cells, said once under its caption.
 export const WHY = {
   missing: 'not on disk any more',
-  notFile: 'not a regular file',
   link: 'a symbolic link: not followed',
   notImage: 'not a picture this can read',
-  noDecoder: 'no ffmpeg on PATH to decode it',
-  noBytes: 'its bytes are not in this session',
+  noDecoder: 'nothing here shrinks it (sips, ImageMagick or ffmpeg)',
+  noBytes: 'not stored in this session',
   failed: 'could not be decoded',
-}
-
-// What /peek prints: the session's pictures, newest first, numbered as `/peek <n>` takes them.
-export function listing(refs, selectedKey) {
-  if (!refs.length) return 'peek: no pictures in this session yet — paste one, or name a .png/.jpg/.gif/.webp path.'
-  const newest = [...refs].reverse()
-  const rows = newest.map((r, i) => `${String(i + 1).padStart(2)}  ${r.key === selectedKey ? '▸' : ' '} ${r.kind === 'paste' ? r.label : r.path}`)
-  return [`peek: ${refs.length} picture${refs.length === 1 ? '' : 's'} in this session (newest first) — /peek <n> shows one, /peek new follows the newest`, ...rows].join('\n')
-}
-
-// `/peek` arguments -> what to do: { show: index-from-newest } | { follow } | { list }.
-export function peekArgs(args) {
-  const a = String(args || '').trim().toLowerCase()
-  if (!a || a === 'list' || a === 'ls') return { list: true }
-  if (a === 'new' || a === 'newest' || a === 'latest' || a === 'follow') return { follow: true }
-  const m = a.match(/^#?(\d+)$/)
-  if (m) return { show: Number(m[1]) }
-  const img = a.match(/^\[?image\s*#?(\d+)\]?$/)
-  if (img) return { image: Number(img[1]) }
-  return { bad: a }
 }
