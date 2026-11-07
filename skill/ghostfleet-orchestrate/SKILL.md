@@ -128,13 +128,22 @@ A worker can't interrupt you, and polling each one with `fleet-read` burns the
 **shared account budget** (see below). Instead the events you act on are collected
 passively into an inbox you drain in one call:
 
-- a worker **`done`** — its turn finished (idle). This is your **completion
-  signal**: a dispatched brief is ready to review/merge. It is NOT "free for the
-  next task" — once its PR merges, that worker is retired with `fleet-stop --reclaim`
-  and the next task gets a new session. (A worker's autonomous turn ends once, so one
-  `done` per brief.) Under the review gate a `done` says whether it is **READY to
-  merge** (review passed at its head), **unreviewed**, or **STUCK** — DONE alone is not
-  ready.
+- a worker **`done`** — its turn finished with **nothing of its own still running**
+  (idle). This is your **completion signal**: a dispatched brief is ready to
+  review/merge. It is NOT "free for the next task" — once its PR merges, that worker is
+  retired with `fleet-stop --reclaim` and the next task gets a new session. A second
+  `done` from the same worker with nothing new since (no prompt sent to it, no commit,
+  no push, no PR command, same words) is the same one: no row, no wake. Under the review
+  gate a `done` says whether it is **READY to merge** (review passed at its head),
+  **unreviewed**, or **STUCK** — DONE alone is not ready.
+- a worker **`waiting`** — its turn ended while a background job it started this task
+  (the suite, a build) is still running: *"toolbox WAITING on its background job (Run the
+  full suite)"*. It is **not finished and does not wake you**; when the job exits the
+  worker is re-invoked, and the turn that ends with nothing left running is its `done`.
+  Don't act on a WAITING row — no PR exists yet, as often as not. If the job never exits
+  or dies with its session, the `done` comes anyway, saying why (`still running after
+  30m`, `ended and no turn followed`). `fleet-inbox` hides a WAITING once that worker has
+  a later row.
 - a worker **`need-you`** — permission / usage-limit / a real question. The row says
   WHAT it asks (the tool and command, the question and its options, the limit line), and
   whether it is still **`(pending)`** — the worker's pane still shows it — or

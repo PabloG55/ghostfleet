@@ -6356,6 +6356,9 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
     for kv in "$@"; do case "$kv" in C:*) c="${kv#C:}" ;; L:*) l="${kv#L:}" ;; P:*) pr="${kv#P:}" ;; esac; done
     nlmark "$NLF/cfnl.$slot" "$c"; nlmark "$NLF/cfnl.api-fix" "$l"; nlmark "$NLF/cfnl" "$pr"
     rm -f "$NLF/cfnl.api-fix.notify.stamp" "$NLF/cfnl.notify.stamp"
+    # each row is its own task: a real one starts with a prompt, which drops the DONE
+    # baseline, so a repeat of the last row's DONE is not folded into it (_done_again)
+    rm -f "$NLF/"*.donemark
     nlfire "$slot" Stop
     local st="$NLF/cfnl.notify.stamp" i; [ "$slot" = api-fix-tests ] && st="$NLF/cfnl.api-fix.notify.stamp"
     for i in $(seq 1 20); do [ -s "$st" ] && break; sleep 0.1; done
@@ -9840,7 +9843,8 @@ if command -v jq >/dev/null 2>&1; then
   is "...and the address is consumed"   "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
   # Both paths must stay independent: no address means no relay, and the responder's own
   # fleet still logs its 'done' exactly as before.
-  : > "$asked"; : > "$RF/cf-resp.inbox"; fire Stop
+  # a second task, as a prompt would start it: its DONE is not the first one again
+  : > "$asked"; : > "$RF/cf-resp.inbox"; rm -f "$RF/"*.donemark; fire Stop
   is "no address, no relay"             "0" "$(rows "$asked")"
   is "...its own fleet still logs done" "1" "$(matches 'done' "$RF/cf-resp.inbox")"
   # ARMING — the ordering guard. fleet-send can paste into a session that is MID-TURN,
@@ -13345,6 +13349,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
   ny_show docs-pass "$FIX/claude-question-notify.txt"
   wait_for 5 "the panes to redraw" 'pane_has cfneed "half a sentence" master && pane_has cfneed "Do you want to proceed" profile-env' || true
   : > "$NY/sent.log"
+  rm -f "$NY/fleet/"*.donemark                  # a new task: not billing-svc's last DONE again
   nyfire billing-svc Stop                       # a finish's retry is armed first
   nyfire profile-env Notification 'Claude needs your permission'
   nyfire docs-pass Notification 'Claude needs your permission'
@@ -13369,6 +13374,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
   ny_show profile-env "$FIX/claude-permission-dashed.txt"
   wait_for 5 "the dialog to redraw" 'pane_has cfneed "Do you want to proceed" profile-env' || true
   : > "$NY/sent.log"
+  rm -f "$NY/fleet/"*.donemark                  # a new task: not billing-svc's last DONE again
   NY_QUIET=3 nyfire billing-svc Stop
   sleep 1
   is "under the quiet window a finish wakes nobody yet"   "0" "$(ny_sent "finished")"
@@ -13388,7 +13394,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
                 "clear; cat '$NY/typed.txt'; stty raw -echo; exec dd bs=1 of='$NY/keys.log' 2>/dev/null" 2>/dev/null; }
   : > "$NY/keys.log"; ny_keys
   wait_for 5 "the typed composer to draw" 'pane_has cfneed "half a sentence" master' || true
-  : > "$NY/sent.log"; rm -f "$NY/fleet/cfneed.notify.stamp" "$NY/fleet/cfneed.notify.blocked"
+  : > "$NY/sent.log"; rm -f "$NY/fleet/cfneed.notify.stamp" "$NY/fleet/cfneed.notify.blocked" "$NY/fleet/"*.donemark
   NY_QUIET=1 NY_TRIES=2 nyfire billing-svc Stop
   wait_for 15 "the hold to be reported" '[ -s "$NY/fleet/cfneed.notify.blocked" ]' || true
   is "a wake the box keeps out is reported as held"       "1" "$([ -s "$NY/fleet/cfneed.notify.blocked" ] && echo 1 || echo 0)"
@@ -15785,6 +15791,221 @@ JS
   rm -rf "$RS"
 else
   skip "a resume turn that made nothing is RESUMED, not DONE" "tmux, jq or git missing"
+fi
+
+# ── a turn that ends with its own background job running is WAITING, not DONE ──
+# A worker is told never to hold a turn open, so it starts the suite in a background shell
+# and ends its turn; it is re-invoked when the shell exits, pushes, and ends a second turn.
+# Every Stop was a DONE row and a lead wake. Measured on one fleet: one worker DONE four
+# times in six minutes, another twice in a minute, and the lead woken for each while no PR
+# existed. Both directions on purpose: a Stop with a job running must go quiet, and the Stop
+# after it, with nothing running, must still be a DONE that wakes — a fix that silenced every
+# Stop with a background job in its history would pass the first half and hide real work.
+# The job is REAL: a `sleep` holding the output file open for writing, which is the half of
+# the signal a transcript cannot fake, killed by its captured pid.
+group "a turn that ends with its own background job running is WAITING, not DONE"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v git >/dev/null 2>&1 \
+   && command -v lsof >/dev/null 2>&1; then
+  BW="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$BW/bin" "$BW/home" "$BW/fleet" "$BW/cfg" "$BW/tasks"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$BW" > "$BW/bin/fleet-send"
+  chmod +x "$BW/bin/fleet-send"
+  : > "$BW/fleet/cfbgw.notify-lead"
+  git init -q -b toolbox "$BW/toolbox" 2>/dev/null
+  git -C "$BW/toolbox" config user.email t@t; git -C "$BW/toolbox" config user.name t
+  : > "$BW/toolbox/f"; git -C "$BW/toolbox" add f; git -C "$BW/toolbox" commit -qm init 2>/dev/null
+  rule="$(printf '─%.0s' $(seq 1 40))"
+  printf '%s\n❯ \n%s\n' "$rule" "$rule" > "$BW/empty.txt"
+  tmux -L cfbgw kill-server 2>/dev/null
+  tmux -L cfbgw new-session -d -s master -x 100 -y 20 "clear; cat '$BW/empty.txt'; sleep 300" 2>/dev/null
+  tmux -L cfbgw new-session -d -s toolbox -x 100 -y 20 'sleep 300' 2>/dev/null
+  wait_for 5 "the lead's composer to draw" 'pane_has cfbgw "❯" master' || true
+  T="$BW/t.jsonl"; : > "$T"
+  bwfire() {                                    # $1 = event, $2 = prompt; env after it
+    local e="$1" p="${2:-}"; shift 2 2>/dev/null || shift $#
+    jq -nc --arg e "$e" --arg c "$BW/toolbox" --arg t "${BW_TR:-$T}" --arg p "$p" \
+      '{hook_event_name:$e, session_id:"bw-toolbox", cwd:$c, transcript_path:$t}
+       + (if $p != "" then {prompt:$p} else {} end)' \
+    | env -u TMUX -u TMUX_PANE HOME="$BW/home" CLAUDE_CONFIG_DIR="$BW/cfg" CLAUDE_FLEET_SOCK=cfbgw \
+        CLAUDE_FLEET_SLOT=toolbox CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_NOTIFIER=off \
+        CLAUDE_FLEET_NOTIFY_DEBOUNCE=30 CLAUDE_FLEET_NOTIFY_QUIET=0 \
+        CLAUDE_FLEET_WAIT_EVERY=1 CLAUDE_FLEET_WAIT_GRACE=2 CLAUDE_FLEET_WAIT_MAX=600 \
+        PATH="$BW/bin:$PATH" "$@" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  # A Bash call run in the background, as 2.1.319 writes it: the call (with its description)
+  # and its result, whose structured half carries the job id and whose text names the file.
+  bw_start() {                                  # $1 = job id, $2 = description
+    local tu="toolu_bw$1" out="$BW/tasks/$1.output"
+    jq -nc --arg tu "$tu" --arg d "$2" \
+      '{type:"assistant", message:{role:"assistant", content:[{type:"tool_use", id:$tu, name:"Bash",
+        input:{command:"./test/run.sh", description:$d, run_in_background:true}}]}}' >> "$T"
+    jq -nc --arg tu "$tu" --arg id "$1" --arg o "$out" \
+      '{type:"user", message:{role:"user", content:[{tool_use_id:$tu, type:"tool_result",
+        content:("Command running in background with ID: " + $id + ". Output is being written to: " + $o + ". You will be notified when it completes.")}]},
+        toolUseResult:{stdout:"", stderr:"", interrupted:false, backgroundTaskId:$id}}' >> "$T"
+  }
+  bw_end() {                                    # $1 = job id: the notification, as queued
+    jq -nc --arg id "$1" --arg o "$BW/tasks/$1.output" \
+      '{type:"queue-operation", operation:"enqueue",
+        content:("<task-notification>\n<task-id>" + $id + "</task-id>\n<output-file>" + $o + "</output-file>\n<status>completed</status>\n</task-notification>")}' >> "$T"
+  }
+  NOTIF='<task-notification>
+<task-id>x</task-id>
+<status>completed</status>
+</task-notification>'
+  bw_last()   { tail -1 "$BW/fleet/cfbgw.inbox" 2>/dev/null | cut -f3; }
+  bw_lastd()  { tail -1 "$BW/fleet/cfbgw.inbox" 2>/dev/null | cut -f4; }
+  bw_rows()   { grep -c . "$BW/fleet/cfbgw.inbox" 2>/dev/null || true; }
+  bw_nudged() { grep -c 'A worker finished' "$BW/sent.log" 2>/dev/null || true; }
+  bw_turn()   { jq -r '.turn // ""' "$BW/fleet/bw-toolbox.json" 2>/dev/null; }
+  bw_reset()  { : > "$BW/sent.log"; rm -f "$BW/fleet/cfbgw.notify.stamp"; }
+
+  # ── 1. a turn ends with its job running: WAITING, nobody woken ──
+  bw_reset
+  bwfire UserPromptSubmit "fix the flaky test in billing-svc"
+  bw_start bjob1 "Run the full suite"
+  sleep 300 > "$BW/tasks/bjob1.output" 2>&1 & BWPID=$!
+  wait_for 5 "the job to hold its file" '[ -n "$(lsof -t -- "$BW/tasks/bjob1.output" 2>/dev/null)" ]' || true
+  bwfire Stop
+  is "a Stop with its own background job running is WAITING"   "waiting" "$(bw_last)"
+  is "...and the row names the job it waits on"                "1" \
+     "$(grep -cF 'on its background job (Run the full suite) · toolbox · toolbox' <<< "$(bw_lastd)" || true)"
+  is "...the record carries the verdict"                       "waiting" "$(bw_turn)"
+  sleep 1
+  is "...and wakes no lead"                                    "0"       "$(bw_nudged)"
+  is "...and arms a watcher for the job"                       "1"       "$([ -f "$BW/fleet/bw-toolbox.wait" ] && echo 1 || echo 0)"
+
+  # ── 2. the job ends; the turn its notification starts ends with nothing running: DONE ──
+  kill "$BWPID" 2>/dev/null; wait "$BWPID" 2>/dev/null
+  bw_end bjob1
+  bwfire UserPromptSubmit "$NOTIF"
+  is "the notification's turn stands the watcher down"         "0"       "$([ -f "$BW/fleet/bw-toolbox.wait" ] && echo 1 || echo 0)"
+  bwfire Stop
+  is "the next Stop, with nothing running, is the DONE"        "done"    "$(bw_last)"
+  is "...with no wait verdict on the record"                   ""        "$(bw_turn)"
+  wait_for 5 "the DONE's nudge" '[ "$(bw_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead once"                           "1"       "$(bw_nudged)"
+
+  # ── 3. a second Stop with no work between: one row, at most one wake ──
+  # The stamp is cleared first, so the wake path would send again on its own: when no
+  # second wake arrives it is because the DONE was recognised, not because of the debounce.
+  n0="$(bw_rows)"; bw_reset
+  bwfire Stop
+  is "a second DONE with nothing new is no second row"         "$n0"     "$(bw_rows)"
+  sleep 1
+  is "...and no second wake"                                   "0"       "$(bw_nudged)"
+  # ...but anything produced makes it news again: a commit,
+  printf 'x\n' > "$BW/toolbox/f"; git -C "$BW/toolbox" commit -qam work 2>/dev/null
+  bwfire Stop
+  is "a DONE after a commit is a row of its own"               "$(( n0 + 1 ))" "$(bw_rows)"
+  # a PR verb in the turn,
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"gh pr create --base staging --fill"}}]}}' >> "$T"
+  bwfire Stop
+  is "a DONE after a gh pr create is a row of its own"         "$(( n0 + 2 ))" "$(bw_rows)"
+  # and a prompt somebody actually sent.
+  bwfire UserPromptSubmit "and which branch are you on?"
+  bwfire Stop
+  is "a DONE answering a new prompt is a row of its own"       "$(( n0 + 3 ))" "$(bw_rows)"
+  # Past the fleet's wake window, the same DONE is a reminder worth its row.
+  bwfire Stop
+  is "...a repeat inside the window is folded"                 "$(( n0 + 3 ))" "$(bw_rows)"
+  dm="$BW/fleet/bw-toolbox.donemark"
+  awk -F'\037' -v OFS='\037' '{ $1 = $1 - 3600; print }' "$dm" > "$dm.n" && mv -f "$dm.n" "$dm"
+  bwfire Stop
+  is "...and one past it is a row again"                       "$(( n0 + 4 ))" "$(bw_rows)"
+
+  # ── 4. a signal that cannot be read behaves exactly as before ──
+  bwfire UserPromptSubmit "run the suite again"
+  bw_start bjob2 "Run the suite again"
+  sleep 300 > "$BW/tasks/bjob2.output" 2>&1 & BWPID=$!
+  wait_for 5 "the second job to hold its file" '[ -n "$(lsof -t -- "$BW/tasks/bjob2.output" 2>/dev/null)" ]' || true
+  bw_reset
+  bwfire Stop "" CLAUDE_FLEET_LSOF="$BW/no-such-lsof"
+  is "no lsof: the Stop is a DONE, as before"                  "done"    "$(bw_last)"
+  wait_for 5 "the no-lsof DONE's nudge" '[ "$(bw_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead"                                "1"       "$(bw_nudged)"
+  # The same chain, the job still running: only the transcript is missing. The baseline the
+  # last DONE left goes too, or this Stop would fold into that DONE and pass without a row.
+  rm -f "$BW/fleet/bw-toolbox.donemark"
+  bw_reset
+  BW_TR="$BW/no-such-transcript.jsonl" bwfire Stop
+  is "no transcript: the Stop is a DONE, as before"            "done"    "$(bw_last)"
+  wait_for 5 "the no-transcript DONE's nudge" '[ "$(bw_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead"                                "1"       "$(bw_nudged)"
+  # A job started BEFORE the prompt that began this chain is not what this turn waits on.
+  bwfire UserPromptSubmit "a new task, with the old job still up"
+  bw_reset
+  bwfire Stop
+  is "a job left from an earlier task does not hold the DONE"  "done"    "$(bw_last)"
+  # The key quoted inside a command is JSON-escaped, so grepping for it is not a job.
+  bwfire UserPromptSubmit "find where the key is read"
+  # It names the live job's file too, so a matcher that ignored the escaping would count it.
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"grep \"backgroundTaskId\":\"bjob2\" t.jsonl; Output is being written to: '"$BW"'/tasks/bjob2.output. done"}]}}' >> "$T"
+  bwfire Stop
+  is "the key inside a command is not a job"                   "done"    "$(bw_last)"
+
+  # ── 5. the job never ends, or dies with its session: the watcher files the DONE ──
+  bwfire UserPromptSubmit "start the dev server and check the page"
+  bw_start bjob3 "Serve the web client"
+  kill "$BWPID" 2>/dev/null; wait "$BWPID" 2>/dev/null
+  sleep 300 > "$BW/tasks/bjob3.output" 2>&1 & BWPID=$!
+  wait_for 5 "the third job to hold its file" '[ -n "$(lsof -t -- "$BW/tasks/bjob3.output" 2>/dev/null)" ]' || true
+  bw_reset
+  bwfire Stop "" CLAUDE_FLEET_WAIT_MAX=3
+  is "a dev server left running makes the Stop WAITING"        "waiting" "$(bw_last)"
+  wait_for 15 "the watcher's DONE" '[ "$(bw_last)" = done ]' || true
+  is "...and past the wait cap the watcher files the DONE"     "done"    "$(bw_last)"
+  is "...saying why"                                           "1" \
+     "$(grep -c 'its background job is still running after' <<< "$(bw_lastd)" || true)"
+  wait_for 5 "the watcher's nudge" '[ "$(bw_nudged)" -ge 1 ]' || true
+  is "...and it wakes the lead"                                "1"       "$(bw_nudged)"
+  is "...without rewriting the session's record"               "waiting" "$(bw_turn)"
+  # The session dies with its job: no notification, no next turn.
+  bwfire UserPromptSubmit "one more run"
+  bw_start bjob4 "Run the suite a last time"
+  kill "$BWPID" 2>/dev/null; wait "$BWPID" 2>/dev/null
+  sleep 300 > "$BW/tasks/bjob4.output" 2>&1 & BWPID=$!
+  wait_for 5 "the fourth job to hold its file" '[ -n "$(lsof -t -- "$BW/tasks/bjob4.output" 2>/dev/null)" ]' || true
+  bw_reset
+  bwfire Stop
+  is "a Stop with the last job running is WAITING"             "waiting" "$(bw_last)"
+  kill "$BWPID" 2>/dev/null; wait "$BWPID" 2>/dev/null
+  wait_for 15 "the watcher's DONE for a job that died" '[ "$(bw_last)" = done ]' || true
+  is "a job gone with no turn after it: the watcher files the DONE" "done" "$(bw_last)"
+  is "...saying why"                                           "1" \
+     "$(grep -c 'its background job ended and no turn followed' <<< "$(bw_lastd)" || true)"
+
+  # ── 6. the review gate's words keep working ──
+  : > "$BW/fleet/cfbgw.review-gate"
+  bwfire UserPromptSubmit "open the PR"
+  bwfire Stop
+  is "under the gate a DONE still says unreviewed"             "1" "$(grep -c '^unreviewed — not ready to merge' <<< "$(bw_lastd)" || true)"
+  n1="$(bw_rows)"
+  mkdir -p "$BW/fleet/cfbgw.reviews"
+  printf '%s\ttoolbox\tx\t%s\tx\tx\tx\tpass\n' "$(date +%s)" "$(git -C "$BW/toolbox" rev-parse HEAD)" \
+    > "$BW/fleet/cfbgw.reviews/acme~acme-api~12.tsv"
+  bwfire Stop
+  is "READY after unreviewed is news, not a repeat"            "$(( n1 + 1 ))" "$(bw_rows)"
+  is "...and its row says READY"                               "1" "$(grep -c '^READY to merge — review passed at' <<< "$(bw_lastd)" || true)"
+  rm -f "$BW/fleet/cfbgw.review-gate"
+
+  # ── 7. fleet-inbox folds a WAITING its worker has moved past ──
+  NOW="$(date +%s)"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$((NOW-30))" toolbox waiting "on its background job (Run the full suite) · toolbox · toolbox" \
+    "$((NOW-20))" toolbox done "toolbox · toolbox" \
+    "$((NOW-10))" acme-api waiting "on its background job (Build) · acme-api · api-fix" > "$BW/fleet/cfbgw.inbox"
+  BWIN="$(env -u TMUX CLAUDE_FLEET_DIR="$BW/fleet" "$ROOT/bin/fleet-inbox" -s cfbgw --all 2>/dev/null)"
+  is "fleet-inbox hides a WAITING the same worker moved past"  "0" "$(grep -c 'toolbox *WAITING' <<< "$BWIN" || true)"
+  is "...keeps that worker's DONE"                             "1" "$(grep -c 'toolbox *DONE' <<< "$BWIN" || true)"
+  is "...and shows a WAITING that is still the latest word"    "1" "$(grep -c 'acme-api *WAITING *on its background job (Build)' <<< "$BWIN" || true)"
+
+  kill "$BWPID" 2>/dev/null
+  _wp="$(cat "$BW/fleet/bw-toolbox.wait.pid" 2>/dev/null)"
+  case "$_wp" in ''|*[!0-9]*) ;; *) kill "$_wp" 2>/dev/null ;; esac
+  tmux -L cfbgw kill-server 2>/dev/null
+  rm -rf "${BW:?}"
+else
+  skip "a turn that ends with its own background job running is WAITING, not DONE" "tmux, jq, git or lsof missing"
 fi
 
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────

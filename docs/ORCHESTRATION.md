@@ -248,7 +248,32 @@ The **inbox carries completion too**: a worker's turn ending shows as `DONE`, so
 you learn when a brief is ready to review/merge without polling — and with
 `CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken**, so it acts hands-off instead of polling at
 all (see [Config](../README.md#config)): a `need-you` at once, and finished workers in one wake
-once the fleet has been quiet for ten minutes ([When the lead is woken](OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits)). A fresh worktree
+once the fleet has been quiet for ten minutes ([When the lead is woken](OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits)).
+
+**`DONE` means nothing of its own is still running.** A worker never holds a turn open, so it
+starts the suite in a background shell and ends its turn, then is re-invoked when the shell
+exits, pushes, and ends a second one. Each turn end used to be a `DONE` and a wake: one worker
+filed four in six minutes, and the lead was woken for each while no PR existed yet. Now a turn
+that ends while a background job the worker started for this task is still running is filed
+**`WAITING`** — `toolbox  WAITING  on its background job (Run the full suite) · …` — and wakes
+nobody. The turn that ends with nothing left running is the `DONE`, and it wakes as before.
+The hook reads it from two places, because neither is enough alone: the transcript says which
+jobs the session started since the last prompt somebody sent it, and has not yet recorded the
+end of, and `lsof` says whether anything still holds a job's output file open for writing
+(a job killed with its session never gets its end written). If either cannot be read, the turn
+is a `DONE`, exactly as before. A job that never exits (a dev server) or dies with its session
+still ends in a `DONE`: a watcher files it after 30 minutes (`CLAUDE_FLEET_WAIT_MAX`), or 90
+seconds after the job is gone with no turn following it (`CLAUDE_FLEET_WAIT_GRACE`), and the
+row says which. `fleet-inbox` hides a `WAITING` once its worker has a later row.
+
+**A repeat `DONE` is not a second one.** A worker can still end two turns in a row with
+nothing between them. A `DONE` is folded into the previous one (no row, no wake) when nobody
+has sent the worker a prompt since, its words are the same, nothing was produced since (no
+commit, no moved pushed branch, no PR command, no ledger item closed), and it falls inside the
+fleet's wake window (`notify-quiet`, or the debounce when that is `0`). A review-gate change,
+`unreviewed` to `READY to merge`, is different words, so it is always a row of its own.
+
+A fresh worktree
 gets the main checkout's `node_modules` symlinked in (workers can run
 lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases a
 branch on your **local** ref — falling back to the remote tip only when local is
