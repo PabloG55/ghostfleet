@@ -590,7 +590,7 @@ _ensure_master() {                   # $1=main checkout
 enter_master() {
   local main; main="$(master_checkout "$PROJECT_ROOT" "$PROJECT")"
   if ! _ensure_master "$main"; then
-    _fail "could not start master for $PROJECT" \
+    _fail "master did not start for $PROJECT" \
           "its pane exits immediately when agent-here is not on PATH — run ./install.sh, or cf-sync if the runtime is half-synced"
     MASTER_GOTO=grid; return 0       # nothing to attach to; the grid still works
   fi
