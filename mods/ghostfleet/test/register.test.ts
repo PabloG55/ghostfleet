@@ -12,10 +12,12 @@ const ID = 'sess-1'
 const FILE = `${DIR}/${ID}.json`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[] }
+// `hang`: commands whose run never settles, as a run whose environment a reload dropped never
+// does. `takeBack`: an entry the sender renames away in the instant the mod marks it submitted.
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[]; hang: Set<string>; takeBack: string }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [] }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [], hang: new Set(), takeBack: '' }
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
@@ -37,6 +39,9 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
       // `mv [-f|-n] src dst`: a rename, which fails when there is nothing to rename. The
       // handoff's claims and revokes are decided by exactly that failure.
       const [src, dst] = argv.slice(-2)
+      if (w.takeBack && dst === `${src.slice(0, -'.taken'.length)}.sent` && src.endsWith(`/${w.takeBack}.taken`)) {
+        w.files.set(`${src.slice(0, -'.taken'.length)}.revoked`, w.files.get(src) ?? ''); w.files.delete(src)
+      }
       if (w.files.has(src)) { w.files.set(dst, w.files.get(src) ?? ''); w.files.delete(src) } else exitCode = 1
     }
     if (argv[0] === 'rm') for (const f of argv.slice(2)) w.files.delete(f)
@@ -57,7 +62,8 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   // rejects an unknown name (measured: "$.command.run: no command named /x in this session").
   on('command.run', (_$: any, e: any, next: any) => {
     if (e.command === 'no-such') return next(e)
-    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim()); return {}
+    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim())
+    return w.hang.has(e.command) ? new Promise(() => {}) : {}
   })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
@@ -253,7 +259,7 @@ test('a claim the sender took back is let go without a failure receipt', async (
   w.files.set(...entry('1000-1', 'wake up'))
   await clock.advance(500)
   // fleet-send gave up on it and renamed it away (a wake it then pasted)
-  w.files.delete(`${SPOOL}/1000-1.taken`)
+  w.files.delete(`${SPOOL}/1000-1.sent`)
   await clock.advance(121_000)
   expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
   w.files.set(...entry('2000-1', 'the next one'))
@@ -427,6 +433,65 @@ test('a claim a dead process left behind is delivered by the next one', async ($
   await start($)
   await clock.advance(500)
   expect(w.submitted.map(e => e.text)).toEqual(['stranded'])
+})
+
+// THE RELOAD THAT DELIVERED ITSELF. `/reload-plugins` handed over through the spool reloads this
+// mod from inside its own command run: the old environment is dropped before that run settles
+// (so its receipt is never written), and the new one starts on the same conversation. The run
+// here never settles, as the dropped one never does, and the second session.start is the
+// reload's. It used to find the claim, put it back, and run the reload again: a loop.
+test('a command that reloads the mod mid-delivery runs once, and is receipted as ran by the reload', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.hang.add('reload-plugins')
+  await start($)
+  w.files.set(...entry('1000-1', '/reload-plugins'))
+  await clock.advance(500)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  await start($)                                   // the reload's own session.start
+  await clock.advance(30_000)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', ran: '/reload-plugins' }))
+  expect([...w.files.keys()].filter(f => /1000-1\.(json|taken|sent)$/.test(f))).toEqual([])
+  // ...and the spool is free again: the next prompt goes through, once.
+  w.files.set(...entry('2000-1', 'next'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['next'])
+})
+
+// A prompt the last process submitted is waited for, not submitted again: its turn.start, when
+// it comes in the new process, still names it. A claim it never submitted goes out once, after.
+test('after a restart a submitted prompt is never resubmitted, and a claim never submitted is', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.files.set(`${SPOOL}/1000-1.sent`, JSON.stringify({ id: '1000-1', text: 'already in' }))
+  w.files.set(`${SPOOL}/1000-2.taken`, JSON.stringify({ id: '1000-2', text: 'never sent' }))
+  await start($)
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await $.turn.start({ text: 'already in', turnId: 't4' })
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't4' }))
+  expect(w.files.has(`${SPOOL}/1000-1.sent`)).toBe(false)
+  await $.turn.complete(complete('answer') as any)
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['never sent'])
+})
+
+// The sender's takeback (fleet-send renames a wake it gave up on) races the submit's own rename:
+// whichever lands first owns it. Lost by the mod, nothing is submitted and nothing receipted.
+test('a claim the sender takes back before its submit is never submitted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.takeBack = '1000-1'
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await clock.advance(121_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['the next one'])
 })
 
 test('SessionEnd withdraws .ready, and the spool keeps what is waiting', async ($, on) => {

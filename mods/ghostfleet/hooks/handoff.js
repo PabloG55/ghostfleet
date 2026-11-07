@@ -4,7 +4,9 @@
 //
 // <fleet dir>/<session_id>.handoff/
 //   <id>.json     a prompt fleet-send left for this session: { id, text, reply? }
-//   <id>.taken    claimed by the mod, being submitted
+//   <id>.taken    claimed by the mod, not submitted yet: a restart puts it back as .json
+//   <id>.sent     submitted, its turn not seen to start: a restart waits for it, never
+//                 submits it again (register.js, DELIVERY, says why the two are apart)
 //   <id>.done     the receipt: { id, turnId } once its turn started, { id, ran } for a slash
 //                 command that ran without starting one, or { dropped | error }
 //   <id>.failed   a { dropped | error } receipt nobody read within the hour, kept for
