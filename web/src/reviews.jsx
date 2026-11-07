@@ -97,7 +97,7 @@ function Step({ s, run, t, v, cur, onSeek, onStep, onStepNote, onChapterNote }) 
       <Requests list={s.requests || []} t={t} />
       {recorded
         ? <Note value={note} label={t.chapterNoteLabel(s.n)}
-                placeholder={flagged ? t.reasonPlaceholder : t.chapterPlaceholder}
+                placeholder={flagged ? t.flagNotePlaceholder : t.chapterPlaceholder}
                 onInput={(x) => onChapterNote(s.n, x)} />
         : <Fragment>
             <div class="seg rv-mark" role="group" aria-label={t.markLabel(s.n)}>

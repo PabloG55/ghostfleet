@@ -401,8 +401,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;max-
 .ch .reqs tr.bad td{color:var(--red)} .ch .reqs tr.warn td{color:var(--yellow)}
 .ch textarea{margin-top:8px;min-height:2.6em;resize:vertical;display:none}
 .ch.here textarea,.ch.has textarea,.ch.flag textarea{display:block}
-.ch textarea.wants{border-color:var(--yellow)}
-.ch .needs{font-size:12px;color:var(--yellow);margin-top:4px}
 
 /* the verdict: pinned to the bottom, because it is the one thing every visit ends with */
 .verdict{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid var(--hair);
@@ -498,8 +496,11 @@ if (has('--check')) {
   const v = readVerdict(dir);
   if (isRecorded(m)) {
     // ONE VERDICT, FOR THE FLOW. Silence is still not approval: no verdict fails exactly as
-    // a rejection does. And a chapter the run flagged needs its reason even under an
-    // approve — the flag rule the per-step review had, carried over whole.
+    // a rejection does. But an approve is the whole decision, flags included: the owner is
+    // the reviewer, he watched the run with its flags drawn on it, and making him type a
+    // reason before his own approve counted read as "approved, but refused". The flags are
+    // still PRINTED — as accepted by the approve, or with his note when he wrote one — so the
+    // record keeps what the run found. Only the per-step branch below still wants a note.
     const fv = v.flow || {};
     const accepted = [], flagged = [];
     for (const st of m.steps.filter(x => x.notes && x.notes.length)) {
@@ -510,18 +511,19 @@ if (has('--check')) {
       const st = m.steps.find(x => String(x.n) === n);
       if (st && !(st.notes || []).length && String(note).trim()) console.log(`note  ${st.n}. ${st.name} — ${note}`);
     }
-    for (const { st, nt } of flagged) console.log(`flagged  ${st.n}. ${st.name} — ${nt}` +
-      (fv.v === 'approve' ? '   (approved with no reason on this chapter — a note is what clears a flag)' : ''));
+    for (const { st, nt } of flagged) console.log(fv.v === 'approve'
+      ? `accepted  ${st.n}. ${st.name} — ${nt}   (accepted by the approve)`
+      : `flagged  ${st.n}. ${st.name} — ${nt}`);
     for (const { st, why } of accepted) console.log(`accepted  ${st.n}. ${st.name} — ${why}`);
-    if (fv.v === 'approve' && !flagged.length) {
+    if (fv.v === 'approve') {
+      const nFlags = flagged.length + accepted.length;
       console.log(`fleet-shots: the flow (${m.steps.length} chapter${m.steps.length === 1 ? '' : 's'}) is approved` +
         (fv.note ? ` — ${fv.note}` : '') +
-        (accepted.length ? `, ${accepted.length} flag${accepted.length === 1 ? '' : 's'} accepted with a reason` : ''));
+        (nFlags ? `, ${nFlags} flagged chapter${nFlags === 1 ? '' : 's'} accepted by the approve` : ''));
       process.exit(0);
     }
     console.log(fv.v === 'reject' ? `fleet-shots: NOT approved — the flow was rejected${fv.note ? ` — ${fv.note}` : ''}`
-      : !fv.v ? 'fleet-shots: NOT approved — the flow has not been reviewed'
-      : `fleet-shots: NOT approved — ${flagged.length} flagged by the run itself, with no reason given`);
+      : 'fleet-shots: NOT approved — the flow has not been reviewed');
     process.exit(1);
   }
   const problems = [], unreviewed = [];
@@ -1106,8 +1108,7 @@ function flowPage(m) {
   ${(s.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('')}
   ${s.file ? `<a class="still" href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(s.name)} — the screen when it failed" loading="lazy"></a>` : ''}
   ${calls.length ? `<details${calls.some(r => r.failed || r.status >= 400) ? ' open' : ''}><summary>${calls.length} call${calls.length === 1 ? '' : 's'} of its own</summary><div class="reqs"><table>${reqRows}</table></div></details>` : ''}
-  <textarea aria-label="note on chapter ${s.n}" placeholder="${flagged ? 'why is this acceptable? a note is what clears the flag' : 'note on this chapter (optional)'}"></textarea>
-  ${flagged ? '<div class="needs" hidden>Approving does not clear this flag — one line saying why it is acceptable does.</div>' : ''}
+  <textarea aria-label="note on chapter ${s.n}" placeholder="${flagged ? 'the run flagged this — a note on why it is fine is optional' : 'note on this chapter (optional)'}"></textarea>
 </section>`;
   }).join('\n');
   const vtype = /\.webm$/.test(m.video) ? 'video/webm' : 'video/mp4';
@@ -1175,10 +1176,6 @@ function paint(){
   cards.forEach(function(el,i){
     el.classList.toggle('here', i===cur);
     el.classList.toggle('has', !!noteOf(CH[i].n));
-    var needs = el.querySelector('.needs'), ta = el.querySelector('textarea');
-    var wants = CH[i].flagged && st.flow && st.flow.v==='approve' && !noteOf(CH[i].n);
-    if (needs) needs.hidden = !wants;
-    if (ta) ta.classList.toggle('wants', wants);
   });
   document.querySelectorAll('#strip button').forEach(function(b,i){ b.classList.toggle('here', i===cur); });
   document.getElementById('now').textContent = CH.length ? (CH[cur].n + '. ' + CH[cur].name) : '';
@@ -1192,14 +1189,15 @@ function paint(){
 }
 function fmt(t){ t=Math.max(0,Math.floor(t||0)); return Math.floor(t/60)+':'+String(t%60).padStart(2,'0'); }
 function gate(){
+  // THE APPROVE IS THE DECISION: a chapter the run flagged is shown, and counted here, but
+  // it does not hold the flow back — fleet-shots --check passes an approve whatever the flags.
   var fv = st.flow && st.flow.v, missing = CH.filter(function(c){ return c.flagged && !noteOf(c.n); });
   var g = document.getElementById('gate'), s = document.getElementById('state');
   if (fv==='reject') { g.className='gate rej'; g.textContent='rejected — fleet-shots --check refuses this run'; s.className='chip bad'; s.textContent='rejected'; }
   else if (!fv) { g.className='gate'; g.textContent='not reviewed yet — watch it, then approve or reject the flow'
       + (missing.length ? ' · ' + missing.length + ' chapter' + (missing.length===1?'':'s') + ' flagged by the run' : ''); s.className='chip none'; s.textContent='not reviewed'; }
-  else if (missing.length) { g.className='gate fail'; g.textContent='approved, but --check still refuses: chapter '
-      + missing.map(function(c){ return c.n; }).join(', ') + ' was flagged by the run and has no reason'; s.className='chip warn'; s.textContent='needs a reason'; }
-  else { g.className='gate pass'; g.textContent='approved — fleet-shots --check passes this run'; s.className='chip ok'; s.textContent='approved'; }
+  else { g.className='gate pass'; g.textContent='approved — fleet-shots --check passes this run'
+      + (missing.length ? ' (' + missing.length + ' flagged chapter' + (missing.length===1?'':'s') + ' accepted by the approve)' : ''); s.className='chip ok'; s.textContent='approved'; }
   var t = document.getElementById('verdicttext');
   if (t) {
     var lines = [];
@@ -1212,11 +1210,6 @@ function choose(which){
   var note = document.getElementById('fnote').value;
   st.flow = { v: which, note: note };
   save(); paint();
-  // approving over a flag with no reason: take the reader to where the reason goes
-  if (which==='approve') {
-    var i = CH.findIndex(function(c){ return c.flagged && !noteOf(c.n); });
-    if (i >= 0) { go(i); var ta = cards[i].querySelector('textarea'); if (ta) ta.focus(); }
-  }
 }
 
 // the strip: one segment per chapter, as wide as it plays

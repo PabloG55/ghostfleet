@@ -556,10 +556,11 @@ export function shotsState(m, v) {
   if (m.video) {
     const fv = (v.flow || {}).v || '';
     const flagged = m.steps.filter(st => st.notes && st.notes.length && !note(st.n)).length;
-    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : flagged ? `${flagged} flagged` : 'approved';
+    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : 'approved';
     return { total: 1, marked: fv ? 1 : 0, problem: fv === 'reject' ? 1 : 0, flagged, label,
-             cls: fv === 'reject' ? 'bad' : (!fv || flagged) ? 'warn' : 'ok',
-             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed' : flagged ? `${flagged} need a reason` : 'approved' };
+             cls: fv === 'reject' ? 'bad' : !fv ? 'warn' : 'ok',
+             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed'
+               : flagged ? `approved · ${flagged} flag${flagged === 1 ? '' : 's'} accepted` : 'approved' };
   }
   const at = (n) => v[String(n)] || {};
   const total = m.steps.length;

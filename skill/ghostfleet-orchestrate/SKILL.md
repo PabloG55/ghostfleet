@@ -334,8 +334,10 @@ the screen lives. `fleet-shots verdict <run>` still reads the verdict in a termi
   (a `data-testid` built from a template literal, a placeholder with a real `…`). An invented
   selector produces a step that photographs an unchanged screen.
 - **`--check` before done (5).** Unreviewed fails exactly as rejected does, so the task
-  cannot close until a human has looked. A flag the RUN raised needs a one-line reason to
-  clear, and the reason is printed — a click alone cannot launder a measured failure.
+  cannot close until a human has looked. On a recorded flow the owner's approve is the
+  reviewer's decision and passes whatever the run flagged; each flag is still printed, as
+  accepted by the approve (or with his note), so the record keeps it. On a per-step run a
+  flag the RUN raised still needs a one-line reason to clear.
 - **PROFILES DO NOT SHARE A SHOTS FOLDER.** `CLAUDE_FLEET_DIR` is `<config>/fleet`, so a
   `personal` worker's runs land under `~/.claude-personal` and a server started from a
   `work` session will not see them. Run `serve` from the same profile, or pass `--dir`.

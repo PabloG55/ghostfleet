@@ -256,13 +256,13 @@ try {
     if (s.ready > 0) is('...and the video plays from where step 3 starts', true, s.time >= 6 && s.time < 9);
     else skipRow('the video seeks to the chapter', 'this Chrome cannot decode the H.264 fixture');
 
-    // THE VERDICT AND ITS GATE: approving a run with a flagged step is not yet a pass.
+    // THE VERDICT AND ITS GATE: the owner's approve is a pass, flagged step or not.
     await tapAt(await centre('#app .rv-acts .go'));
-    s = await settle(x => /approved, but/.test(x.gate));
-    is('approve: the gate says what --check still wants', ['warn', 'approved, but --check still refuses: chapter 3 needs a reason'], [s.gateCls, s.gate]);
+    s = await settle(x => x.gateCls === 'ok');
+    is('approve: the gate passes over a flagged chapter', ['ok', 'approved — fleet-shots --check passes this run'], [s.gateCls, s.gate]);
     await typeInto('#app .rv-step .rv-note', 2, 'the 404 is the empty-state copy, fixed in #14');
     s = await settle(x => x.gateCls === 'ok');
-    is('...and a reason on chapter 3 clears it', ['ok', 'approved — fleet-shots --check passes this run'], [s.gateCls, s.gate]);
+    is('...and an optional note on chapter 3 changes nothing', ['ok', 'approved — fleet-shots --check passes this run'], [s.gateCls, s.gate]);
     await sleep(900);   // past the typing debounce, so the write lands before back
     await b.evaluate(() => { history.back(); return null; });
     s = await settle(x => /reviews/.test(x.main) && x.branches.length);
@@ -335,7 +335,7 @@ try {
     is('→ steps to the next chapter', [2], s.on);
     await press('a');
     s = await settle(x => /approved/.test(x.gate));
-    is('a approves', 'approved, but --check still refuses: chapter 3 needs a reason', s.gate);
+    is('a approves, and the flagged chapter does not hold it back', 'approved — fleet-shots --check passes this run', s.gate);
     await press('r');
     s = await settle(x => /rejected/.test(x.gate));
     is('r rejects', ['bad', 'rejected — --check refuses this run'], [s.gateCls, s.gate]);

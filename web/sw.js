@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: e33cb68b0ca4
+// CLIENT-HASH: ae21a8e833bf
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -438,7 +438,7 @@
 // v96 lists every paired machine's runs in Reviews, each card naming its machine, and opens,
 // plays and judges one through this host — the verdict lands on the machine that recorded
 // it. A phone on v95 lists this machine's runs only.
-const VERSION = 'ghostfleet-v96';
+const VERSION = 'ghostfleet-v97';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
