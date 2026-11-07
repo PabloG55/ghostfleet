@@ -169,6 +169,85 @@ try {
     is('...and a reload keeps the tab', 'projects/personal', s.where);
   });
 
+  // ══ a jump across the stack is not undone by its own address ════════════════════════
+  // Ctrl-p from a session changes the screen at once and pops two entries with ONE
+  // history.go(-2), which lands later. The screen is painted in between, and a paint that
+  // rewrote the address then would write Projects into the SESSION's entry — the one being
+  // left, so going forward to it and reloading opens Projects. Whether a given run would notice
+  // depends on timing; the ORDER does not — no replaceState or pushState between a go() and
+  // its popstate — so that is the claim, and then the effect: the next back leaves the app.
+  await step('jump', async () => {
+    await fresh(A);
+    await A.unlock();
+    await A.card('acme-api');
+    await A.settle(x => x.where === 'grid:acme-api');
+    await A.card('api-fix');
+    await A.settle(x => x.where.startsWith('session:'));
+    await A.t.evaluate(() => {
+      const w = window; w.__gfRace = []; w.__gfPend = 0;
+      const go = history.go.bind(history), rs = history.replaceState.bind(history), ps = history.pushState.bind(history);
+      history.go = (n) => { w.__gfPend++; return go(n); };
+      history.replaceState = (...a) => { if (w.__gfPend) w.__gfRace.push('replace ' + a[2]); return rs(...a); };
+      history.pushState = (...a) => { if (w.__gfPend) w.__gfRace.push('push ' + a[2]); return ps(...a); };
+      // capture: at the window, ahead of the app's own popstate listener
+      addEventListener('popstate', () => { if (w.__gfPend) w.__gfPend--; }, true);
+      return null;
+    });
+    await A.t.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+    await A.t.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+    s = await A.settle(x => x.where.startsWith('projects') && x.q === '?screen=projects');
+    is('Ctrl-p from a session: Projects, and the address says so', ['projects/all', '?screen=projects'], [s.where, s.q]);
+    is('...and nothing rewrote the address while its pop was on the way',
+       [], await A.t.evaluate(() => window.__gfRace));
+    await A.back();
+    s = await A.look();
+    is('...so the next back leaves the app', 'about:blank', s.href);
+  });
+
+  // ══ a full history: the browser has thrown the app's root away ════════════════════════
+  // A tab's history is capped (50 entries in Chrome), and a full one prunes the oldest entry
+  // its page pushed past WITHOUT A GESTURE before the oldest entry — which can be the app's
+  // own root, so a jump that pops by navDepth lands on the page before the app. Built here on
+  // purpose: fillers up to the cap, then the walk made by script (no user activation), and the
+  // first row asks the browser whether the root really went, so a Chrome that stops pruning
+  // this way says so instead of letting the rows below pass for nothing. A tab of its own,
+  // because a full history would change what every later step's back means.
+  await step('full history', async () => {
+    const C = await tab(await b.newTab());
+    await C.navigate('about:blank');
+    for (let i = 0; i < 49; i++) { await C.t.call('Page.navigate', { url: `data:text/html,fill-${i}` }); await sleep(40); }
+    await C.navigate(`${srv.base}/index.html`);
+    await C.unlock();
+    const open = (name) => C.t.evaluate((x) => {
+      const n = [...document.querySelectorAll('#app .card .c-name')].find(e => e.textContent.trim() === x || e.textContent.trim().startsWith(x + ' '));
+      const c = n && n.closest('.card');
+      if (!c) return false;
+      // untrusted pointer events: the app's tap, with no user activation behind it
+      const r = c.getBoundingClientRect(), at = { bubbles: true, pointerId: 7, pointerType: 'mouse', isPrimary: true, button: 0, clientX: r.left + r.width / 2, clientY: r.bottom - 6 };
+      c.dispatchEvent(new PointerEvent('pointerdown', at));
+      c.dispatchEvent(new PointerEvent('pointerup', at));
+      return true;
+    }, name);
+    await open('acme-api');
+    await C.settle(x => x.where === 'grid:acme-api');
+    await open('api-fix');
+    await C.settle(x => x.where.startsWith('session:'));
+    await sleep(400);                                  // the pushes land after the paint
+    const h = await C.t.call('Page.getNavigationHistory', {});
+    const ours = h.entries.filter(x => x.url.startsWith(srv.base)).map(x => new URL(x.url).searchParams.get('screen'));
+    is('a full history walked without a gesture: the browser kept no root of the app', false, ours.includes('projects'));
+    await C.t.evaluate(() => { window.__gfSamePage = 1; return null; });
+    await C.t.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+    await C.t.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'p', code: 'KeyP', windowsVirtualKeyCode: 80, modifiers: 2 });
+    await sleep(800);
+    s = await C.settle(x => x.where.startsWith('projects'));
+    is('...Ctrl-p still lands on Projects, on this page and not the one before it',
+       ['projects/all', '?screen=projects', 1], [s.where, s.q, await C.t.evaluate(() => window.__gfSamePage || 0)]);
+    await C.back();
+    s = await C.look();
+    is('...and the next back leaves the app', true, /^data:text\/html,fill-/.test(s.href));
+  });
+
   // ══ two tabs, two places ═════════════════════════════════════════════════════════════
   // One browser, so one localStorage: the stored state is whichever wrote last, and each tab
   // has to come back from its own address instead.

@@ -6617,9 +6617,13 @@ function placeHref() { return (location.pathname || '') + PL.toQuery(placeOf()) 
 // The current entry's address brought into line with the screen, without a new entry. Only
 // when it differs — render() runs on every poll, and WebKit refuses a page that replaces its
 // state a hundred times in ten seconds. Never under the lock: the address there is the
-// place the unlock will land on, and the lock screen is not a place.
+// place the unlock will land on, and the lock screen is not a place. Never while a pop of
+// setDepth's is on the way, either: the screen has already changed and the entry has not, so
+// a replaceState then writes the place being landed on into the entry being LEFT: go forward
+// to that session and reload, and it opens Projects. The popstate that lands
+// the pop syncs instead, onto the entry that is now current.
 function syncUrl() {
-  if (S.locked || typeof history === 'undefined' || typeof history.replaceState !== 'function') return;
+  if (S.locked || navSkip || typeof history === 'undefined' || typeof history.replaceState !== 'function') return;
   const want = PL.toQuery(placeOf());
   if (location.search === want) return;
   try { history.replaceState(history.state, '', placeHref()); } catch {}
@@ -6632,13 +6636,33 @@ function syncUrl() {
 let navSkip = 0;
 function setDepth(d) {
   if (navDepth > d) {
-    const n = navDepth - d;
+    // never past the first entry that is not this page's: see ownBelow
+    const n = Math.min(navDepth - d, ownBelow());
     navDepth = d;
-    if (typeof history !== 'undefined' && typeof history.go === 'function') {
+    if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
       navSkip++;
       try { history.go(-n); } catch { navSkip--; }
     }
   } else while (navDepth < d) pushNav();
+}
+// HOW MANY OF THE ENTRIES BELOW THIS ONE ARE THIS PAGE'S. navDepth counts the entries this page
+// pushed above its own, and the browser may have thrown some away: a tab's history is capped
+// (50 in Chrome), and a full one prunes the oldest entry the user could not have meant to
+// keep — one its page pushed past without a gesture — before the oldest entry. That is often
+// the app's own root. Then go(-navDepth) is counted correctly and lands one entry too far, on
+// the page the tab held before, which loads (or comes back from the cache) where Projects was
+// asked for. Measured: a desk tab fifty entries deep, root gone, Ctrl-p from a master went to
+// the grid of an earlier page instead. The pruned entries cannot be put back, so the oldest
+// entry of this page that is left becomes the root, and the next back leaves the app as it
+// should. No Navigation API, no way to ask: the count stands.
+function ownBelow() {
+  const nav = typeof navigation !== 'undefined' ? navigation : null;
+  const cur = nav && nav.currentEntry;
+  if (!cur || typeof nav.entries !== 'function') return Infinity;
+  const es = nav.entries();
+  let k = 0;
+  for (let i = cur.index - 1; i >= 0 && es[i] && es[i].sameDocument; i--) k++;
+  return k;
 }
 // ...and what has to wait for that pop to land: a push made before it would be pushed above
 // the entries it is about to remove. The timer is for a pop that never answers (a history the
@@ -6702,7 +6726,7 @@ function back() {
   // Ask the platform to pop, so a tap and a swipe take the identical path. With no entry
   // of ours on the stack (or no history at all) there is nothing to pop, so move directly
   // rather than doing nothing — a back button that silently fails is worse than no gesture.
-  if (navDepth > 0 && typeof history !== 'undefined' && typeof history.back === 'function') history.back();
+  if (navDepth > 0 && ownBelow() > 0 && typeof history !== 'undefined' && typeof history.back === 'function') history.back();
   else popTo();
 }
 
