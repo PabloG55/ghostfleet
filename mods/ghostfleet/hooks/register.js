@@ -35,7 +35,7 @@
 // unbounded one would hold a turn open for as long as the filesystem stalled.
 
 import {
-  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson,
+  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson, codeId, isCodeFile,
 } from './shape.js'
 import {
   mergesAPr, changesABoundary, isMergeTool, prSelector, boundaryOn, mergeRefusal,
@@ -185,7 +185,29 @@ let heartbeat = null
 async function setState($, next, turnId) {
   state = next
   const nowMs = await $.clock.now()
-  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId }))
+  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId, code: codeLoaded || '' }))
+}
+
+// The code this process loaded (shape.js codeId says why `v` cannot tell): read once, at the
+// first session.start of this module, and never again. A reload starts the module over and so
+// reads it afresh; a /clear is the same module, and reading again then would describe whatever
+// is on disk now rather than what is running. '' is "could not be read", reported as nothing,
+// which a reader takes as not known to be current.
+let codeLoaded = null
+const CODE_READ_MS = 30_000
+async function readCode($) {
+  if (codeLoaded !== null) return codeLoaded
+  codeLoaded = ''
+  const dir = `${$.plugin.root}/hooks`
+  // Slow is waited for, because nothing waits on this past the start's own bound (startState);
+  // only a filesystem that never answers is given up on.
+  const list = await bounded($, $.fs.list(dir), CODE_READ_MS, null)
+  if (!list) return codeLoaded
+  const names = list.filter(e => e && e.kind === 'file' && isCodeFile(e.name)).map(e => e.name)
+  const texts = await Promise.all(names.map(name => bounded($, $.fs.read(`${dir}/${name}`), CODE_READ_MS, null)))
+  if (texts.some(t => typeof t !== 'string')) return codeLoaded
+  codeLoaded = names.length ? codeId(names.map((name, i) => ({ name, text: texts[i] }))) : ''
+  return codeLoaded
 }
 
 // The process this module runs in. `$.process.run` starts its child from Claude Code's
@@ -199,6 +221,13 @@ async function learnPid($) {
 
 async function startState($) {
   pid = await learnPid($)
+  // The start waits for the code as long as it can spare, and no longer. Measured on a scratch
+  // session started while the machine was busy: the read outlasted that, the record was written
+  // without it, and an idle session writes nothing again but its heartbeat, so it named no code
+  // for as long as it sat there, which `fleet-mod reload` reads as stale. So a read that lands
+  // late patches its answer in, into a record of this process that has none yet.
+  const reading = readCode($)
+  await bounded($, reading, IO_MS * 3, '')
   // A resumed conversation's record can still say `working` from the process that died
   // mid-turn; this process has started no turn, so say what it IS doing.
   const turns = await bounded($, $.session.turns(), IO_MS, 0)
@@ -208,6 +237,8 @@ async function startState($) {
   if (!(await setState($, first))) {
     $.clock.after(2000, () => { if (state === first) setState($, first) })
   }
+  void reading.then(code => code && patchRecord($, rec => (rec.mod && pid && rec.mod.pid === pid && !rec.mod.code)
+    ? { ...rec, mod: { ...rec.mod, code } } : null)).catch(() => {})
   // A state can be right for hours (a ready session nobody talks to), so its age says
   // nothing about whether anybody is still writing it. The heartbeat is what lets a
   // reader tell "ready for an hour" from "the plugin was disabled an hour ago".

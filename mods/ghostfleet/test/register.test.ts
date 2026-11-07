@@ -6,6 +6,7 @@
 // waiting for it. Each test drives one event the way a session raises it and reads the
 // record the shell hook would read next.
 import { test, expect, mock } from 'claude-code/testing'
+import { codeId } from '../hooks/shape.js'
 
 const DIR = '/fleet'
 const ID = 'sess-1'
@@ -14,18 +15,22 @@ const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', 
 
 // `hang`: commands whose run never settles, as a run whose environment a reload dropped never
 // does. `takeBack`: an entry the sender renames away in the instant the mod marks it submitted.
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[]; hang: Set<string>; takeBack: string }
+// `code`: the files of the plugin's own hooks folder, wherever `$.plugin.root` puts it, each read
+// held until `codeGate` resolves when one is set.
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[]; hang: Set<string>; takeBack: string; code: Record<string, string> | null; codeGate: Promise<void> | null }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [], hang: new Set(), takeBack: '' }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [], hang: new Set(), takeBack: '', code: null, codeGate: null }
+  const codeAt = (p: string) => (w.code && /\/hooks\/[^/]+$/.test(p) ? w.code[p.slice(p.lastIndexOf('/') + 1)] : undefined)
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
   on('session.id', () => ({ value: ID }))
   on('session.turns', () => ({ value: 0 }))
-  on('fs.read', (_$: any, e: any) => {
+  on('fs.read', async (_$: any, e: any) => {
     if (w.stall) return new Promise(() => {})
-    const text = w.files.get(e.path)
+    if (w.codeGate && codeAt(e.path) !== undefined) await w.codeGate
+    const text = w.files.get(e.path) ?? codeAt(e.path)
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -51,6 +56,7 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   })
   on('fs.exists', (_$: any, e: any) => ({ value: w.files.has(e.path) }))
   on('fs.list', (_$: any, e: any) => {
+    if (w.code && e.path.endsWith('/hooks')) return { value: Object.keys(w.code).map(name => ({ name, kind: 'file', size: 1 })) }
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
@@ -139,6 +145,51 @@ test('with no record the mod writes nothing: the shell hook owns its existence',
   const w = world(on, {}, null)
   await $.turn.start({ text: 'go', turnId: 't1' })
   expect(w.files.size).toBe(0)
+})
+
+// WHICH CODE THIS PROCESS LOADED, for `fleet-mod reload` to hold against the runtime's
+// (shape.js codeId): the hooks folder's code files, read at the module's first session.start.
+// A /clear starts the session again in the same module, and must not read the disk again: what
+// is there now may be a deploy this process never loaded.
+test('the record names the code this module loaded, read once: a /clear does not read it again', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two', 'hooks.json': '{}', '.shape.js.swp': 'no', 'notes.md': 'no' }
+  await start($)
+  const first = rec(w).mod.code
+  expect(first).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  expect(first).not.toBe(codeId([{ name: 'register.js', text: 'one!' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  w.code['register.js'] = 'deployed after this process loaded'
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(rec(w).mod.code).toBe(first)
+})
+
+// Measured on a scratch session started on a busy machine: the read outlasted the start, and an
+// idle session's record then named no code at all, which reads as stale.
+test('a code read that outlasts the start is patched into the record when it lands', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two' }
+  let open = () => {}
+  w.codeGate = new Promise<void>(r => { open = r })
+  const started = start($)
+  await clock.advance(6000)
+  await started
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
+  open()
+  await clock.settle()
+  expect(rec(w).mod.code).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }]))
+  expect(rec(w).state).toBe('idle')
+})
+
+test('a hooks folder that cannot be read names no code, rather than a wrong one', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
 })
 
 test('the budget lands in the record with the moment its window resets', async ($, on) => {

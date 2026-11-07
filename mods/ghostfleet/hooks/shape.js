@@ -31,8 +31,9 @@ export function asksAPerson(e, verdict) {
 
 // The state, merged into the record the shell hook wrote. `status` is set too, so a
 // reader that only knows `status` sees the same word; `source` and `mod` are what let a
-// reader decide whether to believe it (lib/mod-status.mjs).
-export function withState(rec, state, { nowMs, pid, turnId }) {
+// reader decide whether to believe it (lib/mod-status.mjs). `mod.code` is which code this
+// process loaded (codeId), once it has been read.
+export function withState(rec, state, { nowMs, pid, turnId, code }) {
   return {
     ...rec,
     ...(turnId ? { turnId } : {}),
@@ -40,8 +41,27 @@ export function withState(rec, state, { nowMs, pid, turnId }) {
     state,
     source: 'mod',
     ts: Math.floor(nowMs / 1000),
-    mod: { v: VERSION, pid, hb: nowMs, at: nowMs },
+    mod: { v: VERSION, pid, hb: nowMs, at: nowMs, ...(code ? { code } : {}) },
   }
+}
+
+// WHICH CODE A PROCESS LOADED, as one short string. `v` above cannot say: the mod is read in
+// place from the runtime, so a deploy is a cf-sync with no version bump, and every session
+// reports 0.1.0 whether it loaded today's hooks or last month's. A session keeps what it loaded
+// until /reload-plugins, so "is it on the mod" was answered yes for sessions running code from
+// before a fix, and `fleet-mod reload` passed them over as "already on mod". This is the same
+// digest of the same files computed on both sides: by the mod over `$.plugin.root/hooks` at its
+// first session.start (register.js readCode), and by lib/mod-reload.mjs over the runtime's copy
+// now. Equal means the session runs what is on disk. FNV-1a over each file's name and text, in
+// name order, with the total length beside it: a change detector, not a signature.
+export const isCodeFile = name => typeof name === 'string' && !name.startsWith('.') && /\.(js|json)$/.test(name)
+export function codeId(files) {
+  let h = 0x811c9dc5, n = 0
+  const eat = s => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0 } n += s.length }
+  for (const f of [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    eat(f.name); eat('\0'); eat(String(f.text)); eat('\0')
+  }
+  return `${h.toString(16).padStart(8, '0')}-${n.toString(36)}`
 }
 
 // An ISO timestamp as epoch seconds, so a shell reader compares it with `date +%s` and

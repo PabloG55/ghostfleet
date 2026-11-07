@@ -1005,7 +1005,8 @@ cf-acme-api/api-fix  ~/.claude       2.1.292  idle     reload
 cf-acme-web/master   ~/.claude-work  2.1.292  working  skip: busy
 cf-acme-web/scratch  ~/.claude-work  ?        -        skip: not claude (codex)
 cf-toolbox/master    ~/.claude       2.1.292  ready    already on mod
-$ fleet-mod reload --apply         # do it, then read every record back: ✓ on mod / ✗ why
+cf-toolbox/docs-pass ~/.claude       2.1.292  ready    reload: stale mod
+$ fleet-mod reload --apply         # one at a time, each read back before the next: ✓ / ✗ why
 ```
 
 - **reload**: `/reload-plugins` typed into the session. No turn starts, and on a new
@@ -1021,8 +1022,18 @@ $ fleet-mod reload --apply         # do it, then read every record back: ✓ on 
   background command that will start one), a permission dialog, a question waiting on you,
   something half-typed, a pane with no input box drawn: each is listed with why, and left
   as it was. Neither is the session running the command.
+- **stale mod**: on the mod, but not on the code the runtime holds now. A deploy is a
+  `cf-sync` with no version bump, so every session reports the same `v`; each one's record
+  says instead which code its process loaded (`mod.code`, a digest of the mod's hooks
+  folder taken at its first session start), and `fleet-mod reload` compares that with the
+  runtime's copy. One that names its code is sent `/reload-plugins` through its own
+  delivery (`fleet-send`), which runs it once; one that names none is from before either
+  existed, and has it typed. `fleet-mod status` says how many sessions are behind.
+- **One at a time.** Each session is acted on and read back before the next is touched, so
+  a reload that goes wrong does so once, in front of you.
 - **Done means the record says so.** Each session gets 15 seconds to write `source: "mod"`
-  from a live process after the action; otherwise it is ✗ with what its pane said.
+  from a live process after the action (for a stale one, with the runtime's code); otherwise
+  it is ✗ with what its pane, or fleet-send, said.
 
 `--only <sock>[/<session>]` narrows it to one fleet or one session; `--reload-only` never
 restarts. The running version comes from Claude's own note about the process
