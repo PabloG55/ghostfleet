@@ -165,7 +165,7 @@ function restore() {
   if (S.screen === 'grid' && !S.project) S.screen = 'projects';
   // A run is reopened by its address and read again; a list is read again. Neither payload
   // is kept: a verdict changes from another device, and a stale one would be shown as now.
-  S.rv = S.screen === 'review' && j.rv && j.rv.profile && j.rv.run ? { profile: String(j.rv.profile), run: String(j.rv.run) } : null;
+  S.rv = S.screen === 'review' && j.rv && j.rv.profile && j.rv.run ? { host: String(j.rv.host || ''), profile: String(j.rv.profile), run: String(j.rv.run) } : null;
   if (S.screen === 'review' && !S.rv) S.screen = 'reviews';
   S.stale = j.at || 0;
   // ...and the trail the back gesture would have had if you had walked here. A cold open is
@@ -1326,7 +1326,13 @@ export function rvAge(sec) {
   return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m` : s < 48 * 3600 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
 }
 const rvAgeOf = (iso, nowS = Math.floor(Date.now() / 1000)) => rvAge(nowS - Math.floor((Date.parse(iso) || 0) / 1000));
-const rvWhere = (g) => `${g.project}${S.shots && S.shots.multi ? ` · ${g.profile}` : ''}`;
+// ONCE A MACHINE IS PAIRED every card names its host, the way every Projects row does once
+// there are two (`tabOf`: host, then profile) — so a card reads `acme-api · vm · work`, and
+// the laptop's own carry the laptop's label rather than nothing, which would read as "here"
+// only to someone who knows which phone this is. One machine: no host, as before.
+const rvPaired = () => !!(S.shots && Array.isArray(S.shots.hosts) && S.shots.hosts.length > 1);
+const rvHostLabel = (key) => (((S.shots && S.shots.hosts) || []).find(h => (h.key || '') === (key || '')) || {}).label || key || '';
+const rvWhere = (g) => [g.project, rvPaired() ? g.host : '', S.shots && S.shots.multi ? g.profile : ''].filter(Boolean).join(' · ');
 const rvCommit = (r) => r.commit ? `${r.commit}${r.dirty ? '*' : ''}` : 'no commit';
 export function reviewModel(g, sel = false) {
   const r = g.latest;
@@ -1366,10 +1372,12 @@ function openReviews() {
 }
 // One run, a level under the list — or, from the list beside it at a desk, in place of the
 // run that was open (the same depth: the right pane changes, the trail does not grow).
-function openReview(profile, run) {
+// `host` is the paired machine's key ('' for this one): the run is named by it as well,
+// since two machines can hold a run of the same name.
+function openReview(host, profile, run) {
   const swap = S.screen === 'review';
   rvFlushNow();
-  S.screen = 'review'; S.rv = { profile, run }; S.rvRun = null; S.rvErr = ''; S.rvSave = '';
+  S.screen = 'review'; S.rv = { host: host || '', profile, run }; S.rvRun = null; S.rvErr = ''; S.rvSave = '';
   if (!swap) pushNav();
   save(); render();
   readReview();
@@ -1378,13 +1386,15 @@ async function readReview() {
   const want = S.rv;
   if (!want) return;
   try {
-    const j = await api.getShotsRun(want.profile, want.run);
+    const j = await api.getShotsRun(want.profile, want.run, want.host);
     if (S.rv !== want) return;                      // another run was opened meanwhile
     S.rvRun = j; S.rvErr = '';
   } catch (e) {
     if (e instanceof api.AuthError) return lock();
     if (S.rv !== want) return;
-    S.rvErr = e && e.status === 404 ? 'that run is not on this machine any more' : `could not read the run — ${e && e.message || e}`;
+    S.rvErr = e && e.status === 404 ? `that run is not on ${want.host ? 'that machine' : 'this machine'} any more`
+      : e && e.status === 502 ? `${rvHostLabel(want.host)} did not answer — its run cannot be opened now`
+      : `could not read the run — ${e && e.message || e}`;
   }
   render();
 }
@@ -1410,7 +1420,7 @@ function reviewsProps() {
   // the keys' cursor — two lit cards would be two answers to "which one is this".
   const selOf = (r) => !(S.screen === 'review' && S.rv) && stops[S.rvsel] && stops[S.rvsel].r === r;
   const cur = S.screen === 'review' && S.rv ? S.rv : null;
-  const isCur = (g, r) => !!cur && cur.profile === g.profile && cur.run === r.id;
+  const isCur = (g, r) => !!cur && (cur.host || '') === (g.host_key || '') && cur.profile === g.profile && cur.run === r.id;
   const groups = sh ? sh.groups : [];
   return {
     scope: `— reviews · ${groups.length}`,
@@ -1422,9 +1432,9 @@ function reviewsProps() {
     // tablet the list is several tracks wide, and an "earlier" row that was its own item
     // would land in the next column, under somebody else's branch.
     cards: sh == null ? skeletonCards(2)
-      : groups.length ? groups.map((g) => {
+      : (groups.length ? groups.map((g) => {
           const open = S.rvOpen.includes(g.key);
-          const kids = [cardEl({ ...reviewModel(g, selOf(g.latest) || isCur(g, g.latest)) }, { tap: () => openReview(g.profile, g.latest.id) }, -1)];
+          const kids = [cardEl({ ...reviewModel(g, selOf(g.latest) || isCur(g, g.latest)) }, { tap: () => openReview(g.host_key, g.profile, g.latest.id) }, -1)];
           if (g.earlier.length) {
             kids.push(el('button', { class: 'rv-more', type: 'button', 'aria-expanded': open ? 'true' : 'false',
               onclick: () => rvToggle(g.key) }, [
@@ -1433,7 +1443,7 @@ function reviewsProps() {
             if (open) for (const r of g.earlier) {
               kids.push(el('button', { class: 'rv-old' + (selOf(r) || isCur(g, r) ? ' sel' : ''), type: 'button',
                 style: `--c:${G.COLORS[RV_HUE[r.state.cls]] || G.COLORS.grey}`,
-                'aria-label': `${g.branch} run ${r.id}: ${r.state.label}`, onclick: () => openReview(g.profile, r.id) }, [
+                'aria-label': `${g.branch} run ${r.id}: ${r.state.label}`, onclick: () => openReview(g.host_key, g.profile, r.id) }, [
                 el('span', { class: 'rv-ol', text: r.state.label }),
                 el('span', { class: 'rv-ow', text: `${rvAgeOf(r.at)} · ${rvCommit(r)}` }),
                 el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
@@ -1442,10 +1452,17 @@ function reviewsProps() {
           }
           return el('div', { class: 'rv-group' }, kids);
         })
-      : [el('div', { class: 'sect', text: 'no runs recorded yet — `fleet-shots <flow>` records one' })],
+      : [el('div', { class: 'sect', text: 'no runs recorded yet — `fleet-shots <flow>` records one' })]).concat(rvMissing(sh)),
     listRef: (list) => { if (list) watchScroll('reviews', list); },
     toast: S.toast,
   };
+}
+// A PAIRED MACHINE THAT DID NOT ANSWER costs its own runs and one quiet line after the cards
+// (the list's own `.sect`, full width and dim): never an error screen, never a spinner that
+// waits on it, and never the other machines' runs with it. A machine with Reviews switched
+// off is not in `missing` at all — off is the owner's choice there, not something to report.
+function rvMissing(sh) {
+  return ((sh && sh.missing) || []).map(m => el('div', { class: 'sect rv-missing', role: 'status', text: `${m.host} ${m.why} · its runs are not listed` }));
 }
 // EVERY WORD ON THE RUN SCREEN, here and not in the component (screens.jsx, "the strings").
 const REVIEW_WORDS = {
@@ -1493,7 +1510,7 @@ function rvGate(run) {
 }
 function reviewProps() {
   const j = S.rvRun, run = j && j.run;
-  const g = run && { project: run.project, profile: run.profile };
+  const g = run && { project: run.project, profile: run.profile, host: run.host || rvHostLabel('') };
   return {
     scope: '— review',
     mode: modeSpec(),
@@ -1553,6 +1570,9 @@ async function rvFlush() {
   const body = run.kind === 'recorded'
     ? { profile: want.profile, run: want.run, flow: (v.flow && v.flow.v) ? v.flow : { v: '' }, chapters: v.chapters || {} }
     : { profile: want.profile, run: want.run, state: Object.fromEntries(Object.entries(v).filter(([, x]) => x && x.v)) };
+  // A PAIRED MACHINE'S RUN is judged THERE: the host rides along and this machine forwards it,
+  // so the verdict lands beside the run, where that machine's --check reads it.
+  if (want.host) body.host = want.host;
   try {
     const r = await api.postShotsVerdict(body);
     if (S.rvRun === j && r.state) j.run.state = r.state;
@@ -8637,7 +8657,7 @@ function reviewsKey(e, k, lk, ctrl) {
   switch (k) {
     case 'ArrowUp': case 'k': move(-1); break;
     case 'ArrowDown': case 'j': move(1); break;
-    case 'Enter': if (at) openReview(at.g.profile, at.r.id); break;
+    case 'Enter': if (at) openReview(at.g.host_key, at.g.profile, at.r.id); break;
     case ' ': case 'l': if (at && at.g.earlier.length) rvToggle(at.g.key); break;
     case 'q': case '`': back(); break;
     case 'Q': toProjects(); break;

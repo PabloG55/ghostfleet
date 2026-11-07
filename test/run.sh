@@ -8252,9 +8252,9 @@ if command -v node >/dev/null 2>&1; then
     bad "the daemon comes up (reviews)" "listening on $RBASE" "$(tr '\n' ' ' < "$RVS/log" 2>/dev/null | cut -c1-180)"
   fi
   reap "$rvp"; wait "$rvp" 2>/dev/null || true
-  # PAIR B'S, NOT THIS ONE'S: a paired machine reads none of this yet. Asked of the source
-  # because the sets are the whole of what a paired host may do.
-  is "no shots route is a paired host's read"  "0" "$(grep -E '^const PAIR_(READS|VERBS) = ' "$ROOT/bin/fleet-serve.mjs" | grep -c 'shots' || true)"
+  # What a PAIRED machine may ask of these routes is the "Reviews across two paired machines"
+  # group's: reviews-peer-check asks pairAllows itself, which is the code that decides,
+  # rather than grepping the sets.
   rm -rf "$RVS"
 else
   skip "the Reviews routes" "node missing"
@@ -19786,6 +19786,30 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "$PRC"
 else
   skip "two paired machines" "node missing"
+fi
+
+# REVIEWS ACROSS THE PAIRING (lib/shots.mjs "PAIRED HOSTS"): the laptop's list carries the
+# vm's runs with the vm's label; a vm run is read, its video ranged (206, the vm's
+# Content-Range and the vm's BYTES) and given a verdict that lands in the vm's run dir and not
+# in the laptop's run of the same name, audited on both; unsigned, a stranger's pairing, a
+# replay and a second hop are refused; a vm with Reviews off contributes nothing and a laptop
+# with Reviews off shows none; a silent vm and a dead one each cost only their own runs, with
+# one entry saying so. Watched red against staging's daemon (31 of 58 rows), and the rows
+# staging passes against copies of this one broken on purpose (listed in the PR).
+group "fleet-serve: Reviews across two paired machines — listed, ranged, a verdict lands on the peer"
+if command -v node >/dev/null 2>&1; then
+  RPC="$(mktemp -d "$TEST_RUNS.$$.rvpeer.XXXXXX")"
+  node "$ROOT/test/helpers/reviews-peer-check.mjs" > "$RPC/out" 2> "$RPC/err"
+  rpcrc=$?
+  is "reviews-peer-check ran"         "0" "$rpcrc"
+  is "...without complaining"         ""  "$(head -2 "$RPC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$RPC/out")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$RPC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$RPC/out"
+  rm -rf "${RPC:?}"
+else
+  skip "Reviews across paired machines" "node missing"
 fi
 
 # ...and what the phone and the desk DRAW of it, in fixture mode at 390x844 with touch and

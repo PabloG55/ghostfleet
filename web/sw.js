@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 81b7ebe4291b
+// CLIENT-HASH: e33cb68b0ca4
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -435,7 +435,10 @@
 // v95 adds Reviews: fleet-shots' runs, one card per branch, a run's video by chapter, its
 // steps and requests, and the verdict saved to the Mac. A phone on v94 has no Reviews row,
 // and `fleet-shots serve` — which used to be where reviews lived — is retired.
-const VERSION = 'ghostfleet-v95';
+// v96 lists every paired machine's runs in Reviews, each card naming its machine, and opens,
+// plays and judges one through this host — the verdict lands on the machine that recorded
+// it. A phone on v95 lists this machine's runs only.
+const VERSION = 'ghostfleet-v96';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -468,6 +471,7 @@ const SHELL = [
   './fixtures/shots-run-2026-03-05_14-02-11.json', './fixtures/shots-run-2026-03-04_10-15-40.json',
   './fixtures/shots-run-sign-in-flow.json', './fixtures/shots-run-2026-03-05_09-30-00.json',
   './fixtures/shots-run-2026-03-03_16-45-12.json',
+  './fixtures/shots-run-vm-2026-03-05_13-20-00.json', './fixtures/shots-run-vm-2026-03-02_08-10-00.json',
 ];
 
 self.addEventListener('install', e => {

@@ -2372,9 +2372,30 @@ export function enforceQuota(dir, quota = ATTACH_QUOTA) {
 // should not buzz about a screen he is looking at. It answers two fields, {idle, locked},
 // computed from this host's own readings — no project, no session, no name — so what it
 // tells a paired host is only "someone touched a key here N seconds ago".
-const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence']);
+// REVIEWS (lib/shots.mjs, "PAIRED HOSTS"), so one app reviews every machine's runs. Each
+// is safe to hand a paired host for its own reason, and none needs a passkey:
+//   /api/shots        the run list: branch names, commits, states and step counts — what
+//                     /api/grid already tells a paired host about the same branches
+//   /api/shots/run    one run's steps, requests and provenance: the URLs fleet-shots drove
+//                     and what they answered, recorded for a human to read, in the same
+//                     fleet whose conversations /api/session already shares
+//   /api/shots/media  one run's recording or stills, by name, matched against the media
+//                     pattern and resolved inside THAT run's own dir on this host — the same
+//                     checks a ticketed phone request gets, with the signature standing in for
+//                     the ticket. It is a read of a file this host made to be watched
+const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
+                            '/api/shots', '/api/shots/run', '/api/shots/media']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage and whether someone is at a keyboard to read; send (photos too), wake, park and resume to act';
+// THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
+// lets one machine write a merge-gating file on another — which is the point: the verdict
+// has to land where the run and its --check are. It is safe to expose because it is no more
+// than the phone on THIS host could already write here: the route takes no passkey for a
+// phone either (lib/shots.mjs, the verdict route), it writes one file, verdict.json, only
+// inside a run dir this host's own runDir() resolves, with a body cleanVerdict() checks
+// against this host's own manifest — and it is serialized and audited here with the paired
+// host's label and the client it acted for, exactly as a paired send is.
+const PAIR_POSTS = new Set(['/api/shots/verdict']);
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -2389,7 +2410,7 @@ export function pairAllows(method, p, body, verbs = PAIR_VERBS) {
   if (method !== 'POST') return false;
   if (p === '/api/verb') return verbs.has(body?.tool);
   if (p === '/api/attach') return verbs.has('fleet_send');
-  return false;
+  return PAIR_POSTS.has(p);
 }
 // THE TIME A FORWARDED PHOTO GETS. The body can be ATTACH_BODY_CAP, and the remote may run a
 // converter on it before it answers, so a flat 15 s would cut a big photo off over a slow
@@ -2448,6 +2469,32 @@ async function fanOut(pathq, req, timeout = 8000) {
   const v = peers();
   if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
   return Promise.all(v.peers.map(async (peer) => ({ peer, r: await callPeer(peer, { pathq, onBehalf: req.client.id, timeout }, { fan: true }) })));
+}
+// What lib/shots.mjs may do with this host's peers, on behalf of the phone that asked: its
+// list fans out like /api/waiting's, and a tap is a single signed call. The media is the one
+// call whose body is not JSON, so it streams (P.peerStream) — and is marked like any other
+// call, so a peer that stopped answering mid-video shows offline on Projects too.
+function shotsPeers(req) {
+  const v = peers();
+  // No req.client is the ticketed media route — a <video> carries no bearer — and there the
+  // client it acts for is the one the ticket was minted for, which lib/shots.mjs passes in.
+  const me = req.session ? req.client : null;     // see the Reviews dispatch: req.client may be a socket
+  if (!v.peers.length || (me && me.pair)) return null;
+  const who = (x) => x || (me && me.id) || '';
+  const byKey = (k) => v.peers.find(x => x.key === k.key);
+  return {
+    self: () => P.selfLabel(v),
+    list: () => v.peers.map(x => ({ key: x.key, label: x.label })),
+    fan: (pathq, ms) => fanOut(pathq, req, ms),
+    call: (k, { method = 'GET', pathq, body = null, ms }) => callPeer(byKey(k), { method, pathq, body, onBehalf: who(''), timeout: ms }),
+    stream: async (k, { method = 'GET', pathq, headers = {}, ms, onBehalf = '' }) => {
+      const peer = byKey(k);
+      let r;
+      try { r = await P.peerStream(peer, { method, pathq, headers, onBehalf: who(onBehalf), timeout: ms }); } catch (e) { r = { status: 0, error: e.message }; }
+      markPeer(peer, !!r.status, r.error || '');
+      return r;
+    },
+  };
 }
 const addrOf = (name, peer) => (peer ? P.joinAddr(name, peer.key) : name);
 // /api/projects with every peer's projects after this host's. This host's rows keep their
@@ -3287,7 +3334,13 @@ function agentCatalogue() {
   // among them: the play button and every session's talk are the phone's own features.
   // REVIEWS (lib/shots.mjs). /api/shots/media is the one route past the token gate above: a
   // <video> cannot send a bearer, so it carries the ticket the run read minted instead.
-  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.client || null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; } });
+  //   A PAIRED HOST'S RUNS come through `peers` — null when there are none, or when this
+  // request is itself a paired host's, which never fans out again (one hop).
+  //   `req.client` IS NOT UNSET ON THE TICKETED ROUTE: Node's IncomingMessage has a
+  // deprecated `client` alias for its socket, so `req.client || null` handed the media route a
+  // Socket for a client. Nothing read it until a paired host's media needed to know whether
+  // the request was signed. A session — a phone's or a signature's — is what made a client.
+  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req) });
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
