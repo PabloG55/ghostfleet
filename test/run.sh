@@ -25921,6 +25921,34 @@ else
   skip "a run leaves no fleet-serve" "node missing"
 fi
 
+group "entering master creates it once, and only when it is absent"
+# Drives the real _ensure_master / _new_session lifted out of bin/ghostfleet, against a tmux
+# server of this run's own ($TMUX_TMPDIR). TM is a recording wrapper, so "new-session was not
+# invoked" is read from what ran rather than inferred from the absence of a message.
+EM="$(mktemp -d)"
+mkdir -p "$EM/bin" "$EM/cfg"
+printf '#!/bin/sh\nexec sleep 60\n' > "$EM/bin/agent-here"; chmod +x "$EM/bin/agent-here"
+{ sed -n '/^_new_session() {/,/^}/p'  "$ROOT/bin/ghostfleet"
+  sed -n '/^_ensure_master() {/,/^}/p' "$ROOT/bin/ghostfleet"; } > "$EM/lib.sh"
+cat > "$EM/t.sh" <<EOT
+export PATH="$EM/bin:\$PATH"
+SOCK=cfmaster1; CONF=/dev/null; CFG_DIR="$EM/cfg"; BIN_DIR="$EM/bin"; PROJECT_AGENT=""
+TM() { echo "\$1" >> "$EM/calls"; tmux -L "\$SOCK" -f "\$CONF" "\$@"; }
+remember_agent() { :; }
+. "$EM/lib.sh"
+EOT
+em_run() { : > "$EM/calls"; bash -c ". '$EM/t.sh'; _ensure_master '$EM'; echo rc=\$?" 2>&1; }
+tmux -L cfmaster1 kill-server 2>/dev/null
+out="$(em_run)"
+is "master absent: it is created"                      "yes" "$(tmux -L cfmaster1 has-session -t master 2>/dev/null && echo yes || echo no)"
+is "...and the call reports success"                   "rc=0" "$out"
+out="$(em_run)"
+is "master present: nothing is printed (no duplicate)" "rc=0" "$out"
+is "...and new-session is never invoked"               "0" "$(grep -c '^new-session$' "$EM/calls")"
+is "...and still exactly one master"                   "1" "$(tmux -L cfmaster1 list-sessions -F '#{session_name}' | grep -cx master)"
+tmux -L cfmaster1 kill-server 2>/dev/null
+rm -rf "${EM:?}"
+
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────
 # A MARKER, NOT THE FIRST SUMMARY printf. cf_only used to take that printf as the end of the
 # last group, which made the n/a list below part of whichever group happened to be last — so

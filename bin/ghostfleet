@@ -568,15 +568,32 @@ master_checkout() {                # <project-root> <project-name> -> the checko
   printf '%s\n' "${main:-${first:-$root}}"
 }
 
+# CREATE master ONLY WHEN IT IS NOT THERE. This was `has-session || remember_agent` with the
+# create on the NEXT line, indented as though it were part of the `||` — it was not, so the
+# create ran on every entry. With master alive tmux refused and printed "duplicate session:
+# master" to the terminal, and the attach a moment later wiped it: a message flashed on
+# entering master and was gone before it could be read. No second session was ever made, which
+# is why it went unnoticed; the create was also never checked, the gap _new_session closes.
+# Braces make the guard cover both commands; the create is the checked one every other path uses.
+_ensure_master() {                   # $1=main checkout
+  TM has-session -t master 2>/dev/null && return 0
+  remember_agent master "${PROJECT_AGENT:-}"
+  _new_session master "$1" "${PROJECT_AGENT:-}" "" && return 0
+  "$BIN_DIR/fleet-agent" forget -s "$SOCK" master 2>/dev/null || true   # no marker without a session
+  return 1
+}
+
 # the "master" lead session runs in the project's main checkout. From inside it,
 # `C-s` (or C-a s) writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
 # we read that marker here to decide where to go next: the grid, or (on a plain
 # `/C-a g detach) back to Projects. Sets MASTER_GOTO for the caller.
 enter_master() {
   local main; main="$(master_checkout "$PROJECT_ROOT" "$PROJECT")"
-  TM has-session -t master 2>/dev/null || \
-    remember_agent master "${PROJECT_AGENT:-}"
-    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=$CFG_DIR/fleet" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"
+  if ! _ensure_master "$main"; then
+    _fail "could not start master for $PROJECT" \
+          "its pane exits immediately when agent-here is not on PATH — run ./install.sh, or cf-sync if the runtime is half-synced"
+    MASTER_GOTO=grid; return 0       # nothing to attach to; the grid still works
+  fi
   tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count
