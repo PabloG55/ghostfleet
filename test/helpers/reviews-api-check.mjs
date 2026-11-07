@@ -212,11 +212,11 @@ const check = (dir) => {
 const SF = path.join(W, 'sign-in-flow');
 is('unreviewed: --check refuses', 1, check(SF));
 const v1 = await post('/api/shots/verdict', { profile: 'work', run: 'sign-in-flow', flow: { v: 'approve', note: '' }, chapters: {} });
-is('approve with the flagged chapter unexplained: saved, and still flagged', '200:1 flagged', `${v1.status}:${v1.json?.state?.label}`);
-is('...so --check still refuses', 1, check(SF));
+is('approve with the flagged chapter unexplained: approved, the flag accepted', '200:approved · 1 flag accepted', `${v1.status}:${v1.json?.state?.text}`);
+is('...and --check passes: the approve is the decision', 0, check(SF));
 const v2 = await post('/api/shots/verdict', { profile: 'work', run: 'sign-in-flow', flow: { v: 'approve', note: 'looks right' },
   chapters: { 2: 'the 404 is the stub server', 9: 'a chapter this run lacks' } });
-is('a note on the flagged chapter: approved', '200:approved', `${v2.status}:${v2.json?.state?.label}`);
+is('a note on the flagged chapter: still approved', '200:approved', `${v2.status}:${v2.json?.state?.label}`);
 is('...and --check passes on what the phone wrote', 0, check(SF));
 is('...and a chapter the run lacks was dropped', false, '9' in (JSON.parse(fs.readFileSync(path.join(SF, 'verdict.json'), 'utf8')).chapters || {}));
 is('the list now reads it approved', 'approved', ((await get('/api/shots')).json?.groups || []).find(g => g.branch === 'api-fix')?.latest?.state?.label);

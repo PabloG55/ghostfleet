@@ -127,7 +127,7 @@ function Step({ s, run, t, v, cur, onSeek, onStep, onStepNote, onChapterNote }) 
 			recorded ? /* @__PURE__ */ u(Note, {
 				value: note,
 				label: t.chapterNoteLabel(s.n),
-				placeholder: flagged ? t.reasonPlaceholder : t.chapterPlaceholder,
+				placeholder: flagged ? t.flagNotePlaceholder : t.chapterPlaceholder,
 				onInput: (x) => onChapterNote(s.n, x)
 			}) : /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
 				class: "seg rv-mark",

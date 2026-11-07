@@ -1316,7 +1316,7 @@ function queueProps() {
 // of every branch flat, so six runs of one branch sat above the one run of another that was
 // actually waiting. The runs before the newest fold under the card as "N earlier".
 //   THE CARD IS THE CARD (cardEl), the same as the queue's: the hue is the fixed palette's —
-// green for approved, yellow for anything still owed (unreviewed, a flag with no reason),
+// green for approved, yellow for anything still owed (unreviewed, a step with no verdict),
 // red for rejected or a step marked a problem.
 const RV_HUE = { ok: 'green', warn: 'yellow', bad: 'red' };
 // A run's age in the unit that reads at a glance: G.humanAge's `72h0m` is right for a
@@ -1479,6 +1479,7 @@ const REVIEW_WORDS = {
   stepNoteLabel: (n) => `note on step ${n}`, chapterNoteLabel: (n) => `note on chapter ${n}`,
   flowNoteLabel: 'note on the whole flow',
   reasonPlaceholder: 'why is this acceptable? a note is what clears the flag',
+  flagNotePlaceholder: 'the run flagged this — a note on why it is fine is optional',
   chapterPlaceholder: 'a note on this chapter', notePlaceholder: 'note',
   flowPlaceholder: 'a note on the whole flow — what to fix, or why it is fine',
   reject: 'reject', approve: 'approve', approved: '✓ approved',
@@ -1490,7 +1491,7 @@ const REVIEW_WORDS = {
   when: (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso; } },
 };
 // THE GATE LINE IS `fleet-shots --check`'s ANSWER, said as what to do next. A worker that
-// asked for a review waits on exactly this, so "2 need a reason" names the chapters.
+// asked for a review waits on exactly this, so an unreviewed run says what to do next.
 function rvGate(run) {
   const st = run.state || {};
   const v = run.verdict || {};
@@ -1499,8 +1500,8 @@ function rvGate(run) {
     const fv = (v.flow || {}).v || '';
     if (fv === 'reject') return { cls: 'bad', text: 'rejected — --check refuses this run' };
     if (!fv) return { cls: 'warn', text: 'not reviewed — watch it, then approve or reject' };
-    const owed = run.steps.filter(s => s.notes && s.notes.length && !String((v.chapters || {})[String(s.n)] || '').trim()).map(s => s.n);
-    if (owed.length) return { cls: 'warn', text: `approved, but --check still refuses: chapter${owed.length === 1 ? '' : 's'} ${owed.join(', ')} need${owed.length === 1 ? 's' : ''} a reason` };
+    // The owner's approve is the decision; a chapter the run flagged stays on the record
+    // (--check prints it as accepted) and no longer owes a written reason.
     return { cls: 'ok', text: pass };
   }
   if (st.problem) return { cls: 'bad', text: `${st.problem} step${st.problem === 1 ? '' : 's'} need${st.problem === 1 ? 's' : ''} changes — --check refuses` };

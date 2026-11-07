@@ -110,15 +110,16 @@ try {
   await key(' ');
   is('...and space pauses', 'yes', (await b.evaluate(() => document.getElementById('v').paused)) ? 'yes' : 'no');
 
-  // THE VERDICT. `a` over a flagged chapter with no reason is recorded, the gate says it
-  // will still refuse, and the cursor is taken to where the reason goes.
+  // THE VERDICT. `a` over a flagged chapter with no note is recorded and the gate passes:
+  // the owner's approve is the decision, the flag is counted as accepted, nothing is demanded.
   await key('a'); await sleep(300);
   is('a approves the flow, into the text to paste', 'yes', /^- \[approve\] flow/m.test(await record()) ? 'yes' : 'no');
   is('...which fleet-shots verdict stores', 'approve', String((verdict().flow || {}).v));
-  is('...but the gate says a flagged chapter needs a reason', 'yes', (await b.evaluate(() => /still refuses/.test(document.getElementById('gate').textContent))) ? 'yes' : 'no');
-  is('...and the note box of that chapter has the cursor', '2', String(await b.evaluate(() => document.activeElement?.closest?.('.ch')?.dataset.n)));
-  is('...so --check refuses', '1', String(check()));
+  is('...and the gate passes, naming the accepted flag', 'yes', (await b.evaluate(() => /passes this run \(1 flagged chapter accepted/.test(document.getElementById('gate').textContent))) ? 'yes' : 'no');
+  is('...and no chapter is shown as needing a reason', '0', String(await b.evaluate(() => document.querySelectorAll('.needs:not([hidden]), textarea.wants').length)));
+  is('...so --check passes', '0', String(check()));
   // TYPING IS NOT A KEY: `r` inside the note must not reject the flow.
+  await b.evaluate(() => { document.querySelector('.ch[data-n="2"] textarea').focus(); });
   await b.call('Input.insertText', { text: 'r' });
   await key('r');
   await sleep(300);
@@ -128,7 +129,7 @@ try {
   await sleep(400);
   await record();
   is('the chapter note lands in verdict.json', 'the 404 is the fixture', String((verdict().chapters || {})['2'] || ''));
-  is('...and now --check passes', '0', String(check()));
+  is('...and --check still passes', '0', String(check()));
   await b.evaluate(() => document.activeElement.blur());
   await key('r'); await sleep(300);
   await record();

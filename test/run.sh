@@ -7963,9 +7963,9 @@ rm -rf "$STEPO"
 # ── a recorded flow is reviewed as one thing ─────────────────────────────────
 # A folder of stills showed where each step ENDED, and asked for a verdict on each one. A
 # recording is one continuous flow with a chapter per step, so the verdict is on the FLOW:
-# approve or reject, with an optional note per chapter — and the flag rule survives whole:
-# a chapter the run flagged is not approved by silence, and a note on it is the reason
-# that clears it. No browser needed for any of this: the manifest is written by hand, the
+# approve or reject, with an optional note per chapter. The owner's approve is the
+# reviewer's decision, so it passes --check whatever the run flagged — the flags are printed
+# as accepted rather than gating — while no verdict and a reject still fail. No browser needed for any of this: the manifest is written by hand, the
 # same shape the recorder writes, and the verbs are the real ones.
 group "fleet-shots: a recorded flow has one verdict"
 RV="$(cd "$(mktemp -d "$TEST_RUNS.$$.recv.XXXXXX")" && pwd -P)"
@@ -7984,20 +7984,34 @@ printf '{"steps":[{"n":1,"name":"old","file":"01-old.png","notes":[],"requests":
 fs() { node "$ROOT/bin/fleet-shots.mjs" "$@" 2>&1; }
 out="$(fs --check "$RV/shots/run1")"; rc=$?
 is "check: an unreviewed flow is not approved"        "1:yes" "$rc:$(grep -q 'not been reviewed' <<< "$out" && echo yes || echo no)"
+# the state text the list and the Reviews screen show is the same rule, said in words
+rsx() { node --input-type=module -e '
+  import { runState, readVerdict, readManifest } from "'"$ROOT"'/lib/shots.mjs";
+  const d = process.argv[1]; const s = runState(readManifest(d), readVerdict(d));
+  console.log(s.label + "|" + s.cls + "|" + s.text);' "$1" 2>&1; }
+is "state: no verdict over a flag is not reviewed, not approved" "unreviewed|warn|not reviewed" "$(rsx "$RV/shots/run1")"
 out="$(printf -- '- [approve] flow — looks right\n' | fs verdict "$RV/shots/run1")"
 is "verdict: the page's approve line is recorded"    "approve" "$(node -e 'console.log(require(process.argv[1]).flow.v)' "$RV/shots/run1/verdict.json" 2>/dev/null)"
 out="$(fs --check "$RV/shots/run1")"; rc=$?
-is "check: approved over a flagged chapter with no reason still fails" "1:yes" \
-   "$rc:$(grep -q '^flagged  2\. after signing in' <<< "$out" && echo yes || echo no)"
+# THE OWNER'S APPROVE IS ENOUGH. Chapter 2 is flagged by the run and has no note, and the
+# approve still passes — but the flag is printed, as accepted by the approve, so the record
+# keeps what the run found.
+is "check: an approve over an unnoted flag passes"     "0" "$rc"
+is "check: ...and prints the flag as accepted"         "yes" \
+   "$(grep -q '^accepted  2\. after signing in .*answered 404.*(accepted by the approve)' <<< "$out" && echo yes || echo no)"
+is "check: ...and does not print it as flagged"        "0" "$(grep -c '^flagged' <<< "$out" || true)"
+is "state: an approve over a flag reads approved, not 'need a reason'" "approved|ok|approved · 1 flag accepted" "$(rsx "$RV/shots/run1")"
 printf -- '- [approve] flow — looks right\n- [note] 2. after signing in — the 404 is the fixture, the real endpoint is stubbed\n- [note] 3. a clean screen — fine\n' \
   | fs verdict "$RV/shots/run1" >/dev/null
 out="$(fs --check "$RV/shots/run1")"; rc=$?
-is "check: a note on the flagged chapter clears it"   "0" "$rc"
+is "check: a note on the flagged chapter still passes" "0" "$rc"
+is "state: ...and with the flag noted it reads approved"  "approved|ok|approved" "$(rsx "$RV/shots/run1")"
 is "check: ...and the reason is on the record"        "yes" "$(grep -q '^accepted  2\..*fixture' <<< "$out" && echo yes || echo no)"
 is "check: ...and an unflagged chapter's note is printed too" "yes" "$(grep -q '^note  3\. a clean screen — fine' <<< "$out" && echo yes || echo no)"
 printf -- '- [reject] flow — the button does nothing\n' | fs verdict "$RV/shots/run1" >/dev/null
 out="$(fs --check "$RV/shots/run1")"; rc=$?
 is "check: a rejected flow fails, with its note"      "1:yes" "$rc:$(grep -q 'rejected — the button does nothing' <<< "$out" && echo yes || echo no)"
+is "state: a rejected flow over a flag reads rejected" "rejected|bad|rejected" "$(rsx "$RV/shots/run1")"
 is "verdict: text with no flow line is refused"       "1" "$(printf -- '- [note] 1. x — y\n' | fs verdict "$RV/shots/run1" >/dev/null; echo $?)"
 out="$(fs list --dir "$RV/shots")"
 is "list: a rejected recorded run reads as rejected"  "yes" "$(grep -qE '^rejected +run1' <<< "$out" && echo yes || echo no)"
