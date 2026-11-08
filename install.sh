@@ -635,6 +635,8 @@ if ! is_repo "$REPO"; then
   prev="$(cat "$FLEET_HOME/.source" 2>/dev/null || true)"
   if [ -n "$prev" ] && [ "$prev" != "$REPO" ] && is_repo "$prev"; then KEEP_SOURCE="$prev"; fi
 fi
+# The memory records this install as a deploy from inside cf-sync (it alone knows the commit it
+# copied), under the name set on the two calls below — see the end of bin/cf-sync.
 # cf-sync narrates its own success in two lines. Keep them for --verbose, and on a
 # FAILURE keep them unconditionally: it prints "the runtime is now a MIX of old and new
 # code, do not trust it" to stderr, and that must never be something a quiet mode ate.
@@ -647,9 +649,9 @@ _sync_rc=0
 if [ "$VERBOSE" = 1 ]; then
   # `|| _sync_rc=$?` and not a bare call: under `set -e` a failing cf-sync would take the
   # whole script out here with its own status and none of the explanation below.
-  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" || _sync_rc=$?
+  CLAUDE_FLEET_DEPLOY_TARGET="ghostfleet install" CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" || _sync_rc=$?
 else
-  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" 2>&1)" \
+  _sync_out="$(CLAUDE_FLEET_DEPLOY_TARGET="ghostfleet install" CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" 2>&1)" \
     || { _sync_rc=$?; printf '%s\n' "$_sync_out"; }
 fi
 # A FAILED STAGE IS THE END OF THE INSTALL, NOT A LINE IN IT. cf-sync copies nothing when it

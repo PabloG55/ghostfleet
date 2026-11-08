@@ -108,7 +108,10 @@ function hook() {
           const r = K.transcriptSince(tr, cursor, path.join(fleetDir, `${session}.chain`));
           facts = K.turnFacts(r.lines, { repoRoot: info.root, repo: info.slug });
           end = r.end;
-          if (facts.deploys.length) { const head = git(cwd, ['rev-parse', 'HEAD']); for (const d of facts.deploys) d.commit = head; }
+          // HEAD at the Stop is where the turn LEFT it. A command that moved HEAD (check a commit
+          // out, sync it, re-park on a tag) shipped something else, and naming the tag is wrong
+          // in a way that looks right; no commit is better than that one.
+          if (facts.deploys.length) { const head = git(cwd, ['rev-parse', 'HEAD']); for (const d of facts.deploys) { if (!d.moves) d.commit = head; delete d.moves; } }
           for (const pr of facts.prs) if (pr.op === 'open' && !pr.branch) pr.branch = a.branch;
         }
         put('turn.end', { ...base, status: a.turn || 'done', said: p.last_assistant_message, files: facts.files, prs: facts.prs, deploys: facts.deploys }, c);
@@ -139,12 +142,23 @@ function prs() {
   const was = new Map(old.map(r => [r.number, r]));
   const first = !old.length;
   const c = ctx({ src: { via: 'fleet-merged' } });
+  // Who opened each open PR (fleet-merged's sidecar: number \x1f login per line), and which of
+  // those the memory has been told already. A PR that was open before authors were recorded
+  // is told again once, with its author: the fold keeps the first-seen time and the state.
+  const author = new Map(String(a.authors ? (() => { try { return fs.readFileSync(a.authors, 'utf8'); } catch { return ''; } })() : '')
+    .split('\n').map(l => l.split('\x1f')).filter(x => x.length === 2 && Number(x[0])).map(([n, who]) => [Number(n), who]));
+  const sentFile = a.authors ? `${a.authors}.told` : '';
+  const told = new Set(sentFile ? (() => { try { return fs.readFileSync(sentFile, 'utf8').split('\n').filter(Boolean); } catch { return []; } })() : []);
+  const toldNow = [];
   for (const r of cur) {
     const o = was.get(r.number);
-    if (r.state === 'OPEN' && (!o || o.state !== 'OPEN')) put('pr.open', { repo, number: r.number, branch: r.branch }, c);
+    const who = r.state === 'OPEN' ? author.get(r.number) : '';
+    const line = who ? `${r.number}\x1f${who}` : '';
+    if (r.state === 'OPEN' && (!o || o.state !== 'OPEN' || (line && !told.has(line)))) { put('pr.open', { repo, number: r.number, branch: r.branch, author: who || undefined }, c); if (line) toldNow.push(line); }
     else if (!first && r.state === 'MERGED' && (!o || o.state !== 'MERGED')) put('pr.merge', { repo, number: r.number, branch: r.branch }, c);
     else if (!first && r.state === 'CLOSED' && (!o || o.state !== 'CLOSED')) put('pr.close', { repo, number: r.number, branch: r.branch }, c);
   }
+  if (sentFile && toldNow.length) { try { fs.appendFileSync(sentFile, toldNow.join('\n') + '\n'); } catch {} }
   // An open PR that is in neither list now was closed without merging (fleet-merged asks
   // for open and merged only).
   const now2 = new Set(cur.map(r => r.number));
