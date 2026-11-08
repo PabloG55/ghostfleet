@@ -1,0 +1,1534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ghostfleet brand manual</title>
+<meta name="description" content="The ghostfleet team brand manual: logo, color, type, states, components, voice and applications.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* tokens:begin */
+/* ghostfleet team — brand tokens.
+ *
+ * The palette is the grid's (bin/fleet-grid.mjs, xterm 203/114/80/221/245/231) turned into
+ * hex, plus the app's dark neutrals. Everything carries a --gf- prefix so it can load next
+ * to styles.css without overriding its --red/--cyan while the app migrates.
+ * manual.html carries a literal copy of this file (the one make-logo.mjs injects);
+ * team/test/brand.test.mjs goes red if the two drift apart. */
+:root {
+  /* ── signal: the grid's six colors ────────────────────── */
+  --gf-teal: #5fd7d7;          /* xterm 80  — the brand, "working", links, focus */
+  --gf-red: #ff5f5f;           /* xterm 203 — "needs you", danger */
+  --gf-green: #87d787;         /* xterm 114 — "done", success */
+  --gf-yellow: #ffd75f;        /* xterm 221 — "out of quota", warning, starting */
+  --gf-grey: #8a8a8a;          /* xterm 245 — idle, paused, muted text */
+  --gf-white: #ffffff;         /* xterm 231 — the ship, headings */
+
+  /* derived tones: a chip's background and text on a signal fill */
+  --gf-teal-hover: #7ee3e3;
+  --gf-teal-ink: #05242a;      /* text on teal: 9.4:1 */
+  --gf-red-ink: #2a0707;
+  --gf-teal-deep: #12303a;     /* your own chat bubble, teal surface */
+  --gf-teal-edge: #1d4654;
+
+  /* ── neutrals: a terminal with a dark profile ─────────── */
+  --gf-abyss: #06080a;         /* command blocks, the background behind the background */
+  --gf-bg: #0b0d10;            /* the app's and the icon's background */
+  --gf-panel: #11151a;
+  --gf-panel-2: #161b22;
+  --gf-hair: #1c2128;          /* card borders */
+  --gf-line: #262d36;          /* control borders */
+  --gf-fg: #c9d1d9;            /* text */
+  --gf-dim: #8a8a8a;
+  --gf-sea: #0a1a22;           /* the board's sea background */
+
+  /* light: only for paper, slides and the brand on a white background */
+  --gf-paper: #f4f6f8;
+  --gf-ink: #0b0d10;
+  --gf-ink-dim: #5b6470;
+  --gf-teal-on-paper: #0e7a81; /* teal darkened to 4.7:1 on --gf-paper */
+
+  /* ── type ────────────────────────────────────────────── */
+  --gf-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --gf-font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --gf-text-xs: 11.5px;
+  --gf-text-sm: 12.5px;
+  --gf-text-md: 14px;
+  --gf-text-lg: 15.5px;
+  --gf-text-xl: 22px;
+  --gf-text-2xl: 32px;
+  --gf-text-hero: clamp(40px, 7vw, 76px);
+  --gf-leading: 1.5;
+  --gf-tracking-tight: -.01em;
+  --gf-tracking-label: .08em;  /* uppercase labels */
+
+  /* ── shape ───────────────────────────────────────────── */
+  --gf-radius-xs: 4px;         /* code, keys */
+  --gf-radius-sm: 8px;         /* buttons, inputs */
+  --gf-radius-md: 12px;        /* session cards */
+  --gf-radius-lg: 16px;        /* panels, the sea */
+  --gf-radius-pill: 999px;     /* status chips */
+  --gf-radius-icon: 22%;       /* the app icon: 112px at 512 */
+  --gf-pixel: 1px;             /* the ship's unit: always whole multiples */
+
+  /* ── shadow and glow ─────────────────────────────────── */
+  --gf-shadow-1: 0 1px 0 rgba(255,255,255,.03) inset, 0 1px 2px rgba(0,0,0,.4);
+  --gf-shadow-2: 0 10px 30px rgba(0,0,0,.45);
+  --gf-shadow-pop: 0 10px 30px rgba(0,0,0,.45), 0 0 0 1px rgba(95,215,215,.15);
+  --gf-glow-teal: 0 0 6px var(--gf-teal);
+  --gf-glow-red: 0 0 6px var(--gf-red);
+  --gf-glow-green: 0 0 6px var(--gf-green);
+  --gf-glow-ghost: drop-shadow(0 0 10px rgba(95,215,215,.55));
+
+  /* ── motion ──────────────────────────────────────────── */
+  --gf-ease: cubic-bezier(.45, .05, .2, 1);
+  --gf-fast: .15s;
+  --gf-slow: 1.1s;
+}
+
+/* ── status LED ────────────────────────────────────────────
+ * <i class="gf-led" data-s="need-you"></i>. The names are the app's statuses
+ * (STATUS in team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
+ * the yellow of starting up blinks; everything else holds still. */
+.gf-led {
+  --c: var(--gf-grey);
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--c); vertical-align: middle;
+}
+.gf-led[data-s="need-you"] { --c: var(--gf-red); animation: gf-led-alarm 1s ease-in-out infinite; }
+.gf-led[data-s="working"] { --c: var(--gf-teal); animation: gf-led-breathe 2s ease-in-out infinite; }
+.gf-led[data-s="ready"] { --c: var(--gf-green); box-shadow: var(--gf-glow-green); }
+.gf-led[data-s="starting"] { --c: var(--gf-yellow); animation: gf-led-blink 1.2s steps(2, jump-none) infinite; }
+.gf-led[data-s="limit"], .gf-led[data-s="interrupted"], .gf-led[data-s="unknown"] { --c: var(--gf-yellow); }
+.gf-led[data-s="idle"], .gf-led[data-s="parked"], .gf-led[data-s="asleep"] { --c: var(--gf-grey); opacity: .7; }
+.gf-led[data-s="lost"] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--gf-grey); }
+@keyframes gf-led-alarm { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,95,95,.6), var(--gf-glow-red); } 50% { box-shadow: 0 0 0 5px rgba(255,95,95,0), var(--gf-glow-red); } }
+@keyframes gf-led-breathe { 0%, 100% { box-shadow: 0 0 2px var(--gf-teal); opacity: .75; } 50% { box-shadow: 0 0 9px var(--gf-teal); opacity: 1; } }
+@keyframes gf-led-blink { 0% { opacity: 1; } 100% { opacity: .3; } }
+
+/* ── the ship ──────────────────────────────────────────────
+ * <span class="gf-ship" data-s="work"><svg viewBox="0 0 32 16">…</svg></span>. The
+ * names are the board's LOOKS (team/web/src/board.jsx). */
+.gf-ship { display: inline-block; color: var(--gf-white); line-height: 0; }
+.gf-ship svg { fill: currentColor; display: block; overflow: visible; shape-rendering: crispEdges; }
+.gf-ship[data-s="need"] { color: var(--gf-red); }
+.gf-ship[data-s="need"] svg { animation: gf-alarm 1s ease-in-out infinite; filter: drop-shadow(0 0 6px var(--gf-red)); }
+.gf-ship[data-s="work"] { color: var(--gf-teal); }
+.gf-ship[data-s="work"] svg { animation: gf-sail .9s ease-in-out infinite; filter: drop-shadow(0 0 5px var(--gf-teal)); }
+.gf-ship[data-s="fresh"] { color: var(--gf-green); }
+.gf-ship[data-s="fresh"] svg { animation: gf-bob 2.4s ease-in-out infinite; filter: drop-shadow(0 0 6px var(--gf-green)); }
+.gf-ship[data-s="warn"] { color: var(--gf-yellow); }
+.gf-ship[data-s="warn"] svg { animation: gf-rock 1.4s ease-in-out infinite; }
+.gf-ship[data-s="open"] svg { animation: gf-bob 3.2s ease-in-out infinite; }
+.gf-ship[data-s="off"] { color: var(--gf-grey); opacity: .45; }
+.gf-ship[data-s="ghost"] { color: #e8fbff; }
+.gf-ship[data-s="ghost"] svg { animation: gf-hover 2.4s ease-in-out infinite; filter: var(--gf-glow-ghost); }
+@keyframes gf-bob { 50% { transform: translateY(-2px); } }
+@keyframes gf-rock { 25% { transform: rotate(-4deg); } 75% { transform: rotate(4deg); } }
+@keyframes gf-sail { 50% { transform: translate(2px, -1.5px) rotate(-2deg); } }
+@keyframes gf-alarm { 50% { transform: translateY(-2px); filter: drop-shadow(0 0 9px var(--gf-red)); } }
+@keyframes gf-hover { 50% { transform: translateY(-5px); } }
+@keyframes gf-waves { to { background-position: 24px 0; } }
+
+/* the waterline under a row of ships */
+.gf-waterline {
+  height: 1px; background: repeating-linear-gradient(90deg, rgba(95,215,215,.35) 0 6px, transparent 6px 12px);
+  animation: gf-waves 4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gf-led, .gf-ship svg, .gf-waterline { animation: none !important; }
+}
+/* tokens:end */
+
+/* ── the manual ────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; background: var(--gf-bg); }
+body { margin: 0; background: var(--gf-bg); color: var(--gf-fg); font: var(--gf-text-md)/1.6 var(--gf-font-sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+h1, h2, h3, h4 { color: var(--gf-white); margin: 0; line-height: 1.15; }
+h2 { font-size: var(--gf-text-2xl); letter-spacing: -.02em; }
+h3 { font-size: 17px; letter-spacing: -.01em; }
+p { margin: 0; }
+code, .mono { font-family: var(--gf-font-mono); }
+code { font-size: .9em; background: var(--gf-panel-2); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-xs); padding: 0 .35em; }
+a { color: var(--gf-teal); }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+.lead { font-size: 17px; color: #aeb7c1; max-width: 62ch; }
+.dim { color: var(--gf-dim); }
+.eyebrow { font: 600 var(--gf-text-xs)/1 var(--gf-font-mono); text-transform: uppercase; letter-spacing: var(--gf-tracking-label); color: var(--gf-teal); }
+.ship-svg { fill: currentColor; display: block; shape-rendering: crispEdges; overflow: visible; }
+
+/* nav */
+.top { position: sticky; top: 0; z-index: 20; background: rgba(11,13,16,.86); backdrop-filter: blur(10px); border-bottom: 1px solid var(--gf-hair); }
+.top .wrap { display: flex; align-items: center; gap: 18px; height: 52px; }
+.top .brand { display: flex; align-items: center; gap: 10px; color: var(--gf-white); text-decoration: none; font: 700 14px var(--gf-font-mono); white-space: nowrap; }
+.top .brand em { font-style: normal; font-weight: 500; color: var(--gf-teal); }
+.top nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin-left: auto; }
+.top nav::-webkit-scrollbar { display: none; }
+.top nav a { color: var(--gf-dim); text-decoration: none; font-size: 13px; padding: 6px 9px; border-radius: 7px; white-space: nowrap; }
+.top nav a:hover { color: var(--gf-white); background: var(--gf-panel-2); }
+.lang { display: flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--gf-line); border-radius: var(--gf-radius-sm); }
+.lang button { font: 600 11.5px var(--gf-font-mono); letter-spacing: .04em; color: var(--gf-dim); background: none; border: 0; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+.lang button:hover { color: var(--gf-white); }
+.lang button[aria-pressed="true"] { background: var(--gf-teal-deep); color: var(--gf-teal); }
+.lang button:focus-visible { outline: 2px solid var(--gf-teal); outline-offset: 1px; }
+
+/* hero */
+.hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--gf-hair);
+  background: radial-gradient(900px 420px at 70% 30%, rgba(95,215,215,.10), transparent 60%),
+              repeating-linear-gradient(0deg, transparent 0 26px, rgba(95,215,215,.03) 26px 27px), var(--gf-bg); }
+.hero .wrap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 40px; align-items: center; padding-top: 88px; padding-bottom: 72px; }
+.hero h1 { font: 700 var(--gf-text-hero)/1 var(--gf-font-mono); letter-spacing: -.04em; }
+.hero h1 em { font-style: normal; font-weight: 500; color: var(--gf-teal); }
+.hero .lead { margin-top: 20px; }
+.hero .meta { margin-top: 28px; display: flex; gap: 18px; flex-wrap: wrap; font: var(--gf-text-sm) var(--gf-font-mono); color: var(--gf-dim); }
+.hero-ship { display: grid; place-items: center; min-height: 260px; position: relative; }
+.hero-ship .gf-ship svg { width: min(100%, 384px); height: auto; }
+.hero-ship .gf-waterline { position: absolute; left: 6%; right: 6%; bottom: 40px; }
+
+/* sections */
+section.s { padding: 88px 0; border-bottom: 1px solid var(--gf-hair); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.panel { background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-lg); padding: 22px; }
+.panel h3 + p, .panel h3 + ul { margin-top: 8px; }
+.panel p + p { margin-top: 8px; }
+.caption { margin-top: 12px; font-size: var(--gf-text-sm); color: var(--gf-dim); }
+.caption b { color: var(--gf-fg); font-weight: 600; }
+ul.clean { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 6px; }
+
+/* story */
+.traits { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.trait { border-top: 2px solid var(--c, var(--gf-teal)); padding-top: 14px; }
+.trait b { display: block; color: var(--gf-white); font: 700 15px var(--gf-font-mono); margin-bottom: 6px; }
+.trait p { font-size: 13.5px; color: #a9b3be; }
+.story p { font-size: 15.5px; color: #b8c1cb; }
+.story p + p { margin-top: 14px; }
+.story strong { color: var(--gf-white); font-weight: 600; }
+
+/* logo */
+.stage { border-radius: var(--gf-radius-lg); border: 1px solid var(--gf-hair); display: grid; place-items: center; padding: 36px 20px; min-height: 200px; position: relative; overflow: hidden; }
+.stage.dark { background: var(--gf-bg); }
+.stage.paper { background: var(--gf-paper); border-color: #dfe3e8; }
+.stage.teal { background: var(--gf-teal); border-color: var(--gf-teal); }
+.stage.abyss { background: #000; }
+.stage .tag { position: absolute; top: 10px; left: 12px; font: 500 11px var(--gf-font-mono); color: var(--gf-dim); }
+.stage.paper .tag { color: var(--gf-ink-dim); } .stage.teal .tag { color: var(--gf-teal-ink); }
+.lockup { display: inline-flex; align-items: center; gap: .55em; font: 700 28px var(--gf-font-mono); letter-spacing: -.01em; color: var(--gf-white); white-space: nowrap; }
+.lockup em { font-style: normal; font-weight: 500; color: var(--gf-teal); }
+.lockup svg { height: 1.14em; width: auto; }
+.lockup.solid em { color: inherit; }
+.lockup.stack { flex-direction: column; gap: .35em; font-size: 22px; }
+.lockup.stack svg { height: 2.8em; }
+.on-paper .lockup, .on-paper { color: var(--gf-ink); } .on-paper .lockup em { color: var(--gf-teal-on-paper); }
+.on-teal .lockup { color: var(--gf-teal-ink); } .on-teal .lockup em { color: var(--gf-teal-ink); }
+.construct { position: relative; width: 100%; max-width: 560px; aspect-ratio: 32 / 16; margin: 0 auto; }
+.construct svg { width: 100%; height: 100%; }
+.app-icon { width: 112px; height: 112px; border-radius: var(--gf-radius-icon); background: radial-gradient(circle at 50% 46%, rgba(95,215,215,.22), transparent 55%), var(--gf-bg);
+  display: grid; place-items: center; box-shadow: 0 0 0 1px rgba(255,255,255,.06), var(--gf-shadow-2); color: var(--gf-white); }
+.app-icon svg { width: 62.5%; filter: drop-shadow(0 0 5px rgba(95,215,215,.55)); }
+.icons-row { display: flex; align-items: flex-end; gap: 22px; flex-wrap: wrap; justify-content: center; }
+.icons-row figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; font: 11px var(--gf-font-mono); color: var(--gf-dim); }
+.sizes { display: flex; align-items: flex-end; gap: 26px; flex-wrap: wrap; }
+.sizes figure { margin: 0; display: flex; flex-direction: column; gap: 8px; font: 11px var(--gf-font-mono); color: var(--gf-dim); }
+.dont { position: relative; }
+.dont .stage { min-height: 150px; padding: 24px 14px; }
+.dont .x { position: absolute; top: 10px; right: 12px; width: 22px; height: 22px; border-radius: 50%; background: var(--gf-red); color: var(--gf-red-ink); display: grid; place-items: center; font: 700 13px var(--gf-font-mono); z-index: 2; }
+.dont p { margin-top: 10px; font-size: 13px; color: #a9b3be; }
+
+/* color */
+.swatch { border-radius: var(--gf-radius-md); overflow: hidden; border: 1px solid var(--gf-hair); background: var(--gf-panel); }
+.swatch .chip { height: 108px; background: var(--sw); position: relative; }
+.swatch .chip span { position: absolute; left: 12px; bottom: 10px; font: 700 12px var(--gf-font-mono); color: var(--on, #0b0d10); }
+.swatch .info { padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; }
+.swatch .info b { color: var(--gf-white); font-size: 14px; }
+.swatch .info code { background: none; border: 0; padding: 0; color: var(--gf-dim); font-size: 12px; }
+.swatch.big .chip { height: 180px; }
+.neutrals { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); border-radius: var(--gf-radius-md); overflow: hidden; border: 1px solid var(--gf-hair); }
+.neutrals div { height: 92px; background: var(--sw); padding: 10px 8px; display: flex; flex-direction: column; justify-content: flex-end; font: 10.5px/1.35 var(--gf-font-mono); color: var(--on, var(--gf-fg)); }
+.neutrals b { font-weight: 700; font-size: 11px; }
+.ratio { display: flex; height: 26px; border-radius: 7px; overflow: hidden; margin-top: 12px; border: 1px solid var(--gf-line); }
+.ratio i { display: block; }
+
+/* type */
+.specimen { font-family: var(--gf-font-mono); color: var(--gf-white); font-size: 64px; font-weight: 700; letter-spacing: -.03em; line-height: 1; }
+.specimen.sans { font-family: var(--gf-font-sans); font-weight: 600; }
+.glyphs { margin-top: 14px; font-size: 15px; color: #a9b3be; overflow-wrap: anywhere; }
+.scale { display: flex; flex-direction: column; }
+.scale-row { display: grid; grid-template-columns: 150px 1fr; gap: 14px; align-items: baseline; padding: 14px 0; border-top: 1px solid var(--gf-hair); }
+.scale-row .k { font: 11.5px var(--gf-font-mono); color: var(--gf-dim); }
+.scale-row .v { color: var(--gf-white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* states */
+.leds { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.led-row { display: flex; gap: 12px; align-items: center; background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-md); padding: 12px 14px; }
+.led-row .gf-led { width: 10px; height: 10px; }
+.led-row b { color: var(--gf-white); font-weight: 600; font-size: 13.5px; display: block; }
+.led-row small { color: var(--gf-dim); font-size: 12px; display: block; }
+.led-row .g { margin-left: auto; font: 15px var(--gf-font-mono); color: var(--c); }
+.sea { border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-lg); padding: 26px 18px 18px; position: relative; overflow: hidden;
+  background: radial-gradient(circle at 20% 15%, rgba(95,215,215,.06), transparent 40%), radial-gradient(circle at 80% 70%, rgba(95,135,255,.05), transparent 45%),
+  repeating-linear-gradient(0deg, transparent 0 26px, rgba(95,215,215,.035) 26px 27px), #090d12; }
+.fleet { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; align-items: end; }
+.boat { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.boat .gf-ship svg { width: 64px; height: 32px; }
+.boat-lab { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 12px; color: var(--gf-dim); text-align: center; }
+.boat-lab b { font: 600 12px var(--gf-font-mono); color: var(--c); }
+.sea .gf-waterline { margin: 2px 0 14px; }
+.ghost-cruise { position: absolute; top: 10px; left: 0; animation: cruise 18s linear infinite; }
+.ghost-cruise .gf-ship svg { width: 40px; height: 20px; }
+@keyframes cruise { from { transform: translateX(-60px); } to { transform: translateX(1200px); } }
+
+/* components (the app's, built from the tokens) */
+.btn { display: inline-flex; align-items: center; gap: .45em; border-radius: var(--gf-radius-sm); padding: .55em 1em; cursor: pointer; font: 500 14px var(--gf-font-sans);
+  background: var(--gf-panel-2); border: 1px solid var(--gf-line); color: var(--gf-fg); white-space: nowrap; transition: background var(--gf-fast), border-color var(--gf-fast); }
+.btn:hover { border-color: #3a4450; background: #1b212a; }
+.btn.primary { background: var(--gf-teal); border-color: var(--gf-teal); color: var(--gf-teal-ink); font-weight: 600; }
+.btn.primary:hover { background: var(--gf-teal-hover); border-color: var(--gf-teal-hover); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--gf-dim); }
+.btn.ghost:hover { color: var(--gf-white); background: var(--gf-panel-2); }
+.btn.danger { color: var(--gf-red); border-color: rgba(255,95,95,.4); background: rgba(255,95,95,.06); }
+.btn.sm { font-size: 12.5px; padding: .35em .75em; }
+.btns { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pill { --c: var(--gf-grey); display: inline-flex; align-items: center; gap: .4em; color: var(--c); font-size: 12.5px; font-weight: 600;
+  background: color-mix(in srgb, var(--c) 12%, transparent); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); border-radius: var(--gf-radius-pill); padding: .15em .7em; white-space: nowrap; }
+.pill b { font-family: var(--gf-font-mono); }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.c-red { --c: var(--gf-red); } .c-teal { --c: var(--gf-teal); } .c-green { --c: var(--gf-green); } .c-yellow { --c: var(--gf-yellow); } .c-grey { --c: var(--gf-grey); }
+.card { --c: var(--gf-grey); background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-md); padding: 12px 14px 12px 16px;
+  display: flex; flex-direction: column; gap: 7px; position: relative; overflow: hidden; }
+.card::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--c); opacity: .85; }
+.card.c-red { border-color: rgba(255,95,95,.35); }
+.card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card h4 { font: 600 15px var(--gf-font-mono); }
+.card-msg { color: #a9b3be; font-size: 13px; }
+.card-foot { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; color: var(--gf-dim); }
+.avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--c); color: var(--gf-bg); font: 700 10px var(--gf-font-sans); }
+.branch { font: 12px var(--gf-font-mono); color: var(--gf-dim); }
+.input { width: 100%; background: var(--gf-panel-2); border: 1px solid var(--gf-line); border-radius: var(--gf-radius-sm); padding: .55em .7em; color: var(--gf-fg); font: 14px var(--gf-font-sans); }
+.input.focus { border-color: var(--gf-teal); }
+
+/* iconography */
+.glyph-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.glyph { background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-md); padding: 14px 8px 10px; text-align: center; }
+.glyph .g { font: 26px/1 var(--gf-font-mono); color: var(--c); height: 30px; }
+.glyph small { display: block; margin-top: 8px; font-size: 11.5px; color: var(--gf-dim); }
+.pix-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.pix { background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-md); padding: 18px 10px 12px; text-align: center; color: var(--gf-fg); }
+.pix svg { width: 48px; height: 48px; display: block; margin: 0 auto; fill: currentColor; shape-rendering: crispEdges; }
+.pix small { display: block; margin-top: 10px; font-size: 11.5px; color: var(--gf-dim); }
+
+/* voice */
+.voice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.say { border-radius: var(--gf-radius-md); padding: 14px 16px; border: 1px solid var(--gf-hair); background: var(--gf-panel); }
+.say .ctx { font: 600 11px var(--gf-font-mono); text-transform: uppercase; letter-spacing: var(--gf-tracking-label); color: var(--gf-dim); margin-bottom: 10px; }
+.say .yes, .say .no { display: flex; gap: 10px; font-size: 14px; }
+.say .yes + .no { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--gf-line); }
+/* the Do/Don't marker is a real element so it is translated and read out; the strike-through
+   sits on the sentence alone, or it would cross out the marker too */
+.say .mk { flex: none; min-width: 5ch; font: 700 12px var(--gf-font-mono); padding-top: 2px; }
+.say .yes .mk { color: var(--gf-green); } .say .no .mk { color: var(--gf-red); }
+.say .yes { color: var(--gf-white); } .say .no span { color: #8e98a3; text-decoration: line-through; text-decoration-color: rgba(255,95,95,.5); }
+.house b { color: var(--gf-white); }
+
+/* applications */
+.device { border-radius: 22px; border: 1px solid var(--gf-line); background: #050608; padding: 10px; box-shadow: var(--gf-shadow-2); }
+.screen { border-radius: 14px; overflow: hidden; min-height: 420px; display: grid; place-items: center; padding: 28px 18px;
+  background: radial-gradient(800px 360px at 50% -10%, rgba(95,215,215,.09), transparent 60%), var(--gf-bg); }
+.login { width: 100%; max-width: 360px; background: var(--gf-panel); border: 1px solid var(--gf-hair); border-radius: var(--gf-radius-lg); padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+.login .field span { display: block; font-size: 12.5px; color: var(--gf-dim); margin-bottom: 5px; }
+.login .btn { justify-content: center; }
+.bizcards { display: flex; flex-direction: column; gap: 14px; align-items: center; }
+.biz { width: 100%; max-width: 420px; aspect-ratio: 85 / 55; border-radius: 12px; padding: 22px; position: relative; overflow: hidden; box-shadow: var(--gf-shadow-2); }
+.biz.front { background: radial-gradient(circle at 78% 38%, rgba(95,215,215,.16), transparent 50%), var(--gf-bg); display: flex; flex-direction: column; justify-content: space-between; }
+.biz.back { background: var(--gf-paper); color: var(--gf-ink); display: flex; flex-direction: column; justify-content: space-between; }
+.biz.front .big { width: 46%; position: absolute; right: 9%; top: 24%; color: var(--gf-white); filter: drop-shadow(0 0 10px rgba(95,215,215,.5)); }
+.biz .name { font: 700 17px var(--gf-font-sans); }
+.biz .role { font-size: 12.5px; color: var(--gf-ink-dim); }
+.biz .contact { font: 12px/1.6 var(--gf-font-mono); color: var(--gf-ink-dim); }
+.biz .lockup { font-size: 15px; }
+.slide { aspect-ratio: 16 / 9; border-radius: var(--gf-radius-md); overflow: hidden; position: relative; border: 1px solid var(--gf-hair); box-shadow: var(--gf-shadow-2);
+  background: radial-gradient(70% 90% at 80% 40%, rgba(95,215,215,.12), transparent 60%), repeating-linear-gradient(0deg, transparent 0 22px, rgba(95,215,215,.03) 22px 23px), var(--gf-bg);
+  padding: 5% 6%; display: flex; flex-direction: column; justify-content: space-between; container-type: inline-size; }
+.slide .k { font: 600 1.6cqw var(--gf-font-mono); color: var(--gf-teal); text-transform: uppercase; letter-spacing: .1em; }
+.slide h3 { font: 700 5cqw/1.05 var(--gf-font-mono); letter-spacing: -.03em; max-width: 60%; }
+.slide h3 em { font-style: normal; color: var(--gf-teal); font-weight: 500; }
+.slide .bottom { display: flex; justify-content: space-between; align-items: flex-end; gap: 4%; }
+.slide .stats { display: flex; gap: 5cqw; }
+.slide .stats b { display: block; font: 700 3.4cqw var(--gf-font-mono); color: var(--gf-white); }
+.slide .stats span { font-size: 1.5cqw; color: var(--gf-dim); }
+.slide .fleet-mini { position: absolute; right: 6%; top: 18%; display: flex; gap: 2.4cqw; align-items: flex-end; }
+.slide .fleet-mini .gf-ship svg { width: 7cqw; height: 3.5cqw; }
+.slide .fleet-mini .gf-ship.lead svg { width: 13cqw; height: 6.5cqw; }
+
+footer { padding: 48px 0 72px; color: var(--gf-dim); font-size: 13px; }
+footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: center; }
+
+@media (max-width: 900px) {
+  .hero .wrap { grid-template-columns: 1fr; padding-top: 48px; padding-bottom: 48px; gap: 20px; }
+  .hero-ship { min-height: 180px; order: -1; }
+  .hero-ship .gf-waterline { bottom: 8px; }
+  .g3, .g4, .traits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fleet { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 24px; }
+  .neutrals { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  section.s { padding: 60px 0; }
+}
+@media (max-width: 600px) {
+  .g2, .g3, .g4, .voice, .traits { grid-template-columns: 1fr; }
+  .top nav { display: none; }
+  .lang { margin-left: auto; }
+  h2 { font-size: 26px; }
+  .specimen { font-size: 44px; }
+  .lockup { font-size: 20px; }
+  .lockup.stack { font-size: 18px; }
+  .scale-row { grid-template-columns: 1fr; gap: 4px; }
+  .scale-row .v { white-space: normal; }
+  .fleet { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .slide .stats span { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .ghost-cruise { animation: none; left: 40%; } html { scroll-behavior: auto; } }
+
+/* ── terminal skin ─────────────────────────────────────────
+ * The manual's own chrome, not the brand: every section is a terminal window whose
+ * heading is a command, set in Silkscreen. Silkscreen is drawn on a real pixel grid,
+ * like the 32 × 16 ship, and carries Latin Extended (ñ, á, ¿); VT323 imitates a CRT
+ * terminal face too close to the body mono to read as a heading, and Pixelify Sans is
+ * an anti-aliased, rounded "pixel" face that softens the very edges the ship keeps.
+ * Long text stays in JetBrains Mono. The brand's own specimens (lockups, buttons,
+ * cards, the Inter sample, the mockups) keep the brand's look on purpose: restyling
+ * them would document something the app does not ship. */
+:root { --px-font: Silkscreen, var(--gf-font-mono); --px-grid: rgba(95,215,215,.04); }
+html, body {
+  background-color: var(--gf-bg);
+  background-image: linear-gradient(var(--px-grid) 1px, transparent 1px), linear-gradient(90deg, var(--px-grid) 1px, transparent 1px);
+  background-size: 8px 8px;
+}
+body { font: 14.5px/1.65 var(--gf-font-mono); }
+.lead { font-size: 15px; max-width: 72ch; margin-top: 14px; }
+h2 { font: 400 clamp(22px, 3vw, 32px)/1.2 var(--px-font); letter-spacing: 0; margin-top: 12px; overflow-wrap: anywhere; }
+h3 { font: 400 16px/1.3 var(--px-font); letter-spacing: 0; }
+h3::before { content: '▸ '; color: var(--gf-teal); }
+.panel h3::before, .login h3::before, .slide h3::before, .s .panel > h3:first-child::before { content: none; }
+
+/* the prompt: "$ ghostfleet brand --colors" and its cursor. Only the hero's blinks:
+   the brand's rule is that only what is urgent moves, and a page of nine blinking
+   cursors would make everything urgent. */
+.cmd { font: 400 clamp(13px, 1.6vw, 16px)/1.4 var(--px-font); color: var(--gf-teal); overflow-wrap: anywhere; }
+.cmd .ps1 { color: var(--gf-green); }
+.cur { display: inline-block; width: .6em; height: 1em; margin-left: .3em; vertical-align: -.12em; background: var(--gf-teal); }
+.cmd.live .cur { animation: px-blink 1.06s steps(1) infinite; }
+@keyframes px-blink { 50% { opacity: 0; } }
+
+/* header: the masthead in pixels, the sections as paths, the language as a flag */
+.top { background: rgba(6,8,10,.92); border-bottom: 2px dashed var(--gf-line); }
+.top .brand .px { font: 400 15px var(--px-font); }
+.top nav a { font: 12.5px var(--gf-font-mono); border-radius: 0; padding: 6px 4px; }
+.top nav a::before { content: './'; color: var(--gf-dim); }
+.lang { align-items: center; gap: 6px; padding: 3px 8px; border: 1px dashed var(--gf-line); border-radius: 0; font: 13px var(--gf-font-mono); }
+.lang .flag { color: var(--gf-dim); }
+.lang button { font: 600 13px var(--gf-font-mono); letter-spacing: 0; padding: 2px 0; border-radius: 0; color: var(--gf-dim); }
+.lang button::before { content: '['; visibility: hidden; } .lang button::after { content: ']'; visibility: hidden; }
+.lang button[aria-pressed="true"] { background: none; color: var(--gf-teal); }
+.lang button[aria-pressed="true"]::before, .lang button[aria-pressed="true"]::after { visibility: visible; }
+
+/* hero */
+.hero { background: radial-gradient(900px 420px at 70% 30%, rgba(95,215,215,.10), transparent 60%); border-bottom: 2px dashed var(--gf-line); }
+.hero .cmd { margin-top: 18px; }
+/* Silkscreen's bold advances about 0.8 em, so "ghostfleet" needs 8 em: 4.6vw keeps it inside the
+   hero's text column at desktop widths instead of breaking the word in two */
+.hero h1 { font: 700 clamp(30px, 4.6vw, 60px)/1.1 var(--px-font); letter-spacing: 0; margin-top: 14px; }
+.hero h1 em { font-weight: 400; }
+.hero-ship .gf-ship svg { width: 384px; max-width: 100%; }
+
+/* a window per section: a pixel border (box-shadows, so the corners step and nothing
+   adds to the layout width), a title bar, and dashed rules inside */
+section.s { padding: 48px 0; border-bottom: 0; }
+.win { position: relative; background: var(--gf-panel); padding: 0 28px 32px; margin: 3px;
+  box-shadow: 0 -3px 0 0 var(--gf-line), 0 3px 0 0 var(--gf-line), -3px 0 0 0 var(--gf-line), 3px 0 0 0 var(--gf-line); }
+.win-bar { display: flex; align-items: center; gap: 8px; margin: 0 -28px 24px; padding: 9px 14px; background: var(--gf-panel-2);
+  border-bottom: 2px dashed var(--gf-line); font: 12.5px var(--gf-font-mono); color: var(--gf-dim); min-width: 0; }
+.win-bar i { width: 10px; height: 10px; flex: none; background: var(--gf-red); }
+.win-bar i:nth-child(2) { background: var(--gf-yellow); } .win-bar i:nth-child(3) { background: var(--gf-green); }
+.win-bar span { margin-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.win-bar b { color: var(--gf-teal); font-weight: 500; }
+.win > .lead { margin-bottom: 32px; }
+.panel, .stage, .swatch, .neutrals, .led-row, .glyph, .pix, .say, .sea, .ratio { border-radius: 0; }
+.panel, .led-row, .glyph, .pix, .say { background: var(--gf-panel-2); border: 1px dashed var(--gf-line); }
+.stage, .swatch, .neutrals, .sea { border-style: dashed; }
+.trait { border-top: 3px dashed var(--c, var(--gf-teal)); }
+.trait b, .say .ctx { font-family: var(--px-font); font-weight: 400; letter-spacing: 0; }
+.eyebrow { line-height: 1.4; }
+.say .ctx { font-size: 12px; }
+
+/* status LEDs as terminal LEDs: square, with a bezel and a hard glow */
+.led-row .gf-led { width: 10px; height: 10px; border-radius: 0; outline: 1px solid color-mix(in srgb, var(--c) 45%, transparent); outline-offset: 2px; }
+.led-row .gf-led[data-s="lost"] { outline-color: var(--gf-line); }
+
+/* sprites at pixel scale: whole multiples of the 32 × 16 grid, moving one sprite pixel
+   at a time. The brand's own animations are smooth; here they step. */
+.ship-svg, .gf-ship svg { image-rendering: pixelated; }
+body .gf-ship[data-s] svg { animation-timing-function: steps(2, jump-none); }
+body .gf-led[data-s] { animation-timing-function: steps(2, jump-none); }
+body .gf-waterline { animation-timing-function: steps(4); }
+.hero-ship .gf-ship[data-s] svg { animation: px-float 1.2s steps(2, jump-none) infinite alternate; }
+@keyframes px-float { to { transform: translateY(-12px); } }
+.boat .gf-ship svg { width: 96px; height: 48px; }
+.boat .gf-waterline { width: 96px !important; }
+.boat .gf-ship[data-s="need"] svg { animation: px-up .5s steps(2, jump-none) infinite alternate; }
+.boat .gf-ship[data-s="work"] svg { animation: px-sail .45s steps(2, jump-none) infinite alternate; }
+.boat .gf-ship[data-s="fresh"] svg { animation: px-up 1.2s steps(2, jump-none) infinite alternate; }
+.boat .gf-ship[data-s="warn"] svg { animation: px-rock .7s steps(2, jump-none) infinite alternate; }
+.boat .gf-ship[data-s="open"] svg { animation: px-up 1.6s steps(2, jump-none) infinite alternate; }
+@keyframes px-up { to { transform: translateY(-3px); } }
+@keyframes px-sail { to { transform: translate(3px, -3px); } }
+@keyframes px-rock { from { transform: translateX(-3px); } to { transform: translateX(3px); } }
+.ghost-cruise { animation-timing-function: steps(90); }
+.ghost-cruise .gf-ship svg { width: 64px; height: 32px; }
+
+footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono); }
+/* specimens of the app's own text keep the app's face: the body is mono now, and an
+   "inter 700 · 32" row set in mono would be a specimen of the wrong font */
+.scale-row .v:not(.mono), .glyphs:not(.mono), .card, .login, .biz, .slide, .pill { font-family: var(--gf-font-sans); }
+.login h3 { font-family: var(--gf-font-sans); font-weight: 600; }
+
+@media (max-width: 600px) {
+  .win { padding: 0 14px 22px; }
+  .win-bar { margin: 0 -14px 18px; }
+  .hero-ship .gf-ship svg { width: 256px; }
+}
+@media (prefers-reduced-motion: reduce) { .cmd.live .cur, .hero-ship .gf-ship svg, .boat .gf-ship svg { animation: none !important; } }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#inicio"><span class="gf-ship" data-ship="1" style="width:32px"></span><span class="px">ghostfleet <em>team</em></span></a>
+    <nav data-t-aria="nav.label">
+      <a href="#historia" data-t="nav.story"></a><a href="#logo" data-t="nav.logo"></a><a href="#color" data-t="nav.color"></a><a href="#tipo" data-t="nav.type"></a>
+      <a href="#estados" data-t="nav.states"></a><a href="#componentes" data-t="nav.comp"></a><a href="#iconos" data-t="nav.icons"></a><a href="#voz" data-t="nav.voice"></a><a href="#aplicaciones" data-t="nav.apps"></a>
+    </nav>
+    <div class="lang" role="group" data-t-aria="lang.label">
+      <span class="flag" aria-hidden="true">--lang</span><button type="button" data-lang="en" lang="en" aria-label="English">en</button><button type="button" data-lang="es" lang="es" aria-label="Español">es</button>
+    </div>
+  </div>
+</header>
+
+<main>
+<section class="hero" id="inicio" aria-labelledby="t-hero">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow" data-t="hero.eyebrow"></p>
+      <p class="cmd live" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --manual<span class="cur"></span></p>
+      <h1 id="t-hero">ghostfleet<br><em>team</em></h1>
+      <p class="lead" data-t="hero.lead"></p>
+      <div class="meta"><span data-t="hero.date"></span><span data-t="hero.topics"></span></div>
+    </div>
+    <div class="hero-ship" aria-hidden="true">
+      <span class="gf-ship" data-s="ghost" data-ship="ghost"></span>
+      <div class="gf-waterline"></div>
+    </div>
+  </div>
+</section>
+
+<!-- 01 story -->
+<section class="s" id="historia" aria-labelledby="t-historia">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="story.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --story<span class="cur"></span></p>
+    <h2 id="t-historia" data-t="story.title"></h2>
+    <p class="lead" data-t="story.lead"></p>
+    <div class="grid g2">
+      <div class="story panel">
+        <p data-t="story.p1"></p>
+        <p data-t="story.p2"></p>
+        <p data-t="story.p3"></p>
+      </div>
+      <div class="panel" style="display:flex;flex-direction:column;gap:14px">
+        <p class="eyebrow" data-t="story.sprite"></p>
+        <pre class="mono" data-t-aria="story.spriteAria" style="margin:0;color:var(--gf-white);font-size:clamp(9px,2.3vw,15px);line-height:1;letter-spacing:0;background:var(--gf-abyss);border:1px solid var(--gf-hair);border-radius:var(--gf-radius-md);padding:18px 14px;overflow:hidden" id="sprite-src"></pre>
+        <p class="caption" data-t="story.spriteCap"></p>
+      </div>
+    </div>
+    <h3 style="margin-top:48px" data-t="story.traits"></h3>
+    <div class="traits">
+      <div class="trait" style="--c:var(--gf-teal)"><b data-t="trait.calm"></b><p data-t="trait.calm.p"></p></div>
+      <div class="trait" style="--c:var(--gf-green)"><b data-t="trait.precise"></b><p data-t="trait.precise.p"></p></div>
+      <div class="trait" style="--c:var(--gf-yellow)"><b data-t="trait.crafted"></b><p data-t="trait.crafted.p"></p></div>
+      <div class="trait" style="--c:var(--gf-red)"><b data-t="trait.dry"></b><p data-t="trait.dry.p"></p></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 02 logo -->
+<section class="s" id="logo" aria-labelledby="t-logo">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="logo.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --logo<span class="cur"></span></p>
+    <h2 id="t-logo" data-t="logo.title"></h2>
+    <p class="lead" data-t="logo.lead"></p>
+
+    <div class="grid g2">
+      <div>
+        <div class="stage dark"><span class="tag" data-t="logo.constructTag"></span>
+          <div class="construct" id="construct"></div>
+        </div>
+        <p class="caption" data-t="logo.constructCap"></p>
+      </div>
+      <div>
+        <div class="stage dark"><span class="tag" data-t="logo.wakeTag"></span>
+          <span class="gf-ship" data-s="ghost" data-ship="ghost" style="width:224px"></span>
+        </div>
+        <p class="caption" data-t="logo.wakeCap"></p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:48px" data-t="logo.variants"></h3>
+    <div class="grid g2" style="margin-top:16px">
+      <div><div class="stage dark"><span class="tag" data-t="var.dark"></span><span class="lockup"></span></div><p class="caption" data-t="var.dark.cap"></p></div>
+      <div><div class="stage paper on-paper"><span class="tag" data-t="var.light"></span><span class="lockup"></span></div><p class="caption" data-t="var.light.cap"></p></div>
+      <div><div class="stage dark"><span class="tag" data-t="var.stack"></span><span class="lockup stack"></span></div><p class="caption" data-t="var.stack.cap"></p></div>
+      <div><div class="stage dark"><span class="tag" data-t="var.icon"></span>
+        <div class="icons-row">
+          <figure><div class="app-icon"><span data-ship="ghost-plain" style="display:contents"></span></div>app-icon.svg</figure>
+          <figure><div class="app-icon" style="width:56px;height:56px"><span data-ship="ghost-plain" style="display:contents"></span></div>56 px</figure>
+          <figure><div class="app-icon" style="width:32px;height:32px;border-radius:7px"><span data-ship="plain" style="display:contents"></span></div>favicon</figure>
+        </div></div><p class="caption" data-t="var.icon.cap"></p></div>
+      <div><div class="stage paper on-paper"><span class="tag" data-t="var.monoBlack"></span><span class="lockup solid" style="color:#000"></span></div><p class="caption" data-t="var.monoBlack.cap"></p></div>
+      <div><div class="stage abyss"><span class="tag" data-t="var.monoWhite"></span><span class="lockup solid"></span></div><p class="caption" data-t="var.monoWhite.cap"></p></div>
+      <div><div class="stage teal on-teal"><span class="tag" data-t="var.teal"></span><span class="lockup"></span></div><p class="caption" data-t="var.teal.cap"></p></div>
+      <div><div class="stage dark"><span class="tag" data-t="var.mark"></span>
+        <div class="icons-row"><span class="gf-ship" data-ship="1" style="width:96px"></span><span class="gf-ship" data-ship="1" style="width:96px;color:var(--gf-teal)"></span></div></div>
+        <p class="caption" data-t="var.mark.cap"></p></div>
+    </div>
+
+    <h3 style="margin-top:48px" data-t="logo.sizes"></h3>
+    <div class="panel" style="margin-top:16px">
+      <div class="sizes">
+        <figure><span class="gf-ship" data-ship="1" style="width:32px"></span><span data-t="size.x1"></span></figure>
+        <figure><span class="gf-ship" data-ship="1" style="width:64px"></span>×2 · UI</figure>
+        <figure><span class="gf-ship" data-ship="1" style="width:96px"></span><span data-t="size.x3"></span></figure>
+        <figure><span class="lockup" style="font-size:14px"></span><span data-t="size.horizontal"></span></figure>
+        <figure><span class="lockup stack" style="font-size:12px"></span><span data-t="size.stacked"></span></figure>
+      </div>
+      <p class="caption" data-t="logo.sizesCap"></p>
+    </div>
+
+    <h3 style="margin-top:48px" data-t="logo.donts"></h3>
+    <div class="grid g3" style="margin-top:16px" id="donts"></div>
+  </div></div>
+</section>
+
+<!-- 03 color -->
+<section class="s" id="color" aria-labelledby="t-color">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="color.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --colors<span class="cur"></span></p>
+    <h2 id="t-color" data-t="color.title"></h2>
+    <p class="lead" data-t="color.lead"></p>
+    <div class="grid g3">
+      <div class="swatch big" style="--sw:var(--gf-teal)"><div class="chip"><span data-t="sw.teal.chip"></span></div><div class="info"><b data-t="sw.teal"></b><code>#5fd7d7 · xterm 80 · rgb 95 215 215</code><span data-t="sw.teal.use"></span></div></div>
+      <div class="swatch big" style="--sw:var(--gf-bg);--on:var(--gf-fg)"><div class="chip" style="border-bottom:1px solid var(--gf-hair)"><span data-t="sw.bg.chip"></span></div><div class="info"><b data-t="sw.bg"></b><code>#0b0d10 · rgb 11 13 16</code><span data-t="sw.bg.use"></span></div></div>
+      <div class="swatch big" style="--sw:var(--gf-white)"><div class="chip"><span data-t="sw.white.chip"></span></div><div class="info"><b data-t="sw.white"></b><code>#ffffff · xterm 231</code><span data-t="sw.white.use"></span></div></div>
+    </div>
+    <div class="grid g4" style="margin-top:16px">
+      <div class="swatch" style="--sw:var(--gf-red)"><div class="chip"><span data-t="sw.red.chip"></span></div><div class="info"><b data-t="sw.red"></b><code>#ff5f5f · xterm 203</code><span data-t="sw.red.use"></span></div></div>
+      <div class="swatch" style="--sw:var(--gf-green)"><div class="chip"><span data-t="sw.green.chip"></span></div><div class="info"><b data-t="sw.green"></b><code>#87d787 · xterm 114</code><span data-t="sw.green.use"></span></div></div>
+      <div class="swatch" style="--sw:var(--gf-yellow)"><div class="chip"><span data-t="sw.yellow.chip"></span></div><div class="info"><b data-t="sw.yellow"></b><code>#ffd75f · xterm 221</code><span data-t="sw.yellow.use"></span></div></div>
+      <div class="swatch" style="--sw:var(--gf-grey)"><div class="chip"><span data-t="sw.grey.chip"></span></div><div class="info"><b data-t="sw.grey"></b><code>#8a8a8a · xterm 245</code><span data-t="sw.grey.use"></span></div></div>
+    </div>
+    <h3 style="margin-top:40px" data-t="color.neutrals"></h3>
+    <div class="neutrals" style="margin-top:14px">
+      <div style="--sw:#06080a"><b>abyss</b>#06080a</div><div style="--sw:#0b0d10"><b>bg</b>#0b0d10</div><div style="--sw:#11151a"><b>panel</b>#11151a</div>
+      <div style="--sw:#161b22"><b>panel-2</b>#161b22</div><div style="--sw:#1c2128"><b>hair</b>#1c2128</div><div style="--sw:#262d36"><b>line</b>#262d36</div>
+      <div style="--sw:#8a8a8a;--on:#0b0d10"><b>dim</b>#8a8a8a</div><div style="--sw:#c9d1d9;--on:#0b0d10"><b>fg</b>#c9d1d9</div><div style="--sw:#f4f6f8;--on:#0b0d10"><b>paper</b>#f4f6f8</div>
+    </div>
+    <div class="grid g2" style="margin-top:24px">
+      <div class="panel"><h3 data-t="color.ratio"></h3><p class="dim" data-t="color.ratio.p"></p>
+        <div class="ratio" data-t-aria="color.ratioAria"><i style="flex:70;background:var(--gf-bg)"></i><i style="flex:18;background:#c9d1d9"></i><i style="flex:7;background:var(--gf-teal)"></i><i style="flex:2;background:var(--gf-red)"></i><i style="flex:1.5;background:var(--gf-green)"></i><i style="flex:1.5;background:var(--gf-yellow)"></i></div></div>
+      <div class="panel"><h3 data-t="color.contrast"></h3><ul class="clean dim" id="contrast"></ul></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 04 type -->
+<section class="s" id="tipo" aria-labelledby="t-tipo">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="type.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --type<span class="cur"></span></p>
+    <h2 id="t-tipo" data-t="type.title"></h2>
+    <p class="lead" data-t="type.lead"></p>
+    <div class="grid g2">
+      <div class="panel"><p class="eyebrow" data-t="type.mono.eyebrow"></p><div class="specimen" style="margin-top:16px">Aa 42</div><h3 style="margin-top:12px">JetBrains Mono</h3><p class="dim" data-t="type.mono.p"></p>
+        <p class="glyphs mono" data-t="type.mono.glyphs"></p></div>
+      <div class="panel"><p class="eyebrow" data-t="type.sans.eyebrow"></p><div class="specimen sans" style="margin-top:16px">Aa 42</div><h3 style="margin-top:12px">Inter</h3><p class="dim" data-t="type.sans.p"></p>
+        <p class="glyphs" data-t="type.sans.glyphs"></p></div>
+    </div>
+    <div class="panel scale" style="margin-top:16px">
+      <div class="scale-row"><span class="k">hero · mono 700 · 76</span><span class="v mono" style="font-size:clamp(28px,6vw,64px);font-weight:700;letter-spacing:-.04em">ghostfleet</span></div>
+      <div class="scale-row"><span class="k">h1 · inter 700 · 32</span><span class="v" style="font-size:32px;font-weight:700;letter-spacing:-.02em" data-t="scale.h1"></span></div>
+      <div class="scale-row"><span class="k">h2 · inter 600 · 22</span><span class="v" style="font-size:22px;font-weight:600" data-t="scale.h2"></span></div>
+      <div class="scale-row"><span class="k" data-t="scale.session.k"></span><span class="v mono" style="font-size:15.5px;font-weight:600">acme-api · fix-login-retry</span></div>
+      <div class="scale-row"><span class="k" data-t="scale.body.k"></span><span class="v" style="font-size:14px;color:var(--gf-fg)" data-t="scale.body"></span></div>
+      <div class="scale-row"><span class="k" data-t="scale.label.k"></span><span class="v eyebrow" data-t="scale.label"></span></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 05 states -->
+<section class="s" id="estados" aria-labelledby="t-estados">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="states.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --states<span class="cur"></span></p>
+    <h2 id="t-estados" data-t="states.title"></h2>
+    <p class="lead" data-t="states.lead"></p>
+    <h3 data-t="states.leds"></h3>
+    <div class="leds" style="margin-top:14px" id="leds"></div>
+    <h3 style="margin-top:44px" data-t="states.fleet"></h3>
+    <p class="dim" style="margin-top:6px" data-t="states.fleet.p"></p>
+    <div class="sea" style="margin-top:16px" data-t-aria="states.seaAria">
+      <div class="ghost-cruise"><span class="gf-ship" data-s="ghost" data-ship="1"></span></div>
+      <div style="height:30px"></div>
+      <div class="fleet" id="fleet"></div>
+    </div>
+    <div class="grid g3" style="margin-top:16px">
+      <div class="panel"><h3>alarm · 1 s</h3><p class="dim" data-t="motion.alarm"></p></div>
+      <div class="panel"><h3>sail · 0.9 s</h3><p class="dim" data-t="motion.sail"></p></div>
+      <div class="panel"><h3>bob · 2.4–3.2 s</h3><p class="dim" data-t="motion.bob"></p></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 06 components -->
+<section class="s" id="componentes" aria-labelledby="t-comp">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="comp.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --components<span class="cur"></span></p>
+    <h2 id="t-comp" data-t="comp.title"></h2>
+    <p class="lead" data-t="comp.lead"></p>
+    <div class="grid g2">
+      <div class="panel"><h3 data-t="comp.buttons"></h3>
+        <div class="btns" style="margin-top:16px">
+          <button class="btn primary" type="button" data-t="btn.new"></button>
+          <button class="btn" type="button" data-t="btn.terminal"></button>
+          <button class="btn ghost" type="button" data-t="btn.cancel"></button>
+          <button class="btn danger" type="button" data-t="btn.close"></button>
+          <button class="btn sm" type="button" data-t="btn.try"></button>
+        </div>
+        <h3 style="margin-top:28px" data-t="comp.pills"></h3>
+        <div class="pills" style="margin-top:14px" id="pills"></div>
+        <h3 style="margin-top:28px" data-t="comp.field"></h3>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
+          <input class="input" data-t-aria="comp.fieldAria" value="acme-web">
+          <input class="input focus" data-t-aria="comp.fieldFocusAria" data-t-value="comp.fieldFocus">
+        </div>
+      </div>
+      <div class="panel"><h3 data-t="comp.cards"></h3>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:16px">
+          <article class="card c-red"><div class="card-top"><span class="pill c-red"><b>●</b> <span data-t="status.need-you"></span></span><span class="dim" style="font-size:12px" data-t="card.2min"></span></div>
+            <h4>acme-api · master</h4><p class="card-msg" data-t="card.need"></p>
+            <div class="card-foot"><span class="branch">staging</span><span class="avatar c-teal">AM</span></div></article>
+          <article class="card c-teal"><div class="card-top"><span class="pill c-teal"><b>◆</b> <span data-t="status.working"></span></span><span class="dim" style="font-size:12px" data-t="card.now"></span></div>
+            <h4>acme-web · fix-checkout</h4><p class="card-msg" data-t="card.work"></p>
+            <div class="card-foot"><span class="branch">fix-checkout</span><span class="avatar c-green">LR</span></div></article>
+          <article class="card c-green"><div class="card-top"><span class="pill c-green"><b>✓</b> <span data-t="status.ready"></span></span><span class="dim" style="font-size:12px" data-t="card.4min"></span></div>
+            <h4>toolbox · scratch</h4><p class="card-msg" data-t="card.done"></p>
+            <div class="card-foot"><span class="branch">scratch</span><span class="avatar c-yellow">DM</span></div></article>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 07 icons -->
+<section class="s" id="iconos" aria-labelledby="t-iconos">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="icons.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --icons<span class="cur"></span></p>
+    <h2 id="t-iconos" data-t="icons.title"></h2>
+    <p class="lead" data-t="icons.lead"></p>
+    <h3 data-t="icons.glyphs"></h3>
+    <div class="glyph-grid" style="margin-top:14px" id="glyphs"></div>
+    <h3 style="margin-top:40px" data-t="icons.pix"></h3>
+    <div class="pix-grid" style="margin-top:14px" id="pix"></div>
+    <p class="caption" data-t="icons.rules"></p>
+  </div></div>
+</section>
+
+<!-- 08 voice -->
+<section class="s" id="voz" aria-labelledby="t-voz">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="voice.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --voice<span class="cur"></span></p>
+    <h2 id="t-voz" data-t="voice.title"></h2>
+    <p class="lead" data-t="voice.lead"></p>
+    <div class="grid g4" style="margin-bottom:24px">
+      <div class="panel"><h3 data-t="voice.facts"></h3><p class="dim" data-t="voice.facts.p"></p></div>
+      <div class="panel"><h3 data-t="voice.you"></h3><p class="dim" data-t="voice.you.p"></p></div>
+      <div class="panel"><h3 data-t="voice.blame"></h3><p class="dim" data-t="voice.blame.p"></p></div>
+      <div class="panel"><h3 data-t="voice.humor"></h3><p class="dim" data-t="voice.humor.p"></p></div>
+    </div>
+    <div class="voice" id="says"></div>
+    <div class="panel" style="margin-top:16px"><h3 data-t="voice.words"></h3>
+      <p class="dim house" style="margin-top:8px" data-t="voice.words.p"></p></div>
+  </div></div>
+</section>
+
+<!-- 09 applications -->
+<section class="s" id="aplicaciones" aria-labelledby="t-apps">
+  <div class="wrap"><div class="win">
+    <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="apps.num"></span></div>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --apps<span class="cur"></span></p>
+    <h2 id="t-apps" data-t="apps.title"></h2>
+    <p class="lead" data-t="apps.lead"></p>
+    <div class="grid g2">
+      <div>
+        <div class="device"><div class="screen">
+          <div class="login" role="group" data-t-aria="login.aria">
+            <span class="lockup" style="font-size:18px"></span>
+            <div><h3 style="font-size:19px" data-t="login.title"></h3><p class="dim" style="font-size:13px;margin-top:4px" data-t="login.sub"></p></div>
+            <label class="field"><span data-t="login.name"></span><input class="input" value="lucia" data-t-aria="login.nameAria"></label>
+            <label class="field"><span data-t="login.pass"></span><input class="input focus" type="password" value="••••••••" data-t-aria="login.passAria"></label>
+            <button class="btn primary" type="button" data-t="login.go"></button>
+          </div>
+        </div></div>
+        <p class="caption" data-t="login.cap"></p>
+      </div>
+      <div>
+        <div class="bizcards">
+          <div class="biz front" data-t-aria="biz.front"><span class="lockup" style="font-size:15px"></span><span class="big" data-ship="ghost-plain"></span><span class="mono dim" style="font-size:11px" data-t="biz.tagline"></span></div>
+          <div class="biz back" data-t-aria="biz.back">
+            <div class="on-paper"><span class="lockup" style="font-size:13px"></span></div>
+            <div><div class="name">Lucía Rivas</div><div class="role" data-t="biz.role"></div></div>
+            <div class="contact">lucia@acme.dev<br>acme.dev/ghostfleet</div>
+          </div>
+        </div>
+        <p class="caption" data-t="biz.cap"></p>
+      </div>
+    </div>
+    <div style="margin-top:24px">
+      <div class="slide" data-t-aria="slide.aria">
+        <div class="k">ghostfleet team</div>
+        <div class="fleet-mini" aria-hidden="true"><span class="gf-ship" data-s="work" data-ship="1"></span><span class="gf-ship lead" data-s="ghost" data-ship="1"></span><span class="gf-ship" data-s="fresh" data-ship="1"></span></div>
+        <h3 data-t="slide.title"></h3>
+        <div class="bottom">
+          <div class="stats"><div><b>12</b><span data-t="slide.parallel"></span></div><div><b>3</b><span data-t="slide.need"></span></div><div><b>0</b><span data-t="slide.byhand"></span></div></div>
+          <span class="lockup" style="font-size:1.6cqw"></span>
+        </div>
+      </div>
+      <p class="caption" data-t="slide.cap"></p>
+    </div>
+  </div></div>
+</section>
+</main>
+
+<footer><div class="wrap"><span class="lockup" style="font-size:14px"></span><span data-t="foot.source"></span></div></footer>
+
+<!-- Every word on the page, in both languages. The markup above carries only keys, so a
+     sentence cannot exist in one language and be missing from the other without
+     team/test/brand.test.mjs going red. Values are HTML; an attribute key (data-t-aria,
+     data-t-value) gets plain text. -->
+<script type="application/json" id="i18n">
+{
+  "en": {
+    "meta.title": "ghostfleet brand manual",
+    "meta.desc": "The ghostfleet team brand manual: logo, color, type, states, components, voice and applications.",
+    "lang.label": "Language",
+    "nav.label": "Sections",
+    "nav.story": "Story",
+    "nav.logo": "Logo",
+    "nav.color": "Color",
+    "nav.type": "Type",
+    "nav.states": "States",
+    "nav.comp": "Components",
+    "nav.icons": "Icons",
+    "nav.voice": "Voice",
+    "nav.apps": "Applications",
+
+    "hero.eyebrow": "Brand manual · v1",
+    "hero.lead": "A fleet of Claude sessions that keeps working while you get on with something else, and a ship that tells you when one of them needs you. This manual is how it looks, how it moves and how it talks.",
+    "hero.date": "November 2026",
+    "hero.topics": "logo · color · type · states · voice",
+
+    "story.num": "<b>01</b> / story",
+    "story.title": "A terminal that learned to sail",
+    "story.lead": "ghostfleet was born in a terminal: a grid of Claude sessions, each in its own copy of the repo, and a ship drawn in half-blocks across the header. <em>team</em> is that same fleet, for a whole team.",
+    "story.p1": "The ship isn’t an illustration: it’s <strong>eight rows of ▀ ▄ █ characters</strong> in the grid, 32 × 16 pixels. Every icon, every lockup and every boat in this manual’s fleet comes from those same rows, pixel for pixel.",
+    "story.p2": "It’s a <strong>ghost ship</strong> because the sessions work on their own, with nobody at the helm, and surface when they’re needed. And it’s a <strong>fleet</strong> because there’s never just one: there’s a lead and a handful of workers, each in its own lane.",
+    "story.p3": "The brand keeps what already worked in the terminal: a dark background, six signal colors and a monospaced face. What it adds is calm: room to breathe, a readable text face, and motion only where it matters.",
+    "story.sprite": "The original sprite, exactly as it sits in the grid",
+    "story.spriteAria": "The ship sprite in half-block characters",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — the single source. <code>team/brand/make-logo.mjs</code> reads it and regenerates every SVG.",
+    "story.traits": "Personality",
+    "trait.calm": "Calm",
+    "trait.calm.p": "Shows a lot without shouting. Red exists, but only for “needs you”.",
+    "trait.precise": "Precise",
+    "trait.precise.p": "Says what happened, where and when. Never “something went wrong”.",
+    "trait.crafted": "Crafted",
+    "trait.crafted.p": "Whole pixels, mono for names, no stock sparkle.",
+    "trait.dry": "Dry wit",
+    "trait.dry.p": "A ghost ship, sure. But the joke never gets in front of the facts.",
+
+    "logo.num": "<b>02</b> / logo",
+    "logo.title": "The ghost ship",
+    "logo.lead": "A 32 × 16 pixel ghost submarine with a conning tower, a flag, three portholes and a periscope trailing its wake. Always in whole pixels: scale it ×1, ×2, ×3… never ×1.5.",
+    "logo.constructTag": "construction · 1 p = 1 sprite pixel",
+    "logo.constructAria": "Construction grid of the ship, 32 by 16 pixels, with 4 pixels of clear space",
+    "logo.constructCap": "<b>32 × 16 grid.</b> Clear space: 4 p all around (dotted teal). Nothing goes in there, not even the wordmark: the wordmark starts 6 p from the ship.",
+    "logo.wakeTag": "proposal · ghost wake",
+    "logo.wakeCap": "<b>Proposed refinement.</b> The ship doesn’t change by a single pixel; under the hull, a three-row wake frays away in teal (60%, 35%, 15%), like the hem of a bedsheet. Use it on the app icon and in large pieces; at UI sizes, use the clean sprite.",
+    "logo.variants": "Variants",
+    "var.dark": "horizontal · dark (primary)",
+    "var.dark.cap": "<b>lockup-dark.svg</b> — the default signature. “team” is always teal.",
+    "var.light": "horizontal · light",
+    "var.light.cap": "<b>lockup-light.svg</b> — ink #0b0d10 and a darkened teal, #0e7a81, to clear 4.5:1 on paper.",
+    "var.stack": "stacked",
+    "var.stack.cap": "<b>lockup-stacked-dark.svg / -light.svg</b> — for squares, covers and the sign-in screen.",
+    "var.icon": "app icon · favicon",
+    "var.icon.cap": "<b>app-icon.svg</b> with 22% corners; <b>app-icon-maskable.svg</b> full-bleed, with the ship inside the central 64%.",
+    "var.monoBlack": "monochrome · black",
+    "var.monoBlack.cap": "<b>lockup-mono-black.svg</b>, <b>mark-mono.svg</b> (currentColor) — stamps, engraving, fax, single-ink print.",
+    "var.monoWhite": "monochrome · white",
+    "var.monoWhite.cap": "<b>lockup-mono-white.svg</b> — over dark photos or flat-color backgrounds.",
+    "var.teal": "on teal",
+    "var.teal.cap": "On the brand color, everything goes in teal ink (#05242a). Campaign pieces only, never in the UI.",
+    "var.mark": "ship only",
+    "var.mark.cap": "<b>mark.svg</b>, <b>mark-teal.svg</b>, <b>mark-ink.svg</b> — when the name is already close by (the app header, the assistant’s avatar).",
+    "logo.sizes": "Minimum sizes",
+    "size.x1": "ship · 32 px (×1)",
+    "size.x3": "×3 · headers",
+    "size.horizontal": "horizontal · 140 px wide",
+    "size.stacked": "stacked · 80 px",
+    "logo.sizesCap": "Below 32 px the ship loses its portholes: use the favicon (32 px square) instead. In print, the horizontal lockup never goes below 30 mm wide.",
+    "logo.donts": "Misuse",
+    "logo.dontAria": "ghostfleet team, misused",
+    "dont.stretch": "Stretching or squashing",
+    "dont.rotate": "Rotating",
+    "dont.blur": "Smoothing the pixels",
+    "dont.recolor": "Recoloring with signal colors",
+    "dont.gradient": "Gradients or outlines",
+    "dont.busy": "Busy backgrounds",
+
+    "color.num": "<b>03</b> / color",
+    "color.title": "Six signals on a dark sea",
+    "color.lead": "The palette is the grid’s: the xterm indices the terminal already paints with. Each signal color means exactly one thing, and that thing is a state.",
+    "sw.teal.chip": "brand",
+    "sw.teal": "Teal",
+    "sw.teal.use": "Brand, working, links, focus, primary button.",
+    "sw.bg.chip": "background",
+    "sw.bg": "Abyss",
+    "sw.bg.use": "The background of everything: app, icon, slides.",
+    "sw.white.chip": "ship",
+    "sw.white": "White",
+    "sw.white.use": "The ship and headings. Never body text.",
+    "sw.red.chip": "needs you",
+    "sw.red": "Red",
+    "sw.red.use": "Waiting for an answer or a permission. Danger.",
+    "sw.green.chip": "done",
+    "sw.green": "Green",
+    "sw.green.use": "Finished its turn. Success.",
+    "sw.yellow.chip": "warning",
+    "sw.yellow": "Yellow",
+    "sw.yellow.use": "Out of quota, cut off, starting up.",
+    "sw.grey.chip": "at rest",
+    "sw.grey": "Grey",
+    "sw.grey.use": "Idle, paused, muted text.",
+    "color.neutrals": "Neutrals",
+    "color.ratio": "Proportion",
+    "color.ratio.p": "On a typical screen, almost everything is background and panels; teal is an accent; the others only show up when there’s a state to report.",
+    "color.ratioAria": "Color proportion: 70 percent dark neutrals, 18 percent text, 7 percent teal, 5 percent signals",
+    "color.contrast": "Contrast",
+    "contrast.text": "text #c9d1d9 on background",
+    "contrast.teal": "teal on background",
+    "contrast.button": "teal ink on teal (button)",
+    "contrast.dim": "dim #8a8a8a on panel",
+    "contrast.red": "red on background",
+    "contrast.paper": "paper teal on paper",
+
+    "type.num": "<b>04</b> / type",
+    "type.title": "Mono for names, Inter for talking",
+    "type.lead": "What comes from the terminal — session names, branches, numbers, the wordmark — is set in JetBrains Mono. What speaks to a person is set in Inter.",
+    "type.mono.eyebrow": "Wordmark and data",
+    "type.mono.p": "400 · 500 · 700 — Google Fonts. Fallback: ui-monospace, SF Mono, Menlo, Consolas.",
+    "type.mono.glyphs": "abcdefghijklmnopqrstuvwxyz 0123456789 ● ◆ ✓ ⏸ ⧗ ⚠ ☾ ✕ ▀ ▄ █",
+    "type.sans.eyebrow": "Text",
+    "type.sans.p": "400 · 500 · 600 · 700 — Google Fonts. Fallback: the system font.",
+    "type.sans.glyphs": "Abcdefghijklmnopqrstuvwxyz What happened while you were out? Done!",
+    "scale.h1": "Your fleet at a glance",
+    "scale.h2": "Three sessions need you",
+    "scale.session.k": "session · mono 600 · 15.5",
+    "scale.body.k": "body · inter 400 · 14",
+    "scale.body": "Finished its turn 4 min ago. Review what changed before you open the PR.",
+    "scale.label.k": "label · mono 600 · 11.5",
+    "scale.label": "working now",
+
+    "states.num": "<b>05</b> / states",
+    "states.title": "Lights and ships",
+    "states.lead": "Every session has a state, and every state has a light, a glyph and a way of moving. Only what’s urgent moves fast: if everything pulses, nothing matters.",
+    "states.leds": "Status LED",
+    "states.fleet": "The fleet, live",
+    "states.fleet.p": "The six looks from the app’s board. Each ship moves like the state it’s reporting.",
+    "states.seaAria": "Animated fleet showing the board’s six states",
+    "motion.alarm": "Red. Jumps and glows. The one thing that asks for your attention.",
+    "motion.sail": "Teal. Pushes forward and pitches: it’s working.",
+    "motion.bob": "Green or white. Floats easy: done, open, waiting.",
+    "status.need-you": "Needs you",
+    "status.need-you.hint": "Waiting for an answer or a permission",
+    "status.working": "Working",
+    "status.working.hint": "In the middle of a turn",
+    "status.ready": "Done",
+    "status.ready.hint": "Finished its turn",
+    "status.starting": "Starting",
+    "status.starting.hint": "Opening up",
+    "status.limit": "Out of quota",
+    "status.limit.hint": "Hit the account’s usage limit",
+    "status.interrupted": "Interrupted",
+    "status.interrupted.hint": "Its turn was cut short",
+    "status.parked": "Paused",
+    "status.parked.hint": "Paused on purpose, not using quota",
+    "status.idle": "Idle",
+    "status.idle.hint": "Open, no task",
+    "status.asleep": "Asleep",
+    "status.asleep.hint": "Wakes up with a click",
+    "status.lost": "Lost",
+    "status.lost.hint": "Can be reopened",
+    "look.need": "Needs you",
+    "look.work": "Working",
+    "look.fresh": "Just finished",
+    "look.warn": "Out of quota",
+    "look.open": "Open",
+    "look.off": "Idle",
+
+    "comp.num": "<b>06</b> / components",
+    "comp.title": "The app’s building blocks",
+    "comp.lead": "Radii of 8 (controls), 12 (cards) and 16 (panels). Hairline borders before shadows. Filled teal is for one action per screen.",
+    "comp.buttons": "Buttons",
+    "btn.new": "New session",
+    "btn.terminal": "Open terminal",
+    "btn.cancel": "Cancel",
+    "btn.close": "Close session",
+    "btn.try": "▶ Try it now",
+    "comp.pills": "Status chips",
+    "comp.field": "Field",
+    "comp.fieldAria": "Example field",
+    "comp.fieldFocusAria": "Example field with focus",
+    "comp.fieldFocus": "billing-svc · focused",
+    "comp.cards": "Session cards",
+    "card.2min": "2 min ago",
+    "card.now": "now",
+    "card.4min": "4 min ago",
+    "card.need": "Can I run the migration on staging? It touches the invoices table.",
+    "card.work": "Running the suite: 212 of 340 tests.",
+    "card.done": "Done: the export script takes dates now.",
+
+    "icons.num": "<b>07</b> / iconography",
+    "icons.title": "Glyphs from the terminal, pixels from the sea",
+    "icons.lead": "Two families. Status glyphs are characters from the grid, set in mono and never drawn separately. Illustrative icons are drawn on a 12 × 12 grid, in whole pixels and a single color.",
+    "icons.glyphs": "Status glyphs",
+    "icons.pix": "Pixel icons",
+    "icons.rules": "Rules: a 12-unit grid, a 1 p stroke, no curves or antialiasing (<code>shape-rendering: crispEdges</code>), color inherited from the text. An icon never carries two signal colors.",
+    "icon.lighthouse": "Lighthouse (notifications)",
+    "icon.buoy": "Buoy (unassigned)",
+    "icon.anchor": "Anchor (paused)",
+    "icon.wave": "Wave (activity)",
+    "icon.compass": "Compass (map)",
+    "icon.flag": "Flag (lead)",
+
+    "voice.num": "<b>08</b> / voice",
+    "voice.title": "How ghostfleet talks",
+    "voice.lead": "Like a good teammate on call: talks to you directly, gets to the point, tells you what happened and what you can do about it. Plain English, short sentences, lead with the verb.",
+    "voice.facts": "Facts first",
+    "voice.facts.p": "Which session, what happened, how long ago. Feelings, if there’s room, come after.",
+    "voice.you": "Talk to the person",
+    "voice.you.p": "“Needs you”, “take a look”. Nobody reading this is “the user”.",
+    "voice.blame": "No blame",
+    "voice.blame.p": "An error explains the cause and the way out, not whose fault it was.",
+    "voice.humor": "Easy on the jokes",
+    "voice.humor.p": "One nautical wink per screen, at most. Never in an error.",
+    "voice.do": "Do",
+    "voice.dont": "Don’t",
+    "say.wait": "A session is waiting",
+    "say.wait.yes": "acme-api needs you: it wants to run a migration on staging.",
+    "say.wait.no": "Attention! User intervention is required.",
+    "say.done": "Finished",
+    "say.done.yes": "Done. Changed 4 files — give them a look before you open the PR.",
+    "say.done.no": "Task completed successfully! 🎉🎉",
+    "say.limit": "Out of quota",
+    "say.limit.yes": "Out of quota until 6 pm. I’ll pick it back up on my own.",
+    "say.limit.no": "Error 429: rate limit exceeded.",
+    "say.error": "Error",
+    "say.error.yes": "Couldn’t open the terminal: the machine killed the process. One click reopens it.",
+    "say.error.no": "Oops, something went wrong. Please try again later.",
+    "say.empty": "Empty",
+    "say.empty.yes": "Calm seas. Start a session to set sail.",
+    "say.empty.no": "No data to display.",
+    "say.confirm": "Confirming something destructive",
+    "say.confirm.yes": "Close fix-checkout? Anything that isn’t committed is gone.",
+    "say.confirm.no": "Are you sure you want to proceed with this action?",
+    "voice.words": "House words",
+    "voice.words.p": "<b>fleet</b> (a project and its sessions) · <b>session</b> (not “agent” or “bot”) · <b>lead</b> (the master session) · <b>worker</b> · <b>quota</b> (not “token limit”) · <b>paused</b> · <b>asleep</b> · <b>lost</b>. Session and branch names go in mono, without quotes.",
+
+    "apps.num": "<b>09</b> / applications",
+    "apps.title": "Out in the world",
+    "apps.lead": "The sign-in screen, a business card and a slide: three places people see the brand before they see the product.",
+    "login.aria": "Sign-in screen mockup",
+    "login.title": "Sign in to your fleet",
+    "login.sub": "Your sessions keep working while you’re away.",
+    "login.name": "Name",
+    "login.nameAria": "Name (mockup)",
+    "login.pass": "Password",
+    "login.passAria": "Password (mockup)",
+    "login.go": "Sign in",
+    "login.cap": "<b>Sign-in screen.</b> The teal halo up top, a single filled action, the lockup at the top left of the card.",
+    "biz.front": "Business card, front",
+    "biz.back": "Business card, back",
+    "biz.tagline": "your fleet at a glance",
+    "biz.role": "Operations · ghostfleet team",
+    "biz.cap": "<b>85 × 55 mm card.</b> A dark front with the large ghost ship; a paper back with the light lockup.",
+    "slide.aria": "Example slide",
+    "slide.title": "Your team sleeps.<br><em>The fleet doesn’t.</em>",
+    "slide.parallel": "sessions in parallel",
+    "slide.need": "need you",
+    "slide.byhand": "terminals opened by hand",
+    "slide.cap": "<b>16:9 slide.</b> A two-line mono title, the second line in teal; the fleet on the right; figures along the bottom; the lockup in the corner.",
+
+    "foot.source": "Source: <code>team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+  },
+  "es": {
+    "meta.title": "Manual de marca ghostfleet",
+    "meta.desc": "Manual de marca de ghostfleet team: logo, color, tipografía, estados, componentes, voz y aplicaciones.",
+    "lang.label": "Idioma",
+    "nav.label": "Secciones",
+    "nav.story": "Historia",
+    "nav.logo": "Logo",
+    "nav.color": "Color",
+    "nav.type": "Tipografía",
+    "nav.states": "Estados",
+    "nav.comp": "Componentes",
+    "nav.icons": "Íconos",
+    "nav.voice": "Voz",
+    "nav.apps": "Aplicaciones",
+
+    "hero.eyebrow": "Manual de marca · v1",
+    "hero.lead": "Una flota de sesiones de Claude que trabaja mientras tú haces otra cosa, y un barco que te avisa cuando alguno te necesita. Este manual es cómo se ve, cómo se mueve y cómo habla.",
+    "hero.date": "noviembre 2026",
+    "hero.topics": "logo · color · tipo · estados · voz",
+
+    "story.num": "<b>01</b> / historia",
+    "story.title": "Un terminal que aprendió a navegar",
+    "story.lead": "ghostfleet nació en un terminal: una cuadrícula de sesiones de Claude, cada una en su propia copia del repo, y un barco de medios bloques en la cabecera. <em>team</em> es esa misma flota para un equipo entero.",
+    "story.p1": "El barco no es una ilustración: son <strong>ocho filas de caracteres ▀ ▄ █</strong> en el grid, 32 × 16 píxeles. Cada ícono, cada lockup y cada barco de la flota en este manual sale de esas mismas filas, píxel por píxel.",
+    "story.p2": "Es un <strong>barco fantasma</strong> porque las sesiones trabajan solas, sin nadie al timón, y aparecen cuando hacen falta. Y es una <strong>flota</strong> porque nunca hay uno: hay un líder y varios trabajadores, cada uno en su carril.",
+    "story.p3": "La marca hereda lo que ya funcionaba en el terminal: fondo oscuro, seis colores de señal y una tipografía monoespaciada. Lo que añade es calma: espacio, una tipografía de texto legible y movimiento sólo donde importa.",
+    "story.sprite": "El sprite original, tal como está en el grid",
+    "story.spriteAria": "Sprite del barco en caracteres de medio bloque",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — la fuente única. <code>team/brand/make-logo.mjs</code> la lee y regenera todos los SVG.",
+    "story.traits": "Personalidad",
+    "trait.calm": "Sereno",
+    "trait.calm.p": "Muestra mucho sin gritar. El rojo existe, pero sólo para «te necesita».",
+    "trait.precise": "Preciso",
+    "trait.precise.p": "Dice qué pasó, dónde y cuándo. Nada de «algo salió mal».",
+    "trait.crafted": "Artesanal",
+    "trait.crafted.p": "Píxeles enteros, mono para los nombres, sin brillos de stock.",
+    "trait.dry": "Con humor seco",
+    "trait.dry.p": "Un barco fantasma, sí. Pero el chiste nunca tapa el dato.",
+
+    "logo.num": "<b>02</b> / logo",
+    "logo.title": "El barco fantasma",
+    "logo.lead": "Un submarino-fantasma de 32 × 16 píxeles con torre, bandera, tres ojos de buey y un periscopio que arrastra su estela. Siempre en píxeles enteros: se escala ×1, ×2, ×3… nunca ×1,5.",
+    "logo.constructTag": "construcción · 1 p = 1 píxel del sprite",
+    "logo.constructAria": "Retícula de construcción del barco, 32 por 16 píxeles, con 4 de zona de respeto",
+    "logo.constructCap": "<b>Retícula de 32 × 16.</b> Zona de respeto: 4 p alrededor (en teal punteado). Nada entra ahí, ni siquiera el wordmark: el wordmark empieza a 6 p del barco.",
+    "logo.wakeTag": "propuesta · estela fantasma",
+    "logo.wakeCap": "<b>Refinamiento propuesto.</b> El barco no cambia ni un píxel; bajo el casco se deshilacha una estela de tres filas en teal (60 %, 35 %, 15 %), como el borde de una sábana. Se usa en el ícono de app y en piezas grandes; en tamaños de UI va el sprite limpio.",
+    "logo.variants": "Variantes",
+    "var.dark": "horizontal · oscuro (principal)",
+    "var.dark.cap": "<b>lockup-dark.svg</b> — la firma por defecto. «team» siempre en teal.",
+    "var.light": "horizontal · claro",
+    "var.light.cap": "<b>lockup-light.svg</b> — tinta #0b0d10 y teal oscurecido #0e7a81 para pasar 4.5:1 en papel.",
+    "var.stack": "apilado",
+    "var.stack.cap": "<b>lockup-stacked-dark.svg / -light.svg</b> — para cuadrados, portadas y la pantalla de entrada.",
+    "var.icon": "ícono de app · favicon",
+    "var.icon.cap": "<b>app-icon.svg</b> esquinas 22 %; <b>app-icon-maskable.svg</b> a sangre, el barco dentro del 64 % central.",
+    "var.monoBlack": "monocromo · negro",
+    "var.monoBlack.cap": "<b>lockup-mono-black.svg</b>, <b>mark-mono.svg</b> (currentColor) — sellos, grabado, fax, un solo tinte.",
+    "var.monoWhite": "monocromo · blanco",
+    "var.monoWhite.cap": "<b>lockup-mono-white.svg</b> — sobre fotos oscuras o fondos de un color.",
+    "var.teal": "sobre teal",
+    "var.teal.cap": "Sobre el color de marca, todo en tinta teal (#05242a). Sólo en piezas de campaña, nunca en la UI.",
+    "var.mark": "sólo el barco",
+    "var.mark.cap": "<b>mark.svg</b>, <b>mark-teal.svg</b>, <b>mark-ink.svg</b> — cuando el nombre ya está cerca (cabecera de la app, avatar del asistente).",
+    "logo.sizes": "Tamaños mínimos",
+    "size.x1": "barco · 32 px (×1)",
+    "size.x3": "×3 · cabeceras",
+    "size.horizontal": "horizontal · 140 px de ancho",
+    "size.stacked": "apilado · 80 px",
+    "logo.sizesCap": "Por debajo de 32 px el barco pierde los ojos de buey: usa el favicon (32 px cuadrado). En impresión, el horizontal no baja de 30 mm de ancho.",
+    "logo.donts": "Usos incorrectos",
+    "logo.dontAria": "ghostfleet team, mal usado",
+    "dont.stretch": "Estirar o aplastar",
+    "dont.rotate": "Girar",
+    "dont.blur": "Suavizar los píxeles",
+    "dont.recolor": "Recolorear con señales",
+    "dont.gradient": "Degradados o contornos",
+    "dont.busy": "Sobre fondos que compiten",
+
+    "color.num": "<b>03</b> / color",
+    "color.title": "Seis señales sobre un mar oscuro",
+    "color.lead": "La paleta es la del grid: los índices xterm que el terminal ya pinta. Cada color de señal significa una sola cosa, y esa cosa es un estado.",
+    "sw.teal.chip": "marca",
+    "sw.teal": "Teal",
+    "sw.teal.use": "Marca, trabajando, enlaces, foco, botón primario.",
+    "sw.bg.chip": "fondo",
+    "sw.bg": "Abismo",
+    "sw.bg.use": "El fondo de todo: app, ícono, diapositivas.",
+    "sw.white.chip": "barco",
+    "sw.white": "Blanco",
+    "sw.white.use": "El barco y los títulos. Nunca texto corrido.",
+    "sw.red.chip": "te necesita",
+    "sw.red": "Rojo",
+    "sw.red.use": "Espera respuesta o permiso. Peligro.",
+    "sw.green.chip": "lista",
+    "sw.green": "Verde",
+    "sw.green.use": "Terminó su turno. Éxito.",
+    "sw.yellow.chip": "aviso",
+    "sw.yellow": "Amarillo",
+    "sw.yellow.use": "Sin cupo, cortada, arrancando.",
+    "sw.grey.chip": "quieta",
+    "sw.grey": "Gris",
+    "sw.grey.use": "Inactiva, en pausa, texto atenuado.",
+    "color.neutrals": "Neutros",
+    "color.ratio": "Proporción",
+    "color.ratio.p": "En una pantalla típica: casi todo es fondo y paneles; el teal es un acento; los demás aparecen sólo cuando hay un estado que contar.",
+    "color.ratioAria": "Proporción de color: 70 por ciento neutros oscuros, 18 por ciento texto, 7 por ciento teal, 5 por ciento señales",
+    "color.contrast": "Contraste",
+    "contrast.text": "texto #c9d1d9 sobre fondo",
+    "contrast.teal": "teal sobre fondo",
+    "contrast.button": "tinta teal sobre teal (botón)",
+    "contrast.dim": "atenuado #8a8a8a sobre panel",
+    "contrast.red": "rojo sobre fondo",
+    "contrast.paper": "teal de papel sobre papel",
+
+    "type.num": "<b>04</b> / tipografía",
+    "type.title": "Mono para los nombres, Inter para hablar",
+    "type.lead": "Lo que viene del terminal —nombres de sesión, ramas, números, el wordmark— va en JetBrains Mono. Lo que le habla a una persona va en Inter.",
+    "type.mono.eyebrow": "Wordmark y datos",
+    "type.mono.p": "400 · 500 · 700 — Google Fonts. Respaldo: ui-monospace, SF Mono, Menlo, Consolas.",
+    "type.mono.glyphs": "abcdefghijklmnñopqrstuvwxyz 0123456789 ● ◆ ✓ ⏸ ⧗ ⚠ ☾ ✕ ▀ ▄ █",
+    "type.sans.eyebrow": "Texto",
+    "type.sans.p": "400 · 500 · 600 · 700 — Google Fonts. Respaldo: la fuente del sistema.",
+    "type.sans.glyphs": "Abcdefghijklmnñopqrstuvwxyz ¿Qué hizo mientras no estabas? ¡Lista!",
+    "scale.h1": "Tu flota, de un vistazo",
+    "scale.h2": "Tres sesiones te necesitan",
+    "scale.session.k": "sesión · mono 600 · 15.5",
+    "scale.body.k": "cuerpo · inter 400 · 14",
+    "scale.body": "Terminó su turno hace 4 min. Revisa lo que cambió antes de abrir el PR.",
+    "scale.label.k": "rótulo · mono 600 · 11.5",
+    "scale.label": "trabajando ahora",
+
+    "states.num": "<b>05</b> / estados",
+    "states.title": "Luces y barcos",
+    "states.lead": "Cada sesión tiene un estado, y el estado tiene una luz, un glifo y una forma de moverse. Sólo lo urgente se mueve rápido: si todo late, nada importa.",
+    "states.leds": "LED de estado",
+    "states.fleet": "La flota, en vivo",
+    "states.fleet.p": "Los seis aspectos del tablero de la app. Cada barco se mueve como el estado que cuenta.",
+    "states.seaAria": "Flota animada con los seis estados del tablero",
+    "motion.alarm": "Rojo. Salta y brilla. Es lo único que reclama tu atención.",
+    "motion.sail": "Teal. Avanza y cabecea: está trabajando.",
+    "motion.bob": "Verde o blanco. Flota tranquilo: listo, abierto, esperando.",
+    "status.need-you": "Te necesita",
+    "status.need-you.hint": "Espera una respuesta o un permiso",
+    "status.working": "Trabajando",
+    "status.working.hint": "En medio de un turno",
+    "status.ready": "Lista",
+    "status.ready.hint": "Terminó su turno",
+    "status.starting": "Arrancando",
+    "status.starting.hint": "Se está abriendo",
+    "status.limit": "Sin cupo",
+    "status.limit.hint": "Llegó al límite de la cuenta",
+    "status.interrupted": "Interrumpida",
+    "status.interrupted.hint": "Su turno se cortó",
+    "status.parked": "En pausa",
+    "status.parked.hint": "Pausada, no gasta cupo",
+    "status.idle": "Inactiva",
+    "status.idle.hint": "Abierta, sin tarea",
+    "status.asleep": "Dormida",
+    "status.asleep.hint": "Se despierta con un clic",
+    "status.lost": "Perdida",
+    "status.lost.hint": "Se puede reabrir",
+    "look.need": "Te necesita",
+    "look.work": "Trabajando",
+    "look.fresh": "Recién terminó",
+    "look.warn": "Sin cupo",
+    "look.open": "Abierta",
+    "look.off": "Inactiva",
+
+    "comp.num": "<b>06</b> / componentes",
+    "comp.title": "Las piezas de la app",
+    "comp.lead": "Radios de 8 (controles), 12 (tarjetas) y 16 (paneles). Bordes de un pelo antes que sombras. El teal relleno es para una sola acción por pantalla.",
+    "comp.buttons": "Botones",
+    "btn.new": "Crear sesión",
+    "btn.terminal": "Abrir terminal",
+    "btn.cancel": "Cancelar",
+    "btn.close": "Cerrar sesión",
+    "btn.try": "▶ Probar ahora",
+    "comp.pills": "Chips de estado",
+    "comp.field": "Campo",
+    "comp.fieldAria": "Ejemplo de campo",
+    "comp.fieldFocusAria": "Ejemplo de campo con foco",
+    "comp.fieldFocus": "billing-svc · con foco",
+    "comp.cards": "Tarjetas de sesión",
+    "card.2min": "hace 2 min",
+    "card.now": "ahora",
+    "card.4min": "hace 4 min",
+    "card.need": "¿Puedo correr la migración en staging? Toca la tabla de facturas.",
+    "card.work": "Corriendo la suite: 212 de 340 pruebas.",
+    "card.done": "Listo: el script de exportación ya acepta fechas.",
+
+    "icons.num": "<b>07</b> / iconografía",
+    "icons.title": "Glifos del terminal, píxeles del mar",
+    "icons.lead": "Dos familias. Los glifos de estado son caracteres del grid, en mono, y nunca se dibujan aparte. Los íconos ilustrativos se dibujan en una retícula de 12 × 12, píxeles enteros, un solo color.",
+    "icons.glyphs": "Glifos de estado",
+    "icons.pix": "Íconos de píxel",
+    "icons.rules": "Reglas: retícula de 12, trazo de 1 p, sin curvas ni antialias (<code>shape-rendering: crispEdges</code>), color heredado del texto. Un ícono nunca lleva dos colores de señal.",
+    "icon.lighthouse": "Faro (notificaciones)",
+    "icon.buoy": "Boya (sin asignar)",
+    "icon.anchor": "Ancla (en pausa)",
+    "icon.wave": "Ola (actividad)",
+    "icon.compass": "Brújula (mapa)",
+    "icon.flag": "Bandera (líder)",
+
+    "voice.num": "<b>08</b> / voz",
+    "voice.title": "Cómo habla ghostfleet",
+    "voice.lead": "Como un buen compañero de guardia: tutea, va al grano, dice qué pasó y qué puedes hacer. Español neutro, frases cortas, verbos al principio.",
+    "voice.facts": "Primero el dato",
+    "voice.facts.p": "Qué sesión, qué pasó, hace cuánto. La emoción, si cabe, después.",
+    "voice.you": "Tú, no usted",
+    "voice.you.p": "«Te necesita», «revisa». Nunca «el usuario».",
+    "voice.blame": "Sin culpas",
+    "voice.blame.p": "Un error explica la causa y la salida, no a quién culpar.",
+    "voice.humor": "Humor con medida",
+    "voice.humor.p": "Un guiño marino por pantalla, como mucho. Nunca en un error.",
+    "voice.do": "Sí",
+    "voice.dont": "No",
+    "say.wait": "Una sesión espera",
+    "say.wait.yes": "acme-api te necesita: quiere correr una migración en staging.",
+    "say.wait.no": "¡Atención! Se requiere la intervención del usuario.",
+    "say.done": "Terminó",
+    "say.done.yes": "Lista. Cambió 4 archivos; revisa antes de abrir el PR.",
+    "say.done.no": "¡Tarea completada con éxito! 🎉🎉",
+    "say.limit": "Sin cupo",
+    "say.limit.yes": "Sin cupo hasta las 18:00. La retomo sola cuando vuelva.",
+    "say.limit.no": "Error 429: rate limit exceeded.",
+    "say.error": "Error",
+    "say.error.yes": "No pude abrir la terminal: la máquina cerró el proceso. Reábrela con un clic.",
+    "say.error.no": "Ups, algo salió mal. Inténtalo de nuevo más tarde.",
+    "say.empty": "Vacío",
+    "say.empty.yes": "Mar en calma. Crea una sesión para zarpar.",
+    "say.empty.no": "No hay datos para mostrar.",
+    "say.confirm": "Confirmar algo destructivo",
+    "say.confirm.yes": "¿Cerrar fix-checkout? Se pierde lo que no esté en un commit.",
+    "say.confirm.no": "¿Está seguro de que desea continuar con esta acción?",
+    "voice.words": "Palabras de la casa",
+    "voice.words.p": "<b>flota</b> (un proyecto con sus sesiones) · <b>sesión</b> (no «agente» ni «bot») · <b>líder</b> (la sesión master) · <b>trabajador</b> · <b>cupo</b> (no «límite de tokens») · <b>en pausa</b> · <b>dormida</b> · <b>perdida</b>. Los nombres propios de sesión y rama van en mono y sin comillas.",
+
+    "apps.num": "<b>09</b> / aplicaciones",
+    "apps.title": "En el mundo",
+    "apps.lead": "La pantalla de entrada, una tarjeta de presentación y una diapositiva: tres lugares donde la marca se ve antes que el producto.",
+    "login.aria": "Maqueta de la pantalla de entrada",
+    "login.title": "Entra a tu flota",
+    "login.sub": "Tus sesiones siguen trabajando mientras no estás.",
+    "login.name": "Nombre",
+    "login.nameAria": "Nombre (maqueta)",
+    "login.pass": "Contraseña",
+    "login.passAria": "Contraseña (maqueta)",
+    "login.go": "Entrar",
+    "login.cap": "<b>Pantalla de entrada.</b> El halo teal arriba, una sola acción rellena, el lockup arriba a la izquierda de la tarjeta.",
+    "biz.front": "Tarjeta de presentación, frente",
+    "biz.back": "Tarjeta de presentación, dorso",
+    "biz.tagline": "tu flota, de un vistazo",
+    "biz.role": "Operaciones · ghostfleet team",
+    "biz.cap": "<b>Tarjeta 85 × 55 mm.</b> Frente oscuro con el barco fantasma grande; dorso en papel con el lockup claro.",
+    "slide.aria": "Diapositiva de ejemplo",
+    "slide.title": "Tu equipo duerme.<br><em>La flota no.</em>",
+    "slide.parallel": "sesiones en paralelo",
+    "slide.need": "te necesitan",
+    "slide.byhand": "terminales abiertas a mano",
+    "slide.cap": "<b>Diapositiva 16:9.</b> Título en mono a dos líneas, la segunda en teal; la flota a la derecha; cifras abajo; lockup en la esquina.",
+
+    "foot.source": "Fuente: <code>team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+  }
+}
+</script>
+<script>
+// The grid's ship (bin/fleet-grid.mjs), row by row. team/test/brand.test.mjs compares these
+// rows with the grid's: if someone redraws the ship, this goes red.
+const SHIP = [
+  '         ▄▄▄▄▄▄█                ',
+  '         ▀▀▀▀▀ █                ',
+  '          ▄▄███████▄▄▄          ',
+  '       ▄██████ ███ ████▄      ▄▀',
+  '     ▄██████████████████    ▄▀  ',
+  '   ▄██▀▀████▀▀████▀▀███   ▄▀    ',
+  '▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▀      ',
+  '  ▀▀▀█████████████████▀▀        ',
+];
+const WAKE = [
+  { y: 16, xs: [6, 7, 10, 11, 14, 15, 18, 19], o: 0.6 },
+  { y: 17, xs: [7, 11, 15, 19], o: 0.35 },
+  { y: 18, xs: [11, 19], o: 0.15 },
+];
+const PX = [];
+SHIP.forEach((row, y) => [...row].forEach((ch, x) => {
+  if (ch === '▀' || ch === '█') PX.push([x, y * 2]);
+  if (ch === '▄' || ch === '█') PX.push([x, y * 2 + 1]);
+}));
+function runs(px) {
+  let d = '';
+  const ys = [...new Set(px.map(p => p[1]))];
+  for (const y of ys) {
+    const xs = px.filter(p => p[1] === y).map(p => p[0]).sort((a, b) => a - b);
+    for (let i = 0; i < xs.length;) { let j = i; while (j + 1 < xs.length && xs[j + 1] === xs[j] + 1) j++; d += `M${xs[i]} ${y}h${j - i + 1}v1h-${j - i + 1}z`; i = j + 1; }
+  }
+  return d;
+}
+const HULL = runs(PX);
+const wakeSvg = () => WAKE.map(r => `<path fill="var(--gf-teal)" fill-opacity="${r.o}" d="${runs(r.xs.map(x => [x, r.y]))}"/>`).join('');
+function shipSvg(kind) {
+  const ghost = kind === 'ghost' || kind === 'ghost-plain';
+  return `<svg class="ship-svg" viewBox="0 0 32 ${ghost ? 19 : 16}" aria-hidden="true"><path d="${HULL}"/>${ghost ? wakeSvg() : ''}</svg>`;
+}
+const lockupHtml = () => `${shipSvg('plain')}<span aria-hidden="true">ghostfleet <em>team</em></span>`;
+document.querySelectorAll('[data-ship]').forEach(el => {
+  el.innerHTML = shipSvg(el.dataset.ship);
+  const w = el.style.width; if (w) { el.style.width = ''; el.firstChild.style.width = w; el.firstChild.style.height = 'auto'; }
+});
+document.querySelectorAll('.lockup').forEach(el => {
+  el.setAttribute('role', 'img'); el.setAttribute('aria-label', 'ghostfleet team');
+  el.innerHTML = lockupHtml();
+});
+document.getElementById('sprite-src').textContent = SHIP.join('\n');
+
+// ── language ─────────────────────────────────────────────
+// The browser's language picks the first one, a click on EN/ES overrides it, and the
+// override is remembered. Storage can be missing or throw (private windows, blocked site
+// data, a file:// page in some browsers), so every touch of it is guarded and the page
+// simply falls back to the browser's language.
+const I18N = JSON.parse(document.getElementById('i18n').textContent);
+const LANGS = Object.keys(I18N);
+const KEY = 'gf-brand-lang';
+let lang = 'en';
+// A missing key shows itself as the key rather than as a blank, so a screenshot finds it.
+const t = (k) => I18N[lang][k] ?? k;
+function initialLang() {
+  try { const saved = localStorage.getItem(KEY); if (LANGS.includes(saved)) return saved; } catch {}
+  return String(navigator.language || '').toLowerCase().startsWith('es') ? 'es' : 'en';
+}
+
+// construction: grid, pixels, clear space
+function renderConstruct() {
+  const pad = 4, W = 32 + pad * 2, H = 16 + pad * 2;
+  let g = '';
+  for (let x = 0; x <= W; x++) g += `<line x1="${x}" y1="0" x2="${x}" y2="${H}"/>`;
+  for (let y = 0; y <= H; y++) g += `<line x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
+  document.getElementById('construct').style.aspectRatio = `${W} / ${H}`;
+  document.getElementById('construct').innerHTML =
+    `<svg viewBox="-0.1 -0.1 ${W + 0.2} ${H + 0.2}" role="img" aria-label="${t('logo.constructAria')}">
+      <g stroke="rgba(255,255,255,.06)" stroke-width=".04">${g}</g>
+      <rect x="${pad}" y="${pad}" width="32" height="16" fill="none" stroke="var(--gf-teal)" stroke-width=".08" stroke-dasharray=".3 .3"/>
+      <rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="var(--gf-teal)" stroke-opacity=".35" stroke-width=".08" stroke-dasharray=".3 .3"/>
+      <path transform="translate(${pad} ${pad})" fill="var(--gf-white)" shape-rendering="crispEdges" d="${HULL}"/>
+      <g font-family="JetBrains Mono, monospace" font-size="1.1" fill="var(--gf-dim)"><text x="${pad}" y="${pad - .6}">32 p</text><text x=".4" y="1.4">4 p</text></g>
+    </svg>`;
+}
+
+// misuse: each one is the real lockup with a transformation that must not be done
+const DONTS = [
+  ['dont.stretch', 'transform:scaleX(1.6)'],
+  ['dont.rotate', 'transform:rotate(-14deg)'],
+  ['dont.blur', 'filter:blur(1.4px)'],
+  ['dont.recolor', 'color:var(--gf-red)'],
+  ['dont.gradient', 'background:linear-gradient(90deg,#ff5f5f,#87afff);-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-stroke:.6px #fff'],
+  ['dont.busy', 'x'],
+];
+function renderDonts() {
+  document.getElementById('donts').innerHTML = DONTS.map(([k, css]) => {
+    const busy = css === 'x';
+    const bg = busy ? 'background:repeating-linear-gradient(45deg,#ffd75f 0 10px,#5fd7d7 10px 20px,#ff5f5f 20px 30px)' : '';
+    return `<div class="dont"><span class="x" aria-hidden="true">✕</span><div class="stage dark" style="${bg}"><span class="lockup" role="img" aria-label="${t('logo.dontAria')}" style="font-size:18px;${busy ? '' : css}">${lockupHtml()}</span></div><p>${t(k)}</p></div>`;
+  }).join('');
+}
+
+// states: the app's (STATUS in team/web/src/ui.jsx), with their LED, glyph and colour
+const STATUS = [
+  ['need-you', '●', 'red'], ['working', '◆', 'teal'], ['ready', '✓', 'green'], ['starting', '…', 'yellow'],
+  ['limit', '⧗', 'yellow'], ['interrupted', '⚠', 'yellow'], ['parked', '⏸', 'grey'], ['idle', '·', 'grey'],
+  ['asleep', '☾', 'grey'], ['lost', '✕', 'grey'],
+];
+// the fleet: the board's LOOKS (team/web/src/board.jsx)
+const LOOKS = [['need', 'red', 'acme-api'], ['work', 'teal', 'acme-web'], ['fresh', 'green', 'toolbox'],
+               ['warn', 'yellow', 'billing-svc'], ['open', 'white', 'scratch'], ['off', 'grey', 'docs']];
+function renderStates() {
+  document.getElementById('leds').innerHTML = STATUS.map(([k, g, c]) =>
+    `<div class="led-row c-${c}"><i class="gf-led" data-s="${k}" aria-hidden="true"></i><div><b>${t(`status.${k}`)}</b><small>${t(`status.${k}.hint`)}</small></div><span class="g" aria-hidden="true">${g}</span></div>`).join('');
+  document.getElementById('pills').innerHTML = STATUS.slice(0, 7).map(([k, g, c]) => `<span class="pill c-${c}"><b>${g}</b> ${t(`status.${k}`)}</span>`).join('');
+  document.getElementById('glyphs').innerHTML = STATUS.map(([k, g, c]) => `<div class="glyph c-${c}"><div class="g" aria-hidden="true">${g}</div><small>${t(`status.${k}`)}</small></div>`).join('');
+  document.getElementById('fleet').innerHTML = LOOKS.map(([k, c, n]) =>
+    `<div class="boat" style="--c:var(--gf-${c})"><span class="gf-ship" data-s="${k}">${shipSvg('plain')}</span><div class="gf-waterline" style="width:72px"></div><div class="boat-lab"><b>${n}</b>${t(`look.${k}`)}</div></div>`).join('');
+}
+
+// contrast measured, not copied: computed here with the WCAG formula
+const CONTRAST = [['contrast.text', '#c9d1d9', '#0b0d10'], ['contrast.teal', '#5fd7d7', '#0b0d10'], ['contrast.button', '#05242a', '#5fd7d7'],
+                  ['contrast.dim', '#8a8a8a', '#11151a'], ['contrast.red', '#ff5f5f', '#0b0d10'], ['contrast.paper', '#0e7a81', '#f4f6f8']];
+function renderContrast() {
+  const lum = h => { const c = [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255).map(v => v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4); return .2126 * c[0] + .7152 * c[1] + .0722 * c[2]; };
+  const cr = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return ((x + .05) / (y + .05)).toFixed(1); };
+  document.getElementById('contrast').innerHTML = CONTRAST.map(([k, a, b]) => `<li>${t(k)}: <b style="color:var(--gf-white)" class="mono">${cr(a, b)}:1</b></li>`).join('');
+}
+
+// pixel icons, 12 × 12
+const ICONS = {
+  'icon.lighthouse': ['.....##.....', '....####....', '....#..#....', '#...####...#', '.#..#..#..#.', '....####....', '....#..#....', '....####....', '...#....#...', '...######...', '..########..', '############'],
+  'icon.buoy': ['.....##.....', '.....##.....', '....####....', '...######...', '...#....#...', '...######...', '...#....#...', '..########..', '.##########.', '############', '.#..#..#..#.', '............'],
+  'icon.anchor': ['.....##.....', '....#..#....', '.....##.....', '..########..', '.....##.....', '.....##.....', '.....##.....', '#....##....#', '##...##...##', '.##..##..##.', '..###..###..', '....####....'],
+  'icon.wave': ['............', '............', '..###.......', '.#...#......', '#.....#...##', '.......###..', '............', '..###.......', '.#...#......', '#.....#...##', '.......###..', '............'],
+  'icon.compass': ['....####....', '..##....##..', '.#...#....#.', '.#..###...#.', '#...###....#', '#..#####...#', '#....#.....#', '#....#.....#', '.#...#....#.', '.#........#.', '..##....##..', '....####....'],
+  'icon.flag': ['.#..........', '.########...', '.#########..', '.##########.', '.#########..', '.########...', '.#..........', '.#..........', '.#..........', '.#..........', '.#..........', '###.........'],
+};
+function renderIcons() {
+  document.getElementById('pix').innerHTML = Object.entries(ICONS).map(([k, rows]) => {
+    const px = []; rows.forEach((r, y) => [...r].forEach((c, x) => { if (c === '#') px.push([x, y]); }));
+    return `<div class="pix"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="${runs(px)}"/></svg><small>${t(k)}</small></div>`;
+  }).join('');
+}
+
+// voice: what to say and what not to, per situation
+const SAYS = ['wait', 'done', 'limit', 'error', 'empty', 'confirm'];
+function renderSays() {
+  document.getElementById('says').innerHTML = SAYS.map(k =>
+    `<div class="say"><div class="ctx">${t(`say.${k}`)}</div>` +
+    `<div class="yes"><b class="mk">${t('voice.do')}</b><span>${t(`say.${k}.yes`)}</span></div>` +
+    `<div class="no"><b class="mk">${t('voice.dont')}</b><span>${t(`say.${k}.no`)}</span></div></div>`).join('');
+}
+
+function setLang(next, remember) {
+  lang = LANGS.includes(next) ? next : 'en';
+  document.documentElement.lang = lang;
+  document.title = t('meta.title');
+  document.querySelector('meta[name="description"]').content = t('meta.desc');
+  document.querySelectorAll('[data-t]').forEach(el => { el.innerHTML = t(el.dataset.t); });
+  document.querySelectorAll('[data-t-aria]').forEach(el => el.setAttribute('aria-label', t(el.dataset.tAria)));
+  document.querySelectorAll('[data-t-value]').forEach(el => { el.value = t(el.dataset.tValue); });
+  renderConstruct(); renderDonts(); renderStates(); renderContrast(); renderIcons(); renderSays();
+  document.querySelectorAll('.lang [data-lang]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === lang)));
+  if (remember) try { localStorage.setItem(KEY, lang); } catch {}
+}
+document.querySelectorAll('.lang [data-lang]').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang, true)));
+setLang(initialLang(), false);
+</script>
+</body>
+</html>
