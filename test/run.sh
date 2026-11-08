@@ -26721,6 +26721,230 @@ if command -v jq >/dev/null 2>&1 && GH="$(mktemp -d)" && [ -d "$GH" ]; then
   is "the default list" \
      "Read Glob Grep LS NotebookRead WebFetch WebSearch ToolSearch TodoWrite mcp__ghostfleet__fleet_* Write:scratch Edit:scratch MultiEdit:scratch NotebookEdit:scratch" \
      "$(bash "$ROOT/hooks/fleet-telegram-guard.sh" --default)"
+
+  # ── the command entries ──
+  # What the phone is allowed instead of a shell. Every refused shape sits beside an allowed
+  # one, so a lexer that refuses everything goes as red as one that refuses nothing.
+  printf '{"allow":["Read","Bash(bin/notes *)","Bash(git status)"]}\n' > "$GT/config.json"
+  tcmd()   { tgg "$(tj Bash "$(jq -nc --arg c "$1" '{command:$c}')")"; }
+  cmd_ok() { tcmd "$2"; is "$1" "0" "$GRC"; }
+  cmd_no() { tcmd "$2"; is "$1" "2" "$GRC"; }
+  gsays()  { grep -qF -- "$1" <<< "$GOUT" && echo yes || echo no; }
+  cmd_ok "a command entry allows its command"           'bin/notes add "buy milk"'
+  cmd_ok "...with leading spaces"                       '   bin/notes add "buy milk"'
+  cmd_ok "...and trailing ones"                         'bin/notes add "buy milk"   '
+  cmd_ok "...and with no arguments"                     'bin/notes'
+  cmd_ok "the '\\'' idiom passes"                       "bin/notes add 'it'\\''s'"
+  cmd_ok "an expansion in single quotes is literal"     "bin/notes '\$(id)'"
+  cmd_ok "...and so is a ; in them"                     "bin/notes 'a; id'"
+  cmd_ok "a message may span lines inside quotes"       "$(printf "bin/notes add 'one\ntwo'")"
+  cmd_ok "an escaped metacharacter is literal"          'bin/notes a\;b'
+  cmd_ok "an escaped dollar in double quotes is too"    'bin/notes "a \$b"'
+  cmd_ok "...and an escaped quote does not end them"    'bin/notes "say \"hi\""'
+  cmd_ok "a quoted hash is text"                        "bin/notes add 'issue #4'"
+  cmd_ok "an exact entry allows its command"            'git status'
+  cmd_ok "...with spaces round it"                      '  git status '
+  cmd_no "a ; is refused"                               'bin/notes a; id'
+  is     "...naming the entries the turn may use"       "yes" "$(gsays 'Bash(bin/notes *) Bash(git status)')"
+  is     "...and what it refused"                       "yes" "$(gsays "an unquoted ';'")"
+  is     "...and how to pass text instead"              "yes" "$(gsays 'pass text in single quotes')"
+  is     "...and still who can widen the list"          "yes" "$(gsays 'fleet-telegram config allow')"
+  cmd_no "&& is refused"                                'bin/notes a && id'
+  cmd_no "|| is refused"                                'bin/notes a || id'
+  cmd_no "| is refused"                                 'bin/notes a | id'
+  cmd_no "& is refused"                                 'bin/notes a & id'
+  cmd_no "> is refused"                                 'bin/notes a > /tmp/x'
+  cmd_no "< is refused"                                 'bin/notes a < /etc/hosts'
+  cmd_no "( is refused"                                 '(bin/notes a)'
+  cmd_no ") alone is refused"                           'bin/notes a)'
+  cmd_no "\$(…) is refused"                             'bin/notes $(id)'
+  cmd_no "a backtick is refused"                        'bin/notes `id`'
+  cmd_no "\$VAR is refused"                             'bin/notes $HOME'
+  cmd_no "\$(…) inside double quotes is refused"        'bin/notes "$(id)"'
+  cmd_no "...and a backtick"                            'bin/notes "`id`"'
+  cmd_no "...and \$VAR"                                 'bin/notes "$HOME"'
+  cmd_no "...and after an escaped backslash"            'bin/notes "\\$(id)"'
+  cmd_no "a newline is refused"                         "$(printf 'bin/notes a\nid')"
+  cmd_no "a carriage return is refused"                 "$(printf 'bin/notes a\rid')"
+  # As JSON, because $(…) would eat the newline these rows are about.
+  tgg "$(tj Bash '{"command":"bin/notes a\n"}')"
+  is "...a trailing newline too"                        "2" "$GRC"
+  tgg "$(tj Bash '{"command":"\nbin/notes a"}')"
+  is "...and a leading one"                             "2" "$GRC"
+  cmd_no "a line continuation is refused"               "$(printf 'bin/notes a\\\nid')"
+  cmd_no "a backslash with nothing after it is refused" 'bin/notes a\'
+  cmd_no "an unterminated single quote is refused"      "bin/notes 'a"
+  cmd_no "an unterminated double quote is refused"      'bin/notes "a'
+  cmd_no "...and one whose close is escaped"            'bin/notes "a\"'
+  cmd_no "...and a lone apostrophe"                     "bin/notes it's"
+  # A shell ignores a quote inside a comment; a lexer that does not know about comments opens
+  # it and walks over the newline, and the second line is then a stranger's. Both halves are
+  # measured: the guard refuses it, and a real shell does run that line.
+  GSMUG="$(printf "bin/notes # '\ntouch %s/smuggled\n# '" "$GH")"
+  cmd_no "a quote in a comment cannot hide a second line" "$GSMUG"
+  bash -c "$GSMUG" >/dev/null 2>&1
+  is "...which a real shell would have run"             "yes" "$([ -e "$GH/smuggled" ] && echo yes || echo no)"
+  cmd_no "an unquoted # is refused"                     'bin/notes add #4'
+  cmd_no "a prefix is a whole word"                     'bin/notesx add'
+  cmd_no "a ./ path is another command"                 './bin/notes add'
+  cmd_no "an env assignment in front is refused"        'FOO=1 bin/notes add'
+  cmd_no "a quoted prefix does not match"               '"bin/notes" add'
+  cmd_no "the boundary is a space, not a tab"           "$(printf 'bin/notes\tadd')"
+  cmd_no "an exact entry takes no arguments"            'git status --short'
+  cmd_no "...and matches its spacing exactly"           'git  status'
+  tgg "$(tj Bash '{"command":"bin/notes a\u0000;id"}')"
+  is "a NUL in the command is refused"                  "2" "$GRC"
+  tgg "$(tj Bash '{"command":["bin/notes"]}')"
+  is "a command that is not a string is refused"        "2" "$GRC"
+  tgg "$(tj Bash '{}')"
+  is "...and a call with no command"                    "2" "$GRC"
+  GLONG="$(head -c 8000 /dev/zero | tr '\0' a)"
+  cmd_ok "a long message in quotes passes"              "bin/notes add '$GLONG'"
+  GLONG="$(head -c 40000 /dev/zero | tr '\0' a)"
+  cmd_no "...one past the size the lexer can check does not" "bin/notes add '$GLONG'"
+  is "...and says so"                                   "yes" "$(gsays 'too long to check')"
+  printf '{"allow":["Bash(bin/re* x)","Bash(bin/no?es *)"]}\n' > "$GT/config.json"
+  cmd_ok "a * inside an entry matches itself"           'bin/re* x'
+  cmd_no "...and is not a glob"                         'bin/report x'
+  cmd_no "...nor is a ?"                                'bin/notes y'
+  printf '{"allow":["Read"]}\n' > "$GT/config.json"
+  cmd_no "Bash with no command entries is refused"      'bin/notes add x'
+  is "...as not on the list"                            "yes" "$(gsays 'Bash is not on the channel')"
+  printf '{"allow":["Bash(bin/notes *)"]}\n' > "$GT/config.json"
+  tgg "$(tj Read '{"file_path":"/etc/hosts"}')"
+  is "a command entry opens no other tool"              "2" "$GRC"
+  # The owner's plain `Bash` means all of it, as it always did, wherever it is on the list.
+  printf '{"allow":["Bash(bin/notes *)","Bash"]}\n' > "$GT/config.json"
+  cmd_ok "plain Bash still allows anything"             'bin/notes a; id'
+  printf '{"allow":["mcp__acme_docs__*","Read"]}\n' > "$GT/config.json"
+  tgg "$(tj mcp__acme_docs__search '{}')"
+  is "a tool-name glob still matches"                   "0" "$GRC"
+  tgg "$(tj mcp__acme_web__search '{}')"
+  is "...and only what it matches"                      "2" "$GRC"
+
+  # ── no jq: every call refused, whatever the list says ──
+  GNJ="$GH/nojq"; mkdir -p "$GNJ"
+  for t in cat head mkdir dirname tmux tr; do p="$(command -v "$t")" && ln -s "$p" "$GNJ/$t"; done
+  GBASH="$(command -v bash)"
+  njg() { GOUT="$(printf '%s' "$1" | env -u TMUX -u TMUX_PANE PATH="$GNJ" HOME="$GH" CLAUDE_FLEET_DIR="$GF" \
+            CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master \
+            "$GBASH" "$ROOT/hooks/fleet-telegram-guard.sh" 2>&1 >/dev/null)"; GRC=$?; }
+  printf '{"allow":["Read","Bash(bin/notes *)"]}\n' > "$GT/config.json"
+  njg "$(tj Read '{"file_path":"/etc/hosts"}')"
+  is "without jq, even a read is refused"               "2" "$GRC"
+  is "...and it says why"                               "yes" "$(gsays 'has no jq')"
+  njg "$(tj Bash '{"command":"bin/notes add x"}')"
+  is "...and so is a command an entry covers"           "2" "$GRC"
+  tgg "$(tj Bash '{"command":"bin/notes add x"}')"
+  is "...which with jq runs"                            "0" "$GRC"
+
+  # ── the :checkout scope ──
+  # The root is the fleet's record of the project. The payload's cwd is the agent's to move.
+  GR="$GH/acme-api"; mkdir -p "$GR/src" "$GH/other" "$GR-evil"
+  printf 'acme-api\t%s\twork\n' "$GR" > "$GH/.config/ghostfleet/projects"
+  printf '{"allow":["Read","Write:checkout","Edit:checkout","MultiEdit:checkout","NotebookEdit:checkout"]}\n' > "$GT/config.json"
+  tw() { tgg "$(tj "$1" "$(jq -nc --arg p "$2" '{file_path:$p}')")"; }
+  w_ok() { tw "${3:-Write}" "$2"; is "$1" "0" "$GRC"; }
+  w_no() { tw "${3:-Write}" "$2"; is "$1" "2" "$GRC"; }
+  w_ok ":checkout allows a write inside the root"       "$GR/src/app.py"
+  w_ok "...an Edit"                                     "$GR/src/app.py" Edit
+  w_ok "...a MultiEdit"                                 "$GR/src/app.py" MultiEdit
+  w_ok "...a file in a folder that does not exist yet"  "$GR/new/dir/notes.md"
+  tgg "$(tj NotebookEdit "$(jq -nc --arg p "$GR/a.ipynb" '{notebook_path:$p}')")"
+  is "...and a notebook by its own field"               "0" "$GRC"
+  is "--checkout-root says where"                       "$(cd "$GR" && pwd -P)" \
+     "$(env -u TMUX -u TMUX_PANE HOME="$GH" CLAUDE_FLEET_DIR="$GF" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master \
+          bash "$ROOT/hooks/fleet-telegram-guard.sh" --checkout-root)"
+  w_no ":checkout refuses a write outside the root"     "$GH/other/notes.md"
+  is "...saying where it may write"                     "yes" "$(gsays "$(cd "$GR" && pwd -P)/")"
+  w_no "...a sibling that only shares the prefix"       "$GR-evil/notes.md"
+  w_no "...the root itself"                             "$GR"
+  w_no "...a '..' out of it"                            "$GR/src/../../other/notes.md"
+  w_no "...a '..' that stays inside it"                 "$GR/src/../notes.md"
+  w_no "...a '.' in it"                                 "$GR/./notes.md"
+  w_no "...a relative path"                             "src/app.py"
+  w_no "...no path at all"                              ""
+  ln -s "$GH/other" "$GR/out"; ln -s "$GH/other/secret.md" "$GR/link.md"; ln -s "$GH/other/notyet" "$GR/later"
+  w_no "...a symlink inside it pointing out"            "$GR/out/notes.md"
+  w_no "...a symlink AT the path"                       "$GR/link.md"
+  w_no "...and a symlink that points nowhere yet"       "$GR/later/notes.md"
+  w_no ".git is inside the root but not the checkout"   "$GR/.git/config"
+  w_no "...in any case, as a Mac volume reads it"       "$GR/.GIT/config"
+  w_no "...and a nested one"                            "$GR/src/.git/hooks/post-commit"
+  w_ok "...while .gitignore is an ordinary file"        "$GR/.gitignore"
+  w_ok "...and so is .github/"                          "$GR/.github/ci.yml"
+  # The tool writes the path it is given: a call whose two path fields disagree must not be
+  # checked on the harmless one.
+  tgg "$(tj NotebookEdit "$(jq -nc --arg a "$GR/ok.ipynb" --arg b "$GH/other/x.ipynb" '{file_path:$a,notebook_path:$b}')")"
+  is "two path fields that disagree are refused"        "2" "$GRC"
+  tgg "$(tj Write "$(jq -nc --arg p "$GR/a
+b.md" '{file_path:$p}')")"
+  is "...and a path with a newline in it"               "2" "$GRC"
+  tgg "$(jq -nc --arg p "$GH/other/notes.md" --arg c "$GH/other" '{hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:$p},cwd:$c}')"
+  is "the payload's cwd moves nothing"                  "2" "$GRC"
+  tgg "$(jq -nc --arg p "$GR/notes.md" --arg c "$GH/other" '{hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{file_path:$p},cwd:$c}')"
+  is "...in either direction"                           "0" "$GRC"
+  # The trap in the shape of the list: the default opens with Write:scratch, and a first match
+  # that refused would mean a :checkout entry added after it never took effect.
+  printf '{"allow":["Write:scratch","Write:checkout"]}\n' > "$GT/config.json"
+  w_ok "a :checkout entry after a :scratch one is reached" "$GR/notes.md"
+  w_ok "...and the scratch dir is still writable"       "$SCR/draft.md"
+  w_no "...and elsewhere still is not"                  "$GH/other/notes.md"
+  is "...naming both places"                            "yes" "$(gsays "$SCR/ or $(cd "$GR" && pwd -P)/")"
+  printf '{"allow":["Write:checkout","Write:scratch"]}\n' > "$GT/config.json"
+  w_ok "...in either order"                             "$SCR/draft.md"
+  printf '{"allow":["Write:scratch","Write"]}\n' > "$GT/config.json"
+  w_ok "plain Write after Write:scratch means plain Write" "$GH/other/notes.md"
+  printf '{"allow":["Read","Write:checkout"]}\n' > "$GT/config.json"
+  tgg "$(tj Bash '{"command":"ls"}')"
+  is "a :checkout entry opens no shell"                 "2" "$GRC"
+  # No root is a refusal, reached four ways: none listed, someone else's, gone, and not a checkout.
+  : > "$GH/.config/ghostfleet/projects"
+  w_no "no root found is refused"                       "$GR/notes.md"
+  is "...and says there is none"                        "yes" "$(gsays 'no checkout on record')"
+  printf 'acme-web\t%s\twork\n' "$GR" > "$GH/.config/ghostfleet/projects"
+  w_no "...another project's record is not this one"    "$GR/notes.md"
+  printf 'acme-api\t%s\tprofile2\n' "$GR" > "$GH/.config/ghostfleet/projects"
+  w_no "...nor another profile's of the same name"      "$GR/notes.md"
+  printf 'acme-api\t%s/gone\twork\n' "$GH" > "$GH/.config/ghostfleet/projects"
+  w_no "...a project whose directory is gone"           "$GH/gone/notes.md"
+  printf 'acme-api\t%s\twork\n' "$GH" > "$GH/.config/ghostfleet/projects"
+  w_no "...and a project at \$HOME is not a checkout"   "$GH/.ssh/authorized_keys"
+  printf 'acme-api\t/\twork\n' > "$GH/.config/ghostfleet/projects"
+  w_no "...nor is one at /"                             "$GH/notes.md"
+  printf 'acme-api\t~/acme-api\twork\n' > "$GH/.config/ghostfleet/projects"
+  w_ok "a ~ in the projects file is the home directory" "$GR/notes.md"
+  # The session's own start dir, from a real server: a worktree worker's checkout is its
+  # worktree, and a session that started anywhere else has none the fleet can vouch for.
+  if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+    printf 'acme-api\t%s\twork\n' "$GR" > "$GH/.config/ghostfleet/projects"
+    git init -q "$GR" && git -C "$GR" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+    git -C "$GR" worktree add -q "$GH/acme-api-w1" -b w1 2>/dev/null
+    tmux -L cf-acme-api kill-server 2>/dev/null
+    tmux -L cf-acme-api new-session -d -s master -c "$GR" 'sleep 300'
+    tmux -L cf-acme-api new-session -d -s w1 -c "$GH/acme-api-w1" 'sleep 300'
+    tmux -L cf-acme-api new-session -d -s w2 -c "$GH/other" 'sleep 300'
+    printf '%s\n' "$GT" > "$GF/cf-acme-api.w1.telegram"; printf '%s\n' "$GT" > "$GF/cf-acme-api.w2.telegram"
+    tws() { tgg "$(tj Write "$(jq -nc --arg p "$2" '{file_path:$p}')")" cf-acme-api "$1"; }
+    tws master "$GR/notes.md"
+    is "a session started in the project writes there"  "0" "$GRC"
+    tws master "$GH/acme-api-w1/notes.md"
+    is "...and not in a worker's worktree"              "2" "$GRC"
+    tws w1 "$GH/acme-api-w1/notes.md"
+    is "a worker's checkout is its own worktree"        "0" "$GRC"
+    tws w1 "$GR/notes.md"
+    is "...and not the main checkout"                   "2" "$GRC"
+    tws w2 "$GH/other/notes.md"
+    is "a session started elsewhere cannot write there" "2" "$GRC"
+    tws w2 "$GR/notes.md"
+    is "...nor in the project it has left"              "2" "$GRC"
+    is "...and has no root to report"                   "1" \
+       "$(env -u TMUX -u TMUX_PANE HOME="$GH" CLAUDE_FLEET_DIR="$GF" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w2 \
+            bash "$ROOT/hooks/fleet-telegram-guard.sh" --checkout-root >/dev/null 2>&1; echo $?)"
+    tmux -L cf-acme-api kill-server 2>/dev/null
+  else
+    skip "a :checkout root follows the session's own start dir" "tmux or git missing"
+  fi
   tgclean "$GH"
 else
   skip "a Telegram turn is held to the channel's tool allowlist" "jq missing, or mktemp not available"
@@ -26756,6 +26980,18 @@ if command -v jq >/dev/null 2>&1 && MH="$(mktemp -d)" && [ -d "$MH" ]; then
   c="$(mctx "$(mfire UserPromptSubmit 'typed at the desk')")"
   is "a prompt typed at the desk unmarks it"            "no" "$([ -f "$MK" ] && echo yes || echo no)"
   is "...and gets no Telegram context"                  "0" "$(grep -c 'Telegram' <<< "$c" || true)"
+  # What the turn is told has to be what the guard will hold it to: a list with a command entry
+  # or a :checkout entry has more to say than the scratch folder, and one without a scratch
+  # entry must not promise one.
+  mkdir -p "$MH/.config/ghostfleet/telegram" "$MH/acme-api"
+  printf 'acme-api\t%s\twork\n' "$MH/acme-api" > "$MH/.config/ghostfleet/projects"
+  printf '{"allow":["Read","Write:checkout","Bash(bin/notes *)"]}\n' > "$MH/.config/ghostfleet/telegram/config.json"
+  c="$(mctx "$(mfire UserPromptSubmit '[telegram] add a note')")"
+  is "a list with command entries names them"           "1" "$(grep -cF 'Bash(bin/notes *)' <<< "$c" || true)"
+  is "...and how to pass text through one"              "1" "$(grep -cF "write a single quote as '\\''" <<< "$c" || true)"
+  is "...a :checkout entry says where"                  "1" "$(grep -cF "$(cd "$MH/acme-api" && pwd -P)/" <<< "$c" || true)"
+  is "...and with no :scratch entry there is no promise of one" "0" "$(grep -cF "$MF/telegram/cf-acme-api.master/" <<< "$c" || true)"
+  mfire Stop >/dev/null
   tgclean "$MH"
 else
   skip "a Telegram turn is marked at its prompt and unmarked at its end" "jq missing, or mktemp not available"
@@ -26852,6 +27088,43 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && CH="$(mkt
   is "a pattern that is not one is refused"             "1" "$(TGC config allow 'Bash;id' | grep -c 'is not a tool pattern' || true)"
   is "...and so is a list with nothing left"            "1" "$(TGC config disallow Read WebFetch | grep -c 'nothing allowed' || true)"
   is "--reset is the default again"                     "1" "$(TGC config allow --reset | grep -c '^allowlist: Read Glob Grep .*(the default)$' || true)"
+  # The two new kinds of entry, through the CLI and back out through the guard, whole: an entry
+  # with a space in it is one entry.
+  is "a command entry is added whole"                   "allowlist: Read Bash(bin/notes *) Write:checkout" \
+     "$(TGC config allow --only Read 'Bash(bin/notes *)' Write:checkout)"
+  CGL() { env -u TMUX HOME="$CH" CLAUDE_FLEET_DIR="$CH/.claude/fleet" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master \
+            bash "$ROOT/hooks/fleet-telegram-guard.sh" "$@"; }
+  is "...and the guard reads what it wrote"             "Read Bash(bin/notes *) Write:checkout" "$(CGL --list)"
+  is "...stored as one entry"                           "3" "$(jq '.allow | length' "$CT/config.json" 2>/dev/null)"
+  is "an exact entry is added too"                      "allowlist: Read Bash(bin/notes *) Write:checkout Bash(git status)" \
+     "$(TGC config allow 'Bash(git status)')"
+  out="$(TGC status)"
+  is "status shows both kinds"                          "1" "$(grep -cF 'Bash(bin/notes *) Write:checkout Bash(git status)' <<< "$out" || true)"
+  is "...and where :checkout writes"                    "yes" "$(grep -qxF "checkout:    $(cd "$CH/acme-api" && pwd -P)" <<< "$out" && echo yes || echo no)"
+  is "config shows them too"                            "1" "$(TGC config | grep -cF 'Bash(bin/notes *)' || true)"
+  mv "$CH/acme-api" "$CH/acme-api.away"
+  is "...and says when there is no such place"          "1" "$(TGC status | grep -c '^checkout: *none on record' || true)"
+  mv "$CH/acme-api.away" "$CH/acme-api"
+  is "disallow takes a command entry away"              "allowlist: Read Bash(bin/notes *) Write:checkout" \
+     "$(TGC config disallow 'Bash(git status)')"
+  is "...and :checkout"                                 "allowlist: Read Bash(bin/notes *)" "$(TGC config disallow Write:checkout)"
+  out="$(TGC status)"
+  is "status with no :checkout entry has no such line"  "0" "$(grep -c '^checkout:' <<< "$out" || true)"
+  # A typo here would leave the permission in place and say nothing.
+  is "a disallow that matches no command entry says so" "1" "$(TGC config disallow 'Bash(bin/notes*)' | grep -c 'is not on the list' || true)"
+  is "...and changes nothing"                           "Read Bash(bin/notes *)" "$(CGL --list)"
+  for bad in 'Bash(*)' 'Bash( *)' 'Bash()' 'Bash( bin/notes *)' 'Bash(bin/notes; id *)' 'Bash(bin/notes $(id))' 'Bash(bin/notes "a)'; do
+    is "$bad is refused"                                "1" "$(TGC config allow "$bad" | grep -c 'was not added' || true)"
+  done
+  is "...and none of them was saved"                    "Read Bash(bin/notes *)" "$(CGL --list)"
+  is "Bash(*) is told it is not all of Bash"            "1" "$(TGC config allow 'Bash(*)' | grep -c 'does not mean all of Bash' || true)"
+  is "a scope that does not exist is refused"           "1" "$(TGC config allow Write:elsewhere | grep -c 'is not a tool pattern' || true)"
+  is "the wrong tool with parentheses is refused"       "1" "$(TGC config allow 'Write(/etc/hosts)' | grep -c 'is not a tool pattern' || true)"
+  out="$(TGC config allow 'Bash(bin/notes:*)')"
+  is "a * that is not trailing is added"                "yes" "$(grep -q '^allowlist: .*Bash(bin/notes:\*)$' <<< "$out" && echo yes || echo no)"
+  is "...and called literal"                            "1" "$(grep -c 'is literal' <<< "$out" || true)"
+  is "a trailing ' *' gets no such note"                "0" "$(TGC config allow 'Bash(bin/acme-report *)' | grep -c 'is literal' || true)"
+  TGC config allow --reset >/dev/null
   # The unit files are plain files on disk — the place the token must never be.
   pl="$(TGSVC=launchd TGC start --dry-run)"
   is "the launchd job runs the daemon"                  "1" "$(grep -c '<string>run</string>' <<< "$pl" || true)"

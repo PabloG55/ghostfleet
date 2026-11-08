@@ -231,9 +231,9 @@ of the turn your message started, sent back to the chat with its markdown render
 split to Telegram's limit. Photos arrive as files the session can open. Voice notes arrive
 as words if you set a transcriber, otherwise as an audio file. The token never touches a
 file: it comes from a command you name, such as a keychain lookup. A Telegram turn may only
-read, look things up and delegate through the fleet tools, because a chat id on a phone is
-weaker proof than you at the keyboard. [docs/TELEGRAM.md](docs/TELEGRAM.md) covers the
-setup and the allowlist.
+read, look things up and delegate through the fleet tools, plus any command or checkout you
+name, because a chat id on a phone is weaker proof than you at the keyboard.
+[docs/TELEGRAM.md](docs/TELEGRAM.md) covers the setup and the allowlist.
 
 Two things that cost people time, so they are in that command's output too: the passkey is
 enforced server-side, so until a phone is enrolled the app sits on its lock screen and the

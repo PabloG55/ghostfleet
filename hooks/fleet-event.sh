@@ -558,12 +558,16 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         _tgw="$FLEET_DIR/telegram/${CLAUDE_FLEET_SOCK}.${SLOT}"
         mkdir -p "$_tgw" 2>/dev/null && chmod 700 "$_tgw" 2>/dev/null
         printf '%s\n' "$_tgd" > "$_tgm" 2>/dev/null
-        _tga="$(CLAUDE_FLEET_SOCK="$CLAUDE_FLEET_SOCK" CLAUDE_FLEET_SLOT="$SLOT" \
-                "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/fleet-telegram-guard.sh" --list 2>/dev/null)"
+        _tgg="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/fleet-telegram-guard.sh"
+        _tga="$(CLAUDE_FLEET_SOCK="$CLAUDE_FLEET_SOCK" CLAUDE_FLEET_SLOT="$SLOT" "$_tgg" --list 2>/dev/null)"
         [ -n "$_tga" ] || _tga="the tools the channel allows"
+        # What a scoped entry means comes from the guard, so the turn is told the rules the
+        # guard will hold it to: a list with a :checkout entry or a command entry has more
+        # than the scratch folder to say.
+        _tgn="$(CLAUDE_FLEET_SOCK="$CLAUDE_FLEET_SOCK" CLAUDE_FLEET_SLOT="$SLOT" "$_tgg" --notes 2>/dev/null)"
         _ctx="${_ctx:+$_ctx
 
-}[fleet] The owner wrote this from Telegram, on their phone. Answer the owner: your final message is sent back to them there, so make it the answer — short, plain, no tables (Telegram shows bold, italics, code and links). This turn's tools are limited to: $_tga. Files may be written only under $_tgw/. To get anything else done, delegate: fleet_send it to the right session (fleet_spawn a worker for new work), then tell the owner who has it." ;;
+}[fleet] The owner wrote this from Telegram, on their phone. Answer the owner: your final message is sent back to them there, so make it the answer — short, plain, no tables (Telegram shows bold, italics, code and links). This turn's tools are limited to: $_tga. ${_tgn:-Files may be written only under $_tgw/.} To get anything else done, delegate: fleet_send it to the right session (fleet_spawn a worker for new work), then tell the owner who has it." ;;
       "<task-notification>"*|"<local-command"*|"") ;;
       *) [ "${_mid:-0}" = 0 ] && rm -f "$_tgm" 2>/dev/null ;;
     esac
