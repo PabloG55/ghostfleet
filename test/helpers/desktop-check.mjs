@@ -31,7 +31,12 @@ const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
-const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
+// A replaced page is SAID, as a row of its own: a run that needed one is not the same run as
+// one that did not, and a retry nobody can see is a flake nobody can count.
+const done = (code = 0) => {
+  if (b) for (const r of b.retries) rows.push('#RETRY' + US + 'a stuck page was replaced' + US + r);
+  console.log(rows.join('\n')); process.exit(code);
+};
 process.on('uncaughtException', (e) => { console.log(rows.join('\n')); console.error(String(e && e.stack || e)); process.exit(1); });
 
 // The desk keys this file presses, as the README's table spells them. Filled in by press().
@@ -46,7 +51,7 @@ try {
     // for a fine pointer that hovers — never appeared there and twenty rows went red on a
     // client that was right. Declared here instead of detected: the desk this file tests is
     // one with a mouse. Touch emulation, where a row turns it on, still overrides it.
-    b = await launch({ width: 1600, height: 900, scale: 1, mobile: false,
+    b = await launch({ width: 1600, height: 900, scale: 1, mobile: false, replaceStuckPage: true,
       args: ['--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2'] });
   } catch (e) {
     if (/no chrome/i.test(String(e && e.message))) { skipGroup('the desktop client', 'no chrome to press keys in'); done(0); }

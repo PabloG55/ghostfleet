@@ -250,6 +250,10 @@ skip()  { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
 na()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
           NA=$((NA+1)); printf '%s\n' "$1" >> "${NA_LOG:-/dev/null}"
           printf '  %s–%s %s %s(n/a: %s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"; }
+# A browser call that was never answered, redone once on a fresh page (lib/browser.mjs,
+# replaceStuckPage). Printed, never counted as a pass or a failure: the assertion that
+# followed still has to pass on its own, and a reader of the log can see how often it happened.
+retried() { printf '  %s↻%s %s %s(retried once: %s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"; }
 ok()    { PASS=$((PASS+1)); printf '  %s✔%s %s\n' "$G" "$N" "$1"; }
 # A red line has to be legible, and two values that differ only in bytes a terminal does
 # not draw print as the same value — which is how "expected: 1 / got: 1" happened above.
@@ -21421,6 +21425,7 @@ if [ -d "$ROOT/web" ]; then
     while IFS=$'\x1f' read -r name want got; do
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
       if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      if [ "$name" = '#RETRY' ]; then retried "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
     done < "$DSK/out"
   fi
