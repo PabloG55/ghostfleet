@@ -20380,7 +20380,7 @@ if command -v node >/dev/null 2>&1; then
   prcrc=$?
   is "pair-check ran"                 "0" "$prcrc"
   is "...without complaining"         ""  "$(head -2 "$PRC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PRC/out")" -ge 75 ] && echo yes || echo "no: $(wc -l < "$PRC/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PRC/out")" -ge 120 ] && echo yes || echo "no: $(wc -l < "$PRC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PRC/out"
@@ -26644,8 +26644,13 @@ rm -rf "${EM:?}"
 # order), and `--at`/`--known-at` before a merge still showing the PR open. `find` reaches a
 # prompt the graph has replaced, a `private` project is marked and never reaches the
 # inferred-fact call (a stub that counts its calls), and the Stop returns while a writer that
-# sleeps 3s is still running. Watched red: every section against a copy of this tree broken
-# on purpose, one break per copy (listed in the PR).
+# sleeps 3s is still running. And the groundwork under it: reads stay linear (bounded on CPU and
+# on how they grow, not on a stopwatch a loaded runner would trip), a log past the 512 MB a
+# string can hold is read a line at a time, a token shape never reaches the log, a forgotten
+# event leaves the graph, find and the pairing (--purge: the file too, and a concurrent writer
+# loses no line), every decision and fact says who said it, and a long turn keeps the question
+# it ends on. Watched red: every section against a copy of this tree broken on purpose, one
+# break per copy (listed in the PR).
 group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost"
 if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   KCD="$(mktemp -d "$TEST_RUNS.$$.know.XXXXXX")"
@@ -26653,7 +26658,7 @@ if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command 
   kcrc=$?
   is "know-check ran"                 "0" "$kcrc"
   is "...without complaining"         ""  "$(head -2 "$KCD/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 85 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 230 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$KCD/out"

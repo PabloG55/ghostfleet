@@ -15,12 +15,18 @@
 //   --known-at <time>  as it was KNOWN then (what had been recorded by that time)
 //   --json             data, not text (the fleet_know MCP tool reads this)
 //   --no-sync          do not ask paired machines; read their last fetched state
+//   --trusted          on a project's page: only what the owner or a lead said
 //
 //   fleet-know describe <project> "<one line>"            what the project is
 //   fleet-know decide <project> "<decision>" [--why "…"]  a decision, stated
 //   fleet-know relate <project> depends-on <other> [--off]
 //   fleet-know privacy [<project> [include|private|exclude|default]]
 //   fleet-know privacy --profile <p> [include|private|exclude|default]
+//   fleet-know forget <id> [--purge]   an event out of the graph, find and what a paired machine
+//                                      fetches (find prints each id); --purge also rewrites its
+//                                      line in the log, in place and with no backup, for a real
+//                                      leak. A paired machine that already fetched it keeps its
+//                                      copy until it fetches the tombstone
 //   fleet-know rebuild [--check]       the graph again from the log; --check only compares
 //   fleet-know sync                    fetch every paired machine's events now
 //
@@ -36,7 +42,7 @@ const flags = {};
 const pos = [];
 for (let i = 0; i < args.length; i++) {
   const x = args[i];
-  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync') flags[x.slice(2)] = true;
+  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync' || x === '--trusted' || x === '--purge') flags[x.slice(2)] = true;
   else if (x === '-h' || x === '--help') flags.help = true;
   else if (['--at', '--known-at', '--why', '--profile'].includes(x)) { flags[x.slice(2)] = args[++i]; if (flags[x.slice(2)] === undefined) die(`${x} needs a value`); }
   else if (x === '--') { pos.push(...args.slice(i + 1)); break; }
@@ -73,8 +79,12 @@ function target(q) {
   const p = hits[0];
   return { ...p, fleetDir: path.join(p.cfg, 'fleet') };
 }
+// A write from the owner's own terminal: no fleet slot, no agent's shell, and a person's tty on
+// both ends. An agent's tool call has no tty, and a fleet pane has a slot. Anything that cannot
+// show all of it is recorded without the claim, and reads as a worker's (authorityOf).
+const atOwnTerminal = () => !process.env.CLAUDE_FLEET_SLOT && !process.env.CLAUDECODE && process.stdin.isTTY && process.stdout.isTTY;
 const writeTo = (p, kind, f) => {
-  const ev = K.record(kind, f, { fleetDir: p.fleetDir, create: true, sock: p.sock, project: p.name, cwd: p.path, src: { via: 'fleet-know', ...(process.env.CLAUDE_FLEET_SLOT ? { slot: process.env.CLAUDE_FLEET_SLOT } : {}) } });
+  const ev = K.record(kind, f, { fleetDir: p.fleetDir, create: true, sock: p.sock, project: p.name, cwd: p.path, src: { via: 'fleet-know', ...(process.env.CLAUDE_FLEET_SLOT ? { slot: process.env.CLAUDE_FLEET_SLOT } : {}), ...(atOwnTerminal() ? { by: 'terminal' } : {}) } });
   if (!ev) die(`nothing recorded: the memory is '${K.privacyFor(p.fleetDir, p.sock).mode}' for ${p.name}`, 1);
   return ev;
 };
@@ -115,7 +125,7 @@ switch (verb) {
       if (flags.check) {
         const inc = K.snapshot(d);
         const fresh = K.rebuild(d, { save: false });
-        const same = JSON.stringify(K.canonical(inc.graph)) === JSON.stringify(fresh.graph);
+        const same = K.sameGraph(K.canonical(inc.graph), fresh.graph);
         if (!same) differs++;
         rows.push({ profile: K.profileOf(d), dir: d, events: fresh.events, same });
       } else {
@@ -127,6 +137,21 @@ switch (verb) {
       ? `${r.profile.padEnd(12)} ${r.events} events — ${r.same ? 'the snapshot matches a rebuild from the log' : 'DIFFERS from a rebuild: run fleet-know rebuild'}`
       : `${r.profile.padEnd(12)} rebuilt from ${r.events} events: ${r.nodes} nodes, ${r.edges} edges`).join('\n') : 'no memory log on this machine yet', { rows });
     process.exit(differs ? 1 : 0);
+  }
+  case 'forget': {
+    if (!pos[1] || pos.length > 2) die('forget <event-id> [--purge] (fleet-know find <text> prints each event\'s id)');
+    const r = K.forget(pos[1], { purge: !!flags.purge });
+    if (!r.ok) die(r.why, 1);
+    const copies = r.files.filter(x => x.peer).map(x => x.peer);
+    const purged = r.files.reduce((n, x) => n + (x.purged || 0), 0);
+    const when = new Date(r.t).toISOString().slice(0, 10);
+    const lines = [`forgotten: ${r.id} (${r.kind}, ${r.project}, ${when}). It is out of the graph, of find, and of what a paired machine fetches.`];
+    if (purged) lines.push(`purged: ${purged} line${purged === 1 ? '' : 's'} rewritten in place, with no backup.`);
+    else if (flags.purge) lines.push('purge: the line was already rewritten.');
+    if (copies.length) lines.push(`this machine's copy of ${copies.join(', ')}'s event: the machine it came from still holds it. Forget it there too.`);
+    if (r.files.some(x => !x.peer)) lines.push('a paired machine that already fetched it keeps its copy until its next fetch brings the tombstone.');
+    out(lines.join('\n'), r);
+    break;
   }
   case 'sync': {
     const r = await K.syncPeers({ timeout: 6000 });
@@ -173,7 +198,7 @@ switch (verb) {
     const q = verb === 'brief' ? pos[1] : verb;
     if (!q) die('brief <project>');
     const v = await getView();
-    const b = K.brief(v, q, { at, known, now });
+    const b = K.brief(v, q, { at, known, now, ...(flags.trusted ? { authority: K.TRUSTED } : {}) });
     if (!b) {
       const names = [...new Set(K.projectsIn(v).map(p => p.name))];
       die(`nothing recorded for '${q}'${names.length ? ` (known: ${names.slice(0, 12).join(', ')})` : ' — events land as sessions run'}`, 1);

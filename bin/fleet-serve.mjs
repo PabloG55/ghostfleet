@@ -3046,7 +3046,7 @@ function agentCatalogue() {
   if (p === '/api/know/events' && req.method === 'GET') {
     const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
     const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 5000));
-    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit }) });
+    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit, tombstones: url.searchParams.get('tombstones') === '1' }) });
   }
 
   // Whether someone is at a keyboard HERE — the paired host's push hold asks it (see "at the
