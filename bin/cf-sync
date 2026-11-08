@@ -289,5 +289,21 @@ fi
 ver="$(sed -n 's/^  "version": *"\([^"]*\)".*/\1/p' "$REPO/package.json" 2>/dev/null | head -1)"
 if [ -n "$ver" ]; then printf '%s\n' "$ver" > "$DEST/.version"; else rm -f "$DEST/.version"; fi
 
+# THE MEMORY HEARS ABOUT THIS DEPLOY FROM HERE, not from the turn that ran it. The fleet's
+# memory (docs/MEMORY.md) used to learn of a deploy by matching the command in a transcript
+# and naming the commit HEAD was at when the turn STOPPED. The usual deploy checks the
+# staging tip out, syncs it and re-parks on a tag in one Bash call, so that named the tag
+# and printed the whole command line. This script is the one place that knows which commit
+# it copied ($sha, stamped above) and that it succeeded: it says so, once, under a short
+# name. install.sh sets CLAUDE_FLEET_DEPLOY_TARGET for the sync it runs. Nothing is
+# written without a commit to name, with CLAUDE_FLEET_KNOW=off, or where the writer is not
+# in the runtime; and a failed memory never fails the sync (the writer always exits 0).
+case "$(printf '%s' "${CLAUDE_FLEET_KNOW:-}" | tr '[:upper:]' '[:lower:]')" in
+  0|off|no|false) ;;
+  *) if is_sha "$sha" && [ -x "$DEST/bin/fleet-know-event" ]; then
+       "$DEST/bin/fleet-know-event" deploy "target=${CLAUDE_FLEET_DEPLOY_TARGET:-ghostfleet runtime}" "commit=$sha" "cwd=$REPO" "slot=${CLAUDE_FLEET_SLOT:-}" >/dev/null 2>&1 || true
+     fi ;;
+esac
+
 echo "cf-sync: synced runtime  $REPO  ->  $DEST"
 echo "  (the ~/.local/bin symlinks + settings hook + MCP already point here; no relink needed)"

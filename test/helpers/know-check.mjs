@@ -68,7 +68,7 @@ await section('brief', () => {
   row('...the live sessions, the one that needs you first', 'yes', yes(/WHERE IT STANDS\n {2}master +need-you/.test(b)));
   row('...the open branch with its PR', 'yes', yes(/branch docs\/setup-pass \(docs-pass\) → PR #1184 open/.test(b)));
   row('...the PR that merged', 'yes', yes(/PR #1170 merged \(fix\/csv-export\)/.test(b)));
-  row('...the last deploy, at its commit', 'yes', yes(/last deploy .*vercel deploy --prod at a1b2c3d4 \(master\)/.test(b)));
+  row('...the last deploy, at its commit', 'yes', yes(/last deploy .*vercel deploy at a1b2c3d4 \(master\)/.test(b)));
   row('...three things waiting on the owner', '3', (b.match(/^ {2}waits on you:/gm) || []).length);
   row('...a decision, with where it came from', 'yes', yes(/Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls \/v1\/export +\[stated, 2026-03-05\]/.test(b)));
   row('...and the worker\'s, from its ack', 'yes', yes(/RFC 4180 quoting; no new dependency .*\[ack, 2026-03-05\]/.test(b)));
@@ -426,6 +426,132 @@ await section('mcp', async () => {
   row('...touched, at a past time', 'yes', yes(/PR #1170 open/.test(text(5))));
   row('...json: data', 'acme-api', (() => { try { return JSON.parse(text(6)).project; } catch (e) { return `not json: ${text(6).slice(0, 60)}`; } })());
   row('...and a flag where a name goes is refused, not run', 'yes', yes(err(7)));
+});
+
+// ══ four gaps the project page showed on a real fleet ═══════════════════════════════════
+// Its own home and fleet, so the counts here are about these events and nothing else. Each
+// row has its opposite beside it: the deploy that moved HEAD beside the one that did not, the
+// worker that acked beside the one that did not, the contributor's PR beside the fleet's own.
+await section('gaps', () => {
+  const GP = path.join(DIR, 'gaps');
+  const GPF = path.join(GP, '.claude', 'fleet');
+  for (const d of [path.join(GP, '.config', 'ghostfleet'), GPF]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(GP, '.config', 'ghostfleet', 'projects'), `acme-api\t${GP}/acme-api\twork\n`);
+  const B = Date.now() - 3600_000;
+  const t = (min) => B + min * 60_000;
+  const rp = 'acme/acme-api';
+  const c = { fleetDir: GPF, sock: 'cf-acme-api', project: 'acme-api' };
+  const put = (kind, f, min, src = {}) => K.record(kind, f, { ...c, t: t(min), rec: t(min), src }, process.env);
+  const boiler = 'You are a worker in the acme-api repo (public, github.com/acme/acme-api). One task, one PR against `staging`.';
+  const sess = (slot, branch) => put('session.start', { branch, repo: rp, cwd: `${GP}/${slot}` }, 1, { via: 'hook', session: `s-${slot}`, slot });
+  const ask = (slot, n, text) => put('request.open', { req: `s-${slot}/${n}`, text, source: 'fleet' }, 2, { via: 'mod', session: `s-${slot}`, slot });
+  // four workers: a Task heading; an ack; neither (an opener, then the task); only the opener
+  put('spawn', { worker: 'w-task', branch: 'fix/csv', repo: rp, task: `${boiler} ## Task Fix the CSV export so a quoted comma stays in one cell. ## Rules Branch off staging.` }, 1, { via: 'spawn' });
+  sess('w-task', 'fix/csv'); ask('w-task', 1, `${boiler} ## Context The exporter splits rows. ## Task Fix the CSV export so a quoted comma stays in one cell. ## Rules Branch off staging.`);
+  put('spawn', { worker: 'w-ack', branch: 'docs/setup', repo: rp, task: `${boiler} ## Context Read the README. ## Rules Be brief.` }, 1, { via: 'spawn' });
+  sess('w-ack', 'docs/setup'); ask('w-ack', 1, `${boiler} ## Context Read the README. ## Rules Be brief.`);
+  put('ack', { worker: 'w-ack', branch: 'docs/setup', repo: rp, understood: 'tighten the README setup section', decisions: 'docs only' }, 3, { via: 'ack' });
+  put('spawn', { worker: 'w-line', branch: 'chore/flag', repo: rp, task: `${boiler} Rename the toolbox flag to --quiet. Run only the touched groups.` }, 1, { via: 'spawn' });
+  sess('w-line', 'chore/flag'); ask('w-line', 1, `${boiler} Rename the toolbox flag to --quiet. Run only the touched groups.`);
+  put('spawn', { worker: 'w-bare', branch: 'spike/bare', repo: rp, task: boiler }, 1, { via: 'spawn' });
+  sess('w-bare', 'spike/bare'); ask('w-bare', 1, boiler);
+  put('request.open', { req: 's-w-task/2', text: 'Check the CSV header row too', source: 'user' }, 4, { via: 'mod', session: 's-w-task', slot: 'w-task' });
+  const nowMs = () => Date.now() + 120_000;
+  const kj = (args, home = GP) => { const r = run('node', [KNOW, ...args, '--no-sync'], { home, env: { CLAUDE_FLEET_NOW_MS: String(nowMs()) } }); return r.stdout; };
+  const page = kj(['acme-api']);
+  const reqs = page.split('\n').filter(l => /^ {4}"/.test(l)).join('\n');
+  const branchLines = page.split('\n').filter(l => /^ {2}branch /.test(l)).join('\n');
+  // 2: open requests
+  row('request: the line under a Task heading, not the opener', 'yes yes', `${yes(/"Fix the CSV export so a quoted comma stays in one cell\." \(w-task/.test(reqs))} ${yes(!/You are a worker/.test(reqs))}`);
+  row('...the worker\'s own ack understood line wins', 'yes', yes(/"tighten the README setup section" \(w-ack/.test(reqs)));
+  row('...no ack and no heading: the first line that is not an opener', 'yes', yes(/"Rename the toolbox flag to --quiet\." \(w-line/.test(reqs)));
+  row('...nothing but the opener: the branch name', 'yes', yes(/"spike\/bare" \(w-bare/.test(reqs)));
+  row('...a request that is not a brief is shown as written', 'yes', yes(/"Check the CSV header row too" \(w-task/.test(reqs)));
+  row('...the branch lines use the same rule', 'yes yes yes', `${yes(/branch fix\/csv \(w-task\) — no PR yet: Fix the CSV export so a quoted comma/.test(branchLines))} ${yes(/branch docs\/setup \(w-ack\) — no PR yet: tighten the README setup section/.test(branchLines))} ${yes(!/You are a worker/.test(branchLines))}`);
+  // 3: a merge met first without its branch, then seen by the refresh that has it
+  put('turn.end', { branch: 'main', repo: rp, status: 'done', said: 'merged', prs: [{ op: 'merge', repo: rp, number: 2201 }, { op: 'merge', repo: rp, number: 2202 }] }, 10, { via: 'hook', session: 's-lead', slot: 'master' });
+  put('pr.merge', { repo: rp, number: 2201, branch: 'feat/tabs' }, 11, { via: 'fleet-merged' });
+  const page2 = kj(['acme-api']);
+  row('merged PR: the branch the later refresh knew is filled in', 'yes', yes(/PR #2201 merged \(feat\/tabs\)/.test(page2)));
+  row('...one nobody ever knew the branch of shows none, not a ?', 'yes yes', `${yes(/PR #2202 merged,/.test(page2))} ${yes(!/\(\?\)/.test(page2))}`);
+  // 4: PRs waiting
+  put('pr.open', { repo: rp, number: 2301, branch: 'feature/outside', author: 'outside-dev' }, 20, { via: 'fleet-merged' });
+  put('pr.open', { repo: rp, number: 2302, branch: 'fix/csv', author: 'acme' }, 21, { via: 'fleet-merged' });
+  put('pr.open', { repo: rp, number: 2303, branch: 'docs/setup', author: 'acme' }, 22, { via: 'fleet-merged' });
+  put('turn.end', { branch: 'docs/setup', repo: rp, status: 'done', said: 'opened' }, 23, { via: 'hook', session: 's-w-ack', slot: 'w-ack' });
+  put('pr.open', { repo: rp, number: 2304, branch: 'chore/other', author: 'acme' }, 24, { via: 'fleet-merged' });
+  const wj = JSON.parse(kj(['waiting', '--json']) || '{}');
+  const ww = (wj.rows || []).map(r => r.what).join('\n');
+  row('waiting: an outside contributor\'s open PR', 'yes', yes(/PR #2301 from outside-dev waits for review/.test(ww)));
+  row('...also on the project page, under what waits on you', 'yes', yes(/waits on you: PR #2301 from outside-dev waits for review/.test(kj(['acme-api']))));
+  row('...a PR whose worker is still working waits on nobody', 'no', yes(/#2302/.test(ww)));
+  row('...the fleet\'s own finished PR keeps its wording', 'yes', yes(/PR #2303 \(docs\/setup\) — its worker reported done; waits for review\/merge/.test(ww)));
+  row('...an owner\'s PR on a branch no session owns still waits, with its author', 'yes', yes(/PR #2304 from acme waits for review/.test(ww)));
+  // the writer end: fleet-merged records who opened a PR, and the cache keeps its columns
+  const FLM = path.join(DIR, 'gaps-merged'); fs.mkdirSync(FLM, { recursive: true });
+  const stub = path.join(FLM, 'bin'); fs.mkdirSync(stub, { recursive: true });
+  fs.writeFileSync(path.join(stub, 'gh'), '#!/bin/sh\ncase "$*" in *"--state merged"*) printf \'old/done\\0372000\\037MERGED\\037acme\\n\' ;; *"--state open"*) printf \'feature/outside\\0372301\\037OPEN\\037outside-dev\\nfix/own\\0372302\\037OPEN\\037acme\\n\' ;; esac\nexit 0\n', { mode: 0o755 });
+  const fl2 = path.join(FLM, 'fleet'); fs.mkdirSync(fl2, { recursive: true });
+  const fmEnv = { CLAUDE_FLEET_DIR: fl2, CLAUDE_FLEET_MERGED_TTL: '0', CLAUDE_FLEET_SOCK: 'cf-acme-api', PATH: `${stub}:${process.env.PATH}` };
+  const fm2 = () => run(path.join(ROOT, 'bin', 'fleet-merged'), [REPO], { home: GP, env: fmEnv });
+  fm2();
+  const opens = lines(path.join(fl2, K.LOG)).filter(e => e.kind === 'pr.open');
+  row('fleet-merged: an open PR is recorded with its author', 'outside-dev acme', opens.map(e => e.f.author).sort().reverse().join(' '));
+  row('...the cache itself keeps three columns', '3', fs.readFileSync(path.join(fl2, 'prs.acme_acme-api'), 'utf8').split('\n').filter(Boolean).map(l => l.split('\x1f').length).filter((v, i, a) => a.indexOf(v) === i).join(','));
+  const n0 = lines(path.join(fl2, K.LOG)).length; fm2();
+  row('...and a refresh that changed nothing adds nothing', '0', lines(path.join(fl2, K.LOG)).length - n0);
+
+  // 1: the deploy is recorded by the script, with the commit it copied
+  const RT = path.join(DIR, 'gaps-rt');
+  for (const d of ['bin', 'lib']) fs.mkdirSync(path.join(RT, d), { recursive: true });
+  for (const f of ['fleet-know-event', 'fleet-know-event.mjs']) fs.copyFileSync(path.join(ROOT, 'bin', f), path.join(RT, 'bin', f));
+  for (const f of fs.readdirSync(path.join(ROOT, 'lib'))) fs.copyFileSync(path.join(ROOT, 'lib', f), path.join(RT, 'lib', f));
+  fs.chmodSync(path.join(RT, 'bin', 'fleet-know-event'), 0o755);
+  const sha = String(git('rev-parse', 'HEAD').stdout).trim();
+  const sync = (env = {}) => run(path.join(ROOT, 'bin', 'cf-sync'), [REPO], { home: GP, env: { CLAUDE_FLEET_HOME: RT, CLAUDE_FLEET_DIR: GPF, CLAUDE_FLEET_SOCK: 'cf-acme-api', ...env } });
+  const deploys = () => lines(path.join(GPF, K.LOG)).filter(e => e.kind === 'deploy');
+  const sy = sync();
+  const d1 = deploys();
+  row('cf-sync: a successful sync records its deploy once, at the commit it copied', `0 1 ghostfleet runtime ${sha}`, `${sy.status} ${d1.length} ${(d1[0] || { f: {} }).f.target} ${(d1[0] || { f: {} }).f.commit}`);
+  sync({ CLAUDE_FLEET_DEPLOY_TARGET: 'ghostfleet install' });
+  row('...install.sh names its own (it passes the target through)', 'ghostfleet install', (deploys()[1] || { f: {} }).f.target);
+  row('...install.sh does pass it, on both of its cf-sync calls', '2', (fs.readFileSync(path.join(ROOT, 'install.sh'), 'utf8').match(/CLAUDE_FLEET_DEPLOY_TARGET="ghostfleet install"/g) || []).length);
+  const before = deploys().length;
+  sync({ CLAUDE_FLEET_KNOW: 'off' });
+  row('...CLAUDE_FLEET_KNOW=off writes nothing', '0', deploys().length - before);
+  fs.rmSync(path.join(RT, 'bin', 'fleet-know-event'));
+  const sy2 = sync();
+  row('...no fleet-know-event in the runtime: nothing written, and the sync still succeeds', '0 0', `${deploys().length - before} ${sy2.status}`);
+  // the turn that ran it: checked a commit out, synced, re-parked on a tag, so HEAD at the
+  // Stop is the tag. The detected deploy must add no second record and name no wrong commit.
+  const tagSha = 'ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11';
+  const cmdLine = `cd /w && git checkout -q --detach origin/staging && cf-sync && ./install.sh; git checkout -q v0.6.1`;
+  const stopAt = Date.now() + 5000;
+  K.record('turn.end', { branch: 'HEAD', repo: rp, status: 'done', said: 'deployed', deploys: [{ target: 'cf-sync', cmd: cmdLine, ok: true, commit: tagSha }] }, { ...c, t: stopAt, rec: stopAt, src: { via: 'hook', session: 's-lead', slot: 'master' } }, process.env);
+  const g = K.rebuild(GPF, { save: false }).graph;
+  const dn = Object.values(g.nodes).filter(n => n.type === 'deploy');
+  row('a deploy the script recorded is not recorded again from the command', '2', dn.length);
+  const lj = JSON.parse(kj(['acme-api', '--json']));
+  row('...the page names the short target and the commit that shipped', 'yes no', `${yes(lj.lastDeploy && /^ghostfleet (runtime|install)$/.test(lj.lastDeploy.label) && lj.lastDeploy.commit === sha)} ${yes(JSON.stringify(lj.lastDeploy || {}).includes(tagSha))}`);
+  row('...as one short line, never the command', 'yes', yes(/last deploy +.*— ghostfleet install at [0-9a-f]{8}$/m.test(kj(['acme-api']))));
+  // a deploy nothing recorded for itself is still detected, named by its verb, and its commit
+  // is left out when the same command moved HEAD
+  const tf = (command) => K.turnFacts([JSON.stringify({ message: { content: [{ type: 'tool_use', id: 'a', name: 'Bash', input: { command } }] } }), JSON.stringify({ message: { content: [{ type: 'tool_result', tool_use_id: 'a', content: 'ok' }] } })]).deploys[0] || {};
+  row('detected: the verb, not the head of the line', 'npm publish|supabase db push|cf-sync', [tf('cd /w && S=/tmp/x; cp a b && npm publish --access public').target, tf('supabase db push').target, tf(cmdLine).target].join('|'));
+  row('...and only a command that moved HEAD is flagged', 'yes no', `${yes(tf(cmdLine).moves)} ${yes(tf('npm publish').moves)}`);
+  // ...through the real Stop hook: the commit HEAD is at is named for a deploy that left it
+  // alone, and for none that moved it
+  const TRD = path.join(SRC, 'dep.jsonl');
+  const tuse = (id, command) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
+  const tres = (id) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+  fs.writeFileSync(TRD, [tuse('d1', 'npm publish --access public'), tres('d1'), tuse('d2', cmdLine), tres('d2')].join('\n') + '\n');
+  run('bash', [path.join(ROOT, 'hooks', 'fleet-event.sh')], { home: H, env: { CLAUDE_FLEET_DIR: FL, CLAUDE_CONFIG_DIR: path.join(H, '.claude'), CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'api-dep', CLAUDE_FLEET_NOTIFIER: 'off' },
+    input: JSON.stringify({ session_id: 's-dep', cwd: REPO, hook_event_name: 'Stop', transcript_path: TRD, last_assistant_message: 'deployed' }) });
+  waitFor(() => lines(LOGF).some(e => e.kind === 'turn.end' && e.src && e.src.session === 's-dep'));
+  const dd = ((lines(LOGF).find(e => e.kind === 'turn.end' && e.src && e.src.session === 's-dep') || { f: {} }).f.deploys) || [];
+  row('hook: a deploy that left HEAD alone names it, one that moved HEAD names no commit', `${sha} none`, `${(dd[0] || {}).commit} ${(dd[1] || {}).commit || 'none'}`);
+  const lbl = (target, cmd) => K.deployLabel(target, cmd);
+  row('...an older event (first word + the whole command) reads as its verb', 'npm publish|cf-sync', `${lbl('cd', 'cd /w && S=1; cp a b && npm publish')}|${lbl('cf-sync', 'cd /w && S=/tmp/x; cp a b …')}`);
 });
 
 for (const r of rows) process.stdout.write(r.join('\x1f') + '\n');

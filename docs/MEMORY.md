@@ -16,7 +16,7 @@ WHERE IT STANDS
   docs-pass      done      on docs/setup-pass  (25m ago)
   branch docs/setup-pass (docs-pass) → PR #1184 open: Tighten the README setup section
   PR #1170 merged (fix/csv-export), 1h ago
-  last deploy  50m ago — vercel deploy --prod at a1b2c3d4 (master)
+  last deploy  50m ago — vercel deploy at a1b2c3d4 (master)
 OPEN
   waits on you: master needs you: Claude needs your permission to use Bash
   waits on you: PR #1184 (docs/setup-pass) — its worker reported done; waits for review/merge
@@ -225,10 +225,29 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
   merged, or the `gh pr merge` in a turn — not GitHub's `mergedAt`, which would need a network
   call nothing else on this path makes. Seen again later, by another refresh or another
   profile, it is the same merge with the earlier time.
-- **A deploy is a command a turn ran** (`vercel deploy`, `fly deploy`, `supabase functions
+- **A deploy is either recorded by the script that did it, or a command a turn ran.** This
+  repo's own `cf-sync` (and `install.sh`, through it) say so themselves, once a sync has
+  succeeded: `fleet-know-event deploy target="ghostfleet runtime" commit=<the commit it
+  copied>`. That is the only record that knows the commit, because the usual deploy checks a
+  commit out, syncs it and re-parks `HEAD` on a tag in one call, so `HEAD` at the Stop is the
+  tag. Nothing is written with `CLAUDE_FLEET_KNOW=off`, without a commit to name, or where
+  `fleet-know-event` is not in the runtime. Any deploy script can do the same.
+  The fallback is a command a turn ran (`vercel deploy`, `fly deploy`, `supabase functions
   deploy`, `npm publish` and their kin, not `--dry-run` or `--help`, and not one whose result
-  was an error), at the commit `HEAD` was at that Stop. A deploy script can record its own with
-  `fleet-know-event deploy target=… commit=…`.
+  was an error), at the commit `HEAD` was at that Stop, which is left out when the same
+  command moved `HEAD` (`git checkout`, `switch`, `reset`…). When a script's own record of the
+  same project landed in the half hour before, the detected `cf-sync` / `install.sh` deploy is
+  not added a second time. The page names a deploy by its short target or verb
+  (`ghostfleet runtime`, `npm publish`), never by the head of the command line.
+- **An open request is shown by its task, not its opening line.** A brief starts with the same
+  boilerplate for every worker, so the line shown is the worker's own `fleet-ack` understood
+  line, else the sentence under a `## Task` heading, else the first sentence that is not a
+  generic opener, else the branch name. Branch lines use the same rule.
+- **A PR from outside the fleet waits on the owner.** `fleet-merged` records who opened each
+  open PR (a sidecar beside its cache, so the cache's own columns are unchanged). An open PR
+  whose head branch no session or spawn manifest owns, or whose author is not the repo's
+  owner, is listed under what waits on you: `PR #1190 from outside-dev waits for review`. A PR
+  the project's own workers opened keeps the wording of "its worker reported done".
 - **The first PR cache a repo gets records only its open PRs.** Its merged ones are history
   whose merge times are unknown, and inventing them would put three hundred merges at the
   moment the cache was first built.

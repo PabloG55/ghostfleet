@@ -140,24 +140,31 @@ trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
 # branch name reused), and the one a live session is working on is the open one.
 q() {   # $1 = state
   gh pr list --repo "$slug" --state "$1" --limit 300 \
-     --json headRefName,number,state \
+     --json headRefName,number,state,author \
      --jq '.[] | select(.headRefName != null and .number != null)
-                 | .headRefName + "\u001f" + (.number|tostring) + "\u001f" + .state' 2>/dev/null
+                 | .headRefName + "\u001f" + (.number|tostring) + "\u001f" + .state + "\u001f" + (.author.login // "")' 2>/dev/null
 }
 # The merged query is the one whose failure means "I don't know": it is what the existing
 # callers read, so if it cannot be answered this prints nothing and every one of them falls
 # back, exactly as before. A failing OPEN query only costs the numbers.
 merged="$(q merged)" || exit 0
 open="$(q open)"     || open=""
-out="$(printf '%s\n%s\n' "$open" "$merged" | grep -v '^$')"
-[ -n "$out" ] || exit 0
+all4="$(printf '%s\n%s\n' "$open" "$merged" | grep -v '^$')"
+[ -n "$all4" ] || exit 0
+# The cache keeps its three columns — every reader of it indexes them — and WHO opened each
+# open PR goes in a sidecar beside it (number, login), for the memory alone: an open PR from
+# somebody who is not the repo's owner is waiting on a review no fleet session will report.
+out="$(printf '%s\n' "$all4" | awk -F"$US" -v OFS="$US" '{print $1, $2, $3}')"
+authors="$(printf '%s\n' "$all4" | awk -F"$US" -v OFS="$US" '$3=="OPEN" && $4!="" {print $2, $4}')"
+_wasa=""; [ -f "$cache.authors" ] && _wasa="$(cat "$cache.authors" 2>/dev/null)"
+printf '%s\n' "$authors" > "$cache.authors" 2>/dev/null
 # The cache as it WAS, for the memory (docs/MEMORY.md): the difference between two fetches is
 # what happened to the repo's PRs — opened, merged, closed — and this is the one place that
 # sees both. Asked only when something changed, so an unchanged refresh costs nothing. The
 # cache's own lines are untouched; the writer never fails, so neither can this.
 _was=""; [ -f "$cache" ] && _was="$(cat "$cache" 2>/dev/null)"
 printf '%s\n' "$out" > "$cache" 2>/dev/null
-[ "$_was" = "$out" ] || printf '%s\n' "$_was" \
-  | "$(dirname "$0")/fleet-know-event" prs "fleet=$FLEET_DIR" "repo=$slug" "new=$cache" "cwd=$REPO_DIR" >/dev/null 2>&1
+{ [ "$_was" = "$out" ] && [ "$_wasa" = "$authors" ]; } || printf '%s\n' "$_was" \
+  | "$(dirname "$0")/fleet-know-event" prs "fleet=$FLEET_DIR" "repo=$slug" "new=$cache" "authors=$cache.authors" "cwd=$REPO_DIR" >/dev/null 2>&1
 [ "$WARM" = 1 ] && exit 0
 printf '%s\n' "$out" | emit
