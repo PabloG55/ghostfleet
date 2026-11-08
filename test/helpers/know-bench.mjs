@@ -1,6 +1,7 @@
 // A synthetic memory log, and a stopwatch for what reads it (lib/know.mjs, docs/MEMORY.md).
 //
 //   node test/helpers/know-bench.mjs gen  <home> <events> [--seed n] [--now ms] [--projects n]
+//   node test/helpers/know-bench.mjs backfill <home> <events> [--now ms]   (on a home gen made)
 //   node test/helpers/know-bench.mjs time <home> [--root <checkout>] [--runs n]
 //   node test/helpers/know-bench.mjs cpu  <home> [--root <checkout>]
 //
@@ -28,7 +29,7 @@ const ROOT = path.resolve(HERE, '..', '..');
 const [verb, homeArg, ...rest] = process.argv.slice(2);
 const die = (m) => { process.stderr.write(`know-bench: ${m}\n`); process.exit(2); };
 const flag = (name, dflt) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? rest[i + 1] : dflt; };
-if (!verb || !homeArg) die('usage: know-bench.mjs gen <home> <events> | time <home> | cpu <home>');
+if (!verb || !homeArg) die('usage: know-bench.mjs gen <home> <events> | backfill <home> <events> | time <home> | cpu <home>');
 const home = path.resolve(homeArg);
 const MARK = path.join(home, '.know-bench');
 
@@ -49,6 +50,43 @@ function cleanEnv() {
   const e = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(CLAUDE_FLEET_|GHOSTFLEET_|CLAUDE_CONFIG_DIR$|TMUX)/.test(k)) e[k] = v;
   return { ...e, HOME: home, CLAUDE_FLEET_KNOW_MACHINE: 'laptop' };
+}
+
+// ── backfill ──────────────────────────────────────────────────────────────
+// What `fleet-know backfill` leaves behind: commits, which cost a line and no node, then merged PRs,
+// ledger items and workers, which cost nodes. Heavier on PRs and workers than the one real machine
+// measured, so it errs on the costly side. All of it older than anything `gen` wrote, appended to the
+// end of the log, which is the case a read pays for: every line behind the snapshot's high-water.
+// Prints how many it added.
+async function syntheticBackfill(target) {
+  if (!fs.existsSync(MARK)) die(`${home} was not made by gen`);
+  const K = await import(path.join(ROOT, 'lib', 'know.mjs'));
+  const now = Number(flag('now', Date.now()));
+  const dir = path.join(home, '.claude', 'fleet');
+  const names = fs.readFileSync(path.join(home, '.config', 'ghostfleet', 'projects'), 'utf8').split('\n').filter(Boolean).map(l => l.split('\t')[0]);
+  const END = now - 61 * 86400e3, STEP = 365 * 86400e3 / target;
+  const events = [];
+  let n = 0;
+  const put = (project, kind, f, t) => { events.push(K.makeEvent({ t, rec: now, kind, machine: 'laptop', profile: 'work', project, src: { via: 'backfill', from: kind, sock: `cf-${project}` }, f })); n++; };
+  for (let i = 0; n < target; i++) {
+    const project = names[i % names.length], repo = `acme/${project}`, t = END - i * STEP * 4, pr = 500000 + i;
+    put(project, 'commit', { sha: K.canon([i]).padEnd(40, '0'), subject: `Backfilled commit ${i} on ${project}`, repo, pr, branch: 'main' }, t);
+    put(project, 'commit', { sha: K.canon([i, 1]).padEnd(40, '1'), subject: `Backfilled commit ${i}, no PR`, repo, branch: 'main' }, t + 1000);
+    if (i % 2 === 0) {
+      put(project, 'pr.open', { repo, number: pr, title: `Backfilled PR ${i}`, author: 'acme-dev', branch: `fix/old-${i}` }, t - 3600e3);
+      put(project, 'pr.merge', { repo, number: pr, title: `Backfilled PR ${i}`, author: 'acme-dev', branch: `fix/old-${i}`, commit: String(i) }, t);
+    } else {
+      const req = `s-old-${i}/1`;
+      put(project, 'request.open', { req, text: `Backfilled ask ${i}`, source: 'user', state: 'open' }, t - 3600e3);
+      put(project, 'request.state', { req, text: `Backfilled ask ${i}`, state: 'done', by: 'agent' }, t);
+    }
+    if (i % 10 === 0) {
+      put(project, 'spawn', { worker: `old-${i}`, branch: `fix/old-${i}`, repo, task: `Backfilled task ${i}` }, t - 7200e3);
+      put(project, 'retire', { worker: `old-${i}`, branch: `fix/old-${i}`, repo, reason: 'backfill' }, t);
+    }
+  }
+  K.appendMany(dir, events);
+  process.stdout.write(`${n}\n`);
 }
 
 // ── gen ───────────────────────────────────────────────────────────────────
@@ -240,6 +278,7 @@ async function cpu() {
 }
 
 if (verb === 'gen') await gen(Number(rest[0]) || die('gen <home> <events>'));
+else if (verb === 'backfill') await syntheticBackfill(Number(rest[0]) || die('backfill <home> <events>'));
 else if (verb === 'time') await timeIt();
 else if (verb === 'cpu') await cpu();
 else die(`unknown verb ${verb}`);

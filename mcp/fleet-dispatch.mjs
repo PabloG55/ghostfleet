@@ -257,7 +257,7 @@ export const TOOLS = [
   // it briefs on is `about`, NOT `project` — every other tool's `project` names the FLEET to
   // act in and is resolved against this machine's project list, while the memory answers
   // about every profile and every paired machine at once (acme-api@vm is a project here).
-  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events; rules:<project> lists the owner's standing rules that apply to a project, most specific first (\"\" for this profile's); about:<project> with fact:<key> reads one keyed fact, and says \"not recorded\" when nothing holds now. With none of them: every project it knows. at:<time> answers as it stood then. Every decision and description says who said it: [owner], [lead], [worker] or [model]; trusted:true narrows about:<project> to the owner's and the lead's word. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
+  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events; rules:<project> lists the owner's standing rules that apply to a project, most specific first (\"\" for this profile's); about:<project> with fact:<key> reads one keyed fact, and says \"not recorded\" when nothing holds now; history:<project> is what happened to it, newest last and grouped by day, narrowed by since and until. With none of them: every project it knows. at:<time> answers as it stood then. Every decision and description says who said it: [owner], [lead], [worker] or [model]; trusted:true narrows about:<project> to the owner's and the lead's word. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
     inputSchema: { type: 'object', properties: {
       about: { type: 'string', description: 'a project to brief on: name, name@machine (a paired one) or name/profile' },
       trusted: { type: 'boolean', description: 'with about: only what the owner or a lead said, in decisions, what the project is, and what it depends on' },
@@ -266,6 +266,9 @@ export const TOOLS = [
       find: { type: 'string', description: 'words to search the raw recorded events for (every word must appear)' },
       rules: { type: 'string', description: 'the standing rules that apply to this project: name or name/profile, or "" for what applies to every project in this profile. project: beats profile beats all, and the answer says so' },
       fact: { type: 'string', description: 'with about: one keyed fact of that project, by its key' },
+      history: { type: 'string', description: 'what happened to this project, one line each, newest last, grouped by day: merged PRs, decisions and rules with who said them, deploys, keyed facts changing, workers started and finished, commits' },
+      since: { type: 'string', description: 'with history: from this date or time. A range too long to print says "+N earlier" and how to read those' },
+      until: { type: 'string', description: 'with history: up to this date (the whole of that day) or time' },
       at: { type: 'string', description: 'answer as it stood at this time: ISO, epoch, or "3d ago" (default now)' },
       json: { type: 'boolean', description: 'return data rather than text' } }, additionalProperties: false } },
 ];
@@ -387,7 +390,7 @@ export function plan(name, a = {}) {
     // CLI reads them, so a caller who sets two gets the first rather than a silent mix.
     case 'fleet_know': {
       // A leading '-' must not read as a flag.
-      for (const [k, x] of [['about', a.about], ['rules', a.rules], ['fact', a.fact]]) {
+      for (const [k, x] of [['about', a.about], ['rules', a.rules], ['fact', a.fact], ['history', a.history]]) {
         if (x && String(x).startsWith('-')) return { kind: 'fail', ...fail(`fleet_know: '${x}' is not a ${k === 'fact' ? "fact's key" : 'project name'}`) };
       }
       // The options first: `find` ends in a `--`, and anything after that is a word to search
@@ -395,9 +398,12 @@ export function plan(name, a = {}) {
       // --via is how a read is told from one at a terminal (fleet-know reads).
       const args = ['--via', 'mcp'];
       if (a.at) args.push('--at', String(a.at));
+      if (a.since) args.push('--since', String(a.since));
+      if (a.until) args.push('--until', String(a.until));
       if (a.trusted) args.push('--trusted');
       if (a.json) args.push('--json');
       if (a.rules !== undefined) { args.push('rule', 'list'); if (a.rules) args.push(String(a.rules)); }
+      else if (a.history) args.push('history', String(a.history));
       else if (a.about && a.fact) args.push('fact', String(a.about), String(a.fact));
       else if (a.about) args.push(String(a.about));
       else if (a.waiting) args.push('waiting');
