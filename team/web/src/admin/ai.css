@@ -1,0 +1,23 @@
+/* Administración → Cuenta de IA. Same tokens as styles.css; nothing here redefines them. */
+.admin-tabs { margin: -6px 0 14px; }
+.ai-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.ai-mode { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 12px 14px; border-radius: var(--r);
+  background: var(--bg); border: 1px solid var(--line); color: var(--fg); font: inherit; cursor: pointer; }
+.ai-mode:hover:not(:disabled) { border-color: #3a4450; }
+.ai-mode:disabled { opacity: .5; cursor: default; }
+.ai-mode.on { border-color: var(--cyan); background: #0f1a1d; }
+.ai-mode b { color: var(--white); font-size: 14.5px; }
+.ai-mode span { font-size: 12.5px; }
+.ai-mode small { display: block; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.ai-mode em { font-style: normal; }
+.ai-on { color: var(--cyan); font-size: 12.5px; font-weight: 600; }
+.ai-warn { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: var(--r);
+  border: 1px solid rgba(255,215,95,.55); background: rgba(255,215,95,.07); }
+.ai-warn > b { color: var(--yellow); }
+.ai-warn input[type=checkbox] { width: auto; }
+.ai-note { padding: 8px 12px; border-radius: var(--r); border-left: 3px solid var(--yellow); background: rgba(255,215,95,.06); }
+.ai-mcp { align-items: flex-start; }
+.ai-mcp .switch { margin-top: 2px; }
+.ai-mcp p { margin: 4px 0 0; }
+.dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.mono { font-family: var(--mono); }
