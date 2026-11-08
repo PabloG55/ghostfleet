@@ -1752,3 +1752,42 @@ html.duo .rv-bar > .rv-gate { flex: 1 1 auto; }
 html.duo .rv-acts > button { flex: 0 0 auto; min-width: 9em; }
 html.duo .rv-video { max-height: 44dvh; }
 html.duo .rv-shot { width: auto; max-width: 100%; max-height: 46dvh; }
+/* ── automations (EXPERIMENTAL, web/src/automations.jsx) ───────────────────────
+ * Built from the same tokens as everything above: a block is a card's surface, a field is
+ * a sheet's field (16px, for the iOS zoom reason given at `.sheet input`). */
+.autos { padding: 8px 12px 24px; display: flex; flex-direction: column; gap: 10px; }
+.autos h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--white); }
+.autos-dim { color: var(--dim); font-size: 13px; margin: 0; }
+.autos-top, .autos-save { display: flex; gap: 8px; justify-content: flex-end; }
+.autos-grow { flex: 1 1 auto; }
+.autos-item, .autos-block, .autos-notices, .autos-runs, .autos-ask {
+  background: var(--surface-1); border-radius: var(--r3); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.autos-item.off { opacity: .6; }
+.autos-block.key { box-shadow: inset 3px 0 0 var(--yellow); }
+.autos-head, .autos-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.autos-name { color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.autos-sw { border: 0; border-radius: var(--pill); padding: 2px 10px; background: var(--surface-2); color: var(--dim); font-size: 12px; }
+.autos-sw.on { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+.autos-flow { display: flex; flex-wrap: wrap; gap: 6px; font-size: 13px; }
+.autos-trigger { color: var(--cyan); }
+.autos-chip { background: var(--surface-2); border-radius: var(--r1); padding: 1px 8px; overflow-wrap: anywhere; }
+.autos-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--dim); min-width: 0; }
+.autos-field input, .autos-field textarea, .autos-field select, .autos-ask textarea {
+  font: inherit; font-size: 16px; width: 100%; color: var(--white); background: var(--surface-2);
+  border: 1px solid transparent; padding: .5em .7em; border-radius: var(--r2); box-sizing: border-box; }
+.autos-field :focus, .autos-ask textarea:focus { border-color: color-mix(in srgb, var(--cyan) 60%, transparent); outline: none; }
+.autos-check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.autos-say { color: var(--cyan); font-size: 13px; margin: 0; }
+.autos-note { color: var(--yellow); font-size: 13px; margin: 0; }
+.autos-notice { font-size: 13px; overflow-wrap: anywhere; }
+.autos-notice.k-bad { color: var(--red); }
+.autos-when { color: var(--dim); font-variant-numeric: tabular-nums; }
+.autos-run summary { display: flex; gap: 8px; align-items: baseline; font-size: 13px; cursor: pointer; flex-wrap: wrap; }
+.autos-st.s-ok { color: var(--green); } .autos-st.s-error { color: var(--red); } .autos-st.s-skipped { color: var(--dim); }
+.autos-step-run { font-size: 12px; padding-left: 20px; overflow-wrap: anywhere; }
+.autos-step-run.bad { color: var(--red); }
+.autos-msg { font-size: 14px; padding: 8px 10px; border-radius: var(--r2); background: var(--surface-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+.autos-msg.user { align-self: flex-end; background: color-mix(in srgb, var(--cyan) 12%, transparent); }
+.autos-msg.bad { color: var(--red); }
+.autos button.off { opacity: .35; }

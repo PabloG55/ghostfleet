@@ -19837,6 +19837,86 @@ else
 fi
 rm -rf "$JW"
 
+# ── automations (EXPERIMENTAL): off means gone, and start or stop is approved at save ──
+# One daemon, the same probe twice: switched on, then off. Off, every /api/automations* is a
+# 404 that says how to turn it on, and the project list says it is off. On, a step that
+# STARTS A SESSION is saved only with a fresh passkey — the run happens with nobody holding
+# the phone, so the save is the moment of action — and a run reaches the real verb path
+# (the stub fleet-send / fleet-spawn). The AI draft is a stub agent: what is proved is the
+# route (a sentence in, a normalised draft out, nothing saved), not the model.
+group "fleet-serve: automations — the switch, the passkey at save, a run"
+# needs: free_port answers in digits
+AW="$(mktemp -d "$TEST_RUNS.$$.auto.XXXXXX")"
+cat > "$AW/agent" <<'AGENT'
+#!/bin/sh
+printf '%s\n' '{"structured_output":{"reply":"built it","automation":{"name":"good morning","trigger":{"type":"schedule","mode":"days","at":"09:00","days":[1,2,3,4,5]},"steps":[{"action":"notify","text":"good morning"}]}}}'
+AGENT
+chmod +x "$AW/agent"
+if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/agent" sv_start automations; then
+  apf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }
+  aj()  { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$3"; }
+  ASW="$CLAUDE_FLEET_EXPERIMENTAL_DIR/automations.enabled"
+  : > "$SV/ran"
+  printf 'on\n' > "$ASW"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations "$(sv_code auton)" > "$SV/probe.auton" 2>"$SV/probe.auton.err"
+  cp "$SV/ran" "$AW/ran.on"; : > "$SV/ran"
+  printf 'off\n' > "$ASW"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations "$(sv_code autoff)" > "$SV/probe.autoff" 2>"$SV/probe.autoff.err"
+  cp "$SV/ran" "$AW/ran.off"
+  is "the probe ran without complaining (on)"   ""      "$(head -2 "$SV/probe.auton.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and off"                               ""      "$(head -2 "$SV/probe.autoff.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "on: the project list says so"             "true"  "$(aj projects auton automations_enabled)"
+  is "...with nothing unseen yet"               "0"     "$(aj projects auton automations_unseen)"
+  is "the list needs a token"                   "401"   "$(apf list.noToken auton)"
+  is "...and with one it answers"               "200"   "$(apf list auton)"
+  is "...empty on a new install"                "[]"    "$(aj list auton automations)"
+  is "...with the fleet to pick from"           "1"     "$(aj list auton fleet | grep -c '"name":"demo"' || true)"
+  is "a send needs no passkey to save"          "200"   "$(apf save.send auton)"
+  is "...and is armed for its next run"         "1"     "$([ -n "$(aj save.send auton automation.nextRun)" ] && [ "$(aj save.send auton automation.nextRun)" != undefined ] && echo 1 || echo 0)"
+  is "an automation with no steps is refused"   "400"   "$(apf save.noSteps auton)"
+  is "run now answers"                          "200"   "$(apf run.send auton)"
+  is "...and it worked"                         "true"  "$(aj run.send auton ok)"
+  is "...through the real verb path to fleet-send" "1"  "$(grep '^fleet-send' "$AW/ran.on" | grep -c 'review what is open on 20' || true)"
+  # 428, NOT 401: the phone reads a 401 as a dead session token and locks itself.
+  is "a step that starts a session: no passkey, refused" "428" "$(apf save.spawnNoKey auton)"
+  is "...saying it needs one"                   "passkey" "$(aj save.spawnNoKey auton needs)"
+  is "...a forged one is refused too"           "428"   "$(apf save.spawnForged auton)"
+  is "...a real one is taken"                   "200"   "$(apf save.spawnKey auton)"
+  is "...and the approval is kept on it"        "automation nightly check" "$(aj save.spawnKey auton automation.approved.purpose)"
+  is "...switched off it needs none"            "200"   "$(apf save.spawnOff auton)"
+  is "...and carries no approval"               "null"  "$(aj save.spawnOff auton automation.approved)"
+  is "the approved one runs"                    "true"  "$(aj run.spawn auton ok)"
+  is "...and fleet-spawn was called for it"     "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
+  is "the save with a passkey is audited as one" "1"    "$(grep '"verb":"automation_save"' "$SV/audit.jsonl" | grep -c 'passkey:automation nightly check' || true)"
+  is "asking for it in a sentence gives a draft" "200"  "$(apf draft auton)"
+  is "...normalised, ready for the editor"      "good morning" "$(aj draft auton automation.name)"
+  is "...and nothing was saved by it"           "0"     "$(aj list.full auton automations | grep -c '"good morning"' || true)"
+  is "...an empty conversation is refused"      "400"   "$(apf draft.empty auton)"
+  is "three are saved"                          "3"     "$(aj list.full auton automations | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "...the runs are listed"                   "2"     "$(aj list.full auton runs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "delete answers"                           "200"   "$(apf delete auton)"
+  is "...and is audited"                        "1"     "$(grep -c '"verb":"automation_delete"' "$SV/audit.jsonl" || true)"
+  is "...and two are left"                      "2"     "$(aj list.after auton automations | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "the files are the owner's only"           "600"   "$(stat -c %a "$AW/data/automations.json" 2>/dev/null || stat -f %Lp "$AW/data/automations.json")"
+  # OFF MEANS GONE.
+  is "off: the project list says so"            "false" "$(aj projects autoff automations_enabled)"
+  is "...and counts nothing"                    "null"  "$(aj projects autoff automations_unseen)"
+  is "off: the list is a 404"                   "404"   "$(apf list autoff)"
+  is "...that says it is disabled"              "true"  "$(aj list autoff disabled)"
+  is "...and how to turn it on"                 "1"     "$(aj list autoff text | grep -c 'fleet-experimental enable automations' || true)"
+  is "...a save is a 404"                       "404"   "$(apf save.send autoff)"
+  is "...so is run now"                         "404"   "$(apf run.send autoff)"
+  is "...and a draft"                           "404"   "$(apf draft autoff)"
+  is "...and delete"                            "404"   "$(apf delete autoff)"
+  is "...still behind the token"                "401"   "$(apf list.noToken autoff)"
+  is "...and nothing ran"                       "0"     "$(grep -c . "$AW/ran.off" || true)"
+  rm -f "$ASW"
+  serve_stop
+else
+  skip "fleet-serve automations" "server did not come up: $SV_WHY"
+fi
+rm -rf "$AW"
+
 # THE CLIENT'S EARS, WITHOUT A PHONE. Two pieces of web/app.js decide what reaches the Mac:
 # the voice-activity detector (when an utterance ENDS) and the WAV encoder (what it sounds
 # like). Both are lifted out of the client exactly as written, the way this file lifts

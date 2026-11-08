@@ -78,6 +78,7 @@ import { clockLabel } from '../grid.js';
 // here — a cycle, and a harmless one: vite emits both files into one chunk, and nothing is
 // called until mount() runs, long after both modules have finished evaluating.
 import { ReviewsScreen, ReviewScreen } from './reviews.jsx';
+import { AutomationsScreen } from './automations.jsx';
 
 // ── a button whose key letter stays in the label ──────────────────────────────────────
 // The TUI's footer is muscle memory, and a button that says "p pause" transfers where one
@@ -88,7 +89,7 @@ import { ReviewsScreen, ReviewScreen } from './reviews.jsx';
 // noticed. The bound is on the KEY, not the label: `⏎ open` splits and `remove anyway`
 // must not.
 const VERB = /^(\S+) (.+)$/;
-function Btn({ label, onClick, cls = '' }) {
+export function Btn({ label, onClick, cls = '' }) {
   const m = VERB.exec(label);
   if (m && [...m[1]].length <= 2) {
     return <button class={(cls + ' k').trim()} onClick={onClick}><b>{m[1]}</b>{' ' + m[2]}</button>;
@@ -364,7 +365,7 @@ function QueueScreen(p) {
 // tears the old tree down and builds the new one, which is exactly what crossing between
 // two screens means. Preact would also tear down on the differing component type alone;
 // the key is here so that stays true if these two ever become one component with a prop.
-const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen, reviews: ReviewsScreen, review: ReviewScreen };
+const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen, reviews: ReviewsScreen, review: ReviewScreen, automations: AutomationsScreen };
 export function mount(container, screen, props) {
   const S = SCREENS[screen];
   // Not a silent no-op: a typo here would leave the container holding the PREVIOUS screen

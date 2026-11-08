@@ -811,6 +811,33 @@ export async function jarvisConfirm(id, answer, assertion = null) {
   record('jarvis_confirm', { id, answer }, 'ok');
   return j;
 }
+// ── automations (EXPERIMENTAL, lib/automations.mjs) ─────────────────────────
+// Server only. Fixture mode answers the way a daemon with the switch off does, a 404, so the
+// screen has exactly one "not here" path. A save holding start or stop carries a fresh
+// assertion; without one the daemon answers 428 with needs:'passkey' — NOT 401, which this
+// client reads as a dead session token.
+export async function getAutomations() {
+  if ((await ready()).mode !== 'server') { const e = new Error('/api/automations → HTTP 404'); e.status = 404; throw e; }
+  return get('/api/automations');
+}
+async function autoPost(kind, path, body, assertion = null) {
+  if ((await ready()).mode !== 'server') throw new Error('automations need a real fleet-serve, not fixtures');
+  if (!haveToken()) throw new AuthError('no live session token');
+  const r = await authFetch(kind, path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
+               ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+    body: JSON.stringify(body || {}),
+  }).catch((e) => { if (e.status === 401 || e.status === 403) clearToken(); throw e; });
+  record(kind, body && (body.id || (body.automation && body.automation.name)) || '', 'ok');
+  return r;
+}
+export const saveAutomation = (automation, assertion) => autoPost('automation_save', '/api/automations', { automation }, assertion);
+export const deleteAutomation = (id) => autoPost('automation_delete', '/api/automations/delete', { id });
+export const runAutomation = (id) => autoPost('automation_run', '/api/automations/run', { id });
+export const automationsSeen = () => autoPost('automation_seen', '/api/automations/seen', {});
+export const automationDraft = (messages, draft) => autoPost('automation_draft', '/api/automations/draft', { messages, draft });
+
 // ── the Mac's ears (every session's talk) ─────────────────────────────────
 // Whether the Mac can transcribe, and whether it reads replies with Kokoro. NOT Jarvis's:
 // /api/voice answers with Jarvis switched off, which is the whole reason it is its own

@@ -4,6 +4,18 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## Unreleased
+
+### Added
+
+- **Automations (experimental, off by default).** A trigger — on days at a time, once, every
+  N minutes, or a session changing state — and steps the fleet runs on its own through the
+  same verb path a tap takes: send, start, pause, resume, wake, interrupt, reopen, stop, plus
+  "tell me", "wait" and "continue only if…". Built on the phone by taps or by saying it in a
+  sentence. A start or a stop asks for the passkey when the automation is saved, since
+  nobody holds the phone when it runs. `fleet-experimental enable automations`;
+  docs/automations.md.
+
 ## 0.6.1 — 2026-10-16
 
 **A first install from npm on WSL now goes cleanly.** Four things a fresh
