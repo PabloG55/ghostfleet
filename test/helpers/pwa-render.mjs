@@ -1153,9 +1153,12 @@ openProjSettings();
 await tick(20);
 // acme-api's OWN row: every other project without a model shows `default` too, so a
 // sheet-wide "no default button" could never hold.
+// Every button UNDER the row, not only its direct children: the settings sit in a group of
+// their own (`.pset`) so a narrow screen can wrap them under the name as one unit.
 const modelRow = (name) => { const s = sheetNow(); return s && s.find(n => n.className.split(/\s+/).includes('srow')
   && n.kids.some(k => k.className.split(/\s+/).includes('nm') && k.textContent === name)); };
-const rowBtns = (name) => { const r = modelRow(name); return r ? r.kids.filter(k => k.tag === 'button').map(k => k.textContent) : []; };
+const btnsUnder = (n, acc = []) => { for (const k of n.kids) { if (k.tag === 'button') acc.push(k.textContent); btnsUnder(k, acc); } return acc; };
+const rowBtns = (name) => { const r = modelRow(name); return r ? btnsUnder(r) : []; };
 is('...and the row reads it back', true, rowBtns('acme-api').includes('haiku') && !rowBtns('acme-api').includes('default'));
 is("...and only that project's row", true, rowBtns('acme-web').includes('sonnet'));
 sClick(/^haiku$/);

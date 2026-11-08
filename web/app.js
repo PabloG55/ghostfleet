@@ -8094,8 +8094,11 @@ async function sheetSettings() {
     // This machine's projects only: these settings are files on the machine that runs the
     // fleet, and a paired host's are set there (the pairing covers reading and messaging).
     for (const p of (S.projects || []).filter(x => !isRemote(x.name))) {
+      // The settings sit in ONE group after the name (app.css `.pset`), so a narrow screen
+      // wraps the four of them under the name as a unit instead of squeezing the name.
       rows.append(el('div', { class: 'srow' }, [
         el('div', { class: 'nm', text: p.name }),
+        el('div', { class: 'pset' }, [
         // Labelled with what it IS, not with a verb: the row is a state readout first.
         // 'claude' rather than blank, because a blank cell reads as "not loaded" — the
         // empty COLUMN is a storage detail and this is the only place it should not leak.
@@ -8106,6 +8109,7 @@ async function sheetSettings() {
         btn(p.model || 'default', () => { closeSheet(); sheetProjectModel(p); }, p.model ? 'on' : ''),
         btn(p.nudge ? '● on' : '○ off', async () => { await doVerb('fleet_nudge', { project: p.name, state: p.nudge ? 'off' : 'on' }); closeSheet(); }, p.nudge ? 'on' : 'off'),
         btn(p.budget === 'ignored' ? '● ignored' : '○ enforced', async () => { await doVerb('fleet_budget', { project: p.name, state: p.budget === 'ignored' ? 'enforced' : 'ignored' }); closeSheet(); }),
+        ]),
       ]));
     }
     kids.push(rows);
