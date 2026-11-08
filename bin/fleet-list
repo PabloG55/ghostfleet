@@ -6,6 +6,16 @@
 # $CLAUDE_FLEET_SOCK.
 set -uo pipefail
 
+# WHERE THIS FILE REALLY LIVES. It is installed as a symlink (~/.local/bin/fleet-list ->
+# the staged runtime), and `dirname "$0"` is the link's directory, not the target's: `$0/..`
+# was ~/.local, whose `lib/` does not exist. Every lib lookup below then found nothing and said
+# so in silence — the model column read `?` on every row and lost sessions were never listed —
+# while the suite, which runs bin/fleet-list by its real path, stayed green. Resolve the link
+# the way fleet-model does.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _l="$(readlink "$_self")"; case "$_l" in /*) _self="$_l" ;; *) _self="$(dirname "$_self")/$_l" ;; esac; done
+LIB_DIR="$(cd "$(dirname "$_self")/../lib" 2>/dev/null && pwd -P)"
+
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 # Prefer $TMUX (the live server this session runs in) over the env var — it's
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
@@ -41,7 +51,7 @@ done
 # One line per session: name, then the record's epoch.
 lost=""
 if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
-  _lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/lib/fleet-scan.mjs"
+  _lib="$LIB_DIR/fleet-scan.mjs"
   _panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
   [ -f "$_lib" ] && lost="$(LIB="$_lib" DIR="$FLEET_DIR" SOCK="$SOCK" NAMES="$names" PANES="$_panes" \
     CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" node --input-type=module -e '
@@ -80,7 +90,7 @@ age_of() {
 # is another agent, whose model is not a Claude model name. Short: the `claude-` every id
 # starts with is dropped. Computed in ONE node run for every row, after the walk, because a
 # node start per session is most of a second on a fleet of twenty.
-_sm_lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/lib"
+_sm_lib="$LIB_DIR"
 # shellcheck source=lib/session-model.sh
 [ -f "$_sm_lib/session-model.sh" ] && . "$_sm_lib/session-model.sh" 2>/dev/null
 short_model() {
@@ -88,13 +98,44 @@ short_model() {
     '') printf '?' ;; -) printf 'default' ;; claude-*) printf '%s' "${1#claude-}" ;; *) printf '%s' "$1" ;;
   esac
 }
-# what an asleep/lost session starts on
-starts_on() {
-  local r m
-  command -v session_model_resolve >/dev/null 2>&1 || { printf '?'; return; }
-  r="$(session_model_resolve "$FLEET_DIR" "$SOCK" "$1" "" 2>/dev/null)"; m="${r%%$'\t'*}"
-  short_model "${m:--}"
+# ASLEEP AND LOST ROWS. No process, so nothing to ask the pane: the model is what it will START
+# on when its pin or the project default says so (lib/session-model.sh — that is what a wake
+# launches with, and it wins over anything the conversation last used), else the last model its
+# conversation recorded (the same reader as a running row, one node run for all of them), else
+# `-`. `default` is no longer printed for these: "the profile default" was a guess about a
+# session that may well have last run on something else.
+DORMANT_MODELS=""
+dormant_models() {
+  local names="$1" recs batch="" n tr id
+  [ -n "$names" ] && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
+    && [ -f "$_sm_lib/session-model.mjs" ] || return 0
+  # ONE jq over the status records, newest per session; scoped by socket (every fleet has a master)
+  recs="$(jq -r --arg k "$SOCK" 'select((.sock // "") == $k) | [.slot, (.ts // 0), (.transcript // "")] | @tsv' \
+    "$FLEET_DIR"/*.json 2>/dev/null | sort -t$'\t' -k2,2rn)"
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    tr="$(awk -F'\t' -v n="$n" '$1==n && $3!="" {print $3; exit}' <<< "$recs")"
+    # An asleep session's status record is gone; its marker keeps the conversation id
+    # (<epoch> <id> <cwd> <idle>), and the transcript is <config>/projects/<dir>/<id>.jsonl.
+    if [ -z "$tr" ] && [ -f "$FLEET_DIR/$SOCK.$n.asleep" ]; then
+      id="$(head -1 "$FLEET_DIR/$SOCK.$n.asleep" | cut -f2)"
+      case "$id" in ''|*[!A-Za-z0-9-]*) ;; *) for tr in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$id".jsonl; do [ -f "$tr" ] && break; tr=""; done ;; esac
+    fi
+    batch="$batch$n"$'\t'"${tr:--}"$'\t-\n'
+  done <<< "$names"
+  DORMANT_MODELS="$(printf '%s' "$batch" | node "$_sm_lib/session-model.mjs" current 2>/dev/null)"
 }
+dormant_model() {
+  local r m n line
+  command -v session_model_resolve >/dev/null 2>&1 && {
+    r="$(session_model_resolve "$FLEET_DIR" "$SOCK" "$1" "" 2>/dev/null)"; m="${r%%$'\t'*}"
+    [ -n "$m" ] && { short_model "$m"; return; }
+  }
+  line="$(awk -F'\t' -v n="$1" '$1==n {print $2; exit}' <<< "$DORMANT_MODELS")"
+  case "$line" in ''|-) printf '%s' - ;; *) short_model "$line" ;; esac
+}
+# a tab or a shell is not a Claude session and has no model to show
+dormant_row_model() { case "$1" in _*) printf '%s' - ;; *) dormant_model "$1" ;; esac; }
 
 printf '%-22s %-10s %-12s %s\n' "SESSION" "STATUS" "MODEL" ""
 ROWS=""; BATCH=""
@@ -158,9 +199,10 @@ done 3<<<"$MODELS" <<EOF
 $ROWS
 EOF
 
+dormant_models "$(printf '%s\n%s\n' "$asleep" "$(cut -f1 <<< "$lost")")"
 while IFS= read -r name; do
   [ -n "$name" ] || continue
-  printf '%-22s %-10s %-12s %s\n' "$name" "asleep" "$(starts_on "$name")" \
+  printf '%-22s %-10s %-12s %s\n' "$name" "asleep" "$(dormant_row_model "$name")" \
     "$(age "$FLEET_DIR/$SOCK.$name.asleep") · wake: fleet-hibernate --wake $name · clear: fleet-stop $name"
 done <<EOF
 $asleep
@@ -168,7 +210,7 @@ EOF
 
 while IFS=$'\t' read -r name at; do
   [ -n "$name" ] || continue
-  printf '%-22s %-10s %-12s %s\n' "$name" "lost" "$(starts_on "$name")" \
+  printf '%-22s %-10s %-12s %s\n' "$name" "lost" "$(dormant_row_model "$name")" \
     "$(age_of "$at") ago, no session · reopen: fleet-restart -s $SOCK --reopen $name · forget: fleet-stop -s $SOCK $name"
 done <<EOF
 $lost

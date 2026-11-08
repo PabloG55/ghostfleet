@@ -11560,6 +11560,35 @@ STUB
     # A claude session has no agent marker, and `tr < missing 2>/dev/null` silences tr, not the
     # shell's failed redirect, which comes first: measured, one "No such file" line per row.
     is "...and says nothing on stderr for a session with no agent marker" ""    "$(cat "$SMD/list.err")"
+
+    # ── the column through the INSTALLED path: a symlink, sessions that predate the launch record ──
+    # fleet-list is installed as a symlink into the staged runtime, and `dirname "$0"` was the
+    # link's directory: lib/ was never found, so every row read `?` — and the group above, which
+    # runs bin/fleet-list by its real path, stayed green. Nothing here records a launch: the
+    # model must come from the conversation, the way fleet-model reads "now".
+    ln -sf "$ROOT/bin/fleet-list" "$SMD/bin/fleet-list-link"
+    LDIR="$SMD/cfg/projects/$(printf '%s' "$SMD/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$LDIR"
+    jq -nc '{type:"assistant",timestamp:"2026-11-07T10:00:00Z",message:{model:"claude-opus-5-5",content:[{type:"text",text:"hi"}]}}' > "$LDIR/old-live.jsonl"
+    jq -nc '{type:"assistant",timestamp:"2026-11-07T10:00:00Z",message:{model:"claude-sonnet-5-5",content:[{type:"text",text:"hi"}]}}' > "$LDIR/33333333-0000-4000-8000-000000000001.jsonl"
+    jq -nc --arg t "$LDIR/old-live.jsonl" '{slot:"legacy",sock:"cf-acme-api",ts:1,status:"ready",transcript:$t}' > "$SMD/fleet/legacy.json"
+    jq -nc '{slot:"blank",sock:"cf-acme-api",ts:1,status:"ready",transcript:""}' > "$SMD/fleet/blank.json"
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" 33333333-0000-4000-8000-000000000001 "$SMD/wt" 1 > "$SMD/fleet/cf-acme-api.nap.asleep"
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" 33333333-0000-4000-8000-0000000000ff "$SMD/wt" 1 > "$SMD/fleet/cf-acme-api.deep.asleep"
+    for n in legacy blank _term-legacy; do
+      smenv tmux -L cf-acme-api new-session -d -s "$n" -c "$SMD/wt" "exec sleep 60" 2>/dev/null
+    done
+    out="$(smenv "$SMD/bin/fleet-list-link" -s cf-acme-api 2>/dev/null)"
+    is "list model: a session with no launch record shows its transcript's model" "1" "$(grep -cE '^legacy +[^ ]+ +opus-5-5( |$)' <<< "$out" || true)"
+    is "...through the symlink, a session started on a launch record still shows it" "1" "$(grep -cE '^docs-pass +[^ ]+ +sonnet( |$)' <<< "$out" || true)"
+    is "...a Claude session with nothing to read is ?"                            "1" "$(grep -cE '^blank +[^ ]+ +\? ' <<< "$out" || true)"
+    is "...a terminal tab is -"                                                   "1" "$(grep -cE '^_term-legacy +[^ ]+ +- ' <<< "$out" || true)"
+    mv "$SMD/fleet/cf-acme-api.model" "$SMD/fleet/cf-acme-api.model.keep"   # the project default would answer for them
+    out="$(smenv "$SMD/bin/fleet-list-link" -s cf-acme-api 2>/dev/null)"
+    is "...an asleep session shows its last model"                                "1" "$(grep -cE '^nap +asleep +sonnet-5-5 ' <<< "$out" || true)"
+    is "...an asleep one whose conversation is gone is -"                         "1" "$(grep -cE '^deep +asleep +- ' <<< "$out" || true)"
+    is "...a pin on an asleep session still wins (it is what a wake runs)"        "1" "$(printf 'haiku\n' > "$SMD/fleet/cf-acme-api.nap.model"; grep -cE '^nap +asleep +haiku ' <<< "$(smenv "$SMD/bin/fleet-list-link" -s cf-acme-api 2>/dev/null)" || true)"
+    rm -f "$SMD/fleet/legacy.json" "$SMD/fleet/blank.json" "$SMD/fleet/cf-acme-api.nap.asleep" "$SMD/fleet/cf-acme-api.deep.asleep" "$SMD/fleet/cf-acme-api.nap.model"
+    mv "$SMD/fleet/cf-acme-api.model.keep" "$SMD/fleet/cf-acme-api.model"
     tmux -L cf-acme-api kill-server 2>/dev/null
 
     # ── through the REAL wake: fleet-hibernate --wake builds the session, agent-here reads the pin ──
