@@ -228,9 +228,10 @@ fleet-telegram link acme-api/master   # then config secret-cmd, start — docs/T
 
 One chat, one session. Your message lands as your words. The answer is the final message
 of the turn your message started, sent back to the chat with its markdown rendered and
-split to Telegram's limit. Photos arrive as files the session can open. Voice notes arrive
-as words if you set a transcriber, otherwise as an audio file. The token never touches a
-file: it comes from a command you name, such as a keychain lookup. A Telegram turn may only
+split to Telegram's limit. Photos and any other file up to 20 MB arrive as files the session
+can open, and a reply keeps what it replies to. Voice notes arrive as words if you set a
+transcriber, otherwise as an audio file, and can be answered with a voice note if you set a
+command for that. The token never touches a file: it comes from a command you name, such as a keychain lookup. A Telegram turn may only
 read, look things up and delegate through the fleet tools, plus any command or checkout you
 name, because a chat id on a phone is weaker proof than you at the keyboard.
 [docs/TELEGRAM.md](docs/TELEGRAM.md) covers the setup and the allowlist.

@@ -968,10 +968,35 @@ _jarvis_delivered
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 
+# A pane shows a prompt in rows, and a prompt is not in rows. Where a row ends depends only on
+# how long the text before it is, so the same last characters sit on one row or on two according
+# to, say, how long a temp path in the prompt happens to be. Compared a row at a time, a tail on
+# two rows is not there. Enter then waits out the fallback below, and in_input answers "box
+# present, probe gone", so a swallowed Enter is never pressed again and the send reports success
+# with the prompt still in the box. Measured with a last line in a 220-column pane: 221 to 243
+# characters and no other length, the same on tmux 3.4 and 3.7b. A last line shorter than the
+# probe crossed a row break the same way.
+#   So both sides are compared with every blank and row break gone. capture-pane -J would not
+# do it: it joins only what tmux wrapped, and a composer breaks and indents its own rows. The
+# bar is for the older composer, which draws one at each end of a row.
+squeeze() {
+  LC_ALL=C tr -d ' \t\r\n' | LC_ALL=C sed 's/│//g'
+}
+# Not ${s: -24} alone. bash answers a negative offset past the start of a string with nothing at
+# all, so a prompt shorter than the probe had no probe. An empty pattern matches every pane, so
+# Enter stopped waiting for the paste and every box read as still holding it, and a turn too quick
+# for the spinner to be caught got a second Enter, which is an empty turn. Short prompts are the
+# common ones.
+paste_probe() {
+  local s; s="$(printf '%s' "$1" | squeeze)"
+  [ "${#s}" -gt 24 ] && s="${s: -24}"
+  printf '%s' "$s"
+}
+
 # wait for the paste to appear in the pane before pressing Enter (fall back ~2s)
-probe="$(printf '%s' "$MSG" | tr '\n\r\t' '   ' | sed 's/  */ /g')"; probe="${probe: -24}"
+probe="$(paste_probe "$MSG")"
 for _ in $(seq 1 20); do
-  tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | grep -qF -- "$probe" && break
+  grep -qF -- "$probe" <<< "$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | squeeze)" && break
   sleep 0.1
 done
 
@@ -1000,14 +1025,19 @@ done
 #   A boundary is a line made of nothing but box-drawing rule characters and spaces —
 # true of ╭──╮/╰──╯ and of a bare ───── alike. The composer is between the LAST TWO,
 # because below it there is only the status bar, which carries text.
+#   LC_ALL=C and an alternation, for the reasons _input_state in hooks/fleet-event.sh gives, and
+# one more seen here: macOS's awk in a UTF-8 locale matched the bracket this used to be, [─╭╰╮╯],
+# against an EMPTY row, so a blank line in a prompt ended the box at that line. Elsewhere that
+# bracket is a set of bytes, which matched a row of em dashes as a rule instead.
 in_input() {
-  local pane; pane="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
-  printf '%s\n' "$pane" | awk -v p="$probe" '
-    { l[NR]=$0; if ($0 ~ /^[[:space:]]*[─╭╰╮╯][─╭╰╮╯[:space:]]*$/) b[++n]=NR }
+  [ -n "$probe" ] || return 2           # nothing but blanks: nothing to look for, so never pressed again
+  local pane box; pane="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
+  box="$(printf '%s\n' "$pane" | LC_ALL=C awk '
+    { l[NR]=$0; if ($0 ~ /^[[:space:]]*(─|╭|╰|╮|╯)(─|╭|╰|╮|╯|[[:space:]])*$/) b[++n]=NR }
     END { if (n < 2) exit 2
-          o = b[n-1]; c = b[n]
-          for (i = o; i <= c; i++) if (index(l[i], p)) exit 0
-          exit 1 }'
+          for (i = b[n-1] + 1; i < b[n]; i++) print l[i] }')" || return 2
+  grep -qF -- "$probe" <<< "$(printf '%s' "$box" | squeeze)" && return 0
+  return 1
 }
 submitted() { busy && return 0; in_input; [ "$?" = 1 ]; }
 
