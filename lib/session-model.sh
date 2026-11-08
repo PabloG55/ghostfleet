@@ -57,7 +57,9 @@ SESSION_MODEL_LIB="$(cd "$(dirname "$_sm_src")" && pwd)"
 _sm_read() {
   local f="$1" raw
   [ -f "$f" ] || return 0
-  raw="$(head -n 1 "$f" 2>/dev/null | tr -d '[:space:]')"
+  # first line, whitespace stripped — read and a parameter expansion, not `head | tr`: this runs for
+  # every asleep or lost row of fleet-list, and two exec'd processes per file add up.
+  raw=""; IFS= read -r raw < "$f" 2>/dev/null; raw="${raw//[[:space:]]/}"
   if model_name_valid "$raw"; then printf '%s' "$raw"; return 0; fi
   printf 'ghostfleet: ignoring %s — "%s" is not a model name\n' "$f" "$raw" >&2
 }
