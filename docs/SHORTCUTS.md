@@ -285,6 +285,11 @@ conversation that agent had (codex cannot, and the row says it starts fresh). A 
 switch leaves the old agent running and puts its reason on the row. See
 [docs/OPERATIONS.md](OPERATIONS.md) for the details.
 
+The screen fits its window at any size. A row is cut to the width and the text under the title
+shows all of what the cursor is on; a list that does not fit scrolls with the cursor, between a
+title and keys that stay (`↑ N more` / `↓ N more`); and setting columns that do not fit scroll
+the same way with `←`/`→` (`← N` / `→ N` beside the column names).
+
 `Esc`/`` ` ``/`Ctrl-C` closes the settings screen, no confirmation needed.
 
 ### "+ add project" screen — a folder browser, not a text prompt

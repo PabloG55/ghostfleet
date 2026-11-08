@@ -3577,6 +3577,224 @@ else
 fi
 rm -rf "$T"
 
+# THE SETTINGS PAGE FITS ITS TERMINAL, WHATEVER IT LISTS. It was written top to bottom and left
+# the rest to the terminal, so each line wider than the pane cost a row nobody counted. With six
+# experimental rows at 120x24 the frame came out taller than the pane, and the page started
+# mid-list with no title. Shortening the sixth description would pass here and break at the
+# seventh, so the rows below ask about the page at any size and any length: one project, forty
+# projects, twelve more features than exist, and a pane too short to hold it all. The cursor is
+# walked with the pane READ at every step, because the failure is a property of where the cursor
+# is, and a check at the two ends would pass a middle that broke.
+#   One key per send, and a wait on the page moving: the reader takes a chunk as one key, so
+# `send-keys j j j` is one unknown key and the cursor stays where it was.
+group "the settings page fits its terminal (real TUI, keys sent)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/x"
+  SPN=0; SPS=""
+  spcap()  { tmux -L "$SPS" capture-pane -p 2>/dev/null; }
+  spwait() { local i=0; while [ "$i" -lt 150 ]; do grep -qE "$1" <<< "$(spcap)" && return 0; sleep 0.1; i=$((i+1)); done; return 1; }
+  # A server per arm, so no arm connects to the one before it while it exits (see agkill).
+  spstart() {          # $1 cols, $2 rows, $3 the grid to run -> on the settings page, or a red
+    [ -n "$SPS" ] && tmux -L "$SPS" kill-server 2>/dev/null
+    SPN=$((SPN+1)); SPS="cfsetpage$SPN"
+    tmux -L "$SPS" new-session -d -x "$1" -y "$2" -e HOME="$T" \
+      -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" -e CLAUDE_FLEET_DIR="$T/.claude/fleet" \
+      -e CLAUDE_FLEET_EXPERIMENTAL_DIR="$T/x" "node '${3:-$ROOT/bin/fleet-grid.mjs}' - --screen projects; sleep 300" 2>/dev/null
+    spwait '[a-z]' || { bad "the settings-page session comes up" "the projects screen" "nothing drawn in 15s"; return 1; }
+    tmux -L "$SPS" send-keys ','
+    # Not the word settings: the projects footer has it too, and this would return before the page.
+    spwait '— per project|PROJECT +PROFILE|^ Experimental' || { bad "the settings-page session comes up" "the settings page" "',' did not land in 15s"; return 1; }
+  }
+  # What has to be on the page wherever the cursor is, and not by being somewhere further down.
+  spfirst() { grep -q 'settings — per project' <<< "$(head -1 <<< "$(spcap)")" && echo yes || echo no; }
+  spkeys()  { grep -qE 'esc[^ ]* back' <<< "$(spcap)" && echo yes || echo no; }
+  spcur()   { grep -E '^▸' <<< "$(spcap)"; }
+  spwalk() {           # $1 key, $2 presses -> how many steps lost the title, the keys or the cursor
+    local n=0 lost=0 was now i scr
+    while [ "$n" -lt "$2" ]; do
+      was="$(spcur)"
+      tmux -L "$SPS" send-keys "$1"
+      i=0
+      while [ "$i" -lt 100 ]; do
+        scr="$(spcap)"; now="$(grep -E '^▸' <<< "$scr" || true)"
+        [ -n "$now" ] && [ "$now" != "$was" ] && break
+        sleep 0.05; i=$((i+1))
+      done
+      if [ -z "$now" ] || [ "$now" = "$was" ] \
+         || ! grep -q 'settings — per project' <<< "$(head -1 <<< "$scr")" \
+         || ! grep -qE 'esc[^ ]* back' <<< "$scr"; then lost=$((lost+1)); fi
+      n=$((n+1))
+    done
+    echo "$lost"
+  }
+  # The columns, walked to the end. Clamped there, so a few presses too many are harmless.
+  spright() { local n=0; while [ "$n" -lt 8 ]; do tmux -L "$SPS" send-keys l; sleep 0.15; n=$((n+1)); done; }
+  sphas() { grep -qE -- "$1" <<< "$(spcap)" && echo yes || echo no; }
+  # Whatever the terminal wrapped or the page broke, the words read in order once the rows are joined.
+  spreads() { grep -qF -- "$1" <<< "$(tr -s ' \n' ' ' <<< "$(spcap)")" && echo yes || echo no; }
+  # The lit cell: reverse video on the cursor's row, which the plain capture cannot see.
+  splitcell() { grep -E '▸' <<< "$(tmux -L "$SPS" capture-pane -e -p 2>/dev/null)" | grep -qE '\[([0-9]+;)*7(;[0-9]+)*m' && echo yes || echo no; }
+  NF="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.length)")"
+  LAST="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.at(-1).name)")"
+  LASTWHAT="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.at(-1).what)")"
+
+  # ── one project, the features as they are: the case that lost its title ──
+  printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  if spstart 120 24; then
+    is "120x24: the title is on the first row"          "yes" "$(spfirst)"
+    is "...the column names are on the page"            "yes" "$(sphas 'PROJECT +PROFILE')"
+    is "...and the keys"                                "yes" "$(spkeys)"
+    is "...and every experimental row, tagged"          "$NF" "$(grep -c '\[experimental\]' <<< "$(spcap)" || true)"
+    is "...cut to the width rather than wrapped"        "yes" "$([ "$(grep -cE '\[experimental\].*…$' <<< "$(spcap)" || true)" -ge 1 ] && echo yes || echo no)"
+    is "...with no marker while everything fits"        "no"  "$(sphas '[↑↓] [0-9]+ more')"
+    is "walking to the last feature loses nothing"      "0"   "$(spwalk j "$NF")"
+    is "...the cursor is on it"                         "yes" "$(sphas "^▸ +$LAST ")"
+    is "...the key says what it does"                   "yes" "$(sphas "turn $LAST on/off")"
+    is "...and all of its text reads, not just the cut" "yes" "$(spreads "$LASTWHAT")"
+    is "and back up loses nothing"                      "0"   "$(spwalk k "$NF")"
+    is "...and the page has columns to the right"       "yes" "$(sphas '→ [0-9]+$')"
+    spright
+    is "the last column is reachable"                   "no"  "$(sphas '→ [0-9]+$')"
+    is "...it says what went off the left"              "yes" "$(sphas '← [0-9]+ +PROJECT')"
+    is "...and the cell the cursor is on is on the page" "yes" "$(splitcell)"
+    is "...with the title still first"                  "yes" "$(spfirst)"
+  fi
+
+  # ── a note about a switch that failed ──
+  # It says why the master did not move, and it used to sit at the row's end, past the column
+  # the cut starts at. Every word of it has to reach the page.
+  mkdir -p "$T/.claude/fleet"
+  printf 'opencode failed to start, so the master stayed on claude (exit 127)\n' > "$T/.claude/fleet/cf-acme-api.master.switch-failed"
+  if spstart 120 24; then
+    is "a failed switch says all of why, at 120x24"     "yes" "$(sphas 'opencode failed to start, so the master stayed on claude \(exit 127\)')"
+    is "...on the line under its row"                   "yes" "$(grep -A1 -E '^▸ +acme-api' <<< "$(spcap)" | grep -q 'exit 127' && echo yes || echo no)"
+    is "...which is still a row of cells"               "yes" "$(grep -E '^▸ +acme-api' <<< "$(spcap)" | grep -qE '○ off +○ enforced' && echo yes || echo no)"
+  fi
+  rm -f "$T/.claude/fleet/cf-acme-api.master.switch-failed"
+
+  # ── 80 columns, where only two of the setting columns fit ──
+  if spstart 80 24; then
+    is "80x24: the title is on the first row"           "yes" "$(spfirst)"
+    is "...and the keys"                                "yes" "$(spkeys)"
+    is "...and it says there are more columns"          "yes" "$(sphas '→ [0-9]+$')"
+    is "...and the first of them is here"               "yes" "$(sphas 'AUTO-NUDGE')"
+    is "...and every experimental row"                  "$NF" "$(grep -c '\[experimental\]' <<< "$(spcap)" || true)"
+    spright
+    is "the last column is reachable there too"         "no"  "$(sphas '→ [0-9]+$')"
+    is "...the first has made way for it"               "no"  "$(sphas 'AUTO-NUDGE')"
+    is "...and the cell the cursor is on is on the page" "yes" "$(splitcell)"
+  fi
+
+  # ── a pane too short to hold it, down to the last row that can still say anything ──
+  if spstart 60 10; then
+    is "60x10: the title is on the first row"           "yes" "$(spfirst)"
+    is "...and the keys"                                "yes" "$(spkeys)"
+    is "...and it says there is more below"             "yes" "$(sphas '↓ [0-9]+ more')"
+    is "walking every row keeps all three"              "0"   "$(spwalk j "$NF")"
+    is "...and reaches the last"                        "yes" "$(sphas "^▸ +$LAST ")"
+  fi
+  # Too short for the longest text this page has: it says it stopped, rather than reading as whole.
+  if spstart 60 8; then
+    spright
+    is "60x8: a text the pane cannot hold says so"      "yes" "$(grep -q '…$' <<< "$(sed -n 3p <<< "$(spcap)")" && echo yes || echo no)"
+    is "...and the keys are still there"                "yes" "$(spkeys)"
+  fi
+  if spstart 70 6; then
+    is "70x6: the title is on the first row"            "yes" "$(spfirst)"
+    is "...and walking every row keeps all three"       "0"   "$(spwalk j "$NF")"
+    is "...and reaches the last"                        "yes" "$(sphas "^▸ +$LAST ")"
+  fi
+  # Three rows hold the title, the row under the cursor and the keys, and nothing else.
+  if spstart 70 3; then
+    is "70x3: the title is on the first row"            "yes" "$(spfirst)"
+    is "...and walking every row keeps all three"       "0"   "$(spwalk j "$NF")"
+    is "...and reaches the last"                        "yes" "$(sphas "^▸ +$LAST ")"
+  fi
+
+  # Under that the keys give way, and the one thing left to ask is that the frame is not taller
+  # than the pane: a third line here would scroll the title off.
+  if spstart 70 2; then
+    is "70x2: the title is still on the first row"      "yes" "$(spfirst)"
+  fi
+
+  # ── forty projects: the list outgrows the rows however short the descriptions are ──
+  : > "$T/.config/ghostfleet/projects"
+  i=1; while [ "$i" -le 40 ]; do printf 'acme-api-%02d\t%s/a\twork\n' "$i" "$T" >> "$T/.config/ghostfleet/projects"; i=$((i+1)); done
+  if spstart 120 24; then
+    TOTAL=$((40 + 2 + NF))     # the rows, a blank and the section's title
+    is "forty projects at 120x24: the title stays first" "yes" "$(spfirst)"
+    is "...and the keys"                                "yes" "$(spkeys)"
+    MORE="$(grep -oE '↓ [0-9]+ more' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
+    SHOWN="$(grep -cE '^.{0,12}acme-api-' <<< "$(spcap)" || true)"
+    is "...and the marker counts what it hides"         "$TOTAL" "$((SHOWN + ${MORE:-0}))"
+    is "walking to the middle loses nothing"            "0"   "$(spwalk j 20)"
+    is "...with something hidden on both sides"         "yes yes" "$(sphas '↑ [0-9]+ more') $(sphas '↓ [0-9]+ more')"
+    ABOVE="$(grep -oE '↑ [0-9]+ more' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
+    MORE="$(grep -oE '↓ [0-9]+ more' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
+    SHOWN="$(grep -cE '^.{0,12}acme-api-' <<< "$(spcap)" || true)"
+    is "...and the two markers and the rows add up"     "$TOTAL" "$((${ABOVE:-0} + SHOWN + ${MORE:-0}))"
+    is "walking to the very last row loses nothing"     "0"   "$(spwalk j $((19 + NF)))"
+    is "...the cursor is on it"                         "yes" "$(sphas "^▸ +$LAST ")"
+    is "...and nothing is left below"                   "yes no" "$(sphas '↑ [0-9]+ more') $(sphas '↓ [0-9]+ more')"
+    is "and all the way back loses nothing"             "0"   "$(spwalk k $((39 + NF)))"
+  fi
+
+  # ── the next feature, and the eleven after it ──
+  # A copy with twelve more entries in the list, because that is the claim: the page does not
+  # care how many there are. Each description is far longer than a row, so a wrap could not hide.
+  STAGE="$T/stage"; mkdir -p "$STAGE"; cp -R "$ROOT/bin" "$ROOT/lib" "$STAGE/"
+  node --input-type=module -e "
+    import fs from 'node:fs';
+    const f = '$STAGE/lib/experimental.mjs'; const s = fs.readFileSync(f, 'utf8');
+    const end = '\n];\nexport const feature';
+    if (!s.includes(end)) process.exit(1);
+    const row = (i) => \`  { name: 'extra-\${i}', what: 'extra \${i} begins here, \${'and it goes on for a good while, '.repeat(9)}and ends in the words of extra \${i}.', file: () => '/nonexistent', used: () => false },\`;
+    fs.writeFileSync(f, s.replace(end, () => '\n' + Array.from({ length: 12 }, (_, i) => row(i + 1)).join('\n') + end));
+  "
+  printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  is "the staged copy lists twelve more features"       "$((NF + 12))" \
+     "$(node --input-type=module -e "import * as X from '$STAGE/lib/experimental.mjs'; console.log(X.FEATURES.length)")"
+  if spstart 120 24 "$STAGE/bin/fleet-grid.mjs"; then
+    is "twelve more features at 120x24: the title stays first" "yes" "$(spfirst)"
+    is "...and the keys"                                "yes" "$(spkeys)"
+    is "...and a long description stops at its row"     "no"  "$(sphas 'ends in the words of extra')"
+    is "walking every row of them loses nothing"        "0"   "$(spwalk j $((NF + 12)))"
+    is "...the cursor is on the last"                   "yes" "$(sphas '^▸ +extra-12 ')"
+    is "...and its last words read, with it selected"   "yes" "$(spreads 'ends in the words of extra 12.')"
+    is "...and only its"                                "no"  "$(sphas 'words of extra 11')"
+  fi
+
+  # ── a pane that changes size ──
+  # On a copy with the clock stopped. The live page repaints every 2.5s anyway, so a wait long
+  # enough to be safe passes with no resize handling at all, and one short enough to mean
+  # something passes or fails on where the tick happened to land.
+  node --input-type=module -e "
+    import fs from 'node:fs';
+    const s = fs.readFileSync('$ROOT/bin/fleet-grid.mjs', 'utf8');
+    const tick = 'timer = setInterval(() => { pBuild(); pRender(); }, 2500);';
+    if (!s.includes(tick)) process.exit(1);
+    fs.writeFileSync('$STAGE/bin/fleet-grid-still.mjs', s.replace(tick, () => 'timer = setInterval(() => {}, 3600000);'));
+  " || bad "the copy with its clock stopped" "built" "the tick was not where it was expected"
+  if spstart 120 24 "$STAGE/bin/fleet-grid-still.mjs"; then
+    WAS="$(grep -oE '→ [0-9]+$' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
+    tmux -L "$SPS" resize-window -x 80 -y 12 2>/dev/null
+    # Fewer columns fit, so more are off to the right: the one thing the old frame cannot say.
+    i=0; NOW="$WAS"
+    while [ "$i" -lt 150 ] && [ "$NOW" = "$WAS" ]; do
+      NOW="$(grep -oE '→ [0-9]+$' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
+      [ "$NOW" = "$WAS" ] && sleep 0.1
+      i=$((i+1))
+    done
+    is "a pane that shrinks is redrawn with no tick to help" "yes" "$([ "${NOW:-0}" -gt "${WAS:-0}" ] && echo yes || echo no)"
+    is "...with the title first"                        "yes" "$(spfirst)"
+    is "...and the keys"                                "yes" "$(spkeys)"
+  fi
+  tmux -L "$SPS" kill-server 2>/dev/null
+else
+  skip "the settings page fits its terminal" "tmux or node not available"
+fi
+rm -rf "$T"
+
 group "projects banner"
 # The sprite costs six rows. On a short or narrow window the cards matter more than
 # the logo, so it must collapse to the one-line header instead of pushing projects

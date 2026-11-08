@@ -1389,6 +1389,48 @@ function schedule(session, whenStr, msg, sock = SOCK, dir = FLEET_DIR, env = nul
 function vis(s) { return [...s].length; }
 function clip(s, w) { s = String(s ?? ''); return vis(s) <= w ? s : [...s].slice(0, Math.max(0, w - 1)).join('') + '…'; }
 function padEndV(s, w) { s = clip(s, w); return s + ' '.repeat(Math.max(0, w - vis(s))); }
+// The same two questions for a line that carries colour, whose codes take no cell. clip() would
+// count them, and would cut one in half.
+const SGR = /(\x1b\[[0-9;]*m)/;
+const isSgr = (t) => t.startsWith('\x1b[');
+function clipSgr(s, w) {
+  let left = Math.max(0, w - 1), out = '';
+  const parts = s.split(SGR);
+  if (parts.reduce((n, t) => n + (isSgr(t) ? 0 : vis(t)), 0) <= w) return s;
+  for (const t of parts) {
+    if (isSgr(t)) { out += t; continue; }
+    if (vis(t) > left) return out + [...t].slice(0, left).join('') + '…' + C.reset;
+    out += t; left -= vis(t);
+  }
+  return out;
+}
+// At spaces, with the colour in force carried across each break. A word wider than the line is
+// left for clipSgr to cut.
+function wrapSgr(s, w) {
+  const lines = [];
+  let cur = '', used = 0, pending = '', active = '';
+  for (const t of s.split(/(\x1b\[[0-9;]*m|\s+)/)) {
+    if (!t) continue;
+    if (isSgr(t)) { cur += t; active = t === C.reset ? '' : active + t; continue; }
+    if (/^\s/.test(t)) { if (used) pending = ' '; continue; }
+    if (used && used + pending.length + vis(t) > w) { lines.push(cur + C.reset); cur = active; used = 0; pending = ''; }
+    cur += pending + t; used += pending.length + vis(t); pending = '';
+  }
+  if (used) lines.push(cur + C.reset);
+  return lines.length ? lines : [''];
+}
+// The rows of a list that fit in `room`, cut around the cursor, in the shape the stack screen
+// draws: a `↑ N more` / `↓ N more` takes a row of its own and counts the row it took.
+function windowLines(lines, sel, room) {
+  if (lines.length <= room) return lines;
+  const top = Math.max(0, Math.min(sel - Math.floor(room / 2), lines.length - room));
+  const shown = lines.slice(top, top + room);
+  if (room < 3) return shown;
+  const below = lines.length - (top + room);
+  if (top > 0) shown[0] = `   ${C.dim}↑ ${top + 1} more${C.reset}`;
+  if (below > 0) shown[room - 1] = `   ${C.dim}↓ ${below + 1} more${C.reset}`;
+  return shown;
+}
 function twoCol(l, r, w) {
   l = clip(l, w - vis(r) - 1);
   const gap = Math.max(1, w - vis(l) - vis(r));
@@ -3713,7 +3755,7 @@ const SETCOLS = [
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
   // "The NEXT one" was true until lib/agent-switch.sh: the running master now moves too,
-  // so what the row has to say is WHEN — see switchNote(), drawn at the row's end.
+  // so what the row has to say is WHEN — see switchNote(), drawn on the line under the row.
   // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
   // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
   // cycles through however many agents are installed, and three presses land back on
@@ -4042,47 +4084,98 @@ function pRender() {
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
+//
+// THE FRAME IS NEVER TALLER THAN THE TERMINAL, whatever the page lists. It was written top to
+// bottom and let the terminal deal with the rest, so every line wider than the pane wrapped and
+// cost a row nobody counted. With six experimental rows at 120x24 it came out taller than the
+// pane: the title and the column names scrolled off, and the page started mid-blurb. Cutting the
+// descriptions alone would pass until the list outgrew the rows, and a window alone would still
+// miscount any line that wrapped, so it takes both:
+//   - every line is cut to the width, so a line costs exactly one row;
+//   - the list is windowed in lines around the cursor, between a head and a footer that stay;
+//   - the setting columns are windowed as well, or a cut would hide the very cell the cursor is on
+//     (seven columns need 163 cells, so this is 120 columns as much as 80);
+//   - the slot under the title carries the whole text of whatever the cursor is on, so what a row
+//     loses to the cut is one key away, in the place this page already explains its selection.
 function pRenderSettings() {
   const projs = visibleProjects();
   const nRows = projs.length + X.FEATURES.length;
   pSetSel = Math.max(0, Math.min(pSetSel, nRows - 1));
   const onExp = pSetSel >= projs.length;
-  let buf = '\x1b[H';
-  buf += ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}\x1b[K\n`;
-  const glob = fs.existsSync(GLOBAL_NOTIFY());
-  buf += ` ${C.dim}${C.reset}${onExp ? `${C.dim}experimental: off on a new install, and off means gone — not hidden${C.reset}` : SETCOLS[pSetCol].blurb}\x1b[K\n`;
-  buf += ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
-  const head = `   ${padEndV('', 6)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}`;
-  buf += `${C.dim}${head}${SETCOLS.map((c, ci) => (ci === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}\x1b[K\n`;
-  if (!projs.length) buf += ` ${C.dim}(no projects yet)${C.reset}\x1b[K\n`;
+  const feat = onExp ? X.FEATURES[pSetSel - projs.length] : null;
+  // One cell short of the edge: a line that fills the last column leaves the cursor waiting to
+  // wrap, and what the erase after it does from there depends on the terminal.
+  const width = W() - 1, rows = H();
+  // The column that held nothing but space goes first when the width is short.
+  const gutter = ' '.repeat(width >= 112 ? 6 : 0);
+  const left = 3 + gutter.length + 2 + 22 + 1 + 10;
+  const nCols = Math.min(SETCOLS.length, Math.max(1, Math.floor((width - left - 4) / 17)));
+  const firstCol = Math.max(0, Math.min(pSetCol - nCols + 1, SETCOLS.length - nCols));
+  const shownCols = SETCOLS.slice(firstCol, firstCol + nCols);
+  const colsLeft = SETCOLS.length - firstCol - nCols;
+
+  // ── the list ──
+  const body = [];
+  let selLine = 0;
+  if (!projs.length) body.push(` ${C.dim}(no projects yet)${C.reset}`);
   projs.forEach((p, i) => {
     const sel = i === pSetSel;
     const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
     const name = (sel ? C.bold + C.white : C.reset) + padEndV(p.name, 22) + C.reset;
-    const cells = SETCOLS.map((c, ci) => {
+    const cells = shownCols.map((c, k) => {
       const st = c.state(p);
-      const lit = sel && ci === pSetCol;                       // the cell space/⏎ acts on
+      const lit = sel && firstCol + k === pSetCol;             // the cell space/⏎ acts on
       const txt = padEndV((st.on ? '● ' : '○ ') + st.label, 16);
       return (lit ? C.rev : '') + (st.on ? c.onColor : C.grey) + txt + C.reset;
     });
+    if (sel) selLine = body.length;
+    body.push(`${cur}${gutter}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}`);
+    // On a line of its own: at the row's end it says WHEN a switch lands, and the cut would take it.
     const note = switchNote(p);
-    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}${note ? '  ' + note : ''}\x1b[K\n`;
+    if (note) body.push(`${' '.repeat(3 + gutter.length + 2)}${note}`);
   });
   // THE EXPERIMENTAL SECTION: global, one row per feature, each tagged every time it is
   // drawn. Its rows continue the project rows, so ↓ walks into them and space/⏎ flips one.
-  buf += `\x1b[K\n ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install${C.reset}\x1b[K\n`;
+  body.push('', ` ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install, and off means gone, not hidden${C.reset}`);
   X.FEATURES.forEach((f, k) => {
     const sel = projs.length + k === pSetSel;
     let on = false; try { on = X.enabled(f.name); } catch {}
     const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
     const st = (sel ? C.rev : '') + (on ? C.green : C.grey) + padEndV((on ? '● on' : '○ off'), 8) + C.reset;
-    buf += `${cur}${padEndV('', 6)}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
-         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}\x1b[K\n`;
+    if (sel) selLine = body.length;
+    body.push(`${cur}${gutter}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
+         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}`);
   });
+
+  // ── what stays ──
+  const title = ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}`;
+  const wrapped = (t) => wrapSgr(t, width - 1);
+  const desc = wrapped(feat ? `${C.dim}${pSetMsg || feat.what}${C.reset}` : SETCOLS[pSetCol].blurb);
+  // As tall as the tallest text it can hold, so walking the list does not move the rows under the
+  // cursor every time a longer description comes up.
+  const slot = Math.max(desc.length, ...[...SETCOLS.map(c => c.blurb), ...X.FEATURES.map(f => f.what)].map(t => wrapped(t).length));
+  const glob = fs.existsSync(GLOBAL_NOTIFY());
+  const nudge = ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}`;
+  const colHead = `${C.dim}${padEndV(firstCol ? `← ${firstCol}` : '', 3 + gutter.length)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}${shownCols.map((c, k) => (firstCol + k === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}${colsLeft ? ` ${C.dim}→ ${colsLeft}${C.reset}` : ''}`;
   // Named per row and column, so the key's own description changes with what it will do.
-  const verb = onExp ? `turn ${X.FEATURES[pSetSel - projs.length].name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
-  out(buf);
+  const verb = feat ? `turn ${feat.name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
+  const keys = [
+    ` ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back`,
+    ` ↑↓ row · ←→ column · space ${verb} · esc back`,
+    ' ↑↓ · ←→ · space · esc back',
+  ].find(f => vis(f) <= width) || ' esc back';
+  // What gives way when the height is short: the spacers and the global default, then the
+  // description's later lines. Never the title, the row under the cursor or the keys.
+  const roomy = rows >= 1 + slot + 3 + 3 + 2;
+  const descRows = roomy ? slot : Math.max(rows >= 5 ? 1 : 0, Math.min(desc.length, rows - 6));
+  const descLines = Array.from({ length: descRows }, (_, i) => (desc[i] === undefined ? '' : ` ${desc[i]}`));
+  // A text this pane cannot hold says so; `fleet-experimental list` still has all of a feature's.
+  if (desc.length > descRows && descRows) descLines[descRows - 1] += '…';
+  const head = [title, ...descLines, ...(roomy ? [nudge, ''] : []), ...(rows >= 4 ? [colHead] : [])];
+  const foot = [...(roomy ? [''] : []), `${C.dim}${keys}${C.reset}`];
+  const frame = [...head, ...windowLines(body, selLine, Math.max(1, rows - head.length - foot.length)), ...foot];
+  // The last line ends without a newline: on the bottom row, one scrolls the whole frame up.
+  out(`\x1b[H${frame.slice(0, rows).map(l => clipSgr(l, width) + '\x1b[K').join('\n')}\x1b[J`);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
 function pRenderSchedule() {
@@ -4886,6 +4979,9 @@ watchLauncher();
 if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', keyReader(onKeyProjects));
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
+  // At once, not at the next tick: the page lays itself out from the size, and until it is redrawn
+  // a shrink leaves the old frame with its top cut off.
+  process.stderr.on('resize', () => pRender());
 } else if (SCREEN === 'addproject') {
   // --clone opens straight on the clone box (the `c` key on the add card). It starts in
   // ~/projects when there is one, since that is where a clone usually goes and HOME
