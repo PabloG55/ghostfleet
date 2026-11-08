@@ -14,12 +14,14 @@
 //   fleet-know-event infer   session=<sid> turn=<id>               < [{text, why}]
 //   fleet-know-event deploy  target= cmd= commit= ok=yes|no
 //   fleet-know-event privacy session=<sid> | sock=<sock>          prints include|private|exclude
+//   fleet-know-event brief   sock= source=                 prints meta JSON, then the briefing
 //
 // Common keys: fleet=<dir> (default: this profile's), sock=, cwd=, session=, slot=, t=<ms>.
 //
 // IT NEVER FAILS ITS CALLER. The hook runs it detached and every other caller ignores its
 // status, so a broken memory can cost a fact and never a turn, a spawn or a merge. Exit 0
-// always, except `privacy`, whose answer IS its output.
+// always, except `privacy`, whose answer IS its output, and `brief`, which is the one a hook
+// waits for: it holds it to a budget, and its status is how it learns why there is no output.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -123,6 +125,17 @@ function hook() {
       put('session.end', { reason: p.reason }, c);
       for (const x of ['knowline', 'knowrepo']) { try { fs.rmSync(path.join(fleetDir, `${session}.${x}`), { force: true }); } catch {} }
       break;
+    case 'PreCompact': put('session.compact', { trigger: p.trigger }, { ...c, cwd: '', project: K.NO_PROJECT }); break;
+    // The hook has handed the briefing over, or has given up on it and says why. Written here,
+    // after the hook has moved on, and only for what really reached the session. Then the
+    // snapshot is brought up to date, off the session's clock, so a log that outgrew the budget
+    // once does not go on outgrowing it at every start.
+    case 'KnowBrief': {
+      const meta = json(a.meta, {}) || {};
+      K.record('know.brief', { source: a.source, chars: meta.chars || 0, ids: meta.ids, why: a.why }, { ...c, cwd: '', project: K.NO_PROJECT });
+      K.snapshot(fleetDir);
+      break;
+    }
     default: break;
   }
 }
@@ -205,11 +218,19 @@ try {
       put('deploy', { target: a.target, cmd: a.cmd, commit: a.commit || git(a.cwd, ['rev-parse', 'HEAD']), ok: a.ok !== 'no' && a.ok !== '0' && a.ok !== 'false' }, ctx());
       break;
     case 'privacy': privacy(); break;
+    case 'brief': {
+      if (/^(0|off|no|false)$/i.test(process.env.CLAUDE_FLEET_KNOW || '')) process.exit(0);
+      const { compose } = await import('../lib/know-brief.mjs');
+      const r = compose({ fleetDir, sock, source: a.source, now: Number(process.env.CLAUDE_FLEET_NOW_MS) || now });
+      if (r.text) process.stdout.write(`${JSON.stringify({ chars: r.text.length, ids: r.ids })}\n${r.text}`);
+      break;
+    }
     default:
-      process.stderr.write('usage: fleet-know-event hook|spawn|ack|retire|prs|ledger|infer|deploy|privacy key=value…  (see the header)\n');
+      process.stderr.write('usage: fleet-know-event hook|spawn|ack|retire|prs|ledger|infer|deploy|privacy|brief key=value…  (see the header)\n');
       process.exit(2);
   }
 } catch (e) {
   if (process.env.CLAUDE_FLEET_KNOW_DEBUG) process.stderr.write(`fleet-know-event: ${e.stack || e}\n`);
+  if (verb === 'brief') process.exit(1);
 }
 process.exit(0);

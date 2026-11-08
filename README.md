@@ -395,7 +395,9 @@ window — and if you use zellij, it stays a single pane instead of commandeerin
   `fleet-merged` and the ledger writers append what happened to a log per profile, and
   `fleet-know <project>` (MCP `fleet_know`) answers "where does it stand" from the graph derived
   from it — `waiting`, `touched <path>` and `find <text>` across every project, `--at` for any past
-  moment. `fleet-know privacy <project> private|exclude` (also a project setting, `know`) keeps a
+  moment. `fleet-know rule` keeps the owner's standing rules, `decide --supersedes` and `fact` close what
+  stopped being true, and the experimental `know-brief` tells a lead all of it at SessionStart.
+  `fleet-know privacy <project> private|exclude` (also a project setting, `know`) keeps a
   project from a model vendor or out of the record.
 - **`claude-here`** is what each session runs, so sessions resume by checkout. If a
   conversation was registered as a Claude Code **background agent** (e.g. it was

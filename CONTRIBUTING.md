@@ -60,7 +60,8 @@ rules; they are written down here so the next one does not have to reverse-engin
 `<feature>` below stands for your feature's name.
 
 **1. One switch, one entry.** Add one entry to `FEATURES` in
-[`lib/experimental.mjs`](lib/experimental.mjs) — a `name`, a one-line `what`, the `file`
+[`lib/experimental.mjs`](lib/experimental.mjs) — a `name`, a one-line `what` (the settings
+page cuts it to the width on its row and shows all of it when the cursor is there), the `file`
 its switch lives in (under `cfgDir()`), a `used()` test, and optionally an `apply(on)` for
 whatever turning it on or off must do besides flipping the file. Never a copy of the switch
 logic: reading, defaulting and writing it down are `enabled()`, `set()` and `settle()`, once,

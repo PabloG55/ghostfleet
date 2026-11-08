@@ -23,9 +23,16 @@ OPEN
   waits on you: request waiting on you: "Which plan tier should the rate limit apply to?"
   1 open request:
     "Which plan tier should the rate limit apply to?" (master, 20m ago) [waiting]
+RULES  most specific wins: project: beats profile beats all
+  k861059144ea1cf70  [lead project:acme-api] Rate limits are per API key, never per account  (“per key, an account can have many”)
+  k9bca217eb72fdd55  [owner profile] Every change lands through a PR, reviewed — main deploys on push
+  1 proposed, not in force (fleet-know rule list acme-api)
 DECISIONS
-  • [lead] Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls /v1/export  [stated, 2026-03-05]
-  • [worker] RFC 4180 quoting; no new dependency — what api-fix said it is building from (fleet-ack)  [ack, 2026-03-05]
+  • [lead] Bill the export endpoint per row — a call can be a million rows  [stated, 2026-03-05]  kb52e4ecb1dfaf259
+  • [lead] Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls /v1/export  [stated, 2026-03-05]  kfcd425e3bda4f21f
+  • [worker] RFC 4180 quoting; no new dependency — what api-fix said it is building from (fleet-ack)  [ack, 2026-03-05]  k9a58c7f6f69536e8
+FACTS
+  deploy.target = vercel-production  [lead, master, 2026-03-05]  k0442b5ca1b2b2165
 EARLIER  1 closed request since 2026-02-22 (fleet-know find <text> searches them)
 ```
 
@@ -70,6 +77,9 @@ its command-line face, called from:
 | every ledger writer (the mod, `fleet-ledger`, the landed and carry passes) | `request.open`, `request.state` |
 | `fleet-know describe` · `decide` · `relate` | `project.about`, `decision`, `relate` |
 | `fleet-know forget` | `forget`, a tombstone naming the event it covers, and nothing of its text |
+| `fleet-know rule add` · `accept` · `close` · `share-from` | `rule`, `rule.accept`, `rule.close`, `rule.share` |
+| `fleet-know fact`, and the pairing sync when a peer's state moves | `fact` |
+| every read · the briefing · `PreCompact` | `know.read`, `know.brief`, `session.compact`: notes the memory keeps about itself, never folded (see [Reads are visible](#reads-are-visible)) |
 | the inferred pass (layer 3) | `decision` marked `inferred` |
 
 `CLAUDE_FLEET_KNOW=off` in the environment stops every writer, for a run that must leave no
@@ -109,8 +119,8 @@ the time it was asked, is the usual case. The newest ten seconds of events are k
 snapshot instead of in it and folded into each answer, so writers that race each other by a
 few milliseconds never cost a rebuild.
 
-- **Nodes:** project, repo, session, branch, PR, request (a ledger item), decision, deploy —
-  plus the file and commit nodes `touched` and a deploy point at.
+- **Nodes:** project, repo, session, branch, PR, request (a ledger item), decision, rule, keyed
+  fact, deploy — plus the file and commit nodes `touched` and a deploy point at.
 - **Edges:** session *works-on* branch, branch *has-pr* PR, request *closed-by* PR, project
   *depends-on* project, decision *about* project, deploy *of* commit — and the membership
   edges that say which project each belongs to.
@@ -149,11 +159,14 @@ most 600 tokens per finished turn while on.
 | `fleet-know waiting` | everything waiting on the owner, every project and machine |
 | `fleet-know touched <path>` | the sessions that touched a file, on which branch, and the PRs that work went into |
 | `fleet-know find <text…>` | searches the **raw events**, not only the graph |
+| `fleet-know rule list [<project>]` | the rules that apply there, most specific first, and the proposals nobody has accepted (see [Rules](#rules)) |
+| `fleet-know fact <project> <key>` | one keyed fact, or `not recorded` (see [Closing a fact](#closing-a-fact)) |
+| `fleet-know reads [--since <time>]` | what the memory was asked, the questions it could not answer first (see [Reads are visible](#reads-are-visible)) |
 | `--at <time>` · `--known-at <time>` · `--json` · `--no-sync` | an instant (ISO, epoch or `3d ago`); data instead of text; skip asking paired machines |
 | `--trusted` | a project page narrowed to what the owner or a lead said (see [Who said it](#who-said-it)) |
 
-The MCP tool **`fleet_know`** is the same reader (`about`, `waiting`, `touched`, `find`, `at`,
-`trusted`, `json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
+The MCP tool **`fleet_know`** is the same reader (`about`, `waiting`, `touched`, `find`, `rules`,
+`fact`, `at`, `trusted`, `json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
 same way. Its project argument is `about`, not `project`: everywhere else `project` names the
 fleet to act in, and the memory answers about every fleet and paired machine at once.
 
@@ -162,8 +175,17 @@ fleet to act in, and the memory answers about every fleet and paired machine at 
 thought would be asked, and a prompt, a turn's last words or a refused deploy keep everything.
 So the graph answers the structured questions, and `find` goes to the words.
 
-**Decay.** A brief stays one page: what closed more than a week before the instant asked about
-is counted on the `EARLIER` line, not listed, and `find` still reaches it.
+**Decay.** A brief stays one page, and what leaves it is what stopped being true or was only ever
+a guess. What the owner or a lead decided holds until somebody closes it: it never ages out, and
+the page lists it first, newest first, at most eight with `+ N more still hold`. A worker's or a
+model's decision keeps the seven days it always had. A rule never decays. Requests, PRs and deploys
+that closed more than a week before the instant asked about are counted on the `EARLIER` line, not
+listed. `find` reaches all of it.
+
+**"Not recorded" is an answer.** A word nothing mentions, a path nothing touched, a project nothing
+knows and a key that was never set, or has been retired, all say `not recorded: …`. A retired key
+says when it closed and that `--at` reads what it was, and never prints the value itself, because
+a stale answer given with confidence is worse than none.
 
 **Writing to it by hand:**
 
@@ -171,6 +193,9 @@ is counted on the `EARLIER` line, not listed, and `find` still reaches it.
 fleet-know describe acme-api "The public REST API behind acme-web: Node and Postgres."
 fleet-know decide acme-api "Keep the v1 export endpoint until acme-web moves to v2" --why "acme-web still calls /v1/export"
 fleet-know relate acme-web depends-on acme-api        # --off closes it
+fleet-know decide acme-api "Bill the export endpoint per row" --supersedes <id>
+fleet-know fact acme-api deploy.target vercel-production
+fleet-know rule add "Every change lands through a PR, reviewed" --scope profile
 ```
 
 ## Who said it
@@ -197,6 +222,176 @@ lead's word: decisions, relations, and what the project is. If a worker has desc
 since, it shows the last line a lead or the owner wrote, and if neither ever did, it says so. What
 *happened* is not narrowed, because a merged PR is a fact whoever opened it: branches, PRs, deploys
 and what waits on the owner stay.
+
+## Rules
+
+A rule is what the owner wants to hold from now on, in every session that will ever start. Rules
+used to live in one session's private notes, so every other session asked again. They are their own
+event, so that nothing about them depends on when they were said.
+
+```
+fleet-know rule add "Rate limits are per API key" --scope project:acme-api --why "…" --quote "per key" --supersedes <id>
+fleet-know rule list acme-api
+fleet-know rule close <id> --reason "…"
+fleet-know rule accept <id>
+fleet-know rule share-from personal                  # --off revokes
+```
+
+| scope | means |
+|---|---|
+| `project:<name>` | that project |
+| `profile` | every project in this profile |
+| `all` | every project in this profile, and in a profile that opted in to this one |
+
+With no `--scope`, the project the session is in, or the profile when there is none. The command
+says which it took. `--quote` keeps the owner's words, or the id of the prompt they came from.
+
+- **Most specific wins, and the output says so.** `project:` beats `profile` beats `all`. Nothing here
+  reads the rules' meaning, so nothing can tell that two contradict each other: the list prints them
+  in the order they win and states that order, and `--supersedes` is how the owner settles it.
+- **Who said it decides whether it is one.** The owner's and a lead's rules are live at once. A
+  worker's is `proposed`: `rule list` shows it apart, the page counts it, the briefing leaves it out,
+  and it becomes a rule when an owner or a lead runs `rule accept`, on their word from then. The
+  fold checks this, not the command, so a line written by hand changes nothing.
+- **Nobody closes what outranks them.** Owner, then lead, then worker. A worker's `--supersedes` is a
+  proposal to replace: the old rule stands until the yes, and a lead cannot say yes to replacing the
+  owner's.
+- **Rules never decay and are never capped by age.** A closed or replaced rule stays in the log.
+  `--at` reads it as it stood, `find` reaches its words, and no reader of the current state shows it.
+
+**Across profiles.** A profile sees its own rules and nobody else's. `fleet-know rule share-from
+<profile>`, recorded in the receiving profile's log, makes the other profile's `all` rules apply
+here too, each marked with where it came from, until `--off` revokes it. It goes one way. `profile`
+and `project:` rules do not cross, since `profile` says *this* profile and `project:` names a project
+of its own; nor does another profile's proposal, which is that profile's to accept.
+
+**Across machines, nothing.** A rule is not served to a paired machine, and one that arrives anyway is
+not kept: a pairing does not get to put a standing rule in front of this machine's leads.
+
+## Closing a fact
+
+`fleet-know decide acme-api "…" --supersedes <id>` closes the old decision. It leaves the page and
+stays readable with `--at`. It is refused aloud, with nothing recorded, for an id nobody has, an id
+about another project, one already closed, and one whose author outranks you; a hand-written line
+that tries any of them is recorded and changes nothing. Decisions print their id at the end of the
+line, so there is something to name.
+
+A **keyed fact** is one value per key, and a new value is the old one closing:
+
+```
+fleet-know fact acme-api deploy.target vercel-production     # write
+fleet-know fact acme-api deploy.target                       # read, or: not recorded
+fleet-know fact acme-api deploy.target --off                 # retire the key
+```
+
+A worker cannot overwrite the owner's or a lead's fact. A worker's own keeps the seven days on the
+page, and `--trusted` omits it.
+
+**The pairing closes itself.** `syncPeers` writes `peer.<machine>.pairing` when a peer's state
+*moves*: a 401 or 403 is `refused`, a good fetch is `paired`. It compares against the peer's own meta
+file, so a poll that finds nothing new writes nothing, and the log does not become a heartbeat. No
+answer at all and a 5xx say nothing about the pairing, since a machine asleep is still paired. It is
+a fact about this machine rather than a project, so it never crosses a pairing and is not in the
+briefing; it shows on the page as `[observed]`, and `fleet-know fact <project> peer.vm.pairing` reads
+it. A project's own fact of the same key gives way to a later sighting, so `peer.vm.pairing = paired`,
+written before that machine started refusing, does not go on reading as current.
+
+## The lead's briefing
+
+A lead that starts, resumes or comes back from `/compact` is told the owner's rules, the decisions
+that hold and what waits on the owner, so it stops asking what was already decided. An experimental
+switch, off on every install:
+
+```
+fleet-experimental enable know-brief
+```
+
+What the suite's fixture fleet prints, 810 characters:
+
+```
+[fleet] Briefing for acme-api, as of 2026-03-05T13:51:00Z. It REPLACES any earlier briefing in this conversation. Live state comes from fleet_know.
+RULES (most specific wins: project: beats profile beats all)
+- k9bca217eb72fdd55 [owner profile] Every change lands through a PR, reviewed
+- k861059144ea1cf70 [lead project:acme-api] Rate limits are per API key, never per account
+DECISIONS THAT HOLD (owner and lead only)
+- kb52e4ecb1dfaf259 [lead] Bill the export endpoint per row
+- kfcd425e3bda4f21f [lead] Keep the v1 export endpoint until acme-web moves to v2
+- k0442b5ca1b2b2165 [lead] deploy.target = vercel-production
+WAITING ON THE OWNER
+- PR #1184 (docs/setup-pass) — its worker reported done; waits for review/merge
+- s-master/2 request waiting on you: "Which plan tier should the rate limit apply to?"
+```
+
+- **Who gets it:** a project's `master` in the project's own checkout. A linked worktree is a worker
+  whatever it is called, so it gets none, and reads rules on demand through `fleet_know`. Neither does
+  another agent's session, whose hook would discard it.
+- **When:** the `SessionStart` sources `startup`, `resume` and `compact`, as `additionalContext`. Not
+  `clear`, where a person asked for an empty context.
+- **What:** rules, owner first; decisions and keyed facts from the owner or a lead only; what waits on
+  the owner, without a session's state this minute, which is what `fleet_know` is for. A wait is an
+  observed state rather than anybody's word, so it has no authority to filter on. Ids and one line
+  each. An excluded project gets nothing; a private one is told to its own lead with the private
+  warning.
+- **At most 2,000 characters**, whatever the log holds. Claude Code turns hook output over 10,000 into
+  a file the model is not asked to read, so a log that grew past that would quietly brief nobody. It is
+  cut by whole lines, one line from each section in turn with `+N more: fleet_know` closing each, so
+  500 rules cannot starve the three things waiting on the owner.
+- **It replaces the earlier one.** The header says so, because after a resume the old briefing is
+  still in the conversation. So a resume or compact where everything an earlier briefing could have
+  named has closed says that nothing holds, rather than saying nothing and leaving the old rules
+  standing. A log with nothing on record stays silent.
+- **It cannot hold up a session start.** The read is this profile's snapshot alone, no paired machine
+  and no file saved, and the hook holds it to about a second from outside the process, since a read
+  that hangs also blocks any timer set inside it. Over budget, or on anything that goes wrong, it
+  prints nothing and writes down why. A missing, empty, torn or unreadable log prints nothing and
+  errors nowhere. `CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS` moves the budget.
+- **Every briefing is an event:** `know.brief` with the session, the source, the character count and
+  the ids it named, or no characters and the reason. There is no holdout: every lead gets it while the
+  switch is on, and that record is what a later evaluation compares sessions by.
+
+Wall clock of the real command, cold-started the way the hook starts it, on an Apple M5 Pro running
+other work (load average between 5 and 50 over the run), in the log's shape from
+`test/helpers/know-bench.mjs`. A miss for want of a snapshot is not repeated, because the writer that
+records it also catches the snapshot up. Going by these numbers, a caught-up read reaches the budget
+around 450k events, and from there every briefing misses and says so; rotation is the way past that:
+
+| events | snapshot caught up | no snapshot at all |
+|---|---|---|
+| 3k | 76 ms | 110 ms |
+| 30k | 158 ms | 361 ms |
+| 90k | 265 ms | 895 ms |
+| 300k | 630 ms | 2.6 s, so it prints nothing and records why |
+
+## Surviving a compaction
+
+With `know-brief` on, the fleet's `PreCompact` hook prints one instruction for a lead's summary: keep
+the owner's decisions and rules with their ids, the open asks and the PR numbers in flight. Claude
+Code appends what the hook prints to the compaction's own instructions. Every tracked session records
+a `session.compact` event with its trigger. The `SessionStart` that follows, source `compact`, briefs
+again.
+
+`install.sh` wires the event for everyone, and with the switch off the hook leaves at once: no output,
+no event, no change to the session's status. A `PreCompact` is new to the hooks, so an install from
+before this needs `./install.sh` once.
+
+## Reads are visible
+
+Every read command and every `fleet_know` call records a `know.read`: the verb, the query, scrubbed
+like any other text, the hit count and the calling session.
+
+```
+fleet-know reads                  # questions with no answer first
+fleet-know reads --since 7d
+```
+
+The zero-hit list is what the memory is missing. The same question twice is one row with a count,
+and asking for the report is not itself a read.
+
+`know.read`, `know.brief` and `session.compact` are notes the memory keeps about itself, and they
+stay out of everything else: never folded, so never on a page and never activity on a project; not
+searched by `find`, which would otherwise start finding its own questions; never sent to a paired
+machine or kept from one. A read still appends a line, so past 64 KB of them the snapshot's mark
+moves on, or a log nobody else writes to would be rescanned from the same place by every read.
 
 ## Privacy — include, private, exclude
 
@@ -375,9 +570,10 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
   [Scale](#scale).
 - **Retroactive redaction.** The table applies from the moment it shipped. Older lines are found
   with `find` and removed with `forget --purge`, one at a time.
-- **Owner-sourced decisions from a conversation.** `owner` is earned today by a person's own
-  terminal and by ledger items the owner asked for. Nothing yet records a decision from a
-  prompt or a ledger reply, though the fold already reads those sources as the owner's.
+- **Owner-sourced decisions and rules from a conversation.** `owner` is earned today by a person's
+  own terminal and by ledger items the owner asked for. Nothing yet records a decision or a rule from
+  a prompt or a ledger reply, though the fold already reads those sources as the owner's, so a lead
+  writes down what the owner said under its own `lead`, with `--quote` keeping the words.
 - **What a project is, automatically** — from its README, via the inferred pass. Today it is
   `fleet-know describe`.
 - **Inferred facts for the other agents.** The pass lives in the Claude Code mod; codex,

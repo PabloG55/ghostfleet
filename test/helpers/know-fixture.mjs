@@ -60,6 +60,18 @@ put('retire', { worker: 'api-fix', branch: 'fix/csv-export', repo, reason: 'recl
 put('prompt', { branch: 'main', repo, text: 'Ship 1170 once the nightly invoice replay passes' }, api, m(64), { via: 'hook', session: 's-master', slot: 'master' });
 put('turn.end', { branch: 'main', repo, status: 'done', said: 'Merged #1170 and deployed it.', files: ['CHANGELOG.md'], deploys: [{ target: 'vercel', cmd: 'vercel deploy --prod', commit: 'a1b2c3d4e5f6', ok: true }] }, api, m(70), { via: 'hook', session: 's-master', slot: 'master' });
 put('decision', { text: 'Keep the v1 export endpoint until acme-web moves to v2', why: 'acme-web still calls /v1/export', source: 'stated' }, api, m(72), { via: 'fleet-know', slot: 'master' });
+// What stands, and what closed: a rule of the owner's and a lead's, a rule, a decision and a keyed
+// fact that were each replaced, and a worker's proposal that nobody has accepted.
+const nowhere = { fleetDir: work, project: K.NO_PROJECT };
+const byLead = { via: 'fleet-know', slot: 'master' };
+put('rule', { text: 'Every change lands through a PR, reviewed', why: 'main deploys on push', scope: 'profile' }, nowhere, m(-30000), { via: 'fleet-know', by: 'terminal' });
+const oldRule = put('rule', { text: 'Rate limits are per account', scope: 'project:acme-api' }, api, m(-3000), byLead);
+put('rule', { text: 'Rate limits are per API key, never per account', quote: 'per key, an account can have many', supersedes: oldRule.id, scope: 'project:acme-api' }, api, m(73), byLead);
+put('rule', { text: 'Retry a failed export three times', scope: 'project:acme-api' }, api, m(74), { via: 'fleet-know', slot: 'api-fix' });
+const oldDecision = put('decision', { text: 'Bill the export endpoint per call', source: 'stated' }, api, m(-4000), byLead);
+put('decision', { text: 'Bill the export endpoint per row', why: 'a call can be a million rows', source: 'stated', supersedes: oldDecision.id }, api, m(75), byLead);
+put('fact', { key: 'deploy.target', value: 'vercel-preview' }, api, m(-2000), byLead);
+put('fact', { key: 'deploy.target', value: 'vercel-production' }, api, m(76), byLead);
 // a second worker: an open PR, a finished turn, so it waits on review; a need-you after
 put('spawn', { worker: 'docs-pass', branch: 'docs/setup-pass', repo, worktree: `${gf}/acme-api-2`, task: 'Tighten the README setup section', parent: 'master', base: 'main' }, api, m(80), { via: 'spawn' });
 put('session.start', { branch: 'docs/setup-pass', repo, cwd: `${gf}/acme-api-2` }, api, m(81), { via: 'hook', session: 's-docs', slot: 'docs-pass' });
