@@ -228,11 +228,11 @@ else, name them, in the same syntax as Claude Code's permission rules:
 
 | entry | allows | does not allow |
 | --- | --- | --- |
-| `Bash(bin/acme-report *)` | `bin/acme-report`, `bin/acme-report weekly "acme-web"` | `bin/acme-reportx`, `./bin/acme-report`, `FOO=1 bin/acme-report` |
+| `Bash(bin/acme-api *)` | `bin/acme-api`, `bin/acme-api weekly "acme-web"` | `bin/acme-apix`, `./bin/acme-api`, `FOO=1 bin/acme-api` |
 | `Bash(toolbox version)` | exactly `toolbox version` | `toolbox version --json`, `toolbox  version` |
 
 ```bash
-fleet-telegram config allow 'Bash(bin/acme-report *)'   # quote them: the * and the space are part of it
+fleet-telegram config allow 'Bash(bin/acme-api *)'   # quote them: the * and the space are part of it
 fleet-telegram config allow 'Bash(toolbox version)'
 fleet-telegram config disallow 'Bash(toolbox version)'
 ```
@@ -242,7 +242,7 @@ A trailing ` *` means "and any arguments", on a word boundary. A `*` anywhere el
 itself, so `Bash(*)` is not all of Bash, and `config allow` refuses it.
 
 **The command must also be one plain command.** A prefix check alone would let
-`bin/acme-report x; rm -rf ~` through, because it does start with `bin/acme-report`. So the
+`bin/acme-api x; rm -rf ~` through, because it does start with `bin/acme-api`. So the
 guard reads the command the way a shell will, and refuses any of these outside quotes:
 
 | refused | because |
@@ -257,7 +257,7 @@ Also refused: `$` or a backtick inside double quotes, a quote that never closes,
 at the very end or the end of a line, and anything over 32 KB, which is too long to check.
 
 Everything inside single quotes is literal, and that is how a turn passes your words through:
-`bin/acme-report note 'don'\''t ship $(this)'` is one command with one argument. A line break
+`bin/acme-api note 'don'\''t ship $(this)'` is one command with one argument. A line break
 inside quotes is fine too. `~`, `*`, `?`, `[` and `{` are not refused: they only change the
 arguments, and the entry already trusts those.
 
@@ -268,7 +268,7 @@ commands that are safe with any input. Don't assume a read-only name is one:
 write. The usual answer is a small script of your own that treats its arguments as data, and
 an entry for that script.
 
-A relative command like `bin/acme-report` runs from the session's working directory, so link
+A relative command like `bin/acme-api` runs from the session's working directory, so link
 a session that sits where you expect, or name the command by its absolute path.
 
 ### Letting a turn edit its checkout
@@ -301,8 +301,8 @@ the list, a write to `.git/config` that sets `diff.external` makes the next
 `git log -p --ext-diff` run whatever it names.
 
 **`:checkout` and a command entry can add up to a shell.** Everything else in the checkout
-stays writable, and that includes what runs. If `Bash(bin/acme-report *)` is on the list and
-`bin/acme-report` is in the checkout, a turn can rewrite the script and then run it, or edit
+stays writable, and that includes what runs. If `Bash(bin/acme-api *)` is on the list and
+`bin/acme-api` is in the checkout, a turn can rewrite the script and then run it, or edit
 what it imports. That turns a message into a remote shell, and the guard cannot tell that
 edit from any other. Hooks in `.claude/settings.json`, `package.json` scripts and a
 `Makefile` are the same thing with a delay. So choose one: keep the commands you allow outside

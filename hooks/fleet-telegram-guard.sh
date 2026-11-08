@@ -98,15 +98,15 @@ load_allow() {
   [ "${#ALLOW[@]}" -gt 0 ] || ALLOW=("${DEFAULT_ALLOW[@]}")
 }
 
-# THE LEXER, for a command entry. A prefix check alone reads `bin/acme-report x; rm -rf ~` as
-# bin/acme-report, so the shell must also be about to see ONE plain command: nothing outside
+# THE LEXER, for a command entry. A prefix check alone reads `bin/acme-api x; rm -rf ~` as
+# bin/acme-api, so the shell must also be about to see ONE plain command: nothing outside
 # quotes that ends it, chains it, redirects it or expands into something else. Prints what
 # it refused, and nothing when the command is clean.
 #
 # `#` IS ON THE LIST BECAUSE OF WHAT THE QUOTES WOULD OTHERWISE HIDE. A shell reads a comment
 # to the end of the line and ignores any quote in it, while this lexer would open a quote and
 # carry it across the newline, so
-#     bin/acme-report # '
+#     bin/acme-api # '
 #     rm -rf ~
 #     # '
 # reads here as one command with a quoted argument and runs in bash and zsh alike as three

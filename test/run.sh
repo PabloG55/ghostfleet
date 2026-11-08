@@ -27123,7 +27123,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && CH="$(mkt
   out="$(TGC config allow 'Bash(bin/notes:*)')"
   is "a * that is not trailing is added"                "yes" "$(grep -q '^allowlist: .*Bash(bin/notes:\*)$' <<< "$out" && echo yes || echo no)"
   is "...and called literal"                            "1" "$(grep -c 'is literal' <<< "$out" || true)"
-  is "a trailing ' *' gets no such note"                "0" "$(TGC config allow 'Bash(bin/acme-report *)' | grep -c 'is literal' || true)"
+  is "a trailing ' *' gets no such note"                "0" "$(TGC config allow 'Bash(bin/acme-api *)' | grep -c 'is literal' || true)"
   TGC config allow --reset >/dev/null
   # The unit files are plain files on disk — the place the token must never be.
   pl="$(TGSVC=launchd TGC start --dry-run)"
