@@ -489,7 +489,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-send <s> "..."` | new task (only if the session is free) |
 | `fleet-send --reply-to me <s> "..."` | **ask** instead of dispatch: the target is told to answer you by name with `SendMessage`, so the reply lands in your session even mid-turn; if it can't reach you, the hook relays its turn-end message into YOUR inbox instead. Works across projects (`-s <sock>`), which is the case it exists for — a plain send's `done` only ever reaches the target's OWN master. [not upstream yet] |
 | `fleet-read <s> [n]` | a worker's last N messages |
-| `fleet-telegram link <project>/<s>` · `start` · `stop` · `status` | a Telegram chat connected to one session: your messages arrive as yours, the turn's answer goes back. `send "<text>" [--file <path>]` messages you; `config secret-cmd\|transcribe-cmd\|allow\|disallow` sets it up — see [TELEGRAM.md](TELEGRAM.md) |
+| `fleet-telegram link <project>/<s>` · `start` · `stop` · `status` | a Telegram chat connected to one session: your messages arrive as yours, the turn's answer goes back. `send "<text>" [--file <path>]` messages you; `config secret-cmd\|transcribe-cmd\|speak-cmd\|voice-ack\|allow\|disallow` sets it up — see [TELEGRAM.md](TELEGRAM.md) |
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
 | `fleet-stop <s>` | shut down for good + clear its state |

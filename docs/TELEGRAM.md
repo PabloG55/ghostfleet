@@ -130,14 +130,84 @@ Its files are in `~/.config/ghostfleet/telegram/`:
 | --- | --- |
 | text | your words, as the owner (a `[telegram] ` prefix marks the turn) |
 | a photo, or an image sent as a file | the caption, plus the path of the picture, stored where the phone client's photos go (`<fleet dir>/attach/<socket>.<session>/`), converted to JPEG or PNG when it is not one already |
+| a document of any type, a video or a GIF | the caption, or `(a file, no caption)`, plus a line with the stored path, the original name, the type and the size: `file: <path> (report.pdf, application/pdf, 412 KB)` |
 | a voice note or audio | **with** `config transcribe-cmd`: the words. **Without** it: the path of the audio file, and a note telling the session it may not be able to listen to it and should ask you to type it |
+| a video note | **with** `config transcribe-cmd`: the words, like a voice note. **Without** it: a file, like a video |
+| a reply to an earlier message | at the top, `(replying to an earlier message: "…")` with up to 400 characters of its text or caption, and what it had attached. A photo or a document it had is fetched and delivered too. This covers replies to the bot's own answers |
 | a sticker, a location, a contact… | nothing; the bot replies that it was not delivered |
 
-A transcriber is any command that takes an audio file as `$1` and prints the words:
+A caption is kept on everything that can carry one, voice notes included.
+
+**Files.** A bot can download at most 20 MB, so that is the limit. Anything larger is refused
+with a reply that says so and what to do: put it on the machine and send the path, or send a
+smaller one. A file you replied to that cannot be fetched does not cost you your words: they
+are delivered, and the session is told the file did not come through.
+
+Files are stored in `<fleet dir>/attach/<socket>.<session>/files/`, readable only by you. Each
+session keeps up to 200 MB of them (ten files at the limit, because an album arrives as one
+message per item), and the oldest are deleted first. **The name you see is only ever data.** The
+stored name is generated, and keeps the original's extension only when that is letters and
+digits, at most 8 of them; anything else is `.bin`. The original name reaches the session on one
+line, cut to 100 characters, and it is never written to the log.
+
+An image sent as a file is treated as a photo when the photo store takes it. Past the photo
+limit of 6 MB, or in a format it does not read (WebP, SVG), it arrives as a file instead.
+
+### Voice
+
+Three settings, each off until you set it. You can use any of them without the others.
+
+**`transcribe-cmd` turns a voice note into words.** It takes an audio file as `$1` and prints
+the words. A video note reaches it as an MP4 and a voice note as an Ogg, so the command must
+read both, which `ffmpeg`-based tools do.
 
 ```bash
 fleet-telegram config transcribe-cmd 'whisper-cli -m ~/models/ggml-base.bin -nt -f "$1"'
 ```
+
+**`speak-cmd` answers a voice note with a voice note.** It reads the answer on stdin and writes
+an OGG/Opus file at `$1`. Telegram only plays OGG/Opus as a voice note.
+
+**macOS** (the built-in `say`, with `ffmpeg` from Homebrew):
+
+```bash
+fleet-telegram config speak-cmd 'in="$1.aiff"; say -o "$in" -f - && ffmpeg -nostdin -loglevel error -y -i "$in" -c:a libopus -b:a 32k -f ogg "$1"; rc=$?; rm -f "$in"; exit $rc'
+```
+
+**Linux / WSL** (`espeak-ng` and `ffmpeg`):
+
+```bash
+fleet-telegram config speak-cmd 'espeak-ng --stdin --stdout | ffmpeg -nostdin -loglevel error -y -i pipe:0 -c:a libopus -b:a 32k -f ogg "$1"'
+```
+
+`$1` is in a private temp directory that is removed afterwards, and the command has 180 seconds to
+finish. When a voice note, or a video note that was transcribed, comes in and `speak-cmd` is set:
+
+- the turn is told its answer will be heard, so it writes it conversationally, in the language
+  you spoke, with no markdown;
+- the text answer goes first, always, as a reply to your message;
+- then the command runs on that text, and the voice goes as a reply to your message too.
+
+If the command fails, you still have the text. The failure goes to the log and never to the chat.
+An audio file you sent as music rather than as a voice note is transcribed but not answered out
+loud. A session waiting on you is never spoken either.
+
+Whether an answer should be spoken is carried in its reply address (`telegram/v<id>`, not
+`telegram/m<id>`), so it survives a busy session's queue and a daemon restart. If the daemon stops
+in the middle of speaking, the next start speaks that answer without sending its text again.
+
+**`voice-ack` says the voice note arrived.** Transcribing and answering can take a minute or more,
+and the typing indicator fades after about 5 seconds. Set a short text and the daemon replies
+with it the moment a voice note or a video note arrives, before it transcribes. It is the same
+on macOS and Linux:
+
+```bash
+fleet-telegram config voice-ack 'Got it, listening.'
+fleet-telegram config voice-ack ''      # off
+```
+
+`fleet-telegram status` shows whether each of the three is set, and `fleet-telegram config` shows
+what it is set to. The daemon reads them on every message, so no restart is needed.
 
 **A busy session queues your message**, exactly as `fleet-send` queues any prompt. The bot
 tells you it is queued and runs next. The answer you get back belongs to **your** message's
@@ -151,6 +221,8 @@ turn, never to the one that was running when you sent it. The relay is armed by 
   bold lines, and tables arrive as code blocks. Anything over Telegram's 4,096-character
   limit is split into several messages, on paragraph boundaries where it can be, and a code
   block cut in two is closed and reopened.
+- **A voice note**, after the text, when your message was a voice note and `speak-cmd` is set
+  ([above](#voice)).
 - **A permission prompt** arrives as `<session> is waiting on you: …`. Answer it at the
   desk, or from the phone client.
 - **Anything a session decides to tell you**, through `fleet-telegram send` or the MCP tool:
@@ -320,6 +392,9 @@ if the phone is lost.
 - The token is part of every Bot API URL, and an HTTP error can quote the URL it failed on.
   Every line the daemon logs, prints or sends back to the chat goes through redaction
   first. A Telegram error that quoted the token reaches you with the token removed.
+- A prompt is an argument to `fleet-send`, so a token in a message, a caption, a quote or a file
+  name is redacted before it gets that far. So is an answer on its way to `speak-cmd`, which reads
+  it on stdin and never as an argument.
 - Only the allowlisted chat is served. Any other chat is dropped without a reply: the bot
   gives a stranger nothing to work with. The log records the chat id it came from, never
   the message text.
@@ -331,6 +406,7 @@ if the phone is lost.
 | `GHOSTFLEET_TELEGRAM_DIR` | `~/.config/ghostfleet/telegram` | where its config, state, log and outbox live |
 | `GHOSTFLEET_TELEGRAM_API` | `https://api.telegram.org` | the Bot API base URL, for a local Bot API server or a test stub |
 | `GHOSTFLEET_TELEGRAM_POLL` | `50` | long-poll seconds per `getUpdates` (1–50) |
+| `GHOSTFLEET_TELEGRAM_SPEAK_TIMEOUT` | `180` | seconds `speak-cmd` may run before it is stopped; it holds the outbox while it runs |
 | `GHOSTFLEET_TELEGRAM_SERVICE` | `launchd` on macOS, `systemd` where `systemctl --user` works, else `pidfile` | force a service kind |
 
 ## When it does not work
@@ -351,3 +427,6 @@ if the phone is lost.
   from `~/.local/libexec/ghostfleet`.
 - **The answer came back as plain text.** Telegram rejected the HTML for a chunk, and the
   daemon resent that chunk without formatting rather than lose it.
+- **A voice note gets a text answer but no voice.** Read the `speak-cmd failed` line in the log.
+  It gives the exit status, and says when the command wrote no file or wrote something that is
+  not an Ogg file. To try the command by hand: `echo hello | sh -c '<your command>' x /tmp/out.ogg`.

@@ -27,8 +27,9 @@
 //   fleet-telegram start | stop               the daemon, as a launchd/systemd unit (or a pidfile)
 //   fleet-telegram run                        the daemon in the foreground (what the unit runs)
 //   fleet-telegram send "<text>" [--file <path>]
-//   fleet-telegram config [secret-cmd <cmd> | transcribe-cmd <cmd> | allow <pattern>… |
-//                          allow --only <pattern>… | allow --reset | disallow <pattern>…]
+//   fleet-telegram config [secret-cmd <cmd> | transcribe-cmd <cmd> | speak-cmd <cmd> |
+//                          voice-ack <text> | allow <pattern>… | allow --only <pattern>… |
+//                          allow --reset | disallow <pattern>…]
 //
 // Node builtins only: ghostfleet is a zero-dependency package.
 import fs from 'node:fs';
@@ -37,7 +38,7 @@ import path from 'node:path';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { projects } from '../lib/projects.mjs';
-import { storePhoto, storeAudio, sniffImage, ATTACH_MAX_BYTES } from '../lib/attach.mjs';
+import { storePhoto, storeAudio, storeFile, sniffImage, ATTACH_MAX_BYTES, ATTACH_FILE_MAX_BYTES } from '../lib/attach.mjs';
 import { telegramChunks } from '../lib/telegram-format.mjs';
 
 const SELF = fs.realpathSync(fileURLToPath(import.meta.url));
@@ -54,6 +55,7 @@ const OUTBOX = path.join(DIR, 'outbox');
 // code never needs a real Telegram to be tested, and the suite never contacts one.
 const API = (process.env.GHOSTFLEET_TELEGRAM_API || 'https://api.telegram.org').replace(/\/+$/, '');
 const POLL = Math.max(1, Math.min(50, Number(process.env.GHOSTFLEET_TELEGRAM_POLL) || 50));
+const SPEAK_SECS = Math.max(1, Number(process.env.GHOSTFLEET_TELEGRAM_SPEAK_TIMEOUT) || 180);
 const LABEL = `com.${(() => { try { return os.userInfo().username.replace(/[^A-Za-z0-9._-]/g, ''); } catch { return 'user'; } })()}.ghostfleet.fleet-telegram`;
 const UNIT = 'ghostfleet-telegram.service';
 
@@ -138,17 +140,31 @@ async function api(token, method, body = {}, { timeout = 30000, signal } = {}) {
     throw new ApiError(redact(`${method}: ${e.name === 'AbortError' ? 'timed out' : (e.cause?.code || e.message)}`), 0);
   } finally { clearTimeout(t); signal?.removeEventListener('abort', onAbort); }
 }
-async function download(token, fileId) {
-  const f = await api(token, 'getFile', { file_id: fileId });
+async function download(token, fileId, { max = ATTACH_MAX_BYTES, timeout = 60000 } = {}) {
+  const limit = Math.round(max / 1048576);
+  let f;
+  try { f = await api(token, 'getFile', { file_id: fileId }); }
+  catch (e) {
+    // Telegram's own refusal, and the only warning there is when the message did not say how
+    // big the file was: it answers 400, which would read as a broken request.
+    if (/file is too big/i.test(e.message)) throw new ApiError(`that file is over the ${limit} MB limit`, 413);
+    throw e;
+  }
   if (!f?.file_path) throw new ApiError('getFile: no file path', 0);
-  if (f.file_size && f.file_size > ATTACH_MAX_BYTES) throw new ApiError(`that file is ${Math.round(f.file_size / 1048576)} MB and the limit is ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB`, 413);
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 60000);
+  if (f.file_size && f.file_size > max) throw new ApiError(`that file is ${Math.round(f.file_size / 1048576)} MB and the limit is ${limit} MB`, 413);
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
   try {
     const res = await fetch(`${API}/file/bot${token}/${f.file_path}`, { signal: ctl.signal });
     if (!res.ok) throw new ApiError(`download: HTTP ${res.status}`, res.status);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > ATTACH_MAX_BYTES) throw new ApiError(`that file is over the ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB limit`, 413);
-    return buf;
+    // A piece at a time, so a body larger than it was declared to be stops at the cap instead
+    // of being held whole in memory first. A local Bot API server serves up to 2 GB.
+    const parts = []; let got = 0;
+    for await (const piece of res.body ?? []) {
+      got += piece.length;
+      if (got > max) { ctl.abort(); throw new ApiError(`that file is over the ${limit} MB limit`, 413); }
+      parts.push(piece);
+    }
+    return Buffer.concat(parts, got);
   } catch (e) {
     if (e instanceof ApiError) throw e;
     throw new ApiError(redact(`download: ${e.name === 'AbortError' ? 'timed out' : (e.cause?.code || e.message)}`), 0);
@@ -238,13 +254,128 @@ const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); inflight.s
 let state = {};
 const saveState = () => { try { writeJson(STATE, state); } catch {} };
 
-const HELP = (t) => `This chat talks to ${t ? `${t.name}/${t.session}` : 'a fleet session (not linked yet)'}. Write to it and its answer comes back here. Photos arrive as files it can open; voice notes are transcribed when the desk has a transcriber set up.\n\n/status — what it is doing\n/help — this`;
+const HELP = (t) => `This chat talks to ${t ? `${t.name}/${t.session}` : 'a fleet session (not linked yet)'}. Write to it and its answer comes back here. Photos and files arrive as files it can open; voice notes are transcribed when the desk has a transcriber set up.\n\n/status — what it is doing\n/help — this`;
+
+// ── what a message carries ───────────────────────────────────────────────────
+// A sentence for the owner: nothing reached the session, and this says why.
+class Refused extends Error {}
+const FILE_KINDS = { animation: 'a GIF', video: 'a video', video_note: 'a video note', document: 'a file' };
+// animation comes first because Telegram sets `document` beside it on the same message.
+const fileOf = (m) => { const kind = Object.keys(FILE_KINDS).find((k) => m?.[k]?.file_id); return kind ? { kind, ...m[kind] } : null; };
+const sizeOf = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${Math.round(n / 1048576 * 10) / 10} MB`);
+// What the sender chose, on its way into a prompt that is pasted into a terminal: one line, so
+// a name cannot forge a `file:` line of its own, and without control characters or direction
+// overrides, so it cannot end the bracketed paste or disguise an extension. Redacted before it
+// is cut, because a token cut in half no longer matches. The prompt is an argument to
+// fleet-send, so a token anywhere in it would be on the process list.
+function oneLine(s, max) {
+  const flat = redact(String(s ?? '')).replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const cp = Array.from(flat);
+  return cp.length > max ? `${cp.slice(0, max).join('')}…` : flat;
+}
+const FILE_MB = Math.round(ATTACH_FILE_MAX_BYTES / 1048576);
+// Only a size that reads as over the limit is quoted: "20 MB and the limit is 20 MB" says nothing.
+const tooBig = (bytes) => {
+  const mb = Math.round(bytes / 1048576 * 10) / 10;
+  return `That file ${mb > FILE_MB ? `is ${mb} MB and the limit is ${FILE_MB} MB` : `is over the ${FILE_MB} MB limit`}, the most a bot can download, so it was not delivered. Put it on the machine and send the path, or send a smaller one.`;
+};
+
+async function fetchLarge(f, sec) {
+  if (f.file_size > ATTACH_FILE_MAX_BYTES) throw new Refused(tooBig(f.file_size));
+  try { return await download(sec.token, f.file_id, { max: ATTACH_FILE_MAX_BYTES, timeout: 180000 }); }
+  catch (e) { if (e.code === 413) throw new Refused(tooBig(f.file_size)); throw e; }
+}
+function fileLine(buf, f, t) {
+  // A video note is always an MP4, and the only kind Telegram gives no type for.
+  const declared = String(f.mime_type || (f.kind === 'video_note' ? 'video/mp4' : ''));
+  const st = storeFile({ buf, name: f.file_name, mime: declared, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
+  if (!st.ok) throw new Refused(`That file was not delivered — ${st.text}.`);
+  // Never the name in the log: it is words the sender chose.
+  log(`file: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${f.kind}${st.dropped ? ` (${st.dropped} older dropped)` : ''}`);
+  const type = /^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+$/.test(declared) ? declared.slice(0, 60) : 'unknown type';
+  return `file: ${st.path} (${oneLine(f.file_name, 100) || FILE_KINDS[f.kind].replace(/^an? /, '')}, ${type}, ${sizeOf(st.bytes)})`;
+}
+// A photo or a file, fetched and stored; the line of the prompt that names it.
+async function fetchAttachment(m, sec, t) {
+  const photoAt = (st) => { log(`photo: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${st.from}`); return `photo: ${st.path}`; };
+  if (m.photo?.length) {
+    // The largest size Telegram made that fits the store's cap; it keeps several.
+    const sizes = [...m.photo].sort((a, b) => (b.file_size || 0) - (a.file_size || 0));
+    const pick = sizes.find((s) => !s.file_size || s.file_size <= ATTACH_MAX_BYTES) || sizes[sizes.length - 1];
+    const st = storePhoto({ buf: await download(sec.token, pick.file_id), sock: t.sock, session: t.session, fleetDir: t.fleetDir });
+    if (!st.ok) { log(`photo refused: ${st.text}`); throw new Refused(`That photo was not delivered — ${st.text}.`); }
+    return photoAt(st);
+  }
+  const f = fileOf(m);
+  const buf = await fetchLarge(f, sec);
+  // An image sent as a file is a photo when the photo store takes it. When it does not (over
+  // 6 MB, a WebP, an SVG, a name that lied) it is still a file, which is what was asked for:
+  // stored under a generated name, it is no more a script than the .sh beside it.
+  if (f.kind === 'document' && /^image\//.test(String(f.mime_type || ''))) {
+    const st = storePhoto({ buf, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
+    if (st.ok) return photoAt(st);
+  }
+  return fileLine(buf, f, t);
+}
+
+// A reply keeps what it replies to. Telegram hands the daemon the whole earlier message, and
+// a turn that only sees "only this one looks bad" has nothing to work with. A file that cannot
+// be fetched does not cost the owner their words: the turn is told, and passes it on.
+async function quotedBlock(msg, sec, t) {
+  const q = msg.reply_to_message;
+  if (!q) return { head: '', line: '' };
+  const words = oneLine(q.text || q.caption, 400);
+  const f = fileOf(q);
+  const name = oneLine(f?.file_name || q.audio?.file_name, 100);
+  const had = q.photo?.length ? 'a photo' : name ? `the file ${name}` : f ? FILE_KINDS[f.kind] : q.voice ? 'a voice note' : q.audio ? 'an audio file' : '';
+  const head = `(replying to an earlier message${words ? `: "${words}"` : ''}${had ? `, which had ${had}` : ''})`;
+  if (!q.photo?.length && !q.document) return { head, line: '' };
+  try { return { head, line: await fetchAttachment(q, sec, t) }; }
+  catch (e) {
+    log(`the replied-to file was not fetched: ${e.message}`);
+    return { head, line: `(that file did not come through, so tell the owner: ${oneLine(e.message, 300)})` };
+  }
+}
+
+// The message's own part of the prompt: its words, the line of any file it stored, and whether
+// its answer should be spoken back.
+const HEARD = 'your answer will also reach the owner as a voice note, so write it to be heard: conversational, in the language they spoke, no markdown';
+const withCaption = (caption, rest) => [caption, rest].filter(Boolean).join('\n\n');
+async function ownContent(msg, text, sec, t) {
+  if (text) return { body: redact(text) };
+  const caption = redact(String(msg.caption || '').trim());
+  if (msg.voice || msg.audio || msg.video_note) {
+    const v = msg.voice || msg.audio || msg.video_note;
+    const speaks = Boolean(config().speak_cmd);
+    const buf = await fetchLarge(v, sec);
+    const words = redact(await transcribe(buf, msg.video_note ? 'mp4' : 'oga'));
+    if (words) {
+      log(`voice: ${t.session} <- ${Math.round(buf.length / 1024)} KB, transcribed ${words.length} chars`);
+      const spoken = speaks && !msg.audio;
+      const label = msg.video_note ? 'video note' : 'voice note';
+      return { body: withCaption(caption, `(${label}, transcribed${spoken ? ` — ${HEARD}` : ''}) ${words}`), spoken };
+    }
+    if (msg.video_note) return { body: caption || '(a video note, no caption)', line: fileLine(buf, { kind: 'video_note', ...v }, t) };
+    // Past the voice store's limit or its four containers, it is still a file the owner sent.
+    let st = storeAudio({ buf, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
+    if (!st.ok) st = storeFile({ buf, name: v.file_name, mime: v.mime_type, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
+    if (!st.ok) { log(`voice refused: ${st.text}`); throw new Refused(`That voice note was not delivered — ${st.text}.`); }
+    log(`voice: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${st.from || 'file'}, not transcribed`);
+    return { body: withCaption(caption, `(a voice note — no transcriber is set up at the desk, so it is an audio file: ${st.path}. If you cannot listen to it, say so and ask for it in text.)`),
+             spoken: speaks && Boolean(msg.voice) };
+  }
+  if (msg.photo?.length || fileOf(msg)) {
+    const line = await fetchAttachment(msg, sec, t);
+    return { body: caption || (line.startsWith('photo:') ? '(a photo, no caption)' : '(a file, no caption)'), line };
+  }
+  return null;
+}
 
 async function onMessage(msg, sec) {
   const chat = String(msg?.chat?.id ?? '');
   if (chat !== sec.chat) { state.dropped = (state.dropped || 0) + 1; log(`dropped from ${chat || '(no chat)'}`); return; }
   const id = Number(msg.message_id) || 0;
-  const reply = (text) => sendText(sec.token, sec.chat, text, { replyTo: id }).catch((e) => log(`reply failed: ${e.message}`));
+  const reply = (text) => sendText(sec.token, sec.chat, redact(text), { replyTo: id }).catch((e) => log(`reply failed: ${e.message}`));
   let t;
   try { t = resolveLink(); } catch (e) { log(`not delivered: ${e.message}`); return reply(`Not delivered — ${e.message}.`); }
 
@@ -263,43 +394,40 @@ async function onMessage(msg, sec) {
   const w = wiring(t);
   if (!w.ok) { log(`not delivered: ${w.why}`); return reply(`Not delivered — ${w.why}. At the desk: ${w.fix}.`); }
 
-  let prompt = '';
+  // Before anything slow: transcribing and answering take a minute or more, the typing
+  // indicator fades after about 5 s, and silence looks like a crash.
+  const ack = String(config().voice_ack || '');
+  if (ack && (msg.voice || msg.video_note)) await reply(ack);
+
+  // [telegram] stays the very first thing, whatever else there is. hooks/fleet-event.sh marks
+  // the turn from that prefix, and that is also where the turn is told its answer goes to the
+  // phone and which tools it has. A quote placed in front of it would leave the turn unmarked and
+  // untold, with the guard holding it on the armed reply address alone, one signal of its two.
+  // After that, the shape is for fleet-send's paste probe, which is the prompt's last 24
+  // characters with its line breaks flattened. Words alone on a last line shorter than that, as
+  // "yes, that one" is, make a probe that spans the break and that no pane ever shows: Enter waits
+  // out its fallback, and the re-nudge that rescues a swallowed one cannot fire. So the quote and
+  // the words share a line, and a stored file's line comes last, a long path on one line.
+  let prompt = '', spoken = false;
   try {
-    if (text) {
-      prompt = `[telegram] ${text}`;
-    } else if (msg.photo?.length || (msg.document && /^image\//.test(String(msg.document.mime_type || '')))) {
-      // The largest size Telegram made that fits the store's cap; it keeps several.
-      const sizes = msg.photo?.length ? [...msg.photo].sort((a, b) => (b.file_size || 0) - (a.file_size || 0)) : [msg.document];
-      const pick = sizes.find((s) => !s.file_size || s.file_size <= ATTACH_MAX_BYTES) || sizes[sizes.length - 1];
-      const buf = await download(sec.token, pick.file_id);
-      const st = storePhoto({ buf, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
-      if (!st.ok) { log(`photo refused: ${st.text}`); return reply(`That photo was not delivered — ${st.text}.`); }
-      log(`photo: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${st.from}`);
-      prompt = `[telegram] ${String(msg.caption || '').trim() || '(a photo, no caption)'}\n\nphoto: ${st.path}`;
-    } else if (msg.voice || msg.audio) {
-      const v = msg.voice || msg.audio;
-      const buf = await download(sec.token, v.file_id);
-      const words = await transcribe(buf);
-      if (words) {
-        log(`voice: ${t.session} <- ${Math.round(buf.length / 1024)} KB, transcribed ${words.length} chars`);
-        prompt = `[telegram] (voice note, transcribed) ${words}`;
-      } else {
-        const st = storeAudio({ buf, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
-        if (!st.ok) { log(`voice refused: ${st.text}`); return reply(`That voice note was not delivered — ${st.text}.`); }
-        log(`voice: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${st.from}, not transcribed`);
-        prompt = `[telegram] (a voice note — no transcriber is set up at the desk, so it is an audio file: ${st.path}. If you cannot listen to it, say so and ask for it in text.)`;
-      }
-    } else {
-      return reply(`Only text, photos and voice notes reach ${t.session}; that one was not delivered.`);
-    }
+    const own = await ownContent(msg, text, sec, t);
+    if (!own) return reply(`Only text, files and voice notes reach ${t.session}; that one was not delivered.`);
+    spoken = Boolean(own.spoken);
+    const q = await quotedBlock(msg, sec, t);
+    const files = [q.line, own.line].filter(Boolean).join('\n');
+    prompt = `[telegram] ${[q.head, own.body].filter(Boolean).join(' ')}${files ? `\n\n${files}` : ''}`;
   } catch (e) {
     log(`not delivered: ${e.message}`);
-    return reply(`Not delivered — ${e.message}.`);
+    return reply(e instanceof Refused ? e.message : `Not delivered — ${e.message}.`);
   }
 
   // fleet-send, as the owner: to a busy session it QUEUES, and the queued turn carries the
   // reply address, so the answer is that turn's — the busy turn's own Stop answers nobody.
-  const r = await run('fleet-send', ['-s', t.sock, '--owner', '--reply-to', `telegram/m${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
+  // "This answer should be spoken" rides the same address (v<id>, not m<id>) rather than a
+  // table in this daemon: the address already crosses the queue, the mod's handoff, the Stop
+  // hook and a daemon restart, and it goes away with the answer, so there is nothing to prune
+  // when a turn is interrupted and never answers.
+  const r = await run('fleet-send', ['-s', t.sock, '--owner', '--reply-to', `telegram/${spoken ? 'v' : 'm'}${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
   if (r.code !== 0) {
     log(`not delivered to ${t.session}: exit ${r.code}`);
     return reply(`Not delivered to ${t.session} — ${r.out.split('\n').map((l) => l.replace(/^fleet-send:\s*/, '')).filter(Boolean).slice(0, 2).join(' — ') || `fleet-send exited ${r.code}`}`);
@@ -315,11 +443,11 @@ async function onMessage(msg, sec) {
 // run as `/bin/sh -c <cmd> fleet-telegram-transcribe <file>`. The audio sits in a private
 // temp dir for as long as the command runs and no longer. '' when there is no transcriber
 // or it failed — the caller then delivers the file itself.
-async function transcribe(buf) {
+async function transcribe(buf, ext = 'oga') {
   const cmd = String(config().transcribe_cmd || '');
   if (!cmd) return '';
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-telegram-'));
-  const f = path.join(tmp, 'voice.oga');
+  const f = path.join(tmp, `voice.${ext}`);
   try {
     fs.writeFileSync(f, buf, { mode: 0o600 });
     const r = await new Promise((done) => execFile('/bin/sh', ['-c', cmd, 'fleet-telegram-transcribe', f],
@@ -327,6 +455,67 @@ async function transcribe(buf) {
     if (r.err) { log(`transcribe-cmd failed: ${r.err.code ?? r.err.message}`); return ''; }
     return String(r.stdout || '').replace(/\s+/g, ' ').trim();
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+
+// An answer out loud, by the owner's own command (`config speak-cmd`), run as
+// `/bin/sh -c <cmd> fleet-telegram-speak <out-file>` with the text on stdin, never in an
+// argument. Spawned rather than execFile'd for three reasons. Nothing is piped from it, so a
+// helper it leaves running cannot hold the outbox open by holding a pipe. Its stdin errors are
+// caught, because a command that exits without reading makes the write fail with EPIPE, and
+// unhandled that takes the whole daemon down. And it is a process group, so a timeout or a
+// stop ends the `say | ffmpeg` pipeline and not only the shell. Resolves '' or why it failed.
+function runSpeak(cmd, out, text) {
+  return new Promise((done) => {
+    let why = '', killer = null, timer = null;
+    const child = spawn('/bin/sh', ['-c', cmd, 'fleet-telegram-speak', out], { stdio: ['pipe', 'ignore', 'ignore'], detached: true });
+    const signal = (sig) => { try { process.kill(-child.pid, sig); } catch {} };
+    const end = (reason) => { if (!why) why = reason; signal('SIGTERM'); killer = setTimeout(() => signal('SIGKILL'), 2000); };
+    const onStop = () => end('stopped');
+    const finish = (reason) => {
+      clearTimeout(timer); clearTimeout(killer);
+      inflight.signal.removeEventListener('abort', onStop);
+      child.stdin?.destroy();
+      done(reason);
+    };
+    timer = setTimeout(() => end(`timed out after ${SPEAK_SECS}s`), SPEAK_SECS * 1000);
+    inflight.signal.addEventListener('abort', onStop, { once: true });
+    child.on('error', (e) => finish(why || `could not run: ${e.code || 'error'}`));
+    child.on('exit', (code, sig) => finish(why || (code === 0 ? '' : `exit ${code ?? sig}`)));
+    child.stdin.on('error', () => {});
+    child.stdin.end(text);
+  });
+}
+// Never throws and never reaches the chat: the owner already has the answer as text, and a line
+// about a broken voice would only be noise on the phone. The log says what failed, by exit status and
+// never by what the command printed, which may be the answer's own words. Returns 'stopped' when
+// the daemon stopped under it, and the caller then leaves the answer in the outbox: its text is
+// recorded as sent, so the next start speaks it without repeating it.
+async function speak(text, replyTo, sec) {
+  const cmd = String(config().speak_cmd || '');
+  if (!cmd) return '';
+  let tmp = '';
+  try {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-telegram-'));
+    const out = path.join(tmp, 'voice.ogg');
+    const bad = await runSpeak(cmd, out, text);
+    if (bad === 'stopped') return 'stopped';
+    if (bad) { log(`speak-cmd failed: ${bad}`); return ''; }
+    const size = (() => { try { return fs.statSync(out).size; } catch { return 0; } })();
+    if (!size) { log('speak-cmd failed: it wrote no file'); return ''; }
+    if (size > 50 * 1024 * 1024) { log(`speak-cmd failed: it wrote ${Math.round(size / 1048576)} MB, over the 50 MB a bot may send`); return ''; }
+    const buf = fs.readFileSync(out);
+    // Telegram turns anything else into a document, and a stray file in the chat is exactly
+    // what a failure here must not produce.
+    if (buf.subarray(0, 4).toString('latin1') !== 'OggS') { log('speak-cmd failed: what it wrote is not an Ogg file'); return ''; }
+    const form = new FormData();
+    form.append('chat_id', sec.chat);
+    if (replyTo) form.append('reply_parameters', JSON.stringify({ message_id: replyTo, allow_sending_without_reply: true }));
+    form.append('voice', new Blob([buf], { type: 'audio/ogg' }), 'voice.ogg');
+    await api(sec.token, 'sendVoice', form, { timeout: 120000 });
+    log(`spoke: ${Math.round(size / 1024)} KB`);
+  } catch (e) { log(`speak failed: ${e.message}`); }
+  finally { if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); }
+  return '';
 }
 
 // The outbox: one JSON file per answer, written by hooks/fleet-event.sh at the Stop of a
@@ -346,13 +535,19 @@ async function pump() {
       const rec = readJson(f, null);
       if (!rec) { quarantine(f, 'unreadable'); continue; }
       const who = `${String(rec.sock || '').replace(/^cf-/, '')}/${rec.session || '?'}`;
-      const text = rec.event === 'asks'
+      const text = redact(rec.event === 'asks'
         ? `${rec.session || 'The session'} is waiting on you: ${rec.text || 'it needs an answer at the desk'}`
-        : (String(rec.text || '').trim() || `(${rec.session || 'the session'} ended its turn without a message — at the desk: fleet-read -s ${rec.sock} ${rec.session})`);
-      const replyTo = /^m\d+$/.test(String(rec.reply_to || '')) ? Number(rec.reply_to.slice(1)) : 0;
+        : (String(rec.text || '').trim() || `(${rec.session || 'the session'} ended its turn without a message — at the desk: fleet-read -s ${rec.sock} ${rec.session})`));
+      const replyTo = /^[mv]\d+$/.test(String(rec.reply_to || '')) ? Number(rec.reply_to.slice(1)) : 0;
+      // A permission prompt keeps its address, so it can carry a v too: it is never spoken.
+      // Nor is the note a turn gets for ending with no message.
+      const spoken = /^v\d+$/.test(String(rec.reply_to || '')) && rec.event !== 'asks' && String(rec.text || '').trim() !== '';
       try {
         const n2 = await sendText(sec.token, sec.chat, text, { replyTo, from: Number(rec.sent) || 0,
           onChunk: (k) => { rec.sent = k; try { writeJson(f, rec); } catch {} } });
+        // After the text, always, and inside this one pump: a voice never overtakes its own
+        // answer or the next one, and a slow command holds the outbox for SPEAK_SECS at most.
+        if (spoken && await speak(text, replyTo, sec) === 'stopped') return;
         fs.rmSync(f, { force: true });
         state.sent = (state.sent || 0) + 1;
         log(`sent ${rec.event || 'answered'} from ${who}: ${n2} message${n2 === 1 ? '' : 's'}, ${text.length} chars`);
@@ -429,6 +624,9 @@ async function daemon() {
     }
   }
   clearInterval(tick); try { watcher?.close(); } catch {}
+  // A pump in the middle of speaking has been told to stop by now. Letting it finish is what
+  // removes its private temp dir, and this is what stop's 5 s wait is for.
+  for (let i = 0; i < 30 && pumping; i++) await new Promise((r) => setTimeout(r, 100));
   await pump().catch(() => {});
   try { if (Number(fs.readFileSync(PIDFILE, 'utf8').trim()) === process.pid) fs.rmSync(PIDFILE, { force: true }); } catch {}
   state.pid = 0; saveState();
@@ -593,6 +791,8 @@ async function status() {
   let waiting = 0; try { waiting = fs.readdirSync(OUTBOX).filter((n) => n.endsWith('.json')).length; } catch {}
   say(`outbox:      ${waiting} waiting`);
   say(`transcribe:  ${c.transcribe_cmd ? 'set' : 'not set — voice notes arrive as audio files'}`);
+  say(`speak:       ${c.speak_cmd ? 'set' : 'not set — a voice note gets a text answer only'}`);
+  say(`voice ack:   ${c.voice_ack ? 'set' : 'not set'}`);
   const list = allowList();
   say(`allowlist:   ${list.join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
   if (list.some((e) => e.endsWith(':checkout'))) say(`checkout:    ${t ? checkoutLine(t) : 'not linked, so :checkout entries refuse every write'}`);
@@ -685,13 +885,21 @@ async function main(argv) {
       if (!what) {
         say(`secret-cmd:     ${c.secret_cmd || '(not set)'}`);
         say(`transcribe-cmd: ${c.transcribe_cmd || '(not set)'}`);
+        say(`speak-cmd:      ${c.speak_cmd || '(not set)'}`);
+        say(`voice-ack:      ${c.voice_ack || '(not set)'}`);
         say(`allow:          ${allowList().join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
         say(`link:           ${c.link ? `${c.link.project}/${c.link.session}` : '(not linked)'}`);
         return;
       }
-      if (what === 'secret-cmd' || what === 'transcribe-cmd') {
+      if (what === 'voice-ack') {
+        if (vals.length !== 1) fail("usage: fleet-telegram config voice-ack '<text>'  ('' turns it off)", 2);
+        if (vals[0].trim()) c.voice_ack = vals[0]; else delete c.voice_ack;
+        saveConfig(c);
+        return say(`voice-ack ${vals[0].trim() ? 'set' : 'off'}`);
+      }
+      if (what === 'secret-cmd' || what === 'transcribe-cmd' || what === 'speak-cmd') {
         if (vals.length !== 1) fail(`usage: fleet-telegram config ${what} '<command>'  ('' clears it)`, 2);
-        const key = what === 'secret-cmd' ? 'secret_cmd' : 'transcribe_cmd';
+        const key = { 'secret-cmd': 'secret_cmd', 'transcribe-cmd': 'transcribe_cmd', 'speak-cmd': 'speak_cmd' }[what];
         // Tried BEFORE it is saved: a command that holds the token itself would otherwise
         // be written to config.json, which puts the token in a file — the thing this whole
         // design keeps it out of. Any other failure (a locked keychain) is saved with a
@@ -739,7 +947,7 @@ async function main(argv) {
         }
         return;
       }
-      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, allow, disallow`, 2);
+      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, speak-cmd, voice-ack, allow, disallow`, 2);
     }
     case undefined: case 'help': case '-h': case '--help':
       return say(`fleet-telegram — a Telegram chat connected to one fleet session
@@ -750,6 +958,8 @@ async function main(argv) {
   fleet-telegram send "<text>" [--file <path>]
   fleet-telegram config secret-cmd '<cmd>'    prints the token ($1=token) or chat id ($1=chat)
   fleet-telegram config transcribe-cmd '<cmd>'  turns $1 (an audio file) into words on stdout
+  fleet-telegram config speak-cmd '<cmd>'     turns stdin into an OGG/Opus voice file at $1
+  fleet-telegram config voice-ack '<text>'    sent the moment a voice note arrives ('' turns it off)
   fleet-telegram config allow [--only|--reset] <entry>…   what a Telegram turn may use:
       Read                      a tool, or a glob over tool names
       Write:scratch             that tool, for files in the session's scratch folder only
