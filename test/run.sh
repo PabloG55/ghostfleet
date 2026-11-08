@@ -25251,6 +25251,47 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
   is "accounts: 'use' of the active account over an unsaved login puts the saved one back" "bob" "$(livewho)"
 
+  # ── `use` right after a /login by hand, before the tick has looked ──────────────────
+  # spare is flagged NEEDS-LOGIN (a login that failed days ago). The owner logs the config dir
+  # into spare and runs `use` a few seconds later: the flag is a record of the past and the
+  # config dir is the truth, so `use` adopts what is live instead of sending them back to a
+  # /login they have just done. No tick runs between the /login and the `use`.
+  flag_spare() { jq --argjson t "$(tnow)" '.accounts.spare.needs_login = {at:$t, why:"its refresh token has expired"} | .accounts.spare.blocked = null' \
+                   "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"; }
+  SPN='work: now on spare (a /login by hand)'
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  flag_spare; ax node "$FL" set "$AW" carol C9; rows0="$(inbox_n "$SPN")"
+  out="$(ax "$ROOT/bin/fleet-accounts" use work spare)"; rc=$?
+  is "accounts: 'use' on a flagged account whose fresh /login is live succeeds with no tick between" "0 spare null spare" \
+     "$rc $(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json") $(jq -r .pin.account "$AW/fleet/accounts.json")"
+  is "accounts: ...the saved login is now the NEW live one, so a swap back restores it" "carol at-C9 carol at-C9" \
+     "$(saved spare) $(livewho) $(ax node "$FL" live "$AW" | awk '{print $2}')"
+  is "accounts: ...verified_at reset, history ends on spare" "0 spare" \
+     "$(jq -r .accounts.spare.verified_at "$AW/fleet/accounts.json") $(jq -r '.history[-1].account' "$AW/fleet/accounts.json")"
+  atick >/dev/null
+  is "accounts: ...and the tick after it adds no second 'now on spare' notice" "1 spare" \
+     "$(( $(inbox_n "$SPN") - rows0 )) $(active)"
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  # the tick's own adoption, with no `use` at all: still there, still one notice
+  flag_spare; ax node "$FL" set "$AW" carol C10; rows0="$(inbox_n "$SPN")"
+  atick >/dev/null; atick >/dev/null
+  is "accounts: the tick still adopts a hand /login to a flagged account, once" "spare null 1 at-C10" \
+     "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json") $(( $(inbox_n "$SPN") - rows0 )) $(saved spare | awk '{print $2}')"
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  # live is ANOTHER account: refused as before, and says why
+  flag_spare; ax node "$FL" set "$AW" alice A9
+  out="$(ax "$ROOT/bin/fleet-accounts" use work spare)"; rc=$?
+  is "accounts: 'use' on a flagged account while the config dir holds another account is refused" "1 yes yes backup" \
+     "$rc $(grep -q "'spare' needs /login first (the config dir is logged in as a different account)" <<< "$out" && echo yes || echo "no: $out") $(jq -e .accounts.spare.needs_login "$AW/fleet/accounts.json" >/dev/null && echo yes || echo no) $(active)"
+  ax node "$FL" set "$AW" bob B5
+  # live is this account's, but Claude Code blanked it: dead, refused
+  flag_spare; ax node "$FL" set "$AW" carol C11; ax node "$FL" blank "$AW"
+  out="$(ax "$ROOT/bin/fleet-accounts" use work spare)"; rc=$?
+  is "accounts: 'use' on a flagged account whose live login is dead or blanked is refused" "1 yes yes backup" \
+     "$rc $(grep -q "'spare' needs /login first (the login in the config dir is dead" <<< "$out" && echo yes || echo "no: $out") $(jq -e .accounts.spare.needs_login "$AW/fleet/accounts.json" >/dev/null && echo yes || echo no) $(active)"
+  ax node "$FL" set "$AW" bob B6
+  jq '.accounts.spare.needs_login = null' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+
   # ── the Linux store: 0600 files beside .credentials.json ─────────────────────────
   LH="$AC/lhome"; mkdir -p "$LH/.config/ghostfleet" "$LH/.claude/fleet"; printf 'on\n' > "$LH/.config/ghostfleet/accounts.enabled"
   lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file "$@" 2>&1; }
