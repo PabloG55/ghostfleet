@@ -11601,7 +11601,13 @@ STUB
 else
   skip "a running session's model" "node or jq missing"
 fi
-case "$SMD" in "${TMPDIR%/}"/?*|/tmp/?*) rm -rf "${SMD:?}" ;; esac
+# Defaulted BEFORE the slash is stripped. A bare "${TMPDIR%/}" under set -u is two bugs,
+# one per bash: 5.x (Ubuntu, the CI linux leg, where TMPDIR is unset by default) aborts the
+# whole suite here with "TMPDIR: unbound variable", and macOS's 3.2 does not fire nounset on
+# a pattern removal at all — it expands to empty, the pattern becomes /?*, and the guard in
+# front of this rm admits every absolute path.
+_smr="${TMPDIR:-/tmp}"; _smr="${_smr%/}"; [ -n "$_smr" ] || _smr=/tmp
+case "$SMD" in "$_smr"/?*|/tmp/?*) rm -rf "${SMD:?}" ;; esac
 
 # ── 4c5. fleet-meter --context: did the ceiling move the spend? ───────────────
 # The report the ceiling is judged by. Its corpus is built by hand (test/helpers/
