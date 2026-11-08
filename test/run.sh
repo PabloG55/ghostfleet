@@ -23887,7 +23887,9 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   }
   flp_run() {     # <root> <sock>: the list, with every spawn logged
     : > "$FP/log"
-    env FP_LOG="$FP/log" PATH="$FP/shim:$PATH" CLAUDE_FLEET_DIR="$1/fleet" CLAUDE_CONFIG_DIR="$1/cfg" CLAUDE_FLEET_SLOT= TMUX= \
+    # LC_ALL=C: tmux 3.4 outside a UTF-8 locale prints a tab in -F as `_`, which fused every
+    # session name with its path; the list must read the same in a bare container or cron job.
+    env FP_LOG="$FP/log" LC_ALL=C LANG=C PATH="$FP/shim:$PATH" CLAUDE_FLEET_DIR="$1/fleet" CLAUDE_CONFIG_DIR="$1/cfg" CLAUDE_FLEET_SLOT= TMUX= \
       "$ROOT/bin/fleet-list" -s "$2" 2>&1
   }
   flp_count() { local n; n="$(grep -cx "$1" "$FP/log" || true)"; printf '%s' "${n:-0}"; }
