@@ -556,4 +556,5 @@ rule worth knowing before sending a patch: a test that cannot fail proves nothin
 
 ## License
 
-MIT © 2026 Pablo Garces
+The core is MIT © 2026 Pablo Garces. The `ee/` folder is the Team edition, under the ghostfleet Team
+License. See [docs/LICENSING.md](docs/LICENSING.md).

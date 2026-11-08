@@ -1,0 +1,90 @@
+# ghostfleet Team License
+
+Copyright (c) 2026-present Pablo Sebastián Garcés Barona. All rights reserved, except as granted below.
+
+## 1. What this license covers
+
+This license applies only to the files in the `ee/` directory of the ghostfleet repository, and to
+any file elsewhere that says it is under the ghostfleet Team License (the "Team Software").
+
+Every other file in the repository is under the MIT License in the repository's `LICENSE` file.
+Nothing in this license limits what the MIT License allows for those files.
+
+Third-party components included in the Team Software are licensed under the licenses their owners
+provide, not under this license.
+
+## 2. Definitions
+
+**"You"** means the person or organization using the Team Software. An organization includes its
+affiliates.
+
+**"User"** means a person who has an account in the Team Software's multi-person mode, or who has
+used it at any time in the previous thirty (30) days.
+
+**"Subscription"** means a paid ghostfleet Team subscription bought from the Licensor for a stated
+number of Users and period.
+
+**"Licensor"** means Pablo Sebastián Garcés Barona, or a company to which he transfers the Team
+Software.
+
+## 3. What You may do without paying
+
+You may use, copy and modify the Team Software:
+- (a) in production, if You have **no more than two (2) Users**;
+- (b) with any number of Users, only to develop, test or evaluate it, and not for any work that
+  You would otherwise do for real.
+
+## 4. What needs a Subscription
+
+You need a Subscription covering every User to use the Team Software in production with **three
+(3) or more Users**.
+
+Using it beyond the Users or period of Your Subscription needs a larger Subscription.
+
+## 5. What You may not do
+
+You may not:
+- (a) provide the Team Software, or a modified version, to third parties as a hosted or managed
+  service;
+- (b) distribute, sublicense, sell or rent the Team Software or a modified version, except
+  contributions to the ghostfleet repository made under its Contributor License Agreement;
+- (c) remove, disable or work around any part of the Team Software that counts Users or checks a
+  Subscription;
+- (d) remove or change any license, copyright or other notice in it.
+
+## 6. Modifications
+
+You may modify the Team Software for Your own use under Sections 3 and 4. The Licensor and its
+licensors keep all rights in the Team Software and in modifications made to it.
+
+You may submit modifications to the ghostfleet repository under its Contributor License Agreement.
+
+## 7. Termination
+
+This license ends automatically if You breach it. It is reinstated if You cure the breach within
+thirty (30) days of becoming aware of it, unless the Licensor has given You notice of the same
+kind of breach before.
+
+When it ends, You must stop using the Team Software beyond what Section 3 allows.
+
+## 8. No warranty
+
+THE TEAM SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NON-INFRINGEMENT. A Subscription may include support or other terms; those are in the
+Subscription agreement, not here.
+
+## 9. Limitation of liability
+
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE TEAM
+SOFTWARE OR ITS USE. Where the law does not allow that exclusion, the Licensor's liability is
+limited to what You paid for the Subscription in the twelve (12) months before the claim.
+
+## 10. Other terms
+
+You are not granted any rights beyond those this license expressly states.
+
+Trademark rights in "ghostfleet" are not granted by this license.
+
+If a court finds a provision unenforceable, the rest of this license still applies.
