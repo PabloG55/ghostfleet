@@ -33,6 +33,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | record what you heard (as a worker) | `fleet-ack "<one line>" --from "<decisions>"` |
 | **where a project stands**, what it is, what was decided — any profile, any paired machine | `fleet-know <project>` (MCP `fleet_know`) — read it before reading files; `fleet-know waiting` for everything on the owner |
 | **standing rules**, and closing what stopped being true | `fleet-know rule add\|list\|close\|accept`, `fleet-know decide … --supersedes <id>`, `fleet-know fact <project> <key> <value>` (MCP `fleet_know`: `rules`, `fact`) — a worker's rule is a proposal until a lead accepts it |
+| **what happened to a project**, in order, with who said what | `fleet-know history <project> [--since <date>] [--until <date>]` (MCP `fleet_know`: `history`, `since`, `until`) |
 | live sessions + status | `fleet-list` |
 | who needs you / what **finished** (drains since last look) | `fleet-inbox` — also names finished workers to `fleet-stop --reclaim` |
 | a queued prompt a dead drain left **stranded** (listed by `fleet-inbox`) | `fleet-send --requeue <session> <id>` or `--discard <session> <id>` — the owner's call |

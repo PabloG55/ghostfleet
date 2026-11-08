@@ -397,6 +397,8 @@ window — and if you use zellij, it stays a single pane instead of commandeerin
   from it — `waiting`, `touched <path>` and `find <text>` across every project, `--at` for any past
   moment. `fleet-know rule` keeps the owner's standing rules, `decide --supersedes` and `fact` close what
   stopped being true, and the experimental `know-brief` tells a lead all of it at SessionStart.
+  `fleet-know history <project>` is what happened, in order, and `fleet-know backfill` fills that in
+  from the PRs, ledgers, manifests and commits the machine already has, at the times they happened.
   `fleet-know privacy <project> private|exclude` (also a project setting, `know`) keeps a
   project from a model vendor or out of the record.
 - **`claude-here`** is what each session runs, so sessions resume by checkout. If a

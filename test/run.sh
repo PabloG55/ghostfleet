@@ -27285,16 +27285,20 @@ rm -rf "${EM:?}"
 # string can hold is read a line at a time, a token shape never reaches the log, a forgotten
 # event leaves the graph, find and the pairing (--purge: the file too, and a concurrent writer
 # loses no line), every decision and fact says who said it, and a long turn keeps the question
-# it ends on. Watched red: every section against a copy of this tree broken on purpose, one
+# it ends on. And history: a backfill lands once, at the source's time, known now, beside what the
+# live hooks saw and never on top of it, and never reads a profile that does not record; an answer
+# of the owner's becomes the owner's decision with its question, while a lead's reply or a worker's
+# ack does not; history reads back in order and bounded; and a briefing cuts what waits before it
+# cuts a rule. Watched red: every section against a copy of this tree broken on purpose, one
 # break per copy (listed in the PR).
-group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost, rules, facts that close, the lead's briefing, compaction, reads"
+group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost, rules, facts that close, the lead's briefing, compaction, reads, backfill, history"
 if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   KCD="$(mktemp -d "$TEST_RUNS.$$.know.XXXXXX")"
   node "$ROOT/test/helpers/know-check.mjs" "$KCD" > "$KCD/out" 2> "$KCD/err"
   kcrc=$?
   is "know-check ran"                 "0" "$kcrc"
   is "...without complaining"         ""  "$(head -2 "$KCD/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 450 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 600 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$KCD/out"

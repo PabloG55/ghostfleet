@@ -722,7 +722,7 @@ const TOOLS_ALLOWED = {
   // The fleet's memory: a read across every fleet and paired machine, so noProject — and its
   // project is `about`, which this daemon does not resolve or forward (acme-api@vm is
   // answered HERE, from the events this host already fetched over the pairing).
-  fleet_know:            { fields: ['about', 'waiting', 'touched', 'find', 'at', 'json'], noProject: true },
+  fleet_know:            { fields: ['about', 'waiting', 'touched', 'find', 'history', 'since', 'until', 'at', 'json'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },

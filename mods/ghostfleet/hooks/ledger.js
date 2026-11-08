@@ -38,7 +38,10 @@
 //            within RESEND_MS of the stop is folded into the interrupted item (resendOf)
 //   repeated how many more times the same words were sent while it was open, each within
 //            REPEAT_MS of the last (`repeatedAt`): one ask, not one item per send (repeatOf)
-//   replies  [{ at, text }]: bare answers to a numbered question the agent asked about it
+//   replies  [{ at, text, source, asked }]: bare answers to a numbered question the agent asked
+//            about it, who sent each and what was asked. A reply from before those two has neither
+//   asked    on a `user` item: the numbered question the turn before it ended on, so this whole
+//            message is the person's answer to it (ownerAnswers)
 //   prompt   the number of the prompt that made it (ledger.prompt counts them); `window` is
 //            the first prompt of the latest one, and only items from `window` on are gated.
 //            An item from before this field existed has none, and is never gated again
@@ -226,10 +229,14 @@ export function requestAsks(text) {
 // the message speaks to is the agent's to act on again (wakeWaiting).
 // `made`, when given, is filled with only the items it created (a resend or a reply touches
 // one that was there before, and undoing the prompt must not delete it).
-export function addPrompt(ledger, { text, at, turnId, source, queued, whole = false, choiceTurn = '' }, ids = [], made = []) {
+export function addPrompt(ledger, { text, at, turnId, source, queued, whole = false, choiceTurn = '', asked = '' }, ids = [], made = []) {
   if (isNudge(text)) return null
-  const folded = !queued && choiceTurn ? foldReply(ledger, text, { at, choiceTurn }) : null
+  const folded = !queued && choiceTurn ? foldReply(ledger, text, { at, choiceTurn, source, asked }) : null
   if (folded) { ids.push(folded.id); return folded.ledger }
+  // A message that is not bare but still the next thing the person said after a numbered question
+  // answers it too. Once, on the first of its asks: the rest of the message is more asks. Past a
+  // paragraph it is a new brief that happens to come next, and an owner's decision never decays.
+  let answers = !queued && choiceTurn && source === 'user' && requestText(text).length <= ANSWER_MAX ? asked : ''
   const asks = whole ? [requestItem(text)].filter(Boolean) : requestAsks(text)
   if (!asks.length) return null
   const prompt = (Number(ledger.prompt) || 0) + 1
@@ -271,7 +278,8 @@ export function addPrompt(ledger, { text, at, turnId, source, queued, whole = fa
       ids.push(same.id)
       continue
     }
-    next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true, inTurn })
+    next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true, inTurn, asked: answers })
+    answers = ''
     ids.push(next.items[next.items.length - 1].id)
     made.push(next.items[next.items.length - 1].id)
   }
@@ -352,12 +360,21 @@ export function endsOnChoice(answer) {
   return (tail.match(/^\s*\(?\d+[.)]\s+\S/gm) || []).length >= 2 && tail.includes('?')
 }
 const OWED = new Set(['open', 'waiting', 'stale'])
-export function foldReply(ledger, text, { at, choiceTurn }) {
+const ANSWER_MAX = 500
+// The question a numbered choice put, as a reply will need it quoted: the options and the line that
+// leads into them, because "2" says nothing without them. From the window endsOnChoice read.
+export function askedIn(answer, n = 400) {
+  const lines = String(answer || '').slice(-800).split('\n').map(l => l.trim()).filter(Boolean)
+  const first = lines.findIndex(l => /^\(?\d+[.)]\s+\S/.test(l))
+  if (first < 0) return ''
+  return excerpt(lines.slice(Math.max(0, first - 1)).join(' '), n)
+}
+export function foldReply(ledger, text, { at, choiceTurn, source = '', asked = '' }) {
   if (!choiceTurn || !isBareChoice(text)) return null
   const of = ledger.items.filter(i => i.turnId === choiceTurn && OWED.has(i.state))
   const it = of.filter(i => i.source !== 'promise').pop() || of.pop()
   if (!it) return null
-  const reply = { at, text: excerpt(requestText(text), 40) }
+  const reply = { at, text: excerpt(requestText(text), 40), ...(source ? { source } : {}), ...(asked ? { asked } : {}) }
   const items = ledger.items.map(i => (i === it ? { ...reopened(i), replies: [...(i.replies || []), reply].slice(-3) } : i))
   return { id: it.id, ledger: { ...ledger, items } }
 }
@@ -396,13 +413,13 @@ export function stampTurn(ledger, text, turnId) {
 // `queued`: typed over a running turn. Such a message can still be pulled back out of the
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
 // `prompt`: the message it came from (addPrompt). `asIs`: the text is already an item's.
-export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, asIs, inTurn }) {
+export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, asIs, inTurn, asked }) {
   const seq = (Number(ledger.seq) || 0) + 1
   const words = asIs ? String(text) : source === 'promise' ? excerpt(text) : requestItem(text)
   const item = {
     id: String(seq), text: words, at, ...(turnId ? { turnId } : {}), state: 'open', source,
     ...(queued ? { queued: true } : {}), ...(prompt ? { prompt } : {}), ...(by ? { addedBy: by } : {}),
-    ...(inTurn ? { inTurn: true } : {}),
+    ...(inTurn ? { inTurn: true } : {}), ...(asked ? { asked } : {}),
   }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
@@ -1492,6 +1509,45 @@ export function ledgerRuns(s, nowMs, columns) {
 // never has to watch the files, and spelled once, here, because the mod can import only
 // this directory and lib/ can import it too. `t` is the ledger's own time for the change:
 // when the item was asked, or closed.
+// WHAT THE OWNER ANSWERED, read off one ledger, so a live write and a backfill spell it the same.
+// Each is an answer the ledger can show was given to a question, and nothing weaker:
+//   a bare reply to a numbered question (foldReply), from the person: its `source` says so, and
+//     `asked` is the question. One from before replies carried those is not an answer to anything
+//     on record: "1" says nothing without what it picked, and the item's own text is the person's
+//     ask, not a question put to them. Measured on one machine: every such reply was a bare digit,
+//     and printed against that text they would have read as the owner's decisions on every
+//     briefing and meant nothing. They are counted (unaskedReplies), not guessed at
+//   a whole message, the next thing the person said after a numbered question (addPrompt)
+//   a lead's QUESTION that waited on the person, woken by a message of theirs
+// NOT ANY OTHER WAKE. A wake is two shared words (mentions, loose), which is right for "the person
+// may have moved" and wrong for "the person decided". Measured on one log: 34 wakes by the person,
+// none of them passing the strict reading, one with a question in it, and most of them a follow-up
+// on the same subject. A decision from the owner never decays, so a wrong one stays on every
+// briefing, and that is worse than one that was never recorded.
+// A reply of the person's whose question the ledger never held. A lead's "2" to a worker folds the same
+// way, so one with no source counts as the person's only on the person's own item.
+export function unaskedReplies(ledger) {
+  let n = 0
+  for (const i of (ledger && ledger.items) || []) {
+    for (const r of i.replies || []) if ((r.source ? r.source === 'user' : i.source === 'user') && !r.asked) n++
+  }
+  return n
+}
+export function ownerAnswers(ledger) {
+  const items = (ledger && ledger.items) || []
+  const out = []
+  for (const i of items) {
+    for (const r of i.replies || []) {
+      if (r.source === 'user' && r.asked) out.push({ id: String(i.id), t: Number(r.at) || 0, answer: r.text, question: r.asked, how: 'reply' })
+    }
+    if (i.asked && i.source === 'user') out.push({ id: String(i.id), t: Number(i.at) || 0, answer: i.text, question: i.asked, how: 'reply' })
+    if (i.woke && i.source === 'fleet' && String(i.text || '').includes('?')) {
+      const by = items.find(x => x !== i && x.source === 'user' && Number(x.at) === Number(i.woke))
+      if (by) out.push({ id: String(i.id), t: Number(i.woke) || 0, answer: by.text, question: i.text, how: 'woke' })
+    }
+  }
+  return out.filter(a => a.t && a.answer && a.question)
+}
 export function ledgerChanges(before, after) {
   const was = new Map(((before && before.items) || []).map(i => [String(i.id), i]))
   const out = []
@@ -1503,5 +1559,7 @@ export function ledgerChanges(before, after) {
                  by: i.closedBy, t: Number(i.closedAt || i.expiredAt) || 0 })
     }
   }
+  const told = new Set(ownerAnswers(before).map(a => `${a.id}/${a.t}`))
+  for (const a of ownerAnswers(after)) if (!told.has(`${a.id}/${a.t}`)) out.push({ op: 'answer', ...a })
   return out
 }

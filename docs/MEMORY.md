@@ -74,13 +74,14 @@ its command-line face, called from:
 | `hooks/fleet-event.sh` (detached, see the cost below) | `session.start`, `prompt` (the owner's, never the fleet's own nudges), `need-you`, `turn.end` (with the files edited, PRs opened or merged and deploys run in that turn, read from the transcript since the last Stop), `session.end` |
 | `fleet-spawn` · `fleet-ack` · `fleet-stop` | `spawn` (branch, worktree, task, parent), `ack` (what the worker understood, and the decisions it builds from), `retire` |
 | `fleet-merged` (the PR cache) | `pr.open`, `pr.merge`, `pr.close` — from what changed between two refreshes |
-| every ledger writer (the mod, `fleet-ledger`, the landed and carry passes) | `request.open`, `request.state` |
+| every ledger writer (the mod, `fleet-ledger`, the landed and carry passes) | `request.open`, `request.state`, and a `decision` when the owner answered a question (see [The owner's answers](#the-owners-answers)) |
 | `fleet-know describe` · `decide` · `relate` | `project.about`, `decision`, `relate` |
 | `fleet-know forget` | `forget`, a tombstone naming the event it covers, and nothing of its text |
 | `fleet-know rule add` · `accept` · `close` · `share-from` | `rule`, `rule.accept`, `rule.close`, `rule.share` |
 | `fleet-know fact`, and the pairing sync when a peer's state moves | `fact` |
 | every read · the briefing · `PreCompact` | `know.read`, `know.brief`, `session.compact`: notes the memory keeps about itself, never folded (see [Reads are visible](#reads-are-visible)) |
 | the inferred pass (layer 3) | `decision` marked `inferred` |
+| `fleet-know backfill` | `pr.open`, `pr.merge`, `request.open`, `request.state`, `decision`, `spawn`, `retire`, `commit`, each at the source's own time and marked `src.via: backfill` (see [Backfill](#backfill)) |
 
 `CLAUDE_FLEET_KNOW=off` in the environment stops every writer, for a run that must leave no
 trace.
@@ -132,6 +133,12 @@ answers as things stood then (a PR merged at 13:00 is open in a brief `--at 12:3
 peer's log fetched tomorrow) visible as late. The few attributes a brief reads as at a time —
 a session's status and last sighting, a request's state — keep their history too.
 
+`--known-at` folds the lines recorded by then, rather than filtering the graph as it stands. A
+first-wins attribute such as a PR's `merged` holds one value, so a read that leaned on one reported
+things nobody had written down yet. That went unseen while a line's recorded time was its valid time to
+the second, and a backfill puts months between them. A fold is the price: `rebuild`'s time, on a flag
+somebody reaches for rarely, and a plain read pays nothing for it.
+
 Two profiles, or two machines, that see the same PR are talking about one node: a repo, a
 branch, a PR and a commit are named by the repo, not by where they were seen. A project is
 per machine and profile (`acme-api@laptop/work`).
@@ -161,12 +168,14 @@ most 600 tokens per finished turn while on.
 | `fleet-know find <text…>` | searches the **raw events**, not only the graph |
 | `fleet-know rule list [<project>]` | the rules that apply there, most specific first, and the proposals nobody has accepted (see [Rules](#rules)) |
 | `fleet-know fact <project> <key>` | one keyed fact, or `not recorded` (see [Closing a fact](#closing-a-fact)) |
+| `fleet-know history <project> [--since <date>] [--until <date>]` | what happened to it, one line each, newest last, grouped by day (see [History](#history)) |
+| `fleet-know backfill [--profile <p>] [--since <date>] [--dry-run]` | writes, once: the history this machine already has on record, at the time it happened (see [Backfill](#backfill)) |
 | `fleet-know reads [--since <time>]` | what the memory was asked, the questions it could not answer first (see [Reads are visible](#reads-are-visible)) |
 | `--at <time>` · `--known-at <time>` · `--json` · `--no-sync` | an instant (ISO, epoch or `3d ago`); data instead of text; skip asking paired machines |
 | `--trusted` | a project page narrowed to what the owner or a lead said (see [Who said it](#who-said-it)) |
 
 The MCP tool **`fleet_know`** is the same reader (`about`, `waiting`, `touched`, `find`, `rules`,
-`fact`, `at`, `trusted`, `json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
+`fact`, `history`, `since`, `until`, `at`, `trusted`, `json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
 same way. Its project argument is `about`, not `project`: everywhere else `project` names the
 fleet to act in, and the memory answers about every fleet and paired machine at once.
 
@@ -333,9 +342,17 @@ WAITING ON THE OWNER
   each. An excluded project gets nothing; a private one is told to its own lead with the private
   warning.
 - **At most 2,000 characters**, whatever the log holds. Claude Code turns hook output over 10,000 into
-  a file the model is not asked to read, so a log that grew past that would quietly brief nobody. It is
-  cut by whole lines, one line from each section in turn with `+N more: fleet_know` closing each, so
-  500 rules cannot starve the three things waiting on the owner.
+  a file the model is not asked to read, so a log that grew past that would quietly brief nobody.
+- **A rule is the last thing cut.** A rule the lead was not told about is one it breaks, and a waiting
+  item it was not told about is one `fleet_know` still lists. Sharing the cap by turns got that
+  backwards: with 13 rules and 8 waiting items it cut the 3 oldest rules while every waiting item
+  showed. So rules claim their room first, and decisions and waits share what is left, closing with
+  `+N more: fleet_know`. A long rule gives up the end of its text before any rule gives up its line,
+  but not past 48 characters of it.
+- **When rules alone will not fit,** one line says so, and the lines kept are the front of the order the
+  rules always print in: the owner's before a lead's, then `all` and `profile` before `project:`, then
+  the newest. Every other section still gets its heading and one line, however many rules there are,
+  so 500 rules cannot hide that something waits on the owner, and the count says how much more does.
 - **It replaces the earlier one.** The header says so, because after a resume the old briefing is
   still in the conversation. So a resume or compact where everything an earlier briefing could have
   named has closed says that nothing holds, rather than saying nothing and leaving the old rules
@@ -479,6 +496,122 @@ still holds it, and the next fetch does not bring it back.
 
 `CLAUDE_FLEET_KNOW=off` refuses aloud and writes nothing: off means no writer writes.
 
+## The owner's answers
+
+A question the owner answered is a decision, and a lead that has to ask it again is the failure this
+memory exists to prevent. So an answer becomes a `decision` with authority `owner`, carrying the answer
+and the question it answered, and the page and the briefing print it as such:
+
+```
+- kb52e4ecb1dfaf259 [owner] The owner already answered "2" (Parquet) to: Which format? 1. CSV 2. Parquet
+```
+
+Three shapes count, each read off the ledger (`ownerAnswers` in the mod's `hooks/ledger.js`), live as the
+ledger is written and again by a backfill:
+
+- **A reply the owner sent to a turn that asked,** which folds into the ledger item as a `replies` row
+  saying who sent it (`source`) and what it answered (`asked`, the numbered list off the end of the turn).
+  A row from before those fields existed is not an answer to anything on record: "1" says nothing
+  without what it picked, and the item's own text is the owner's ask, not a question put to them. A
+  backfill counts those and writes nothing for them. Measured on one machine, every one was a bare digit.
+- **A short message right after a numbered question,** which is a new ledger item rather than a reply.
+  The question is kept on the item. Past 500 characters it is a new brief, not an answer.
+- **A lead's question that a message of the owner's woke.** Only one with a question mark in it. Measured
+  on one machine: of 57 wakes, 34 were by a person, and only 1 of those 34 woke an item that asked a
+  question at all, so a wake alone proves nothing.
+
+A lead's reply to a worker is not the owner's, whatever it says, and neither is anything a worker writes:
+an `ack` stays `worker` even when its text claims otherwise. Authority follows the writer and the source,
+never the words.
+
+## History
+
+`fleet-know history <project>` is what happened, in order: merged PRs, decisions and rules with who said
+them, deploys, keyed facts changing, workers started and finished, and commits nothing else accounts for.
+No model reads anything for it. What the suite's fixture fleet prints:
+
+```
+acme-api@laptop · work profile · history, newest last, times in UTC
+2026-02-12
+  16:00  [owner] rule (profile): Every change lands through a PR, reviewed
+2026-03-02
+  17:20  [lead] decision: Bill the export endpoint per call (no longer holds)
+2026-03-03
+  10:00  [lead] rule (project:acme-api): Rate limits are per account
+2026-03-04
+  02:40  [lead] deploy.target = vercel-preview
+2026-03-05
+  12:01  worker api-fix started on fix/csv-export: a quote-aware CSV writer, column order kept
+  12:03  [worker] decision: RFC 4180 quoting; no new dependency
+  13:00  PR #1170 merged (fix/csv-export)
+  13:02  worker api-fix finished (fix/csv-export)
+  13:10  deploy vercel deploy at a1b2c3d4 (master)
+  13:12  [lead] decision: Keep the v1 export endpoint until acme-web moves to v2
+  13:13  [lead] rule (project:acme-api): Rate limits are per API key, never per account
+  13:13  rule closed (project:acme-api): Rate limits are per account — superseded by k861059144ea1cf70
+  13:14  [worker api-fix] proposed a rule (project:acme-api): Retry a failed export three times
+  13:15  [lead] decision: Bill the export endpoint per row
+  13:16  [lead] deploy.target = vercel-production (was vercel-preview)
+  13:20  worker docs-pass started on docs/setup-pass: Tighten the README setup section
+```
+
+- **Times are UTC, and each line is at the time it happened,** not when it was recorded.
+- **`--since` and `--until` take a date or a time.** A bare `--until 2026-03-05` means the whole of that
+  day. `--at` stops the list there, and `--known-at` shows only what had been recorded by then.
+- **It prints the newest 200 lines of a range,** whatever the range holds, and says what it left out:
+  `+60 earlier: --since 2026-01-10 --until 2026-01-12T22:00:00.000Z`, a range that reads exactly the rest.
+- **A commit that names a PR already listed is not said twice.**
+- **MCP:** `fleet_know` with `history`, `since` and `until`.
+
+Private and excluded projects follow the same rules as the page: an excluded one has no history here, and
+a private one says so at the top.
+
+## Backfill
+
+`fleet-know backfill [--profile <p>] [--since <date>] [--dry-run]` fills in history from what the machine
+already has on record. It is a command the owner runs. Nothing in the install runs it, and it calls no
+model.
+
+| source | what it reads | what it writes |
+|---|---|---|
+| merged PRs | `gh pr list` per repo: the real merge time, head branch, title, author | `pr.open`, `pr.merge` |
+| ledgers | `<fleet dir>/*.ledger`: each item's ask, state, times and proof, and any owner's answer | `request.open`, `request.state`, `decision` |
+| spawn manifests | `<fleet dir>/*.manifest.tsv`: worker, branch, task | `spawn`, and `retire` when the worktree is gone |
+| the default branch | `git log --first-parent`: commit time, subject, the PR number a subject names | `commit`, a line and no graph node |
+
+- **Valid then, known now.** Each line's `t` is the source's time and its `rec` is this run, so `--at`
+  before a backfilled merge says it had not merged, and `--known-at` before the run says nobody knew.
+- **A source with no time gets no line.** A manifest row has no time in it, so it borrows the spawn's
+  line in `<sock>.brief.tsv`, then the branch's first reflog line, then the first line of a transcript from
+  that folder, and past those it is counted as skipped.
+- **Once.** A second run adds nothing, and a later run adds only what is new.
+- **Never beside what the live hooks saw.** A live writer saw the same merge at a different time, so its
+  id differs, and an id alone would file it twice. The log is read first into one key per fact (a PR's
+  merge is one key whoever wrote it), and a merge a live writer recorded keeps the live writer's time.
+- **Authority does not change.** A ledger item the owner asked for is `owner`, a lead's brief is `lead`, a
+  promise is `worker`, and the only `decision` it writes is an [owner's answer](#the-owners-answers). It
+  never invents one.
+- **A profile that does not record is not read.** Its folder is not opened unless `--profile` names it,
+  because recording is turned on per profile, and history is the same data. It prints which it left and
+  why. Naming one starts its log. An excluded project is not asked of `gh`, read, or written.
+- **`--dry-run` writes nothing,** not a line, not a snapshot and not a read note, and prints the counts per
+  source and per project, and how many of the lines would be the owner's decisions.
+- **It prints what it skipped, and why:** a session with no project on the list, a row with no time, a
+  repo `gh` could not list, a reply of the owner's whose question is not on record.
+- **It leaves the graph built.** Every line is older than the snapshot's high-water, so the next read would
+  rebuild anyway, and this puts that wait on the command that caused it, not on a session's start.
+
+**It closes what nobody will.** A ledger item still open a week after it was asked is not a live ask: the
+session that could close it is gone, and it would sit on the project's page forever. So one older than
+that gets an `expired` state at the end of that week, with a reason saying the backfill wrote it. Only for
+what the backfill itself opened: an item a live hook recorded is still the live hook's to close. It is the
+one line a backfill writes that no source says outright, and it is marked `by: backfill`.
+
+**What it cannot reach.** A paired machine asks a peer for the lines newer than the last one it fetched, and
+a backfilled line carries the time it happened. So lines dated before that point do not reach a machine
+that has already fetched past it, and its view of this machine goes on without them. This machine's own
+answers are not affected.
+
 ## Scale
 
 A read costs CPU in proportion to what it answers, not to the square of the log. A read index
@@ -496,6 +629,23 @@ Wall clock on an Apple M5 Pro at a load average of 5–8, log of many projects
 | 3k | 61 ms | 63 ms | 60 ms | 67 ms | 71 ms |
 | 30k | 130 ms | 137 ms | 127 ms | 177 ms | 273 ms |
 | 90k | 239 ms | 284 ms | 276 ms | 408 ms | 696 ms |
+
+**A backfill is the case a read pays most for,** since every line it adds is older than what the
+snapshot has folded. Same machine at a load average of 5–7, a log of 40 projects with a synthetic
+backfill added on top (`know-bench.mjs backfill`, which holds more PRs and workers per commit than the
+one real machine measured, so it errs on the costly side):
+
+| log | `fleet-know <project>` | `waiting` | `history` | `--known-at` | `rebuild` |
+|---|---|---|---|---|---|
+| 10k, before | 82 ms | 84 ms | | | 123 ms |
+| 30k, after adding 20k | 134 ms | 142 ms | 175 ms | 227 ms | 231 ms |
+| 30k, before | 138 ms | 144 ms | | | 294 ms |
+| 90k, after adding 60k | 252 ms | 284 ms | 393 ms | 428 ms | 622 ms |
+
+The command rebuilds before it returns, so these are what any read after it costs. Lines landing with
+no rebuild, as when a backfill is killed before its last step, cost the next read one rebuild of its
+own: 337 ms at 30k and 1,015 ms at 90k, once. `--known-at` folds the log again per read, on purpose,
+because the earliest-wins attributes hold one value and cannot be asked what was known then.
 
 **The log is read a line at a time**, in a bounded buffer, so a file past the 512 MB a string can
 hold is only a longer read. A torn line, a foreign line, and one past 1 MB are skipped. Measured
@@ -532,7 +682,8 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
 - **A merge's time is when ghostfleet first saw it** — the `fleet-merged` refresh that found it
   merged, or the `gh pr merge` in a turn — not GitHub's `mergedAt`, which would need a network
   call nothing else on this path makes. Seen again later, by another refresh or another
-  profile, it is the same merge with the earlier time.
+  profile, it is the same merge with the earlier time. A [backfill](#backfill) writes GitHub's time, for
+  a merge no live writer saw, and leaves one that was seen alone.
 - **A deploy is either recorded by the script that did it, or a command a turn ran.** This
   repo's own `cf-sync` (and `install.sh`, through it) say so themselves, once a sync has
   succeeded: `fleet-know-event deploy target="ghostfleet runtime" commit=<the commit it
@@ -558,12 +709,10 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
   the project's own workers opened keeps the wording of "its worker reported done".
 - **The first PR cache a repo gets records only its open PRs.** Its merged ones are history
   whose merge times are unknown, and inventing them would put three hundred merges at the
-  moment the cache was first built.
+  moment the cache was first built. A [backfill](#backfill) is where they come from, at GitHub's times.
 
 ## What is not built yet
 
-- **Backfill.** Only events from install onward are recorded; the existing ledgers,
-  manifests and PR caches are not replayed into the log.
 - **Compaction.** The log only grows (a line is a few hundred bytes; a busy fleet writes a few
   thousand a day). Rotating it into segments, with the snapshot as the fold of the closed ones,
   is the next step when it matters, and the way past the snapshot's ceiling under
@@ -571,9 +720,10 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
 - **Retroactive redaction.** The table applies from the moment it shipped. Older lines are found
   with `find` and removed with `forget --purge`, one at a time.
 - **Owner-sourced decisions and rules from a conversation.** `owner` is earned today by a person's
-  own terminal and by ledger items the owner asked for. Nothing yet records a decision or a rule from
-  a prompt or a ledger reply, though the fold already reads those sources as the owner's, so a lead
-  writes down what the owner said under its own `lead`, with `--quote` keeping the words.
+  own terminal, by ledger items the owner asked for, and by [an answer to a question](#the-owners-answers).
+  Nothing yet records a decision the owner stated unprompted, or a rule from a prompt, though the fold
+  already reads those sources as the owner's, so a lead writes down what the owner said under its own
+  `lead`, with `--quote` keeping the words.
 - **What a project is, automatically** — from its README, via the inferred pass. Today it is
   `fleet-know describe`.
 - **Inferred facts for the other agents.** The pass lives in the Claude Code mod; codex,

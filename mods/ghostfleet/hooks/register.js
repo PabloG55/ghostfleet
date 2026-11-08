@@ -49,7 +49,7 @@ import {
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn, countJudge, adoptLedger,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
-  revisitTurn, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
+  revisitTurn, expireDormant, endsOnChoice, askedIn, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
   deliverySource, ledgerChanges,
 } from './ledger.js'
 import { inferFacts, INFER_MODEL, INFER_TOKENS, INFER_MS } from './know-shape.js'
@@ -1251,6 +1251,7 @@ let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
 let gateTurns = []       // the last few turns the gate's own re-prompt started
 let choiceTurn = ''      // the last turn, when it ended on a numbered question (ledger.js foldReply)
+let choiceAsked = ''     // ...and what it asked, for quoting beside the answer (ledger.js askedIn)
 let personTexts = []     // the person's own messages, submitted and not yet started as a turn
 let personTurns = []     // the last few turns one of those started (ledger.js revisitTurn)
 
@@ -1472,7 +1473,7 @@ async function ledgerPromptSubmit($, e, next) {
   let window = 0
   let cur = source ? await changeLedger($, l => {
     window = Number(l.window) || 0
-    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn }, ids, made)
+    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn, asked: choiceAsked }, ids, made)
   }) : null
   if (!cur) {
     const file = await ledgerPath($)
@@ -1618,6 +1619,7 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
   if (!cfg.on) return
   const at = await $.clock.now()
   choiceTurn = e.reason === 'answer' && endsOnChoice(blocks[blocks.length - 1]) ? e.turnId : ''
+  choiceAsked = choiceTurn ? askedIn(blocks[blocks.length - 1]) : ''
   if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
   if (e.reason !== 'answer') { await settleOf($, e.turnId, generation); return }
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)

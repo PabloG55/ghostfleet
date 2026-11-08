@@ -13,6 +13,10 @@
 //   fleet-know rule list [<project>]   the standing rules that apply, most specific first
 //   fleet-know fact <project> <key>    one keyed fact; "not recorded" when nothing holds now
 //   fleet-know reads [--since <time>]  what was asked of the memory, zero-hit questions first
+//   fleet-know history <project> [--since <date>] [--until <date>]
+//                                      what happened to it, newest last, grouped by day: merges,
+//                                      decisions and rules with who said them, deploys, keyed
+//                                      facts changing, workers started and finished, commits
 //
 //   --at <time>        as it stood then (ISO, epoch, or "3d ago"); default now
 //   --known-at <time>  as it was KNOWN then (what had been recorded by that time)
@@ -44,6 +48,12 @@
 //                                      leak. A paired machine that already fetched it keeps its
 //                                      copy until it fetches the tombstone
 //   fleet-know rebuild [--check]       the graph again from the log; --check only compares
+//   fleet-know backfill [--profile <p>] [--since <date>] [--dry-run]
+//                                      what this machine's records already say happened: merged
+//                                      PRs, ledgers, spawn manifests, each default branch's log.
+//                                      At the time it happened, once, and only into a profile that
+//                                      already records unless --profile names it. --dry-run counts
+//                                      per source and per project, and writes nothing
 //   fleet-know sync                    fetch every paired machine's events now
 //
 // Every write here goes through record() in lib/know.mjs, the one writer fleet-know-event is
@@ -58,9 +68,9 @@ const flags = {};
 const pos = [];
 for (let i = 0; i < args.length; i++) {
   const x = args[i];
-  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync' || x === '--trusted' || x === '--purge') flags[x.slice(2)] = true;
+  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync' || x === '--trusted' || x === '--purge' || x === '--dry-run') flags[x.slice(2)] = true;
   else if (x === '-h' || x === '--help') flags.help = true;
-  else if (['--at', '--known-at', '--why', '--profile', '--scope', '--quote', '--supersedes', '--reason', '--since', '--via'].includes(x)) { flags[x.slice(2)] = args[++i]; if (flags[x.slice(2)] === undefined) die(`${x} needs a value`); }
+  else if (['--at', '--known-at', '--why', '--profile', '--scope', '--quote', '--supersedes', '--reason', '--since', '--until', '--via'].includes(x)) { flags[x.slice(2)] = args[++i]; if (flags[x.slice(2)] === undefined) die(`${x} needs a value`); }
   else if (x === '--') { pos.push(...args.slice(i + 1)); break; }
   else if (x.startsWith('--')) die(`unknown option ${x} (fleet-know --help)`);
   else pos.push(x);
@@ -82,7 +92,7 @@ try { at = K.parseAt(flags.at); known = K.parseAt(flags['known-at']); } catch (e
 // counts its "3h ago" from that time: the page reads as it would have then.
 const now0 = Number(process.env.CLAUDE_FLEET_NOW_MS) || Date.now();
 const now = Number.isFinite(at) ? at : now0;
-const getView = () => K.view({ sync: !flags['no-sync'] });
+const getView = async () => K.asKnown(await K.view({ sync: !flags['no-sync'] }), known);
 const PRIV_JSON = 'items marked private are for this machine\'s leads: do not paste them into a prompt for another model vendor';
 
 // A registered project, by name (name/profile when two profiles share one), for the writes.
@@ -174,6 +184,36 @@ switch (verb) {
     out(K.renderFind(r, now), { ...r, ...(r.rows.some(x => x.mode === 'private') ? { note: PRIV_JSON } : {}) });
     break;
   }
+  case 'history': {
+    if (!pos[1] || pos.length > 2) die('history <project> [--since <date>] [--until <date>]');
+    let since, until;
+    try {
+      since = flags.since === undefined ? -Infinity : K.parseAt(flags.since, now0);
+      // A bare date is the whole of that day, which is what `--until 2026-03-05` is asking for.
+      const u = flags.until;
+      until = u === undefined ? Infinity : K.parseAt(u, now0) + (/^\d{4}-\d{2}-\d{2}$/.test(String(u).trim()) ? 86400e3 - 1 : 0);
+    } catch (e) { die(e.message.replace('--at', flags.until !== undefined && !/--since/.test(String(flags.since)) ? '--since/--until' : '--since')); }
+    const v = await getView();
+    const r = K.history(v, pos[1], { since, until: Math.min(until, at) });
+    noted('history', pos[1], r ? r.rows.length : 0);
+    if (!r) {
+      const names = [...new Set(K.projectsIn(v).map(p => p.name))];
+      die(`not recorded: nothing for '${pos[1]}'${names.length ? ` (known: ${names.slice(0, 12).join(', ')})` : ' — events land as sessions run'}`, 1);
+    }
+    out(K.renderHistory(r), { ...r, ...(r.mode === 'private' || r.rows.some(x => x.priv) ? { note: PRIV_JSON } : {}) });
+    break;
+  }
+  case 'backfill': {
+    if (pos.length > 1) die('backfill [--profile <p>] [--since <date>] [--dry-run]');
+    let since = -Infinity;
+    if (flags.since !== undefined) { try { since = K.parseAt(flags.since, now0); } catch (e) { die(e.message.replace('--at', '--since')); } }
+    // Imported here: it reads the ledger's module and asks gh and git, and no read needs any of that.
+    const B = await import('../lib/know-backfill.mjs');
+    const r = await B.backfill({ profile: flags.profile, since, dryRun: !!flags['dry-run'], now: now0 });
+    if (r.error) die(r.error, 1);
+    out(B.renderBackfill(r), r);
+    break;
+  }
   case 'rebuild': {
     const rows = [];
     let differs = 0;
@@ -261,7 +301,7 @@ switch (verb) {
     if (!q || !key) die('fact <project> <key> [<value> | --off]');
     if (!K.FACT_KEY.test(key)) die(`a fact's key is letters, digits and . _ : -, not '${key}'`);
     if (!value && !flags.off) {
-      const r = K.factFor(await K.view({ sync: false }), q, key, { at, known });
+      const r = K.factFor(K.asKnown(await K.view({ sync: false }), known), q, key, { at, known });
       noted('fact', `${q} ${key}`, r.recorded ? 1 : 0);
       out(K.renderFact(r, q, now), r);
       break;
@@ -305,7 +345,7 @@ switch (verb) {
         const mine = K.profileOf(K.fleetDirOf());
         const profile = flags.profile || pf || (reg.find(p => p.profile === mine) || reg[0] || {}).profile || mine;
         // Rules do not cross a pairing, so a list of them has no reason to wait on one.
-        const v = await K.view({ sync: false });
+        const v = K.asKnown(await K.view({ sync: false }), known);
         const r = K.rulesFor(v, { profile, project: name, at, known });
         noted('rule.list', q, r.live.length);
         const stranger = name && !reg.length && !K.findProject(v, q).hit;

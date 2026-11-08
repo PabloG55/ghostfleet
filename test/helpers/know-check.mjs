@@ -403,6 +403,9 @@ await section('mcp', async () => {
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', json: true } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: '-rf' } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', trusted: true } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: 'acme-api' } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: 'acme-api', since: iso(m(45)), until: iso(m(50)) } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: '-rf' } } },
   ];
   const ch = spawn('node', [path.join(ROOT, 'mcp', 'fleet-mcp.mjs')], {
     env: { ...base(), HOME: FX, CLAUDE_FLEET_SOCK: 'cfmcpknow', CLAUDE_FLEET_NOW_MS: String(m(120)) }, stdio: ['pipe', 'pipe', 'ignore'],
@@ -430,6 +433,10 @@ await section('mcp', async () => {
   row('...json: data', 'acme-api', (() => { try { return JSON.parse(text(6)).project; } catch (e) { return `not json: ${text(6).slice(0, 60)}`; } })());
   row('...and a flag where a name goes is refused, not run', 'yes', yes(err(7)));
   row('...the page says who said it', 'yes', yes(/• \[worker\] RFC 4180 quoting/.test(text(2))));
+  row('...history: what happened, in order', 'yes yes', `${yes(!!(t && t.inputSchema.properties.history && t.inputSchema.properties.since && t.inputSchema.properties.until))} ${yes(/history, newest last[\s\S]*PR #1170 merged/.test(text(9)))}`);
+  row('...since and until narrow it', 'no', yes(text(10).split('\n').length >= text(9).split('\n').length));
+  row('...a flag where its name goes is refused', 'yes', yes(err(11)));
+  row('...and the phone\'s tool policy lets it through', 'yes', yes(/fleet_know:[^\n]*'history', 'since', 'until'/.test(fs.readFileSync(path.join(ROOT, 'bin', 'fleet-serve.mjs'), 'utf8'))));
   row('...trusted: owner and lead only', 'yes yes no', `${yes(/only what owner or lead said/.test(text(8)))} ${yes(/• \[lead\] Keep the v1 export/.test(text(8)))} ${yes(/RFC 4180/.test(text(8)))}`);
 });
 
@@ -800,6 +807,12 @@ await section('forget', async () => {
   // the old descriptor after it, and the writer's own look at whether it wrote to the log. The
   // last of those is a window of microseconds that lost a line in one purge of three, so a row
   // that purged once would pass on broken code most of the time. Eight rounds, the real append().
+  //
+  // EVERY ROUND STARTS FROM THE SAME LOG. Every purge ends in a rebuild that folds the whole log,
+  // and an unthrottled writer outruns it where appends are cheap, so rounds sharing a log compound:
+  // measured on Linux at about 3.7 times a round, 75k lines, 352k, 1.3M, 4.7M, and the Set below
+  // threw "Set maximum size exceeded" at 2^24 in the fifth. Nothing in the product was failing. On
+  // the Mac the same writer is twenty times slower, which is why this was only ever red on Linux.
   const Y = newHome('forget-race');
   const stopFile = path.join(DIR, 'forget-race.stop');
   const writerCode = (round) => `import fs from 'node:fs'; import * as K from ${JSON.stringify(path.join(ROOT, 'lib', 'know.mjs'))};
@@ -809,9 +822,13 @@ await section('forget', async () => {
   const filler = K.makeEvent({ t: t + 1, rec: t + 1, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: { sock: 'cf-acme-api' }, f: { text: R('filler words about the webhook backoff ', 600) } });
   fs.mkdirSync(Y.fl, { recursive: true });
   fs.appendFileSync(Y.log, Array.from({ length: 3000 }, (_, n) => JSON.stringify({ ...filler, id: `kfill${n}` })).join('\n') + '\n');
-  let wrote = 0, stayed = 0, failed = 0, left = 0;
+  const fillerBytes = fs.statSync(Y.log).size;
+  let wrote = 0, stayed = 0, failed = 0, left = 0, inherited = 0;
   for (let round = 0; round < 8; round++) {
     fs.rmSync(stopFile, { force: true });
+    fs.truncateSync(Y.log, fillerBytes);
+    fs.rmSync(Y.snap, { force: true });
+    if (lines(Y.log).some(e => String(e.id).startsWith('kw'))) inherited++;
     const victim = K.record('prompt', { branch: 'main', text: `the line to purge ${round}` }, onApi(Y, t + round));
     const size = fs.statSync(Y.log).size;
     let said = '';
@@ -830,7 +847,28 @@ await section('forget', async () => {
     if (text(Y.log).includes(`the line to purge ${round}`)) left++;
   }
   row('...a writer running all through eight purges loses no line', 'yes 0 yes 0', `${yes(wrote > 0)} ${failed} ${yes(stayed === wrote)} ${left}`);
+  row('...and no round inherits the last one\'s log, so the rounds cannot compound', '0', inherited);
   fs.rmSync(Y.h, { recursive: true, force: true });
+  // The catch-up's only exit used to be the file holding still. Here it never does: every look at
+  // the file's size writes a line first. By the count of looks, not a clock, so it needs no race.
+  const W = newHome('forget-never-still');
+  const never = K.record('prompt', { branch: 'main', text: 'the line a busy fleet still purges' }, onApi(W, t));
+  const still = probe(W, `const fs = (await import('node:fs')).default;
+    const log = process.env.HOME + '/.claude/fleet/' + K.LOG, real = fs.fstatSync;
+    let looks = 0;
+    fs.fstatSync = (...a) => {
+      if (++looks > 300) throw new Error('the catch-up never ended');
+      fs.appendFileSync(log, JSON.stringify({ id: 'ktick' + looks, v: 1, t: ${t} + looks, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: {}, f: { text: 'tick' } }) + '\\n');
+      return real(...a);
+    };
+    const r = K.forget(${JSON.stringify(never.id)}, { purge: true });
+    const wrote = looks;
+    fs.fstatSync = real;
+    let landed = 0;
+    K.scanLog(log, 0, (e) => { if (String(e.id).startsWith('ktick')) landed++; });
+    return { ok: r.ok, wrote, landed, gone: !fs.readFileSync(log, 'utf8').includes('the line a busy fleet still purges') };`);
+  row('...a purge finishes when the file never holds still, the text gone and every line kept', 'yes yes yes', still.failed || `${yes(still.ok)} ${yes(still.gone)} ${yes(still.wrote > 0 && still.wrote === still.landed)}`);
+  fs.rmSync(W.h, { recursive: true, force: true });
   // The cache of a paired machine, as a fetch fills it. Its tombstones reach that file and no other.
   const Z = newHome('forget-peer');
   const pf = K.peerFiles(Z.fl, 'vm');
@@ -1497,6 +1535,59 @@ await section('the briefing has a cap', () => {
   row('fit: the cap holds, and each section keeps a share', 'yes yes', `${yes(fit.len <= 500 && fit.ids > 1)} ${yes(fit.w)}`);
 });
 
+// The shape it was seen in: 13 rules and 8 waiting items, and the 3 rules cut were the oldest, while
+// every waiting item showed. The text lengths are measured from that set.
+await section('the briefing keeps every rule', () => {
+  const LENS = [39, 51, 58, 66, 67, 73, 75, 78, 84, 90, 99, 114, 133];
+  const words = (n, i) => `Rule ${i} ${'keeps the release branch green '.repeat(9)}`.slice(0, n);
+  const B = briefRig('brief-rules');
+  B.on(); seed(B);
+  const t = Date.now() - 100 * 3600e3;
+  // Oldest first, and the oldest are the owner's, for everything: the case an even share got wrong.
+  const says = LENS.map((n, i) => {
+    const src = i < 7 ? OWNER_SRC : LEAD_SRC, scope = ['all', 'project:acme-api', 'profile'][i % 3];
+    const ev = K.record('rule', { text: words(n, i), scope }, onApi(B, t + i * 3600e3, src));
+    return { id: ev.id, by: i < 7 ? 0 : 1, wide: scope.startsWith('project') ? 1 : 0, t: ev.t, n };
+  });
+  for (let i = 0; i < 8; i++) {
+    const src = { via: 'ledger', session: 's-lead', slot: 'master' }, text = `Waiting question ${i}: ${'should the export keep its old columns or move on '.repeat(3)}`.slice(0, 150);
+    K.record('request.open', { req: `r-wait-${i}`, text, source: 'user' }, onApi(B, t + i, src));
+    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text }, onApi(B, t + i + 1, src));
+  }
+  const c = B.ctxOf(B.start()), L = c.split('\n');
+  row('13 rules and 8 waiting items: at or under 2,000 characters', 'yes', yes(c.length > 500 && c.length <= 2000));
+  row('...every rule is there', '13', says.filter(r => L.some(l => l.startsWith(`- ${r.id} `))).length);
+  row('...none of them cut, so nothing says any was', 'no', yes(/DO NOT ALL FIT/.test(c)));
+  const wait = c.slice(c.indexOf('WAITING ON THE OWNER'));
+  const shown = wait.split('\n').filter(l => l.startsWith('- ')).length, more = Number((/^\+(\d+) more: fleet_know$/m.exec(wait) || [])[1] || 0);
+  row('...the waiting list gives way, with its count', 'yes 8', `${yes(shown >= 1 && more >= 1)} ${shown + more}`);
+  const order = says.slice().sort((a, b) => a.by - b.by || a.wide - b.wide || b.t - a.t).map(r => r.id).join(' ');
+  row('...owner first, then profile and all before project, then newest', order, L.filter(l => /^- k\w+ \[(owner|lead) /.test(l)).map(l => l.split(' ')[1]).join(' '));
+  row('...a short rule keeps every word', 'yes', yes(L.some(l => l.endsWith(words(39, 0)))));
+  // RULES ALONE PAST THE BUDGET: 60 of them, half the owner's.
+  const M = briefRig('brief-rules-over');
+  M.on(); seed(M);
+  const lots = Array.from({ length: 60 }, (_, i) => {
+    const owner = i % 2 === 0, ev = K.record('rule', { text: `Standing rule ${i}: ${'never ship on a red build '.repeat(6)}`, scope: i % 4 < 2 ? 'all' : 'project:acme-api' }, onApi(M, t + i * 1000, owner ? OWNER_SRC : LEAD_SRC));
+    return { id: ev.id, owner, project: i % 4 >= 2, t: ev.t };
+  });
+  for (let i = 0; i < 8; i++) {
+    const src = { via: 'ledger', session: 's-lead', slot: 'master' };
+    K.record('request.open', { req: `r-over-${i}`, text: `Waiting over ${i}`, source: 'user' }, onApi(M, t + i, src));
+    K.record('request.state', { req: `r-over-${i}`, state: 'waiting', text: `Waiting over ${i}` }, onApi(M, t + i + 1, src));
+  }
+  const o = M.ctxOf(M.start()), OL = o.split('\n');
+  row('rules alone past the budget: still under the cap', 'yes', yes(o.length <= 2000 && o.length > 500));
+  row('...it says so, in one line', '1', OL.filter(l => /DO NOT ALL FIT/.test(l)).length);
+  const sec = o.split(/^(?=DECISIONS|WAITING)/m)[0];
+  const got = sec.split('\n').filter(l => l.startsWith('- ')).map(l => l.split(' ')[1]);
+  row('...and counts the rest', '60', got.length + Number((/^\+(\d+) more/m.exec(sec) || [])[1] || 0));
+  const want = lots.slice().sort((a, b) => (b.owner - a.owner) || (a.project - b.project) || b.t - a.t).map(r => r.id);
+  row('...what stays is the front of that order', 'yes', yes(got.length > 5 && got.join() === want.slice(0, got.length).join()));
+  row('...and what waits on the owner is not starved', 'yes', yes(/Waiting over/.test(o)));
+  row('...and no rule line runs past where it says something', 'yes', yes(got.length > 10));
+});
+
 await section('the briefing survives a broken log', () => {
   const B = briefRig('brief-broken');
   B.on();
@@ -1717,6 +1808,410 @@ await section('reads', async () => {
     };
     tick();
   });
+});
+
+// ══ history: what the machine already had on record, and reading it back ══════════════════
+// A fleet that started recording last week still has months behind it: merged PRs, ledgers,
+// manifests, a default branch. The rig has all of them, a second profile that does not record, a
+// live hook's view of some of the same things, and a clock pinned well after every source's time,
+// so "the source's time" and "when this ran" cannot be mistaken for each other.
+const DAY = 86400e3, HOUR = 3600e3;
+const BF_T = Date.UTC(2026, 0, 10, 12), BF_NOW = BF_T + 60 * DAY;
+const LOGIN = ['acme', 'dev'].join('-');         // built here: a login in the tree is what the name sweep reads for
+const bfRig = (name, { live = true } = {}) => {
+  const X = twoProfiles(name);
+  const env = { CLAUDE_FLEET_NOW_MS: String(BF_NOW), PATH: `${path.join(X.h, 'stub-bin')}:${process.env.PATH}` };
+  fs.mkdirSync(path.join(X.h, 'stub-bin'));
+  fs.writeFileSync(path.join(X.h, 'stub-bin', 'gh'), `#!/bin/sh\necho "$*" >> "$HOME/gh.calls"\ncase "$*" in *"--repo acme/acme-api "*"--state merged"*) cat "$HOME/gh.json" ;; *) echo '[]' ;; esac\nexit 0\n`, { mode: 0o755 });
+  const pr = (number, branch, title, created, merged) => ({ number, headRefName: branch, title, author: { login: LOGIN }, createdAt: iso(created), mergedAt: iso(merged), mergeCommit: { oid: `${number}abc` } });
+  fs.writeFileSync(path.join(X.h, 'gh.json'), JSON.stringify([
+    pr(1173, 'chore/y', 'Tidy the release script', BF_T + 3 * DAY, BF_T + 3 * DAY + HOUR),
+    pr(1172, 'feat/x', 'Add the webhook retry', BF_T + 2 * DAY, BF_T + 5 * DAY),
+    pr(1171, 'docs/typo', 'Fix a typo in the docs', BF_T + DAY, BF_T + 2 * DAY),
+    pr(1170, 'fix/csv-export', 'Fix the CSV export', BF_T, BF_T + DAY),
+  ]));
+  const repo = path.join(X.h, 'gf-demo', 'acme-api');
+  fs.mkdirSync(repo, { recursive: true });
+  const g = (args, t) => run('git', ['-C', repo, ...args], { home: X.h, env: t ? { GIT_COMMITTER_DATE: `${Math.floor(t / 1000)} +0000`, GIT_AUTHOR_DATE: `${Math.floor(t / 1000)} +0000` } : {} });
+  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
+  g(['remote', 'add', 'origin', 'https://github.com/acme/acme-api.git']);
+  const commit = (subject, t) => { fs.appendFileSync(path.join(repo, 'a'), `${subject}\n`); g(['add', 'a']); g(['commit', '-qm', subject], t); };
+  commit('Fix the CSV export (#1170)', BF_T + DAY);
+  commit('Fix a typo in the docs (#1171)', BF_T + 2 * DAY);
+  commit('Bump the version', BF_T + 4 * DAY);
+  g(['update-ref', 'refs/remotes/origin/main', 'HEAD']); g(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main']);
+  g(['branch', 'fix/from-reflog'], BF_T + 6 * DAY);
+  const session = (dir, sid, sock, items) => {
+    if (sock) fs.writeFileSync(path.join(dir, `${sid}.json`), JSON.stringify({ session_id: sid, sock, slot: 'api-fix' }));
+    fs.writeFileSync(path.join(dir, `${sid}.ledger`), JSON.stringify({ v: 1, seq: items.length, items }));
+  };
+  session(X.fl, 's-old', 'cf-acme-api', [
+    { id: 1, text: 'Fix the CSV export', source: 'user', at: BF_T, state: 'done', closedAt: BF_T + HOUR, proof: 'https://github.com/acme/acme-api/pull/1170', closedBy: 'agent' },
+    { id: 2, text: 'Write the migration note', source: 'fleet', at: BF_T + HOUR, state: 'done', closedAt: BF_T + 2 * HOUR, closedBy: 'agent' },
+    { id: 3, text: 'I will merge when green', source: 'promise', at: BF_T + 2 * HOUR, state: 'stale', closedAt: BF_T + 3 * HOUR, closedBy: 'judge' },
+    { id: 4, text: 'Nobody ever closed this', source: 'user', at: BF_T + 3 * HOUR, state: 'open' },
+    { id: 5, text: 'Waiting on the owner this week', source: 'user', at: BF_NOW - 2 * DAY, state: 'waiting', progress: { at: BF_NOW - DAY } },
+    { id: 6, text: 'Open since before recording started', source: 'user', at: BF_T + 4 * HOUR, state: 'open' },
+  ]);
+  session(X.fl, 's-q', 'cf-acme-api', [
+    { id: 1, text: 'Pick the export format', source: 'user', at: BF_T + 4 * HOUR, state: 'open', replies: [{ at: BF_T + 5 * HOUR, text: '2', source: 'user', asked: 'Which format? 1. CSV 2. Parquet' }] },
+    { id: 2, text: 'A brief from the lead', source: 'fleet', at: BF_T + 5 * HOUR, state: 'open', replies: [{ at: BF_T + 6 * HOUR, text: '1', source: 'fleet', asked: 'Merge it? 1. yes 2. no' }] },
+    { id: 3, text: 'A brief with an old reply', source: 'fleet', at: BF_T + 6 * HOUR, state: 'open', replies: [{ at: BF_T + 7 * HOUR, text: '1' }] },
+    { id: 4, text: 'Keep the old endpoint?', source: 'user', at: BF_T + 7 * HOUR, state: 'open', replies: [{ at: BF_T + 8 * HOUR, text: 'yes' }] },
+    { id: 6, text: 'Ship on Friday or Monday?', source: 'fleet', at: BF_T + 8 * HOUR, state: 'open', woke: BF_T + 9 * HOUR },
+    { id: 7, text: 'Monday', source: 'user', at: BF_T + 9 * HOUR, state: 'done', closedAt: BF_T + 9 * HOUR + 1000 },
+    { id: 8, text: 'Deploy the site', source: 'fleet', at: BF_T + 9 * HOUR, state: 'open', woke: BF_T + 10 * HOUR },
+    { id: 9, text: 'the deploy failed again', source: 'user', at: BF_T + 10 * HOUR, state: 'done', closedAt: BF_T + 10 * HOUR + 1000 },
+    { id: 10, text: 'Which host?', source: 'fleet', at: BF_T + 10 * HOUR, state: 'open', woke: BF_T + 11 * HOUR },
+    { id: 11, text: 'Use the vm', source: 'fleet', at: BF_T + 11 * HOUR, state: 'done', closedAt: BF_T + 11 * HOUR + 1000 },
+    { id: 12, text: 'keep v1 for now', source: 'user', at: BF_T + 12 * HOUR, state: 'open', asked: 'Which API? 1. v1 2. v2' },
+    { id: 13, text: 'Rename the export', source: 'user', at: BF_T + 13 * HOUR, state: 'open', replies: [{ at: BF_T + 14 * HOUR, text: '1', source: 'user' }] },
+  ]);
+  session(X.fl, 's-lost', '', [{ id: 1, text: 'From a folder nobody registered', source: 'user', at: BF_T, state: 'open' }]);
+  const gone = path.join(X.h, 'gf-demo', 'acme-api-w1'), there = path.join(X.h, 'gf-demo', 'acme-api-w3');
+  fs.mkdirSync(there);
+  fs.writeFileSync(path.join(X.fl, 'cf-acme-api.manifest.tsv'), [
+    `${gone}\tapi-fix\tfix/csv-export\tFix the CSV export`,
+    `${there}\trate-limit\tfix/rate\tAdd a rate limit`,
+    `${path.join(X.h, 'gf-demo', 'acme-api-w4')}\tcache-keys\tfix/from-reflog\tCache keys`,
+    `${path.join(X.h, 'gf-demo', 'acme-api-w5')}\tdocs-pass\tdocs/untimed\tNo time anywhere for this one`,
+    `${path.join(X.h, 'gf-demo', 'acme-api-w6')}\thealth`,
+  ].join('\n') + '\n');
+  fs.writeFileSync(path.join(X.fl, 'cf-acme-api.brief.tsv'), [
+    `${(BF_T - HOUR) / 1000}\t${gone}\tapi-fix\tdone\titems\t900\tabc`,
+    `${(BF_T + 7 * DAY) / 1000}\t${there}\trate-limit\tdone\titems\t900\tabd`,
+  ].join('\n') + '\n');
+  fs.writeFileSync(path.join(X.fl, 'cf-elsewhere.manifest.tsv'), `/tmp/nowhere\tghost\tghost/branch\tA fleet that is not on the list\n`);
+  // The second profile has everything a backfill reads, and no log.
+  fs.writeFileSync(path.join(X.pl, 'cf-personal-billing-svc.manifest.tsv'), `${path.join(X.h, 'gf-demo', 'billing-w1')}\tapi-fix\tfix/invoice\tInvoice replay\n`);
+  fs.writeFileSync(path.join(X.pl, 'cf-personal-billing-svc.brief.tsv'), `${BF_T / 1000}\t${path.join(X.h, 'gf-demo', 'billing-w1')}\tapi-fix\tdone\titems\t900\tabe\n`);
+  session(X.pl, 's-personal', 'cf-personal-billing-svc', [{ id: 1, text: 'Replay the invoices', source: 'user', at: BF_T, state: 'open' }]);
+  if (live) {
+    const on = (t, src) => onApi(X, t, src);
+    const hook = { via: 'hook', session: 's-live', slot: 'master' };
+    // Seen by the live hooks, each at the time they saw it, which is not GitHub's time.
+    K.record('pr.merge', { repo: 'acme/acme-api', number: 1171, branch: 'docs/typo' }, on(BF_T + 2 * DAY + HOUR, { via: 'fleet-merged' }));
+    K.record('turn.end', { repo: 'acme/acme-api', status: 'done', prs: [{ op: 'merge', repo: 'acme/acme-api', number: 1172, branch: 'feat/x' }] }, on(BF_T + 5 * DAY + HOUR, hook));
+    K.record('request.open', { req: 's-old/6', text: 'Open since before recording started', source: 'user', state: 'open' }, on(BF_T + 4 * HOUR, { via: 'mod', session: 's-old', slot: 'api-fix' }));
+    K.record('request.open', { req: 's-old/2', text: 'Write the migration note', source: 'fleet', state: 'open' }, on(BF_T + HOUR, { via: 'mod', session: 's-old', slot: 'api-fix' }));
+    K.record('spawn', { worker: 'rate-limit', branch: 'fix/rate', repo: 'acme/acme-api', task: 'Add a rate limit' }, on(BF_T + 7 * DAY + 5000, { via: 'fleet-spawn', slot: 'master' }));
+  }
+  const bf = (...a) => run('node', [KNOW, 'backfill', ...a], { home: X.h, env });
+  const hist = (...a) => run('node', [KNOW, 'history', ...a], { home: X.h, env });
+  const page = (...a) => run('node', [KNOW, ...a], { home: X.h, env });
+  const graph = () => K.rebuild(X.fl, { save: false }).graph;
+  return { ...X, repo, gone, there, env, bf, hist, page, graph, commit, g };
+};
+const sameBytes = (f, before) => (text(f) === before ? 'same' : `moved by ${text(f).length - before.length}`);
+
+await section('backfill: a dry run', () => {
+  const X = bfRig('bf-dry');
+  const before = text(X.log), n0 = lines(X.log).length;
+  const r = X.bf('--dry-run');
+  row('--dry-run answers', '0', r.status);
+  const out = JSON.parse(X.bf('--dry-run', '--json').stdout);
+  const w = out.profiles.find(p => p.profile === 'work') || { counts: {}, projects: {}, skipped: {} };
+  row('...writes no line', 'same', sameBytes(X.log, before));
+  row('...and no snapshot', 'no', yes(fs.existsSync(X.snap)));
+  row('...and no read of itself', String(n0), lines(X.log).length);
+  row('...prints a count per source', 'yes', yes(/by source: +prs \d+ +ledgers \d+ +spawns \d+ +commits \d+/.test(r.stdout)));
+  row('...and per project', 'yes', yes(/by project:\n +acme-api +prs \d+ +ledgers \d+ +spawns \d+ +commits \d+/.test(r.stdout)));
+  row('...counts each source', 'yes yes yes yes', ['prs', 'ledgers', 'spawns', 'commits'].map(s => yes(w.counts[s] > 0)).join(' '));
+  row('...says it wrote nothing', 'yes', yes(/would add \d+ events \(a dry run: nothing written\)/.test(r.stdout)));
+  row('...the real run adds exactly what it counted', String(w.added), JSON.parse(X.bf('--json').stdout).profiles.find(p => p.profile === 'work').wrote);
+});
+
+await section('backfill: once, and at the time it happened', () => {
+  const X = bfRig('bf-main');
+  const n0 = lines(X.log).length;
+  const first = X.bf();
+  const n1 = lines(X.log).length;
+  const after = text(X.log);
+  const built = fs.existsSync(X.snap) ? JSON.parse(text(X.snap)).bytes : -1;
+  const again = X.bf();
+  row('a run adds to the log', 'yes', yes(n1 > n0));
+  row('...and leaves the graph built, so the next session\'s start does not pay for it', fs.statSync(X.log).size, built);
+  row('...and a second run adds nothing', 'same', sameBytes(X.log, after));
+  row('...and says why', 'yes', yes(/added 0 events/.test(again.stdout) && /already on record, so not added: \d+/.test(again.stdout)));
+  const evs = lines(X.log), bf = evs.filter(e => e.src && e.src.via === 'backfill');
+  row('every line it wrote says where it came from', String(n1 - n0), bf.length);
+  row('...and has one id', String(bf.length), new Set(bf.map(e => e.id)).size);
+  const one = (kind, pred) => bf.filter(e => e.kind === kind && pred(e.f));
+  const merge = one('pr.merge', f => f.number === 1170)[0] || { f: {} };
+  row('a merge carries GitHub\'s time, not this run\'s', iso(BF_T + DAY), iso(merge.t || 0));
+  row('...and this run\'s as when it was known', iso(BF_NOW), iso(merge.rec || 0));
+  row('...its title, branch and author', `Fix the CSV export fix/csv-export ${LOGIN}`, `${merge.f.title} ${merge.f.branch} ${merge.f.author}`);
+  row('a request\'s close is the time it closed', iso(BF_T + HOUR), iso((one('request.state', f => f.req === 's-old/1')[0] || {}).t || 0));
+  row('its opening is the PR\'s own time', iso(BF_T), iso((one('pr.open', f => f.number === 1170)[0] || {}).t || 0));
+  const before = X.page('acme-api', '--at', iso(BF_T + DAY - HOUR)).stdout, then = X.page('acme-api', '--at', iso(BF_T + DAY + HOUR)).stdout;
+  row('--at before a backfilled merge: not merged', 'yes no', `${yes(/PR #1170 open/.test(before))} ${yes(/PR #1170 merged/.test(before))}`);
+  row('...and after it: merged', 'no yes', `${yes(/PR #1170 open/.test(then))} ${yes(/PR #1170 merged/.test(then))}`);
+  const unknown = X.page('acme-api', '--at', iso(BF_T + DAY + HOUR), '--known-at', iso(BF_NOW - HOUR)).stdout;
+  row('--known-at before the run: nobody knew it yet', 'no', yes(/PR #1170/.test(unknown)));
+  row('...nor a merge a live writer saw later than that', 'no', yes(/PR #1171/.test(unknown)));
+  const knew = X.page('acme-api', '--at', iso(BF_T + 3 * DAY), '--known-at', iso(BF_NOW - HOUR)).stdout;
+  row('...but the one it did see, once it had happened', 'yes no', `${yes(/PR #1171 merged/.test(knew))} ${yes(/PR #1170/.test(knew))}`);
+  // WHAT THE LIVE HOOKS SAW STAYS WHAT THEY SAW
+  row('a merge a live writer recorded is not added again', '0 1', `${one('pr.merge', f => f.number === 1171).length} ${evs.filter(e => e.kind === 'pr.merge' && e.f.number === 1171).length}`);
+  row('...nor one a turn\'s end recorded', '0', one('pr.merge', f => f.number === 1172).length);
+  row('...while one nobody saw is', '1', one('pr.merge', f => f.number === 1173).length);
+  const merged = K.attr(X.graph().nodes[K.prId('acme/acme-api', 1171)], 'merged');
+  row('...and the graph keeps the live writer\'s time', iso(BF_T + 2 * DAY + HOUR), iso(merged || 0));
+  row('a request a live hook opened is not opened again', '0 1', `${one('request.open', f => f.req === 's-old/2').length} ${evs.filter(e => e.kind === 'request.open' && e.f.req === 's-old/2').length}`);
+  row('...and the close it never saw is added', 'done', (one('request.state', f => f.req === 's-old/2')[0] || { f: {} }).f.state);
+  row('...and a spawn a live one recorded is not spawned again', '0', one('spawn', f => f.branch === 'fix/rate').length);
+  // WHAT IT LEAVES ALONE
+  const g = X.graph();
+  row('no session comes back to life', 'no', yes(!!g.nodes['session:s-q']));
+  row('a commit costs a line and no node', 'no', yes(Object.values(g.nodes).some(n => n.type === 'commit' && /^[0-9a-f]{40}$/.test(K.attr(n, 'sha') || ''))));
+  row('an old open item stops reading as open, and says who closed it', 'expired backfill', (() => { const e = one('request.state', f => f.req === 's-old/4')[0] || { f: {} }; return `${e.f.state} ${e.f.by}`; })());
+  row('...a week on, not today', iso(BF_T + 3 * HOUR + 7 * DAY), iso((one('request.state', f => f.req === 's-old/4')[0] || {}).t || 0));
+  row('...and one a live hook opened stays the live hook\'s to close', '0', one('request.state', f => f.req === 's-old/6' && f.state === 'expired').length);
+  row('...and this week\'s waiting item still waits', 'waiting', K.attr(g.nodes['request:s-old/5'], 'state'));
+  const it = (req) => K.attr(g.nodes[`request:${req}`], 'authority');
+  row('the owner\'s item is the owner\'s, a brief the lead\'s, a promise the worker\'s', 'owner lead worker', `${it('s-old/1')} ${(evs.find(e => e.kind === 'request.open' && e.f.req === 's-old/2') ? 'lead' : '?')} ${it('s-old/3')}`);
+  row('...a proof that names a PR links it', 'yes', yes(!!g.edges[`closed-by|request:s-old/1|${K.prId('acme/acme-api', 1170)}`]));
+  row('the derived graph still matches a rebuild', '0', X.page('rebuild', '--check').status);
+  row('...once per row, however many lines that row would have been', 'yes', yes(/^ +1 +spawns: no time on record$/m.test(first.stdout)));
+  row('it says how many of the owner\'s decisions it wrote', 'yes', yes(/the owner's answers, as the owner's decisions: 3$/m.test(first.stdout)));
+  row('it prints what it skipped, and why', 'yes yes yes yes', [/ledgers: a session with no project on the list/, /spawns: no time on record/, /spawns: a manifest row with no branch/, /spawns: a manifest row from a fleet not on the project list/].map(p => yes(p.test(first.stdout))).join(' '));
+  // A MANIFEST HAS NO TIME OF ITS OWN
+  const sp = (b) => one('spawn', f => f.branch === b)[0] || {};
+  row('a worker\'s start is the spawn\'s own line', iso(BF_T - HOUR), iso(sp('fix/csv-export').t || 0));
+  row('...else its branch\'s first reflog line', iso(BF_T + 6 * DAY), iso(sp('fix/from-reflog').t || 0));
+  row('...and no row gets a time it does not have', '0', one('spawn', f => f.branch === 'docs/untimed').length);
+  row('a worker whose folder is gone finished when its PR merged', iso(BF_T + DAY), iso((one('retire', f => f.branch === 'fix/csv-export')[0] || {}).t || 0));
+  row('...and one whose folder is still there is not ended', '0', one('retire', f => f.branch === 'fix/rate').length);
+  row('commits: the subject and the PR it names', 'Fix the CSV export (#1170) 1170', (() => { const f = (one('commit', x => x.pr === 1170)[0] || { f: {} }).f; return `${f.subject} ${f.pr}`; })());
+  row('...one that names no PR is kept too', 'yes', yes(one('commit', x => x.subject === 'Bump the version').length === 1));
+  row('...at its commit time', iso(BF_T + 4 * DAY), iso((one('commit', x => x.subject === 'Bump the version')[0] || {}).t || 0));
+  // AND A LATER RUN PICKS UP WHAT IS NEW, AND ONLY THAT
+  X.commit('Add the changelog', BF_T + 8 * DAY);
+  X.g(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  const n2 = lines(X.log).length;
+  X.bf();
+  row('a later run adds only what is new', '1 Add the changelog', (() => { const a = lines(X.log).slice(n2); return `${a.length} ${(a[0] || { f: {} }).f.subject}`; })());
+});
+
+await section('backfill: which profiles', () => {
+  const X = bfRig('bf-scope');
+  const r = X.bf('--dry-run');
+  row('a profile with no log is skipped, and it says so', 'yes', yes(/skipped profile personal: no know\.jsonl/.test(r.stdout)));
+  row('...its ledger and manifest are not counted', 'no', yes(/personal: would add/.test(r.stdout)));
+  X.bf();
+  row('...and a real run does not start its log', 'no', yes(fs.existsSync(X.plog)));
+  const pl = text(X.plog);
+  const named = X.bf('--profile', 'personal', '--dry-run');
+  row('--dry-run with --profile reads it', 'yes', yes(/personal: would add [1-9]/.test(named.stdout)));
+  row('...and still writes nothing, not even the log', 'no', yes(fs.existsSync(X.plog) || pl !== ''));
+  row('...and is not asked about the others', 'no', yes(/\bwork:/.test(named.stdout)));
+  const real = X.bf('--profile', 'personal');
+  row('--profile starts it, and only it', 'yes', yes(/personal: added [1-9]/.test(real.stdout) && lines(X.plog).length > 0));
+  row('...with the same rules', 'yes', yes(lines(X.plog).every(e => e.src.via === 'backfill' && e.profile === 'personal')));
+  row('a profile that is not there is refused', '1', X.bf('--profile', 'nosuch').status);
+  // The recording profile's project the owner excluded: not asked of gh, not read, not written.
+  const E = bfRig('bf-exclude');
+  const web = path.join(E.h, 'gf-demo', 'acme-web');
+  fs.mkdirSync(web, { recursive: true });
+  const gw = (...a) => run('git', ['-C', web, ...a], { home: E.h });
+  gw('init', '-q', '-b', 'main'); gw('config', 'user.email', 't@t'); gw('config', 'user.name', 't');
+  gw('remote', 'add', 'origin', 'https://github.com/acme/acme-web.git');
+  fs.writeFileSync(path.join(web, 'a'), 'a\n'); gw('add', 'a'); gw('commit', '-qm', 'Secret launch plan');
+  fs.writeFileSync(path.join(E.fl, 'cf-acme-web.know'), 'exclude\n');
+  fs.writeFileSync(path.join(E.fl, 'cf-acme-web.manifest.tsv'), `${web}-w1\tapi-fix\tfix/web\tA worker there\n`);
+  fs.writeFileSync(path.join(E.fl, 'cf-acme-web.brief.tsv'), `${BF_T / 1000}\t${web}-w1\tapi-fix\tdone\titems\t900\tabf\n`);
+  const ex = E.bf();
+  row('an excluded project writes nothing', '0', lines(E.log).filter(e => e.project === 'acme-web').length);
+  row('...and is not asked of gh', 'no', yes(/acme-web/.test(text(path.join(E.h, 'gh.calls')))));
+  row('...and it says so', 'yes', yes(/projects: excluded from the memory/.test(ex.stdout)));
+  row('...beside the project that was read', 'yes', yes(/acme-api/.test(text(path.join(E.h, 'gh.calls')))));
+  const S = bfRig('bf-since');
+  const sn = S.bf('--since', iso(BF_T + 4 * DAY), '--json');
+  const w = JSON.parse(sn.stdout).profiles[0];
+  const added = lines(S.log).filter(e => e.src.via === 'backfill');
+  row('--since keeps what happened from then on', 'yes yes', `${yes(added.length > 0 && added.every(e => e.t >= BF_T + 4 * DAY))} ${yes(w.beforeSince > 0)}`);
+  row('--since with a bad date is refused', '2', S.bf('--since', 'not a date').status);
+  const G = bfRig('bf-nogh');
+  const off = run('node', [KNOW, 'backfill'], { home: G.h, env: { ...G.env, PATH: `${path.join(G.h, 'no-gh')}:${path.dirname(process.execPath)}:/usr/bin:/bin` } });
+  row('no gh: the rest still lands, and it says what it could not read', 'yes yes', `${yes(lines(G.log).some(e => e.kind === 'commit'))} ${yes(/prs: gh is not installed/.test(off.stdout))}`);
+});
+
+await section('the owner\'s answers', async () => {
+  const L = await import(path.join(ROOT, 'mods', 'ghostfleet', 'hooks', 'ledger.js'));
+  const X = bfRig('bf-answers');
+  const run1 = X.bf();
+  const ans = lines(X.log).filter(e => e.kind === 'decision' && e.src.via === 'backfill');
+  const g = X.graph();
+  const by = Object.fromEntries(ans.map(e => [e.f.req, e]));
+  const auth = (e) => (e ? K.attr(g.nodes[`decision:${e.id}`], 'authority') : '');
+  row('a reply the owner sent becomes the owner\'s decision', 'owner', auth(by['s-q/1']));
+  row('...at the time they sent it', iso(BF_T + 5 * HOUR), iso((by['s-q/1'] || {}).t || 0));
+  row('...quoting the answer and the question', '2 | Which format? 1. CSV 2. Parquet', `${(by['s-q/1'] || { f: {} }).f.answer} | ${(by['s-q/1'] || { f: {} }).f.question}`);
+  row('...and spells out what "2" picked', 'yes', yes(/already answered "2" \(Parquet\) to: Which format\?/.test((by['s-q/1'] || { f: {} }).f.text)));
+  row('a lead\'s reply to a worker never does', 'no', yes('s-q/2' in by));
+  row('...nor one from before replies said who sent them, on a lead\'s brief', 'no', yes('s-q/3' in by));
+  row('...nor one on the owner\'s own item, since the item\'s text is their ask and no question put to them', 'no no', `${yes('s-q/4' in by)} ${yes('s-q/13' in by)}`);
+  row('...and it says how many it could not quote', 'yes', yes(/^ +2 +ledgers: a reply of the owner's whose question is not on record$/m.test(run1.stdout)));
+  row('a message right after a numbered question answers it', 'owner Which API? 1. v1 2. v2', `${auth(by['s-q/12'])} ${(by['s-q/12'] || { f: {} }).f.question}`);
+  row('a lead\'s question the owner woke is answered', 'owner Monday Ship on Friday or Monday?', `${auth(by['s-q/6'])} ${(by['s-q/6'] || { f: {} }).f.answer} ${(by['s-q/6'] || { f: {} }).f.question}`);
+  row('...but a wake that was no question is not a decision', 'no', yes('s-q/8' in by));
+  row('...nor a wake by a lead\'s own message', 'no', yes('s-q/10' in by));
+  row('the backfill writes no owner\'s word of any other kind', '3', ans.length);
+  const page = X.page('acme-api').stdout;
+  row('the project page shows it', 'yes', yes(/\[owner\] The owner already answered "2" \(Parquet\)/.test(page)));
+  // THE LIVE PATH: a reply lands, ledgerChanges says so, the writer records it. Nothing else changes.
+  const asked = L.askedIn('Here is where it stands.\n\nWhich way?\n1. Keep v1\n2. Move to v2');
+  row('the question is read off the end of the turn', 'Which way? 1. Keep v1 2. Move to v2', asked);
+  const base0 = L.addItem(L.emptyLedger(), { text: 'Move the API', at: BF_T, source: 'user', turnId: 't1' });
+  const noop = L.ledgerChanges(base0, base0).filter(c => c.op === 'answer').length;
+  const replied = L.addPrompt(base0, { text: '2', at: BF_T + HOUR, source: 'user', choiceTurn: 't1', asked }, [], []);
+  const ch = L.ledgerChanges(base0, replied).filter(c => c.op === 'answer');
+  row('ledgerChanges says a reply is new, once', '0 1 0', `${noop} ${ch.length} ${L.ledgerChanges(replied, replied).filter(c => c.op === 'answer').length}`);
+  const fromLead = L.addPrompt(base0, { text: '2', at: BF_T + HOUR, source: 'fleet', choiceTurn: 't1', asked }, [], []);
+  row('...and a lead\'s same "2" is no answer of the owner\'s', '0', L.ledgerChanges(base0, fromLead).filter(c => c.op === 'answer').length);
+  const worded = L.addPrompt(base0, { text: 'move to v2 but keep the docs', at: BF_T + HOUR, source: 'user', choiceTurn: 't1', asked }, [], []);
+  row('a worded answer is one too', 'move to v2 but keep the docs', (L.ledgerChanges(base0, worded).find(c => c.op === 'answer') || {}).answer);
+  const fresh = L.addPrompt(base0, { text: 'move to v2 but keep the docs', at: BF_T + HOUR, source: 'user', choiceTurn: '', asked }, [], []);
+  row('...and the same words with no question before them are not', '0', L.ledgerChanges(base0, fresh).filter(c => c.op === 'answer').length);
+  const leadWords = L.addPrompt(base0, { text: 'move to v2 but keep the docs', at: BF_T + HOUR, source: 'fleet', choiceTurn: 't1', asked }, [], []);
+  row('...a lead\'s words after a question carry no question at all', 'no', yes(leadWords.items.some(i => i.asked)));
+  const brief = L.addPrompt(base0, { text: `Here is a whole new brief. ${'Do the next thing carefully. '.repeat(30)}`, at: BF_T + HOUR, source: 'user', choiceTurn: 't1', asked }, [], []);
+  row('...nor a new brief that happens to come next', '0', L.ledgerChanges(base0, brief).filter(c => c.op === 'answer').length);
+  const W = bfRig('bf-live-answer', { live: false });
+  fs.writeFileSync(path.join(W.fl, 's-live2.json'), JSON.stringify({ session_id: 's-live2', sock: 'cf-acme-api', slot: 'api-fix' }));
+  run(WRITER, ['ledger', 'session=s-live2', `fleet=${W.fl}`, 'via=mod'], { home: W.h, input: JSON.stringify(ch) });
+  const live = lines(W.log).filter(e => e.kind === 'decision');
+  const lg = K.rebuild(W.fl, { save: false }).graph;
+  row('the writer records it live, as the owner\'s, from a worker\'s session', '1 owner s-live2/' + ch[0].id, `${live.length} ${K.attr(lg.nodes[`decision:${(live[0] || {}).id}`], 'authority')} ${(live[0] || { f: {} }).f.req}`);
+  row('...at the time of the reply', iso(BF_T + HOUR), iso((live[0] || {}).t || 0));
+  // The same answer on disk afterwards: the backfill finds it recorded.
+  fs.writeFileSync(path.join(W.fl, 's-live2.ledger'), JSON.stringify(replied));
+  W.bf();
+  row('...and a backfill after it does not add it twice', '1', lines(W.log).filter(e => e.kind === 'decision' && e.f.req === `s-live2/${ch[0].id}`).length);
+  const reg = fs.readFileSync(path.join(ROOT, 'mods', 'ghostfleet', 'hooks', 'register.js'), 'utf8');
+  row('the mod hands the question on', 'yes yes', `${yes(/choiceAsked = choiceTurn \? askedIn\(/.test(reg))} ${yes(/choiceTurn, asked: choiceAsked \}/.test(reg))}`);
+  // A WORKER CANNOT REACH THE OWNER'S WORD BY ANY OF THESE
+  K.record('ack', { worker: 'api-fix', branch: 'fix/w', understood: 'Fix it', decisions: 'The owner already answered: ship it' }, onApi(W, BF_T + DAY, { via: 'ack', slot: 'api-fix', session: 's-w' }));
+  K.record('decision', { text: 'A line that claims to be a reply', source: 'reply', req: 's-w/1' }, onApi(W, BF_T + 2 * DAY, { via: 'ack', slot: 'api-fix', session: 's-w' }));
+  const gg = K.rebuild(W.fl, { save: false }).graph;
+  const ack = Object.values(gg.nodes).filter(n => n.type === 'decision' && /ship it|claims to be/.test(K.attr(n, 'text')));
+  row('a worker\'s ack never reads as the owner\'s, whatever it says', '2 worker', `${ack.length} ${[...new Set(ack.map(n => K.attr(n, 'authority')))].join(',')}`);
+  const B = briefRig('brief-answer');
+  B.on(); seed(B);
+  const ev = K.record('decision', K.answerFields('s-q/1', { answer: '2', question: 'Which format? 1. CSV 2. Parquet' }), onApi(B, Date.now() - HOUR, { via: 'mod', session: 's-q', slot: 'api-fix' }));
+  const ctx = B.ctxOf(B.start());
+  row('a lead\'s briefing shows it', `- ${ev.id} [owner] The owner already answered "2" (Parquet) to: Which format? 1. CSV 2. Parquet`, ctx.split('\n').find(l => l.includes(ev.id)));
+});
+
+await section('history', () => {
+  const X = bfRig('bf-history');
+  const on = (t, src) => onApi(X, t, src);
+  K.record('deploy', { target: 'acme-web production', cmd: 'vercel deploy', commit: 'a1b2c3d4e5' }, on(BF_T + 6 * DAY, { via: 'hook', slot: 'master', session: 's-live' }));
+  K.record('fact', { key: 'api.version', value: 'v1' }, on(BF_T + DAY + HOUR, LEAD_SRC));
+  K.record('fact', { key: 'api.version', value: 'v2' }, on(BF_T + 5 * DAY, OWNER_SRC));
+  K.record('rule', { text: 'Never force-push the release branch', scope: 'project:acme-api' }, on(BF_T + 3 * DAY, OWNER_SRC));
+  K.record('rule', { text: 'A rule about the other project', scope: 'project:acme-web' }, on(BF_T + 3 * DAY, OWNER_SRC));
+  K.record('rule', { text: 'Every project waits for green', scope: 'profile' }, on(BF_T + 3 * DAY + 1000, LEAD_SRC));
+  K.record('decision', { text: 'Keep the v1 export', source: 'stated' }, on(BF_T + 4 * DAY, LEAD_SRC));
+  K.record('decision', { text: 'Use RFC 4180 quoting', source: 'ack' }, on(BF_T + 4 * DAY + 1000, { via: 'ack', slot: 'api-fix', session: 's-w' }));
+  X.bf();
+  const r = X.hist('acme-api'), L = r.stdout.trimEnd().split('\n');
+  row('history answers', '0', r.status);
+  row('...one line per thing, each with its time', 'yes', yes(L.slice(1).every(l => /^\d{4}-\d{2}-\d{2}$/.test(l) || /^ {2}\d{2}:\d{2} {2}\S/.test(l))));
+  const days = L.filter(l => /^\d{4}-\d{2}-\d{2}$/.test(l));
+  row('...grouped by day', 'yes', yes(days.length >= 5 && new Set(days).size === days.length));
+  row('...oldest day first, so the newest is last', 'yes', yes(days.join() === [...days].sort().join()));
+  row('...and in order inside a day', 'yes', yes((() => {
+    const seen = []; let d = '';
+    for (const l of L.slice(1)) { if (/^\d{4}/.test(l)) d = l; else seen.push(`${d} ${l.slice(2, 7)}`); }
+    return seen.join() === [...seen].sort().join();
+  })()));
+  const has = (p) => L.filter(l => p.test(l)).length;
+  row('a merged PR, with its title, branch and author', 1, has(new RegExp(`PR #1170 merged: Fix the CSV export \\(fix/csv-export\\) by ${LOGIN}`)));
+  row('...once, however many writers saw it', '1 1', `${has(/PR #1171 merged/)} ${has(/PR #1172 merged/)}`);
+  row('a commit a merge already said is not said again', '0 0', `${has(/commit .*\(#1170\)/)} ${has(/commit .*\(#1171\)/)}`);
+  row('...and one nothing else said is', 1, has(/commit [0-9a-f]{8} Bump the version/));
+  row('a decision, saying who said it', 1, has(/\[lead\] decision: Keep the v1 export/));
+  row('...a worker\'s says so', 1, has(/\[worker api-fix\] decision: Use RFC 4180 quoting/));
+  row('...and an owner\'s answer', 1, has(/\[owner\] decision: The owner already answered "2" \(Parquet\)/));
+  row('a rule, saying who', 1, has(/\[owner\] rule \(project:acme-api\): Never force-push/));
+  row('...one for the whole profile is here too', 1, has(/\[lead\] rule \(profile\): Every project waits/));
+  row('...another project\'s is not', 0, has(/A rule about the other project/));
+  row('a deploy', 1, has(/deploy .*vercel deploy.* at a1b2c3d4/));
+  row('a keyed fact changing', '1 1', `${has(/\[lead\] api\.version = v1$/)} ${has(/\[owner\] api\.version = v2 \(was v1\)/)}`);
+  row('a worker starting, with what it was for', 1, has(/worker api-fix started on fix\/csv-export: Fix the CSV export/));
+  row('...and finishing', 1, has(/worker api-fix finished \(fix\/csv-export\)/));
+  const hms = (l) => l.slice(2, 7);
+  row('a merge sits on the day GitHub says it happened', 'yes', yes((() => {
+    const i = L.findIndex(l => /PR #1170 merged/.test(l));
+    return L.slice(0, i).filter(x => /^\d{4}-/.test(x)).pop() === iso(BF_T + DAY).slice(0, 10) && hms(L[i]) === iso(BF_T + DAY).slice(11, 16);
+  })()));
+  const sinceDay = iso(BF_T + 4 * DAY).slice(0, 10), untilDay = iso(BF_T + 4 * DAY).slice(0, 10);
+  const nar = X.hist('acme-api', '--since', sinceDay, '--until', untilDay).stdout;
+  row('--since and --until narrow it, a bare date meaning that whole day', 'yes yes no', `${yes(/Keep the v1 export/.test(nar))} ${yes(/Bump the version/.test(nar))} ${yes(/PR #1170/.test(nar))}`);
+  row('...an empty range says so', 'yes', yes(/nothing recorded in that range/.test(X.hist('acme-api', '--since', iso(BF_NOW + DAY)).stdout)));
+  row('...a date it cannot read is refused', '2', X.hist('acme-api', '--until', 'someday').status);
+  const at = X.hist('acme-api', '--at', iso(BF_T + DAY + 2 * HOUR)).stdout;
+  row('--at stops it there', 'yes no', `${yes(/PR #1170 merged/.test(at))} ${yes(/PR #1173/.test(at))}`);
+  const ka = X.hist('acme-api', '--known-at', iso(BF_NOW - HOUR)).stdout;
+  row('--known-at before the backfill: only what was recorded by then', 'no yes', `${yes(/PR #1170 merged/.test(ka))} ${yes(/PR #1171 merged/.test(ka))}`);
+  const nobody = X.hist('nosuch');
+  row('a project nobody knows is not recorded', '1 yes', `${nobody.status} ${yes(/^fleet-know: not recorded/m.test(nobody.stderr))}`);
+  row('no project named is refused', '2', X.hist().status);
+  row('--json carries the rows', 'yes', yes((() => { const j = JSON.parse(X.hist('acme-api', '--json').stdout); return j.project === 'acme-api' && j.rows.some(x => x.kind === 'pr') && j.earlier === 0; })()));
+  row('history is a read, and leaves a line like any', 'yes', yes(lines(X.log).some(e => e.kind === 'know.read' && e.f.verb === 'history')));
+  // THE BOUND: 260 lines in a range, of which the 200 newest print.
+  const H = newHome('bf-bound');
+  for (let i = 0; i < 260; i++) K.record('commit', { sha: `c${String(i).padStart(39, '0')}`, subject: `Commit number ${i}` }, { fleetDir: H.fl, project: 'acme-web', sock: 'cf-acme-web', t: BF_T + i * HOUR, src: { via: 'backfill' } });
+  const b = kh(H, ['history', 'acme-web']).stdout, bl = b.split('\n');
+  row('a long range keeps the newest', 'yes no', `${yes(/Commit number 259$/m.test(b))} ${yes(/Commit number 59$/m.test(b))}`);
+  row('...the same number however long the log', 200, bl.filter(l => /Commit number/.test(l)).length);
+  const more = /^\+(\d+) earlier: --since (\S+) --until (\S+)$/m.exec(b) || [];
+  row('...and says how many earlier, and how to read them', '60', more[1]);
+  const back = more[2] ? kh(H, ['history', 'acme-web', '--since', more[2], '--until', more[3]]).stdout : '';
+  row('...which is exactly the rest', '60 yes yes', `${back.split('\n').filter(l => /Commit number/.test(l)).length} ${yes(/Commit number 59$/m.test(back))} ${yes(/Commit number 0$/m.test(back))}`);
+  row('...and that page has no earlier line', 'no', yes(/ earlier: --since/.test(back)));
+  row('a repeated sha is one line', 'yes', yes((() => {
+    K.record('commit', { sha: `c${String(259).padStart(39, '0')}`, subject: 'Commit number 259', repo: 'acme/acme-web' }, { fleetDir: H.fl, project: 'acme-web', sock: 'cf-acme-web', t: BF_T + 259 * HOUR, src: { via: 'backfill' } });
+    return kh(H, ['history', 'acme-web']).stdout.split('\n').filter(l => /Commit number 259$/.test(l)).length === 1;
+  })()));
+  // PRIVACY, ON THE FIXTURE'S OWN PROJECTS
+  row('a private project says so', 'yes', yes(new RegExp(K.PRIV_NOTE.slice(0, 30).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(know(['history', 'scratch']).stdout)));
+  row('...an excluded one is not there', '1', know(['history', 'toolbox']).status);
+  // Excluded after it recorded: the lines stay in the log, and no answer shows them.
+  K.record('decision', { text: 'A launch nobody should read about', source: 'stated' }, { fleetDir: X.fl, project: 'acme-web', sock: 'cf-acme-web', t: BF_T, src: LEAD_SRC });
+  const shown = X.hist('acme-web');
+  fs.writeFileSync(path.join(X.fl, 'cf-acme-web.know'), 'exclude\n');
+  const hidden = X.hist('acme-web');
+  row('...nor one excluded after it recorded, though its lines stay in the log', 'yes 1 no', `${yes(/A launch nobody/.test(shown.stdout))} ${hidden.status} ${yes(/A launch nobody/.test(hidden.stdout))}`);
+  // The fixture fleet, through the command, for what a lead would see of a real one.
+  const fx1 = know(['history', 'acme-api']).stdout;
+  row('the fixture: its merge, its deploy, its worker, its decision', 'yes yes yes yes', [/PR #1170 merged/, /deploy .*vercel deploy/, /worker \S+ started/, /decision: Keep the v1 export/].map(p => yes(p.test(fx1))).join(' '));
+  // The example in the docs, against what the fixture fleet prints, the way the briefing's is held: a
+  // fixture of its own, since the shared one has been written to by the time this runs.
+  const F3 = path.join(DIR, 'fx-docs-history');
+  const built = run('node', [path.join(ROOT, 'test', 'helpers', 'know-fixture.mjs'), F3], { home: F3 });
+  const sample = run('node', [KNOW, 'history', 'acme-api', '--no-sync'], { home: F3, env: { CLAUDE_FLEET_NOW_MS: String(Number(built.stdout.trim()) + 111 * 60000) } }).stdout.trim();
+  row('the fixture\'s history is the one docs/MEMORY.md prints', 'yes', yes(sample.length > 200 && text(path.join(ROOT, 'docs', 'MEMORY.md')).includes(sample)));
+});
+
+// Every line a backfill writes lands behind the snapshot's high-water, which is the one shape a read
+// cannot just fold onto what it holds. So a snapshot exists first, as on any machine with a log.
+await section('backfill: a read after it is still right', () => {
+  const home = path.join(DIR, 'bench-bf');
+  const bench = path.join(ROOT, 'test', 'helpers', 'know-bench.mjs');
+  const benv = { ...base(), HOME: FX };
+  const kn = (...a) => spawnSync('node', [KNOW, ...a], { encoding: 'utf8', timeout: 60000, env: { ...base(), HOME: home } });
+  const g = spawnSync('node', [bench, 'gen', home, '3000', '--projects', '5', '--now', String(BF_NOW)], { encoding: 'utf8', timeout: 60000, env: benv });
+  const before = kn('acme-api', '--no-sync');
+  const bf = spawnSync('node', [bench, 'backfill', home, '3000', '--now', String(BF_NOW)], { encoding: 'utf8', timeout: 60000, env: benv });
+  const evs = lines(path.join(home, '.claude', 'fleet', K.LOG));
+  const old = evs.filter(e => e.src && e.src.via === 'backfill');
+  row('the bench adds a backfill of the size asked, and says so', `yes ${old.length}`, `${yes(g.status === 0 && before.status === 0 && bf.status === 0 && old.length >= 3000)} ${String(bf.stdout).trim()}`);
+  row('...of lines older than everything else in the log', 'yes', yes(old.every(e => e.t < BF_NOW - 60 * DAY)));
+  const after = kn('acme-api', '--no-sync');
+  row('...and the page reads it', 'yes', yes(after.status === 0 && /WHERE IT STANDS/.test(after.stdout)));
+  row('...and the graph it read is the one a rebuild makes', '0', kn('rebuild', '--check').status);
 });
 
 for (const r of rows) process.stdout.write(r.join('\x1f') + '\n');
