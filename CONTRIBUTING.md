@@ -10,8 +10,16 @@ has no roadmap, and there is no SLA on anything here. I answer issues when I ans
 Saying that plainly up front is meant to be useful to you: it tells you what a slow reply
 means, and it tells you not to wait on me before forking.
 
-MIT means you can take it anywhere, and you do not need my permission or my attention to
-do that.
+The core is MIT, which means you can take it anywhere, and you do not need my permission or
+my attention to do that. The `ee/` folder is not MIT: it is the Team edition, under its own
+license. [docs/LICENSING.md](docs/LICENSING.md) explains the split in plain words.
+
+## Contributor License Agreement
+
+Every contribution, to the core or to `ee/`, needs the [CLA](CLA.md), once. You keep your
+copyright; it is a license, not an assignment. It exists so I can keep the core MIT and offer
+`ee/` under the Team License. On your first PR a bot asks you to accept it, and until that bot
+is on, I will ask you in the PR. More in [docs/LICENSING.md](docs/LICENSING.md).
 
 ## Bugs
 
