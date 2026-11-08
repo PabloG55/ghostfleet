@@ -2468,11 +2468,11 @@ function renderSettings() {
   const names = cards.map(c => c.name);
   gSetSel = Math.max(0, Math.min(gSetSel, Math.max(0, names.length - 1)));
   const pOn = projPushOn();
-  let buf = '\x1b[H';
-  buf += ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per session${C.reset}\x1b[K\n`;
-  buf += ` ${C.dim}a session's own setting wins over the project's.  project ${C.reset}${C.bold}${Z}${C.reset}${C.dim}: ${C.reset}` +
-         `${pOn ? `${C.green}on` : `${C.grey}off`}${C.reset} ${C.dim}(change on the projects screen → ,)${C.reset}\x1b[K\n\x1b[K\n`;
-  if (!names.length) buf += ` ${C.dim}(no sessions yet)${C.reset}\x1b[K\n`;
+  // One cell short of the edge, as the Projects settings page draws: a line that fills the last
+  // column leaves the cursor waiting to wrap, and the second header line is wider than 80.
+  const width = W() - 1, rows = H();
+  const body = [];
+  if (!names.length) body.push(` ${C.dim}(no sessions yet)${C.reset}`);
   names.forEach((n, i) => {
     const st = sessPush(n), selRow = i === gSetSel;
     const badge = st === 'on'  ? `${C.green}● on     ${C.reset}`
@@ -2486,11 +2486,25 @@ function renderSettings() {
       : par && parSt !== 'inherit' ? `follows ${par} · ${parSt}`
       : par ? `follows project · ${fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off')) ? 'off' : 'on'}`
       : `follows project · ${pOn ? 'on' : 'off'}`;
-    buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
-           `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
+    body.push(`${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
+           `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}`);
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · l label · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
-  out(buf);
+  // What stays is the title, the line about precedence and the keys; the rows are cut around the
+  // cursor by the same helper the Projects page uses, and the spacers go first when short.
+  const title = ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per session${C.reset}`;
+  const info = ` ${C.dim}a session's own setting wins over the project's.  project ${C.reset}${C.bold}${Z}${C.reset}${C.dim}: ${C.reset}` +
+         `${pOn ? `${C.green}on` : `${C.grey}off`}${C.reset} ${C.dim}(change on the projects screen → ,)${C.reset}`;
+  const keys = [
+    ' ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · l label · esc/` back',
+    ' ↑↓ move · space cycle · r rename · l label · esc back',
+    ' ↑↓ · space · esc back',
+  ].find(f => vis(f) <= width) || ' esc back';
+  const roomy = rows >= 8;
+  const head = rows >= 4 ? [title, info, ...(roomy ? [''] : [])] : [title];
+  const foot = [...(roomy ? [''] : []), `${C.dim}${keys}${C.reset}`];
+  const frame = [...head, ...windowLines(body, gSetSel, Math.max(1, rows - head.length - foot.length)), ...foot];
+  // The last line ends without a newline: on the bottom row, one scrolls the whole frame up.
+  out(`\x1b[H${frame.slice(0, rows).map(l => clipSgr(l, width) + '\x1b[K').join('\n')}\x1b[J`);
 }
 function renderRename() {
   let buf = '\x1b[H';
