@@ -634,7 +634,7 @@ await section('big log', () => {
   const rb = kh(X, ['rebuild']);
   row('...rebuild folds the two events, torn and foreign lines skipped', '0 yes', `${rb.status} ${yes(/rebuilt from 2 events/.test(rb.stdout))}`);
   row('...and a project page still answers', '0', kh(X, ['acme-api']).status);
-  const p = probe(X, `const d = process.env.HOME + '/.claude/fleet'; const s = K.rebuild(d, { save: false }); let n = 0; K.scanLog(d + '/' + K.LOG, 0, () => n++); return { events: s.events, n, rss: process.resourceUsage().maxRSS };`);
+  const p = probe(X, `const d = process.env.HOME + '/.claude/fleet'; const s = K.rebuild(d, { save: false }); let n = 0; K.scanLog(d + '/' + K.LOG, 0, (e) => { if (!K.TELEMETRY.has(e.kind)) n++; }); return { events: s.events, n, rss: process.resourceUsage().maxRSS };`);
   // macOS and Linux both report kilobytes through node. A real read of a file this size is 600 MB.
   row('...in memory that is not the size of the file (under 250 MB)', 'yes', yes(p.rss > 0 && p.rss < 250 * 1024));
   row('...the scan sees the same two', '2 2', `${p.events} ${p.n}`);
@@ -928,7 +928,8 @@ await section('authority', () => {
   const longAgo = t - 30 * 86400e3;
   mk('decision', { text: 'old from a lead', source: 'stated' }, longAgo, lead);
   mk('decision', { text: 'old from a worker', source: 'stated' }, longAgo + 1, worker);
-  row('...and the count of old decisions follows the filter', '2 1', `${kjson(W, ['acme-api']).earlier?.decisions} ${kjson(W, ['acme-api', '--trusted']).earlier?.decisions}`);
+  // The old lead decision is listed now, since it has not closed, and only the worker's is counted.
+  row('...and the count of old decisions follows the filter', '1 0', `${kjson(W, ['acme-api']).earlier?.decisions} ${kjson(W, ['acme-api', '--trusted']).earlier?.decisions}`);
   // The owner's own terminal, for real: a pty. Beside it the same command in the three cases
   // that look like one and are not.
   const V = newHome('authority-tty');
@@ -982,6 +983,740 @@ await section('said', () => {
   waitFor(() => lines(LOGF).some(e => e.kind === 'turn.end' && e.src && e.src.session === 's-long'));
   const s = (lines(LOGF).find(e => e.kind === 'turn.end' && e.src && e.src.session === 's-long') || { f: {} }).f.said || '';
   row('...through the real Stop hook: the question kept, the token not', 'yes no yes', `${yes(s.endsWith(question))} ${yes(s.includes(tok))} ${yes(s.includes('[redacted:github-token]'))}`);
+});
+
+// ══ phase B: rules, facts that close, the lead's briefing, compaction, reads ══════════════
+// What a lead is told at the start of a session has to be right on the day something changes, so
+// the two checks that matter most here are knowledge update (what closed is never read as
+// current, wherever it is read) and abstention (what was never recorded says so). Each writes
+// through the real command or the real hook, and reads back through the real command or hook.
+const LEAD = { CLAUDE_FLEET_SLOT: 'master' }, WORKER = { CLAUDE_FLEET_SLOT: 'api-fix' };
+const OWNER_SRC = { via: 'fleet-know', by: 'terminal' }, LEAD_SRC = { via: 'fleet-know', slot: 'master' }, WORKER_SRC = { via: 'fleet-know', slot: 'api-fix' };
+const twoProfiles = (name) => {
+  const X = newHome(name);
+  const pl = path.join(X.h, '.claude-personal', 'fleet');
+  fs.mkdirSync(pl, { recursive: true });
+  fs.writeFileSync(path.join(X.h, '.config', 'ghostfleet', 'projects'),
+    `acme-api\t${X.h}/gf-demo/acme-api\twork\nacme-web\t${X.h}/gf-demo/acme-web\twork\nbilling-svc\t${X.h}/gf-demo/billing-svc\tpersonal\n`);
+  return { ...X, pl, plog: path.join(pl, K.LOG) };
+};
+const asJson = (r) => { try { return JSON.parse(r.stdout); } catch { return {}; } };
+const idOf = (r) => asJson(r).id || '';
+const ruleAdd = (X, words, opts = [], env = LEAD) => kh(X, ['rule', 'add', words, ...opts, '--json'], env);
+const ruleList = (X, ...a) => kh(X, ['rule', 'list', ...a]).stdout;
+const ofKind = (X, kind) => lines(X.log).filter(e => e.kind === kind);
+const seed = (X, project = 'acme-api', sock = 'cf-acme-api') => K.record('session.start', { branch: 'main' }, { fleetDir: X.fl, project, sock, t: Date.now(), src: { via: 'hook', session: `s-${project}`, slot: 'master' } });
+
+await section('rules', () => {
+  const X = twoProfiles('rules');
+  seed(X); seed(X, 'acme-web', 'cf-acme-web');
+  const pro = ruleAdd(X, 'Keep the v1 export until acme-web moves', ['--scope', 'project:acme-api', '--why', 'acme-web still calls it', '--quote', 'not before the move']);
+  const prf = ruleAdd(X, 'Every project ships through a PR', ['--scope', 'profile']);
+  const all = ruleAdd(X, 'Never paste a live log into a PR', ['--scope', 'all']);
+  row('rule add: a lead\'s is live at once, and says its scope', 'live project:acme-api', `${asJson(pro).state} ${asJson(pro).scope}`);
+  const j = asJson(kh(X, ['rule', 'list', 'acme-api', '--json']));
+  row('rule list: the most specific first', 'project:acme-api profile all', (j.live || []).map(r => r.scope).join(' '));
+  const out = ruleList(X, 'acme-api');
+  row('...and it says which wins, in words', 'yes', yes(/most specific wins: project: beats profile beats all/.test(out)));
+  row('...with the why and the words they came from', 'yes yes', `${yes(/acme-web still calls it/.test(out))} ${yes(/not before the move/.test(out))}`);
+  row('...a rule of another project does not apply here', 'no yes', `${yes(/Keep the v1 export/.test(ruleList(X, 'acme-web')))} ${yes(/ships through a PR/.test(ruleList(X, 'acme-web')))}`);
+  const page = kh(X, ['acme-api']).stdout;
+  row('the project page carries them, under the same order', 'yes yes', `${yes(/RULES  most specific wins/.test(page))} ${yes(/Never paste a live log/.test(page))}`);
+  row('the scope is checked, and nothing is written when it is wrong', '2 1 3', `${kh(X, ['rule', 'add', 'x', '--scope', 'everywhere'], LEAD).status} ${kh(X, ['rule', 'add', 'x', '--scope', 'project:no-such-project'], LEAD).status} ${ofKind(X, 'rule').length}`);
+  K.record('rule', { text: 'scope the fold will not read', scope: 'everywhere' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  row('...and a line written by hand with a bad scope is no rule', 'no', yes(/fold will not read/.test(ruleList(X, 'acme-api'))));
+  row('with no --scope: the project the session is in', 'project:acme-api', asJson(ruleAdd(X, 'default scope here', [], { ...LEAD, CLAUDE_FLEET_SOCK: 'cf-acme-api' })).scope);
+  row('...and with no project to name, the profile, which it says', 'profile', asJson(ruleAdd(X, 'default scope nowhere')).scope);
+
+  // A worker's rule is a proposal until somebody trusted says yes.
+  const prop = ruleAdd(X, 'Run the export job twice', ['--scope', 'project:acme-api'], WORKER);
+  row('a worker\'s rule is proposed', 'proposed worker', `${asJson(prop).state} ${asJson(prop).authority}`);
+  const pj = asJson(kh(X, ['rule', 'list', 'acme-api', '--json']));
+  const inLive = (o, re) => (o.live || []).some(r => re.test(r.text));
+  row('...is listed apart, not as a rule', 'no yes', `${yes(inLive(pj, /export job twice/))} ${yes((pj.proposed || []).some(r => /export job twice/.test(r.text)))}`);
+  row('...and says so', 'yes', yes(/PROPOSED — not rules until/.test(ruleList(X, 'acme-api'))));
+  row('...and the page does not show its text', 'no yes', (() => { const t = kh(X, ['acme-api']).stdout; return `${yes(/export job twice/.test(t))} ${yes(/1 proposed, not in force/.test(t))}`; })());
+  const w0 = ofKind(X, 'rule.accept').length;
+  row('a worker cannot accept it', '1 0', `${kh(X, ['rule', 'accept', idOf(prop)], WORKER).status} ${ofKind(X, 'rule.accept').length - w0}`);
+  K.record('rule.accept', { target: idOf(prop) }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: WORKER_SRC });
+  row('...and a line that claims it changes nothing', 'no', yes(inLive(asJson(kh(X, ['rule', 'list', 'acme-api', '--json'])), /export job twice/)));
+  K.record('rule', { text: 'promoted by a field', scope: 'all', authority: 'owner', source: 'prompt', by: 'terminal' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: WORKER_SRC });
+  row('...and neither does a field claiming the owner', 'no', yes(inLive(asJson(kh(X, ['rule', 'list', 'acme-api', '--json'])), /promoted by a field/)));
+  row('a lead can', '0', kh(X, ['rule', 'accept', idOf(prop)], LEAD).status);
+  const pa = asJson(kh(X, ['rule', 'list', 'acme-api', '--json']));
+  const acc = (pa.live || []).find(r => /export job twice/.test(r.text)) || {};
+  row('...and it stands on the lead\'s word from then', 'lead no', `${acc.authority} ${yes((pa.proposed || []).some(r => /export job twice/.test(r.text)))}`);
+  row('...so the worker who proposed it can no longer close it', '1', kh(X, ['rule', 'close', idOf(prop)], WORKER).status);
+
+  // Never decays, whatever its age.
+  const old = Date.now() - 400 * 86400e3;
+  K.record('rule', { text: 'Said four hundred days ago', scope: 'profile' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: old, rec: old, src: OWNER_SRC });
+  row('a rule never decays', 'yes yes', `${yes(/four hundred days ago/.test(ruleList(X, 'acme-api')))} ${yes(/four hundred days ago/.test(kh(X, ['acme-api']).stdout))}`);
+  row('...and the owner\'s comes first within its scope', 'owner', ((asJson(kh(X, ['rule', 'list', 'acme-api', '--json'])).live || []).find(r => r.scope === 'profile') || {}).authority);
+
+  // Closing, in both directions of who may.
+  const closeMe = idOf(ruleAdd(X, 'Close this one later', ['--scope', 'profile']));
+  const before = Date.now(); sleep(3);
+  row('a worker cannot close a lead\'s rule', '1', kh(X, ['rule', 'close', closeMe], WORKER).status);
+  K.record('rule.close', { target: closeMe }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: WORKER_SRC });
+  row('...and a line that claims it changes nothing', 'yes', yes(/Close this one later/.test(ruleList(X, 'acme-api'))));
+  const ownerRule = K.record('rule', { text: 'The owner said this', scope: 'all' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: OWNER_SRC });
+  row('a lead cannot close the owner\'s', '1 yes', `${kh(X, ['rule', 'close', ownerRule.id], LEAD).status} ${yes(/The owner said this/.test(ruleList(X, 'acme-api')))}`);
+  row('close: a reason is taken', '0', kh(X, ['rule', 'close', closeMe, '--reason', 'done with it'], LEAD).status);
+  const afterClose = Date.now() + 1;
+  row('...it is no longer current, on the list or the page', 'no no', `${yes(/Close this one later/.test(ruleList(X, 'acme-api')))} ${yes(/Close this one later/.test(kh(X, ['acme-api']).stdout))}`);
+  row('...and --at before the close still reads it, and after does not', 'yes no', `${yes(/Close this one later/.test(ruleList(X, 'acme-api', '--at', String(before))))} ${yes(/Close this one later/.test(ruleList(X, 'acme-api', '--at', String(afterClose))))}`);
+  row('...and the line is still in the log, for find', 'yes', yes(/Close this one later/.test(kh(X, ['find', 'close', 'this', 'one']).stdout)));
+  row('closing what is already closed says so', '1', kh(X, ['rule', 'close', closeMe], LEAD).status);
+
+  // Supersede, at every scope. A proposal to replace waits for its yes.
+  for (const scope of ['project:acme-api', 'profile', 'all']) {
+    const a = idOf(ruleAdd(X, `Old wording at ${scope}`, ['--scope', scope]));
+    const before2 = Date.now(); sleep(3);
+    const b = idOf(ruleAdd(X, `New wording at ${scope}`, ['--scope', scope, '--supersedes', a]));
+    const now2 = ruleList(X, 'acme-api'), then = ruleList(X, 'acme-api', '--at', String(before2));
+    const page2 = kh(X, ['acme-api']).stdout;
+    row(`knowledge update, a rule (${scope}): the old is gone from the list and the page`, 'no no', `${yes(now2.includes(`Old wording at ${scope}`))} ${yes(page2.includes(`Old wording at ${scope}`))}`);
+    row('...the new one reads in its place', 'yes', yes(now2.includes(`New wording at ${scope}`) && !!b));
+    row('...and --at reads what it was', 'yes no', `${yes(then.includes(`Old wording at ${scope}`))} ${yes(then.includes(`New wording at ${scope}`))}`);
+  }
+  const keep = idOf(ruleAdd(X, 'Stands until somebody says yes', ['--scope', 'profile']));
+  const repl = ruleAdd(X, 'A worker would replace it', ['--scope', 'profile', '--supersedes', keep], WORKER);
+  row('a worker\'s proposal to replace: nothing moves yet', 'yes no', (() => { const o = ruleList(X, 'acme-web'); return `${yes(/Stands until somebody/.test(o.split('PROPOSED')[0]))} ${yes(/A worker would replace it/.test(o.split('PROPOSED')[0]))}`; })());
+  kh(X, ['rule', 'accept', idOf(repl)], LEAD);
+  row('...and on the yes, the replaced one closes', 'no yes', (() => { const o = ruleList(X, 'acme-web'); return `${yes(/Stands until somebody/.test(o))} ${yes(/A worker would replace it/.test(o))}`; })());
+  const ownerKeep = K.record('rule', { text: 'Owner rule a lead cannot replace', scope: 'all' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: OWNER_SRC });
+  const replO = ruleAdd(X, 'A worker would replace the owner', ['--scope', 'all', '--supersedes', ownerKeep.id], WORKER);
+  row('...but a lead cannot say yes to replacing the owner\'s', '1 yes', `${kh(X, ['rule', 'accept', idOf(replO)], LEAD).status} ${yes(/Owner rule a lead cannot/.test(ruleList(X, 'acme-web')))}`);
+  const rulesBefore = ofKind(X, 'rule').length;
+  const outright = ruleAdd(X, 'A lead would replace the owner outright', ['--scope', 'all', '--supersedes', ownerKeep.id]);
+  // Refused rather than left to the fold: the new rule would go live beside the one it claims to replace.
+  row('...nor replace it outright, and nothing is recorded', '1 0 yes', `${outright.status} ${ofKind(X, 'rule').length - rulesBefore} ${yes(/Owner rule a lead cannot/.test(ruleList(X, 'acme-web')))}`);
+  row('--supersedes of a rule that does not exist is refused', '1', kh(X, ['rule', 'add', 'x', '--scope', 'profile', '--supersedes', 'knope'], LEAD).status);
+
+  // The derived graph stays derived: rebuilt from the log it is the same, a doubled log folds to
+  // one fact each, and the nameless rows make no project of their own.
+  row('the graph with rules in it rebuilds to the same thing', '0', kh(X, ['rebuild', '--check']).status);
+  const doubled = path.join(X.h, 'doubled.jsonl');
+  fs.writeFileSync(doubled, text(X.log) + text(X.log));
+  const same = probe(X, `const a = K.rebuild(${JSON.stringify(X.fl)}, { save: false }); const d = ${JSON.stringify(path.join(X.h, 'dbl'))}; (await import('node:fs')).mkdirSync(d, { recursive: true }); (await import('node:fs')).copyFileSync(${JSON.stringify(doubled)}, d + '/' + K.LOG); const b = K.rebuild(d, { save: false }); return { same: K.sameGraph(K.canonical(a.graph), K.canonical(b.graph)) };`);
+  row('...every line twice folds to the same graph', 'true', String(same.same));
+  row('...and no project called - appears', 'no', yes(/^-\s/m.test(kh(X, []).stdout)));
+  // Complete, and caught up with the log, except that it knows nothing of rules: all it has against
+  // it is its version, which is what has to refuse it. The hot list goes as well, because a recent
+  // event is folded from there on top of the graph, and an emptied graph alone still answers.
+  kh(X, ['rebuild']);
+  const was = JSON.parse(text(X.snap));
+  fs.writeFileSync(X.snap, JSON.stringify({ ...was, v: was.v - 1, graph: { nodes: {}, edges: {} }, hot: [], bytes: fs.statSync(X.log).size }));
+  row('a snapshot from before rules is not trusted', 'yes', yes(/Never paste a live log/.test(ruleList(X, 'acme-api'))));
+  row('forget reaches a rule', '0 no', `${kh(X, ['forget', idOf(all)]).status} ${yes(/Never paste a live log/.test(ruleList(X, 'acme-api')))}`);
+});
+
+await section('rules across profiles', () => {
+  const X = twoProfiles('rules-share');
+  const onPersonal = { ...LEAD, CLAUDE_CONFIG_DIR: path.join(X.h, '.claude-personal') };
+  seed(X);
+  ruleAdd(X, 'A rule of the work profile', ['--scope', 'all']);
+  ruleAdd(X, 'Personal says this everywhere', ['--scope', 'all'], onPersonal);
+  ruleAdd(X, 'Personal says this for itself', ['--scope', 'profile'], onPersonal);
+  ruleAdd(X, 'Personal says this about billing', ['--scope', 'project:billing-svc'], onPersonal);
+  const onlyAll = /Personal says this everywhere/, onlyProfile = /Personal says this for itself/, onlyProject = /Personal says this about billing/;
+  const worksees = () => ruleList(X, 'acme-api');
+  row('no rule crosses profiles by default', 'no no no', `${yes(onlyAll.test(worksees()))} ${yes(onlyProfile.test(worksees()))} ${yes(onlyProject.test(worksees()))}`);
+  row('...and each still has its own', 'yes yes', `${yes(/A rule of the work profile/.test(worksees()))} ${yes(onlyAll.test(ruleList(X, 'billing-svc')))}`);
+  row('a worker cannot opt a profile in', '1 no', `${kh(X, ['rule', 'share-from', 'personal'], WORKER).status} ${yes(onlyAll.test(worksees()))}`);
+  K.record('rule.share', { from: 'personal' }, { fleetDir: X.fl, project: K.NO_PROJECT, t: Date.now(), src: WORKER_SRC });
+  row('...and a line that claims it changes nothing', 'no', yes(onlyAll.test(worksees())));
+  row('a profile that does not exist, or itself, is refused', '1 2', `${kh(X, ['rule', 'share-from', 'no-such'], LEAD).status} ${kh(X, ['rule', 'share-from', 'work'], LEAD).status}`);
+  const pl0 = lines(X.plog).length;
+  const sh = kh(X, ['rule', 'share-from', 'personal'], LEAD);
+  row('share-from: the owner of the log says what crosses', '0 yes', `${sh.status} ${yes(/reads the `all` rules of personal/.test(sh.stdout))}`);
+  row('...recorded in the receiving profile\'s log, not the giver\'s', '1 0', `${ofKind(X, 'rule.share').filter(e => e.src.slot === 'master').length} ${lines(X.plog).length - pl0}`);
+  row('...an `all` rule crosses, and says where from', 'yes yes', `${yes(onlyAll.test(worksees()))} ${yes(/from personal/.test(worksees()))}`);
+  row('...`profile` and `project:` do not', 'no no', `${yes(onlyProfile.test(worksees()))} ${yes(onlyProject.test(worksees()))}`);
+  row('...and it goes one way', 'no', yes(/A rule of the work profile/.test(ruleList(X, 'billing-svc'))));
+  const overThere = idOf(ruleAdd(X, 'A proposal over in personal', ['--scope', 'all'], { ...WORKER, CLAUDE_CONFIG_DIR: path.join(X.h, '.claude-personal') }));
+  const theirs = idOf(ruleAdd(X, 'Read here, closed only there', ['--scope', 'all'], onPersonal));
+  row('...and a lead here can neither accept nor close what it reads from there', '1 1 yes', `${kh(X, ['rule', 'accept', overThere], LEAD).status} ${kh(X, ['rule', 'close', theirs], LEAD).status} ${yes(/Read here, closed only there/.test(worksees()))}`);
+  row('...while a lead there can', '0', kh(X, ['rule', 'close', theirs], onPersonal).status);
+  row('...and another profile\'s proposal is that profile\'s to accept', 'no yes', `${yes(/A proposal over in personal/.test(worksees()))} ${yes(/A proposal over in personal/.test(ruleList(X, 'billing-svc')))}`);
+  const b4 = Date.now(); sleep(3);
+  kh(X, ['rule', 'share-from', 'personal', '--off'], LEAD);
+  row('revoked: it stops crossing', 'no', yes(onlyAll.test(worksees())));
+  row('...and --at before the revoke still reads it', 'yes', yes(onlyAll.test(ruleList(X, 'acme-api', '--at', String(b4)))));
+  // A paired machine is not a profile that opted in, and neither direction carries a rule.
+  const ev = lines(X.log).find(e => e.kind === 'rule');
+  const pc = probe(X, `const rows = K.eventsForPeer({ after: 0 }); return { kinds: [...new Set((rows.events || rows).map(e => e.kind))] };`);
+  row('a rule is never served to a paired machine', 'no', yes((pc.kinds || []).some(k => k.startsWith('rule'))));
+  row('...while what happened still is', 'yes', yes((pc.kinds || []).includes('session.start')));
+  const ing = probe(X, `const files = K.peerFiles(process.env.HOME + '/.claude/fleet', 'vm'); return K.ingestPeerEvents(files, 'vm', [${JSON.stringify({ ...ev, id: 'kfromapeer', machine: 'vm' })}], 0);`);
+  row('...and one that arrives anyway is not kept', '0', String(ing.added));
+});
+
+await section('decisions and facts that close', () => {
+  const X = twoProfiles('closing');
+  seed(X); seed(X, 'acme-web', 'cf-acme-web');
+  const page = (...a) => kh(X, ['acme-api', ...a]).stdout;
+  const oldD = idOf(kh(X, ['decide', 'acme-api', 'Keep the v1 export endpoint', '--json'], LEAD));
+  const b4 = Date.now(); sleep(3);
+  row('the page prints a decision\'s id', 'yes', yes(page().includes(oldD) && !!oldD));
+  const n0 = ofKind(X, 'decision').length;
+  row('decide --supersedes: an id nobody has is refused, and nothing is recorded', '1 0', `${kh(X, ['decide', 'acme-api', 'x', '--supersedes', 'knope'], LEAD).status} ${ofKind(X, 'decision').length - n0}`);
+  const webD = idOf(kh(X, ['decide', 'acme-web', 'A decision about the web app', '--json'], LEAD));
+  const across = kh(X, ['decide', 'acme-api', 'x', '--supersedes', webD], LEAD);
+  row('...and so is one about another project, in those words', '1 yes', `${across.status} ${yes(/acme-api has no decision/.test(across.stderr))}`);
+  const webNode = () => JSON.stringify(K.derive(lines(X.log)).nodes[`decision:${webD}`]);
+  const webBefore = webNode();
+  K.record('decision', { text: 'hand-written close across projects', source: 'stated', supersedes: webD }, onApi(X, Date.now(), LEAD_SRC));
+  row('...and a line that tries it changes nothing over there', 'yes yes', `${yes(kh(X, ['acme-web']).stdout.includes('A decision about the web app'))} ${yes(webNode() === webBefore)}`);
+  row('...and a worker closing a lead\'s word', '1 yes', `${kh(X, ['decide', 'acme-api', 'x', '--supersedes', oldD], WORKER).status} ${yes(page().includes('Keep the v1 export endpoint'))}`);
+  K.record('decision', { text: 'hand-written close', source: 'stated', supersedes: oldD }, onApi(X, Date.now(), WORKER_SRC));
+  row('...and a line that claims it changes nothing', 'yes', yes(page().includes('Keep the v1 export endpoint')));
+  const newD = kh(X, ['decide', 'acme-api', 'Drop the v1 export endpoint', '--supersedes', oldD, '--json'], LEAD);
+  row('a lead closes it', '0', newD.status);
+  row('knowledge update, a decision: the old is gone from the page', 'no yes', `${yes(page().includes('Keep the v1 export endpoint'))} ${yes(page().includes('Drop the v1 export endpoint'))}`);
+  row('...and from a narrowed page', 'no yes', `${yes(page('--trusted').includes('Keep the v1 export endpoint'))} ${yes(page('--trusted').includes('Drop the v1 export endpoint'))}`);
+  row('...and --at reads what held then', 'yes no', `${yes(page('--at', String(b4)).includes('Keep the v1 export endpoint'))} ${yes(page('--at', String(b4)).includes('Drop the v1 export endpoint'))}`);
+  row('closing it twice says so', '1', kh(X, ['decide', 'acme-api', 'x', '--supersedes', oldD], LEAD).status);
+
+  // A keyed fact.
+  const fact = (...a) => kh(X, ['fact', 'acme-api', ...a]);
+  row('fact: a value', '0 yes', (() => { const r = fact('deploy.target', 'blue', '--json'); return `${r.status} ${yes(!!asJson(r).id)}`; })());
+  row('...reads back', 'yes', yes(/deploy\.target = blue/.test(fact('deploy.target').stdout)));
+  const b5 = Date.now(); sleep(3);
+  kh(X, ['fact', 'acme-api', 'deploy.target', 'green'], LEAD);
+  row('knowledge update, a fact: a new value closes the old', 'yes no', (() => { const o = fact('deploy.target').stdout; return `${yes(/= green/.test(o))} ${yes(/blue/.test(o))}`; })());
+  row('...on the page as well', 'yes no', (() => { const o = page(); return `${yes(/deploy\.target = green/.test(o))} ${yes(/deploy\.target = blue/.test(o))}`; })());
+  row('...and --at reads what it was', 'yes', yes(/= blue/.test(kh(X, ['fact', 'acme-api', 'deploy.target', '--at', String(b5)]).stdout)));
+  const leadFact = kh(X, ['fact', 'acme-api', 'owner.key', 'set-by-a-lead', '--json'], LEAD);
+  row('a worker cannot overwrite a lead\'s fact', '1 yes', `${kh(X, ['fact', 'acme-api', 'owner.key', 'overwritten'], WORKER).status} ${yes(/set-by-a-lead/.test(fact('owner.key').stdout) && !!idOf(leadFact))}`);
+  K.record('fact', { key: 'owner.key', value: 'hand-written' }, onApi(X, Date.now(), WORKER_SRC));
+  row('...and a line that claims it changes nothing', 'yes', yes(/set-by-a-lead/.test(fact('owner.key').stdout)));
+  kh(X, ['fact', 'acme-api', 'worker.key', 'from-a-worker'], WORKER);
+  row('a worker\'s own fact reads, and says whose', 'yes', yes(/\[worker, api-fix/.test(fact('worker.key').stdout)));
+  row('...and a narrowed page drops it', 'yes no', `${yes(/from-a-worker/.test(page()))} ${yes(/from-a-worker/.test(page('--trusted')))}`);
+  const wasOn = Date.now(); sleep(3);
+  row('--off retires a key', '0', kh(X, ['fact', 'acme-api', 'deploy.target', '--off'], LEAD).status);
+  const off = fact('deploy.target'), offJ = asJson(kh(X, ['fact', 'acme-api', 'deploy.target', '--json']));
+  row('abstention: a retired key says not recorded, and not its value', 'yes no false', `${yes(/^not recorded: acme-api has no current fact 'deploy.target'/.test(off.stdout))} ${yes(/green|blue/.test(off.stdout))} ${offJ.recorded}`);
+  row('...and is gone from the page', 'no', yes(/deploy\.target/.test(page())));
+  row('...and --at before it still reads it', 'yes', yes(/= green/.test(kh(X, ['fact', 'acme-api', 'deploy.target', '--at', String(wasOn)]).stdout)));
+  row('a key is checked', '2', kh(X, ['fact', 'acme-api', 'has space', 'x'], LEAD).status);
+
+  // The page's bound and its order.
+  const Y = twoProfiles('page-bound');
+  const t = Date.now();
+  seed(Y);
+  const dec = (s, src, age) => K.record('decision', { text: s, source: 'stated' }, onApi(Y, t - age * 86400e3, src));
+  for (let i = 1; i <= 10; i++) dec(`lead decision ${String(i).padStart(2, '0')}, ${i * 20} days old`, LEAD_SRC, i * 20);
+  dec('owner decision, a year old', OWNER_SRC, 365);
+  dec('worker decision from yesterday', WORKER_SRC, 1);
+  dec('worker decision from a month ago', WORKER_SRC, 30);
+  const bp = asJson(kh(Y, ['acme-api', '--json']));
+  const ds = (bp.decisions || []).map(d => d.text);
+  row('the page: what the owner or a lead said does not age out', 'yes', yes(ds.some(s => /lead decision 01/.test(s))));
+  row('...owner and lead first, newest first, a worker\'s after them', 'lead decision 01 yes', `${String(ds[0]).slice(0, 16)} ${yes(ds.every((s, i) => i === 0 || !/worker/.test(ds[i - 1]) || /worker/.test(s)))}`);
+  row('...bounded, with a count of the rest', '8 4', `${ds.length} ${bp.decisionsMore}`);
+  row('...and the count is on the page', 'yes', yes(/\+ 4 more still hold/.test(kh(Y, ['acme-api']).stdout)));
+  const shown = asJson(kh(Y, ['acme-api', '--trusted', '--json']));
+  row('a worker\'s keeps the seven days', 'no 1', `${yes(ds.some(s => /a month ago/.test(s)))} ${bp.earlier && bp.earlier.decisions}`);
+  row('...and a narrowed page counts none, since it shows none', '0', String(shown.earlier && shown.earlier.decisions));
+});
+
+await section('abstention', () => {
+  const X = twoProfiles('abstain');
+  seed(X);
+  kh(X, ['fact', 'acme-api', 'known.key', 'known-value'], LEAD);
+  const says = (r) => r.stdout + r.stderr;
+  row('abstention: a word nothing mentions', 'yes', yes(/^not recorded: no event mentions "zebra-crossing"/.test(says(kh(X, ['find', 'zebra-crossing'])))));
+  row('...a path nothing touched', 'yes', yes(/^not recorded: nothing touching src\/no-such\.js/.test(says(kh(X, ['touched', 'src/no-such.js'])))));
+  row('...a project nothing knows', '1 yes', (() => { const r = kh(X, ['no-such-project']); return `${r.status} ${yes(/^fleet-know: not recorded: nothing for 'no-such-project'/.test(r.stderr))}`; })());
+  row('...a key that was never set', '0 yes false', (() => { const r = kh(X, ['fact', 'acme-api', 'never.set']); return `${r.status} ${yes(/^not recorded/.test(r.stdout))} ${asJson(kh(X, ['fact', 'acme-api', 'never.set', '--json'])).recorded}`; })());
+  row('...a key on a project nothing knows', 'yes', yes(/^not recorded/.test(kh(X, ['fact', 'no-such-project', 'known.key']).stdout)));
+  row('...and another project\'s value is not offered in its place', 'no', yes(/known-value/.test(kh(X, ['fact', 'acme-web', 'known.key']).stdout)));
+  row('...no rule at all', 'yes', yes(/not recorded: no rule applies/.test(ruleList(X, 'acme-api'))));
+  row('...a project nobody has heard of gets the rules any project has, and is told', 'yes', yes(/no project 'no-such-project' on record/.test(ruleList(X, 'no-such-project'))));
+  row('...while what IS recorded still answers', 'yes', yes(/known-value/.test(kh(X, ['fact', 'acme-api', 'known.key']).stdout)));
+});
+
+// A real pairing's refusal is hard to stage from a real host (an unpair reaches both sides), and
+// what this needs to see is the difference between refused, no answer and fine. So: a stub host.
+await section('pairing', async () => {
+  const X = twoProfiles('pairing');
+  seed(X);
+  const stateF = path.join(X.h, 'status'), portF = path.join(X.h, 'port');
+  fs.writeFileSync(stateF, '200');
+  // What the host has of its own, so a project of the host's exists to read here.
+  const remote = { ...lines(X.log)[0], id: 'kremote0001', project: 'acme-remote', machine: 'vm', t: Date.now() };
+  const stub = spawn('node', ['-e', `
+    const http = require('http'), fs = require('fs');
+    const s = http.createServer((q, r) => {
+      const c = Number(fs.readFileSync(${JSON.stringify(stateF)}, 'utf8'));
+      r.writeHead(c, { 'content-type': 'application/json' });
+      r.end(JSON.stringify(c === 200 ? { events: [${JSON.stringify(remote)}] } : { text: 'no' }));
+    });
+    s.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(portF)}, String(s.address().port)));`], { stdio: 'ignore' });
+  try {
+    await new Promise(res => { const i = setInterval(() => { if (fs.existsSync(portF)) { clearInterval(i); res(); } }, 20); });
+    const port = fs.readFileSync(portF, 'utf8').trim();
+    fs.writeFileSync(path.join(X.h, '.config', 'ghostfleet', 'serve-peers.json'), JSON.stringify({ self: 'laptop', peers: [{ id: 'p1', key: 'vm', label: 'vm', out: 'o'.repeat(64), in: 'i'.repeat(64), url: `http://127.0.0.1:${port}` }] }));
+    const sync = async () => new Promise(res => { const c = spawn('node', [KNOW, 'sync', '--json'], { env: { ...base(), HOME: X.h }, stdio: 'ignore' }); c.on('close', res); });
+    const fired = () => ofKind(X, 'fact').filter(e => e.f.key === 'peer.vm.pairing').map(e => e.f.value).join(' ');
+    const reads = () => kh(X, ['fact', 'acme-api', 'peer.vm.pairing', '--no-sync']).stdout;
+    await sync();
+    row('pairing: a peer first seen fine records that once', 'paired', fired());
+    await sync(); await sync();
+    row('...and never again on a poll', 'paired', fired());
+    row('...and reads back', 'yes', yes(/peer\.vm\.pairing = paired/.test(reads())));
+    row('...and shows on the page, as what the fleet saw', 'yes', yes(/peer\.vm\.pairing = paired  \[observed/.test(kh(X, ['acme-api', '--no-sync']).stdout)));
+    ruleAdd(X, 'A rule for this machine alone', ['--scope', 'all']);
+    row('the host\'s project is listed here, and is not told this machine\'s rules', 'yes no yes', (() => { const r = kh(X, ['acme-remote', '--no-sync']); return `${yes(r.status === 0 && /acme-remote/.test(r.stdout))} ${yes(/A rule for this machine alone/.test(r.stdout))} ${yes(/A rule for this machine alone/.test(kh(X, ['acme-api', '--no-sync']).stdout))}`; })());
+    fs.writeFileSync(stateF, '403');
+    await sync();
+    row('a 403 closes it: the fact moves, once', 'paired refused', fired());
+    row('...knowledge update: "paired" is no longer read', 'yes no', (() => { const o = reads(); return `${yes(/= refused/.test(o))} ${yes(/= paired/.test(o))}`; })());
+    row('...and says why', 'yes', yes(/answered 403/.test(reads())));
+    await sync();
+    row('...and a second refusal is not a change', 'paired refused', fired());
+    fs.writeFileSync(stateF, '500');
+    await sync();
+    row('a server error says nothing about the pairing', 'paired refused', fired());
+    fs.writeFileSync(stateF, '200');
+    await sync();
+    row('and back: it closes itself the other way', 'paired refused paired', fired());
+    row('...with no stale reason beside it', 'yes no', (() => { const o = reads(); return `${yes(/= paired/.test(o))} ${yes(/answered 403/.test(o))}`; })());
+    // While paired, which is when reading it as a refusal would move the fact. The row above ran
+    // with the fact already at refused, where it can say nothing.
+    fs.writeFileSync(stateF, '500');
+    await sync();
+    row('...nor does a server error while paired', 'paired refused paired', fired());
+    fs.writeFileSync(stateF, '401');
+    await sync();
+    row('a 401 is a refusal as well', 'paired refused paired refused', fired());
+    fs.writeFileSync(stateF, '200');
+    await sync();
+    // No answer at all: a machine asleep is still paired.
+    stub.kill();
+    await new Promise(r => stub.once('close', r));
+    await sync();
+    row('no answer is not a change either', 'paired refused paired refused paired', fired());
+    const ov = kh(X, ['--no-sync']).stdout;
+    row('...and none of it is activity on a project', 'no', yes(/peer\.vm/.test(ov)));
+    const onward = probe(X, `const rows = K.eventsForPeer({ after: 0 }); return { facts: (rows.events || rows).filter(e => e.kind === 'fact').length };`);
+    row('...and it does not cross to a paired machine', '0', String(onward.facts));
+    // Somebody's hand-written fact of the same name does not outlive what was then seen.
+    const Y = twoProfiles('pairing-hand');
+    seed(Y);
+    const t0 = Date.now();
+    K.record('fact', { key: 'peer.vm.pairing', value: 'paired' }, onApi(Y, t0 - 5000, LEAD_SRC));
+    K.record('fact', { key: 'peer.vm.pairing', value: 'refused', note: 'answered 403', scope: 'machine' }, { fleetDir: Y.fl, project: K.NO_PROJECT, t: t0, src: { via: 'pairing' } });
+    K.record('fact', { key: 'peer.other.pairing', value: 'paired', scope: 'machine' }, { fleetDir: Y.fl, project: K.NO_PROJECT, t: t0, src: WORKER_SRC });
+    row('a worker\'s line claiming to be what the machine saw is not recorded as such', 'yes', yes(/^not recorded/.test(kh(Y, ['fact', 'acme-api', 'peer.other.pairing', '--no-sync']).stdout)));
+    row('a project\'s own fact of that key gives way to a later sighting', 'yes no', (() => { const o = kh(Y, ['acme-api', '--no-sync']).stdout; return `${yes(/peer\.vm\.pairing = refused/.test(o))} ${yes(/peer\.vm\.pairing = paired/.test(o))}`; })());
+  } finally { try { stub.kill(); } catch {} }
+});
+
+// The hook, for real, on a real repo with a real linked worktree. The budget is opened right up
+// except where the budget is the point: this runs on loaded machines, and a phantom miss here would
+// read as a briefing that did not print.
+const briefRig = (name) => {
+  const X = twoProfiles(name);
+  const repo = path.join(X.h, 'gf-demo', 'acme-api'), wt = path.join(X.h, 'gf-demo', 'acme-api-w1');
+  const xdir = path.join(X.h, 'switches');
+  fs.mkdirSync(repo, { recursive: true }); fs.mkdirSync(xdir);
+  const g = (...a) => run('git', ['-C', repo, ...a], { home: X.h });
+  g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, 'a'), 'a\n');
+  g('add', '-A'); g('commit', '-qm', 'init'); g('worktree', 'add', '-q', '-b', 'fix/w1', wt);
+  const env = { CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'master', CLAUDE_FLEET_NOTIFIER: 'off', CLAUDE_FLEET_EXPERIMENTAL_DIR: xdir, CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS: '30000' };
+  const hookPath = path.join(ROOT, 'hooks', 'fleet-event.sh');
+  const fire = (event, extra = {}, more = {}, script = hookPath) => run('bash', [script], { home: X.h, env: { ...env, ...more }, input: JSON.stringify({ hook_event_name: event, session_id: 's-lead', cwd: repo, ...extra }) });
+  const start = (source = 'startup', extra = {}, more = {}) => fire('SessionStart', { source, ...extra }, more);
+  const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext || ''; } catch { return ''; } };
+  const on = () => run(path.join(ROOT, 'bin', 'fleet-experimental'), ['enable', 'know-brief'], { home: X.h, env: { CLAUDE_FLEET_EXPERIMENTAL_DIR: xdir } });
+  return { ...X, repo, wt, xdir, fire, start, ctxOf, on, env, hookPath, briefs: () => lines(X.log).filter(e => e.kind === 'know.brief') };
+};
+
+await section('the briefing', () => {
+  const B = briefRig('brief');
+  const rec = (kind, f, src, t = Date.now()) => K.record(kind, f, onApi(B, t, src));
+  seed(B);
+  rec('project.about', { text: 'A paragraph about what acme-api is' }, LEAD_SRC);
+  const ownerR = K.record('rule', { text: 'The owner\'s rule about shipping', scope: 'profile' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: Date.now(), src: OWNER_SRC });
+  const leadR = K.record('rule', { text: 'A lead\'s rule for this project', scope: 'project:acme-api' }, { fleetDir: B.fl, project: 'acme-api', t: Date.now(), src: LEAD_SRC });
+  K.record('rule', { text: 'A worker proposes this rule', scope: 'profile' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: Date.now(), src: WORKER_SRC });
+  const leadD = rec('decision', { text: 'The lead decided on the v2 export', source: 'stated' }, LEAD_SRC);
+  const ownerD = rec('decision', { text: 'The owner decided on quarterly billing', source: 'stated' }, OWNER_SRC);
+  rec('decision', { text: 'A worker decided something on its own', source: 'stated' }, WORKER_SRC);
+  rec('decision', { text: 'A model inferred something', inferred: true, source: 'inferred' }, { via: 'infer', slot: 'master', session: 's-lead' });
+  rec('fact', { key: 'export.version', value: 'v2-from-a-lead' }, LEAD_SRC);
+  rec('fact', { key: 'worker.note', value: 'a-worker-fact' }, WORKER_SRC);
+  // A millisecond apart: two events at the same instant fold in id order, which is random.
+  const tw = Date.now();
+  rec('request.open', { req: 'r-wait', text: 'Which plan tier should the rate limit apply to?', source: 'prompt' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
+  rec('request.state', { req: 'r-wait', state: 'waiting', text: 'Which plan tier should the rate limit apply to?' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw + 1);
+  rec('pr.open', { repo: 'acme/acme-api', number: 77, branch: 'fix/rate-limit', author: 'outside-dev' }, { via: 'gh', slot: 'master' });
+  rec('need-you', { need: 'a live question on a pane' }, { via: 'hook', session: 's-worker', slot: 'api-fix' });
+
+  // Off first, and for real: off means nothing runs.
+  const off = B.start();
+  row('the briefing: off by default, and prints nothing', '0 empty', `${off.status} ${off.stdout === '' ? 'empty' : off.stdout.slice(0, 80)}`);
+  row('...and is not recorded', '0', B.briefs().length);
+  const xl = run(path.join(ROOT, 'bin', 'fleet-experimental'), ['list'], { home: B.h, env: { CLAUDE_FLEET_EXPERIMENTAL_DIR: B.xdir } });
+  row('...and is listed as an experimental switch, off', 'yes', yes(/know-brief\s+off/.test(xl.stdout) || /off\s+know-brief/.test(xl.stdout)));
+  row('fleet-experimental turns it on', '0 on', `${B.on().status} ${text(path.join(B.xdir, 'know-brief.enabled')).trim()}`);
+
+  const first = B.start();
+  const c = B.ctxOf(first);
+  row('on, a lead: it reaches the session as additionalContext', 'SessionStart', (() => { try { return JSON.parse(first.stdout).hookSpecificOutput.hookEventName; } catch { return first.stdout.slice(0, 80) || 'nothing'; } })());
+  row('...and the hook said nothing else on stdout', 'yes', yes(first.stdout.trim().startsWith('{') && first.stdout.trim().endsWith('}')));
+  row('...says it replaces any earlier briefing', 'yes', yes(/REPLACES any earlier briefing/.test(c)));
+  row('...with the as-of time, and where live state comes from', 'yes yes', `${yes(/as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/.test(c))} ${yes(/Live state comes from fleet_know/.test(c))}`);
+  const at = (re) => c.search(re);
+  row('...in the order asked: rules, decisions, what waits', 'yes', yes(at(/^RULES/m) > 0 && at(/^RULES/m) < at(/^DECISIONS/m) && at(/^DECISIONS/m) < at(/^WAITING ON THE OWNER/m)));
+  row('...the owner\'s rule first', 'yes', yes(at(/The owner's rule about shipping/) > 0 && at(/The owner's rule about shipping/) < at(/A lead's rule for this project/)));
+  row('...and says which scope wins, rather than picking', 'yes', yes(/most specific wins: project: beats profile beats all/.test(c)));
+  row('...ids, one line each', 'yes yes', `${yes(c.includes(ownerR.id) && c.includes(leadR.id) && c.includes(ownerD.id) && c.includes(leadD.id))} ${yes(c.split('\n').every(l => l.length <= 220))}`);
+  row('...what waits on the owner, a request and a PR', 'yes yes', `${yes(/Which plan tier should the rate limit apply to/.test(c))} ${yes(/PR #77 from outside-dev waits for review/.test(c))}`);
+  row('names only owner and lead items', 'no no no no', `${yes(/A worker proposes/.test(c))} ${yes(/A worker decided/.test(c))} ${yes(/A model inferred/.test(c))} ${yes(/a-worker-fact/.test(c))}`);
+  row('...and carries their keyed facts', 'yes', yes(/export\.version = v2-from-a-lead/.test(c)));
+  row('no live session status, and no paragraph on what it is', 'no no', `${yes(/live question|needs you/.test(c))} ${yes(/A paragraph about what acme-api is/.test(c))}`);
+
+  // Every briefing is an event.
+  waitFor(() => B.briefs().length >= 1);
+  const ev = B.briefs()[0] || { f: {}, src: {} };
+  row('every briefing is recorded: session, source, characters, ids', `s-lead startup ${c.length} yes`, `${ev.src.session} ${ev.f.source} ${ev.f.chars} ${yes((ev.f.ids || []).includes(ownerR.id) && (ev.f.ids || []).includes(ownerD.id))}`);
+  row('...and only what it named', 'yes', yes((ev.f.ids || []).every(id => c.includes(id.replace(/^pr#/, 'PR #')))));
+  row('...never as a read', '0', lines(B.log).filter(e => e.kind === 'know.read').length);
+  for (const source of ['resume', 'compact']) {
+    const n = B.briefs().length;
+    const r = B.start(source);
+    row(`source ${source}: it briefs again`, 'yes', yes(/REPLACES any earlier/.test(B.ctxOf(r))));
+    waitFor(() => B.briefs().length > n);
+    row('...and is recorded as that source', source, (B.briefs().pop() || { f: {} }).f.source);
+  }
+  row('source clear: a person asked for an empty context', 'empty', B.start('clear').stdout === '' ? 'empty' : 'printed');
+
+  // Who gets one.
+  row('never to a worker: a linked worktree, even one calling itself master', 'empty', B.start('startup', { cwd: B.wt }).stdout === '' ? 'empty' : 'printed');
+  row('...nor another slot in the main checkout', 'empty', B.start('startup', {}, { CLAUDE_FLEET_SLOT: 'api-fix' }).stdout === '' ? 'empty' : 'printed');
+  row('...nor a session of another agent, whose hook discards it', 'empty', B.start('startup', {}, { CLAUDE_FLEET_EVENT_AGENT: 'cursor' }).stdout === '' ? 'empty' : 'printed');
+  row('...and the kill switch silences it', 'empty', B.start('startup', {}, { CLAUDE_FLEET_KNOW: 'off' }).stdout === '' ? 'empty' : 'printed');
+  row('...while the lead in its own checkout still has one', 'yes', yes(/REPLACES/.test(B.ctxOf(B.start('resume')))));
+  const nobody = B.ctxOf(B.start('startup', {}, { CLAUDE_FLEET_SOCK: 'cf-nobody-registered' }));
+  row('a fleet with no project: the profile\'s rules, and no project\'s', 'yes no', `${yes(/The owner's rule about shipping/.test(nobody))} ${yes(/A lead's rule for this project/.test(nobody))}`);
+
+  // Knowledge update: read through the session start, the place it does the most harm.
+  const oldR = K.record('rule', { text: 'The old briefing rule', scope: 'all' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  const cutR = K.record('rule', { text: 'A rule about to be closed', scope: 'project:acme-api' }, { fleetDir: B.fl, project: 'acme-api', t: Date.now(), src: LEAD_SRC });
+  const oldD = rec('decision', { text: 'The old briefing decision', source: 'stated' }, LEAD_SRC);
+  rec('fact', { key: 'brief.key', value: 'old-fact-value' }, LEAD_SRC);
+  rec('fact', { key: 'gone.key', value: 'retired-fact-value' }, LEAD_SRC);
+  const had = B.ctxOf(B.start('resume'));
+  row('knowledge update, the briefing: all of it is there first', 'yes yes yes yes yes', ['The old briefing rule', 'A rule about to be closed', 'The old briefing decision', 'old-fact-value', 'retired-fact-value'].map(s => yes(had.includes(s))).join(' '));
+  kh(B, ['rule', 'add', 'The new briefing rule', '--scope', 'all', '--supersedes', oldR.id], LEAD);
+  kh(B, ['rule', 'close', cutR.id], LEAD);
+  kh(B, ['decide', 'acme-api', 'The new briefing decision', '--supersedes', oldD.id], LEAD);
+  kh(B, ['fact', 'acme-api', 'brief.key', 'new-fact-value'], LEAD);
+  kh(B, ['fact', 'acme-api', 'gone.key', '--off'], LEAD);
+  const now2 = B.ctxOf(B.start('compact'));
+  row('...and after the closes, none of it reads as current', 'no no no no no', ['The old briefing rule', 'A rule about to be closed', 'The old briefing decision', 'old-fact-value', 'retired-fact-value'].map(s => yes(now2.includes(s))).join(' '));
+  row('...and what replaced it does', 'yes yes yes', ['The new briefing rule', 'The new briefing decision', 'new-fact-value'].map(s => yes(now2.includes(s))).join(' '));
+
+  // Excluded and private.
+  fs.writeFileSync(path.join(B.fl, 'cf-acme-api.know'), 'exclude\n');
+  row('an excluded project is not briefed', 'empty', B.start('resume').stdout === '' ? 'empty' : 'printed');
+  fs.writeFileSync(path.join(B.fl, 'cf-acme-api.know'), 'private\n');
+  row('a private one is, and carries the warning', 'yes', yes(/\[private\]/.test(B.ctxOf(B.start('resume')))));
+  fs.rmSync(path.join(B.fl, 'cf-acme-api.know'));
+
+  // A project with nothing, and a project nobody registered.
+  const E = briefRig('brief-empty');
+  E.on(); seed(E);
+  row('nothing on record, ever: nothing printed, on any source', 'empty empty empty', ['startup', 'resume', 'compact'].map(s => (E.start(s).stdout === '' ? 'empty' : 'printed')).join(' '));
+  const lone = K.record('rule', { text: 'The only rule there is', scope: 'profile' }, { fleetDir: E.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  row('...while it is there, it is what is said', 'yes', yes(/The only rule there is/.test(E.ctxOf(E.start('resume')))));
+  kh(E, ['rule', 'close', lone.id], LEAD);
+  row('closed, and nothing left: a fresh session hears nothing', 'empty', E.start('startup').stdout === '' ? 'empty' : 'printed');
+  row('...but a resume is told, so the earlier briefing does not stand', 'yes yes no', (() => { const t = E.ctxOf(E.start('resume')); return `${yes(/REPLACES/.test(t))} ${yes(/No rules, decisions or waits on record/.test(t))} ${yes(/The only rule there is/.test(t))}`; })());
+  K.record('rule', { text: 'Profile rule, any project', scope: 'profile' }, { fleetDir: E.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  const un = E.ctxOf(E.start('startup', {}, { CLAUDE_FLEET_SOCK: 'cf-no-such-project' }));
+  row('an unregistered project gets the profile\'s rules and no more', 'yes yes', `${yes(/Profile rule, any project/.test(un))} ${yes(/the work profile/.test(un))}`);
+
+  // Cross-profile, through the session start.
+  const S = briefRig('brief-share');
+  S.on(); seed(S);
+  const P = { ...LEAD, CLAUDE_CONFIG_DIR: path.join(S.h, '.claude-personal') };
+  ruleAdd(S, 'Personal rule for everyone', ['--scope', 'all'], P);
+  ruleAdd(S, 'A work rule so there is a briefing', ['--scope', 'profile']);
+  row('the briefing: no other profile\'s rule without share-from', 'no', yes(/Personal rule for everyone/.test(S.ctxOf(S.start()))));
+  kh(S, ['rule', 'share-from', 'personal'], LEAD);
+  row('...with it, yes', 'yes', yes(/Personal rule for everyone/.test(S.ctxOf(S.start()))));
+  kh(S, ['rule', 'share-from', 'personal', '--off'], LEAD);
+  row('...and revoked, no', 'no', yes(/Personal rule for everyone/.test(S.ctxOf(S.start()))));
+});
+
+// The example in the docs, against what the fixture fleet prints: an example nobody re-reads drifts.
+await section('the briefing in the docs', () => {
+  const F2 = path.join(DIR, 'fx-docs');
+  const built = run('node', [path.join(ROOT, 'test', 'helpers', 'know-fixture.mjs'), F2], { home: F2 });
+  const at = Number(built.stdout.trim()) + 111 * 60000;
+  const r = run('node', [path.join(ROOT, 'bin', 'fleet-know-event.mjs'), 'brief', `fleet=${path.join(F2, '.claude', 'fleet')}`, 'sock=cf-acme-api', 'source=startup'], { home: F2, env: { CLAUDE_FLEET_NOW_MS: String(at) } });
+  const body = r.stdout.split('\n').slice(1).join('\n').trimEnd();
+  const doc = text(path.join(ROOT, 'docs', 'MEMORY.md'));
+  row('the fixture\'s briefing is the one docs/MEMORY.md prints, and its length', 'yes yes', `${yes(body.length > 200 && doc.includes(body))} ${yes(doc.includes(`prints, ${body.length} characters`))}`);
+  row('...and the first line says what to record: its length and its ids', 'yes', (() => { try { const m = JSON.parse(r.stdout.split('\n')[0]); return yes(m.chars === body.length && m.ids.length > 3); } catch { return 'no'; } })());
+});
+
+await section('the briefing has a cap', () => {
+  const B = briefRig('brief-cap');
+  B.on(); seed(B);
+  const t = Date.now();
+  for (let i = 0; i < 500; i++) K.record('rule', { text: `Standing rule number ${i}: ${'long words about shipping '.repeat(i % 7 === 0 ? 30 : 2)}`, scope: i % 3 === 0 ? 'all' : i % 3 === 1 ? 'profile' : 'project:acme-api' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: t - i * 1000, rec: t, src: i % 2 ? LEAD_SRC : OWNER_SRC });
+  for (let i = 0; i < 500; i++) K.record('decision', { text: `Decision number ${i}: ${'because of the rate limits '.repeat(i % 5 === 0 ? 30 : 2)}`, source: 'stated' }, onApi(B, t - i * 1000, LEAD_SRC));
+  for (let i = 0; i < 3; i++) {
+    K.record('request.open', { req: `r-wait-${i}`, text: `Waiting question ${i}`, source: 'prompt' }, onApi(B, t, { via: 'ledger', session: 's-lead', slot: 'master' }));
+    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text: `Waiting question ${i}` }, onApi(B, t + 1, { via: 'ledger', session: 's-lead', slot: 'master' }));
+  }
+  const c = B.ctxOf(B.start());
+  row('500 rules and 500 decisions: at or under 2,000 characters', 'yes', c.length > 200 && c.length <= 2000 ? 'yes' : `no: ${c.length}`);
+  row('...cut with the tail that was asked for', 'yes', yes(/^\+\d+ more: fleet_know$/m.test(c)));
+  row('...one line each, however long the text was', 'yes', yes(c.split('\n').every(l => l.length <= 220)));
+  row('...by whole lines: every line is complete', 'yes', yes(c.split('\n').every(l => /^(\[fleet\]|RULES|DECISIONS|WAITING|- |\+\d+ more: fleet_know$)/.test(l))));
+  row('...and the counts add up to the whole', '500', (() => {
+    const sec = c.split(/^(?=DECISIONS)/m)[0];
+    const shown = sec.split('\n').filter(l => l.startsWith('- ')).length;
+    const more = Number((/^\+(\d+) more/m.exec(sec) || [])[1] || 0);
+    return String(shown + more);
+  })());
+  row('...and 500 rules do not starve what waits on the owner', 'yes yes', `${yes(/Waiting question 0/.test(c))} ${yes(/^DECISIONS/m.test(c))}`);
+  row('...and the owner\'s rules still lead', 'owner', (/\[(owner|lead) /.exec(c) || [])[1]);
+  const small = B.ctxOf(B.start('resume'));
+  row('...and it holds a second time, on the same log', 'yes', small.length <= 2000 ? 'yes' : `no: ${small.length}`);
+  const fit = probe(B, `const B = await import(${JSON.stringify(path.join(ROOT, 'lib', 'know-brief.mjs'))}); const r = B.fit('head', [{ title: 'T', rows: Array.from({ length: 300 }, (_, i) => ({ id: 'k' + i, text: 'x'.repeat(50) })) }, { title: 'W', rows: [{ id: 'w1', text: 'y'.repeat(50) }] }], 500); return { len: r.text.length, ids: r.ids.length, w: r.ids.includes('w1') };`);
+  row('fit: the cap holds, and each section keeps a share', 'yes yes', `${yes(fit.len <= 500 && fit.ids > 1)} ${yes(fit.w)}`);
+});
+
+await section('the briefing survives a broken log', () => {
+  const B = briefRig('brief-broken');
+  B.on();
+  const quiet = (r) => (r.status === 0 && r.stdout === '' && r.stderr === '' ? 'quiet' : `status ${r.status} out ${r.stdout.slice(0, 60)} err ${r.stderr.slice(0, 120)}`);
+  row('a missing log: nothing printed, no error', 'quiet', quiet(B.start()));
+  row('...and on a resume', 'quiet', quiet(B.start('resume')));
+  const gone = () => { sleep(150); fs.rmSync(B.snap, { force: true }); };
+  gone(); fs.writeFileSync(B.log, '');
+  row('an empty log', 'quiet', quiet(B.start('resume')));
+  gone(); fs.writeFileSync(B.log, '{"id":"ktorn","kind":"rule","t":17');
+  row('a log that is one torn line', 'quiet', quiet(B.start('resume')));
+  gone(); fs.writeFileSync(B.log, 'not json at all\n\x00\x01\x02\n');
+  row('a log of garbage', 'quiet', quiet(B.start('resume')));
+  sleep(150);
+  // On a log of its own: this one has been cut back underneath its snapshot, which no log ever is.
+  const T = briefRig('brief-torn');
+  T.on();
+  const tornRule = K.record('rule', { text: 'Healthy line before the tear', scope: 'profile' }, { fleetDir: T.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  fs.appendFileSync(T.log, '{"id":"ktorn2","kind":"rule","t":17');
+  const torn = T.ctxOf(T.start());
+  row('a torn tail on a good log still briefs what is whole', 'yes', yes(torn.includes('Healthy line before the tear') && !!tornRule));
+  fs.writeFileSync(T.snap, '{ this is not json');
+  row('...and a broken snapshot is rebuilt from it', 'yes', yes(/Healthy line/.test(T.ctxOf(T.start()))));
+  fs.rmSync(B.log); fs.mkdirSync(B.log);
+  const asDir = B.start();
+  row('a log that cannot be read at all: nothing printed, no error', 'quiet', quiet(asDir));
+  fs.rmSync(B.log, { recursive: true });
+
+  // The budget. A stub stands in for the briefing, sleeping, and with a child that outlives it
+  // holding its output: what the hook must not wait for.
+  const stage = path.join(B.h, 'stage');
+  for (const d of ['hooks', 'lib', 'bin']) fs.mkdirSync(path.join(stage, d), { recursive: true });
+  fs.copyFileSync(B.hookPath, path.join(stage, 'hooks', 'fleet-event.sh'));
+  fs.cpSync(path.join(ROOT, 'lib'), path.join(stage, 'lib'), { recursive: true });
+  const called = path.join(B.h, 'stub-calls');
+  fs.writeFileSync(path.join(stage, 'bin', 'fleet-know-event'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${called}"\ncase "$1" in brief) printf 'partial output' ; sleep 8 ;; esac\nexit 0\n`, { mode: 0o755 });
+  const stubbed = path.join(stage, 'hooks', 'fleet-event.sh');
+  const t0 = Date.now();
+  const late = B.fire('SessionStart', { source: 'startup' }, { CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS: '1000' }, stubbed);
+  const took = Date.now() - t0;
+  row('over the budget: prints nothing, not even what it had', 'quiet', quiet(late));
+  row('...and the hook is back inside the bound, not after the sleep', 'yes', took < 6000 ? 'yes' : `no: ${took}ms`);
+  row('...and it was given the chance', 'yes', yes(waitFor(() => /^brief /m.test(text(called)), 2000)));
+  row('...and writes down why', 'yes', yes(waitFor(() => /^hook event=KnowBrief .*why=over its 1000ms budget/m.test(text(called)), 4000)));
+  row('...leaving no temp file behind', '0', fs.readdirSync(B.fl).filter(f => f.endsWith('.brief')).length);
+  fs.rmSync(called, { force: true });
+  // Through the stub, because the real writer honours the kill switch as well and would hide a hook
+  // that had stopped reading it: the session start would wait on a process with nothing to say.
+  const killed = B.fire('SessionStart', { source: 'startup' }, { CLAUDE_FLEET_KNOW: 'off', CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS: '1000' }, stubbed);
+  row('the kill switch: the briefing is never even started', 'quiet no', `${quiet(killed)} ${yes(/^brief /m.test(text(called)))}`);
+  fs.rmSync(called, { force: true });
+  fs.rmSync(path.join(B.xdir, 'know-brief.enabled'));
+  const offStub = B.fire('SessionStart', { source: 'startup' }, {}, stubbed);
+  waitFor(() => text(called).includes('event=SessionStart'), 3000);
+  row('off means gone: with the switch off the briefing is never even started', 'quiet no', `${quiet(offStub)} ${yes(/^brief /m.test(text(called)))}`);
+  B.on();
+  // ...and through the real writer: the miss is an event a later evaluation can count.
+  const R = briefRig('brief-budget');
+  R.on(); seed(R);
+  K.record('rule', { text: 'A rule the budget will miss', scope: 'profile' }, { fleetDir: R.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  const miss = R.start('startup', {}, { CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS: '1' });
+  row('a real miss: nothing printed', 'quiet', quiet(miss));
+  waitFor(() => R.briefs().length >= 1);
+  const me = R.briefs()[0] || { f: {} };
+  row('...recorded, with no characters and the reason', '0 yes', `${me.f.chars} ${yes(/budget/.test(me.f.why || ''))}`);
+  row('...and the writer catches the snapshot up for the next one', 'yes', yes(waitFor(() => fs.existsSync(R.snap), 8000)));
+});
+
+await section('compaction', () => {
+  const B = briefRig('compact');
+  seed(B);
+  const recF = path.join(B.fl, 's-lead.json');
+  const pre = (extra = {}, more = {}) => B.fire('PreCompact', { trigger: 'manual', ...extra }, more);
+  B.fire('Stop', { stop_hook_active: false, transcript_path: '' });
+  waitFor(() => fs.existsSync(recF));
+  const statusNow = () => { try { return JSON.parse(text(recF)).status; } catch { return 'none'; } };
+  const stood = statusNow();
+  const compacts = () => lines(B.log).filter(e => e.kind === 'session.compact');
+  const off = pre();
+  row('PreCompact, switch off: silent, nothing recorded, the status untouched', `0 empty 0 ${stood}`, `${off.status} ${off.stdout === '' ? 'empty' : 'printed'} ${compacts().length} ${statusNow()}`);
+  B.on();
+  const on = pre();
+  row('on, a lead: an instruction for the summary', 'yes yes yes yes', `${yes(/decisions and standing rules/.test(on.stdout))} ${yes(/open ask/.test(on.stdout))} ${yes(/PR numbers in flight/.test(on.stdout))} ${yes(on.stdout.length < 400)}`);
+  row('...in plain words: Claude Code appends stdout, and JSON would be read as text', 'no', yes(on.stdout.trim().startsWith('{')));
+  row('...and a compaction does not paint an idle session busy', stood, statusNow());
+  waitFor(() => compacts().length >= 1);
+  const ev = compacts()[0] || { f: {}, src: {} };
+  row('...a session.compact event: session, slot, trigger', 's-lead master manual', `${ev.src.session} ${ev.src.slot} ${ev.f.trigger}`);
+  const wp = pre({ cwd: B.wt, session_id: 's-w', trigger: 'auto' }, { CLAUDE_FLEET_SLOT: 'api-fix' });
+  row('a worker gets no instruction', '0 empty', `${wp.status} ${wp.stdout === '' ? 'empty' : 'printed'}`);
+  row('...and its compaction is still on record', 'yes', yes(waitFor(() => compacts().some(e => e.src.session === 's-w'))));
+  row('...none of it activity on a project, or on its page', 'no', yes(/session\.compact/.test(kh(B, ['acme-api']).stdout)));
+  K.record('rule', { text: 'Still told after a compact', scope: 'profile' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: Date.now(), src: LEAD_SRC });
+  row('the SessionStart that follows briefs again', 'yes', yes(/Still told after a compact/.test(B.ctxOf(B.start('compact')))));
+});
+
+await section('reads', async () => {
+  const X = twoProfiles('reads');
+  seed(X);
+  // What the fold says for itself, past the readers that skip these lines before it sees them.
+  {
+    const all = () => lines(X.log);
+    const t = Date.now();
+    K.record('know.read', { verb: 'find', q: 'x', hits: 0 }, onApi(X, t, LEAD_SRC));
+    K.record('session.compact', { trigger: 'manual' }, onApi(X, t + 1, LEAD_SRC));
+    K.record('know.brief', { source: 'startup', chars: 1, ids: [] }, onApi(X, t + 2, LEAD_SRC));
+    row('a log holding what the memory notes about itself folds to the same graph', 'true', String(JSON.stringify(K.derive(all())) === JSON.stringify(K.derive(all().filter(e => !K.TELEMETRY.has(e.kind))))));
+  }
+  K.record('decision', { text: 'A decision to read about', source: 'stated' }, onApi(X, Date.now(), LEAD_SRC));
+  const reads = () => lines(X.log).filter(e => e.kind === 'know.read');
+  const last = () => reads().pop() || { f: {}, src: {} };
+  const before = asJson(kh(X, ['acme-api', '--json']));
+  const n0 = reads().length;
+  const worker = { ...WORKER, CLAUDE_FLEET_SOCK: 'cf-acme-api' };
+  kh(X, ['find', 'decision', 'read'], worker);
+  row('a read leaves a line: verb, query, hits, session', 'find decision read 1 api-fix cf-acme-api cli', (() => { const e = last(); return `${e.f.verb} ${e.f.query} ${e.f.hits} ${e.src.slot} ${e.src.sock} ${e.src.via}`; })());
+  kh(X, ['find', 'nothing', 'about', 'this']);
+  row('...and a miss says so', 'find 0', `${last().f.verb} ${last().f.hits}`);
+  kh(X, ['acme-api']);
+  row('...the page', 'about acme-api 1', `${last().f.verb} ${last().f.query} ${last().f.hits}`);
+  kh(X, ['no-such-project']);
+  row('...a project nothing knows, though the read fails', 'about no-such-project 0', `${last().f.verb} ${last().f.query} ${last().f.hits}`);
+  kh(X, []);
+  row('...the list', 'overview', last().f.verb);
+  kh(X, ['waiting']);
+  row('...what waits', 'waiting', last().f.verb);
+  kh(X, ['touched', 'src/no-such.js']);
+  row('...what touched a file', 'touched src/no-such.js 0', `${last().f.verb} ${last().f.query} ${last().f.hits}`);
+  kh(X, ['rule', 'list', 'acme-api']);
+  row('...the rules', 'rule.list acme-api 0', `${last().f.verb} ${last().f.query} ${last().f.hits}`);
+  kh(X, ['fact', 'acme-api', 'never.set']);
+  row('...a keyed fact', 'fact 0', `${last().f.verb} ${last().f.hits}`);
+  row('every one of those landed', '9', reads().length - n0);
+  const tok = `gh${'p'}_${'a1B2'.repeat(9)}`;
+  kh(X, ['find', 'token', tok]);
+  row('the query is scrubbed like any other text', 'no yes', `${yes(text(X.log).includes(tok))} ${yes(/\[redacted:github-token\]/.test(last().f.query))}`);
+
+  // Nothing a read writes changes what anybody reads.
+  const after = asJson(kh(X, ['acme-api', '--json']));
+  const shape = (b) => JSON.stringify({ d: b.decisions, r: b.openRequests, s: (b.sessions || []).map(s => [s.slot, s.last]), w: b.waiting, e: b.earlier, last: b.last });
+  row('reads never count as activity, or show on a page', 'yes no', `${yes(shape(before) === shape(after))} ${yes(/know\.read/.test(kh(X, ['acme-api']).stdout))}`);
+  row('...the project\'s last-seen does not move', 'yes', (() => {
+    const a = probe(X, `const v = await K.view({ sync: false }); return { last: K.projectsIn(v).find(p => p.name === 'acme-api').last };`);
+    kh(X, ['acme-api']);
+    const b = probe(X, `const v = await K.view({ sync: false }); return { last: K.projectsIn(v).find(p => p.name === 'acme-api').last };`);
+    return yes(a.last > 0 && a.last === b.last);
+  })());
+  row('...no project appears from them', 'no', yes(/^-\s/m.test(kh(X, []).stdout)));
+  kh(X, ['find', 'zebra-crossing']);
+  row('...find never finds a question', 'yes', yes(/^not recorded/.test(kh(X, ['find', 'zebra-crossing']).stdout)));
+  const served = probe(X, `const rows = K.eventsForPeer({ after: 0 }); return { kinds: [...new Set((rows.events || rows).map(e => e.kind))] };`);
+  row('...and none crosses to a paired machine', 'no yes', `${yes((served.kinds || []).includes('know.read'))} ${yes((served.kinds || []).includes('decision'))}`);
+  const peerIn = probe(X, `const files = K.peerFiles(process.env.HOME + '/.claude/fleet', 'vm'); return K.ingestPeerEvents(files, 'vm', [{ id: 'kpeerread', kind: 'know.read', t: 5, f: {} }, { id: 'kpeerbrief', kind: 'know.brief', t: 6, f: {} }], 0);`);
+  row('...in either direction', '0', String(peerIn.added));
+  row('the graph with reads in the log rebuilds to the same thing', '0', kh(X, ['rebuild', '--check']).status);
+
+  // The report.
+  const n1 = reads().length;
+  const rep = kh(X, ['reads']);
+  const j = asJson(kh(X, ['reads', '--json']));
+  row('fleet-know reads: zero-hit questions first', 'yes', yes(rep.stdout.indexOf('ZERO HITS') === 0 && rep.stdout.indexOf('zebra-crossing') < rep.stdout.indexOf('ANSWERED') && rep.stdout.indexOf('decision read') > rep.stdout.indexOf('ANSWERED')));
+  row('...the same question twice is one row with a count', '2', String(((j.missing || []).find(r => r.query === 'zebra-crossing') || {}).count));
+  row('...says who asked', 'yes', yes(((j.answered || []).find(r => r.query === 'decision read') || { who: [] }).who.includes('acme-api/api-fix')));
+  row('...reading the report is not itself a read', '0', reads().length - n1);
+  const future = asJson(kh(X, ['reads', '--since', String(Date.now() + 60000), '--json']));
+  const recent = asJson(kh(X, ['reads', '--since', '1h', '--json']));
+  row('--since narrows it', '0 yes', `${(future.missing || []).length + (future.answered || []).length} ${yes((recent.missing || []).length > 0)}`);
+  row('--since reads the same times --at does', '2', kh(X, ['reads', '--since', 'not-a-time']).status);
+
+  // A log nobody else writes to must not be rescanned from further back at every read.
+  const Y = twoProfiles('reads-slack');
+  seed(Y);
+  kh(Y, ['acme-api']);
+  const b0 = probe(Y, `K.snapshot(process.env.HOME + '/.claude/fleet'); return { b: K.loadSnapshot(process.env.HOME + '/.claude/fleet').bytes };`);
+  sleep(0);
+  for (let i = 0; i < 400; i++) K.record('know.read', { verb: 'find', query: `padding the log out ${'x'.repeat(200)} ${i}`, hits: 0 }, { fleetDir: Y.fl, project: K.NO_PROJECT, t: Date.now(), src: { via: 'cli' } });
+  const b1 = probe(Y, `K.snapshot(process.env.HOME + '/.claude/fleet'); return { b: K.loadSnapshot(process.env.HOME + '/.claude/fleet').bytes, size: (await import('node:fs')).statSync(process.env.HOME + '/.claude/fleet/' + K.LOG).size };`);
+  row('reads alone: the snapshot still moves past them', 'yes', yes(b1.b > b0.b && b1.size - b1.b < 1024));
+
+  // Through the MCP tool, flags beside find included.
+  await new Promise((res) => {
+    const calls = [
+      { name: 'fleet_know', arguments: { rules: 'acme-api' } },
+      { name: 'fleet_know', arguments: { rules: '' } },
+      { name: 'fleet_know', arguments: { about: 'acme-api', fact: 'never.set' } },
+      { name: 'fleet_know', arguments: { find: 'zebra-crossing', json: true } },
+      { name: 'fleet_know', arguments: { rules: '-rf' } },
+      { name: 'fleet_know', arguments: { about: 'acme-api', fact: '--json' } },
+    ];
+    const ch = spawn('node', [path.join(ROOT, 'mcp', 'fleet-mcp.mjs')], { env: { ...base(), HOME: X.h, CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'api-fix' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    const got = new Map();
+    let buf = '';
+    const n2 = reads().length;
+    ch.stdout.on('data', (d) => {
+      buf += d;
+      for (let i; (i = buf.indexOf('\n')) >= 0;) { const l = buf.slice(0, i); buf = buf.slice(i + 1); try { const o = JSON.parse(l); if (o.id != null) got.set(o.id, o); } catch {} }
+    });
+    ch.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {} }) + '\n');
+    ch.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) + '\n');
+    calls.forEach((c, i) => ch.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i + 2, method: 'tools/call', params: c }) + '\n'));
+    const end = Date.now() + 25000;
+    const tick = () => {
+      if (got.size < calls.length + 2 && Date.now() < end) { setTimeout(tick, 50); return; }
+      ch.kill();
+      const txt = (i) => { const r = (got.get(i) || {}).result || {}; return ((r.content || [])[0] || {}).text || ''; };
+      const err = (i) => !!((got.get(i) || {}).result || {}).isError;
+      const t = (((got.get(1) || {}).result || {}).tools || []).find(x => x.name === 'fleet_know');
+      row('fleet_know: rules and fact are in the schema', 'yes yes', `${yes(!!(t && t.inputSchema.properties.rules))} ${yes(!!(t && t.inputSchema.properties.fact))}`);
+      row('...rules: what applies to a project', 'yes', yes(/most specific wins/.test(txt(2))));
+      row('...with an empty name, what applies to every project in this profile', 'yes', yes(/every project in work/.test(txt(3))));
+      row('...about with fact: one key, and not recorded when it is not', 'yes', yes(/^not recorded/.test(txt(4))));
+      row('...a flag beside find is obeyed, not searched for', 'json', (() => { try { return JSON.parse(txt(5)).query ? 'json' : 'no query'; } catch { return `text: ${txt(5).slice(0, 50)}`; } })());
+      row('...a flag where a name goes is refused', 'yes yes', `${yes(err(6))} ${yes(err(7))}`);
+      const mine = reads().slice(n2);
+      row('every fleet_know call is a read', '4 mcp', `${mine.length} ${[...new Set(mine.map(e => e.src.via))].join(',')}`);
+      row('...with the calling session', 'api-fix cf-acme-api', `${(mine[0] || { src: {} }).src.slot} ${(mine[0] || { src: {} }).src.sock}`);
+      res();
+    };
+    tick();
+  });
 });
 
 for (const r of rows) process.stdout.write(r.join('\x1f') + '\n');

@@ -93,16 +93,20 @@ fi
 # with the next hook for the CPU. test/run.sh holds the property rather than the number — a
 # writer that sleeps does not hold the hook up. CLAUDE_FLEET_KNOW=off is the kill switch,
 # and the writer itself decides privacy (an excluded project writes nothing).
-_know() {                             # $1 = event, rest = key=value for the writer
-  [ "${CLAUDE_FLEET_KNOW:-}" = off ] && return 0
+_know_bin() {                         # sets _kn: the writer beside this file, through the install symlink
   local s="${BASH_SOURCE[0]}" t d
   while [ -L "$s" ]; do
     t="$(readlink "$s")"
     case "$t" in /*) s="$t" ;; *) s="${s%/*}/$t" ;; esac
   done
   case "$s" in */*) d="${s%/*}" ;; *) d=. ;; esac
-  [ -x "$d/../bin/fleet-know-event" ] || return 0
-  nohup "$d/../bin/fleet-know-event" hook "event=$1" "fleet=$FLEET_DIR" "${@:2}" <<< "$input" >/dev/null 2>&1 &
+  _kn="$d/../bin/fleet-know-event"
+}
+_know() {                             # $1 = event, rest = key=value for the writer
+  [ "${CLAUDE_FLEET_KNOW:-}" = off ] && return 0
+  _know_bin
+  [ -x "$_kn" ] || return 0
+  nohup "$_kn" hook "event=$1" "fleet=$FLEET_DIR" "${@:2}" <<< "$input" >/dev/null 2>&1 &
   return 0
 }
 
@@ -296,6 +300,76 @@ if [ -n "${CLAUDE_JOB_DIR:-}" ] && [ -z "${TMUX:-}" ]; then
   CLAUDE_FLEET_SOCK="$SOCK"; CLAUDE_FLEET_SLOT="$SLOT"
 fi
 now="$(date +%s)"
+
+# ── THE LEAD'S BRIEFING (lib/know-brief.mjs), behind the `know-brief` switch ─────
+# A lead is the project's master in the project's own checkout. `master` alone is not enough: a
+# conversation resumed into the wrong pane can run under that name from a worker's folder (see
+# the MOVED log below), and a linked worktree is a worker whatever it is called. The git test is
+# the one fleet-guard uses. No repo at all is a lead too: it cannot be a linked worktree.
+_know_brief_on() {
+  [ "${CLAUDE_FLEET_KNOW:-}" != off ] && [ -z "$NESTED" ] \
+    && grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/know-brief.enabled"
+}
+_is_lead() {
+  [ "$SLOT" = master ] && [ -n "$SOCK" ] && [ -z "${CLAUDE_FLEET_EVENT_AGENT:-}" ] || return 1
+  local gd gcd
+  gd="$(git -C "$CWD" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  gcd="$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  [ "$gd" = "$gcd" ]
+}
+# COMPACTION. Exits here, ahead of the record below, whose catch-all reads any event it does not
+# name as `working`: a compaction of an idle session would paint it busy, and with the switch off
+# this event must not change a thing. What it prints, Claude Code appends to the compaction's own
+# instructions (exit 0 stdout, checked against 2.1.x's hook docs). The SessionStart that follows,
+# with source `compact`, is what briefs again.
+if [ "$EVENT" = PreCompact ]; then
+  if _know_brief_on; then
+    _is_lead && printf '%s\n' "[fleet] In this summary keep, word for word: the owner's decisions and standing rules with their ids, every open ask of the owner, and the PR numbers in flight. A fresh briefing follows and replaces any earlier one."
+    [ -n "$SOCK" ] && _know PreCompact "sock=$SOCK" "slot=$SLOT"
+  fi
+  exit 0
+fi
+# THE BUDGET IS HELD FROM OUT HERE. A read that hangs is a synchronous one, which also blocks any
+# timer set inside it, and macOS has no `timeout` to reach for. Output goes to a file rather than
+# through $(…), because a pipe stays open for as long as anything holds its write end, and a
+# capture would then wait out whatever outlived the process it was killing.
+#   Nothing is printed unless the whole of it arrived, and only one thing happens after: the
+# detached writer records it. So a session start cannot be failed or held up by this, whatever
+# state the log is in; the worst it can do is say nothing and write down why.
+_know_briefing() {                    # $1 = the SessionStart source
+  local f="$FLEET_DIR/.$SESSION.$$.brief" p w rc head body
+  local ms="${CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS:-1000}"
+  case "$ms" in ''|*[!0-9]*) ms=1000 ;; esac
+  _know_bin
+  [ -x "$_kn" ] && [ -d "$FLEET_DIR" ] || return 0
+  {
+    "$_kn" brief "fleet=$FLEET_DIR" "sock=$SOCK" "source=$1" </dev/null >"$f" &
+    p=$!
+    ( sleep "$(( ms / 1000 )).$(printf '%03d' $(( ms % 1000 )))"; kill -9 "$p" ) >/dev/null 2>&1 &
+    w=$!
+    wait "$p"; rc=$?
+    # Reaped here, inside the redirect. Left to the next command, bash prints "Terminated: 15"
+    # for the watchdog on the hook's stderr, on every briefing that came in on time.
+    kill "$w"; wait "$w"
+  } 2>/dev/null
+  if [ "$rc" != 0 ]; then
+    rm -f "$f" 2>/dev/null
+    case "$rc" in 137) rc="over its ${ms}ms budget" ;; *) rc="failed with status $rc" ;; esac
+    _dbg "know-brief $SESSION ($1): printed nothing — $rc"
+    _know KnowBrief "sock=$SOCK" "slot=$SLOT" "source=$1" "why=$rc"
+    return 0
+  fi
+  # The first line is what to record, the rest is what the model is told.
+  if IFS= read -r head < "$f" && [ -n "$head" ]; then
+    body="$(sed 1d "$f" 2>/dev/null)"
+    [ -n "$body" ] && jq -n --arg c "$body" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}' 2>/dev/null \
+      && _know KnowBrief "sock=$SOCK" "slot=$SLOT" "source=$1" "meta=$head"
+  else
+    _dbg "know-brief $SESSION ($1): nothing to brief"
+  fi
+  rm -f "$f" 2>/dev/null
+  return 0
+}
 
 # ── A TURN STARTED BY A RESUME IS NOT NEWS UNLESS IT MADE SOME ──────────────────
 # Every park and resume ends in a turn: the resume prompt says "continue", the worker looks,
@@ -735,6 +809,12 @@ case "$EVENT" in
     [ "$EVENT" = Notification ] && [ "$status" != need-you ] || \
       _know "$EVENT" "sock=$SOCK" "slot=$SLOT" "branch=$branch" "status=$status" "turn=$TURN" ;;
 esac
+# The lead's briefing (see _know_briefing): after the record, since an error there would leave
+# the session with no status. Exactly these three: `clear` is a person asking for an empty context.
+if [ "$EVENT" = SessionStart ] && _know_brief_on && _is_lead; then
+  _brief_src="$(printf '%s' "$input" | jq -r '.source // ""' 2>/dev/null)"
+  case "$_brief_src" in startup|resume|compact) _know_briefing "$_brief_src" ;; esac
+fi
 _pane_text() {                        # $1=socket $2=session -> the pane, dim runs removed
   if [ -r "${CF_UNDIM:-}" ]; then
     tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null | LC_ALL=C awk -f "$CF_UNDIM"

@@ -26677,18 +26677,29 @@ rm -rf "${EM:?}"
 # loses no line), every decision and fact says who said it, and a long turn keeps the question
 # it ends on. Watched red: every section against a copy of this tree broken on purpose, one
 # break per copy (listed in the PR).
-group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost"
+group "the fleet's memory (fleet-know): every writer, the graph, --at, find, privacy, MCP, the Stop's cost, rules, facts that close, the lead's briefing, compaction, reads"
 if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   KCD="$(mktemp -d "$TEST_RUNS.$$.know.XXXXXX")"
   node "$ROOT/test/helpers/know-check.mjs" "$KCD" > "$KCD/out" 2> "$KCD/err"
   kcrc=$?
   is "know-check ran"                 "0" "$kcrc"
   is "...without complaining"         ""  "$(head -2 "$KCD/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 230 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$KCD/out")" -ge 450 ] && echo yes || echo "no: $(wc -l < "$KCD/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$KCD/out"
   tmux -L cf-acme-api kill-server 2>/dev/null
+  # install.sh's own function, in a HOME of its own: with PreCompact unwired, surviving a compaction
+  # does nothing at all and every check above still passes, since they call the hook directly.
+  IKH="$KCD/install-home"; mkdir -p "$IKH"
+  (
+    HOME="$IKH"; FLEET_HOME="$ROOT"; HOOK=/stage/fleet-event.sh; GUARD=/stage/guard; TGGUARD=/stage/tg; OBSERVE=/stage/observe; N_WIRED=0
+    vsay() { :; }; register_mcp() { :; }
+    eval "$(sed -n '/^wire_hooks() {/,/^}/p' "$ROOT/install.sh")"
+    wire_hooks "$IKH/.claude"; wire_hooks "$IKH/.claude"
+  ) >/dev/null 2>&1
+  is "install.sh wires PreCompact to the fleet's hook, once however often it runs" "/stage/fleet-event.sh 1" \
+    "$(jq -r '[.hooks.PreCompact[0].hooks[0].command, (.hooks.PreCompact | length | tostring)] | join(" ")' "$IKH/.claude/settings.json" 2>/dev/null)"
   rm -rf "${KCD:?}"
 else
   skip "the fleet's memory" "node, git, tmux or jq missing"

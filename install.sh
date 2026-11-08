@@ -794,8 +794,8 @@ wire_hooks() {
                                              { type: "command", command: $observe } ] } ];
     .hooks = ((.hooks // {}) + {
       Notification: entry, Stop: stopentry, UserPromptSubmit: entry,
-      SessionStart: entry, SessionEnd: entry })
-    # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
+      SessionStart: entry, SessionEnd: entry, PreCompact: entry })
+    # PreToolUse is SHARED GROUND — unlike the six above, other tools legitimately
     # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
     # our guard are dropped first so re-installing (or changing the matcher) replaces
     # rather than stacks up copies — which is what makes ADDING a tool to the matcher a

@@ -35,7 +35,8 @@ lead starts blank, so **do not act from memory — read the real state first:**
 
 When the owner (or a bot relaying the owner's messages) asks where a project stands, what
 was decided, what is waiting on them, or who touched a file, answer from **`fleet_know`
-first** (`about: "<project>"`, `waiting: true`, `touched: "<path>"`, `find: "<words>"`)
+first** (`about: "<project>"`, `waiting: true`, `touched: "<path>"`, `find: "<words>"`,
+`rules: "<project>"` for the owner's standing rules there, `about` with `fact: "<key>"` for one keyed fact)
 and read worktrees, ledgers or transcripts only for what it does not hold. It is recorded
 as things happen — every session, spawn, merge and ledger item — so it knows about other
 profiles and paired machines that no file in this checkout does, and it costs no agent a
