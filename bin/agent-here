@@ -148,12 +148,52 @@ live_mark() {
 # A person typing `exit` is always on the far side of both.
 AGENT_MIN_RUN="${CLAUDE_FLEET_MIN_RUN:-5}"
 
+# ── WHICH MODEL A CLAUDE SESSION STARTS ON ────────────────────────────────────
+# A session moved with fleet-model came back on the profile default the next time it slept,
+# restarted or was reopened, because every one of those relaunches builds a new tmux session
+# without CLAUDE_FLEET_MODEL — so a by-hand switch never lasted. They all launch through HERE,
+# so the choice is resolved here, at every start: the per-session pin, then what the session was
+# spawned with, then the project default (never for master), then nothing — the profile default
+# (lib/session-model.sh has the precedence and why). claude-here turns CLAUDE_FLEET_MODEL into
+# `--model`, as it always has.
+#   Inside the resume loop, not once: Enter on an exited session starts it again, and a pin set
+# while it sat there must apply to that start too.
+#   WHAT IT STARTED ON IS LEFT ON THE SESSION, as CLAUDE_FLEET_MODEL_LAUNCH =
+# `<epoch> <source> <model|->`. The transcript says which model each reply came from, but a
+# resumed conversation's last reply is from BEFORE this start, so without the launch's own
+# record a session restarted onto sonnet would read as still on opus until it next answered.
+# The epoch is what tells the two apart (bin/fleet-model's current_model).
+#   No socket or no slot: not a fleet session, nothing to resolve and nowhere to record it.
+_ah_lib=""
+claude_model() {
+  [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] || return 0
+  if [ -z "$_ah_lib" ]; then
+    _ah_lib="${BASH_SOURCE[0]}"
+    while [ -L "$_ah_lib" ]; do _l="$(readlink "$_ah_lib")"; case "$_l" in /*) _ah_lib="$_l" ;; *) _ah_lib="$(dirname "$_ah_lib")/$_l" ;; esac; done
+    _ah_lib="$(cd "$(dirname "$_ah_lib")/../lib" 2>/dev/null && pwd)"
+  fi
+  [ -f "$_ah_lib/session-model.sh" ] || return 0
+  local res m src
+  res="$( . "$_ah_lib/session-model.sh"; session_model_resolve "$MARK_DIR" "$CLAUDE_FLEET_SOCK" "$SLOT" "${CLAUDE_FLEET_MODEL:-}" )"
+  # Split by expansion, never `IFS=$'\t' read`: a tab is IFS-whitespace, so the EMPTY model
+  # of a profile default collapsed and the source word landed in the model field — measured,
+  # a session with nothing set launched as `claude --model profile`.
+  m="${res%%$'\t'*}"; src="${res#*$'\t'}"
+  if [ -n "$m" ]; then export CLAUDE_FLEET_MODEL="$m"; else unset CLAUDE_FLEET_MODEL; fi
+  # The server this pane is IN ($TMUX), not -L: a stale CLAUDE_FLEET_SOCK would name another
+  # fleet's server, where the same %N is somebody else's pane.
+  [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] && tmux set-environment -t "$TMUX_PANE" \
+    CLAUDE_FLEET_MODEL_LAUNCH "$(date +%s) ${src:-profile} ${m:--}" 2>/dev/null
+  return 0
+}
+
 run_agent() {
   local launcher="$1"; shift
   # No `exec`: this shell has to outlive the agent to write the marker and hold the
   # pane. A tab or stack session never reaches here, so neither does the holding.
   while :; do
     local t0=$SECONDS
+    [ "$launcher" = claude-here ] && claude_model
     "$launcher" "$@"
     local rc=$? ran=$((SECONDS - t0))
     # NOT HELD WHEN THERE IS NOTHING TO HOLD FOR. Without a socket and a slot there is

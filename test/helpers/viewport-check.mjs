@@ -714,6 +714,17 @@ async function walk(w, h) {
   // and a resolved origin printed as prose, which is one unbreakable 480px word.
   await clickVerb('settings'); await seeing('sheet', 'the settings sheet');
   await at('projects/settings sheet');
+  // EVERY PROJECT'S NAME, WHOLE. The per-project table gained a fourth button (model), and
+  // the loose row squeezed the name instead of wrapping: at 390 acme-api and acme-web both
+  // read `a…`, so the rows could not be told apart. An ellipsis is not an overflow, so the
+  // fit checks above passed it. Asked of every name in the sheet, not of one class the fix
+  // added, so the old layout fails it; and no rows at all is a failure, not a pass.
+  is(`${w}px projects/settings sheet: every project's name is whole`, '',
+     await evaluate(() => {
+       const nm = [...document.querySelectorAll('#sheet .srow > .nm')];
+       if (!nm.length) return 'no project rows in the sheet';
+       return nm.filter(n => n.scrollWidth > n.clientWidth + 1).map(n => n.textContent).join(',');
+     }));
   await escSheet(); await seeing('noSheet', 'the sheet to close');
   // THE SCHEDULE SHEET, WHICH THIS FILE HAS NEVER ACTUALLY MEASURED, and two separate
   // things were hiding that. It was asked of the GRID, whose verbs are

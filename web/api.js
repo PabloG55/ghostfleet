@@ -377,7 +377,8 @@ export async function getProjects() {
   // which is where the `sessions` field in the fixture comes from.
   const projects = [];
   for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
-    agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent });
+    agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent,
+    model: overlay.projModel.has(p.name) ? overlay.projModel.get(p.name) : (p.model ?? null) });
   const pr = await pairedFixture();
   if (!pr) return { ...j, projects };
   // fleet-serve's mergeProjects, as fixtures: this machine's rows keep their places and gain
@@ -1030,7 +1031,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), projModel: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
                   shots: new Map(), unpaired: false, relabel: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
@@ -1183,6 +1184,12 @@ function fixtureVerb(tool, a) {
       overlay.projAgent.set(a.name, String(a.agent || ''));
       return ok(a.agent ? `'${a.name}' will start its master as ${a.agent}`
                         : `'${a.name}' is back to the default agent (claude)`);
+    // null, not '', for a cleared one: the daemon sends null for "no default", and the row
+    // has to read the same from both.
+    case 'fleet_project_model':
+      overlay.projModel.set(a.name, String(a.model || '').trim() || null);
+      return ok(a.model ? `'${a.name}' sessions start on ${a.model} from their next start`
+                        : `'${a.name}' is back to the profile default model`);
     case 'fleet_nudge':  return ok(`auto-nudge for '${a.session}' → ${a.state}`);
     case 'fleet_budget': return ok(`budget limit for '${a.project}' → ${a.state}`);
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };

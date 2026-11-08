@@ -3741,6 +3741,17 @@ const SETCOLS = [
       const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
       return { on: !!a, label: (a || 'claude') + pos };
     } },
+  // THE PROJECT'S MODEL (lib/session-model.sh): what its sessions START on, below a session's
+  // own pin (fleet-model) and above the profile default. A ring for the same reason AGENT is
+  // one — four states, and a lap lands on "default", which is the row of a project never set —
+  // so it carries a position. A model named by hand that is not in the ring shows its name and
+  // no position, as AGENT does for an agent that is not installed.
+  { title: 'MODEL', onColor: C.cyan, toggle: cycleModel, verb: 'cycle',
+    blurb: `${C.dim}model: what sessions start on, ${C.reset}${C.bold}from their next start${C.reset}${C.dim} (new worker, restart, wake) · ${C.reset}${C.bold}fleet-model${C.reset}${C.dim} moves a running one · not master: fleet-model master <m>${C.reset}`,
+    state: p => {
+      const m = projModel(p), i = MODEL_RING.indexOf(m);
+      return { on: !!m, label: (m || 'default') + (i >= 0 ? ` ${i + 1}/${MODEL_RING.length}` : '') };
+    } },
   // TWO OF THE BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
   // agent approving another session's permission dialog. Project-wide here; the one-session
   // form (the sub-master of its task) is `fleet-project set … --session <s>`. Written
@@ -3766,6 +3777,22 @@ const SETCOLS = [
 ];
 function boundaryOn(proj, b) {
   try { return fs.existsSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.${b}`)); } catch { return false; }
+}
+const MODEL_RING = ['', 'opus', 'sonnet', 'haiku'];
+function projModel(proj) {
+  try {
+    const v = fs.readFileSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.model`), 'utf8').trim();
+    // lib/model-kind.sh's model_name_valid, so the cell and a launch agree on what counts
+    return (v !== 'default' && /^[A-Za-z0-9._:/@\[\]-]{1,100}$/.test(v)) ? v : '';
+  } catch { return ''; }
+}
+// Written through fleet-project, like AGENT and the boundaries, so the file has one writer.
+function cycleModel(proj) {
+  const next = MODEL_RING[(Math.max(0, MODEL_RING.indexOf(projModel(proj))) + 1) % MODEL_RING.length];
+  for (const bin of [path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-project'), 'fleet-project']) {
+    try { execFileSync(bin, ['set', proj.name, 'model', next || 'default'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return; }
+    catch {}
+  }
 }
 function toggleBoundary(proj, b) {
   const want = boundaryOn(proj, b) ? 'off' : 'on';

@@ -830,6 +830,19 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
  * in, which is a minimum that has stopped meaning "align these" and started meaning
  * "overflow". */
 .srow .badge { min-width: min(8.5em, 45%); }
+/* A PROJECT'S ROW IS ITS NAME AND ONE GROUP OF ITS SETTINGS (agent, model, auto-nudge,
+ * budget), and the group wraps under the name as a unit when the two do not fit side by
+ * side. Loose in the row, the fourth button squeezed the name instead: `.nm` is flex 1 with
+ * a zero basis and hidden overflow, so it gives its width away before the row ever wraps —
+ * measured at 390x844, acme-api and acme-web both read `a…`. Here the name's basis is its
+ * own width, so it never shrinks below itself; only a name wider than the whole row
+ * ellipsizes, and then at the row's full width. Wide screens keep the one-line row.
+ *   `min-width: 0` on the group is what keeps A BUTTON NEVER LEAVES THE SCREEN (above) true
+ * in here: a button's `max-width: 100%` now resolves against the group, and a flex item
+ * will not shrink below its content by default — so at 320px and AX5 text the group held
+ * `○ enforced` at 341px in a 288px row, where the bare row had truncated it. */
+.srow > .nm:has(+ .pset) { flex: 1 0 auto; max-width: 100%; }
+.srow > .pset { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; max-width: 100%; }
 /* SCOPED TO THE BADGE. These were bare `.on`/`.off`, and `.on` is also the class the stack
  * puts on its focused column — so every word in the focused conversation came out green. */
 .badge.on { color: var(--green); } .badge.off { color: var(--red); } .badge.inherit { color: var(--dim); }

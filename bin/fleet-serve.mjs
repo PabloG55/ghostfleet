@@ -751,6 +751,7 @@ const TOOLS_ALLOWED = {
   // would put Face ID in front of a preference, which is how a passkey stops meaning
   // anything on the taps that matter.
   fleet_project_agent:   { fields: ['name', 'agent'],                          write: true, noProject: true, subject: 'name' },
+  fleet_project_model:   { fields: ['name', 'model'],                          write: true, noProject: true, subject: 'name' },
 };
 // `branch` is accepted on fleet_worktree_remove and thrown away: web/api.js sends it so
 // its fixture backend can name the branch in a refusal. Silently ignoring an argument is
@@ -782,6 +783,15 @@ const IGNORED = new Set(['fleet_worktree_remove.branch']);
 //
 // Until then they are refused BY NAME with that reason, so the buttons behind them fail
 // loudly. A 404 or a generic "unknown tool" would look like a typo in the client.
+// A project's default model (lib/session-model.sh): `<cfg>/fleet/<sock>.model`, or null for none.
+// Held to model_name_valid's charset, so the phone shows what a launch would actually use.
+function projectModel(t) {
+  try {
+    const v = fs.readFileSync(path.join(t.cfg, 'fleet', `${t.sock}.model`), 'utf8').trim();
+    return (v !== 'default' && /^[A-Za-z0-9._:/@\[\]-]{1,100}$/.test(v)) ? v : null;
+  } catch { return null; }
+}
+
 const NOT_YET = {
   fleet_schedule: 'the schedule marker is written by the grid; bin/fleet-schedule writes a different, un-namespaced path',
   fleet_label: 'the card label is a marker file only fleet-grid.mjs writes',
@@ -789,6 +799,7 @@ const NOT_YET = {
   fleet_budget: 'the budget-ceiling marker is written by the grid\'s settings screen',
   fleet_order: 'the card order is <sock>.order plus a tmux option, both written by the grid',
   fleet_project_order: 'the projects order is written by the Projects screen',
+  fleet_model: 'moving one running session is a lead\'s call, made with a reason; the phone sets a project\'s default (fleet_project_model)',
 };
 
 const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting']);
@@ -2898,7 +2909,7 @@ function agentCatalogue() {
       let live = 0;
       try { live = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean).length; } catch {}
-      const row = { name: t.name, profile: t.profile, path: t.path, agent: t.agent || 'claude', sock: t.sock, live };
+      const row = { name: t.name, profile: t.profile, path: t.path, agent: t.agent || 'claude', model: projectModel(t), sock: t.sock, live };
       if (!rollup) return row;
       const g = await gridJson(t);
       if (g.error) return { ...row, sessions: null };

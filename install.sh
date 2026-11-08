@@ -694,7 +694,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
          fleet-digest fleet-jarvis fleet-experimental fleet-accounts fleet-update fleet-mod fleet-ledger fleet-web fleet-know fleet-know-event
-         fleet-telegram
+         fleet-telegram fleet-model
          agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do

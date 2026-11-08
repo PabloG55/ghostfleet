@@ -1126,6 +1126,47 @@ is('clearing reports the default', true, await until(() => /back to the default 
 await until(() => !/· opencode/.test(projText('acme-api')), 4000);
 is('...and the card stops naming one', false, /· opencode/.test(projText('acme-api')));
 is('...without falling back to the word claude', false, /· claude/.test(projText('acme-api')));
+
+// 3. THE PROJECT'S MODEL, the same table's next setting (lib/session-model.sh). What it does
+// NOT do is the sentence that matters — a running session keeps its model, and master never
+// takes it — so that is asserted, not only the buttons. acme-web is `sonnet` in the fixture
+// and acme-api has none: both directions on one screen.
+while (sheetNow()) closeSheetFromTest();
+openProjSettings();
+await tick(20);
+is('project settings lists the model', true, sheetHas(/model: what this project's claude sessions start on/));
+is("...saying running sessions keep theirs and master never takes it", true, sheetHas(/Running sessions keep theirs, and master never takes it/));
+is('...showing a project that has one', true, !!sBtn(/^sonnet$/));
+is('...and default for one that has not', true, !!sBtn(/^default$/));
+sClick(/^default$/);           // acme-api's row: opens its own sheet
+await tick(20);
+is('a project opens its own model sheet', true, sheetHas(/model · acme-api/));
+sClick(/^haiku$/);
+await tick(5);
+is('...and says what the choice is for', true, sheetHas(/lists, lookups and formatting/));
+const saveModel = () => sheetHas(/model · /) && sClick(/^save$/);
+is('the save belongs to the model sheet', true, saveModel());
+is('saving reports the change', true, await until(() => /'acme-api' sessions start on haiku from their next start/.test(app.textContent), 4000));
+// ROUND TRIP: the next sheet reads the value off the refreshed payload, not off the click.
+while (sheetNow()) closeSheetFromTest();
+openProjSettings();
+await tick(20);
+// acme-api's OWN row: every other project without a model shows `default` too, so a
+// sheet-wide "no default button" could never hold.
+// Every button UNDER the row, not only its direct children: the settings sit in a group of
+// their own (`.pset`) so a narrow screen can wrap them under the name as one unit.
+const modelRow = (name) => { const s = sheetNow(); return s && s.find(n => n.className.split(/\s+/).includes('srow')
+  && n.kids.some(k => k.className.split(/\s+/).includes('nm') && k.textContent === name)); };
+const btnsUnder = (n, acc = []) => { for (const k of n.kids) { if (k.tag === 'button') acc.push(k.textContent); btnsUnder(k, acc); } return acc; };
+const rowBtns = (name) => { const r = modelRow(name); return r ? btnsUnder(r) : []; };
+is('...and the row reads it back', true, rowBtns('acme-api').includes('haiku') && !rowBtns('acme-api').includes('default'));
+is("...and only that project's row", true, rowBtns('acme-web').includes('sonnet'));
+sClick(/^haiku$/);
+await tick(20);
+sClick(/^default$/);
+await tick(5);
+is('the clear is saved from the model sheet', true, saveModel());
+is('clearing reports the profile default', true, await until(() => /back to the profile default model/.test(app.textContent), 4000));
 // LEAVE THE SCREEN AS THIS SECTION FOUND IT, whatever it found. If a control here goes
 // missing, sClick() is a no-op and every step after it operates on a sheet that never
 // opened — which ended, three sections later, as `box.scrollTop` on an undefined grid

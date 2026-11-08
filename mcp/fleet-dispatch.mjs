@@ -231,6 +231,15 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, agent: { type: 'string', description: "default coding CLI for this project's master and its workers (fleet-agent list; omit for claude)" }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master switches too: at once when idle, after its current turn when not; switching back to an agent it ran before resumes that agent's own conversation (codex, which cannot resume, starts fresh). Running workers keep their agent.",
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, agent: { type: 'string', description: 'an agent from fleet-agent list; empty or omitted clears it back to claude' } }, required: ['name'], additionalProperties: false } },
+  { name: 'fleet_project_model', description: "Set or clear an EXISTING project's default model — what its sessions START on from their next start (a new worker, a restart, a wake), below a session's own pin (fleet_model) and above the profile default. Never master's: a master moves only by its own pin (fleet_model session:master). Running sessions keep the model they have. Omit `model` (or pass an empty string) to clear it back to the profile default.",
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, model: { type: 'string', description: 'opus, sonnet, haiku or a full model id; empty or omitted clears it' } }, required: ['name'], additionalProperties: false } },
+  // A RUNNING SESSION'S MODEL, which before this only a NEW worker could be given (fleet_spawn's
+  // model/kind). The CLI's whole contract rides along: Claude sessions only, never mid-turn,
+  // the outcome read back from the transcript, the profile's settings.json left as it was, and
+  // a pin so a wake or a restart keeps it. The description carries WHEN to move one, because
+  // the tool is no use to a lead that does not know a cheaper model is the right answer.
+  { name: 'fleet_model', description: "Show or change the MODEL a Claude session runs on, without losing its conversation. With no `model`: what it runs on now (its last reply's model, or what it started on) and what it will start on next (its pin, the project default, or the profile default). With `model` (opus | sonnet | haiku | a full id): moves it as soon as it is free — at once when idle (the answer says whether it took), after its current turn when not (the answer says it is queued; call again without `model` for the outcome) — and PINS it, so a wake, a restart or a reopen keeps it. The profile's own default is left exactly as it was. `unpin:true` drops the pin (its next start goes back to the project/profile default). Claude sessions only — another agent is refused. WHEN: move a session DOWN (sonnet, haiku) when its work is lists, lookups, formatting, summaries or routine edits; move it UP (opus) for graded, sworn or high-stakes reasoning — legal and immigration forms, money, a review that decides a merge. Say which model and why in the same reply, so the owner can disagree.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'the session (see fleet_list — its MODEL column)' }, model: { type: 'string', description: 'opus, sonnet, haiku, or a full model id; omit to only read' }, unpin: { type: 'boolean', description: 'drop the pin instead (no model)' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_worktree_remove', description: "Remove ONE git worktree that no session is using — the `x` on a grey FREE card in the grid. Whether removal is safe is decided by fleet-clean's own gates (clean tree, fully pushed or merged, no live session); if they decline, the worktree is kept and the reason is printed. force:true is the escalation for exactly that case — the grid's `f = remove anyway` — and it DELETES UNCOMMITTED WORK. It still refuses a main checkout, a worktree a live session is standing in, and Claude's own .claude/worktrees trees. Use fleet_stop reclaim for a worktree that still has a session on it.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "the project whose worktree this is (name from fleet_projects); omit for your own fleet" }, path: { type: 'string', description: 'absolute path of the worktree to remove' }, force: { type: 'boolean', description: 'remove it past those gates — destroys uncommitted work; the deliberate second step after a plain removal was declined' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_remove', description: "Unregister a project — drop its entry from the projects list. Its sessions, worktrees and history are untouched; this is the `x` on the Projects screen, not a delete.",
@@ -359,6 +368,9 @@ export function plan(name, a = {}) {
     // indistinguishable from an argument that got lost on the way.
     case 'fleet_project_agent':
       return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
+    // `default` rather than an empty argument, for the reason `--none` is above.
+    case 'fleet_project_model':
+      return run('fleet-project', ['set', String(a.name), 'model', String(a.model || '').trim() || 'default']);
     case 'fleet_projects': return { kind: 'text', text: projectTable() };
     // No target and no -s: the digest is every fleet at once, and it resolves the
     // profiles itself from the same projects files target() reads.
@@ -432,6 +444,16 @@ export function plan(name, a = {}) {
     case 'fleet_companion':
       return run('fleet-companion', a.session ? [String(a.session)] : [], t,
                  { cwd: t ? checkoutOf(t) : undefined });
+    // `--` before the positionals, as fleet_send's: a session or model spelled "--unpin" must
+    // not become the flag. unpin and a model together are two answers to one question; refused
+    // here, before anything runs, rather than letting the CLI pick one.
+    case 'fleet_model': {
+      if (a.unpin === true && a.model) return { kind: 'fail', ...fail('fleet_model: pass a model OR unpin:true, not both') };
+      const args = a.unpin === true ? ['--unpin'] : [];
+      args.push('--', String(a.session));
+      if (a.model && a.unpin !== true) args.push(String(a.model));
+      return run('fleet-model', args, t);
+    }
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
     // `--` BEFORE THE POSITIONALS, always. fleet-answer takes --human-approved, and a text

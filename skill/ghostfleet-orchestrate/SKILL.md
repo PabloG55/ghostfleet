@@ -315,6 +315,8 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
 | unblock a stuck worker | `fleet-answer <session> "<keys>"` |
 | park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
+| what a session runs on, and where that came from | `fleet-model <session>` (MCP `fleet_model`, no model) |
+| move a RUNNING session to another model, keeping its conversation | `fleet-model <session> <opus\|sonnet\|haiku>` (MCP `fleet_model`) — waits until it is free, and pins it |
 | stop a worker for good (or a dead orphan) | `fleet-stop <session>` |
 
 **Pick the model by the KIND of task.** `fleet-spawn --kind <verify|ci|docs|video|build>`
@@ -327,6 +329,19 @@ opt-in per project and a model choice is the owner's, so set it when they ask
 it). A kind with no entry starts on the
 account default, the same as no `--kind`, so pass `--kind` anyway: it is recorded, and
 `fleet-worktrees` shows it as `[verify]` in ASKED. An explicit `--model opus` always wins.
+
+**Move a running session when its work changes phase.** `fleet-model <session> <model>` (MCP
+`fleet_model`) switches a Claude session that is already running, keeps its conversation, and
+pins the model so a wake or a restart starts on it too. Move it **down** (`sonnet`, `haiku`)
+when what is left is lists, lookups and formatting: a summary, a table, a changelog, a status
+read-out. Move it **up** (`opus`) for anything graded, sworn or high-stakes: an exam answer, a
+legal form, an irreversible migration, a review whose verdict others will act on. **Say which
+model and why** in the message that moves it, so the owner can disagree cheaply. A switch
+re-reads the whole conversation on the new model, so do it at a change of phase, not every turn.
+It waits until the session is free, so it never cuts a turn. It refuses a session on another
+agent. `fleet-model <session>` reports what it runs on and where that came from: the session's
+pin, the project's default (`fleet-project set <project> model <m>`, never master's), or the
+profile default.
 `fleet-spawn` records each worker's task in a manifest, so `fleet-worktrees`
 shows *what each worktree is for* — that's how you rebuild your map after a restart
 instead of guessing. `--from` bases the branch on your **local** ref (use
@@ -396,7 +411,9 @@ the screen lives. `fleet-shots verdict <run>` still reads the verdict in a termi
   with `fleet-stop --reclaim` and `fleet-spawn` the next one (`--reuse <worktree>` keeps
   the folder, never the conversation).
 - **Pick the model by kind.** `--kind verify|ci|docs|video` for the cheap work, `--kind
-  build` for the code. Say which in every spawn.
+  build` for the code. Say which in every spawn. A running session moves with `fleet-model`:
+  down for lists, lookups and formatting, up for graded, sworn or high-stakes reasoning, and
+  you say which model and why.
 - **Waiting on CI is one background watch, then end the turn.** Never a sleep or `until`
   loop, and never a new watch armed on each wake: every wake re-reads the whole context. On
   one fleet, workers ran 2,785 polling commands, and 25% of the spend was in turns woken by

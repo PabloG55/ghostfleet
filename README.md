@@ -439,6 +439,16 @@ Details: [The context ceiling](docs/OPERATIONS.md#the-context-ceiling).
 on the account default, as before, and an explicit `--model` always wins. Details:
 [A model for each kind of task](docs/OPERATIONS.md#a-model-for-each-kind-of-task).
 
+**A running session can move to another model without losing its conversation.**
+`fleet-model <session> sonnet` waits until the session is free, sends `/model sonnet` and reads
+the switch back from the transcript. Then it undoes the two side effects of a `/model` typed by
+hand. It puts the profile's `settings.json` back, because Claude Code saves a `/model` as the
+default for every later session, but only when that switch is the whole change. And it pins the
+session, so a restart, a wake or a reopen starts it on the new model. `fleet-model <session>`
+says what it runs on now and what it starts on next. `fleet-project set <project> model sonnet`
+is a project's default, for every session except master. Claude sessions only. Details:
+[Moving a running session to another model](docs/ORCHESTRATION.md#moving-a-running-session-to-another-model).
+
 ### Several Claude accounts on one profile (experimental)
 
 Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and

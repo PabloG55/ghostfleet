@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 171d2f652b6f
+// CLIENT-HASH: 3a8d8ee23b1b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -442,7 +442,7 @@
 // own, and a link (?screen=session&p=…&s=…) opens its screen after the unlock. The installed
 // app still opens start_url and restores from the stored state. A phone on v97 ignores the
 // query and reopens whatever the last tab stored.
-const VERSION = 'ghostfleet-v98';
+const VERSION = 'ghostfleet-v99';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js', './place.js',

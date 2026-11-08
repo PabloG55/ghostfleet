@@ -3536,6 +3536,15 @@ if command -v tmux >/dev/null 2>&1; then
   is "the lap wraps, visibly"           "yes" "$(agpress 'claude 1/3')"
   is "...and the row is a 3-column row again" "3" \
      "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
+  # ── MODEL, the next column: a ring of four for the same reason, through fleet-project ──
+  tmux -L cfagcol send-keys 'l'; agwait "model: what sessions start on" || true
+  is "the model column says cycle"            "yes" "$(grep -q 'space/⏎ cycle' <<< "$(agfoot)" && echo yes || echo no)"
+  is "...and starts on the default, 1 of 4"   "yes" "$(grep -q 'default 1/4' <<< "$(agrow)" && echo yes || echo no)"
+  is "one press: opus, 2 of 4"                "yes" "$(agpress 'opus 2/4')"
+  is "...written as the project's default"    "opus" "$(cat "$T/.claude/fleet/cf-acme-api.model" 2>/dev/null)"
+  agpress 'sonnet 3/4' >/dev/null; agpress 'haiku 4/4' >/dev/null
+  is "the lap lands on the default, visibly"  "yes" "$(agpress 'default 1/4')"
+  is "...and the project default is gone"     "no"  "$([ -f "$T/.claude/fleet/cf-acme-api.model" ] && echo yes || echo no)"
 
   else skip "the agent column: a ring of three" "the session did not come up"; fi
   agcol claude codex          # a ring of two: a real toggle, and no counter on it
@@ -5947,13 +5956,19 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
   : > "$BSF/cf-acme-api.api-fix.workers-merge"
   : > "$BSF/cf-acme-api.api-fix.review-gate-off"
+  # The model pin (bin/fleet-model) lives the same life: a per-session marker, so it moves with
+  # a rename and goes with a stop, or a worker reborn under the name would start on it.
+  printf 'haiku\n' > "$BSF/cf-acme-api.api-fix.model"
   env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
   is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
   is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
   is "...and the review-gate override"            "1" "$([ -f "$BSF/cf-acme-api.api-retry.review-gate-off" ] && echo 1 || echo 0)"
+  is "...and the model pin"                       "haiku" "$(cat "$BSF/cf-acme-api.api-retry.model" 2>/dev/null)"
   is "...leaving nothing under the old name"      "0" "$(ls "$BSF" | grep -c '^cf-acme-api\.api-fix\.' || true)"
+  : > "$BSF/cf-acme-api.api-retry.model-switch.result"; : > "$BSF/cf-acme-api.api-retry.settings-backup.json"
   env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-stop" -s cf-acme-api api-retry >/dev/null 2>&1
   is "stop clears the session's overrides"        "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(workers-merge|agents-approve|review-gate)' || true)"
+  is "...and its model pin and switch records"    "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(model|model-switch\..*|settings-backup\.json)$' || true)"
   tmux -L cf-acme-api kill-server 2>/dev/null
   rm -rf "$BS"
 else
@@ -11305,10 +11320,14 @@ STUB
   is "--kind with a map entry: that model"           "sonnet" "$(mkspawn 0 --kind verify)"
   is "...and the spawn says where it came from"      "1" \
      "$(grep -c "kind 'verify' runs on sonnet (this project's map)" "$MK/spawn.out" || true)"
+  # PINNED, because CLAUDE_FLEET_MODEL reaches this start only: a wake or a restart builds a
+  # new tmux session without it (lib/session-model.sh, bin/agent-here).
+  is "...and pins it, so a wake starts on it too"    "sonnet" "$(cat "$MK/fleet/cf-mkind.w1.model" 2>/dev/null)"
   is "an explicit --model beats the map"             "opus"   "$(mkspawn 0 --kind verify --model opus)"
   is "...in either order"                            "opus"   "$(mkspawn 0 --model opus --kind verify)"
   is "another kind is not touched by that entry"     "none"   "$(mkspawn 0 --kind build)"
   is "THE DEFAULT DOES NOT MOVE: no --kind, map set" "none"   "$(mkspawn 0)"
+  is "...and the last w1's pin is not inherited"     "no"     "$([ -f "$MK/fleet/cf-mkind.w1.model" ] && echo yes || echo no)"
   is "...and its manifest row stays four columns"    "4"      "$(awk -F'\t' '$2=="w1"{print NF; exit}' "$MK/fleet/cf-mkind.manifest.tsv")"
   # A model name is vendor-specific, so a worker on another agent keeps its kind and is NOT
   # handed the claude map's model. The stub stands in for opencode, whose launcher passes
@@ -11317,6 +11336,9 @@ STUB
   is "a non-claude worker is not handed the map's model" "none" "$(mkspawn 0 --kind verify --agent opencode)"
   is "...and the spawn says why"                     "1" "$(grep -c 'the model map is for claude workers' "$MK/spawn.out" || true)"
   is "...while --model still reaches it"             "gpt-x" "$(mkspawn 0 --kind verify --agent opencode --model gpt-x)"
+  printf 'haiku\n' > "$MK/fleet/cf-mkind.w1.model"
+  mkspawn 0 --agent opencode --model gpt-x >/dev/null
+  is "...but is never pinned: a pin is a claude model" "no"  "$([ -f "$MK/fleet/cf-mkind.w1.model" ] && echo yes || echo no)"
   mkspawn 0 --kind verfiy >/dev/null
   is "an unknown kind is refused"                    "1" "$MKRC"
   is "...naming the kinds"                           "1" "$(grep -c "unknown --kind 'verfiy' (known: verify ci docs video build)" "$MK/spawn.out" || true)"
@@ -11359,6 +11381,233 @@ if command -v node >/dev/null 2>&1; then
         process.stdout.write(m.TOOLS.find(t => t.name === 'fleet_spawn').inputSchema.properties.kind.enum.join(','));" 2>/dev/null)"
 fi
 rm -rf "$MK"
+
+# ── 4c4b. a RUNNING session's model (bin/fleet-model, lib/session-model.*) ─────
+# A by-hand `/model sonnet` sent into a session kept the conversation and did two more things:
+# Claude Code saved it as the PROFILE's default for every later session, and the session came
+# back on that default the next time it slept or restarted. So: the precedence a launch
+# resolves (pin > what it was spawned with > project default, never for master > profile),
+# the settings restore that must put back exactly what was there and refuse anything it did
+# not cause, the launch itself through the real agent-here and claude-here — handed a
+# `--model` with no CLAUDE_FLEET_MODEL, the way a relaunch and a wake start a session — and the
+# CLI and MCP doors.
+group "a running session's model (fleet-model)"
+SMD="$(mktemp -d)"
+if [ -d "$SMD" ] && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  mkdir -p "$SMD/fleet" "$SMD/cfg" "$SMD/bin" "$SMD/home/.config/ghostfleet" "$SMD/home/.claude/fleet" "$SMD/wt" "$SMD/sr"
+
+  # ── precedence ──
+  smr() { ( . "$ROOT/lib/session-model.sh"; session_model_resolve "$@" ) 2>"$SMD/err" | tr '\t' '|'; }
+  is "precedence: nothing set is the profile default"          "|profile"       "$(smr "$SMD/fleet" cf-acme-api api-fix "")"
+  printf 'sonnet\n' > "$SMD/fleet/cf-acme-api.model"
+  is "precedence: then the project default"                    "sonnet|project" "$(smr "$SMD/fleet" cf-acme-api api-fix "")"
+  is "...of that project only"                                 "|profile"       "$(smr "$SMD/fleet" cf-acme-web api-fix "")"
+  is "...and never master's"                                   "|profile"       "$(smr "$SMD/fleet" cf-acme-api master "")"
+  is "precedence: what it was spawned with beats the project"  "opus|spawn"     "$(smr "$SMD/fleet" cf-acme-api api-fix opus)"
+  printf 'haiku\n' > "$SMD/fleet/cf-acme-api.api-fix.model"
+  is "precedence: the session's pin beats both"                "haiku|pin"      "$(smr "$SMD/fleet" cf-acme-api api-fix opus)"
+  is "...and is that session's alone"                          "sonnet|project" "$(smr "$SMD/fleet" cf-acme-api docs-pass "")"
+  printf 'haiku\n' > "$SMD/fleet/cf-acme-api.master.model"
+  is "...and a pin is how master moves"                        "haiku|pin"      "$(smr "$SMD/fleet" cf-acme-api master "")"
+  printf 'hai ku"\n' > "$SMD/fleet/cf-acme-api.api-fix.model"
+  is "a pin that is not a model name is passed over"           "opus|spawn"     "$(smr "$SMD/fleet" cf-acme-api api-fix opus)"
+  is "...and says so"                                          "1"              "$(grep -c 'is not a model name' "$SMD/err" || true)"
+  rm -f "$SMD/fleet/cf-acme-api.api-fix.model" "$SMD/fleet/cf-acme-api.master.model"
+
+  # ── the profile's settings.json: put back what OUR /model wrote, and nothing else ──
+  # The after-files are what Claude Code 2.1.319 actually writes: the whole file rewritten,
+  # its keys re-ordered, the new `model` at the end.
+  SR="$SMD/sr"
+  srs() { node "$ROOT/lib/session-model.mjs" restore "$SR/settings.json" "$1" "$2" "$SR/backup.json"; }
+  # The before-file is TAB-indented, as a hand-edited one may be: a restore that re-serialised
+  # the JSON would give back the same keys in a different file, and only cmp can tell.
+  printf '{\n\t"theme": "dark",\n\t"env": {\n\t\t"FOO": "bar"\n\t}\n}\n' > "$SR/before.json"
+  printf '{\n  "env": {\n    "FOO": "bar"\n  },\n  "theme": "dark",\n  "model": "sonnet"\n}\n' > "$SR/settings.json"
+  out="$(srs "$SR/before.json" sonnet)"; rc=$?
+  is "restore: the key our /model wrote is put back"           "0 restored"     "$rc ${out%%:*}"
+  is "...to exactly the bytes the file had"                    "same"           "$(cmp -s "$SR/before.json" "$SR/settings.json" && echo same || echo differs)"
+  is "...with no model key, as before"                         "null"           "$(jq -c .model "$SR/settings.json")"
+  is "...and the version it replaced is kept"                  "sonnet"         "$(jq -r .model "$SR/backup.json" 2>/dev/null)"
+  printf '{\n  "model": "opus",\n  "theme": "dark"\n}\n' > "$SR/before.json"
+  printf '{\n  "theme": "dark",\n  "model": "sonnet"\n}\n' > "$SR/settings.json"
+  srs "$SR/before.json" sonnet >/dev/null
+  is "restore: a key that WAS set goes back to that value"     "opus"           "$(jq -r .model "$SR/settings.json")"
+  # ...and the refusals: the file is left as it is, and nothing is backed up
+  rm -f "$SR/backup.json"
+  printf '{\n  "env": {\n    "FOO": "baz"\n  },\n  "theme": "dark",\n  "model": "sonnet"\n}\n' > "$SR/settings.json"
+  cp "$SR/settings.json" "$SR/expect.json"
+  printf '{\n  "theme": "dark",\n  "env": {\n    "FOO": "bar"\n  }\n}\n' > "$SR/before.json"
+  out="$(srs "$SR/before.json" sonnet)"; rc=$?
+  is "restore: another key changed too — left alone"           "3 left"         "$rc ${out%%:*}"
+  is "...naming the key"                                       "1"              "$(grep -c 'other keys changed in the same window (env)' <<< "$out" || true)"
+  is "...the file untouched"                                   "same"           "$(cmp -s "$SR/expect.json" "$SR/settings.json" && echo same || echo differs)"
+  is "...and no backup written"                                "no"             "$([ -f "$SR/backup.json" ] && echo yes || echo no)"
+  printf '{\n  "env": {\n    "FOO": "bar"\n  },\n  "theme": "dark",\n  "model": "haiku"\n}\n' > "$SR/settings.json"
+  out="$(srs "$SR/before.json" sonnet)"; rc=$?
+  is "restore: the key moved to a model we did not set — left" "3 haiku"        "$rc $(jq -r .model "$SR/settings.json")"
+  cp "$SR/before.json" "$SR/settings.json"
+  out="$(srs "$SR/before.json" sonnet)"; rc=$?
+  is "restore: nothing moved, nothing written"                 "0 unchanged"    "$rc ${out%%:*}"
+  # in place: a symlinked settings.json stays a symlink (a rename would make it a file)
+  printf '{\n  "env": {\n    "FOO": "bar"\n  },\n  "theme": "dark",\n  "model": "sonnet"\n}\n' > "$SR/real.json"
+  rm -f "$SR/settings.json"; ln -s "$SR/real.json" "$SR/settings.json"
+  srs "$SR/before.json" sonnet >/dev/null
+  is "restore: written in place, so a symlink stays one"       "link same"      "$([ -L "$SR/settings.json" ] && echo link || echo file) $(cmp -s "$SR/before.json" "$SR/real.json" && echo same || echo differs)"
+  rm -f "$SR/settings.json"; printf '{\n  "model": "sonnet"\n}\n' > "$SR/settings.json"
+  srs - sonnet >/dev/null
+  is "restore: a file the /model created loses only its key"   "{}"             "$(jq -c . "$SR/settings.json")"
+
+  # ── the read-back: the two transcript shapes, as Claude Code writes them ──
+  TRX="$SMD/t.jsonl"
+  cmdl() { jq -nc --arg a "$1" --arg ts "$2" '{type:"user",timestamp:$ts,message:{role:"user",content:("<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>"+$a+"</command-args>")}}'; }
+  { jq -nc '{type:"assistant",timestamp:"2026-11-07T10:00:00Z",message:{model:"claude-opus-5-5",content:[{type:"text",text:"hi"}]}}'
+  } > "$TRX"
+  OFF="$(wc -c < "$TRX" | tr -d ' ')"
+  { cmdl sonnet 2026-11-07T10:01:00Z
+    jq -nc '{type:"user",timestamp:"2026-11-07T10:01:00Z",message:{role:"user",content:"<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"}}'
+    jq -nc '{type:"system",subtype:"local_command",timestamp:"2026-11-07T10:02:00Z",content:"<local-command-stdout>Kept model as `Sonnet 5.5`</local-command-stdout>",commandRun:{command:"model",args:"haiku"}}'
+  } >> "$TRX"
+  smo() { node "$ROOT/lib/session-model.mjs" outcome "$TRX" "$1" "$2"; }
+  is "read-back: a /model that took"                           "ok"             "$(smo "$OFF" sonnet | cut -d' ' -f1)"
+  is "read-back: one that was declined"                        "failed Kept model as \`Sonnet 5.5\`" "$(smo "$OFF" haiku)"
+  is "read-back: nothing yet for a model nobody asked for"     "none"           "$(smo "$OFF" opus)"
+  is "read-back: only what came after the send counts"         "none"           "$(smo "$(wc -c < "$TRX" | tr -d ' ')" sonnet)"
+  smc() { printf 'x\t%s\t%s\n' "$TRX" "$1" | node "$ROOT/lib/session-model.mjs" current | cut -f2,4; }
+  is "current: a switch with no reply since"                   "sonnet	switch"  "$(smc -)"
+  is "current: a later launch wins over the transcript"        "haiku	launch:pin" "$(smc "$(date +%s) pin haiku")"
+  is "current: an earlier launch does not"                     "sonnet	switch"  "$(smc "1700000000 pin haiku")"
+  jq -nc '{type:"assistant",timestamp:"2026-11-07T10:03:00Z",message:{model:"claude-sonnet-5-5",content:[{type:"text",text:"ok"}]}}' >> "$TRX"
+  is "current: then the model its last reply came from"        "claude-sonnet-5-5	reply" "$(smc -)"
+
+  # ── fleet-project set <p> model ──
+  printf 'toolbox\t%s\twork\n' "$SMD/wt" > "$SMD/home/.config/ghostfleet/projects"
+  TBF="$SMD/home/.claude/fleet"
+  fp() { env -u TMUX HOME="$SMD/home" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  fp set toolbox model sonnet >/dev/null
+  is "fleet-project: model writes the project default"         "sonnet"         "$(cat "$TBF/cf-toolbox.model" 2>/dev/null)"
+  is "...and get shows it"                                     "1"              "$(grep -cE '^model +sonnet ' <<< "$(fp get toolbox)" || true)"
+  is "...a name that is not a model is refused"                "1"              "$(fp set toolbox model 'x y' >/dev/null; echo $?)"
+  is "...one session's model points at fleet-model"            "1"              "$(grep -c 'fleet-model api-fix' <<< "$(fp set toolbox model haiku --session api-fix)" || true)"
+  fp set toolbox model default >/dev/null
+  is "...and default drops it"                                 "no"             "$([ -f "$TBF/cf-toolbox.model" ] && echo yes || echo no)"
+
+  # ── fleet-model: refusals, and a session with nothing running ──
+  fmx() { env -u TMUX -u CLAUDE_FLEET_SOCK HOME="$SMD/home" CLAUDE_FLEET_DIR="$SMD/fleet" CLAUDE_CONFIG_DIR="$SMD/cfg" "$ROOT/bin/fleet-model" "$@"; }
+  printf 'codex\n' > "$SMD/fleet/cf-acme-web.scratch.agent"
+  touch "$SMD/fleet/cf-acme-web.scratch.asleep"
+  out="$(fmx -s cf-acme-web scratch sonnet 2>&1)"; rc=$?
+  is "fleet-model: a codex session is refused"                 "1"              "$rc"
+  is "...naming what keeps a model per agent"                  "yes"            "$(grep -q 'lib/agent-switch.sh' <<< "$out" && echo yes || echo no)"
+  is "...and nothing is pinned"                                "no"             "$([ -f "$SMD/fleet/cf-acme-web.scratch.model" ] && echo yes || echo no)"
+  is "...and reading it says why"                              "1"              "$(grep -c 'claude sessions only' <<< "$(fmx -s cf-acme-web scratch 2>&1)" || true)"
+  touch "$SMD/fleet/cf-acme-web.billing-svc.asleep"
+  out="$(fmx -s cf-acme-web billing-svc sonnet 2>&1)"; rc=$?
+  is "fleet-model: an asleep claude session is pinned"         "0 sonnet"       "$rc $(cat "$SMD/fleet/cf-acme-web.billing-svc.model" 2>/dev/null)"
+  is "...and it says it wakes on it"                           "1"              "$(grep -c 'it wakes on sonnet' <<< "$out" || true)"
+  is "...reading it back names the pin"                        "1"              "$(grep -cE "starts: +sonnet — this session's pin" <<< "$(fmx -s cf-acme-web billing-svc 2>&1)" || true)"
+  is "...fleet-list shows what it will start on"               "1"              "$(grep -cE '^billing-svc +asleep +sonnet ' <<< "$(env -u TMUX CLAUDE_FLEET_DIR="$SMD/fleet" "$ROOT/bin/fleet-list" -s cf-acme-web 2>/dev/null)" || true)"
+  is "fleet-model: a name that is not a model is refused"      "1"              "$(fmx -s cf-acme-web billing-svc 'son net' >/dev/null 2>&1; echo $?)"
+  is "fleet-model: an unknown session is refused"              "1"              "$(fmx -s cf-acme-web nobody sonnet >/dev/null 2>&1; echo $?)"
+  fmx -s cf-acme-web billing-svc --unpin >/dev/null 2>&1
+  is "fleet-model: --unpin drops the pin"                      "no"             "$([ -f "$SMD/fleet/cf-acme-web.billing-svc.model" ] && echo yes || echo no)"
+
+  # ── the launch: the real agent-here and claude-here, a stub claude ──
+  if command -v tmux >/dev/null 2>&1; then
+    cat > "$SMD/bin/claude" <<'STUB'
+#!/bin/sh
+# claude-here asks `claude agents --json` before a resume; that is a probe, not the launch
+[ "${1:-}" = agents ] && { echo '[]'; exit 0; }
+m=none; prev=""
+for a in "$@"; do [ "$prev" = --model ] && m="$a"; prev="$a"; done
+printf '%s|%s\n' "$m" "$*" > "$SM_OUT.$CLAUDE_FLEET_SLOT"
+echo "  ctx:3%  auto mode on"
+exec sleep 60
+STUB
+    chmod +x "$SMD/bin/claude"
+    jq -n --arg d "$SMD/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$SMD/cfg/.claude.json"
+    smenv() { env -u TMUX -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK \
+        HOME="$SMD/home" SM_OUT="$SMD/out" CLAUDE_FLEET_DIR="$SMD/fleet" CLAUDE_CONFIG_DIR="$SMD/cfg" \
+        PATH="$SMD/bin:$ROOT/bin:$PATH" "$@"; }
+    # smlaunch <slot> [-e VAR=…]… — start it as fleet-restart's relaunch and fleet-hibernate's
+    # wake do: a NEW tmux session running `exec agent-here <slot>`, no CLAUDE_FLEET_MODEL —
+    # and print the --model the agent was handed (`none` for none).
+    smlaunch() {
+      local slot="$1" i; shift
+      rm -f "$SMD/out.$slot"
+      smenv tmux -L cf-acme-api new-session -d -s "$slot" -c "$SMD/wt" -x 120 -y 30 \
+        -e CLAUDE_FLEET_SOCK=cf-acme-api -e CLAUDE_FLEET_DIR="$SMD/fleet" -e CLAUDE_CONFIG_DIR="$SMD/cfg" "$@" \
+        "exec agent-here \"$slot\"" 2>/dev/null
+      for i in $(seq 1 50); do [ -s "$SMD/out.$slot" ] && break; sleep 0.1; done
+      cut -d'|' -f1 "$SMD/out.$slot" 2>/dev/null || echo "no launch"
+    }
+    smlaunched() { tmux -L cf-acme-api show-environment -t "$1" CLAUDE_FLEET_MODEL_LAUNCH 2>/dev/null | cut -d' ' -f2-; }
+    printf 'sonnet\n' > "$SMD/fleet/cf-acme-api.model"
+    is "launch: no pin — the project default"                  "sonnet"         "$(smlaunch docs-pass)"
+    is "...and the session records what it started on"         "project sonnet" "$(smlaunched docs-pass)"
+    is "launch: master is not given the project default"       "none"           "$(smlaunch master)"
+    is "...and records the profile default"                    "profile -"      "$(smlaunched master)"
+    printf 'haiku\n' > "$SMD/fleet/cf-acme-api.api-fix.model"
+    is "launch: a pinned session starts on its pin"            "haiku"          "$(smlaunch api-fix)"
+    printf 'opus\n' > "$SMD/fleet/cf-acme-api.scratch.model"
+    is "launch: the pin beats what it was spawned with"        "opus"           "$(smlaunch scratch -e CLAUDE_FLEET_MODEL=haiku)"
+    is "launch: with no pin, the spawn's model beats the project" "haiku"       "$(smlaunch toolbox -e CLAUDE_FLEET_MODEL=haiku)"
+    printf 'opus\n' > "$SMD/fleet/cf-acme-api.master.model"
+    tmux -L cf-acme-api kill-session -t '=master' 2>/dev/null
+    is "launch: master moves by its own pin"                   "opus"           "$(smlaunch master)"
+    # fleet-list over LIVE sessions (an asleep row never reaches the per-session walk).
+    out="$(smenv "$ROOT/bin/fleet-list" -s cf-acme-api 2>"$SMD/list.err")"
+    is "fleet-list: a live session's model is what it started on" "1"           "$(grep -cE '^docs-pass +[^ ]+ +sonnet( |$)' <<< "$out" || true)"
+    # A claude session has no agent marker, and `tr < missing 2>/dev/null` silences tr, not the
+    # shell's failed redirect, which comes first: measured, one "No such file" line per row.
+    is "...and says nothing on stderr for a session with no agent marker" ""    "$(cat "$SMD/list.err")"
+    tmux -L cf-acme-api kill-server 2>/dev/null
+
+    # ── through the REAL wake: fleet-hibernate --wake builds the session, agent-here reads the pin ──
+    ID=22222222-3333-4444-5555-666666666666
+    PD="$SMD/cfg/projects/$(printf '%s' "$SMD/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PD"; : > "$PD/$ID.jsonl"
+    printf 'haiku\n' > "$SMD/fleet/cf-acme-api.billing-svc.model"
+    printf '%s\t%s\t%s\n' "$(date +%s)" "$ID" "$SMD/wt" > "$SMD/fleet/cf-acme-api.billing-svc.asleep"
+    rm -f "$SMD/out.billing-svc"
+    smenv "$ROOT/bin/fleet-hibernate" -s cf-acme-api --wake billing-svc --timeout 15 > "$SMD/wake" 2>&1
+    for i in $(seq 1 50); do [ -s "$SMD/out.billing-svc" ] && break; sleep 0.1; done
+    is "wake: a pinned session wakes on its pin"              "haiku"          "$(cut -d'|' -f1 "$SMD/out.billing-svc" 2>/dev/null)"
+    is "...in its own conversation"                            "1"              "$(grep -c -- "--resume $ID" "$SMD/out.billing-svc" 2>/dev/null || true)"
+    tmux -L cf-acme-api kill-server 2>/dev/null
+  else
+    skip "launch through agent-here" "tmux missing"
+  fi
+
+  # ── the MCP door: fleet_model, through the real server ──
+  touch "$TBF/cf-toolbox.docs-pass.asleep"
+  printf 'codex\n' > "$TBF/cf-toolbox.scratch.agent"
+  mcpm() {
+    { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+      printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fleet_model","arguments":%s}}\n' "$1"
+      sleep 3
+    } | ( cd "$SMD/wt" && env -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR HOME="$SMD/home" TMUX= CLAUDE_FLEET_SOCK= node "$ROOT/mcp/fleet-mcp.mjs" 2>/dev/null ) \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{d.split("\n").filter(Boolean).forEach(l=>{try{const o=JSON.parse(l);if(o.id===2)process.stdout.write(JSON.stringify(o.result))}catch{}})})'
+  }
+  out="$(mcpm '{"project":"toolbox","session":"docs-pass","model":"haiku"}')"
+  is "MCP: fleet_model reaches the session (here: pins it)"    "haiku"          "$(cat "$TBF/cf-toolbox.docs-pass.model" 2>/dev/null)"
+  is "...and answers with what it did"                         "1"              "$(grep -c 'it wakes on haiku' <<< "$out" || true)"
+  out="$(mcpm '{"project":"toolbox","session":"docs-pass"}')"
+  is "MCP: with no model it reads it back"                     "1"              "$(grep -c 'starts:  haiku' <<< "$out" || true)"
+  out="$(mcpm '{"project":"toolbox","session":"docs-pass","model":"sonnet","unpin":true}')"
+  is "MCP: a model AND unpin is refused before anything runs"  "1 haiku"        "$(grep -c '"isError":true' <<< "$out" || true) $(cat "$TBF/cf-toolbox.docs-pass.model" 2>/dev/null)"
+  out="$(mcpm '{"project":"toolbox","session":"scratch","model":"sonnet"}')"
+  is "MCP: a codex session is refused there too"               "1"              "$(grep -c 'lib/agent-switch.sh' <<< "$out" || true)"
+  out="$(mcpm '{"project":"toolbox","session":"docs-pass","unpin":true}')"
+  is "MCP: unpin"                                              "no"             "$([ -f "$TBF/cf-toolbox.docs-pass.model" ] && echo yes || echo no)"
+else
+  skip "a running session's model" "node or jq missing"
+fi
+# Defaulted BEFORE the slash is stripped. A bare "${TMPDIR%/}" under set -u is two bugs,
+# one per bash: 5.x (Ubuntu, the CI linux leg, where TMPDIR is unset by default) aborts the
+# whole suite here with "TMPDIR: unbound variable", and macOS's 3.2 does not fire nounset on
+# a pattern removal at all — it expands to empty, the pattern becomes /?*, and the guard in
+# front of this rm admits every absolute path.
+_smr="${TMPDIR:-/tmp}"; _smr="${_smr%/}"; [ -n "$_smr" ] || _smr=/tmp
+case "$SMD" in "$_smr"/?*|/tmp/?*) rm -rf "${SMD:?}" ;; esac
 
 # ── 4c5. fleet-meter --context: did the ceiling move the spend? ───────────────
 # The report the ceiling is judged by. Its corpus is built by hand (test/helpers/

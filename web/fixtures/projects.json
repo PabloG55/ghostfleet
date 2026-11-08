@@ -6,6 +6,7 @@
       "profile": "work",
       "path": "/Users/you/gf-demo/acme-api",
       "agent": null,
+      "model": null,
       "socket": "cf-acme-api",
       "sessions": {
         "need": 1,
@@ -22,6 +23,7 @@
       "profile": "work",
       "path": "/Users/you/gf-demo/acme-web",
       "agent": null,
+      "model": "sonnet",
       "socket": "cf-acme-web",
       "sessions": {
         "need": 1,
@@ -40,6 +42,7 @@
       "profile": "work",
       "path": "/Users/you/gf-demo/toolbox",
       "agent": "codex",
+      "model": null,
       "socket": "cf-toolbox",
       "sessions": {
         "need": 0,
@@ -56,6 +59,7 @@
       "profile": "work",
       "path": "/Users/you/gf-demo/billing-svc",
       "agent": null,
+      "model": null,
       "socket": "cf-billing-svc",
       "sessions": {
         "need": 0,
@@ -72,6 +76,7 @@
       "profile": "personal",
       "path": "/Users/you/gf-demo/scratch",
       "agent": null,
+      "model": null,
       "socket": "cf-personal-scratch",
       "sessions": {
         "need": 0,
