@@ -43,11 +43,10 @@ changes to the core and to `ee/`.
 - **Why.** It lets the project keep offering the core as MIT and `ee/` under the Team License.
 - **What you keep.** Your copyright. The CLA is a license, not an assignment. You can use your
   own work anywhere else.
-- **How you sign.** On your first PR, a bot comments with a link to the CLA. Reply with the
-  line it asks for. It is recorded against your GitHub account, and it covers all your later
-  PRs.
-- **The bot.** It is CLA Assistant, and it is being switched on. Until it is, a maintainer will
-  ask you in the PR.
+- **How you sign.** On your first PR, the CLA bot ([CLA Assistant](https://cla-assistant.io))
+  comments with a link to the CLA, and the PR shows a `license/cla` check as pending. Follow the
+  link, sign in with GitHub and accept. The check turns green, and the acceptance is recorded
+  against your GitHub account, so it covers all your later PRs.
 
 If you contribute for a company, ask in an issue first. A company needs a corporate version.
 

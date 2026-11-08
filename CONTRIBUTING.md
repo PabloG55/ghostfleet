@@ -18,8 +18,9 @@ license. [docs/LICENSING.md](docs/LICENSING.md) explains the split in plain word
 
 Every contribution, to the core or to `ee/`, needs the [CLA](CLA.md), once. You keep your
 copyright; it is a license, not an assignment. It exists so I can keep the core MIT and offer
-`ee/` under the Team License. On your first PR a bot asks you to accept it, and until that bot
-is on, I will ask you in the PR. More in [docs/LICENSING.md](docs/LICENSING.md).
+`ee/` under the Team License. On your first PR a bot comments with a link: sign in with GitHub
+and accept, and the PR's `license/cla` check turns green. More in
+[docs/LICENSING.md](docs/LICENSING.md).
 
 ## Bugs
 
