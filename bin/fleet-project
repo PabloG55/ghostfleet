@@ -7,6 +7,7 @@
 # fleet-project set <name | -s SOCK> review-<model|level|stalled|rounds> <value|default>
 # fleet-project set <name | -s SOCK> context-window <300k|off|default>
 # fleet-project set <name | -s SOCK> model-<verify|ci|docs|video|build> <model|default>
+# fleet-project set <name | -s SOCK> model <model|default>
 # fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
@@ -40,6 +41,12 @@
 #           set <name> model-<kind> <model|default> — the model `fleet-spawn --kind <kind>`
 #           starts a worker on (lib/model-kind.sh). Unset, a kind gets the account default,
 #           exactly as a spawn without --kind does; an explicit --model always wins.
+#           set <name> model <model|default> — the model EVERY session of the project
+#           starts on (lib/session-model.sh): topic sessions, workers, a wake, a restart —
+#           all but master, which moves only when someone names it (fleet-model master
+#           <model>). A session's own pin (fleet-model) and a spawn's --model/--kind win;
+#           `default` (or `unset`) drops it, back to the profile default. Read at launch,
+#           so a running session takes it at its next start, or now with fleet-model.
 #           set <name> know <include|private|exclude|default> — what the fleet's memory
 #           (fleet-know, docs/MEMORY.md) does with this project: include (the default)
 #           records it; private records it for this machine's leads only, never sends a
@@ -330,6 +337,7 @@ case "$cmd" in
     }
     . "$BIN_DIR/../lib/context-window.sh"
     . "$BIN_DIR/../lib/model-kind.sh"
+    . "$BIN_DIR/../lib/session-model.sh"
     . "$BIN_DIR/../lib/review-gate.sh"
     if [ "$cmd" = get ]; then
       for b in $BOUNDARY_SETTINGS; do
@@ -340,6 +348,9 @@ case "$cmd" in
       printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
         context-window "$(context_window_label "$cw")" "$cwsrc"
       printf '%-15s %s\n' know "$(know_label)"
+      m="$(session_model_project "$DIR" "$SOCK")"
+      printf '%-15s %-4s  (%s)\n' model "${m:--}" \
+        "$([ -n "$m" ] && echo "what its sessions start on, master excepted; a pin or --model wins" || echo 'unset: sessions start on the profile default')"
       for k in $MODEL_KINDS; do
         m="$(model_kind_resolve "$DIR" "$SOCK" "$k")"
         printf '%-15s %-4s  (%s; %s)\n' "model-$k" "${m:--}" "$(model_kind_label "$k")" \
@@ -396,6 +407,25 @@ case "$cmd" in
     # a worker on. Project-wide, like the ceiling, and it changes no running session — a worker
     # takes its model when it is spawned. `default` drops the entry, so that kind goes back to
     # the account default; nothing here sets a model for a kind that was not asked about.
+    # THE MODEL EVERY SESSION OF THE PROJECT STARTS ON (lib/session-model.sh) — not just the
+    # workers a kind map reaches. Project-wide only: one session's model is its pin, set with
+    # fleet-model, which also moves it while it runs. Master is not given this one (the lead
+    # decides what ships; moving it is a call made about it by name), and nothing running is
+    # touched — sessions read it when they start.
+    if [ "$B" = model ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: model is the project default; one session's model is fleet-model $SESS <model> (it moves the running session too)" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      case "$V" in
+        default|unset)
+          rm -f "$DIR/$SOCK.model"
+          echo "fleet-project: '$NAME' sessions start on the profile default (a pin or --model still wins)" ;;
+        *)
+          model_name_valid "$V" || { echo "fleet-project: model takes a model name (opus, sonnet, haiku, claude-sonnet-5-5, …) or default" >&2; exit 1; }
+          printf '%s\n' "$V" > "$DIR/$SOCK.model"
+          echo "fleet-project: '$NAME' sessions start on $V from their next start — master excepted (fleet-model master $V moves it); a running session moves now with fleet-model <session> $V" ;;
+      esac
+      exit 0
+    fi
     case "$B" in model-*)
       k="${B#model-}"
       model_kind_valid "$k" || { echo "fleet-project: unknown kind '$k' (known: $MODEL_KINDS)" >&2; exit 1; }
@@ -437,7 +467,7 @@ case "$cmd" in
       exit 0 ;;
     esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> know <include|private|exclude|default>" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> model <model|default>  |  set <name|-s sock> know <include|private|exclude|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -489,6 +519,7 @@ case "$cmd" in
     echo "  fleet-project set <name|-s sock> review-<model|level|stalled|rounds> <value|default>" >&2
     echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
     echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
+    echo "  fleet-project set <name|-s sock> model <model|default>" >&2
     echo "  fleet-project set <name|-s sock> know <include|private|exclude|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;

@@ -67,6 +67,8 @@ while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) 
 LIB_DIR="$(cd "$(dirname "$src")" && pwd)"
 BIN_DIR="$(cd "$LIB_DIR/../bin" && pwd)"
 SELF="$LIB_DIR/agent-switch.sh"
+# shellcheck source=lib/session-idle.sh
+. "$LIB_DIR/session-idle.sh"
 
 IDLE_N="${CLAUDE_FLEET_SWITCH_IDLE_N:-3}"          # consecutive idle samples before firing
 POLL="${CLAUDE_FLEET_SWITCH_POLL:-1}"               # seconds between samples
@@ -362,7 +364,7 @@ watch_loop() {
   log "watcher $$ done"
 }
 watch_once() {
-  local want live idle=0 rc seen="" since=$SECONDS
+  local want live idle=0 seen="" since=$SECONDS
   while :; do
     [ -f "$PENDING" ] || break
     want="$(tr -d '[:space:]' < "$PENDING" 2>/dev/null)"
@@ -373,11 +375,8 @@ watch_once() {
     live="$(live_agent)"
     if [ -z "$want" ] || [ "$want" = "$live" ]; then rm -f "${PENDING:?}"; log "cancelled: $SLOT already runs ${live}"; break; fi
     [ "$want" = "$seen" ] || { seen="$want"; since=$SECONDS; }
-    # 0 = working. A pane blocked on a dialog is mid-turn too. 1 or 2 (cannot tell) is idle:
-    # an agent with no detector would otherwise never switch.
-    FA busy "$SLOT" -s "$SOCK" >/dev/null 2>&1; rc=$?
-    if [ "$rc" = 0 ] || FA blocked "$SLOT" -s "$SOCK" >/dev/null 2>&1; then idle=0
-    else idle=$((idle+1)); fi
+    # Working, blocked on a dialog, or idle: lib/session-idle.sh, shared with bin/fleet-model.
+    if session_idle_sample "$SOCK" "$SLOT"; then idle=$((idle+1)); else idle=0; fi
     if [ "$idle" -ge "$IDLE_N" ] && [ $((SECONDS - since)) -ge "$SETTLE" ]; then
       do_switch "$want"
       idle=0

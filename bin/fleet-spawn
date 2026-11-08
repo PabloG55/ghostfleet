@@ -841,6 +841,17 @@ else
   rm -f "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
 fi
 
+# THE MODEL PIN (lib/session-model.sh), for the same reason and one more. CLAUDE_FLEET_MODEL
+# reaches this start only: a wake, a restart and a reopen build a new tmux session without
+# it, so a worker spawned on haiku came back on the profile default the first time it slept.
+# The pin is what bin/agent-here reads at every start. No model, no pin — and a stale one a
+# killed same-named session left behind goes, or the new worker would inherit its model.
+if [ -n "$MODEL" ] && [ "$AGENT" = claude ]; then
+  printf '%s\n' "$MODEL" > "$FLEET_DIR_NOW/$SOCK.$name.model" 2>/dev/null
+else
+  rm -f "$FLEET_DIR_NOW/$SOCK.$name.model" 2>/dev/null
+fi
+
 # SAY "STARTED" ONLY WHEN A SESSION IS ACTUALLY THERE.
 #
 # This printed the success line unconditionally, one line below a `new-session` whose

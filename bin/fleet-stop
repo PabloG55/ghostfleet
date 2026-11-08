@@ -295,6 +295,13 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.parent" "$FLEET_DIR/$SOCK.$SESSION.inbox" \
 # phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.
 # .exited goes with it, for the name-reuser reason above.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.asleep" "$FLEET_DIR/$SOCK.$SESSION.exited" 2>/dev/null
+# its model pin and any switch still waiting (bin/fleet-model): a session that reuses this
+# name starts on what IT is given, not on a stranger's model. Taking the request away is
+# what ends its watcher, which looks for it on every sample.
+rm -f "$FLEET_DIR/$SOCK.$SESSION.model" "$FLEET_DIR/$SOCK.$SESSION.model-switch" \
+      "$FLEET_DIR/$SOCK.$SESSION.model-switch.result" "$FLEET_DIR/$SOCK.$SESSION.model-switch.log" \
+      "$FLEET_DIR/$SOCK.$SESSION.model-switch.pid" "$FLEET_DIR/$SOCK.$SESSION.settings-before.json" \
+      "$FLEET_DIR/$SOCK.$SESSION.settings-backup.json" 2>/dev/null
 # prompts queued behind its last turn (fleet-send): nothing is left to run them, and a
 # session that reuses this name must not start by working through a stranger's backlog.
 _qd="$FLEET_DIR/$SOCK.$SESSION.queue.drain"; _qp="$(cat "$_qd" 2>/dev/null)"

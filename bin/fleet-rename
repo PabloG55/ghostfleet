@@ -94,6 +94,8 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.label"           "$FLEET_DIR/$SOCK.$NEW.label"     
 # back as claude), the exited/asleep markers (a card that should say exited or asleep
 # said nothing), and the relay stamp.
 mv -f "$FLEET_DIR/$SOCK.$OLD.agent"           "$FLEET_DIR/$SOCK.$NEW.agent"           2>/dev/null || true
+# the model pin (fleet-model): left behind, a renamed session came back on the profile default
+mv -f "$FLEET_DIR/$SOCK.$OLD.model"           "$FLEET_DIR/$SOCK.$NEW.model"           2>/dev/null || true
 # the inbox a sub-lead's children write into, with the offset it has already read
 mv -f "$FLEET_DIR/$SOCK.$OLD.inbox"           "$FLEET_DIR/$SOCK.$NEW.inbox"           2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.inbox.seen"      "$FLEET_DIR/$SOCK.$NEW.inbox.seen"      2>/dev/null || true

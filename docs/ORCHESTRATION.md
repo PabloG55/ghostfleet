@@ -44,6 +44,8 @@ which is what keeps a long-running or restarted lead from getting lost:
 | new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
 | unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
+| what a session **runs on**, and where that came from | `fleet-model <session>` |
+| move a **running** session to another model, keeping its conversation | `fleet-model <session> sonnet` (MCP `fleet_model`) — say which model and why; [details](#moving-a-running-session-to-another-model) |
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
 | **retire** a finished worker and its worktree | `fleet-stop --reclaim <session>` — removes the tree when safe (a squash-merged PR on a clean tree is), else keeps it and says why |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
@@ -101,6 +103,75 @@ master (main checkout)
   `fleet-stop --children [--reclaim] <sub-lead>` stops and reclaims each child through
   fleet-clean's squash-aware gates, then the sub-lead. The grid's `x` and the phone's
   long-press ask the same question with the worker count in it.
+
+### Moving a running session to another model
+
+Every session starts on the profile default, and that is the most expensive model. A new worker
+can be started on another one (`fleet-spawn --model`, or `--kind` with the project's map), but a
+session that is already running could only be moved by hand, with `fleet-send <s> "/model
+sonnet"`. That keeps the conversation. It also does two things nobody asked for: Claude Code saves
+the model as the **profile's** default, so every later session of that profile starts on it, and
+the choice is lost the next time the session sleeps or restarts.
+
+`fleet-model` does the same switch and undoes both side effects:
+
+```bash
+fleet-model docs-pass                # what it runs on now, and what it starts on next
+fleet-model docs-pass haiku          # move it, keep the conversation, pin it there
+fleet-model docs-pass --unpin        # the next start goes back to the project / profile default
+fleet-project set acme-api model sonnet   # the project's default (never master's)
+fleet-project set acme-api model default  # drop it
+```
+
+What a switch does, in order:
+
+1. **Claude sessions only.** A model name means nothing to another CLI, so any other agent is
+   refused. Moving a session to another agent is `lib/agent-switch.sh`, which keeps a model per
+   agent.
+2. **It waits until the session is free.** That means not busy, not on a dialog, idle three
+   samples in a row (the same check `lib/agent-switch.sh` uses), *and* nothing in its
+   `fleet-send` queue. An idle session with a backlog takes the backlog first, so a `/model`
+   sent then would land behind work nobody connected it to. An idle session is moved while you
+   wait, for up to a minute. A busy one is moved when its turn ends: `fleet-model` returns at
+   once and `fleet-model <session>` shows the result later. `--wait` blocks until it is done.
+3. **It sends `/model <m>` through `fleet-send`.** That is the mod's command channel when the mod
+   is current, and a pane paste when it is not. With a warm prompt cache, Claude Code asks
+   *"Switch model? … 1. Yes, switch to …"*. The request was the answer, so `fleet-model` presses
+   `1` on that exact dialog and nothing else.
+4. **It reads the result back from the transcript.** Success is `Set model to …`. A decline
+   (`Kept model as …`) or a bad name (`Unable to validate model …`) is a failure, and nothing is
+   pinned.
+5. **It puts the profile's `settings.json` back, but only when its own switch is the whole
+   change.** It takes a snapshot before the switch. If only the `model` key moved, and it moved to
+   the model this switch asked for, the snapshot's exact bytes are written back in place, so a
+   symlink stays a symlink. Anything else is left as it is, with a warning that names what
+   changed: another key edited in the same window, or the key now holding a model this switch did
+   not set. The version it replaced is kept as `<fleet dir>/<sock>.<session>.settings-backup.json`.
+   A running session does not follow that key, so the restore never moves the session back.
+6. **It pins the session** at `<fleet dir>/<sock>.<session>.model`. `agent-here` reads the pin at
+   every start: a new session, `fleet-restart`, a hibernate wake and a reopen. A session that is
+   not running (asleep, or exited) is only pinned, and wakes on that model.
+
+**What a session starts on**, highest first:
+
+| source | set by |
+|--------|--------|
+| the session's pin | `fleet-model <session> <m>` — the only way master moves — and `fleet-spawn --model` / `--kind`, which writes one so a worker wakes on the model it was given |
+| `CLAUDE_FLEET_MODEL` in its environment | a session started before pins existed |
+| the project's default — **never master's** | `fleet-project set <project> model <m>`, or the MODEL column on the grid's `,` page and the phone's project settings |
+| the profile default | Claude Code's own `settings.json` |
+
+There is no all-projects default, for the same reason the kind map has none. `fleet-list`
+shows a MODEL column: what the session's last reply came from, or what it was started on when it
+has not replied since, or what an asleep session will start on. It shows `?` when the two
+sources disagree or neither is there.
+
+**When to move one.** Move a session **down** when what is left is lists, lookups and
+formatting: a summary, a table, a changelog, a status read-out. Move it **up** for anything
+graded, sworn or high-stakes: an exam answer, a legal form, an irreversible migration, a review
+whose verdict others will act on. A switch re-reads the whole conversation on the new model, so
+it is worth doing at a change of phase, not every turn. A lead says which model and why, in the
+same message that moves it.
 
 ### The review gate — no merge without an independent review
 

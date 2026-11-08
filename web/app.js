@@ -7953,6 +7953,41 @@ function sheetProjectAgent(p) {
   ]));
 }
 
+// THE PROJECT'S MODEL (lib/session-model.sh), the same table's next setting. What it does NOT
+// do is the sentence that matters, so it is the sheet's subtitle: a running session keeps the
+// model it has (fleet-model moves one), and master is never given it.
+const MODEL_WHEN = "what this project's claude sessions start on, from their next start — a new worker, a restart, a wake. Running sessions keep theirs, and master never takes it: a lead moves one with fleet-model.";
+const MODEL_OPTS = [
+  { name: '', label: 'default', hint: "the profile's own default — whatever this machine's Claude Code is set to." },
+  { name: 'opus', label: 'opus', hint: 'opus — for graded, sworn or high-stakes reasoning.' },
+  { name: 'sonnet', label: 'sonnet', hint: 'sonnet — everyday code work.' },
+  { name: 'haiku', label: 'haiku', hint: 'haiku — lists, lookups and formatting.' },
+];
+function sheetProjectModel(p) {
+  let model = p.model || '';
+  const note = el('p', { class: 'hint' });
+  const row = el('div', { class: 'seg wrap' });
+  // A model set by hand that is not one of the four is shown, and stays selected, rather than
+  // being silently replaced by "default" the moment the sheet opens.
+  const opts = MODEL_OPTS.some(o => o.name === model) ? MODEL_OPTS
+    : [...MODEL_OPTS, { name: model, label: model, hint: `${model} — set by hand on the machine that runs the fleet.` }];
+  const draw = () => {
+    row.textContent = '';
+    for (const o of opts) row.append(btn(o.label, () => { model = o.name; draw(); }, model === o.name ? 'on' : ''));
+    note.textContent = (opts.find(o => o.name === model) || MODEL_OPTS[0]).hint;
+  };
+  draw();
+  const go = async () => {
+    closeSheet();
+    await doVerb('fleet_project_model', { name: p.name, model });
+    refresh();
+  };
+  openSheet(sheet(`model · ${p.name}`, MODEL_WHEN, [
+    row, note,
+    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', dismissSheet)]),
+  ]));
+}
+
 function sheetAddProject() {
   const p = input('', { placeholder: '/Users/you/some-repo' });
   const nm = input('');
@@ -8054,6 +8089,7 @@ async function sheetSettings() {
     // which is all of them — had no edit path at all on the phone, so a picker that only
     // worked at creation time would not have answered the request.
     kids.push(el('p', { text: "agent: which coding CLI this project's master runs — " + NEXT_MASTER }));
+    kids.push(el('p', { text: 'model: ' + MODEL_WHEN }));
     const rows = el('div', { class: 'rows' });
     // This machine's projects only: these settings are files on the machine that runs the
     // fleet, and a paired host's are set there (the pairing covers reading and messaging).
@@ -8066,6 +8102,8 @@ async function sheetSettings() {
         btn(p.agent && p.agent !== 'claude' ? p.agent : 'claude',
             () => { closeSheet(); sheetProjectAgent(p); },
             p.agent && p.agent !== 'claude' ? 'on' : ''),
+        // 'default' for none, for the reason 'claude' is written above rather than a blank.
+        btn(p.model || 'default', () => { closeSheet(); sheetProjectModel(p); }, p.model ? 'on' : ''),
         btn(p.nudge ? '● on' : '○ off', async () => { await doVerb('fleet_nudge', { project: p.name, state: p.nudge ? 'off' : 'on' }); closeSheet(); }, p.nudge ? 'on' : 'off'),
         btn(p.budget === 'ignored' ? '● ignored' : '○ enforced', async () => { await doVerb('fleet_budget', { project: p.name, state: p.budget === 'ignored' ? 'enforced' : 'ignored' }); closeSheet(); }),
       ]));
