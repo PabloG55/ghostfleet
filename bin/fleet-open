@@ -159,7 +159,7 @@ if [ -f "$_lib" ] && command -v node >/dev/null 2>&1 \
    && holder="$(CLAUDE_CONFIG_DIR="$CFG_DIR" node "$_lib" held --grace 0 --agent "$AGENT" --id "$FULL_ID" --transcript "$TR" 2>/dev/null)"; then
   _ok=0
   if [ -n "$INTO" ] && [ "$holder" != "?" ]; then
-    _pp="$(tmux -L "$SOCK" display-message -p -t "$INTO" '#{pane_pid}' 2>/dev/null)" _p="$holder"
+    _pp="$(tmux -u -L "$SOCK" display-message -p -t "$INTO" '#{pane_pid}' 2>/dev/null)" _p="$holder"
     for _ in 1 2 3 4 5 6 7 8; do
       [ -n "$_p" ] && [ "$_p" != 0 ] && [ "$_p" != 1 ] || break
       [ "$_p" = "$_pp" ] && { _ok=1; break; }
@@ -189,7 +189,7 @@ if [ -n "$INTO" ]; then
     fi
     echo "fleet-open: replacing $SOCK's LEAD with this conversation — it inherits the inbox/dispatch role" >&2
   fi
-  old_cwd="$(tmux -L "$SOCK" display-message -t "$INTO" -p '#{pane_current_path}' 2>/dev/null)"
+  old_cwd="$(tmux -u -L "$SOCK" display-message -t "$INTO" -p '#{pane_current_path}' 2>/dev/null)"
   [ "$old_cwd" = "$CWD" ] || echo "fleet-open: note — '$INTO' sits in $old_cwd but this conversation belongs to $CWD; opening it in $CWD" >&2
   name="$INTO"
   tmux -L "$SOCK" kill-session -t "$INTO" 2>/dev/null

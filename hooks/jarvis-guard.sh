@@ -27,7 +27,7 @@ input="$(cat)"
 jsock="$(grep -m1 '^sock=' "$MARK" 2>/dev/null | cut -d= -f2-)"
 _t="${TMUX:-}"; sock="${_t%%,*}"; sock="${sock##*/}"
 [ -n "$jsock" ] && [ "$sock" = "$jsock" ] || exit 0
-sess="$(tmux -L "$sock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
+sess="$(tmux -u -L "$sock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
 [ "$sess" = master ] || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"

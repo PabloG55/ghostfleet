@@ -183,7 +183,16 @@ agent_field() {
         # ("… (10m" / "… (42s"), which prose only carries if it quotes a whole live
         # line verbatim AND starts it at the margin. The first branch keeps its loose
         # "(", because a narrow pane drops the clock and that must still fire.
-        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+(…|\.\.\.) ?\(|^[[:space:]]*[^[:alnum:][:space:]][[:space:]]*[A-Za-z]+[^(`"]*(…|\.\.\.) \([0-9]+[ms][^)]*\)[[:space:]]*$' ;;
+        # ONE GLYPH IS THREE BYTES IN THE C LOCALE, and a bracket expression holds one. So
+        # [^[:alnum:][:space:]]? could not get past ✻ under a POSIX locale, every spinner line
+        # missed, and a working claude read as idle. That is not a cosmetic miss: agent-switch
+        # waits for idle before it kills the pane, so a switch asked for mid-turn fired at once
+        # and threw the turn away. A daemon has no locale unless someone gives it one (launchd
+        # and a systemd unit included), and neither does a stock container. The second
+        # alternative is 2-4 bytes that are not printable, which in the C locale is exactly a
+        # UTF-8 sequence and in a UTF-8 locale is nothing a capture holds, so this changes no
+        # answer there; `**Word… (` stays out in both, which {1,4} of the first class would not.
+        busy_re)    printf '%s' '^[[:space:]]*([^[:alnum:][:space:]]|[^[:print:]]{2,4})?[[:space:]]*[A-Za-z]+(…|\.\.\.) ?\(|^[[:space:]]*([^[:alnum:][:space:]]|[^[:print:]]{2,4})[[:space:]]*[A-Za-z]+[^(`"]*(…|\.\.\.) \([0-9]+[ms][^)]*\)[[:space:]]*$' ;;
         busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(|^\s*[^A-Za-z0-9\s]\s*[A-Za-z]+[^(`"]*(?:…|\.\.\.) \(\d+[ms][^)]*\)\s*$' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;

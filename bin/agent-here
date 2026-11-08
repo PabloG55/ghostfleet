@@ -99,7 +99,7 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && command -v node >/dev/null 2>&1; then
       export CLAUDE_FLEET_DIR="$_dir"
       _own=""
       [ -n "${TMUX_PANE:-}" ] \
-        && _own="$(tmux -L "$CLAUDE_FLEET_SOCK" show-environment -t "$TMUX_PANE" CLAUDE_CONFIG_DIR 2>/dev/null)"
+        && _own="$(tmux -u -L "$CLAUDE_FLEET_SOCK" show-environment -t "$TMUX_PANE" CLAUDE_CONFIG_DIR 2>/dev/null)"
       case "$_own" in CLAUDE_CONFIG_DIR=/*) ;; *) export CLAUDE_CONFIG_DIR="$_cfg" CLAUDE_FLEET_PROFILE="$_prof" ;; esac
     fi
   fi
@@ -127,7 +127,7 @@ MARK=""
 live_mark() {
   [ -n "$MARK" ] && [ -n "${TMUX_PANE:-}" ] || return 0
   local now
-  now="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+  now="$(tmux -u -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
   case "$now" in ''|_*|+*) return 0 ;; esac
   SLOT="$now"; MARK="$MARK_DIR/$CLAUDE_FLEET_SOCK.$SLOT.exited"
 }

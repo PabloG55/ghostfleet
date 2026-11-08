@@ -107,7 +107,7 @@ pre_remove() {                     # $1 = worktree path; non-zero means DO NOT r
 echo "fleet-clean · $SOCK · repo $GITROOT · main=$MAIN · $([ "$GO" = 1 ] && echo 'EXECUTING' || echo 'DRY RUN (add --go to apply)')"
 git -C "$GITROOT" fetch --prune --quiet origin 2>/dev/null || true   # refresh 'gone' upstream tracking
 
-panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null || true)"
+panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null || true)"
 sess_for() { local wt="$1" p s; while IFS=$'\t' read -r p s; do [ -n "$p" ] || continue
   case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac; done <<EOF
 $panes
@@ -233,7 +233,7 @@ for pidf in "$FLEET_DIR"/*.governor.pid; do
     *)  echo "  stale $(basename "$pidf") (pid ${pid:-?} is not a governor)"; run "rm -f '$pidf'" ;;
   esac
 done
-live="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null || true)"
+live="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null || true)"
 # .stale is the governor's "this pane has not repainted since we parked it" fingerprint.
 # It self-clears the moment the pane moves, so the only ones that linger belong to
 # sessions that died while parked — and a leftover would make a NEW session of the same

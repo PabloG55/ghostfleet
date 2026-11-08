@@ -86,7 +86,7 @@ function haveTmux() {
 }
 function liveSessions(sock) {
   try {
-    return new Set(execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'],
+    return new Set(execFileSync('tmux', ['-u', '-L', sock, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 })
       .split('\n').filter(n => n && !/^_(?:term|edit)-/.test(n)));
   } catch { return new Set(); }        // no server on that socket: nothing live
@@ -96,7 +96,7 @@ function liveSessions(sock) {
 // record — so a session renamed by hand is not reported lost under its old name.
 function livePanes(sock) {
   try {
-    return new Set(execFileSync('tmux', ['-L', sock, 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+    return new Set(execFileSync('tmux', ['-u', '-L', sock, 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).split('\n').filter(Boolean));
   } catch { return new Set(); }
 }

@@ -53,10 +53,10 @@ const die = (msg, code = 1) => { process.stderr.write(`fleet-jarvis: ${msg}\n`);
 const readStdin = () => { try { return fs.readFileSync(0, 'utf8'); } catch { return ''; } };
 // A TIMEOUT ON EVERY ONE: fleet-serve calls jarvisState() on the phone's poll, and a wedged
 // tmux server must cost that request two seconds, not the daemon its event loop.
-const tmux = (sock, ...a) => spawnSync('tmux', ['-L', sock, ...a], { encoding: 'utf8', timeout: 2000 });
+const tmux = (sock, ...a) => spawnSync('tmux', ['-u', '-L', sock, ...a], { encoding: 'utf8', timeout: 2000 });
 // A new-session that may START the server: the client's env becomes the server's global one,
 // so it is the fleet's profile here, never whoever ran this (lib/fleet-env.mjs).
-const tmuxAs = (m, ...a) => spawnSync('tmux', ['-L', m.sock, ...a], { encoding: 'utf8', timeout: 2000,
+const tmuxAs = (m, ...a) => spawnSync('tmux', ['-u', '-L', m.sock, ...a], { encoding: 'utf8', timeout: 2000,
   env: { ...process.env, CLAUDE_CONFIG_DIR: m.cfg, CLAUDE_FLEET_DIR: m.dir, CLAUDE_FLEET_PROFILE: m.profile } });
 const running = (m) => !!m && tmux(m.sock, 'has-session', '-t', '=master').status === 0;
 const sockFor = (name, prof) => (prof === 'work' || prof === 'default') ? `cf-${name}` : `cf-${prof}-${name}`;

@@ -47,7 +47,7 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # the fleet's inbox exactly as before.
 if [ -z "$READER" ]; then
   case "${TMUX:-}" in *"/$SOCK,"*)
-    [ -n "${TMUX_PANE:-}" ] && READER="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+    [ -n "${TMUX_PANE:-}" ] && READER="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
   [ -n "$READER" ] || READER="${CLAUDE_FLEET_SLOT:-}"
   if [ -n "$READER" ] && [ "$READER" != master ] && [ ! -e "$FLEET_DIR/$SOCK.$READER.inbox" ] \
      && ! grep -qxF -- "$READER" "$FLEET_DIR/$SOCK".*.parent 2>/dev/null; then
@@ -256,7 +256,7 @@ finished_live() {
     why="$("$sh" -s "$SOCK" "$s" 2>/dev/null)" || continue
     out="$out  $s  ($why)  →  fleet-stop --reclaim $s
 "
-  done < <(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)
+  done < <(tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)
   [ -n "$out" ] || return 0
   echo
   echo "finished workers — task shipped, session still up (a new task is a new session):"

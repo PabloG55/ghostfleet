@@ -425,7 +425,7 @@ fi
 
 # who's live where — so we can tell free worktrees from occupied ones (same test
 # as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
-panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 sess_for() {
   local wt="$1" p="" s=""
   while IFS=$'\t' read -r p s; do
@@ -470,11 +470,11 @@ fi
 PARENT_SESS=""; PARENT_BRANCH=""
 if [ -n "$LINKED_ROOT" ]; then
   case "${TMUX:-}" in *"/$SOCK,"*)
-    [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+    [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
   if [ -z "$PARENT_SESS" ] && [ -n "${CLAUDE_FLEET_SLOT:-}" ]; then
     _here="$(sess_for "$LINKED_ROOT")"
     [ -n "$_here" ] && tmux -L "$SOCK" has-session -t "$CLAUDE_FLEET_SLOT" 2>/dev/null \
-      && case "$(tmux -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
+      && case "$(tmux -u -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
            "$LINKED_ROOT"|"$LINKED_ROOT"/*) PARENT_SESS="$CLAUDE_FLEET_SLOT" ;; esac
   fi
   [ -n "$PARENT_SESS" ] || PARENT_SESS="$(sess_for "$LINKED_ROOT")"
@@ -909,7 +909,7 @@ session_live() {                   # is $sid still a session on this fleet?
   # this to has-session.
   local s
   while IFS= read -r s; do [ "$s" = "$sid" ] && return 0; done < <(
-    tmux -L "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null)
+    tmux -u -L "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null)
   return 1
 }
 #   ACTION BEFORE RATIONALE, and short lines. fleet-grid.mjs's new-worktree form shows

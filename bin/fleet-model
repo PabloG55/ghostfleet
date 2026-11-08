@@ -137,7 +137,7 @@ record() {
 }
 agent()  { "$BIN_DIR/fleet-agent" of "$SESSION" -s "$SOCK" 2>/dev/null || echo claude; }
 envof()  {
-  local v; v="$(tmux -L "$SOCK" show-environment -t "$SESSION" "$1" 2>/dev/null)" || return 0
+  local v; v="$(tmux -u -L "$SOCK" show-environment -t "$SESSION" "$1" 2>/dev/null)" || return 0
   case "$v" in "$1="*) printf '%s' "${v#"$1="}" ;; esac
 }
 # The conversation the process is in NOW — fleet-hibernate's resolver, the one fleet-restart

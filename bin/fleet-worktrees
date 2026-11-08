@@ -43,7 +43,7 @@ MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 
 # pane cwd -> session, once. `exec agent-here` keeps the pane cwd at the session
 # checkout, so a worktree is "occupied" when some session's pane sits in it.
-panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 
 sess_for() {                       # first session whose pane cwd is at/under $1
   local wt="$1" p="" s=""
