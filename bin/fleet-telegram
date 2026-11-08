@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# fleet-telegram — a Telegram chat connected to one fleet session. The program is
+# bin/fleet-telegram.mjs; this only finds node and the real path behind a symlink, the way
+# bin/fleet-serve does. See docs/TELEGRAM.md.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-telegram: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/fleet-telegram.mjs" "$@"

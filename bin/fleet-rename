@@ -21,6 +21,7 @@
 #   - its display label (the grid's `,` then `l`)
 #   - its agent, exited and asleep markers, and its relay stamp
 #   - its phone attachments directory (attach/<sock>.<session>/)
+#   - its Telegram scratch directory (telegram/<sock>.<session>/)
 #   - its parent tag (a sub-worker keeps its sub-lead), and every child's tag that names
 #     it (a sub-lead keeps its workers), plus the sub-lead's own inbox and read offset
 #   - every reply-to marker in this fleet that names it as the ASKER, so an answer on its
@@ -126,6 +127,10 @@ done
 mv -f "$FLEET_DIR/$SOCK.$OLD.now"             "$FLEET_DIR/$SOCK.$NEW.now"             2>/dev/null || true
 [ -d "$FLEET_DIR/attach/$SOCK.$OLD" ] && [ ! -e "$FLEET_DIR/attach/$SOCK.$NEW" ] \
   && mv "$FLEET_DIR/attach/$SOCK.$OLD" "$FLEET_DIR/attach/$SOCK.$NEW" 2>/dev/null
+# The scratch dir a Telegram turn may write in (hooks/fleet-telegram-guard.sh) is keyed the
+# same way, so it moves with the name or the next turn starts with an empty one.
+[ -d "$FLEET_DIR/telegram/$SOCK.$OLD" ] && [ ! -e "$FLEET_DIR/telegram/$SOCK.$NEW" ] \
+  && mv "$FLEET_DIR/telegram/$SOCK.$OLD" "$FLEET_DIR/telegram/$SOCK.$NEW" 2>/dev/null
 
 # A REPLY ADDRESS NAMES ITS ASKER INSIDE THE FILE. When this session asked another one a
 # question (fleet-send --reply-to me), the answer's address sits in THAT session's marker,

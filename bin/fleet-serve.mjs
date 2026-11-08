@@ -54,6 +54,7 @@ import * as shots from '../lib/shots.mjs';
 import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
 import * as P from '../lib/peers.mjs';
 import * as K from '../lib/know.mjs';
+import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -2224,17 +2225,10 @@ const proj = (name) => resolveProject(name).t || null;
 // that has always protected it — a cap is per purpose here, not global, and the refusal
 // says the number rather than dying opaquely.
 const ATTACH_BODY_CAP = 9 * 1024 * 1024;   // 6 MB of photo is 8 MB of base64, plus room
-const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is checked too
-// SEVERAL PHOTOS GO IN ONE MESSAGE, and the phone uploads them one request at a time before
-// the message is sent. The quota drops the OLDEST files first, so at 24 MB a message of ten
-// full-size photos on a machine with no converter (nothing shrinks them) deleted its own
-// first six while the last four were still arriving — and the agent was handed six paths to
-// files that no longer existed. Sized so one whole message always fits: what gets dropped is
-// then only ever an earlier message's.
-export const ATTACH_PER_MESSAGE = 10;      // web/api.js holds the phone to the same number
-const ATTACH_QUOTA = Math.max(24 * 1024 * 1024, ATTACH_PER_MESSAGE * ATTACH_MAX_BYTES);  // per session, oldest deleted first
-const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
-const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
+// The decoded cap, the per-message count, the quota and the converter live in
+// lib/attach.mjs now, shared with the Telegram channel: one store behind both doors.
+// Re-exported because the phone's count is held to the server's by name (attach-quota).
+export { ATTACH_PER_MESSAGE, enforceQuota };
 // Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 90 s (it
 // waits through pauses now, so a thought spoken slowly runs long), and this is the headroom.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
@@ -2268,86 +2262,6 @@ async function hear(req, res, body) {
 // One line per sentence spoken, saying which voice read it and whether it was made or
 // replayed — the record that proves a mixed reply really did switch voices.
 const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang} ${job.it.voice} ${job.it.text.length} chars ${m.ok ? (m.cached ? 'cached' : `synth ${m.ms}ms`) : `FAILED ${m.error}`}`);
-
-// SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
-// bytes are what the file is. SVG is refused loudly and specifically further down: it is an
-// image that is also a script container.
-function sniffImage(buf) {
-  if (buf.length < 12) return null;
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  // HEIC/HEIF is ISO-BMFF: a size, then 'ftyp', then a brand.
-  if (buf.slice(4, 8).toString('latin1') === 'ftyp') {
-    const brand = buf.slice(8, 12).toString('latin1');
-    if (['heic', 'heix', 'hevc', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand)) return 'heic';
-  }
-  if (buf.slice(0, 5).toString('latin1').trim().startsWith('<')) return 'markup';
-  return null;
-}
-
-// LINUX IS SUPPORTED AND sips IS NOT ON IT (CLAUDE.md: every macOS-only call needs a
-// guard). Probed in order and remembered, because three spawns per photo to re-learn the
-// same answer is three spawns per photo.
-let converterCache;
-function imageConverter() {
-  if (converterCache !== undefined) return converterCache;
-  const has = (bin) => { try { return execFileSync('command', ['-v', bin], { shell: '/bin/sh', encoding: 'utf8' }).trim(); } catch { return ''; } };
-  for (const [bin, kind] of [['sips', 'sips'], ['heif-convert', 'heif'], ['magick', 'magick']]) {
-    const at = has(bin);
-    if (at) { converterCache = { bin: at, kind }; return converterCache; }
-  }
-  converterCache = null;
-  return converterCache;
-}
-
-// Returns '' on success, or a sentence saying what could not be done. Never throws into
-// the request path: a silently dropped attachment is the worst outcome this feature has.
-function convertImage(kind, src, dst) {
-  const c = imageConverter();
-  if (!c) return 'no image converter on this machine (looked for sips, heif-convert, magick)';
-  try {
-    if (c.kind === 'sips') {
-      execFileSync(c.bin, ['-s', 'format', 'jpeg', '-Z', String(ATTACH_MAX_PX), src, '--out', dst],
-                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
-    } else if (c.kind === 'heif') {
-      // heif-convert only reads HEIF; a JPEG or PNG that reaches it would fail, so those
-      // are copied instead (below) and this only ever sees HEIC.
-      execFileSync(c.bin, [src, dst], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
-    } else {
-      execFileSync(c.bin, [src, '-auto-orient', '-resize', `${ATTACH_MAX_PX}x${ATTACH_MAX_PX}>`, dst],
-                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
-    }
-  } catch (e) {
-    return `${c.kind} could not convert it: ${String((e.stderr || e.message || '')).split('\n')[0].slice(0, 160)}`;
-  }
-  try { if (!fs.statSync(dst).size) return `${c.kind} produced an empty file`; } catch { return `${c.kind} produced no file`; }
-  return '';
-}
-
-// $CLAUDE_FLEET_DIR/attach/<sock>.<session>/<random>.jpg — the same <sock>.<session> key
-// every other piece of per-session state under that directory already uses, so a directory
-// whose session is gone is an orphan of a class fleet-clean already understands.
-function attachDir(sock, session) {
-  return path.join(process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'),
-                   'attach', `${sock}.${session}`);
-}
-// OLDEST FIRST, to a fixed ceiling. fleet-clean can only help once a session is dead; a
-// session that lives for weeks and gets a photo a day needs the bound enforced here.
-export function enforceQuota(dir, quota = ATTACH_QUOTA) {
-  let files = [];
-  try {
-    files = fs.readdirSync(dir).map(f => {
-      const full = path.join(dir, f);
-      try { const st = fs.statSync(full); return { full, size: st.size, at: st.mtimeMs }; } catch { return null; }
-    }).filter(Boolean).sort((a, b) => a.at - b.at);
-  } catch { return 0; }
-  let total = files.reduce((n, f) => n + f.size, 0), dropped = 0;
-  while (total > quota && files.length > 1) {
-    const oldest = files.shift();
-    try { fs.unlinkSync(oldest.full); total -= oldest.size; dropped++; } catch { break; }
-  }
-  return dropped;
-}
 
 // ── PAIRED HOSTS: one web client, several machines (lib/peers.mjs) ───────────
 // The phone logs in to ONE host — its passkey cannot work anywhere else — and that host
@@ -3255,67 +3169,13 @@ function agentCatalogue() {
     // string is about to name a directory AND end up inside a prompt that gets pasted into
     // a terminal. Everything else in the path is generated here.
     const session = String(body.session || '');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(session) || session.includes('..'))
-      return send(res, 400, { ok: false, text: `'${session.slice(0, 40)}' is not a usable session name here — letters, digits, dot, dash and underscore only` });
-
     let buf;
     try { buf = Buffer.from(String(body.data || ''), 'base64'); }
     catch { return send(res, 400, { ok: false, text: "'data' is not base64" }); }
-    if (!buf.length) return send(res, 400, { ok: false, text: "'data' is empty" });
-    // Checked again after decoding: base64 that decodes to something implausible is a
-    // signal in itself, and the body cap alone does not bound the decoded length.
-    if (buf.length > ATTACH_MAX_BYTES)
-      return send(res, 413, { ok: false, text: `that photo is ${Math.round(buf.length / 1048576 * 10) / 10} MB and the limit is ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB` });
-
-    const kind = sniffImage(buf);
-    if (kind === 'markup')
-      return send(res, 415, { ok: false, text: 'that looks like markup, not a photo. SVG is refused here on purpose: it is an image that is also a script container' });
-    if (!kind)
-      return send(res, 415, { ok: false, text: 'that is not a JPEG, a PNG or a HEIC — the type is read from the file itself, not from what the phone called it' });
-    // HEIC is the iPhone's default and cannot be handed to an agent as-is.
-    if (kind === 'heic' && !imageConverter())
-      return send(res, 501, { ok: false, text: 'that is a HEIC and this machine has no converter for it — looked for sips (macOS), heif-convert and magick. Send a JPEG, or install one of those' });
-
-    const dir = attachDir(rp.t.sock, session);
-    let out = '';
-    try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const id = crypto.randomBytes(8).toString('hex');
-      const raw = path.join(dir, `.in-${id}`);
-      // O_EXCL on a name nothing has seen: never write through a path that existed before
-      // this request, and never follow a symlink into one.
-      fs.writeFileSync(raw, buf, { flag: 'wx', mode: 0o600 });
-      const conv = imageConverter();
-      // HEIC ALWAYS, because no agent reads it. Anything already readable is only put
-      // through a converter when it is big enough for that to be worth doing: measured,
-      // sips turns a 70-byte PNG into a 41 KB JPEG, so re-encoding by reflex can make a
-      // small picture bigger AND lossier for nothing.
-      const worthResizing = buf.length > ATTACH_RESIZE_OVER;
-      if (kind === 'heic' || (conv && conv.kind !== 'heif' && worthResizing)) {
-        out = path.join(dir, `${id}.jpg`);
-        const bad = convertImage(kind, raw, out);
-        if (bad) { try { fs.unlinkSync(raw); } catch {} try { fs.unlinkSync(out); } catch {}
-          return send(res, 500, { ok: false, text: bad }); }
-        fs.unlinkSync(raw);
-      } else {
-        // No converter, and it is already something an agent can read: keep the original
-        // rather than refuse. This is the Linux-without-sips path.
-        out = path.join(dir, `${id}.${kind}`);
-        fs.renameSync(raw, out);
-      }
-      fs.chmodSync(out, 0o600);
-    } catch (e) {
-      return send(res, 500, { ok: false, text: `could not store it: ${e.message}` });
-    }
-    const dropped = enforceQuota(dir);
-    const size = (() => { try { return fs.statSync(out).size; } catch { return 0; } })();
-    // THE PATH IS ABOUT TO BE PUT IN A PROMPT AND PASTED INTO A TERMINAL. Every component
-    // of it is either from the projects file or generated here, so this can only fail if
-    // one of those assumptions breaks — which is exactly when it should.
-    if (!/^[A-Za-z0-9._\/-]+$/.test(out)) {
-      try { fs.unlinkSync(out); } catch {}
-      return send(res, 500, { ok: false, text: 'refusing to hand back a path with characters a shell would read' });
-    }
+    // lib/attach.mjs: the same store, refusals and quota the Telegram channel uses.
+    const st = storePhoto({ buf, sock: rp.t.sock, session, fleetDir: defaultFleetDir() });
+    if (!st.ok) return send(res, st.status, { ok: false, text: st.text });
+    const { path: out, bytes: size, from: kind, dropped } = st;
     log(`attach: ${session} <- ${Math.round(size / 1024)} KB ${path.extname(out).slice(1)}${dropped ? ` (${dropped} older dropped)` : ''}`);
     // AUDITED LIKE A MUTATION, because it is one: after this call there are bytes on the
     // fleet's disk that were not there before. The subject is the session it is for.

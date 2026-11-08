@@ -444,6 +444,9 @@ _bg_running() {
 # interrupt record too. What was asked is kept in <session_id>.task: its first line, and
 # the transcript line the turn began at.
 if [ "$EVENT" = "UserPromptSubmit" ]; then
+  # What this prompt's turn is told, gathered and printed ONCE below: the hook may write a
+  # single JSON object to stdout, and a second one makes Claude Code ignore both.
+  _ctx=""
   _prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
   _taskf="$FLEET_DIR/$SESSION.task"
   # Any turn starting, the machine's own included (a job's <task-notification> is exactly
@@ -509,8 +512,7 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         *)              rm -f "$_resf" 2>/dev/null ;;
       esac
       if [ "$_mid" = 1 ]; then
-        jq -n --arg t "$_t_line" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit",
-          additionalContext: ("[fleet] This message arrived while you were still working on: \"" + $t + "\". It is QUEUED WORK, not a replacement: add it to your task list, finish the task in hand, then do this one — unless this message itself says to stop or switch (stop, instead, drop that, first do). Your closing report lists every task you received this turn with its state.")}}' 2>/dev/null
+        _ctx="[fleet] This message arrived while you were still working on: \"$_t_line\". It is QUEUED WORK, not a replacement: add it to your task list, finish the task in hand, then do this one — unless this message itself says to stop or switch (stop, instead, drop that, first do). Your closing report lists every task you received this turn with its state."
       else
         # A new turn: this prompt IS the task in hand. A fleet reply preamble is not what
         # was asked, so the first line after it is.
@@ -529,6 +531,44 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         printf '%s\n' "$_tl" > "$FLEET_DIR/$SESSION.chain" 2>/dev/null
       fi ;;
   esac
+  # ── A TURN THE OWNER STARTED FROM TELEGRAM (bin/fleet-telegram) ───────────────
+  # Marked HERE, from the prompt itself, and not from the reply address it rides in on. The
+  # address reaches this session two ways: a paste writes it before the prompt is typed, but
+  # the mod writes it at the turn.start of its own delivery, asynchronously — so on the
+  # mod's path an address-only mark could land after the turn's first tool call, and the
+  # guard would let that call through unrestricted. The daemon puts `[telegram] ` in front
+  # of everything it delivers, the prompt is in this payload, and so the mark is written
+  # before the model has produced a token. hooks/fleet-telegram-guard.sh holds the turn to
+  # the allowlist while the mark exists; the Stop below clears it.
+  #   A prompt typed INTO that turn keeps it marked (the owner's phone words are in its
+  # context now); a new turn that is not from Telegram clears it, which is also what an Esc
+  # interrupt — it fires no Stop — needs. The machine's own turns leave it as it is.
+  #   The mark holds the channel's state dir, which is where the guard reads the owner's
+  # allowlist: the reply address's directory when it is already here, else the default.
+  if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
+    _tgm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.telegram"
+    case "$_prompt" in
+      "[telegram] "*)
+        _tgd="${HOME}/.config/ghostfleet/telegram"
+        _tgr="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
+        if [ -f "$_tgr" ]; then
+          IFS=$'\x1f' read -r _tgs _ _tgrd _ < "$_tgr" 2>/dev/null
+          [ "${_tgs:-}" = telegram ] && case "${_tgrd:-}" in /*) _tgd="$_tgrd" ;; esac
+        fi
+        _tgw="$FLEET_DIR/telegram/${CLAUDE_FLEET_SOCK}.${SLOT}"
+        mkdir -p "$_tgw" 2>/dev/null && chmod 700 "$_tgw" 2>/dev/null
+        printf '%s\n' "$_tgd" > "$_tgm" 2>/dev/null
+        _tga="$(CLAUDE_FLEET_SOCK="$CLAUDE_FLEET_SOCK" CLAUDE_FLEET_SLOT="$SLOT" \
+                "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/fleet-telegram-guard.sh" --list 2>/dev/null)"
+        [ -n "$_tga" ] || _tga="the tools the channel allows"
+        _ctx="${_ctx:+$_ctx
+
+}[fleet] The owner wrote this from Telegram, on their phone. Answer the owner: your final message is sent back to them there, so make it the answer — short, plain, no tables (Telegram shows bold, italics, code and links). This turn's tools are limited to: $_tga. Files may be written only under $_tgw/. To get anything else done, delegate: fleet_send it to the right session (fleet_spawn a worker for new work), then tell the owner who has it." ;;
+      "<task-notification>"*|"<local-command"*|"") ;;
+      *) [ "${_mid:-0}" = 0 ] && rm -f "$_tgm" 2>/dev/null ;;
+    esac
+  fi
+  [ -n "${_ctx:-}" ] && jq -n --arg c "$_ctx" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}' 2>/dev/null
   # ── JARVIS'S LEDGER: what the OWNER said, which is how a yes is proven ────────
   # Jarvis's confirm-list (lib/jarvis.mjs) lets a listed action through only after a yes that
   # the model did not write. This is where that yes is recorded: a prompt SUBMITTED into
@@ -544,6 +584,12 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
   fi
 fi
 [ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
+# The Telegram turn is over (see the mark above): its Stop ends the allowlist, so the next
+# turn — typed at the desk, or a queued prompt from anyone else — runs as it always did.
+case "$EVENT" in Stop|StopFailure)
+  [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
+    && rm -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.telegram" 2>/dev/null ;;
+esac
 
 # The resume turn's verdict, decided once, before the record is written: `resume` while it
 # runs, `resumed` on a Stop that produced nothing. The record carries it so fleet-serve's
@@ -1653,7 +1699,56 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
     # own input — and that reply is a prompt, which Stops, and relays again.
     [ "${r_sock:-}" = "$CLAUDE_FLEET_SOCK" ] && [ "${r_sess:-}" = "$SLOT" ] && r_ok=0
 
-    if [ "$r_ok" = 1 ]; then
+    if [ "$r_ok" = 1 ] && [ "$r_sock" = telegram ]; then
+      # THE OWNER ASKED FROM TELEGRAM (bin/fleet-telegram): the answer is the turn's FINAL
+      # MESSAGE, whole. Not the 220-character excerpt below, which is an inbox row's detail
+      # and a wake's one line, and not flattened — a phone shows paragraphs and lists, and
+      # the daemon turns the markdown into what Telegram renders. Nor is there a peer to
+      # SendMessage, a row or a wake: the daemon sends what lands in <dir>/outbox/.
+      #   Scoped to this turn and retried for the same reason as the excerpt (the final
+      # message can land in the transcript in the same second the Stop hook runs), and
+      # grouped by message id, because one message's text blocks are separate lines there.
+      r_start="$(head -n 1 "$rt.armed" 2>/dev/null | tr -d '[:space:]')"
+      case "$r_start" in ''|*[!0-9]*) r_start="" ;; esac
+      if [ -n "$r_start" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+        _tn="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+        case "$_tn" in ''|*[!0-9]*) _tn=0 ;; esac
+        [ "$r_start" -gt "$_tn" ] && r_start=""
+      fi
+      r_txt=""
+      if [ "$EVENT" = "Stop" ]; then
+        r_ev="answered"
+        for _try in 1 2 3 4 5; do
+          if [ -n "$r_start" ]; then _from="+$(( r_start + 1 ))"; else _from="-400"; fi
+          r_txt="$(tail -n "$_from" "$TRANSCRIPT" 2>/dev/null \
+            | jq -Rc 'fromjson? // empty | select(.type == "assistant")
+                      | { id: (.message.id // ""),
+                          t: ([(.message.content // [])[] | select(.type == "text") | .text] | join("")) }
+                      | select(.t | test("\\S"))' 2>/dev/null \
+            | jq -sr 'if length == 0 then empty
+                      else (last.id) as $i
+                        | (if $i == "" then [last] else map(select(.id == $i)) end)
+                        | map(.t) | join("\n\n") end' 2>/dev/null)"
+          [ -n "$r_txt" ] && break
+          sleep 0.2
+        done
+      else
+        r_ev="asks"; r_txt="$NEED_DETAIL"
+      fi
+      # Only into a real channel dir: fleet-telegram always sends an absolute one, and an
+      # empty field would otherwise make this "/outbox".
+      _tgo="$r_dir/outbox"
+      if case "$r_dir" in /?*) true ;; *) false ;; esac && mkdir -p "$_tgo" 2>/dev/null; then
+        _tgf="$_tgo/$now.$$.${CLAUDE_FLEET_SOCK}.$SLOT.$r_ev.json"
+        jq -n --arg ev "$r_ev" --arg to "$r_sess" --arg sock "$CLAUDE_FLEET_SOCK" --arg sess "$SLOT" \
+              --arg text "$r_txt" --argjson at "$now" \
+              '{event: $ev, reply_to: $to, sock: $sock, session: $sess, text: $text, at: $at}' \
+              > "$_tgf.tmp" 2>/dev/null && mv "$_tgf.tmp" "$_tgf" 2>/dev/null
+        rm -f "$_tgf.tmp" 2>/dev/null
+      fi
+      # One message, one answer; need-you keeps the address, as below.
+      [ "$EVENT" = "Stop" ] && rm -f "$rt" "$rt.armed" 2>/dev/null
+    elif [ "$r_ok" = 1 ]; then
       # Who we would be answering, and where this turn began (see _peer_answered).
       r_peer="${r_sock#cf-}/$r_sess"
       r_start="$(head -n 1 "$rt.armed" 2>/dev/null | tr -d '[:space:]')"
