@@ -10846,9 +10846,11 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   XSEND "task-hotel" >/dev/null
   is "...and fleet-send hands it the prompt"          "task-hotel" "$(cat "$XS/claimed" 2>/dev/null)"
   # WHO SENT IT, on the row: the next prompt nobody can explain names its caller.
+  tmux -L cfxsrv new-session -d -x 100 -y 20 -s plain 'cat >/dev/null' 2>/dev/null
   xrow="$(cd "$XS" && env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
             CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix CLAUDE_FLEET_MOD_DELIVER=off \
-            "$ROOT/bin/fleet-send" -s cfxsrv --anyway master "go" >/dev/null 2>&1; tail -n 1 "$XF/cfxsrv.sent")"
+            "$ROOT/bin/fleet-send" -s cfxsrv --anyway plain "go" >/dev/null 2>&1; tail -n 1 "$XF/cfxsrv.sent")"
+  tmux -L cfxsrv kill-session -t plain 2>/dev/null
   is "the sent log names the sending session"         "from=env:cf-acme-api/api-fix" \
      "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'from=[^ ]*')"
   is "...the directory it ran in"                     "cwd=$(cd "$XS" && pwd -P)" \
@@ -10859,8 +10861,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # "attempted": three wakes that never landed read exactly like three that did. The first
   # five fields are where they were; the sixth is the outcome, written as fleet-send exits.
   is "...one record of six fields, the first five where they were" "6" "$(awk -F'\t' '{print NF}' <<< "$xrow")"
-  # The pane is a `cat`, not an agent: the paste lands and no turn is ever seen to start.
-  # fleet-send has always warned so on this pane; now the row says it too.
+  # The pane is a `cat`, not an agent, with no box to read: the paste lands and no turn is ever
+  # seen to start. fleet-send has always warned so on a pane like this; now the row says it too.
   is "...the sixth saying no turn was seen to start"  "unconfirmed" "$(cut -f6 <<< "$xrow")"
   is "...and so does the mod's, once its turn started" "delivered" \
      "$(awk -F'\t' '$3 == 10 {print $6}' "$XF/cfxsrv.sent" | tail -n 1)"
@@ -10902,7 +10904,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "$(ls "$XF/xs-1.handoff" | grep -c '\.taken$' || true)"
   is "...and pasted instead"                          "1" \
      "$(grep -cx 'wake-juliet' <<< "$(tmux -L cfxsrv capture-pane -p -t master 2>/dev/null)" || true)"
-  is "...logged as the paste it became"              "rc=0 unconfirmed" "$(grep -o '^rc=[0-9]*$' <<< "$out") $(xlast)"
+  # delivered: this pane's box is empty and the paste echoed below it, which is what a prompt that
+  # went in looks like. It read unconfirmed only while a prompt under 24 characters had no probe,
+  # and an empty probe was "still in the box" on every pane. A longer one said delivered all along.
+  is "...logged as the paste it became"              "rc=0 delivered" "$(grep -o '^rc=[0-9]*$' <<< "$out") $(xlast)"
   out="$(XNUDGE master "brief-kilo")"
   is "a brief the mod claimed is NOT taken back"      "1" "$(ls "$XF/xs-1.handoff" | grep -c '\.taken$' || true)"
   is "...nor pasted"                                  "0" \
@@ -13052,8 +13057,8 @@ is "the grid has an 'interrupted' status" "1" \
 group "fleet-send can see the composer"
 if command -v awk >/dev/null 2>&1; then
   # the real function, lifted out of the script so the test exercises the shipped code
-  eval "$(sed -n '/^in_input() {/,/^}/p' "$ROOT/bin/fleet-send" | sed 's/tmux -L "\$SOCK" capture-pane -p -t "\$SESSION" 2>\/dev\/null/cat "$PANE"/')"
-  probe="browser walkthrough on 8120"
+  eval "$(sed -n '/^squeeze() {/,/^}/p;/^paste_probe() {/,/^}/p;/^in_input() {/,/^}/p' "$ROOT/bin/fleet-send" | sed 's/tmux -L "\$SOCK" capture-pane -p -t "\$SESSION" 2>\/dev\/null/cat "$PANE"/')"
+  probe="$(paste_probe 'continue the browser walkthrough on 8120')"
   ii() { PANE="$1" in_input; echo $?; }
   PANE="$FIX/claude-input-pending.txt";   in_input; is "plain rules: probe still in the box" "0" "$?"
   PANE="$FIX/claude-input-submitted.txt"; in_input; is "plain rules: probe gone = submitted" "1" "$?"
@@ -13063,9 +13068,167 @@ if command -v awk >/dev/null 2>&1; then
   # a pane with no composer at all is UNKNOWN (2), never a confident answer
   printf 'just some text\nand more\n' > "$RB"
   PANE="$RB"; in_input; is "no box at all -> unknown, not a guess" "2" "$?"
+  # A prompt on several rows of the box, the way a composer draws one: it breaks the rows itself
+  # and indents them, so this is not something capture-pane -J would put back together.
+  probe="$(paste_probe $'rebase onto staging and\nthen re-run the suite')"
+  PANE="$FIX/pane-draft-multiline.txt";   in_input; is "a tail across two rows of the box is still in it" "0" "$?"
+  PANE="$FIX/claude-input-submitted.txt"; in_input; is "...and that tail in no box is gone"            "1" "$?"
+  rule='──────────────────────────────'
+  printf '❯ rebase onto staging and\n  then re-run the suite\n\n%s\n❯ \n%s\n  status\n' "$rule" "$rule" > "$RB"
+  PANE="$RB"; in_input; is "...and in the transcript above an empty box, gone too" "1" "$?"
+  printf '╭%s╮\n│ ❯ rebase onto staging and │\n│   then re-run the suite   │\n╰%s╯\n  status\n' "$rule" "$rule" > "$RB"
+  PANE="$RB"; in_input; is "...in the older box, with a bar at each end of a row" "0" "$?"
+  # What counts as an edge of the box. On macOS an empty row did, in a UTF-8 locale; on Linux a row
+  # of em dashes did, because a bracket of multibyte characters is a set of bytes there.
+  probe="$(paste_probe $'look at the acme-web deploy\n\nyes, that one')"
+  printf '%s\n❯ look at the acme-web deploy\n\n  yes, that one\n%s\n  status\n' "$rule" "$rule" > "$RB"
+  PANE="$RB"; in_input; is "a blank row in the box is not its edge"       "0" "$?"
+  printf '%s\n❯ look at the acme-web deploy\n\n  yes, that one\n%s\n\n  status\n' "$rule" "$rule" > "$RB"
+  PANE="$RB"; in_input; is "...nor one under the box"                     "0" "$?"
+  probe="$(paste_probe $'look at the acme-web deploy\n———\nyes, that one')"
+  printf '%s\n❯ look at the acme-web deploy\n  ———\n  yes, that one\n%s\n  status\n' "$rule" "$rule" > "$RB"
+  PANE="$RB"; in_input; is "...and neither is a row of em dashes"         "0" "$?"
+  probe="$(paste_probe $'rebase onto staging and\nthen re-run the suite')"
+  is "the tail is taken from what a pane can show"  "ingandthenre-runthesuite" "$probe"
+  # bash answers ${s: -24} on a shorter string with nothing, and an empty pattern matches anything.
+  is "a prompt shorter than the probe is its own tail" "goon" "$(paste_probe 'go on')"
+  probe="$(paste_probe '   ')"; PANE="$FIX/claude-input-pending.txt"; in_input
+  is "a prompt of nothing but blanks is unknown, so it is never pressed again" "2" "$?"
   rm -f "$RB"
 else
   skip "fleet-send composer detector" "awk missing"
+fi
+
+# ── 4d5a. ...and see a prompt the pane broke across rows ─────────────────────
+# fleet-send looks for the last characters of a prompt to know it landed. Where a row ends depends
+# only on how long the text is, so the same prompt is found or not by how long a temp path in it
+# happens to be. That is how this hid: a last line of 224 characters failed on a runner whose temp
+# paths are short, and passed on a machine whose paths are 40 characters longer.
+#   Both agents below, because the same blindness costs each something different. One takes a
+# prompt as a first line plus a one-second window, so an Enter that waits out fleet-send's two-second
+# fallback splits the prompt in two. The other draws a composer and swallows Enters, and there the
+# cost is the one a person sees: fleet-send says it was delivered, and the prompt sits in the box.
+group "a prompt the pane breaks across rows still goes in"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && W="$(mktemp -d)" && [ -d "$W" ]; then
+  mkdir -p "$W/fleet"
+  cat > "$W/agent" <<'AGENT'
+#!/usr/bin/env bash
+L="$1"; rule='────────────────────────────────────────'
+n=0
+while :; do
+  printf '\033[2J\033[H\n%s\n❯ \n%s\n  status\n' "$rule" "$rule"
+  IFS= read -r line || exit 0
+  p="$line"
+  # a WHOLE second: macOS /bin/bash is 3.2, which refuses a fractional -t
+  while IFS= read -r -t 1 more; do p="$p"$'\n'"$more"; done
+  n=$((n + 1)); printf '%s' "$p" > "$L/turn.$n"
+done
+AGENT
+  # $1 = where to write, $2 = how many Enters to swallow, the race a re-nudge exists for.
+  cat > "$W/composer.mjs" <<'COMPOSER'
+import { appendFileSync, writeFileSync } from 'node:fs';
+const dir = process.argv[2];
+let left = Number(process.argv[3]), box = '', buf = '', pasting = false, turns = 0;
+const frame = () => {
+  const cols = process.stdout.columns, room = cols - 2, rule = '─'.repeat(cols), rows = [];
+  for (const line of box.split('\n')) { let t = line; do { rows.push(t.slice(0, room)); t = t.slice(room); } while (t); }
+  const text = rows.map((r, i) => (i ? '  ' : '❯ ') + r).join('\r\n');
+  process.stdout.write(`\x1b[2J\x1b[H\r\n${rule}\r\n${text}\r\n${rule}\r\n  status\r\n`);
+};
+process.stdin.setRawMode(true);
+process.stdout.write('\x1b[?2004h');
+process.stdin.on('data', (chunk) => {
+  buf += chunk.toString();
+  while (buf) {
+    if (pasting) {
+      const end = buf.indexOf('\x1b[201~');
+      box += (end < 0 ? buf : buf.slice(0, end)).replace(/\r/g, '\n');
+      buf = end < 0 ? '' : buf.slice(end + 6);
+      if (end >= 0) pasting = false;
+    } else if (buf.startsWith('\x1b[200~')) { pasting = true; buf = buf.slice(6); }
+    else {
+      if (buf[0] === '\r') {
+        appendFileSync(`${dir}/enters`, 'x');
+        if (left > 0) left -= 1;
+        else { turns += 1; writeFileSync(`${dir}/turn.${turns}`, box); box = ''; }
+      }
+      buf = buf.slice(1);
+    }
+  }
+  frame();
+});
+frame();
+COMPOSER
+  # Kill, then wait for the process to be gone, for the reason agkill gives: the new session can
+  # reach the dying server and get none, and the rows after it read empty. Fourteen restarts in one
+  # group under load lost that race in about half the runs, on a different row each time.
+  wpane() { local pid; pid="$(tmux -L cfwrap display-message -p '#{pid}' 2>/dev/null)"
+            tmux -L cfwrap kill-server 2>/dev/null
+            if [ -n "$pid" ]; then for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; fi
+            rm -f "$W"/turn.* "$W/enters"
+            tmux -L cfwrap new-session -d -x 60 -y 30 -s master -c "$W" "$1" 2>/dev/null
+            for _ in $(seq 1 50); do grep -q '❯' <<< "$(tmux -L cfwrap capture-pane -p -t master 2>/dev/null)" && break; sleep 0.1; done; }
+  WS() { env -u TMUX -u TMUX_PANE CLAUDE_FLEET_DIR="$W/fleet" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfwrap master "$1" 2>&1; }
+  wturn() { for _ in $(seq 1 30); do [ -e "$W/turn.1" ] && break; sleep 0.1; done; cat "$W/turn.1" 2>/dev/null; }
+  # $1 characters, the last of them unique, so a probe cannot match some earlier row of the pane.
+  wline() { local t="tail-of-$1"; printf '%s%s' "$(printf 'x%.0s' $(seq 1 $(($1 - ${#t}))))" "$t"; }
+
+  # The edges of the band in 60 columns: 60 fits, 61 to 83 put the row break inside the probe, and
+  # from 84 the whole probe is on the second row. The two ends are what said it was the wrap.
+  for n in 60 61 72 83 84; do
+    msg=$'for acme-web\n\n'"$(wline "$n")"
+    wpane "bash '$W/agent' '$W'"
+    WS "$msg" >/dev/null
+    is "a last line of $n characters in 60 columns goes in whole" "$msg" "$(wturn)"
+  done
+  # Shorter than the probe, the tail starts on the row above.
+  msg=$'look at the acme-web deploy\n\nyes, that one'
+  wpane "bash '$W/agent' '$W'"
+  WS "$msg" >/dev/null
+  is "a last line shorter than the probe goes in whole" "$msg" "$(wturn)"
+  # Shorter than the probe altogether. A second Enter here is a second, empty turn.
+  wpane "bash '$W/agent' '$W'"
+  WS "go on" >/dev/null
+  is "a prompt shorter than the probe goes in"          "go on" "$(wturn)"
+  sleep 1.2
+  is "...as one turn, with no empty one after it"       "no" "$([ -e "$W/turn.2" ] && echo yes || echo no)"
+
+  # The same tail in a composer. It fits one row: the control, which goes in either way.
+  msg="$(wline 40)"
+  wpane "node '$W/composer.mjs' '$W' 1"
+  out="$(WS "$msg")"
+  is "a swallowed Enter on a tail on one row is pressed again" "$msg" "$(wturn)"
+  msg="$(wline 70)"
+  wpane "node '$W/composer.mjs' '$W' 1"
+  out="$(WS "$msg")"
+  is "a swallowed Enter on a tail across two rows is pressed again" "$msg" "$(wturn)"
+  is "...twice in all"                                  "xx" "$(cat "$W/enters" 2>/dev/null)"
+  is "...and fleet-send says it landed"                 "1" "$(grep -c '→ master$' <<< "$out" || true)"
+  msg=$'look at the acme-web deploy\n\nyes, that one'
+  wpane "node '$W/composer.mjs' '$W' 1"
+  WS "$msg" >/dev/null
+  is "...and on a last line shorter than the probe"     "$msg" "$(wturn)"
+  wpane "node '$W/composer.mjs' '$W' 1"
+  WS "go on" >/dev/null
+  is "...and on a prompt shorter than the probe"        "go on" "$(wturn)"
+  is "...twice there too"                               "xx" "$(cat "$W/enters" 2>/dev/null)"
+  wpane "node '$W/composer.mjs' '$W' 0"
+  WS "go on" >/dev/null
+  is "a short prompt that went in is not pressed again" "x" "$(cat "$W/enters" 2>/dev/null)"
+  # The other direction: a re-nudge into a turn that did start would submit whatever came next.
+  msg="$(wline 70)"
+  wpane "node '$W/composer.mjs' '$W' 0"
+  WS "$msg" >/dev/null
+  is "with no Enter swallowed, a tail across two rows goes in" "$msg" "$(wturn)"
+  is "...on one Enter, not a second into the turn it started" "x" "$(cat "$W/enters" 2>/dev/null)"
+  # And when it will not go, the send says so. This is the row that read as success.
+  wpane "node '$W/composer.mjs' '$W' 9"
+  out="$(WS "$msg")"
+  is "a tail still in the box is not reported as landed" "1" "$(grep -c 'could not confirm submit' <<< "$out" || true)"
+  tmux -L cfwrap kill-server 2>/dev/null
+  rm -rf "${W:?}"
+else
+  skip "a prompt the pane breaks across rows still goes in" "tmux or node missing, or mktemp not available"
 fi
 
 # ── 4d5b. the wake must find the INPUT BOX, not the last ❯ on screen ─────────

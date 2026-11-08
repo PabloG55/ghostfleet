@@ -403,11 +403,8 @@ async function onMessage(msg, sec) {
   // the turn from that prefix, and that is also where the turn is told its answer goes to the
   // phone and which tools it has. A quote placed in front of it would leave the turn unmarked and
   // untold, with the guard holding it on the armed reply address alone, one signal of its two.
-  // After that, the shape is for fleet-send's paste probe, which is the prompt's last 24
-  // characters with its line breaks flattened. Words alone on a last line shorter than that, as
-  // "yes, that one" is, make a probe that spans the break and that no pane ever shows: Enter waits
-  // out its fallback, and the re-nudge that rescues a swallowed one cannot fire. So the quote and
-  // the words share a line, and a stored file's line comes last, a long path on one line.
+  // The quote and the words share that first line, and any stored file's line comes last. A quote
+  // is flattened to one line anyway, which is what stops it forging a "file:" line of its own.
   let prompt = '', spoken = false;
   try {
     const own = await ownContent(msg, text, sec, t);
