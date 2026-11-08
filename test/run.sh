@@ -23849,6 +23849,86 @@ else
   skip "fleet_list shows asleep sessions with their age" "tmux not available"
 fi
 
+# ── fleet-list costs a bounded number of processes, not one per session per file ──
+# It ran one jq per status-record FILE per session: a fleet dir holds a record for every
+# conversation every fleet ever ran, so twelve sessions over a hundred records was ~1400 jq
+# and eleven seconds inside an agent's turn. The output was right all along, so nothing
+# looked wrong except the clock — and a stopwatch on a shared runner is noise. Count what
+# is spawned instead: PATH shims log every jq/tmux/awk/sort/node the script starts, and the
+# count must not grow with the number of sessions (nor the records). The golden table pins
+# every column, in order, for the cases the walk has branches for: a mod's state, a parked
+# marker, another agent, a dead cwd, an asleep row, and another fleet's records that share
+# slot names.
+group "fleet-list: a bounded number of processes, whatever the fleet's size"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FP="$(cd "$(mktemp -d "$TEST_RUNS.$$.flperf.XXXXXX")" && pwd -P)"
+  mkdir -p "$FP/shim"
+  for c in jq tmux node awk sort; do
+    real="$(command -v "$c")"
+    printf '#!/bin/bash\necho %s >> "$FP_LOG"\nexec %s "$@"\n' "$c" "$real" > "$FP/shim/$c"; chmod +x "$FP/shim/$c"
+  done
+  flp_fleet() {   # <root> <sock> <n>: n sessions, 3 records each, plus the branches above
+    local R="$1" S="$2" N="$3" i name now; now="$(date +%s)"
+    mkdir -p "$R/fleet" "$R/wt" "$R/cfg"
+    tmux -L "$S" kill-server 2>/dev/null
+    for i in $(seq 1 "$N"); do
+      name="w$i"; [ "$i" = 1 ] && name=master
+      tmux -L "$S" new-session -d -s "$name" -c "$R/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+      jq -n --arg s "$name" --arg k "$S" --argjson ts "$((now - i))" --arg st "$([ $((i % 3)) = 0 ] && echo working || echo ready)" \
+        '{slot:$s,sock:$k,ts:$ts,status:$st,transcript:""}' > "$R/fleet/rec-$i.json"
+      jq -n --arg s "$name" --arg k "$S" --argjson ts "$((now - 5000 - i))" '{slot:$s,sock:$k,ts:$ts,status:"need-you"}' > "$R/fleet/old-$i.json"
+      jq -n --arg s "$name" --argjson ts "$now" '{slot:$s,sock:"cf-acme-web",ts:$ts,status:"working"}' > "$R/fleet/other-$i.json"
+    done
+    jq -n --argjson ts "$now" --argjson hb "$((now * 1000))" '{slot:"w2",sock:"'"$S"'",ts:$ts,status:"ready",source:"mod",state:"need-you",mod:{hb:$hb,pid:0}}' > "$R/fleet/mod-w2.json"
+    : > "$R/fleet/$S.w3.parked"
+    printf 'codex\n' > "$R/fleet/$S.w4.agent"
+    printf '%s\t%s\t%s\t%s\n' "$((now - 7200))" "aaaaaaaa-7777-7777-7777-000000000007" "$R/wt" 100 > "$R/fleet/$S.nap.asleep"
+    mkdir -p "$R/gone"; tmux -L "$S" new-session -d -s gone-wt -c "$R/gone" "sleep 600"; rmdir "$R/gone"
+  }
+  flp_run() {     # <root> <sock>: the list, with every spawn logged
+    : > "$FP/log"
+    env FP_LOG="$FP/log" PATH="$FP/shim:$PATH" CLAUDE_FLEET_DIR="$1/fleet" CLAUDE_CONFIG_DIR="$1/cfg" CLAUDE_FLEET_SLOT= TMUX= \
+      "$ROOT/bin/fleet-list" -s "$2" 2>&1
+  }
+  flp_count() { local n; n="$(grep -cx "$1" "$FP/log" || true)"; printf '%s' "${n:-0}"; }
+
+  flp_fleet "$FP/a" cf-acme-api 8
+  outA="$(flp_run "$FP/a" cf-acme-api)"
+  jqA="$(flp_count jq)"; tmA="$(flp_count tmux)"; ndA="$(flp_count node)"; awA="$(flp_count awk)"; soA="$(flp_count sort)"
+  flp_fleet "$FP/b" cf-acme-web 40
+  outB="$(flp_run "$FP/b" cf-acme-web)"
+  jqB="$(flp_count jq)"; tmB="$(flp_count tmux)"; ndB="$(flp_count node)"; awB="$(flp_count awk)"; soB="$(flp_count sort)"
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-acme-web kill-server 2>/dev/null
+
+  # THE BOUNDS ARE GENEROUS (the real counts are 2 jq, 4 tmux, 3 node) and what they exclude is
+  # a return to a process per session: eight sessions over 24 records was 200+ jq before.
+  is "fleet-list: jq runs a handful of times for 8 sessions"      "yes" "$([ "$jqA" -ge 1 ] && [ "$jqA" -le 4 ] && echo yes || echo "no ($jqA)")"
+  is "fleet-list: tmux runs a handful of times for 8 sessions"    "yes" "$([ "$tmA" -ge 1 ] && [ "$tmA" -le 8 ] && echo yes || echo "no ($tmA)")"
+  is "fleet-list: node runs a handful of times for 8 sessions"    "yes" "$([ "$ndA" -le 4 ] && echo yes || echo "no ($ndA)")"
+  is "fleet-list: awk and sort stay a handful too"                "yes" "$([ "$awA" -le 4 ] && [ "$soA" -le 4 ] && echo yes || echo "no ($awA, $soA)")"
+  is "fleet-list: 40 sessions spawn no more jq than 8"            "$jqA" "$jqB"
+  is "fleet-list: ...nor more tmux"                               "$tmA" "$tmB"
+  is "fleet-list: ...nor more node, awk or sort"                  "$ndA $awA $soA" "$ndB $awB $soB"
+  is "fleet-list: the 40-session list has every row"              "yes" "$([ "$(wc -l <<< "$outB")" -ge 42 ] && echo yes || echo no)"
+
+  # EVERY COLUMN, IN ORDER (captured from the one-process-per-file version this replaced).
+  want="SESSION                STATUS     MODEL        
+gone-wt                dead       ?            worktree gone → fleet-stop gone-wt
+master                 ready      ?            
+w2                     need-you   ?            
+w3                     parked     ?            
+w4                     ready      -            
+w5                     ready      ?            
+w6                     working    ?            
+w7                     ready      ?            
+w8                     ready      ?            
+nap                    asleep     -            2h · wake: fleet-hibernate --wake nap · clear: fleet-stop nap"
+  is "fleet-list: the table is byte-for-byte what it was"        "$want" "$outA"
+  rm -rf "${FP:?}"
+else
+  skip "fleet-list: a bounded number of processes" "tmux, jq or node not available"
+fi
+
 # ── 4a10c12d. the new-session screen lists what is parked in that checkout ──
 # E. The owner's words: "could you add a list of parked parallel sessions pls". The name
 # screen is where a person says "a session in THIS checkout", and it offered only a new
