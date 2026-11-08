@@ -217,8 +217,10 @@ turn. It is not another agent's brief.
   short: a sentence or a few lines, plain markdown, no tables. Telegram shows bold,
   italics, code and links, and long text arrives as several messages.
 - **Delegate whatever needs more than reading.** The turn runs under a tool allowlist:
-  reads, web lookups and the `fleet_*` tools. No shell, and writes only into this
-  session's scratch folder. So `fleet_send` the task to the session that should do it, or
+  reads, web lookups and the `fleet_*` tools. By default no shell, and writes only into this
+  session's scratch folder. The owner may have added commands (`Bash(<prefix> *)`) or the
+  checkout (`Write:checkout`), and the `[fleet]` line says what this turn has. Pass text to an
+  allowed command in single quotes. For the rest, `fleet_send` the task to the session that should do it, or
   `fleet_spawn` a worker for new work (and set its model when that tool exists). Then tell
   the owner in one line who has it. A refused tool's message says the same. Don't try to
   route around it: a fleet tool aimed at your own session is refused too.

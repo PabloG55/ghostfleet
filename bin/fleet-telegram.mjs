@@ -14,7 +14,8 @@
 //
 // WHAT A TELEGRAM TURN MAY DO is the owner's decision, and the choice was an allowlist over
 // full power: hooks/fleet-telegram-guard.sh holds such a turn to reading, searching, the web and
-// the fleet's own tools, and delegation does the rest. See docs/TELEGRAM.md.
+// the fleet's own tools, plus any command or checkout the owner names, and delegation does the
+// rest. See docs/TELEGRAM.md.
 //
 // THE TOKEN AND THE CHAT ID ARE NEVER STORED HERE. `config secret-cmd` names a command that
 // prints them (the OS keychain, a secret manager); it is run with `token` or `chat` as its
@@ -592,7 +593,17 @@ async function status() {
   let waiting = 0; try { waiting = fs.readdirSync(OUTBOX).filter((n) => n.endsWith('.json')).length; } catch {}
   say(`outbox:      ${waiting} waiting`);
   say(`transcribe:  ${c.transcribe_cmd ? 'set' : 'not set — voice notes arrive as audio files'}`);
-  say(`allowlist:   ${allowList().join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
+  const list = allowList();
+  say(`allowlist:   ${list.join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
+  if (list.some((e) => e.endsWith(':checkout'))) say(`checkout:    ${t ? checkoutLine(t) : 'not linked, so :checkout entries refuse every write'}`);
+}
+
+// The guard answers, so this cannot disagree with what a turn is held to.
+function checkoutLine(t) {
+  const r = spawnSync(GUARD, ['--checkout-root'], { encoding: 'utf8',
+    env: { ...envFor(t), TMUX_PANE: '', CLAUDE_FLEET_SLOT: t.session } });
+  const root = String(r.stdout || '').trim();
+  return r.status === 0 && root ? root : 'none on record for this session, so :checkout entries refuse every write';
 }
 
 function allowList() {
@@ -604,7 +615,23 @@ function allowList() {
 
 // ── the CLI ──────────────────────────────────────────────────────────────────
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const PATTERN = /^[A-Za-z0-9_*?\[\]-]+(?::scratch)?$/;
+const PATTERN = /^[A-Za-z0-9_*?\[\]-]+(?::scratch|:checkout)?$/;
+const COMMAND_ENTRY = /^Bash\(([\s\S]*)\)$/;
+// Why a command entry could never do what it says, or '' when it can. Saved anyway, each of
+// these would sit on the list looking like a permission and refuse every call. Bash(*) is worth
+// its own sentence: in Claude Code's own rules it means all of Bash, and here the only `*` with
+// a meaning is a trailing " *". The guard's own lexer decides, so there is one answer to what a
+// command may contain.
+function commandEntryProblem(entry) {
+  const body = COMMAND_ENTRY.exec(entry)[1];
+  const cmd = body.replace(/ \*$/, '');
+  if (!cmd.trim() || cmd === '*') return 'it names no command. Bash(*) does not mean all of Bash here; plain Bash does, and that is a remote shell';
+  if (cmd !== cmd.trim()) return 'it has spaces around its command, and a command is compared with its surrounding spaces trimmed, so this could never match';
+  const r = spawnSync(GUARD, ['--lex', cmd], { encoding: 'utf8' });
+  const why = String(r.stdout || '').trim();
+  if (r.status !== 0) return 'the guard could not check it';
+  return why ? `it contains ${why}, and the guard refuses any command that does, so this could never match` : '';
+}
 async function main(argv) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
@@ -688,14 +715,29 @@ async function main(argv) {
         if (what === 'allow' && vals[0] === '--reset') { delete c.allow; saveConfig(c); return say(`allowlist: ${allowList().join(' ')}  (the default)`); }
         const only = what === 'allow' && vals[0] === '--only';
         const pats = only ? vals.slice(1) : vals;
-        if (!pats.length) fail(`usage: fleet-telegram config ${what} ${what === 'allow' ? '[--only] ' : ''}<tool-pattern>…   (a glob over tool names; <pattern>:scratch allows it for files under the session's scratch dir only)`, 2);
-        for (const p of pats) if (!PATTERN.test(p)) fail(`'${p}' is not a tool pattern — letters, digits, _ - and the globs * ? [ ], optionally ending :scratch`, 2);
+        if (!pats.length) fail(`usage: fleet-telegram config ${what} ${what === 'allow' ? '[--only] ' : ''}<tool-pattern>…   (a glob over tool names; <pattern>:scratch or <pattern>:checkout allows it for files under the session's scratch dir or checkout only; 'Bash(<prefix> *)' or 'Bash(<command>)' allows that one command)`, 2);
+        for (const p of pats) {
+          if (COMMAND_ENTRY.test(p)) {
+            // A disallow is not checked: an entry that is wrong must still be removable. But it
+            // must be there, because a typo here would leave the permission in place and say
+            // nothing, which is the one failure the owner cannot see.
+            if (what === 'allow') { const why = commandEntryProblem(p); if (why) fail(`'${p}' was not added: ${why}`, 2); }
+            else if (!list.includes(p)) fail(`'${p}' is not on the list, so nothing changed — fleet-telegram status shows the list`, 2);
+          } else if (!PATTERN.test(p)) fail(`'${p}' is not a tool pattern — letters, digits, _ - and the globs * ? [ ], optionally ending :scratch or :checkout; or a command entry, 'Bash(<prefix> *)' or 'Bash(<command>)'`, 2);
+        }
         if (only) list = [...new Set(pats)];
         else if (what === 'allow') list = [...new Set([...list, ...pats])];
         else list = list.filter((x) => !pats.includes(x));
         if (!list.length) fail('that would leave nothing allowed at all — a Telegram turn could not even read; use `allow --only Read` for the narrowest list', 2);
         c.allow = list; saveConfig(c);
-        return say(`allowlist: ${list.join(' ')}`);
+        say(`allowlist: ${list.join(' ')}`);
+        if (what === 'allow') {
+          for (const p of pats) {
+            const m = COMMAND_ENTRY.exec(p);
+            if (m && m[1].replace(/ \*$/, '').includes('*')) say(`note: the * inside '${p}' is literal — only a trailing ' *' means any arguments`);
+          }
+        }
+        return;
       }
       return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, allow, disallow`, 2);
     }
@@ -708,8 +750,13 @@ async function main(argv) {
   fleet-telegram send "<text>" [--file <path>]
   fleet-telegram config secret-cmd '<cmd>'    prints the token ($1=token) or chat id ($1=chat)
   fleet-telegram config transcribe-cmd '<cmd>'  turns $1 (an audio file) into words on stdout
-  fleet-telegram config allow [--only|--reset] <tool-pattern>…   tools a Telegram turn may use
-  fleet-telegram config disallow <tool-pattern>…
+  fleet-telegram config allow [--only|--reset] <entry>…   what a Telegram turn may use:
+      Read                      a tool, or a glob over tool names
+      Write:scratch             that tool, for files in the session's scratch folder only
+      Write:checkout            that tool, for files in the session's checkout only
+      'Bash(<prefix> *)'        that command, with any arguments
+      'Bash(<command>)'         exactly that command
+  fleet-telegram config disallow <entry>…
 
 Setup: docs/TELEGRAM.md — https://github.com/PabloG55/ghostfleet/blob/main/docs/TELEGRAM.md`);
     default: fail(`unknown command '${cmd}' — fleet-telegram help`, 2);

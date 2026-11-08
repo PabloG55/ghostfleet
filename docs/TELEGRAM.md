@@ -169,7 +169,8 @@ which needs no tool: the final message already goes back.
 A message from Telegram is you, but proven only by a chat id on a phone, not by you sitting
 at the keyboard. A lost phone or a hijacked Telegram account should not get a shell on the
 machine. So **a Telegram turn may only read, look things up and delegate.** It may not run
-arbitrary commands or write outside its own scratch folder. The default list:
+arbitrary commands or write outside its own scratch folder, unless you name a command or
+the checkout on the list ([below](#letting-a-turn-run-a-command)). The default list:
 
 | pattern | what it allows |
 | --- | --- |
@@ -179,10 +180,10 @@ arbitrary commands or write outside its own scratch folder. The default list:
 | `mcp__ghostfleet__fleet_*` | the fleet tools: `fleet_send`, `fleet_spawn`, `fleet_list`, `fleet_read`, `fleet_inbox`, … and any fleet tool added later, such as a model switch |
 | `Write:scratch` `Edit:scratch` `MultiEdit:scratch` `NotebookEdit:scratch` | writing, but only under `<fleet dir>/telegram/<socket>.<session>/` |
 
-Anything else, `Bash` first of all, is refused. The refusal tells the model why and what to
-do instead: delegate it with `fleet_send` to the session that should do it, or
-`fleet_spawn` a worker, then tell you who has it. It also says that only you can widen the
-list, from the desk.
+Anything else, `Bash` first of all, is refused. The refusal tells the model why, names what
+the turn may use, and says what to do instead: delegate it with `fleet_send` to the session
+that should do it, or `fleet_spawn` a worker, then tell you who has it. It also says that
+only you can widen the list, from the desk.
 
 Two rules apply on top of the list:
 
@@ -191,6 +192,9 @@ Two rules apply on top of the list:
   as the session's next prompt, which would run unrestricted.
 - **A `:scratch` write needs an absolute path inside the scratch folder.** A path with a
   `..` in it, or one that is a symlink, is refused.
+
+A list may hold several entries for one tool. The call is allowed if any of them covers it, so
+`Write:checkout` added to the default list works beside `Write:scratch`.
 
 **How a turn is known to be from Telegram.** The daemon prefixes every prompt with
 `[telegram] `. The fleet's `UserPromptSubmit` hook sees that and marks the turn
@@ -215,7 +219,95 @@ fleet-telegram config allow --reset                 # back to the default
 ```
 
 A change takes effect on the next tool call. No restart is needed: the guard reads the list
-each time.
+each time. `fleet-telegram status` shows the list, and where a `:checkout` entry writes.
+
+### Letting a turn run a command
+
+Plain `Bash` on the list gives the phone a shell. To let it run a few commands and nothing
+else, name them, in the same syntax as Claude Code's permission rules:
+
+| entry | allows | does not allow |
+| --- | --- | --- |
+| `Bash(bin/acme-api *)` | `bin/acme-api`, `bin/acme-api weekly "acme-web"` | `bin/acme-apix`, `./bin/acme-api`, `FOO=1 bin/acme-api` |
+| `Bash(toolbox version)` | exactly `toolbox version` | `toolbox version --json`, `toolbox  version` |
+
+```bash
+fleet-telegram config allow 'Bash(bin/acme-api *)'   # quote them: the * and the space are part of it
+fleet-telegram config allow 'Bash(toolbox version)'
+fleet-telegram config disallow 'Bash(toolbox version)'
+```
+
+Spaces and tabs around the command are ignored. Past that, it is a plain string comparison.
+A trailing ` *` means "and any arguments", on a word boundary. A `*` anywhere else is only
+itself, so `Bash(*)` is not all of Bash, and `config allow` refuses it.
+
+**The command must also be one plain command.** A prefix check alone would let
+`bin/acme-api x; rm -rf ~` through, because it does start with `bin/acme-api`. So the
+guard reads the command the way a shell will, and refuses any of these outside quotes:
+
+| refused | because |
+| --- | --- |
+| `;` `&` `\|` and a line break | they end the command and start another |
+| `<` `>` | they read or overwrite a file the arguments never named |
+| `(` `)` | a subshell |
+| `$` and a backtick | they run something, or expand into something else |
+| `#` | a comment, which hides any quote in it from the shell: `x # '`, a line break, `rm -rf ~`, a line break, `# '` reads as one quoted argument and runs as three lines |
+
+Also refused: `$` or a backtick inside double quotes, a quote that never closes, a backslash
+at the very end or the end of a line, and anything over 32 KB, which is too long to check.
+
+Everything inside single quotes is literal, and that is how a turn passes your words through:
+`bin/acme-api note 'don'\''t ship $(this)'` is one command with one argument. A line break
+inside quotes is fine too. `~`, `*`, `?`, `[` and `{` are not refused: they only change the
+arguments, and the entry already trusts those.
+
+**A command entry trusts that command with any arguments.** The guard checks that the shell
+will run that one command, not what the command does with what it is given. So name only
+commands that are safe with any input. Don't assume a read-only name is one:
+`Bash(git log *)` looks harmless, and `git log --output=<file>` overwrites any file you can
+write. The usual answer is a small script of your own that treats its arguments as data, and
+an entry for that script.
+
+A relative command like `bin/acme-api` runs from the session's working directory, so link
+a session that sits where you expect, or name the command by its absolute path.
+
+### Letting a turn edit its checkout
+
+`:checkout` is a path scope like `:scratch`, for the session's own checkout:
+
+```bash
+fleet-telegram config allow Write:checkout Edit:checkout MultiEdit:checkout NotebookEdit:checkout
+```
+
+**Where the root comes from: the fleet's records, never the turn.** The agent can `cd`, so
+the working directory the hook is told about proves nothing.
+
+- The start is the project's directory in your projects list, found by the session's socket.
+- A session started in a worktree that git lists for that project has that worktree as its
+  root, and not the main checkout. The `acme-web` worker in its own worktree edits its
+  worktree.
+- A session started anywhere else has no root. That can happen after a restart, which
+  recreates a session from wherever its pane was.
+- `$HOME`, or anything above it, is never a root, even if a project is registered there.
+
+**When no root can be found, every `:checkout` write is refused**, and the refusal says so.
+`fleet-telegram status` shows the root it found, or that there is none.
+
+A path must be absolute and resolve inside the root. A `..` or `.` in it is refused. So is a
+symlink at the path, a symlink on the way to it that leaves the root or points at nothing, and
+any path through a `.git` directory. `.git` is inside the root but it is not the checkout: it
+never appears in `git status` or a diff, and it decides what runs. With `Bash(git log *)` on
+the list, a write to `.git/config` that sets `diff.external` makes the next
+`git log -p --ext-diff` run whatever it names.
+
+**`:checkout` and a command entry can add up to a shell.** Everything else in the checkout
+stays writable, and that includes what runs. If `Bash(bin/acme-api *)` is on the list and
+`bin/acme-api` is in the checkout, a turn can rewrite the script and then run it, or edit
+what it imports. That turns a message into a remote shell, and the guard cannot tell that
+edit from any other. Hooks in `.claude/settings.json`, `package.json` scripts and a
+`Makefile` are the same thing with a delay. So choose one: keep the commands you allow outside
+the folder the phone can edit, or decide you are comfortable with what that combination means
+if the phone is lost.
 
 ## Secrets
 
