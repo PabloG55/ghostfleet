@@ -3633,7 +3633,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # Whatever the terminal wrapped or the page broke, the words read in order once the rows are joined.
   spreads() { grep -qF -- "$1" <<< "$(tr -s ' \n' ' ' <<< "$(spcap)")" && echo yes || echo no; }
   # The lit cell: reverse video on the cursor's row, which the plain capture cannot see.
-  splitcell() { grep -E '▸' <<< "$(tmux -L "$SPS" capture-pane -e -p 2>/dev/null)" | grep -qE '\[([0-9]+;)*7(;[0-9]+)*m' && echo yes || echo no; }
+  splitcell() { grep -qE '\[([0-9]+;)*7(;[0-9]+)*m' <<< "$(grep -E '▸' <<< "$(tmux -L "$SPS" capture-pane -e -p 2>/dev/null)")" && echo yes || echo no; }
   NF="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.length)")"
   LAST="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.at(-1).name)")"
   LASTWHAT="$(node --input-type=module -e "import * as X from '$ROOT/lib/experimental.mjs'; console.log(X.FEATURES.at(-1).what)")"
@@ -3667,8 +3667,8 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   printf 'opencode failed to start, so the master stayed on claude (exit 127)\n' > "$T/.claude/fleet/cf-acme-api.master.switch-failed"
   if spstart 120 24; then
     is "a failed switch says all of why, at 120x24"     "yes" "$(sphas 'opencode failed to start, so the master stayed on claude \(exit 127\)')"
-    is "...on the line under its row"                   "yes" "$(grep -A1 -E '^▸ +acme-api' <<< "$(spcap)" | grep -q 'exit 127' && echo yes || echo no)"
-    is "...which is still a row of cells"               "yes" "$(grep -E '^▸ +acme-api' <<< "$(spcap)" | grep -qE '○ off +○ enforced' && echo yes || echo no)"
+    is "...on the line under its row"                   "yes" "$(grep -q 'exit 127' <<< "$(grep -A1 -E '^▸ +acme-api' <<< "$(spcap)")" && echo yes || echo no)"
+    is "...which is still a row of cells"               "yes" "$(grep -qE '○ off +○ enforced' <<< "$(grep -E '^▸ +acme-api' <<< "$(spcap)")" && echo yes || echo no)"
   fi
   rm -f "$T/.claude/fleet/cf-acme-api.master.switch-failed"
 
