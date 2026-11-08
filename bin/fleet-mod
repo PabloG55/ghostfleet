@@ -159,4 +159,19 @@ done
 if [ "$changed" = 1 ] && [ "$DRY" = 0 ] && [ "$rc" = 0 ]; then
   echo "  (running sessions keep what they loaded: /reload-plugins in one, or start a new one)"
 fi
+# Where the profiles stand says nothing about the sessions already running in them: each keeps
+# the code it loaded. Counted the way `reload` decides it (lib/mod-reload.mjs: off the mod, or
+# on code that is not the runtime's), so this line and its plan never disagree.
+if [ "$ACTION" = status ] && command -v node >/dev/null 2>&1; then
+  _src="${BASH_SOURCE[0]}"
+  while [ -L "$_src" ]; do
+    _lnk="$(readlink "$_src")"; case "$_lnk" in /*) _src="$_lnk" ;; *) _src="$(dirname "$_src")/$_lnk" ;; esac
+  done
+  _behind="$(FLEET_MOD_MIN="$MIN_VERSION" node "$(cd "$(dirname "$_src")" && pwd)/../lib/mod-reload.mjs" --count 2>/dev/null)"
+  case "$_behind" in
+    ''|*[!0-9]*) ;;
+    0) echo "sessions: every live Claude session runs the current mod" ;;
+    *) echo "sessions: $_behind live Claude session$([ "$_behind" = 1 ] || echo s) not on the current mod — fleet-mod reload for which" ;;
+  esac
+fi
 exit "$rc"

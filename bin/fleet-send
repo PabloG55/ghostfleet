@@ -462,11 +462,12 @@ if { [ -z "$_a" ] || [ "$_a" = claude ]; } \
   MOD_SID=pending; _mod_look || true
 fi
 # Prompts handed to the mod and not yet started are a backlog like the queue's: a send
-# arriving behind one must wait behind it, not be handed over beside it.
+# arriving behind one must wait behind it, not be handed over beside it. Waiting (.json),
+# claimed (.taken) and submitted with no turn seen yet (.sent) alike.
 _mod_backlog() {
   [ -n "$MOD_SID" ] || return 1
   local f
-  for f in "$MOD_DIR/$MOD_SID.handoff/"*.json "$MOD_DIR/$MOD_SID.handoff/"*.taken; do
+  for f in "$MOD_DIR/$MOD_SID.handoff/"*.json "$MOD_DIR/$MOD_SID.handoff/"*.taken "$MOD_DIR/$MOD_SID.handoff/"*.sent; do
     [ -e "$f" ] && return 0
   done
   return 1
@@ -893,6 +894,20 @@ if [ "$USE_MOD" = 1 ]; then
         # A slash command that ran without a turn of its own (a panel, a local command).
         SENT_OUT=ran
         echo "fleet-send: → $SESSION (ran $_ran; it started no turn)"
+      elif [ -n "$_rcpt" ] && [[ "$_why" == *"a text beginning with / would run a command"* ]]; then
+        # A MOD OLDER THAN THE FLEET THAT SENDS TO IT. Slash text is run by the mod as the
+        # command it is only since the delivery learned `$.command.run`; a session that loaded
+        # its mod before that, and never reloaded, still hands every prompt to
+        # `$.prompt.submit`, which the host refuses for a leading "/" in exactly these words.
+        # That refusal comes before anything ran, so the prompt is whole and unsent, and this
+        # was reported as "the mod could not submit it" and given up on: a `/reload-plugins`
+        # sent to bring such a session up to date was refused BY the staleness it was sent to
+        # cure. The pane takes slash text as typed, so that is where it goes, with the fix said
+        # once for whoever reads this.
+        rm -f "$_spool/$_hid.done" 2>/dev/null
+        echo "fleet-send: note — the mod in '$SESSION' is older than slash-command delivery and refused this as text; pasting it instead (/reload-plugins in that session, or fleet-mod reload --apply, brings it up to date)" >&2
+        busy && _mod_requeue
+        USE_MOD=0
       elif [ -n "$_rcpt" ]; then
         SENT_OUT=failed
         echo "fleet-send: → $SESSION (not delivered: the mod could not submit it — ${_why:-no reason given})" >&2
@@ -903,7 +918,8 @@ if [ "$USE_MOD" = 1 ]; then
         rm -f "$_spool/$_hid.done" 2>/dev/null
         [ -n "${CLAUDE_FLEET_SEND_REPORT:-}" ] && _report_failed "$CLAUDE_FLEET_SEND_REPORT not delivered — ${_why:-no reason given}"
         exit 1
-      elif [ "$KIND" = nudge ] && mv "$_spool/$_hid.taken" "$_spool/$_hid.revoked" 2>/dev/null; then
+      elif [ "$KIND" = nudge ] && { mv "$_spool/$_hid.taken" "$_spool/$_hid.revoked" 2>/dev/null \
+                                    || mv "$_spool/$_hid.sent" "$_spool/$_hid.revoked" 2>/dev/null; }; then
         # A WAKE THE MOD CLAIMED AND NEVER STARTED IS TAKEN BACK. For any other prompt the
         # wait below is right: the mod holds it and submits it once the session is idle, and
         # taking it back could deliver it twice. For the fleet's own wake that trade is the
@@ -913,6 +929,7 @@ if [ "$USE_MOD" = 1 ]; then
         # one is a lead idle for hours. So it is taken back by the same rename a claim races
         # (one that started at this instant wrote its receipt first and is left alone), and
         # goes the way an unclaimed prompt goes: queued if a turn is running, else pasted.
+        # Claimed (.taken) or already submitted (.sent): for a wake, either is taken back.
         rm -f "$_spool/$_hid.revoked" 2>/dev/null
         if [ -s "$_spool/$_hid.done" ]; then
           SENT_OUT=delivered; echo "fleet-send: → $SESSION"

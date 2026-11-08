@@ -45,10 +45,15 @@ export type PeekPicture = {
  *  as a card above the prompt or as a window of its own. */
 export type PeekShown = { n: number; target: string; edge: 'card' | 'window' }
 
+/** The handoff DELIVERY submitted and has not seen start (register.js `.sent`): its id, and the
+ *  ledger items its claim named and made, so the process a reload starts can stamp or undo them. */
+export type DeliverySent = { id: string; ledgered: string[]; made: string[] }
+
 declare module 'claude-code' {
   interface PluginState {
     ghostfleet: {
       band: Band | null; ledger: Ledger | null
+      deliverySent: DeliverySent | null
       /** PEEK: the switch; the draft's `[Image #N]` numbers; each paste read, by N; the preview open. */
       peekOn: boolean; peekDraft: number[]; peekPics: Record<string, PeekPicture>; peekShown: PeekShown | null
     }

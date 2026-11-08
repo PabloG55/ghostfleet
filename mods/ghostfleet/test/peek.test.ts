@@ -25,7 +25,7 @@ function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Dar
   if (peek !== null) files.set(`${XD}/peek.enabled`, `${peek}\n`)
   for (const [name, b64] of Object.entries(images)) files.set(`${FOLDER}/images/${name}`, b64)
   const box = { text: draft }
-  const w = { files, box, runs: [] as string[][], reads: [] as string[], windows: [] as { argv: string[]; env: Record<string, string>; isEnded: boolean }[], api: { reads: 0 } }
+  const w = { files, box, runs: [] as string[][], reads: [] as string[], windows: [] as { argv: string[]; env: Record<string, string>; isEnded: boolean }[], api: { reads: 0 }, looks: { n: 0 } }
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.env(on, { HOME: '/home/u', CLAUDE_FLEET_DIR: '/fleet', ...env })
   on('session.id', () => ({ value: 'sess-1' }))
@@ -33,7 +33,7 @@ function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Dar
   on('session.cwd', () => ({ value: CWD }))
   on('session.root', () => ({ value: CWD }))
   on('session.messages', (_$: any, e: any) => { if (e && e.as === 'api') w.api.reads++; return { value: e && e.as === 'api' ? api : [] } })
-  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
+  on('prompt.read', () => { w.looks.n++; return { value: { text: box.text, cursor: box.text.length } } })
   on('fs.read', (_$: any, e: any) => {
     w.reads.push(e.path)
     const t = files.get(e.path)
@@ -352,6 +352,68 @@ test('a stored file that is not a picture is said so, never shown', async ($, on
   await w.clock.settle()
   expect(await band.find({ type: 'Text', text: /^\[Image #3\] no preview: not a picture this can read/ })).toBeDefined()
   expect(w.windows).toHaveLength(0)
+})
+
+// What an earlier copy of the mod left in $.state, the way a reload hands it to the new one: the
+// host keeps a plugin's state across /reload-plugins, the module starts over. Read from the seed
+// until the mod writes the value itself.
+function seeded(on: any, values: Record<string, unknown>) {
+  const written = new Set<string>()
+  on('state.get', (_$: any, e: any, next: any) => (e.key in values && !written.has(e.key) ? { value: { value: values[e.key], version: 1 } } : next(e)))
+  on('state.set', (_$: any, e: any, next: any) => { written.add(e.key); return next(e) })
+}
+
+// Measured on a scratch session: [Image #1] read, /reload-plugins, and the new copy's look found
+// #1 already read and never read it again, with no pixels to draw: a card that said loading.
+test('after a reload a paste the copy before read is read again by this one, and drawn', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', env: { ...MAC_TMUX, CLAUDE_FLEET_PEEK: 'cells' } })
+  seeded(on, {
+    peekOn: true, peekDraft: [3], peekShown: null,
+    peekPics: { 3: { label: '[Image #3]', file: `${FOLDER}/images/3.png`, format: 'png', bytes: 120, width: 16, height: 8, ready: true } },
+  })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(w.reads).toContain(`${FOLDER}/images/3.png`)
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster' })
+  expect(await band.find({ type: 'Text', text: /loading/ })).toBeUndefined()
+  // And this copy looks at the box, once a half second: a paste after the reload is found.
+  await point(band, 'chip:3', 'leave')
+  const before = w.looks.n
+  w.box.text = '[Image #3] [Image #4]'
+  await w.clock.advance(2000)
+  expect(w.looks.n - before).toBe(4)
+  expect(await band.find({ key: 'chip:4' })).toBeDefined()
+})
+
+// One look every half second, however many times the session starts again in one module (/clear).
+test('one poll at a time: starting again, and turns ending, never add a second look', async ($, on) => {
+  const w = world(on)
+  await start($, w.clock)
+  for (let i = 0; i < 3; i++) await start($, w.clock)
+  await $.turn.complete(COMPLETE as any)
+  await $.turn.complete(COMPLETE as any)
+  const before = w.looks.n
+  await w.clock.advance(2000)
+  expect(w.looks.n - before).toBe(4)
+})
+
+// A copy of the module the engine started in place of a lost one: no session.start reaches it
+// before the turn that was running ends. It learns from the session that it is drawn in a
+// terminal, looks at the box from then on, and reads the paste there itself.
+test('a copy whose first event is a turn\'s end still looks at the box, once every half second', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', env: { ...MAC_TMUX, CLAUDE_FLEET_PEEK: 'cells' } })
+  on('session.surfaces', () => ({ value: ['terminal'] }))
+  await $.turn.complete(COMPLETE as any)
+  await w.clock.settle()
+  const before = w.looks.n
+  await w.clock.advance(2000)
+  expect(w.looks.n - before).toBe(4)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster' })
 })
 
 test('turning the switch off mid-session takes the row away at the turn\'s end', async ($, on) => {

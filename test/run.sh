@@ -10506,6 +10506,12 @@ while :; do
     if [ "$text" = RANME ]; then
       printf '{"id":"%s","ran":"/cost"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
     fi
+    # A mod from before slash-command delivery: it submits everything as text, and the host
+    # refuses a leading "/" in these words (the plugin's name first, as the host prefixes it).
+    if [ -f "$dir/oldmod" ] && [ "${text#/}" != "$text" ]; then
+      printf '{"id":"%s","error":"%s"}' "$id" 'ghostfleet: $.prompt.submit submits a prompt to the model; a text beginning with / would run a command as the user; run one with $.command.run({ command })' > "$sp/$id.done"
+      rm -f "$sp/$id.taken"; continue
+    fi
     st=working; rec
     printf 'TURN %s%s%s\n' "$text" "${rs:+ reply=$rs}" "${k:+ kind=$k}" >> "$log"
     printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
@@ -10601,6 +10607,17 @@ MOD
   mready
   mx="$(MS w1 "RANME")"; mxc=$?
   is "a command that ran with no turn: delivered"     "0 1" "$mxc $(grep -c '→ w1 (ran /cost; it started no turn)' <<< "$mx" || true)"
+  # A mod that cannot run slash text (it predates `$.command.run`): the host's refusal is not a
+  # failure of the prompt, which never ran, so it is pasted, with the fix named. The other
+  # direction is ERRME above: any other refusal is still a failure, exit 1.
+  mready; : > "$M/turns"; touch "$MF/oldmod"
+  mbg "$M/mo" "/probe-skill now" w1 "/probe-skill now"
+  is "slash text an old mod refuses is pasted into the pane" "1" "$(grep -c '/probe-skill now' <<< "$(mpane)" || true)"
+  is "...saying why, and naming the fix"              "1" "$(grep -c 'older than slash-command delivery.*/reload-plugins' "$M/mo" || true)"
+  is "...not reported as a failure"                    "0" "$(grep -c 'not delivered' "$M/mo" || true)"
+  is "...its receipt consumed, so nothing is filed"    "0" "$(grep -l 'would run a command' "$MF"/fm-1.handoff/*.done 2>/dev/null | grep -c . || true)"
+  is "...and never ran through the mod"                "" "$(mturns)"
+  rm -f "$MF/oldmod"
   # Refused from the QUEUE: the drain sends with its output going nowhere, so the failure
   # is filed in the lead's inbox, naming the worker and the host's words.
   mready; : > "$M/turns"
@@ -17196,9 +17213,12 @@ else
     # fleet-send exits 1 with "(not delivered: the mod could not submit it — …)" when the
     # mod's receipt says it refused, and the daemon used to drop that status: 200, ok:true,
     # the composer cleared and the owner believed it sent. A stand-in mod answers the
-    # handoff here exactly as the real one did — the claim, then a receipt — once with the
-    # refusal it gave for a prompt beginning with `/`, and once with a started turn, so the
-    # assertion is proven in both directions through the same daemon and the same fleet-send.
+    # handoff here the way the real one does — the claim, then a receipt — once with a
+    # refusal, and once with a started turn, so the assertion is proven in both directions
+    # through the same daemon and the same fleet-send. (The refusal that first showed this,
+    # the host's for slash text an older mod hands to prompt.submit, is no longer one: that
+    # prompt is pasted into the pane instead, as the mod group's rows show. Any other refusal
+    # still fails the send.)
     rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
     hq_rec idle
     hq_mod() {   # $1 = the receipt the stand-in writes for every handoff it claims
@@ -17217,13 +17237,13 @@ else
       if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
       const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: process.argv[2] });
       console.log(JSON.stringify({ status: r.status, ok: r.json.ok, text: r.json.text }));" "$1" "$2"; }
-    hq_mod '{"error":"prompt.submit: refused — a text beginning with / would run a command as the user"}'
-    out="$(hq_verb "$(pn_cli enroll phone-held3 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "/review the acme-api routes")"
+    hq_mod '{"error":"prompt.submit: refused — the session is closing and takes no prompt"}'
+    out="$(hq_verb "$(pn_cli enroll phone-held3 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "review the acme-api routes")"
     kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
     is "a send the mod refused is not ok"        "false" "$(jq -r '.ok' <<< "$out" 2>/dev/null)"
     is "...and is not a 200"                     "400"   "$(jq -r '.status' <<< "$out" 2>/dev/null)"
     is "...saying it did not reach the session"  "1"     "$([ "$(grep -c 'did not reach held' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
-    is "...and why, in the mod's words"          "1"     "$([ "$(grep -c 'would run a command' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and why, in the mod's words"          "1"     "$([ "$(grep -c 'takes no prompt' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
     hq_mod '{"turnId":"t-1"}'
     out="$(hq_verb "$(pn_cli enroll phone-held4 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the billing-svc jobs")"
     kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
@@ -25333,6 +25353,11 @@ fi
 #   master     2.1.292, Claude says busy          -> skipped, reads nothing
 #   cache-keys 2.1.284, idle                      -> restart (and never, with --reload-only)
 #   scratch    a codex session                    -> not claude
+# and three already on the mod, whose records say which code they loaded (shape.js codeId):
+#   rotate-keys  the runtime's code                 -> already on mod, never touched
+#   csv-export   other code                         -> stale: /reload-plugins through the mod's
+#                                                      own delivery (fleet-send), ✓ by its code
+#   list-pages   no code at all (an older mod)      -> stale: typed into its pane, ✓ by its code
 # WATCHED GOING RED three ways: decide() without its draft rule (rate-limit planned as a
 # reload), --apply marking ✓ without reading a record (docs-pass read ✓), and a dry run that
 # acted (four rows, the untouched panes first).
@@ -25342,23 +25367,51 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   mkdir -p "$MR/fleet" "$MR/cfg/plugins" "$MR/home" "$MR/wt"
   cat > "$MR/agent" <<'STUB'
 #!/usr/bin/env bash
-dir="$1" sock="$2" slot="$3" mode="$4"
+dir="$1" sock="$2" slot="$3" mode="$4" code="$5"
 draw() { printf '\033[2J\033[H  agent %s\n──────────────────────\n❯ %s\n──────────────────────\n' "$slot" "$1"; }
 if [ "$mode" = typed ]; then draw "half a thought"; else draw ""; fi
 while IFS= read -r line; do
   echo "$line" >> "$dir/$slot.got"
+  perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000' >> "$dir/$slot.at"
   if [ "$line" = /reload-plugins ] && [ "$mode" = loads ]; then
     # MILLISECONDS, as the mod writes them. Whole seconds with 000 appended put the heartbeat
     # BEFORE the reload whenever the answer landed in the same second the reload was sent,
     # and the record was rightly not believed: red on both CI legs, green here by luck.
     now="$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000')"
-    printf '{"session_id":"sid-%s","sock":"%s","slot":"%s","status":"ready","ts":%s,"source":"mod","state":"ready","mod":{"pid":%s,"hb":%s}}\n' \
-      "$slot" "$sock" "$slot" "${now%???}" "$$" "$now" > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"
+    printf '{"session_id":"sid-%s","sock":"%s","slot":"%s","status":"ready","ts":%s,"source":"mod","state":"ready","mod":{"pid":%s,"hb":%s,"code":"%s"}}\n' \
+      "$slot" "$sock" "$slot" "${now%???}" "$$" "$now" "$code" > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"
   fi
   draw ""
 done
 STUB
   chmod +x "$MR/agent"
+  # A session on the mod: its record names the code it loaded ($4, '' for a mod from before
+  # it could say), its spool delivers (.ready), and /reload-plugins, typed or handed over,
+  # loads $5. Every line it takes is written down with where it came from, and when.
+  cat > "$MR/onmod" <<'STUB'
+#!/usr/bin/env bash
+dir="$1" sock="$2" slot="$3" code="$4" new="$5"; sp="$dir/sid-$slot.handoff"; mkdir -p "$sp"
+ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+rec() { local now; now="$(ms)"
+  jq -nc --arg s "$slot" --arg k "$sock" --arg c "$code" --argjson pid $$ --argjson now "$now" \
+    '{session_id:("sid-"+$s), sock:$k, slot:$s, status:"ready", ts:(($now/1000)|floor), source:"mod", state:"ready",
+      mod:({v:"0.1.0", pid:$pid, hb:$now, at:$now} + (if $c == "" then {} else {code:$c} end))}' \
+    > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"; }
+got() { echo "$1" >> "$dir/$slot.got"; ms >> "$dir/$slot.at"; echo >> "$dir/$slot.at"; }
+rec; printf '%s\n' $$ > "$sp/.ready"
+printf '\033[2J\033[H  agent %s\n──────────────────────\n❯ \n──────────────────────\n' "$slot"
+while :; do
+  if IFS= read -r -t 1 line; then got "$line"; [ "$line" = /reload-plugins ] && { code="$new"; rec; }; fi
+  f="$(ls "$sp" 2>/dev/null | grep -E '^[0-9].*\.json$' | head -1)"
+  if [ -n "$f" ] && mv "$sp/$f" "$sp/${f%.json}.taken" 2>/dev/null; then
+    id="${f%.json}"; t="$(jq -r .text "$sp/$id.taken")"; got "spool $t"
+    [ "$t" = /reload-plugins ] && { code="$new"; rec; }
+    printf '{"id":"%s","ran":"%s"}' "$id" "$t" > "$sp/$id.done"; rm -f "$sp/$id.taken"
+  fi
+done
+STUB
+  chmod +x "$MR/onmod"
+  RCODE="$(node --input-type=module -e "import { runtimeCode } from '$ROOT/lib/mod-reload.mjs'; console.log(runtimeCode())")"
   printf '{"version":2,"plugins":{"ghostfleet@ghostfleet":[{"scope":"user"}]}}\n' > "$MR/cfg/plugins/installed_plugins.json"
   tmux -L cf-acme-api kill-server 2>/dev/null
   tmux -L cf-acme-api new-session -d -s _term -c "$MR/wt" "sleep 600" 2>/dev/null
@@ -25366,10 +25419,14 @@ STUB
   tmux -L cf-acme-api set-environment -g CLAUDE_FLEET_DIR "$MR/fleet"
   for s in api-fix:loads docs-pass:ignores rate-limit:typed master:ignores cache-keys:ignores scratch:ignores; do
     tmux -L cf-acme-api new-session -d -s "${s%%:*}" -c "$MR/wt" -x 100 -y 20 \
-      "exec '$MR/agent' '$MR/fleet' cf-acme-api '${s%%:*}' '${s#*:}'" 2>/dev/null
+      "exec '$MR/agent' '$MR/fleet' cf-acme-api '${s%%:*}' '${s#*:}' '$RCODE'" 2>/dev/null
+  done
+  for s in "rotate-keys:$RCODE" "csv-export:0badc0de-1" "list-pages:"; do
+    tmux -L cf-acme-api new-session -d -s "${s%%:*}" -c "$MR/wt" -x 100 -y 20 \
+      "exec '$MR/onmod' '$MR/fleet' cf-acme-api '${s%%:*}' '${s#*:}' '$RCODE'" 2>/dev/null
   done
   echo codex > "$MR/fleet/cf-acme-api.scratch.agent"
-  stubs_drawn() { local s; for s in api-fix docs-pass rate-limit master cache-keys; do pane_has cf-acme-api '❯' "$s" || return 1; done; }
+  stubs_drawn() { local s; for s in api-fix docs-pass rate-limit master cache-keys rotate-keys csv-export list-pages; do pane_has cf-acme-api '❯' "$s" || return 1; done; }
   wait_for 5 "every stub drew its box" stubs_drawn
   is "reload: the stub panes are up" "0" "$([ "$WAITED" = timeout ] && echo "timeout: $WAIT_UNMET" || echo 0)"
   # The note Claude writes about itself, version and status included.
@@ -25380,6 +25437,7 @@ STUB
   }
   mnote api-fix 2.1.292 idle; mnote docs-pass 2.1.292 idle; mnote rate-limit 2.1.292 idle
   mnote master 2.1.292 busy; mnote cache-keys 2.1.284 idle
+  mnote rotate-keys 2.1.292 idle; mnote csv-export 2.1.292 idle; mnote list-pages 2.1.292 idle
   # The wait is the real command's 15 s: a ✓ returns the moment its record lands, so a
   # generous window costs nothing on a fast run and holds on a loaded one. Only the ✗ row,
   # which by construction waits it out, is given 2 s (nothing will ever answer it).
@@ -25387,7 +25445,7 @@ STUB
   # One session's row, its columns split on the table's two-space gutters. After --apply the
   # plan is printed first and the result last, so a result is the last match.
   row() { grep -E "^cf-acme-api/$1 " <<< "$2" | sed -E 's/  +/ | /g'; }
-  snap() { for s in api-fix docs-pass rate-limit master cache-keys scratch; do tmux -L cf-acme-api capture-pane -p -t "$s"; done; ls -l "$MR/fleet"; }
+  snap() { for s in api-fix docs-pass rate-limit master cache-keys scratch rotate-keys csv-export list-pages; do tmux -L cf-acme-api capture-pane -p -t "$s"; done; ls -l "$MR/fleet"; }
 
   before="$(snap)"; plan="$(mrun)"
   is "reload: an idle 2.1.292 with an empty box is reloaded" "reload"  "$(row api-fix "$plan" | awk -F' [|] ' '{print $5}')"
@@ -25397,11 +25455,14 @@ STUB
   is "reload: a 2.1.284 is restarted"         "restart" "$(row cache-keys "$plan" | awk -F' [|] ' '{print $5}')"
   is "reload: a codex session is not claude"  "skip: not claude (codex)" "$(row scratch "$plan" | awk -F' [|] ' '{print $5}')"
   is "reload: the tab is not listed"          "" "$(row _term "$plan")"
+  is "reload: on the runtime's code is already on the mod" "already on mod" "$(row rotate-keys "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: on other code is flagged stale"  "reload: stale mod" "$(row csv-export "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: ...and so is a mod that names no code" "reload: stale mod" "$(row list-pages "$plan" | awk -F' [|] ' '{print $5}')"
   is "reload: the dry run touched nothing"    "$before" "$(snap)"
   is "reload: ...and no stub read a line"     "" "$(cat "$MR"/fleet/*.got 2>/dev/null)"
   is "reload: --reload-only never restarts"   "skip: Claude 2.1.284 needs a restart (--reload-only)" \
      "$(row cache-keys "$(mrun --reload-only)" | awk -F' [|] ' '{print $5}')"
-  is "reload: --count is every claude not on the mod" "5" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
+  is "reload: --count is every claude not on the current mod" "7" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
   # not installed in the profile: nothing to reload into
   printf '{"version":2,"plugins":{}}\n' > "$MR/cfg/plugins/installed_plugins.json"
   is "reload: a profile without the mod is told to install it" "skip: mod not installed in this profile: fleet-mod install" \
@@ -25417,7 +25478,28 @@ STUB
   is "reload: rate-limit read nothing"        "no" "$([ -e "$MR/fleet/rate-limit.got" ] && echo yes || echo no)"
   is "reload: ...and its draft is still there" "yes" "$(pane_has cf-acme-api 'half a thought' rate-limit && echo yes || echo no)"
   is "reload: master read nothing"            "no" "$([ -e "$MR/fleet/master.got" ] && echo yes || echo no)"
-  is "reload: --count drops by the one that loaded" "4" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
+  # The stale ones, in that same run: each through the path its mod can take, once, and done
+  # only by the runtime's code in its record.
+  is "reload: a stale mod that names its code is reloaded through its delivery, once" "spool /reload-plugins" \
+     "$(cat "$MR/fleet/csv-export.got" 2>/dev/null)"
+  is "reload: ...and is on the current mod, by its record" "✓ on the current mod" "$(row csv-export "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
+  is "reload: a mod that names none has it typed, once" "/reload-plugins" "$(cat "$MR/fleet/list-pages.got" 2>/dev/null)"
+  is "reload: ...and is on the current mod, by its record" "✓ on the current mod" "$(row list-pages "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
+  is "reload: the one on the runtime's code read nothing" "no" "$([ -e "$MR/fleet/rotate-keys.got" ] && echo yes || echo no)"
+  # ONE AT A TIME: list-pages comes after docs-pass in the plan, and docs-pass never answers,
+  # so its 2 s wait runs out before list-pages is touched. All at once, they land together.
+  mgap="$(( $(grep -m1 . "$MR/fleet/list-pages.at" 2>/dev/null || echo 0) - $(grep -m1 . "$MR/fleet/docs-pass.at" 2>/dev/null || echo 0) ))"
+  is "reload: one session at a time, each read back before the next" "yes" "$([ "$mgap" -ge 1500 ] && echo yes || echo "no: ${mgap}ms apart")"
+  is "reload: --count drops by the ones that loaded" "4" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
+  # status says how many are behind, counted by the same walk, so the two never disagree. A
+  # claude that answers its version and lists nothing is all status needs to get that far.
+  mkdir -p "$MR/stub"
+  printf '#!/usr/bin/env bash\ncase "$*" in --version) echo "2.1.292 (Claude Code)" ;; *) echo "[]" ;; esac\n' > "$MR/stub/claude"
+  chmod +x "$MR/stub/claude"
+  mall="$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count)"
+  mst="$(env HOME="$MR/home" PATH="$MR/stub:$PATH" "$ROOT/bin/fleet-mod" status --profile "$MR/cfg" 2>&1)"
+  is "status: how many live sessions are not on the current mod, as reload counts them" "1" \
+     "$(grep -cE "^sessions: $mall live Claude sessions? not on the current mod" <<< "$mst" || true)"
   tmux -L cf-acme-api kill-server 2>/dev/null
   rm -rf "$MR"
 else

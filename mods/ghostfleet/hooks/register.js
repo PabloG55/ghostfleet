@@ -35,7 +35,7 @@
 // unbounded one would hold a turn open for as long as the filesystem stalled.
 
 import {
-  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson,
+  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson, codeId, isCodeFile,
 } from './shape.js'
 import {
   mergesAPr, changesABoundary, isMergeTool, prSelector, boundaryOn, mergeRefusal,
@@ -186,7 +186,29 @@ let heartbeat = null
 async function setState($, next, turnId) {
   state = next
   const nowMs = await $.clock.now()
-  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId }))
+  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId, code: codeLoaded || '' }))
+}
+
+// The code this process loaded (shape.js codeId says why `v` cannot tell): read once, at the
+// first session.start of this module, and never again. A reload starts the module over and so
+// reads it afresh; a /clear is the same module, and reading again then would describe whatever
+// is on disk now rather than what is running. '' is "could not be read", reported as nothing,
+// which a reader takes as not known to be current.
+let codeLoaded = null
+const CODE_READ_MS = 30_000
+async function readCode($) {
+  if (codeLoaded !== null) return codeLoaded
+  codeLoaded = ''
+  const dir = `${$.plugin.root}/hooks`
+  // Slow is waited for, because nothing waits on this past the start's own bound (startState);
+  // only a filesystem that never answers is given up on.
+  const list = await bounded($, $.fs.list(dir), CODE_READ_MS, null)
+  if (!list) return codeLoaded
+  const names = list.filter(e => e && e.kind === 'file' && isCodeFile(e.name)).map(e => e.name)
+  const texts = await Promise.all(names.map(name => bounded($, $.fs.read(`${dir}/${name}`), CODE_READ_MS, null)))
+  if (texts.some(t => typeof t !== 'string')) return codeLoaded
+  codeLoaded = names.length ? codeId(names.map((name, i) => ({ name, text: texts[i] }))) : ''
+  return codeLoaded
 }
 
 // The process this module runs in. `$.process.run` starts its child from Claude Code's
@@ -200,6 +222,13 @@ async function learnPid($) {
 
 async function startState($) {
   pid = await learnPid($)
+  // The start waits for the code as long as it can spare, and no longer. Measured on a scratch
+  // session started while the machine was busy: the read outlasted that, the record was written
+  // without it, and an idle session writes nothing again but its heartbeat, so it named no code
+  // for as long as it sat there, which `fleet-mod reload` reads as stale. So a read that lands
+  // late patches its answer in, into a record of this process that has none yet.
+  const reading = readCode($)
+  await bounded($, reading, IO_MS * 3, '')
   // A resumed conversation's record can still say `working` from the process that died
   // mid-turn; this process has started no turn, so say what it IS doing.
   const turns = await bounded($, $.session.turns(), IO_MS, 0)
@@ -209,6 +238,8 @@ async function startState($) {
   if (!(await setState($, first))) {
     $.clock.after(2000, () => { if (state === first) setState($, first) })
   }
+  void reading.then(code => code && patchRecord($, rec => (rec.mod && pid && rec.mod.pid === pid && !rec.mod.code)
+    ? { ...rec, mod: { ...rec.mod, code } } : null)).catch(() => {})
   // A state can be right for hours (a ready session nobody talks to), so its age says
   // nothing about whether anybody is still writing it. The heartbeat is what lets a
   // reader tell "ready for an hour" from "the plugin was disabled an hour ago".
@@ -380,12 +411,27 @@ async function onInbox($) { return runFleet($, 'fleet-inbox') }
 //
 // EACH STEP IS A RENAME, so exactly one side owns an entry at any moment:
 //   fleet-send writes <id>.json and waits for <id>.done;
-//   this claims it (.json -> .taken) only while no turn runs, and submits it; at the
-//     turn.start whose text is that prompt it writes <id>.done with the turnId and arms
-//     the prompt's reply address, if it has one, for THAT turn;
+//   this claims it (.json -> .taken) only while no turn runs, and marks it submitted
+//     (.taken -> .sent) in the instant before it submits; at the turn.start whose text is
+//     that prompt it writes <id>.done with the turnId and arms the prompt's reply address,
+//     if it has one, for THAT turn;
 //   fleet-send, finding the entry unclaimed when its window closes, takes it back
 //     (.json -> .revoked) and pastes. The loser of a rename knows it lost, so a prompt is
 //     never both submitted and pasted.
+//
+// `.taken` AND `.sent` ARE TWO STATES BECAUSE A RESTART CANNOT TELL THEM APART OTHERWISE.
+// A process that starts on this conversation finds what the last one left: a claim it never
+// submitted is put back and delivered again, which is what makes a crash cost nothing. A
+// claim it DID submit must never be, and with one state for both it was: `/reload-plugins`
+// delivered through here reloads this mod inside its own `$.command.run`, the reload drops the
+// old environment's timers before its receipt is written, and the new one found `.taken`, put
+// it back, and ran the reload again. Measured: one send, 65 reloads before it was cut off by
+// hand, and the sender's "could not confirm submit" was the only sign. So the submit is
+// written down before it is made, and a process that finds `.sent` resumes waiting for that
+// prompt's turn (DELIVERY_SENT keeps its ledger items across a reload) and never submits it.
+// The one window left is the rename itself: a crash between `.sent` and the call loses that
+// one prompt, which is the side to err on: a prompt run twice is work done twice, and a
+// command run twice can be a loop.
 //
 // NOT HERE: the queue, and --now. A prompt for a busy session still goes to fleet-send's
 // <sock>.<slot>.queue, counted on the card and drained by the shell hook's Stop through
@@ -408,8 +454,12 @@ const RAN_MS = 10_000
 // The slash commands this mod registers and answers itself (COMMANDS, LEDGER).
 const OWN_COMMANDS = ['fleet', 'inbox', 'ledger']
 
+// The prompt submitted and not yet started, by id, with the ledger items its claim made: in
+// $.state, so the process a reload starts can still stamp or undo them.
+const DELIVERY_SENT = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'deliverySent' })
+
 let turnRunning = false
-let pending = null                         // { id, text, command, reply, at }: submitted, not started
+let pending = null                         // { id, text, command, reply, at, resumed? }: claimed, not started
 let claiming = false
 let poll = null
 let spool = ''
@@ -436,7 +486,9 @@ async function receipt($, id, fields) {
     if (rec && rec.sock && rec.slot) who = { sock: rec.sock, slot: rec.slot }
   }
   await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, ...who, at: nowMs }))
-  await runBounded($, ['rm', '-f', `${spool}/${id}.taken`])
+  await runBounded($, ['rm', '-f', `${spool}/${id}.taken`, `${spool}/${id}.sent`])
+  const sent = await soon($, $.state.get(DELIVERY_SENT), null)
+  if (sent && sent.value && sent.value.id === id) await soon($, $.state.set(DELIVERY_SENT, null), null)
 }
 
 // Receipts past the hour go, except a failure: nobody read it (fleet-send removes the ones it
@@ -501,10 +553,20 @@ async function deliverTick($) {
     // its receipt says it ran, which is a delivery, and its ledger item goes, as nothing
     // will ever answer it.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
-    const lost = async () => { const m = pending?.ledgerMade || pending?.ledgered; if (m?.length) await ledgerUndo($, m) }
+    const lost = () => ledgerLost($, pending)
     const ranAlone = async () => {
       await $.clock.sleep(RAN_MS)
       if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { ran: `/${cmd.command}` }) }
+    }
+    // Written down before it is made (`.sent`, above). A rename that fails means the sender
+    // took the claim back (fleet-send does that to a wake it gave up on) and delivers it
+    // itself; one whose answer was lost to the bound is asked of the file.
+    await soon($, $.state.set(DELIVERY_SENT, { id, ledgered: pending.ledgered || [], made: pending.ledgerMade || [] }), null)
+    const marked = await runBounded($, ['mv', `${spool}/${id}.taken`, `${spool}/${id}.sent`])
+    if (marked?.exitCode !== 0 && (await bounded($, $.fs.exists(`${spool}/${id}.sent`), IO_MS, false)) !== true) {
+      await lost(); pending = null
+      await soon($, $.state.set(DELIVERY_SENT, null), null)
+      return
     }
     const run = cmd ? $.command.run({ command: cmd.command, args: cmd.args }) : $.prompt.submit({ text: entry.text, asUser: true })
     Promise.resolve(run).then(
@@ -567,13 +629,48 @@ async function deliveryTurnStart($, e) {
 // runs. A claim the sender already took back (its `.taken` renamed away: fleet-send does
 // that to a wake it gave up on) is let go without a receipt, because that sender delivered
 // it another way and a failure written now would be reported as one nobody read.
+//   A command a restart RESUMED has no run of its own left to settle, so it is held to RAN_MS,
+// the wait its own run would have had: the commonest is the `/reload-plugins` that started
+// this very process, which ran and started no turn, and its receipt says exactly that.
 async function expirePending($) {
   const p = pending
-  if (!p || (await $.clock.now()) - p.at <= START_MS) return
+  const ran = Boolean(p && p.resumed && p.command && !p.command.refused)
+  if (!p || (await $.clock.now()) - p.at <= (ran ? RAN_MS : START_MS)) return
   pending = null
-  const held = await bounded($, $.fs.exists(`${spool}/${p.id}.taken`), IO_MS, null)
+  const held = await bounded($, $.fs.exists(`${spool}/${p.id}.sent`), IO_MS, null)
   if (held === false) return
-  await bounded($, receipt($, p.id, { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
+  if (ran) await ledgerLost($, p)
+  await bounded($, receipt($, p.id, ran ? { ran: `/${p.command.command}` } : { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
+}
+
+// The ledger items a claim made and nothing will answer now (a refusal, a command that started
+// no turn): undone, those alone (ledgerDelivery says why `made` and not `ledgered`).
+async function ledgerLost($, p) {
+  const m = p?.ledgerMade || p?.ledgered
+  if (m?.length) await ledgerUndo($, m)
+}
+
+// What a process finds that the one before it on this conversation submitted: waited for, as
+// that one would have, and never submitted again. The newest is resumed; one older than it is
+// from a process before that, whose turn has had its chance, and is written off as expirePending
+// would have written it off.
+async function resumeSent($, dir, ids) {
+  const nowMs = await $.clock.now()
+  const st = await soon($, $.state.get(DELIVERY_SENT), null)
+  const kept = st && st.value ? st.value : null
+  const all = [...ids].sort()
+  for (const [i, id] of all.entries()) {
+    const entry = await readRecord($, `${dir}/${id}.sent`)
+    const text = entry && typeof entry.text === 'string' ? entry.text : ''
+    const p = {
+      id, text, command: commandOf(text), reply: replyOf(entry), at: nowMs, resumed: true,
+      nudge: entry?.kind === 'nudge', owner: entry?.kind === 'owner',
+      ...(kept && kept.id === id ? { ledgered: kept.ledgered, ledgerMade: kept.made } : {}),
+    }
+    if (i === all.length - 1) { pending = p; continue }
+    pending = { ...p, at: -Infinity }
+    await expirePending($)
+  }
 }
 
 function deliveryTurnComplete(e) {
@@ -586,16 +683,22 @@ async function deliveryStart($) {
     if (!sid || !pid) return
     const dir = spoolOf(await fleetDir($), sid)
     await runBounded($, ['mkdir', '-p', dir])
-    // A claim an earlier process of this conversation made and never finished goes back,
-    // so the next tick delivers it instead of leaving it stranded as `.taken`.
+    // A claim an earlier process of this conversation made and never submitted goes back,
+    // so the next tick delivers it instead of leaving it stranded as `.taken`. One it DID
+    // submit (`.sent`) is waited for and never submitted again (the section's head says why).
+    const sent = []
     for (const t of (await bounded($, $.fs.list(dir), IO_MS, null)) || []) {
-      const id = t && t.kind === 'file' ? entryId(t.name, '.taken') : null
+      if (!t || t.kind !== 'file') continue
+      const id = entryId(t.name, '.taken')
       if (id) await runBounded($, ['mv', '-n', `${dir}/${id}.taken`, `${dir}/${id}.json`])
+      const was = entryId(t.name, '.sent')
+      if (was) sent.push(was)
     }
     spool = dir
     deliverSid = sid
     pending = null
     turnRunning = false
+    if (sent.length) await resumeSent($, dir, sent)
     await writeSpool($, dir, '.ready', `${pid}\n`)
     if (poll) poll.cancel()
     poll = $.clock.every(POLL_MS, () => { void deliverTick($) })
@@ -1742,6 +1845,7 @@ let peekTool = ''            // the shrinker that worked here
 let peekSid = ''             // whose pictures these are: /clear starts the numbers again
 let peekFolder = ''          // the session's temp folder, once found
 let peekPoll = null
+let peekFresh = true         // this copy of the module has not begun yet (peekBegin)
 let peekDraftIds = []
 let peekWin = null           // { target, isOpen }: the window program running now
 let peekChanging = Promise.resolve()
@@ -1764,6 +1868,9 @@ const peekVal = (got, fallback) => (got && got.value !== undefined && got.value 
 // looking at the box; off stops that, closes a window and forgets the pictures. Asked at the
 // start and again at every turn's end, so `fleet-experimental disable peek` needs no restart.
 async function peekSync($) {
+  // A copy of the module that is asked before any session.start reached it: the engine replaced
+  // the one that had (its hooks worker was lost), and this one learns where it runs on its own.
+  if (peekFresh) await peekBegin($, ((await soon($, $.session.surfaces(), [])) || []).includes('terminal'))
   const on = await peekSwitch($)
   const was = peekOn
   peekOn = on
@@ -1791,6 +1898,27 @@ async function peekSync($) {
   }
   if (!on && was) await peekForget($)
   return on
+}
+
+// A RELOAD KEEPS $.state AND STARTS THE MODULE OVER, and the pictures were in both. PEEK_PICS
+// says which pastes were read; the pixels a card is drawn from, the bytes a prompt handed over
+// and the window a hover opened lived in the module, and went with it. So a paste read before
+// /reload-plugins was still "read" after it, never read again, and its card said loading for as
+// long as the session ran; the new code never saw the file, and wrote nothing beside it. The
+// same for a paste an older mod read and recorded in its own shape, which is what a reload
+// after a deploy meets. A new copy of the module starts its pictures again: each paste in the
+// box, or in a sent prompt, is read on the next look, by this code.
+//   The look itself was never the fault, though it was the first suspect: measured on 2.1.319,
+// a reload's session.start says isInteractive like the first one, the new copy arms its poll on
+// the switch's edge, and only that poll ticks (the engine drops the old copy's timers). One
+// copy would miss it: one the engine starts in place of a lost hooks worker, whose first event
+// can be a turn's end with no session.start before it, so it never learns it is in a terminal
+// and never looks. It asks the session instead.
+async function peekBegin($, interactive) {
+  peekFresh = false
+  peekInteractive = interactive
+  await soon($, $.state.set(PEEK_PICS, {}), null)
+  await soon($, $.state.set(PEEK_SHOWN, null), null)
 }
 
 async function peekForget($) {
@@ -2039,7 +2167,8 @@ async function peekOpenImage($, n) {
 // ── the hooks ──
 
 async function peekStart($, e) {
-  peekInteractive = Boolean(e && e.isInteractive)
+  if (peekFresh) await peekBegin($, Boolean(e && e.isInteractive))
+  else peekInteractive = Boolean(e && e.isInteractive)
   await peekFollow($)
   await peekSync($)
 }

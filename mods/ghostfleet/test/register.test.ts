@@ -6,24 +6,31 @@
 // waiting for it. Each test drives one event the way a session raises it and reads the
 // record the shell hook would read next.
 import { test, expect, mock } from 'claude-code/testing'
+import { codeId } from '../hooks/shape.js'
 
 const DIR = '/fleet'
 const ID = 'sess-1'
 const FILE = `${DIR}/${ID}.json`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[] }
+// `hang`: commands whose run never settles, as a run whose environment a reload dropped never
+// does. `takeBack`: an entry the sender renames away in the instant the mod marks it submitted.
+// `code`: the files of the plugin's own hooks folder, wherever `$.plugin.root` puts it, each read
+// held until `codeGate` resolves when one is set.
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[]; hang: Set<string>; takeBack: string; code: Record<string, string> | null; codeGate: Promise<void> | null }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [] }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [], hang: new Set(), takeBack: '', code: null, codeGate: null }
+  const codeAt = (p: string) => (w.code && /\/hooks\/[^/]+$/.test(p) ? w.code[p.slice(p.lastIndexOf('/') + 1)] : undefined)
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
   on('session.id', () => ({ value: ID }))
   on('session.turns', () => ({ value: 0 }))
-  on('fs.read', (_$: any, e: any) => {
+  on('fs.read', async (_$: any, e: any) => {
     if (w.stall) return new Promise(() => {})
-    const text = w.files.get(e.path)
+    if (w.codeGate && codeAt(e.path) !== undefined) await w.codeGate
+    const text = w.files.get(e.path) ?? codeAt(e.path)
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -37,6 +44,9 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
       // `mv [-f|-n] src dst`: a rename, which fails when there is nothing to rename. The
       // handoff's claims and revokes are decided by exactly that failure.
       const [src, dst] = argv.slice(-2)
+      if (w.takeBack && dst === `${src.slice(0, -'.taken'.length)}.sent` && src.endsWith(`/${w.takeBack}.taken`)) {
+        w.files.set(`${src.slice(0, -'.taken'.length)}.revoked`, w.files.get(src) ?? ''); w.files.delete(src)
+      }
       if (w.files.has(src)) { w.files.set(dst, w.files.get(src) ?? ''); w.files.delete(src) } else exitCode = 1
     }
     if (argv[0] === 'rm') for (const f of argv.slice(2)) w.files.delete(f)
@@ -46,6 +56,7 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   })
   on('fs.exists', (_$: any, e: any) => ({ value: w.files.has(e.path) }))
   on('fs.list', (_$: any, e: any) => {
+    if (w.code && e.path.endsWith('/hooks')) return { value: Object.keys(w.code).map(name => ({ name, kind: 'file', size: 1 })) }
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
@@ -57,7 +68,8 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   // rejects an unknown name (measured: "$.command.run: no command named /x in this session").
   on('command.run', (_$: any, e: any, next: any) => {
     if (e.command === 'no-such') return next(e)
-    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim()); return {}
+    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim())
+    return w.hang.has(e.command) ? new Promise(() => {}) : {}
   })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
@@ -133,6 +145,51 @@ test('with no record the mod writes nothing: the shell hook owns its existence',
   const w = world(on, {}, null)
   await $.turn.start({ text: 'go', turnId: 't1' })
   expect(w.files.size).toBe(0)
+})
+
+// WHICH CODE THIS PROCESS LOADED, for `fleet-mod reload` to hold against the runtime's
+// (shape.js codeId): the hooks folder's code files, read at the module's first session.start.
+// A /clear starts the session again in the same module, and must not read the disk again: what
+// is there now may be a deploy this process never loaded.
+test('the record names the code this module loaded, read once: a /clear does not read it again', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two', 'hooks.json': '{}', '.shape.js.swp': 'no', 'notes.md': 'no' }
+  await start($)
+  const first = rec(w).mod.code
+  expect(first).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  expect(first).not.toBe(codeId([{ name: 'register.js', text: 'one!' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  w.code['register.js'] = 'deployed after this process loaded'
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(rec(w).mod.code).toBe(first)
+})
+
+// Measured on a scratch session started on a busy machine: the read outlasted the start, and an
+// idle session's record then named no code at all, which reads as stale.
+test('a code read that outlasts the start is patched into the record when it lands', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two' }
+  let open = () => {}
+  w.codeGate = new Promise<void>(r => { open = r })
+  const started = start($)
+  await clock.advance(6000)
+  await started
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
+  open()
+  await clock.settle()
+  expect(rec(w).mod.code).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }]))
+  expect(rec(w).state).toBe('idle')
+})
+
+test('a hooks folder that cannot be read names no code, rather than a wrong one', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
 })
 
 test('the budget lands in the record with the moment its window resets', async ($, on) => {
@@ -253,7 +310,7 @@ test('a claim the sender took back is let go without a failure receipt', async (
   w.files.set(...entry('1000-1', 'wake up'))
   await clock.advance(500)
   // fleet-send gave up on it and renamed it away (a wake it then pasted)
-  w.files.delete(`${SPOOL}/1000-1.taken`)
+  w.files.delete(`${SPOOL}/1000-1.sent`)
   await clock.advance(121_000)
   expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
   w.files.set(...entry('2000-1', 'the next one'))
@@ -427,6 +484,65 @@ test('a claim a dead process left behind is delivered by the next one', async ($
   await start($)
   await clock.advance(500)
   expect(w.submitted.map(e => e.text)).toEqual(['stranded'])
+})
+
+// THE RELOAD THAT DELIVERED ITSELF. `/reload-plugins` handed over through the spool reloads this
+// mod from inside its own command run: the old environment is dropped before that run settles
+// (so its receipt is never written), and the new one starts on the same conversation. The run
+// here never settles, as the dropped one never does, and the second session.start is the
+// reload's. It used to find the claim, put it back, and run the reload again: a loop.
+test('a command that reloads the mod mid-delivery runs once, and is receipted as ran by the reload', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.hang.add('reload-plugins')
+  await start($)
+  w.files.set(...entry('1000-1', '/reload-plugins'))
+  await clock.advance(500)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  await start($)                                   // the reload's own session.start
+  await clock.advance(30_000)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', ran: '/reload-plugins' }))
+  expect([...w.files.keys()].filter(f => /1000-1\.(json|taken|sent)$/.test(f))).toEqual([])
+  // ...and the spool is free again: the next prompt goes through, once.
+  w.files.set(...entry('2000-1', 'next'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['next'])
+})
+
+// A prompt the last process submitted is waited for, not submitted again: its turn.start, when
+// it comes in the new process, still names it. A claim it never submitted goes out once, after.
+test('after a restart a submitted prompt is never resubmitted, and a claim never submitted is', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.files.set(`${SPOOL}/1000-1.sent`, JSON.stringify({ id: '1000-1', text: 'already in' }))
+  w.files.set(`${SPOOL}/1000-2.taken`, JSON.stringify({ id: '1000-2', text: 'never sent' }))
+  await start($)
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await $.turn.start({ text: 'already in', turnId: 't4' })
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't4' }))
+  expect(w.files.has(`${SPOOL}/1000-1.sent`)).toBe(false)
+  await $.turn.complete(complete('answer') as any)
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['never sent'])
+})
+
+// The sender's takeback (fleet-send renames a wake it gave up on) races the submit's own rename:
+// whichever lands first owns it. Lost by the mod, nothing is submitted and nothing receipted.
+test('a claim the sender takes back before its submit is never submitted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.takeBack = '1000-1'
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await clock.advance(121_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['the next one'])
 })
 
 test('SessionEnd withdraws .ready, and the spool keeps what is waiting', async ($, on) => {
