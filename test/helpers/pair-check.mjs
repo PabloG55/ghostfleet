@@ -422,6 +422,53 @@ is('...and `find` searches the vm\'s raw events too', true, c.code === 0 && /acm
 c = know(A, 'fleet-know.mjs', 'toolbox@vm');
 is('...but holds nothing of the vm\'s private project', true, c.code === 1 && !/private toolbox task/.test(c.out));
 
+// ── what a host forgets, the host that fetched it drops ─────────────────────────────
+// The copy the laptop already fetched is the hard half of forget: a tombstone on the vm alone
+// leaves the text on another disk. So it crosses too, over the same signed read, to the file
+// that holds the copy and nowhere else.
+const aPeerLog = path.join(A.home, '.claude', 'fleet', 'know-peers', 'vm.jsonl');
+const peerLogText = () => { try { return fs.readFileSync(aPeerLog, 'utf8'); } catch { return ''; } };
+const kvm = (worker, branch, task) => know(B, 'fleet-know-event.mjs', 'spawn', `fleet=${bFleet}`, 'sock=cf-acme-api', `cwd=${path.join(B.dir, 'acme-api')}`, `worker=${worker}`, `branch=${branch}`, `task=${task}`, 'parent=master');
+kvm('csv-export', 'fix/vm-forget', 'A staging detail the vm will forget');
+kvm('rate-limit', 'fix/vm-stays', 'A sibling task that stays');
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+const leaked = ((s.res.json && s.res.json.events) || []).find(e => /will forget/.test(e.f && e.f.task)) || {};
+c = know(A, 'fleet-know.mjs', 'sync');
+is('forget: the laptop fetched the event, so the laptop holds it', true, /will forget/.test(peerLogText()));
+c = know(B, 'fleet-know.mjs', 'forget', leaked.id || 'none');
+is('the vm forgets it, and says a paired machine keeps its copy until it fetches', true, c.code === 0 && /keeps its copy until/.test(c.out));
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+is('...the vm no longer serves it', false, JSON.stringify(s.res.json || {}).includes('will forget'));
+is('...and a reader that did not ask is not sent the tombstone', false, ((s.res.json && s.res.json.events) || []).some(e => e.kind === 'forget'));
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0&tombstones=1');
+is('...the sync\'s read carries it, naming the event and not its text', true, ((s.res.json && s.res.json.events) || []).some(e => e.kind === 'forget' && e.f && e.f.target === leaked.id));
+c = know(A, 'fleet-know.mjs', 'find', 'staging', 'detail');
+is('...the laptop still has its copy until it fetches: the documented window', true, /will forget/.test(c.out));
+c = know(A, 'fleet-know.mjs', 'sync');
+is('after a sync the laptop\'s cached line has gone from its disk', 'no yes', `${peerLogText().includes('will forget') ? 'yes' : 'no'} ${peerLogText().includes('sibling task that stays') ? 'yes' : 'no'}`);
+c = know(A, 'fleet-know.mjs', 'find', 'staging', 'detail');
+is('...and its find no longer reaches it', false, /will forget/.test(c.out));
+c = know(A, 'fleet-know.mjs', 'find', 'sibling', 'task');
+is('...while the event beside it still answers', true, /sibling task that stays/.test(c.out));
+// A tombstone is scoped to the file holding the copy. If it applied everywhere, a paired machine
+// could erase this machine's own memory by naming an id.
+kvm('docs-sweep', 'fix/vm-scope', 'An event this machine holds as well');
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+const heldBoth = ((s.res.json && s.res.json.events) || []).find(e => /holds as well/.test(e.f && e.f.task)) || {};
+know(A, 'fleet-know.mjs', 'sync');
+fs.appendFileSync(path.join(A.home, '.claude', 'fleet', 'know.jsonl'), JSON.stringify({ ...heldBoth, machine: 'laptop' }) + '\n');
+know(B, 'fleet-know.mjs', 'forget', heldBoth.id || 'none');
+know(A, 'fleet-know.mjs', 'sync');
+c = know(A, 'fleet-know.mjs', 'find', 'holds', 'as', 'well');
+// Matching more than the query: find's no-match line repeats what it was asked.
+is('the vm\'s tombstone takes the copy the vm sent, and not this machine\'s own line', 'no yes', `${peerLogText().includes('holds as well') ? 'yes' : 'no'} ${/An event this machine holds as well/.test(c.out) ? 'yes' : 'no'}`);
+// A key the vm's own writer was handed never leaves the vm's disk at all.
+const crossing = `gh${'p'}_${'a1B2'.repeat(9)}`;
+kvm('cache-keys', 'fix/vm-token', `Rotate the deploy key ${crossing} tonight`);
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+is('a token in a task is replaced before it can cross', 'no yes', `${JSON.stringify(s.res.json || {}).includes(crossing) ? 'yes' : 'no'} ${JSON.stringify(s.res.json || {}).includes('[redacted:github-token]') ? 'yes' : 'no'}`);
+is('...and is not on the disk of the machine that wrote it', false, fs.readFileSync(path.join(bFleet, 'know.jsonl'), 'utf8').includes(crossing));
+
 // ── a host that is down stays visible ───────────────────────────────────────────────
 await stop(B);
 // The memory: a peer that does not answer is its last fetched state, marked stale — an

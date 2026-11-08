@@ -257,9 +257,10 @@ export const TOOLS = [
   // it briefs on is `about`, NOT `project` — every other tool's `project` names the FLEET to
   // act in and is resolved against this machine's project list, while the memory answers
   // about every profile and every paired machine at once (acme-api@vm is a project here).
-  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events. With none of them: every project it knows. at:<time> answers as it stood then. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
+  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events. With none of them: every project it knows. at:<time> answers as it stood then. Every decision and description says who said it: [owner], [lead], [worker] or [model]; trusted:true narrows about:<project> to the owner's and the lead's word. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
     inputSchema: { type: 'object', properties: {
       about: { type: 'string', description: 'a project to brief on: name, name@machine (a paired one) or name/profile' },
+      trusted: { type: 'boolean', description: 'with about: only what the owner or a lead said, in decisions, what the project is, and what it depends on' },
       waiting: { type: 'boolean', description: 'everything waiting on the owner, every project' },
       touched: { type: 'string', description: 'a file path (repo-relative, or its tail): which sessions touched it and the PRs it went into' },
       find: { type: 'string', description: 'words to search the raw recorded events for (every word must appear)' },
@@ -389,6 +390,7 @@ export function plan(name, a = {}) {
       else if (a.touched) args.push('touched', String(a.touched));
       else if (a.find) args.push('find', '--', ...String(a.find).split(/\s+/).filter(Boolean));
       if (a.at) args.push('--at', String(a.at));
+      if (a.trusted) args.push('--trusted');
       if (a.json) args.push('--json');
       // a leading '-' in `about` must not read as a flag
       if (a.about && String(a.about).startsWith('-')) return { kind: 'fail', ...fail(`fleet_know: '${a.about}' is not a project name`) };

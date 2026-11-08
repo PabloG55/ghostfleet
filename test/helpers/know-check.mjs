@@ -276,6 +276,8 @@ await section('hook', () => {
     `${ts.length} turns, ${ts.flatMap(t => t.f.files || []).length} files, ${ts.flatMap(t => t.f.prs || []).length} PR`);
   hook({ hook_event_name: 'SessionEnd', reason: 'exit' });
   waitFor(() => evs('session.end').length >= 1, 5000);
+  // The writer is detached and removes the cursor after the line lands, so ask for each in turn.
+  waitFor(() => !fs.existsSync(path.join(FL, 's-1.knowline')), 3000);
   row('hook: SessionEnd lands once, and the cursor goes with it', '1 gone',
     `${evs('session.end').length} ${fs.existsSync(path.join(FL, 's-1.knowline')) ? 'kept' : 'gone'}`);
   const off = run('bash', [path.join(ROOT, 'hooks', 'fleet-event.sh')], { home: H, env: { ...env, CLAUDE_FLEET_KNOW: 'off' }, input: JSON.stringify({ session_id: 's-2', cwd: REPO, hook_event_name: 'SessionStart' }) });
@@ -400,6 +402,7 @@ await section('mcp', async () => {
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { touched: 'src/export/csv.js', at: iso(m(45)) } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', json: true } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: '-rf' } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', trusted: true } } },
   ];
   const ch = spawn('node', [path.join(ROOT, 'mcp', 'fleet-mcp.mjs')], {
     env: { ...base(), HOME: FX, CLAUDE_FLEET_SOCK: 'cfmcpknow', CLAUDE_FLEET_NOW_MS: String(m(120)) }, stdio: ['pipe', 'pipe', 'ignore'],
@@ -426,6 +429,8 @@ await section('mcp', async () => {
   row('...touched, at a past time', 'yes', yes(/PR #1170 open/.test(text(5))));
   row('...json: data', 'acme-api', (() => { try { return JSON.parse(text(6)).project; } catch (e) { return `not json: ${text(6).slice(0, 60)}`; } })());
   row('...and a flag where a name goes is refused, not run', 'yes', yes(err(7)));
+  row('...the page says who said it', 'yes', yes(/• \[worker\] RFC 4180 quoting/.test(text(2))));
+  row('...trusted: owner and lead only', 'yes yes no', `${yes(/only what owner or lead said/.test(text(8)))} ${yes(/• \[lead\] Keep the v1 export/.test(text(8)))} ${yes(/RFC 4180/.test(text(8)))}`);
 });
 
 // ══ four gaps the project page showed on a real fleet ═══════════════════════════════════
@@ -552,6 +557,431 @@ await section('gaps', () => {
   row('hook: a deploy that left HEAD alone names it, one that moved HEAD names no commit', `${sha} none`, `${(dd[0] || {}).commit} ${(dd[1] || {}).commit || 'none'}`);
   const lbl = (target, cmd) => K.deployLabel(target, cmd);
   row('...an older event (first word + the whole command) reads as its verb', 'npm publish|cf-sync', `${lbl('cd', 'cd /w && S=1; cp a b && npm publish')}|${lbl('cf-sync', 'cd /w && S=/tmp/x; cp a b …')}`);
+});
+
+// ══ the groundwork under the memory: a log that grows, a secret in a prompt, who said it ═══
+// Each section has its own home, so its counts are about its own events. In every one the
+// thing that must happen stands beside the thing that must not.
+const newHome = (name) => {
+  const h = path.join(DIR, name), fl = path.join(h, '.claude', 'fleet');
+  fs.mkdirSync(path.join(h, '.config', 'ghostfleet'), { recursive: true });
+  fs.mkdirSync(fl, { recursive: true });
+  fs.writeFileSync(path.join(h, '.config', 'ghostfleet', 'projects'), `acme-api\t${h}/gf-demo/acme-api\twork\nacme-web\t${h}/gf-demo/acme-web\twork\n`);
+  return { h, fl, log: path.join(fl, K.LOG), snap: path.join(fl, K.SNAP) };
+};
+const onApi = (X, t, src = { via: 'hook', session: 's-api', slot: 'master' }) => ({ fleetDir: X.fl, project: 'acme-api', sock: 'cf-acme-api', t, rec: t, src });
+const kh = (X, args, env = {}) => run('node', [KNOW, ...args], { home: X.h, env });
+const kjson = (X, args) => { try { return JSON.parse(kh(X, [...args, '--json']).stdout); } catch { return {}; } };
+const text = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+// A read run in a child, under that home: what the library resolves from HOME stays that home.
+const probe = (X, body, env = {}) => {
+  const code = `import * as K from ${JSON.stringify(path.join(ROOT, 'lib', 'know.mjs'))}; const out = await (async () => { ${body} })(); process.stdout.write(JSON.stringify(out));`;
+  const r = run('node', ['--input-type=module', '-e', code], { home: X.h, env });
+  try { return JSON.parse(r.stdout); } catch { return { failed: String(r.stderr).split('\n').find(l => /Error/.test(l)) || `status ${r.status}` }; }
+};
+
+// A regression back to quadratic has to go red without a loaded machine doing the same. So the
+// bound is on CPU, which a load of 25 stretches far less than the wall clock, and on how a read
+// GROWS, which no machine's speed changes: three times the events cost a linear read about three
+// times the CPU and a quadratic one about nine. Measured from 10k to 30k events: before the index
+// 9.3 for a page, 11.3 for waiting, 12.8 for touched and 4.9 for a rebuild; after it about 2.
+// A limit on the wall clock at 10k could not do this job: the quadratic code read 10k in well
+// under two seconds. Eight projects, because many small ones hide what one big one shows.
+await section('scale', () => {
+  const bench = path.join(ROOT, 'test', 'helpers', 'know-bench.mjs');
+  const cpu = (n) => {
+    const h = path.join(DIR, `bench-${n}`);
+    run('node', [bench, 'gen', h, String(n), '--projects', '8'], { home: h });
+    const r = run('node', [bench, 'cpu', h], { home: h });
+    fs.rmSync(h, { recursive: true, force: true });
+    try { return JSON.parse(r.stdout); } catch { return {}; }
+  };
+  const a = cpu(10000), b = cpu(30000);
+  // Below 20 ms a ratio is the clock's grain, not the read's shape.
+  const grows = (k) => (b[k] === undefined ? Infinity : b[k] / Math.max(a[k] || 0, 20));
+  const under = (x, limit) => yes(x !== undefined && x < limit);
+  row('scale: the generator built both logs and the reads ran', 'yes', yes(a.brief !== undefined && b.brief !== undefined));
+  row('...at 30k events a project page costs under 200 ms of CPU', 'yes', under(b.brief, 200));
+  row('...waiting, a page per project, under 1 s', 'yes', under(b.waiting, 1000));
+  row('...touched, under 1 s', 'yes', under(b.touched, 1000));
+  row('...three times the events: a page grows about three times, not nine', 'yes', yes(grows('brief') <= 5));
+  row('...waiting, the same', 'yes', yes(grows('waiting') <= 5));
+  row('...touched, the same', 'yes', yes(grows('touched') <= 5));
+  row('...and the rebuild', 'yes', yes(grows('rebuild') <= 4));
+  // The generator never reaches a real fleet: it refuses a directory it did not make. Refusing
+  // the real home is not a row, on purpose: if that guard ever broke, the row would write there.
+  const other = path.join(DIR, 'bench-not-empty');
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(other, 'keep'), 'x');
+  const r = run('node', [bench, 'gen', other, '10'], { home: other });
+  row('...the generator refuses a directory it did not make, and writes nothing', '2 keep', `${r.status} ${fs.readdirSync(other).join(' ')}`);
+});
+
+// A sparse hole past the 512 MB a string can hold, between real lines. Holding the file as one
+// string threw ERR_STRING_TOO_LONG out of every read of it. As far as newlines can tell, the hole
+// is one enormous line, so it also proves a line that long is not buffered.
+await section('big log', () => {
+  const X = newHome('big');
+  const t = Date.now() - 86400e3;
+  K.record('prompt', { branch: 'main', text: 'before the hole: nightly invoice replay' }, onApi(X, t));
+  fs.appendFileSync(X.log, '{"id":"ktorn","kind":"pro\nnot json at all\n{"no":"id"}\n');
+  fs.truncateSync(X.log, fs.statSync(X.log).size + 600 * 1024 * 1024);
+  fs.appendFileSync(X.log, '\n');
+  K.record('prompt', { branch: 'main', text: 'after the hole: webhook backoff' }, onApi(X, t + 1000));
+  const f1 = kh(X, ['find', 'webhook', 'backoff']), f2 = kh(X, ['find', 'invoice', 'replay']);
+  row('big log: find reaches a line past the hole', '0 yes', `${f1.status} ${yes(/after the hole/.test(f1.stdout))}`);
+  row('...and one before it', '0 yes', `${f2.status} ${yes(/before the hole/.test(f2.stdout))}`);
+  const rb = kh(X, ['rebuild']);
+  row('...rebuild folds the two events, torn and foreign lines skipped', '0 yes', `${rb.status} ${yes(/rebuilt from 2 events/.test(rb.stdout))}`);
+  row('...and a project page still answers', '0', kh(X, ['acme-api']).status);
+  const p = probe(X, `const d = process.env.HOME + '/.claude/fleet'; const s = K.rebuild(d, { save: false }); let n = 0; K.scanLog(d + '/' + K.LOG, 0, () => n++); return { events: s.events, n, rss: process.resourceUsage().maxRSS };`);
+  // macOS and Linux both report kilobytes through node. A real read of a file this size is 600 MB.
+  row('...in memory that is not the size of the file (under 250 MB)', 'yes', yes(p.rss > 0 && p.rss < 250 * 1024));
+  row('...the scan sees the same two', '2 2', `${p.events} ${p.n}`);
+  fs.rmSync(X.h, { recursive: true, force: true });
+  // an unfinished last line waits for its newline, and a read does not move past it
+  const Y = newHome('torn-tail');
+  K.record('prompt', { branch: 'main', text: 'a whole line' }, onApi(Y, t));
+  const whole = fs.statSync(Y.log).size;
+  fs.appendFileSync(Y.log, '{"id":"khalf","v":1,"t":1,"kind":"prompt"');
+  const q = probe(Y, `const r = K.readLog(process.env.HOME + '/.claude/fleet/' + K.LOG); return { n: r.events.length, end: r.end };`);
+  row('...an unfinished last line waits: read up to it, not past it', `1 ${whole}`, `${q.n} ${q.end}`);
+});
+
+// The two bounded readers keep their best few as they go, so they can only be wrong in the order
+// they drop things. The lines here are written out of time order to give them the chance.
+await section('bounded readers', () => {
+  const X = newHome('bounded');
+  const t = Date.now() - 86400e3;
+  const order = Array.from({ length: 200 }, (_, i) => (i * 73) % 200);
+  for (const i of order) K.record('prompt', { branch: 'main', text: `the replay line ${i}` }, onApi(X, t + i * 1000));
+  const r = probe(X, `
+    const seen = []; let after = 0, pages = 0, more = true;
+    while (more && pages < 50) { const p = K.eventsForPeer({ after, limit: 30 }); seen.push(...p.events.map(e => e.t)); more = p.more; after = p.next; pages++; }
+    const v = await K.view({ sync: false });
+    const f = K.find(v, 'replay');
+    return { seen, pages, first: K.eventsForPeer({ after: 0, limit: 30 }).events.length, total: f.total, rows: f.rows.map(x => x.t) };`);
+  const sorted = (xs) => xs.every((x, i) => !i || xs[i - 1] <= x);
+  row('paging a long log: every event once, in time order', '200 yes', `${new Set(r.seen || []).size} ${yes(sorted(r.seen || []) && (r.seen || []).length === 200)}`);
+  row('...a page at a time', '30 7', `${r.first} ${r.pages}`);
+  row('find: counts all it matched and keeps the newest', '200 20 yes', `${r.total} ${(r.rows || []).length} ${yes((r.rows || [])[0] === t + 199000 && (r.rows || [])[19] === t + 180000)}`);
+});
+
+const R = (s, n) => s.repeat(Math.ceil(n / s.length)).slice(0, n);
+// Built at runtime, so nothing here is a string a scanner would stop on, or a key anyone could use.
+const SECRET_SAMPLES = {
+  'private-key': [`-----BEGIN ${'RSA '}PRIVATE KEY-----\n${R('MIIE', 64)}\n${R('abcd', 64)}\n-----END RSA PRIVATE KEY-----`, `-----BEGIN ${'OPENSSH '}PRIVATE KEY-----\n${R('b3Bl', 70)}`],
+  jwt: [`ey${'J'}${R('hbGci', 24)}.ey${'J'}${R('zdWIi', 40)}.${R('s1g_', 43)}`],
+  'telegram-bot-token': [`${'1234'}${'56789'}:${R('Aa1_-', 35)}`],
+  'github-token': [`gh${'p'}_${R('a1B2', 36)}`, `gh${'s'}_${R('c3D4', 36)}`, `github${'_pat_'}${R('e5F6_', 60)}`],
+  'api-key': [`s${'k'}-${R('g7H8', 40)}`, `s${'k'}-ant-${R('i9J0-', 60)}`],
+  'aws-key': [`AK${'IA'}${R('K1L2M3N4', 16)}`, `AS${'IA'}${R('O5P6Q7R8', 16)}`],
+  'slack-token': [`xo${'x'}b-${R('1234-', 30)}abc`, `xo${'x'}p-${R('5678-', 30)}def`],
+};
+const KEPT_SAMPLES = {
+  bearer: [`Authorization: Bea${'rer'} ${R('t0k3n.', 40)}`],
+  credential: [`pass${'word'}=${R('hunter2', 14)}`, `to${'ken'}=${R('abc123', 18)}`, `client_sec${'ret'}=${R('def456', 18)}`, `GITHUB_TO${'KEN'}="${R('ghi789', 18)}"`, `{"api_${'key'}":"${R('jkl012', 18)}"}`, `https://example.test/cb?to${'ken'}=${R('mno345', 18)}&page=2`],
+};
+
+await section('secrets', () => {
+  const X = newHome('secrets');
+  const t = Date.now() - 86400e3;
+  let i = 0;
+  const logged = (f, kind = 'prompt') => { const ev = K.record(kind, f, onApi(X, t + (i++) * 1000)); const line = text(X.log).split('\n').filter(Boolean).find(l => l.includes(`"${ev.id}"`)); return line || ''; };
+  const body = (s) => s.replace(/^.*?(?:Bearer |=["']?|":")/s, '').slice(0, 24);
+  const all = { ...SECRET_SAMPLES, ...KEPT_SAMPLES };
+  // A kind added to the table without a sample here goes red, so the table cannot outgrow this.
+  row('secrets: every kind in the table has a sample here', 'yes', yes(K.SECRET_SHAPES.every(([k]) => all[k]) && Object.keys(all).every(k => K.SECRET_SHAPES.some(([n]) => n === k))));
+  for (const [kind, samples] of Object.entries(SECRET_SAMPLES)) {
+    samples.forEach((s, n) => {
+      const line = logged({ branch: 'main', text: `before ${s} after` });
+      row(`...${kind} (${n + 1}): replaced, the words around it kept`, 'yes yes no yes', `${yes(line.includes(`[redacted:${kind}]`))} ${yes(line.includes('before '))} ${yes(line.includes(s.slice(0, 24).replace(/\n/g, '\\n')))} ${yes(line.includes(' after') || kind === 'private-key')}`);
+    });
+  }
+  for (const [kind, samples] of Object.entries(KEPT_SAMPLES)) {
+    samples.forEach((s, n) => {
+      const line = logged({ branch: 'main', text: `before ${s} after` });
+      row(`...${kind} (${n + 1}): the value goes, the name of it stays`, 'yes no yes', `${yes(line.includes(`[redacted:${kind}]`))} ${yes(line.includes(body(s)))} ${yes(/Bearer|password|token|secret|TOKEN|api_key/.test(line))}`);
+    });
+  }
+  // Text a token shape must not eat. Each of these has a near miss of a shape in it.
+  const keep = {
+    'a short value': 'token=abc123',
+    'a reference, not a value': `pass${'word'}=$DB_PASSWORD`,
+    'a placeholder': `sec${'ret'}=<your-secret-here>`,
+    'prose about a secret': 'the secret: understanding the cache keys',
+    'a short bearer': 'Bearer abc123',
+    'a branch that ends in a shape': 'task-force-a-very-long-branch-name-goes-here',
+    'a word ending in sk-': 'risk-assessment-for-the-export-endpoint-today',
+    'a commit': 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+    'a PR link': 'https://github.com/acme/acme-api/pull/1170',
+    'a short id and a colon': '123456:short',
+    'a time with a long tail': `12:${R('ab', 35)}`,
+  };
+  for (const [what, s] of Object.entries(keep)) {
+    const line = logged({ branch: 'main', text: `left ${s} right` });
+    row(`...${what} stays as written`, 'yes no', `${yes(line.includes(s))} ${yes(line.includes('[redacted:'))}`);
+  }
+  // Every text a writer hands over, at any depth: the same path for each.
+  const tok = SECRET_SAMPLES['github-token'][0];
+  const deep = logged({ branch: 'main', status: 'done', said: `said ${tok}`, files: [`src/${tok}.js`], deploys: [{ target: 'vercel', cmd: `to${'ken'}=${R('abc123', 18)} vercel deploy --prod`, ok: true }], prs: [{ op: 'open', repo: 'acme/acme-api', number: 1170, title: `fix ${tok}` }] }, 'turn.end');
+  row('...in a turn: its words, its files, a deploy\'s command and a PR', 'no yes', `${yes(deep.includes(tok) || deep.includes(R('abc123', 18)))} ${yes((deep.match(/\[redacted:/g) || []).length >= 4)}`);
+  // Redacted before the cap: half a token cut by it would no longer match its shape and is still a leak.
+  const wide = logged({ branch: 'main', text: `${R('x ', K.TEXT_CAP - 10)}${tok}` });
+  row('...a token the cap would cut in half leaves nothing of itself', 'no', yes(wide.includes(`gh${'p'}_`)));
+  // A line from before the table is scrubbed on its way to a paired machine, with its id.
+  const Y = newHome('secrets-old');
+  const old = K.makeEvent({ t, rec: t, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: { sock: 'cf-acme-api' }, f: { text: `old ${tok}` } });
+  fs.writeFileSync(Y.log, JSON.stringify(old) + '\n');
+  const out = probe(Y, 'return K.eventsForPeer({});');
+  row('...a line written before the table crosses a pairing scrubbed, under its own id', 'yes no yes', `${yes(((out.events || [])[0] || {}).id === old.id)} ${yes(JSON.stringify(out).includes(tok))} ${yes(JSON.stringify(out).includes('[redacted:github-token]'))}`);
+  // And it never reached the writer's other copy.
+  K.snapshot(X.fl);
+  row('...nor is any of it in the graph', 'no', yes(text(X.snap).includes(tok)));
+});
+
+await section('forget', async () => {
+  const X = newHome('forget');
+  const t = Date.now() - 86400e3;
+  const ctx = (n, src) => onApi(X, t + n * 1000, src);
+  K.record('prompt', { branch: 'main', text: 'an ordinary request about the export writer' }, ctx(0));
+  const leak = K.record('decision', { text: 'the leaked staging detail', source: 'stated' }, ctx(1, { via: 'fleet-know', slot: 'master' }));
+  K.record('turn.end', { branch: 'main', status: 'done', said: 'a turn after it about the export writer' }, ctx(2));
+  fs.appendFileSync(X.log, 'a torn line a purge must leave alone\n');
+  const fileMode = 0o640;
+  fs.chmodSync(X.log, fileMode);
+  const page0 = kh(X, ['acme-api']).stdout;
+  const f0 = kh(X, ['find', 'leaked']).stdout;
+  row('forget: find prints the id forget takes', 'yes', yes(f0.includes(leak.id)));
+  row('...the event is on the page before it is forgotten', 'yes', yes(page0.includes('leaked staging')));
+  row('...and in the snapshot that read saved', 'yes', yes(text(X.snap).includes('leaked staging')));
+  const r = kh(X, ['forget', leak.id]);
+  // Before anything reads it: a read would rebuild it anyway, and hide a forget that left it.
+  row('...forget takes it from the snapshot at once', 'no', yes(text(X.snap).includes('leaked staging')));
+  row('...forget answers, and never repeats the text', '0 yes no', `${r.status} ${yes(/forgotten: k/.test(r.stdout))} ${yes(r.stdout.includes('leaked'))}`);
+  row('...and says a paired machine keeps its copy until it fetches the tombstone', 'yes', yes(/paired machine that already fetched it keeps its copy until/.test(r.stdout)));
+  row('...the page has dropped it', 'no', yes(kh(X, ['acme-api']).stdout.includes('leaked staging')));
+  row('...find has too', 'no', yes(kh(X, ['find', 'leaked']).stdout.includes('leaked staging')));
+  // find's no-match line repeats the query, so these match words the query does not hold.
+  row('...while what is around it stands', 'yes yes', `${yes(/an ordinary request/.test(kh(X, ['find', 'export', 'writer']).stdout))} ${yes(/a turn after it/.test(kh(X, ['find', 'export', 'writer']).stdout))}`);
+  const rc = kh(X, ['rebuild', '--check']);
+  row('...the graph is the same folded on or rebuilt', '0 yes', `${rc.status} ${yes(/matches a rebuild/.test(rc.stdout))}`);
+  row('...the line itself stays, without --purge', 'yes', yes(text(X.log).includes('leaked staging')));
+  let ex = probe(X, 'return K.eventsForPeer({ tombstones: true });');
+  row('...not served to a paired machine, and the tombstone is', 'no yes', `${yes(JSON.stringify(ex).includes('leaked staging'))} ${yes((ex.events || []).some(e => e.kind === K.FORGET && e.f.target === leak.id))}`);
+  ex = probe(X, 'return K.eventsForPeer({});');
+  row('...a client that did not ask for tombstones is not sent one, nor the event', 'no no', `${yes((ex.events || []).some(e => e.kind === K.FORGET))} ${yes(JSON.stringify(ex).includes('leaked staging'))}`);
+  // Written while it was being forgotten, or re-recorded after: a late line under that id stays out.
+  const raw = text(X.log).split('\n').find(l => l.includes(`"id":"${leak.id}"`));
+  fs.appendFileSync(X.log, raw + '\n');
+  row('...the same event landing again stays forgotten', 'no', yes(kh(X, ['acme-api']).stdout.includes('leaked staging')));
+  // The refusals, and what they leave behind.
+  const before = text(X.log);
+  const un = kh(X, ['forget', 'k0000000000000000']);
+  row('forget: an id nothing holds is refused and writes nothing', '1 yes', `${un.status} ${yes(text(X.log) === before)}`);
+  const off = kh(X, ['forget', leak.id, '--purge'], { CLAUDE_FLEET_KNOW: 'off' });
+  row('...with the memory switched off it refuses aloud, and writes nothing', '1 yes yes', `${off.status} ${yes(/switched off/.test(off.stderr))} ${yes(text(X.log) === before)}`);
+  // --purge: that one line, atomically, no backup.
+  const ino0 = fs.statSync(X.log).ino;
+  const ls0 = fs.readdirSync(X.fl).sort().join(' ');
+  const was = text(X.log).split('\n');
+  const pg = kh(X, ['forget', leak.id, '--purge']);
+  const now = text(X.log).split('\n');
+  row('--purge: answers, says it rewrote the lines', '0 yes', `${pg.status} ${yes(/purged: 2 lines rewritten/.test(pg.stdout))}`);
+  row('...the text is gone from the log and the snapshot', 'no no', `${yes(text(X.log).includes('leaked staging'))} ${yes(text(X.snap).includes('leaked staging'))}`);
+  row('...and only those lines changed: every other byte is what it was', 'yes', yes(was.length === now.length && was.every((l, n) => l === now[n] || l.includes(`"id":"${leak.id}"`))));
+  row('...the torn line included', 'yes', yes(text(X.log).includes('a torn line a purge must leave alone')));
+  row('...a new file renamed into place, with the mode it had', `yes ${fileMode.toString(8)}`, `${yes(fs.statSync(X.log).ino !== ino0)} ${(fs.statSync(X.log).mode & 0o777).toString(8)}`);
+  row('...no temp file and no backup beside it', ls0, fs.readdirSync(X.fl).sort().join(' '));
+  row('...a second purge has nothing to do', '0 yes', (() => { const a = kh(X, ['forget', leak.id, '--purge']); return `${a.status} ${yes(/already rewritten/.test(a.stdout))}`; })());
+  const pc = kh(X, ['rebuild', '--check']);
+  row('...and the graph still matches a rebuild', '0', pc.status);
+  // A writer that keeps writing all through a purge loses nothing: the catch-up before the rename,
+  // the old descriptor after it, and the writer's own look at whether it wrote to the log. The
+  // last of those is a window of microseconds that lost a line in one purge of three, so a row
+  // that purged once would pass on broken code most of the time. Eight rounds, the real append().
+  const Y = newHome('forget-race');
+  const stopFile = path.join(DIR, 'forget-race.stop');
+  const writerCode = (round) => `import fs from 'node:fs'; import * as K from ${JSON.stringify(path.join(ROOT, 'lib', 'know.mjs'))};
+    let n = 0;
+    while (!fs.existsSync(${JSON.stringify(stopFile)})) { K.append(${JSON.stringify(Y.fl)}, { id: 'kw${round}-' + n, v: 1, t: ${t + 100000} + n, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: {}, f: { text: 'written during the purge ' + n } }); n++; }
+    process.stdout.write(String(n));`;
+  const filler = K.makeEvent({ t: t + 1, rec: t + 1, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: { sock: 'cf-acme-api' }, f: { text: R('filler words about the webhook backoff ', 600) } });
+  fs.mkdirSync(Y.fl, { recursive: true });
+  fs.appendFileSync(Y.log, Array.from({ length: 3000 }, (_, n) => JSON.stringify({ ...filler, id: `kfill${n}` })).join('\n') + '\n');
+  let wrote = 0, stayed = 0, failed = 0, left = 0;
+  for (let round = 0; round < 8; round++) {
+    fs.rmSync(stopFile, { force: true });
+    const victim = K.record('prompt', { branch: 'main', text: `the line to purge ${round}` }, onApi(Y, t + round));
+    const size = fs.statSync(Y.log).size;
+    let said = '';
+    const writer = spawn('node', ['--input-type=module', '-e', writerCode(round)], { env: { ...base(), HOME: Y.h }, stdio: ['ignore', 'pipe', 'ignore'] });
+    writer.stdout.on('data', d => { said += d; });
+    const exited = new Promise(res => writer.on('exit', res));
+    for (let i = 0; i < 400 && fs.statSync(Y.log).size === size; i++) await sleep(5);   // it is writing
+    const purge = spawn('node', [KNOW, 'forget', victim.id, '--purge'], { env: { ...base(), HOME: Y.h }, stdio: 'ignore' });
+    if (await new Promise(res => purge.on('exit', res))) failed++;
+    fs.writeFileSync(stopFile, '');
+    await exited;
+    wrote += Number(said) || 0;
+    const landed = new Set();
+    K.scanLog(Y.log, 0, (e) => { if (String(e.id).startsWith(`kw${round}-`)) landed.add(e.id); });
+    stayed += landed.size;
+    if (text(Y.log).includes(`the line to purge ${round}`)) left++;
+  }
+  row('...a writer running all through eight purges loses no line', 'yes 0 yes 0', `${yes(wrote > 0)} ${failed} ${yes(stayed === wrote)} ${left}`);
+  fs.rmSync(Y.h, { recursive: true, force: true });
+  // The cache of a paired machine, as a fetch fills it. Its tombstones reach that file and no other.
+  const Z = newHome('forget-peer');
+  const pf = K.peerFiles(Z.fl, 'vm');
+  const ev = (text, n) => K.makeEvent({ t: t + n, rec: t + n, kind: 'prompt', machine: 'vm', profile: 'work', project: 'acme-api', src: { sock: 'cf-acme-api', session: 's-vm' }, f: { branch: 'main', text } });
+  const tomb = (target, n) => K.makeEvent({ t: t + n, rec: t + n, kind: K.FORGET, machine: 'vm', profile: 'work', project: '', src: { via: 'fleet-know' }, f: { target } });
+  const kept = ev('a request that stays', 1000), gone = ev('a request the vm forgot', 2000), both = ev('never written here', 3000);
+  K.ingestPeerEvents(pf, 'vm', [kept, gone], 0, t);
+  row('a fetch caches the events', 'yes yes', `${yes(text(pf.log).includes('a request that stays'))} ${yes(text(pf.log).includes('a request the vm forgot'))}`);
+  K.ingestPeerEvents(pf, 'vm', [tomb(gone.id, 4000)], 0, t);
+  row('...its tombstone, later: the cached copy is gone from the disk', 'no yes', `${yes(text(pf.log).includes('a request the vm forgot'))} ${yes(text(pf.log).includes('a request that stays'))}`);
+  K.ingestPeerEvents(pf, 'vm', [gone], 0, t);
+  row('...and the overlap of the next fetch does not bring it back', 'no', yes(text(pf.log).includes('a request the vm forgot')));
+  K.ingestPeerEvents(pf, 'vm', [both, tomb(both.id, 5000)], 0, t);
+  // By its line, not its text: written and then purged leaves no text either, and a stub.
+  const hasLine = () => lines(pf.log).some(e => e.id === both.id);
+  row('...a tombstone on the same page as its target: the target is never written', 'no', yes(hasLine()));
+  K.ingestPeerEvents(pf, 'vm', [both], 0, t);
+  row('...nor by the overlap of the fetch after that', 'no', yes(hasLine()));
+  const added = K.ingestPeerEvents(pf, 'vm', [ev(`scrub ${SECRET_SAMPLES['github-token'][0]}`, 6000)], 0, t);
+  row('...a line from a machine without the table is scrubbed on arrival', '1 no yes', `${added.added} ${yes(text(pf.log).includes(SECRET_SAMPLES['github-token'][0]))} ${yes(text(pf.log).includes('[redacted:github-token]'))}`);
+  // A forget of a cached copy says the machine it came from still has it.
+  const lc = K.record('prompt', { text: 'local one' }, onApi(Z, t));
+  const fp = kh(Z, ['forget', kept.id]);
+  row('...forgetting a cached copy here says the machine it came from still holds it', '0 yes no', `${fp.status} ${yes(/vm's event: the machine it came from still holds it/.test(fp.stdout))} ${yes(/paired machine that already fetched/.test(fp.stdout))}`);
+  row('...while the local log is untouched', 'yes', yes(text(Z.log).includes(lc.id)));
+});
+
+await section('authority', () => {
+  // On the fixture fleet, which holds a lead's decision and a worker's ack.
+  const b = know(['acme-api']).stdout;
+  row('authority: a lead\'s decision says so', 'yes', yes(/• \[lead\] Keep the v1 export endpoint/.test(b)));
+  row('...a worker\'s fleet-ack says so', 'yes', yes(/• \[worker\] RFC 4180 quoting/.test(b)));
+  row('...what the project is says who wrote it', 'yes', yes(/what it is +The public REST API.*\[lead\]$/m.test(b)));
+  const j = knowJ(['acme-api']);
+  row('...and the JSON carries it', 'lead worker lead', `${(j.decisions || []).find(d => /v1 export/.test(d.text))?.authority} ${(j.decisions || []).find(d => /RFC 4180/.test(d.text))?.authority} ${j.aboutAuthority}`);
+  const tr = know(['acme-api', '--trusted']).stdout;
+  row('--trusted: keeps the lead\'s, drops the worker\'s', 'yes no', `${yes(tr.includes('Keep the v1 export'))} ${yes(tr.includes('RFC 4180'))}`);
+  row('...says it is narrowed', 'yes', yes(/only what owner or lead said/.test(tr)));
+  row('...what happened is not narrowed: the PRs and what waits stay', 'yes yes', `${yes(tr.includes('PR #1184'))} ${yes(/waits on you/.test(tr))}`);
+  const X = newHome('authority');
+  const t = Date.now() - 86400e3;
+  let n = 0;
+  const put = (kind, f, src) => K.record(kind, f, { fleetDir: X.fl, project: 'acme-api', sock: 'cf-acme-api', t: t + (n++) * 1000, src });
+  const lead = { via: 'fleet-know', slot: 'master' }, worker = { via: 'fleet-know', slot: 'api-fix' };
+  put('decision', { text: 'a-lead-said', source: 'stated' }, lead);
+  put('decision', { text: 'b-worker-said', source: 'stated' }, worker);
+  put('decision', { text: 'c-nobody-said', source: 'stated' }, {});
+  put('decision', { text: 'd-owner-terminal', source: 'stated' }, { via: 'fleet-know', by: 'terminal' });
+  put('decision', { text: 'e-owner-reply', source: 'reply' }, { via: 'mod', session: 's-api', slot: 'master' });
+  put('decision', { text: 'f-owner-prompt', source: 'prompt' }, { via: 'mod', session: 's-api', slot: 'api-fix' });
+  put('decision', { text: 'g-the-model', source: 'inferred', inferred: true }, { via: 'infer', session: 's-api', slot: 'master' });
+  put('decision', { text: 'h-model-unmarked', source: 'stated' }, { via: 'infer', session: 's-api', slot: 'master' });
+  put('decision', { text: 'i-forged', source: 'stated', authority: 'owner' }, worker);
+  put('ack', { worker: 'master', branch: 'fix/x', repo: 'acme/acme-api', decisions: 'j-ack-from-the-lead-slot' }, { via: 'ack', slot: 'master' });
+  const by = (d) => (kjson(X, ['acme-api']).decisions || []).find(x => x.text.startsWith(d))?.authority;
+  // The page lists five, and these are all recent, so read them all from the graph.
+  const g = K.rebuild(X.fl, { save: false }).graph;
+  const auth = (s) => Object.values(g.nodes).find(x => x.type === 'decision' && String(K.attr(x, 'text')).startsWith(s))?.a.authority?.[0];
+  row('derived from the source: a lead, a worker', 'lead worker', `${auth('a-')} ${auth('b-')}`);
+  row('...a write that says nothing fails closed, to worker', 'worker', auth('c-'));
+  row('...the owner: their own terminal, a ledger reply, their prompt', 'owner owner owner', `${auth('d-')} ${auth('e-')} ${auth('f-')}`);
+  row('...the model, marked or only by its path', 'model model', `${auth('g-')} ${auth('h-')}`);
+  row('...a field claiming authority is not believed', 'worker', auth('i-'));
+  row('...fleet-ack is a worker\'s whatever slot ran it', 'worker', auth('j-'));
+  row('...and it is not stored in the log: the fold derives it', 'no', yes(lines(X.log).some(e => e.f.authority && e.f.text !== 'i-forged')));
+  const trusted = probe(X, 'const v = await K.view({ sync: false }); const b = K.brief(v, "acme-api", { authority: K.TRUSTED }); const a = K.brief(v, "acme-api"); return { t: b.decisions.map(d => d.authority), all: a.decisions.length };');
+  row('the reader option: owner and lead only', 'yes', yes((trusted.t || []).length > 0 && trusted.t.every(a => a === 'owner' || a === 'lead')));
+  row('...its list of two is the one the next phase imports', 'owner lead', K.TRUSTED.join(' '));
+  // What the project is: the newest for a plain read, the last trusted one for a narrowed read.
+  const Y = newHome('authority-about');
+  let m2 = 0;
+  const putY = (kind, f, src) => K.record(kind, f, { fleetDir: Y.fl, project: 'acme-api', sock: 'cf-acme-api', t: t + (m2++) * 1000, src });
+  putY('project.about', { text: 'the lead wrote this line' }, lead);
+  putY('project.about', { text: 'a worker wrote this one since' }, worker);
+  putY('relate', { rel: 'depends-on', to: 'billing-svc' }, lead);
+  putY('relate', { rel: 'depends-on', to: 'toolbox' }, worker);
+  const plain = kh(Y, ['acme-api']).stdout, narrow = kh(Y, ['acme-api', '--trusted']).stdout;
+  row('what it is: a plain read takes the newest and says whose', 'yes', yes(/what it is +a worker wrote this one since +\[worker\]/.test(plain)));
+  row('...a narrowed read keeps the last line a lead wrote', 'yes', yes(/what it is +the lead wrote this line +\[lead\]/.test(narrow)));
+  row('depends on: a worker\'s is tagged, a lead\'s reads plain', 'yes', yes(/depends on +billing-svc, toolbox \[worker\]/.test(plain)));
+  row('...and a narrowed read drops the worker\'s', 'yes', yes(/depends on +billing-svc$/m.test(narrow)));
+  const Z = newHome('authority-none');
+  K.record('project.about', { text: 'only a worker has said' }, { fleetDir: Z.fl, project: 'acme-api', sock: 'cf-acme-api', t, src: worker });
+  row('...and with no trusted line it says so, rather than the worker\'s', 'yes no', (() => { const o = kh(Z, ['acme-api', '--trusted']).stdout; return `${yes(/what it is +\(nothing from owner or lead\)/.test(o))} ${yes(o.includes('only a worker'))}`; })());
+  // A request already says whose ask it is. Closed after a week it is counted, and the count
+  // follows the filter too.
+  const W = newHome('authority-req');
+  const mk = (kind, f, tt, src = { via: 'mod', session: 's-api', slot: 'master' }) => K.record(kind, f, { fleetDir: W.fl, project: 'acme-api', sock: 'cf-acme-api', t: tt, src });
+  mk('request.open', { req: 's-api/1', text: 'from the owner', source: 'user', state: 'open' }, t);
+  mk('request.open', { req: 's-api/2', text: 'from a lead', source: 'fleet', state: 'open' }, t + 1);
+  mk('request.open', { req: 's-api/3', text: 'a promise', source: 'promise', state: 'open' }, t + 2);
+  const reqs = kjson(W, ['acme-api']).openRequests || [];
+  const rq = (s) => (reqs.find(r => r.text === s) || {}).authority;
+  row('a request\'s authority is the ledger\'s word for whose ask it is', 'owner lead worker', `${rq('from the owner')} ${rq('from a lead')} ${rq('a promise')}`);
+  const longAgo = t - 30 * 86400e3;
+  mk('decision', { text: 'old from a lead', source: 'stated' }, longAgo, lead);
+  mk('decision', { text: 'old from a worker', source: 'stated' }, longAgo + 1, worker);
+  row('...and the count of old decisions follows the filter', '2 1', `${kjson(W, ['acme-api']).earlier?.decisions} ${kjson(W, ['acme-api', '--trusted']).earlier?.decisions}`);
+  // The owner's own terminal, for real: a pty. Beside it the same command in the three cases
+  // that look like one and are not.
+  const V = newHome('authority-tty');
+  const q = (s) => `'${s}'`;
+  const inPane = (label, prefix) => {
+    const cmd = `${prefix} HOME=${q(V.h)} CLAUDE_FLEET_KNOW_MACHINE=laptop node ${q(KNOW)} decide acme-api ${q(label)}`;
+    spawnSync('tmux', ['-L', 'know-authority', 'new-session', '-d', '-x', '120', '-y', '30', 'sh', '-c', cmd], { env: base(), encoding: 'utf8' });
+    waitFor(() => text(V.log).includes(label));
+  };
+  const clean = 'env -u CLAUDECODE -u CLAUDE_FLEET_SLOT';
+  inPane('tty-plain', clean);
+  inPane('tty-agent', `${clean} CLAUDECODE=1`);
+  inPane('tty-slot', `${clean} CLAUDE_FLEET_SLOT=master`);
+  inPane('tty-worker', `${clean} CLAUDE_FLEET_SLOT=api-fix`);
+  spawnSync('tmux', ['-L', 'know-authority', 'kill-server'], { env: base() });
+  run('node', [KNOW, 'decide', 'acme-api', 'no-tty'], { home: V.h, env: { CLAUDECODE: '' } });
+  const vg = K.rebuild(V.fl, { save: false }).graph;
+  const vauth = (s) => Object.values(vg.nodes).find(x => x.type === 'decision' && K.attr(x, 'text') === s)?.a.authority?.[0];
+  row('decide at a person\'s terminal, in a real pty: owner', 'owner', vauth('tty-plain'));
+  row('...an agent\'s shell with a pty is not', 'worker', vauth('tty-agent'));
+  row('...a fleet pane is its slot: the lead, a worker', 'lead worker', `${vauth('tty-slot')} ${vauth('tty-worker')}`);
+  row('...and with no terminal at all, nothing to claim', 'worker', vauth('no-tty'));
+});
+
+await section('said', () => {
+  const X = newHome('said');
+  const t = Date.now() - 86400e3;
+  const question = 'Which plan tier should the rate limit apply to?';
+  const long = `Opened PR #1170 for the export. ${R('The writer quotes every field. ', 3000)}${question}`;
+  const put = (f, n) => { K.record('turn.end', { branch: 'main', status: 'done', ...f }, onApi(X, t + n * 1000)); return lines(X.log).pop().f; };
+  const a = put({ said: long }, 1);
+  row('said: a long turn keeps the question at its end', 'yes', yes(a.said.endsWith(question)));
+  row('...and how it opened', 'yes', yes(a.said.startsWith('Opened PR #1170')));
+  row('...with a mark where it was cut', 'yes', yes(a.said.includes(' […] ')));
+  row('...within the cap, head and tail about two to one', 'yes yes', `${yes(a.said.length <= K.TEXT_CAP)} ${yes(a.said.indexOf(' […] ') >= K.TEXT_CAP * 0.6)}`);
+  const exact = R('abcd ', K.TEXT_CAP).slice(0, K.TEXT_CAP - 1) + 'z';
+  row('...one that fits is left exactly as it was', 'yes', yes(put({ said: exact }, 2).said === exact));
+  row('...one past the cap is cut, and stays within it', 'yes', yes((() => { const x = put({ said: `${exact}y` }, 3).said; return x.includes(' […] ') && x.length <= K.TEXT_CAP && x.endsWith('zy'); })()));
+  row('...every other text still keeps its head', 'yes no', (() => { const x = put({ said: 'short', note: long }, 4).note; return `${yes(x.endsWith('…'))} ${yes(x.includes(question))}`; })());
+  // An oversized line sheds its longest texts until it fits: the question survives that too.
+  const fields = Object.fromEntries(Array.from({ length: 14 }, (_, i) => [`x${i}`, R('filler ', 1400)]));
+  const shed = put({ ...fields, said: long }, 5);
+  row('...a line over its cap sheds down to the two ends as well', 'yes yes', `${yes(shed.said.length <= 200)} ${yes(shed.said.endsWith('apply to?'))}`);
+  // Through the real Stop hook, with a secret in it.
+  const tok = SECRET_SAMPLES['github-token'][0];
+  run('bash', [path.join(ROOT, 'hooks', 'fleet-event.sh')], {
+    home: H,
+    env: { CLAUDE_FLEET_DIR: FL, CLAUDE_CONFIG_DIR: path.join(H, '.claude'), CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'api-long', CLAUDE_FLEET_NOTIFIER: 'off' },
+    input: JSON.stringify({ session_id: 's-long', cwd: REPO, hook_event_name: 'Stop', last_assistant_message: `${tok} ${long}` }),
+  });
+  waitFor(() => lines(LOGF).some(e => e.kind === 'turn.end' && e.src && e.src.session === 's-long'));
+  const s = (lines(LOGF).find(e => e.kind === 'turn.end' && e.src && e.src.session === 's-long') || { f: {} }).f.said || '';
+  row('...through the real Stop hook: the question kept, the token not', 'yes no yes', `${yes(s.endsWith(question))} ${yes(s.includes(tok))} ${yes(s.includes('[redacted:github-token]'))}`);
 });
 
 for (const r of rows) process.stdout.write(r.join('\x1f') + '\n');

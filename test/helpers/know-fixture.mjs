@@ -40,8 +40,8 @@ const repo = 'acme/acme-api';
 const put = (kind, f, c, t, src = {}) => K.record(kind, f, { ...c, t, rec: t, src }, process.env);
 
 // acme-api: what it is, a lead, two workers, a merged PR, an open one, a deploy, decisions
-put('project.about', { text: 'The public REST API behind acme-web: Node and Postgres.' }, api, m(-20000));
-put('relate', { rel: 'depends-on', to: 'billing-svc' }, api, m(-20000));
+put('project.about', { text: 'The public REST API behind acme-web: Node and Postgres.' }, api, m(-20000), { via: 'fleet-know', slot: 'master' });
+put('relate', { rel: 'depends-on', to: 'billing-svc' }, api, m(-20000), { via: 'fleet-know', slot: 'master' });
 put('session.start', { branch: 'main', repo, cwd: `${gf}/acme-api` }, api, m(0), { via: 'hook', session: 's-master', slot: 'master' });
 // an old request, closed eleven days ago: the brief counts it, it does not list it
 put('request.open', { req: 's-master/1', text: 'Rotate the staging database password', source: 'user' }, api, m(-16000), { via: 'mod', session: 's-master', slot: 'master' });
@@ -71,7 +71,7 @@ put('need-you', { branch: 'main', repo, note: 'Claude needs your permission to u
 
 // acme-web: one turn, which touched a file acme-api's worker touched too
 const web = W('cf-acme-web', 'acme-web');
-put('relate', { rel: 'depends-on', to: 'acme-api' }, web, m(-20000));
+put('relate', { rel: 'depends-on', to: 'acme-api' }, web, m(-20000), { via: 'fleet-know', slot: 'master' });
 put('turn.end', { branch: 'main', repo: 'acme/acme-web', status: 'done', said: 'Moved the export button to the v1 endpoint.', files: ['src/export/csv.js'] }, web, m(50), { via: 'hook', session: 's-web', slot: 'master' });
 
 // toolbox: EXCLUDED — these calls must write nothing

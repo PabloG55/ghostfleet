@@ -9,7 +9,7 @@ writes each of those down as it happens, and answers from that.
 ```
 $ fleet-know acme-api
 acme-api@laptop · work profile · acme/acme-api
-  what it is   The public REST API behind acme-web: Node and Postgres.
+  what it is   The public REST API behind acme-web: Node and Postgres.  [lead]
   depends on   billing-svc · used by acme-web
 WHERE IT STANDS
   master         need-you  on main  (9m ago)
@@ -24,8 +24,8 @@ OPEN
   1 open request:
     "Which plan tier should the rate limit apply to?" (master, 20m ago) [waiting]
 DECISIONS
-  • Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls /v1/export  [stated, 2026-03-05]
-  • RFC 4180 quoting; no new dependency — what api-fix said it is building from (fleet-ack)  [ack, 2026-03-05]
+  • [lead] Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls /v1/export  [stated, 2026-03-05]
+  • [worker] RFC 4180 quoting; no new dependency — what api-fix said it is building from (fleet-ack)  [ack, 2026-03-05]
 EARLIER  1 closed request since 2026-02-22 (fleet-know find <text> searches them)
 ```
 
@@ -42,7 +42,8 @@ nothing sent to GitHub.
 
 One append-only JSONL file per profile, beside that profile's fleet:
 `<fleet-dir>/know.jsonl` (so `~/.claude/fleet/know.jsonl` for the work profile,
-`~/.claude-<p>/fleet/know.jsonl` for another). A line is never rewritten.
+`~/.claude-<p>/fleet/know.jsonl` for another). A line is never rewritten, with one exception:
+`fleet-know forget <id> --purge`, for a real leak (see [Forgetting](#forgetting)).
 
 ```json
 {"id":"k3f9a…","v":1,"t":1772714400000,"kind":"turn.end","machine":"laptop","profile":"work",
@@ -68,6 +69,7 @@ its command-line face, called from:
 | `fleet-merged` (the PR cache) | `pr.open`, `pr.merge`, `pr.close` — from what changed between two refreshes |
 | every ledger writer (the mod, `fleet-ledger`, the landed and carry passes) | `request.open`, `request.state` |
 | `fleet-know describe` · `decide` · `relate` | `project.about`, `decision`, `relate` |
+| `fleet-know forget` | `forget`, a tombstone naming the event it covers, and nothing of its text |
 | the inferred pass (layer 3) | `decision` marked `inferred` |
 
 `CLAUDE_FLEET_KNOW=off` in the environment stops every writer, for a run that must leave no
@@ -148,9 +150,10 @@ most 600 tokens per finished turn while on.
 | `fleet-know touched <path>` | the sessions that touched a file, on which branch, and the PRs that work went into |
 | `fleet-know find <text…>` | searches the **raw events**, not only the graph |
 | `--at <time>` · `--known-at <time>` · `--json` · `--no-sync` | an instant (ISO, epoch or `3d ago`); data instead of text; skip asking paired machines |
+| `--trusted` | a project page narrowed to what the owner or a lead said (see [Who said it](#who-said-it)) |
 
 The MCP tool **`fleet_know`** is the same reader (`about`, `waiting`, `touched`, `find`, `at`,
-`json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
+`trusted`, `json`), so a lead restricted to MCP, or a bot answering the owner's messages, asks it the
 same way. Its project argument is `about`, not `project`: everywhere else `project` names the
 fleet to act in, and the memory answers about every fleet and paired machine at once.
 
@@ -169,6 +172,31 @@ fleet-know describe acme-api "The public REST API behind acme-web: Node and Post
 fleet-know decide acme-api "Keep the v1 export endpoint until acme-web moves to v2" --why "acme-web still calls /v1/export"
 fleet-know relate acme-web depends-on acme-api        # --off closes it
 ```
+
+## Who said it
+
+Every decision and fact carries an **`authority`**, which the fold derives from where the event
+came from. A field in the event claiming one is ignored, so nothing recorded can promote itself.
+
+| | what earns it |
+|---|---|
+| **`owner`** | `decide`, `describe` or `relate` run at a person's own terminal (a real TTY, no fleet slot, not inside an agent), a `source` of `prompt`, `ledger` or `reply`, and a ledger request whose source is `user` |
+| **`lead`** | written from the `master` slot, and a ledger request whose source is `fleet` |
+| **`worker`** | any other slot, every `fleet-ack` whoever ran it, a ledger item a session promised itself, and any write that says nothing about itself |
+| **`model`** | the inferred pass |
+
+It fails closed: a writer that loses its context can only understate what it knows.
+
+The project page prints it as a short tag: `• [lead] Keep the v1 export endpoint…`, and
+`what it is   …  [lead]`. A relation is tagged only below a lead (`billing-svc, toolbox [worker]`),
+because almost every one is a lead's and the tag would be noise. A request carries its authority
+in `--json` only.
+
+`--trusted`, or `authority: K.TRUSTED` to `brief()`, narrows the page to the owner's and the
+lead's word: decisions, relations, and what the project is. If a worker has described the project
+since, it shows the last line a lead or the owner wrote, and if neither ever did, it says so. What
+*happened* is not narrowed, because a merged PR is a fact whoever opened it: branches, PRs, deploys
+and what waits on the owner stay.
 
 ## Privacy — include, private, exclude
 
@@ -200,6 +228,90 @@ new events and hides the old ones from every answer (they stay in the log — no
 deleted — and `include` again shows them). Which projects are private is the owner's call; the
 switch ships set to `include` everywhere.
 
+## Secrets
+
+A prompt and a turn's text are stored as written, and the log crosses pairings. So
+`record()` replaces token shapes with `[redacted:<kind>]` before anything reaches the disk, at
+any depth of the event (a deploy's command, a PR's title, a file path), and before the text cap,
+because half a token cut by the cap no longer matches its shape and is still a leak.
+
+The shapes are one table, `SECRET_SHAPES` in `lib/know.mjs`: private-key blocks, JWTs, Telegram
+bot tokens, GitHub tokens, `sk-…` keys, AWS keys, Slack tokens, `Bearer <long>`, and
+`password=`/`token=`/`secret=` pairs with a long value. Adding a row is the whole change; the
+suite goes red until the row has a sample, which also proves it matches. A value that is a
+reference (`$DB_PASSWORD`, `<token>`) or short (`token=abc123`) stays, because a shape that eats
+prose would cost more than it saves.
+
+The table does not reach back. A line written before it existed stays as it was on this
+machine, until `fleet-know find` shows it and `forget --purge` removes it. It is scrubbed again on
+its way across a pairing, in both directions, so a line from before the table never crosses as
+it was.
+
+## Forgetting
+
+```
+fleet-know find <text…>             # prints each event's id at the end of its row
+fleet-know forget <event-id>        # the event drops out of every answer
+fleet-know forget <event-id> --purge
+```
+
+**`forget`** appends a tombstone. The event leaves the graph, `find` and what a paired machine
+can fetch; a line landing later under the same id stays out, and the snapshot is rebuilt without
+it at once. The line itself stays in the log, so an ordinary forget can be undone by hand.
+
+**`--purge`** is for a real leak: it also rewrites that one line, keeping its id, time and
+project and dropping its text. Every other byte of the file stays as it was, torn lines included.
+It writes a temp file beside the log and renames it into place, and keeps no backup. A writer
+running all the while loses nothing: the copy catches up with what landed behind it, whatever
+reached the old file past the rename is carried across after it, and a writer that writes after
+that last look sees that its file is no longer the log and writes the line again. That last case
+is a window of microseconds, and it lost a line in three purges of ten under a writer in a tight
+loop before writers looked. The same line twice is one event. A session that loaded its code
+before this has no such look, so it can still lose a line that way until it restarts.
+
+**A paired machine that already fetched the event keeps its copy until it fetches the
+tombstone.** A read asks a peer at most every two minutes, and a machine that is asleep asks when
+it wakes, so the copy can outlive the forget by that long. A tombstone holds only the id it
+covers, so it crosses whatever the project's privacy setting says. When it arrives, the cached
+line is rewritten the way `--purge` rewrites one, whether or not the machine that sent it purged
+its own.
+
+**A tombstone is scoped to the file it is in**, which is the file holding its target. One that
+came from a paired machine lands in that machine's cache and can only take what came from it. If
+it applied everywhere, a paired machine could erase this machine's own memory by naming an id.
+Forgetting a cached copy here takes it from this machine's cache only: the machine it came from
+still holds it, and the next fetch does not bring it back.
+
+`CLAUDE_FLEET_KNOW=off` refuses aloud and writes nothing: off means no writer writes.
+
+## Scale
+
+A read costs CPU in proportion to what it answers, not to the square of the log. A read index
+over the edges, built once per graph and never saved, replaced a scan of every edge per PR and
+per request; `waiting`, a page per project, was the worst of it. The fold has one of its own,
+for finding a session's edges when it ends. Neither changes an answer: the index keeps the
+graph's order, and a page, `waiting`, `touched` and `find` were compared byte for byte, old against
+new, on a 30k-event log, apart from the authority fields this adds.
+
+Wall clock on an Apple M5 Pro at a load average of 5–8, log of many projects
+(`test/helpers/know-bench.mjs`, whose `gen` builds one in a scratch home and refuses anything else):
+
+| events | `fleet-know <project>` | `waiting` | `touched` | `find` | `rebuild` |
+|---|---|---|---|---|---|
+| 3k | 61 ms | 63 ms | 60 ms | 67 ms | 71 ms |
+| 30k | 130 ms | 137 ms | 127 ms | 177 ms | 273 ms |
+| 90k | 239 ms | 284 ms | 276 ms | 408 ms | 696 ms |
+
+**The log is read a line at a time**, in a bounded buffer, so a file past the 512 MB a string can
+hold is only a longer read. A torn line, a foreign line, and one past 1 MB are skipped. Measured
+on a 1M-event log of 600 MB: a page takes about 3 s, a rebuild about 12 s. The memory that takes
+is the graph's, about 2.5 GB there, not the file's.
+
+**The ceiling is now the snapshot.** It is about 60% of the log's size and is saved as one JSON
+string, so past a log of roughly 840 MB it cannot be written, and every read rebuilds instead.
+Measured on a log of 900 MB: no snapshot on disk, and a page takes about 17 s. Slower, but it
+still answers. Rotation (below) is the way past it.
+
 ## Paired machines
 
 A machine paired through `fleet-serve` (its `PAIRED HOSTS`) is read through the pairing, the
@@ -215,6 +327,7 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
   one that did not answer is not asked again for a minute, so a dead peer never makes a brief
   wait out its timeout twice. `fleet-know sync` fetches now.
 - A paired host never passes on what it fetched from a third: one hop, as every paired request.
+- A forget crosses too, the next time this machine fetches: see [Forgetting](#forgetting).
 
 ## Choices made where the design was silent
 
@@ -258,7 +371,13 @@ merges it in — so `fleet-know acme-api@vm` is a brief about the VM's acme-api,
   manifests and PR caches are not replayed into the log.
 - **Compaction.** The log only grows (a line is a few hundred bytes; a busy fleet writes a few
   thousand a day). Rotating it into segments, with the snapshot as the fold of the closed ones,
-  is the next step when it matters.
+  is the next step when it matters, and the way past the snapshot's ceiling under
+  [Scale](#scale).
+- **Retroactive redaction.** The table applies from the moment it shipped. Older lines are found
+  with `find` and removed with `forget --purge`, one at a time.
+- **Owner-sourced decisions from a conversation.** `owner` is earned today by a person's own
+  terminal and by ledger items the owner asked for. Nothing yet records a decision from a
+  prompt or a ledger reply, though the fold already reads those sources as the owner's.
 - **What a project is, automatically** — from its README, via the inferred pass. Today it is
   `fleet-know describe`.
 - **Inferred facts for the other agents.** The pass lives in the Claude Code mod; codex,
