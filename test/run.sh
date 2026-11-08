@@ -3589,8 +3589,8 @@ rm -rf "$T"
 # projects, twelve more features than exist, and a pane too short to hold it all. The cursor is
 # walked with the pane READ at every step, because the failure is a property of where the cursor
 # is, and a check at the two ends would pass a middle that broke.
-#   One key per send, and a wait on the page moving: the reader takes a chunk as one key, so
-# `send-keys j j j` is one unknown key and the cursor stays where it was.
+#   One key per send, and a wait on the page moving: this walk reads the page at every step,
+# so it sends the keys apart on purpose (the burst case has its own group below).
 group "the settings page fits its terminal (real TUI, keys sent)"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/x"
@@ -3798,6 +3798,105 @@ else
   skip "the settings page fits its terminal" "tmux or node not available"
 fi
 rm -rf "$T"
+
+# ── 4a4. a burst of keys is every one of them, and the sessions' settings page fits ──
+# Two bugs found while the Projects settings page was being made to fit. (1) The reader kept a
+# run of text as ONE event, so `jjj` in one read (send-keys with several keys, or a held key
+# that arrived while a refresh blocked the loop) matched no command and moved nothing. (2)
+# renderSettings, the page for one fleet's sessions, drew a line per session with no regard for
+# the height, so forty of them scrolled the title off a 24-row pane. Driven through the real
+# grid: a data server holds the sessions, a view server holds the pane the grid draws in.
+group "a burst of keys, and the sessions' settings page (real TUI, keys sent)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  KT="$(mktemp -d)"; mkdir -p "$KT/a" "$KT/f"
+  KN=0; KV=""; KD=""
+  kcap()  { tmux -L "$KV" capture-pane -p 2>/dev/null; }
+  kwait() { local i=0; while [ "$i" -lt 150 ]; do grep -qE "$1" <<< "$(kcap)" && return 0; sleep 0.1; i=$((i+1)); done; return 1; }
+  # Retried: a capture can land between the clear and the paint of a redraw, which reads as no
+  # cursor at all, and on a loaded machine that is not rare.
+  kcur()  { local i=0 v; while [ "$i" -lt 10 ]; do v="$(grep -oE '^▸ .*' <<< "$(kcap)" | grep -oE 's[0-9]{2}' | head -1 || true)"; [ -n "$v" ] && break; sleep 0.1; i=$((i+1)); done; echo "$v"; }
+  kstart() {           # $1 cols, $2 rows, $3 how many sessions -> on the settings page, or a red
+    [ -n "$KV" ] && tmux -L "$KV" kill-server 2>/dev/null
+    [ -n "$KD" ] && tmux -L "$KD" kill-server 2>/dev/null
+    KN=$((KN+1)); KV="cfkeysv$KN"; KD="cfkeysd$KN"
+    local i=1
+    while [ "$i" -le "$3" ]; do
+      tmux -L "$KD" new-session -d -s "$(printf 's%02d' "$i")" -c "$KT/a" "sleep 300" 2>/dev/null; i=$((i+1))
+    done
+    tmux -L "$KV" new-session -d -x "$1" -y "$2" -e HOME="$KT" -e CLAUDE_FLEET_DIR="$KT/f" \
+      "node '$ROOT/bin/fleet-grid.mjs' $KD; sleep 300" 2>/dev/null
+    kwait '╭─ ' || { bad "the grid comes up" "the cards" "nothing drawn in 15s"; return 1; }
+    tmux -L "$KV" send-keys -l ','
+    kwait 'settings — worker' || { bad "the grid comes up" "the settings page" "',' did not land in 15s"; return 1; }
+  }
+  kfirst() { local i=0; while [ "$i" -lt 10 ]; do grep -q 'settings — worker' <<< "$(head -1 <<< "$(kcap)")" && { echo yes; return; }; sleep 0.1; i=$((i+1)); done; echo no; }
+  kkeys()  { local i=0; while [ "$i" -lt 10 ]; do grep -qE 'esc[^ ]* back' <<< "$(kcap)" && { echo yes; return; }; sleep 0.1; i=$((i+1)); done; echo no; }
+  kwalk() {            # $1 presses of j -> how many steps lost the title, the keys or the cursor
+    local n=0 lost=0 was i scr now
+    while [ "$n" -lt "$1" ]; do
+      was="$(kcur)"; tmux -L "$KV" send-keys -l j; i=0
+      while [ "$i" -lt 100 ]; do now="$(kcur)"; [ -n "$now" ] && [ "$now" != "$was" ] && break; sleep 0.05; i=$((i+1)); done
+      { [ -z "$now" ] || [ "$now" = "$was" ] || [ "$(kfirst)" != yes ] || [ "$(kkeys)" != yes ]; } && lost=$((lost+1))
+      n=$((n+1))
+    done
+    echo "$lost"
+  }
+  # Wait for the cursor to reach $1, so a check made before the keys are read cannot pass by luck.
+  kat() { local i=0; while [ "$i" -lt 150 ]; do [ "$(kcur)" = "$1" ] && break; sleep 0.1; i=$((i+1)); done; kcur; }
+
+  for geo in "120 24" "80 24"; do
+    set -- $geo
+    if kstart "$1" "$2" 40; then
+      is "$1x$2, 40 sessions: the title is on the first row" "yes" "$(kfirst)"
+      is "...and the keys"                                  "yes" "$(kkeys)"
+      MORE="$(grep -oE '↓ [0-9]+ more' <<< "$(kcap)" | grep -oE '[0-9]+' || true)"
+      SHOWN="$(grep -cE '^.{0,16}s[0-9]{2} ' <<< "$(kcap)" || true)"
+      is "...and the marker counts what it hides"           "40" "$((SHOWN + ${MORE:-0}))"
+      is "...the page is no taller than the pane"           "yes" "$([ "$(kcap | wc -l)" -le "$2" ] && echo yes || echo no)"
+      is "walking to the middle loses nothing"              "0"  "$(kwalk 20)"
+      is "...with something hidden on both sides"          "yes yes" "$(grep -qE '↑ [0-9]+ more' <<< "$(kcap)" && echo yes || echo no) $(grep -qE '↓ [0-9]+ more' <<< "$(kcap)" && echo yes || echo no)"
+      is "walking to the last session loses nothing"        "0"  "$(kwalk 19)"
+      is "...the cursor is on it"                          "s40" "$(kcur)"
+      # keys sent as a burst are each read, in the same pane
+      tmux -L "$KV" send-keys -l 'kkk'
+      is "$1x$2: kkk in one read moves three rows"          "s37" "$(kat s37)"
+    fi
+  done
+
+  # ── a burst: one write, many keys ──
+  if kstart 120 24 40; then
+    is "the cursor starts on the first session"           "s01" "$(kcur)"
+    tmux -L "$KV" send-keys -l 'jjj'
+    is "jjj in one read moves three rows"                 "s04" "$(kat s04)"
+    # twenty Down arrows as ONE write: send-keys with several keys writes them separately,
+    # and hex bytes land in a single tty write, which is what a held key looks like
+    tmux -L "$KV" send-keys -H $(for _ in $(seq 20); do printf '1b 5b 42 '; done)
+    is "twenty Down arrows in one read move twenty rows"  "s24" "$(kat s24)"
+    tmux -L "$KV" send-keys -l 'kkjk'
+    is "a mixed run is read in order"                     "s22" "$(kat s22)"
+    tmux -L "$KV" send-keys -H 1b 5b 42 6a 1b 5b 41
+    is "an arrow, j and an arrow up in one read"          "s23" "$(kat s23)"
+    # an escape sequence cut across two writes is still one key
+    tmux -L "$KV" send-keys -H 1b 5b; sleep 0.1; tmux -L "$KV" send-keys -H 42
+    is "an arrow cut across two reads is one Down"        "s24" "$(kat s24)"
+    # a lone Esc is still Esc, after the short wait
+    tmux -L "$KV" send-keys Escape
+    kwait 'a8|s01 ' || true
+    i=0; while [ "$i" -lt 60 ] && grep -q 'settings — worker' <<< "$(kcap)"; do sleep 0.1; i=$((i+1)); done
+    is "a lone Esc still goes back"                       "no"  "$(grep -q 'settings — worker' <<< "$(kcap)" && echo yes || echo no)"
+    is "...to the cards"                                  "yes" "$(grep -qE '╭─ .*s[0-9]' <<< "$(kcap)" && echo yes || echo no)"
+    # on the card grid too: a burst of j is each j
+    tmux -L "$KV" send-keys -l 'jjjj'; sleep 0.5
+    tmux -L "$KV" send-keys -l ','
+    kwait 'settings — worker' || true
+    is "jjjj on the cards moved the selection four rows (three to a row)" "s13" "$(kat s13)"
+  fi
+  [ -n "$KV" ] && tmux -L "$KV" kill-server 2>/dev/null
+  [ -n "$KD" ] && tmux -L "$KD" kill-server 2>/dev/null
+  rm -rf "${KT:?}"
+else
+  skip "a burst of keys, and the sessions' settings page" "tmux or node not available"
+fi
 
 group "projects banner"
 # The sprite costs six rows. On a short or narrow window the cards matter more than
@@ -4403,6 +4502,7 @@ KEYS_OUT="$(node --input-type=module -e '
   line("arrows", J(splitKeys("\x1b[B\r").keys));
   line("dels", J(splitKeys("\x7f\x7f\x7f").keys.map(k => k.charCodeAt(0))));
   line("paste", J(splitKeys("git@x:acme/acme-web.git").keys));
+  line("jjj", J(splitKeys("jjj").keys));
   line("keymouse", J(splitKeys("j\x1b[<0;1;2M").keys));
   line("ctrl", J(splitKeys("\x0612").keys));
   line("escq", J(splitKeys("\x1bq").keys));
@@ -4420,9 +4520,10 @@ kv() { sed -n "s/^$1=//p" <<< "$KEYS_OUT"; }
 is "press+release in one read: two events" '["\u001b[<0;10;11M","\u001b[<0;10;11m"]' "$(kv pr)"
 is "↓⏎ in one read: two keys"               '["\u001b[B","\r"]'                       "$(kv arrows)"
 is "three DELs: three keys"                 '[127,127,127]'                           "$(kv dels)"
-is "a paste stays one run"                  '["git@x:acme/acme-web.git"]'             "$(kv paste)"
+is "a run of text is one key per character" "$(node -e 'console.log(JSON.stringify([..."git@x:acme/acme-web.git"]))')" "$(kv paste)"
+is "jjj in one read: three keys"           '["j","j","j"]'                           "$(kv jjj)"
 is "a key typed with a click: both"         '["j","\u001b[<0;1;2M"]'                  "$(kv keymouse)"
-is "^F then digits: ^F on its own"          '["\u0006","12"]'                         "$(kv ctrl)"
+is "^F then digits: ^F, then each digit"    '["\u0006","1","2"]'                         "$(kv ctrl)"
 is "Esc then q: Esc, then q"                '["\u001b","q"]'                          "$(kv escq)"
 is "a cut-off report is held, not dispatched" '{"keys":["\u001b[A"],"rest":"\u001b[<0;1"}' "$(kv tail)"
 is "a report over two reads: one event"     '["\u001b[<0;10;11M"]'                    "$(kv split)"
