@@ -3995,24 +3995,24 @@ fi
 # that keeps the check from silencing a launcher that happens to be agent-named.
 group "an agent started by an agent is not that agent"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  NA="$(cd "$(mktemp -d)" && pwd -P)"; NAF="$NA/fleet"; mkdir -p "$NAF" "$NA/cfg" "$NA/home" "$NA/bin" "$NA/w1"
+  NEST="$(cd "$(mktemp -d)" && pwd -P)"; NAF="$NEST/fleet"; mkdir -p "$NAF" "$NEST/cfg" "$NEST/home" "$NEST/bin" "$NEST/w1"
   # A symlink, not a copy: macOS kills a copied system binary on exec (137, measured), and
   # `ps` names a process by the path it was exec'd through, so this is `claude` to the tree.
-  ln -s "$(command -v bash)" "$NA/bin/claude"
+  ln -s "$(command -v bash)" "$NEST/bin/claude"
   # The pane's environment is the server's, which is this suite's: every fleet variable is
   # named, so nothing here can reach the fleet the suite runs in. `fire` is the hook's caller
   # (a shell, as an agent's hook runner is); `drive` builds each chain above it.
-  { printf 'export HOME=%q CLAUDE_FLEET_DIR=%q CLAUDE_CONFIG_DIR=%q CLAUDE_FLEET_NOTIFIER=off\n' "$NA/home" "$NAF" "$NA/cfg"
+  { printf 'export HOME=%q CLAUDE_FLEET_DIR=%q CLAUDE_CONFIG_DIR=%q CLAUDE_FLEET_NOTIFIER=off\n' "$NEST/home" "$NAF" "$NEST/cfg"
     printf 'unset CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_NOTIFY_LEAD CLAUDE_JOB_DIR\n'
-    printf 'H=%q W=%q A=%q F=%q NA=%q\n' "$ROOT/hooks/fleet-event.sh" "$NA/w1" "$NA/bin/claude" "$NA/fire" "$NA"; } > "$NA/env"
-  cat > "$NA/fire" <<'EOF'
+    printf 'H=%q W=%q A=%q F=%q NEST=%q\n' "$ROOT/hooks/fleet-event.sh" "$NEST/w1" "$NEST/bin/claude" "$NEST/fire" "$NEST"; } > "$NEST/env"
+  cat > "$NEST/fire" <<'EOF'
 #!/usr/bin/env bash
 . "$(dirname "$0")/env"
 for ev in SessionStart Stop; do
   printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s"}' "$ev" "$1" "$W" | "$H" >/dev/null 2>&1
 done
 EOF
-  cat > "$NA/drive" <<'EOF'
+  cat > "$NEST/drive" <<'EOF'
 #!/usr/bin/env bash
 . "$(dirname "$0")/env"
 case "$1" in
@@ -4020,14 +4020,14 @@ case "$1" in
   probe)   "$A" -c "bash -c '$A -c \"$F $2; true\"; true'; true" ;;  # agent <- tool shell <- agent
   wrapper) "$A" -c "$A -c '$F $2; true'; true" ;;                   # agent <- agent, nothing between
 esac
-: > "$NA/$2.ran"
+: > "$NEST/$2.ran"
 EOF
-  chmod +x "$NA/drive" "$NA/fire"
+  chmod +x "$NEST/drive" "$NEST/fire"
   tmux -L cf-nestk kill-server 2>/dev/null
-  tmux -L cf-nestk new-session -d -s w1 -c "$NA/w1" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  tmux -L cf-nestk new-session -d -s w1 -c "$NEST/w1" -x 120 -y 30 "sleep 600; :" 2>/dev/null
   narun() {  # chain sid -> runs it in a window of w1 and waits for it
-    tmux -L cf-nestk new-window -d -t w1 "$NA/drive $1 $2" 2>/dev/null
-    for _ in $(seq 1 100); do [ -f "$NA/$2.ran" ] && break; sleep 0.1; done
+    tmux -L cf-nestk new-window -d -t w1 "$NEST/drive $1 $2" 2>/dev/null
+    for _ in $(seq 1 100); do [ -f "$NEST/$2.ran" ] && break; sleep 0.1; done
   }
   narec() { jq -r "$2" "$NAF/$1.json" 2>/dev/null; }
   narows() { grep -c $'\tw1\tdone\t' "$NAF/cf-nestk.inbox" 2>/dev/null || true; }
@@ -4043,7 +4043,7 @@ EOF
   is "an agent-named launcher is still the session"    "cf-nestk w1" "$(narec s-wrap '.sock + " " + .slot')"
   is "...and its Stop files a done row"                "2" "$(narows)"
   tmux -L cf-nestk kill-server 2>/dev/null
-  rm -rf "$NA"
+  rm -rf "${NEST:?}"
 else
   skip "an agent started by an agent is not that agent" "tmux/jq missing"
 fi
@@ -8692,6 +8692,32 @@ is "...and the sweep would see one"     "1" \
 # made it red: a sweep that cannot tell code from prose forbids explaining itself.
 is "...and not one in a comment"        "0" \
    "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
+# ── the suite's own counters belong to the suite ─────────────────────────────
+# A GROUP THAT BORROWS A COUNTER'S NAME ERASES IT. One group kept its temp dir in `NA`, a
+# short name that read as "nested agents" and is also the n/a counter. From then on every
+# run that reached it ended with a path where the n/a count belongs, `[: integer expression
+# expected` on the line that decides whether to list the n/a rows, and no list at all.
+# Nothing went red: the summary still said 0 failed. So a counter is assigned in exactly
+# two shapes, the reset at the top and the increment in its helper, and any other
+# assignment to one is refused here. The epilogue checks the values too, for the shapes a
+# line-by-line read cannot see (an `eval`, a `read`, a `printf -v`).
+group "the suite's counters are assigned by the suite alone"
+# The names are joined at runtime and the reset is matched in pieces, so no line of this
+# group is itself an assignment to a counter, and the sweep can run over this file.
+ctr_borrow() { awk -v ctr='FAIL PASS SKIP NA' '
+  BEGIN { n = split(ctr, C, " "); reset = "PASS" "=0; FAIL" "=0; SKIP" "=0; NA" "=0; " }
+  { line = $0; h = index(line, "#"); if (h) line = substr(line, 1, h - 1)
+    if (index($0, reset) == 1) next
+    for (i = 1; i <= n; i++) gsub(C[i] "=\\$\\(\\(" C[i] "\\+1\\)\\)", "", line)
+    for (i = 1; i <= n; i++) if (line ~ ("(^|[^A-Za-z0-9_])" C[i] "=")) { hits++; break } }
+  END { print hits + 0 }' "$@"; }
+is "no group assigns PASS, FAIL, SKIP or NA"      "0" "$(ctr_borrow "$ROOT/test/run.sh")"
+# ...and the sweep can SEE one, or it is green by blindness: the exact shape that bit.
+is "...and the sweep would see one"              "1" "$(printf '  %s="$(cd "$(mktemp -d)" \&\& pwd -P)"\n' NA | ctr_borrow)"
+is "...or one written into a generated env file" "1" "$(printf "    printf 'W=%%q %s=%%q'\n" NA | ctr_borrow)"
+is "...but not a counter's own increment"        "0" "$(printf 'ok() { %s=$((%s+1)); }\n' PASS PASS | ctr_borrow)"
+is "...nor a name that only ends in one"         "0" "$(printf '  %s_%s=1\n' STUB FAIL | ctr_borrow)"
+is "...nor one in a comment"                     "0" "$(printf '# %s=1 was the bug\n' NA | ctr_borrow)"
 # ── what made the suite green on a developer's Mac stays made ────────────────
 # A MERGE UNDID IT AND NOTHING SAID SO. A branch resolved against an old base put back the
 # version of three files from before a fix landed: the process-table read lost its buffer,
@@ -27419,6 +27445,18 @@ fi
 # a filtered run without that group counted its n/a rows and never named them. A group
 # written below this line is not a group: cf_only and shard-plan.mjs both stop here.
 [ -n "${CF_RAN:-}" ] && printf '%s\t#end\n' "$SECONDS" >> "$CF_RAN"
+# A COUNTER THAT IS NOT A NUMBER WAS OVERWRITTEN by a group, and printing it would put a
+# path where a count belongs (see "the suite's counters are assigned by the suite alone").
+# Say which, and fail the run. FAIL first, so an overwritten FAIL is a number again before
+# anything is added to it. The n/a count can be had back: every n/a row is also a line of
+# NA_LOG, and the list below is the half of it that matters.
+for ctr_v in FAIL PASS SKIP NA; do
+  case "${!ctr_v}" in
+    ''|*[!0-9]*) printf '\n%s%s was overwritten by a group: %s%s\n' "$R" "$ctr_v" "$(vis "${!ctr_v}")" "$N"
+                 ctr_n=0; [ "$ctr_v" = NA ] && [ -s "${NA_LOG:-/dev/null}" ] && ctr_n="$(grep -c . "$NA_LOG")"
+                 printf -v "$ctr_v" '%s' "$ctr_n"; FAIL=$((FAIL+1)) ;;
+  esac
+done
 # NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
 # from one nobody wrote, unless the run says which rows they were.
 if [ "$NA" -gt 0 ] && [ -s "${NA_LOG:-/dev/null}" ]; then
