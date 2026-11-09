@@ -482,6 +482,10 @@ textarea { resize: vertical; }
 
 .app:has(.composer) .as-launch { bottom: 96px; }
 .app:has(.att-list) .as-launch { bottom: 150px; }
+/* A page clears the floating button with its bottom padding; the chat scrolls on its own, so it
+   needs the same, or its newest message ends under the button even scrolled to the end. */
+.app:has(.as-launch) .chat { padding-bottom: 60px; }
+@media (max-width: 900px) { .app:has(.as-launch) .chat { padding-bottom: 50px; } }
 
 /* ── phase 3: home agent, console, picker, tree ──────── */
 .home-agent { background: linear-gradient(180deg, rgba(95,215,215,.07), rgba(95,215,215,.015)); border: 1px solid rgba(95,215,215,.28);

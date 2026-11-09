@@ -132,9 +132,15 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 .side-sec { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 14px; }
 .side-foot { border-top: 1px dashed var(--line); }
 .search { font-size: 13px; }
-.topbar { background: var(--gf-abyss); border-bottom: 1px solid var(--line); }
+.topbar { background: var(--gf-abyss); border-bottom: 1px solid var(--line); gap: 12px; min-width: 0; }
+.topbar > .icon-btn { flex: none; } /* the menu keeps its 28px target when the bar is tight */
 .topbar .brand b { font-size: 12px; white-space: nowrap; }
-.topbar .brand { min-width: 0; flex: 0 1 auto; }
+/* The wordmark stays whole or steps out. When it cannot sit beside the ship and keep the bar's
+   gap to the usage chips, it wraps to a second line that this box, the Logo's 22px, clips: the
+   ship alone carries the brand. With two profiles' chips the wordmark touched them at 390px, and
+   at 360 the bar kept the whole page 30px wider than the screen, so it scrolled sideways: as a
+   grid item the bar's floor was its contents' full width until min-width: 0 above, as on .main. */
+.topbar .brand { min-width: 0; flex: 0 1 auto; flex-wrap: wrap; align-content: flex-start; height: 22px; overflow: hidden; }
 .demo-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
   font: 12px var(--mono); }
 
