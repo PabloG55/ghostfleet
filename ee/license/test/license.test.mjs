@@ -55,6 +55,10 @@ test('another signing pair fails signature verification', () => {
 test('expired key is rejected', () => {
   assert.deepEqual(verify(expired), { ok: false, reason: 'expired' });
 });
+test('expired key reports expiration even when issued after expiry', () => {
+  assert.deepEqual(verify(mint({ ...payload, issued: '2030-06-01', expires: '2030-05-01' })),
+    { ok: false, reason: 'expired' });
+});
 test('expiration boundary is exclusive UTC midnight', () => {
   assert.deepEqual(verify(key, { now: '2031-01-01' }), { ok: false, reason: 'expired' });
 });
@@ -86,7 +90,7 @@ for (const [name, changes] of [
   ['string seats', { seats: '5' }], ['unsafe seats', { seats: Number.MAX_SAFE_INTEGER + 1 }],
   ['blank org', { org: ' ' }], ['missing id', { id: undefined }],
   ['impossible date', { expires: '2030-02-30' }], ['invalid date', { issued: 'yesterday' }],
-  ['reversed dates', { issued: '2032-01-01' }], ['extra field', { extra: true }],
+  ['extra field', { extra: true }],
 ]) {
   test(`signed malformed payload is rejected: ${name}`, () => {
     assert.deepEqual(verify(mint({ ...payload, ...changes })), { ok: false, reason: 'malformed' });

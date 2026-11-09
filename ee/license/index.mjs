@@ -24,8 +24,7 @@ export function validPayload(payload) {
     typeof payload.id === 'string' && payload.id.trim().length > 0 &&
     typeof payload.org === 'string' && payload.org.trim().length > 0 &&
     Number.isSafeInteger(payload.seats) && payload.seats > 0 &&
-    Number.isFinite(isoTime(payload.issued)) && Number.isFinite(isoTime(payload.expires)) &&
-    isoTime(payload.issued) < isoTime(payload.expires);
+    Number.isFinite(isoTime(payload.issued)) && Number.isFinite(isoTime(payload.expires));
 }
 
 function decode(part) {
