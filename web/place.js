@@ -27,7 +27,7 @@ export const TAB_SEP = ' · ';
 // Screens a URL may name. The terminal is not one: it takes a passkey at every open, so a
 // reload of it lands where it was opened from (app.js placeOf). `jarvis` is written for the
 // session screen in Jarvis mode, because its project is whatever /api/jarvis says it is.
-const SCREENS = ['projects', 'queue', 'reviews', 'review', 'grid', 'session', 'stack', 'stackpick'];
+const SCREENS = ['projects', 'queue', 'reviews', 'review', 'automations', 'grid', 'session', 'stack', 'stackpick'];
 export const PLACE_KEYS = ['screen', 'tab', 'p', 'sub', 's', 'view', 'from', 'host', 'profile', 'run'];
 
 // Every field of a place, defaulted. The shape save() writes and restore() reads.
@@ -157,7 +157,7 @@ export function clamp(j, { tabs = [], stackLen = 0 } = {}) {
     ? { host: String(j.rv.host || ''), profile: String(j.rv.profile), run: String(j.rv.run) } : null;
   if (screen === 'review' && !rv) screen = 'reviews';
   const depth = screen === 'session' ? (jarvisMode || entry ? 1 : 2)
-    : (screen === 'grid' || screen === 'queue' || screen === 'reviews' || screen === 'stack' || screen === 'stackpick') ? 1
+    : (screen === 'grid' || screen === 'queue' || screen === 'reviews' || screen === 'automations' || screen === 'stack' || screen === 'stackpick') ? 1
     : screen === 'review' ? 2 : 0;
   return { screen, project, session, sub, view, profile, entry, jarvisMode, rv, depth };
 }

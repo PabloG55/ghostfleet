@@ -225,7 +225,7 @@ function Provenance({ run, t }) {
 		children: rows.map(([k, v]) => /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("dt", { children: k }), /* @__PURE__ */ u("dd", { children: v })] }, k))
 	});
 }
-function Bar({ run, t, v, gate, save, onFlow, onRestOk, onRetry }) {
+function Bar$1({ run, t, v, gate, save, onFlow, onRestOk, onRetry }) {
 	const fv = (v.flow || {}).v || "";
 	const unmarked = run.kind === "recorded" ? 0 : run.steps.filter((s) => !(v[String(s.n)] || {}).v).length;
 	return /* @__PURE__ */ u("div", {
@@ -393,7 +393,7 @@ function ReviewScreen(p) {
 			class: ("toast " + (p.toast.kind || "")).trim(),
 			children: p.toast.text
 		}) : null,
-		/* @__PURE__ */ u(Bar, {
+		/* @__PURE__ */ u(Bar$1, {
 			run,
 			t,
 			v,
@@ -514,6 +514,15 @@ var STATES = [
 	"limit",
 	"interrupted"
 ];
+var LIMITS = {
+	steps: 20,
+	prompt: 4e3,
+	name: 80,
+	text: 300,
+	waitMin: 60,
+	cooldownMin: 1440,
+	everyMin: 15
+};
 var DAY_NAMES = [
 	"Sun",
 	"Mon",
@@ -525,7 +534,19 @@ var DAY_NAMES = [
 ];
 var EVENT_PROJECT = "{project}";
 var EVENT_SESSION = "{session}";
+var SESSION_OK = /^[A-Za-z0-9][A-Za-z0-9 ._~-]{0,47}$/;
+var TEMPLATE_OK = /^[A-Za-z0-9{}][A-Za-z0-9 ._~{}-]{0,79}$/;
+var HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+var DATE = /^\d{4}-\d{2}-\d{2}$/;
+var str = (v, max) => String(v ?? "").trim().slice(0, max);
+var bad = (text) => Object.assign(new Error(text), { status: 400 });
 var own = (o, k) => typeof k === "string" && Object.hasOwn(o, k);
+var realDate = (v) => {
+	if (typeof v !== "string" || !DATE.test(v)) return false;
+	const [y, m, d] = v.split("-").map(Number), x = new Date(y, m - 1, d);
+	return x.getFullYear() === y && x.getMonth() === m - 1 && x.getDate() === d;
+};
+var dayOf = (d) => typeof d === "number" || typeof d === "string" && d.trim() !== "" ? Number(d) : NaN;
 var blankTrigger = (type = "schedule") => type === "event" ? {
 	type: "event",
 	event: "finished",
@@ -565,6 +586,116 @@ var blankAutomation = () => ({
 	steps: []
 });
 var needsPasskey = (a) => (a?.steps || []).some((s) => own(ACTIONS, s.action) && ACTIONS[s.action].passkey);
+function normalize(raw, { strict = true } = {}) {
+	const a = raw && typeof raw === "object" ? raw : {};
+	const name = str(a.name, LIMITS.name) || "untitled automation";
+	const t = a.trigger && typeof a.trigger === "object" ? a.trigger : {};
+	let trigger;
+	if (t.type === "event") {
+		if (!own(EVENTS, t.event)) throw bad(`unknown event: ${t.event}`);
+		const project = str(t.project, 80) || "*", session = str(t.session, 48) || "*";
+		if (session !== "*" && !SESSION_OK.test(session)) throw bad(`the trigger names an invalid session: '${session}'`);
+		const cooldown = Math.max(1, Math.min(LIMITS.cooldownMin, Math.round(Number(t.cooldown) || 10)));
+		trigger = {
+			type: "event",
+			event: t.event,
+			project,
+			session,
+			cooldown
+		};
+	} else {
+		const mode = [
+			"once",
+			"days",
+			"every"
+		].includes(t.mode) ? t.mode : "days";
+		const at = typeof t.at === "string" && HHMM.test(t.at) ? t.at : "10:00";
+		const days = [...new Set((Array.isArray(t.days) ? t.days : []).map(dayOf).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
+		const date = realDate(t.date) ? t.date : "";
+		const minutes = Math.max(LIMITS.everyMin, Math.min(10080, Math.round(Number(t.minutes) || 60)));
+		if (strict && mode === "once" && !date) throw bad("a one-off run needs a real date");
+		if (strict && mode === "days" && !days.length) throw bad("pick at least one day of the week");
+		trigger = {
+			type: "schedule",
+			mode,
+			at,
+			days,
+			date,
+			minutes
+		};
+		if (strict && mode === "once" && nextAfter(trigger, Math.floor(Date.now() / 1e3)) == null) throw bad(`${date} at ${at} has already passed: pick a later time`);
+	}
+	const list = Array.isArray(a.steps) ? a.steps : [];
+	if (list.length > LIMITS.steps) throw bad(`at most ${LIMITS.steps} steps`);
+	const steps = list.map((s, i) => {
+		const action = s?.action;
+		if (!own(ACTIONS, action)) throw bad(`step ${i + 1}: unknown action '${action}'`);
+		const def = ACTIONS[action];
+		const o = { action };
+		if (def.needs.includes("project")) o.project = str(s.project, 80);
+		if (def.needs.includes("session")) {
+			o.session = str(s.session, 48);
+			if (o.session && o.session !== "{session}" && !SESSION_OK.test(o.session)) throw bad(`step ${i + 1}: invalid session name '${o.session}'`);
+		}
+		if (def.needs.includes("prompt") || def.optional?.includes("prompt")) o.prompt = str(s.prompt, LIMITS.prompt);
+		if (def.needs.includes("name")) {
+			o.name = str(s.name, 80);
+			if (o.name && !TEMPLATE_OK.test(o.name)) throw bad(`step ${i + 1}: a session name takes letters, digits, spaces and . _ ~ -`);
+		}
+		if (def.optional?.includes("branch")) o.branch = str(s.branch, 80);
+		if (action === "wait") o.minutes = Math.max(1, Math.min(LIMITS.waitMin, Math.round(Number(s.minutes) || 1)));
+		if (action === "notify") o.text = str(s.text, LIMITS.text);
+		if (action === "check") o.status = [...new Set((Array.isArray(s.status) ? s.status : []).filter((x) => STATES.includes(x)))];
+		if (strict) {
+			for (const f of def.needs) if (o[f] === "" || o[f] == null || Array.isArray(o[f]) && !o[f].length) throw bad(`step ${i + 1} (${def.label}): ${FIELD[f] || f} is missing`);
+			if ((o.project === "{project}" || o.session === "{session}") && trigger.type !== "event") throw bad(`step ${i + 1}: "the event's session" only exists when the trigger is an event`);
+		}
+		return o;
+	});
+	if (strict && !steps.length) throw bad("add at least one step");
+	return {
+		id: str(a.id, 40) || null,
+		name,
+		enabled: a.enabled !== false,
+		trigger,
+		steps
+	};
+}
+var FIELD = {
+	status: "at least one status",
+	project: "the project",
+	session: "the session",
+	prompt: "the message",
+	name: "the name",
+	text: "the text",
+	minutes: "the minutes"
+};
+var localAt = (y, m, d, hhmm) => {
+	const [h, mi] = hhmm.split(":").map(Number);
+	return Math.floor(new Date(y, m, d, h, mi, 0).getTime() / 1e3);
+};
+function nextAfter(trigger, t, anchor = t) {
+	if (!trigger || trigger.type !== "schedule") return null;
+	if (trigger.mode === "once") {
+		if (!trigger.date) return null;
+		const [y, m, d] = trigger.date.split("-").map(Number);
+		const at = localAt(y, m - 1, d, trigger.at);
+		return at > t ? at : null;
+	}
+	if (trigger.mode === "every") {
+		const step = trigger.minutes * 60;
+		const k = Math.floor((t - anchor) / step) + 1;
+		return anchor + Math.max(1, k) * step;
+	}
+	const base = /* @__PURE__ */ new Date(t * 1e3);
+	for (let i = 0; i <= 7; i++) {
+		const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+		if (!trigger.days.includes(d.getDay())) continue;
+		const at = localAt(d.getFullYear(), d.getMonth(), d.getDate(), trigger.at);
+		if (at > t) return at;
+	}
+	return null;
+}
 var everyWords = (m) => m % 1440 === 0 ? `${m / 1440} day${m > 1440 ? "s" : ""}` : m % 60 === 0 ? `${m / 60} h` : `${m} min`;
 function daysWords(days) {
 	const s = [...days].sort().join(",");
@@ -573,10 +704,20 @@ function daysWords(days) {
 	if (s === "0,6") return "weekends";
 	return days.map((d) => DAY_NAMES[d]).join(", ");
 }
+function dateWords(date) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
+	if (!m) return date || "?";
+	const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+	return d.toLocaleDateString(void 0, {
+		month: "short",
+		day: "numeric",
+		...d.getFullYear() !== (/* @__PURE__ */ new Date()).getFullYear() ? { year: "numeric" } : {}
+	});
+}
 function describeTrigger(t) {
 	if (!t) return "";
 	if (t.type === "event") return `when ${t.session && t.session !== "*" ? t.session : "any session"} ${!t.project || t.project === "*" ? "in any project" : `in ${t.project}`} ${own(EVENTS, t.event) ? EVENTS[t.event].label : t.event}`;
-	if (t.mode === "once") return `once, ${t.date || "?"} at ${t.at}`;
+	if (t.mode === "once") return `once, ${dateWords(t.date)} at ${t.at}`;
 	if (t.mode === "every") return `every ${everyWords(t.minutes)}`;
 	return `${daysWords(t.days)} at ${t.at}`;
 }
@@ -609,12 +750,18 @@ var EVERY = [
 	720,
 	1440
 ];
-var when = (ts) => (/* @__PURE__ */ new Date(ts * 1e3)).toLocaleString(void 0, {
+var when = (ts) => (/* @__PURE__ */ new Date(ts * 1e3)).toLocaleString(void 0, Math.abs(ts - Date.now() / 1e3) > 518400 ? {
+	month: "short",
+	day: "numeric",
+	hour: "2-digit",
+	minute: "2-digit"
+} : {
 	weekday: "short",
 	hour: "2-digit",
 	minute: "2-digit"
 });
 var clone = (v) => JSON.parse(JSON.stringify(v));
+var eventOnly = (a) => a.trigger.type === "event" && a.steps.some((s) => s.project === "{project}" || s.session === "{session}");
 function AutomationsScreen(p) {
 	return /* @__PURE__ */ u(S, { children: [
 		/* @__PURE__ */ u(Header, {
@@ -623,26 +770,134 @@ function AutomationsScreen(p) {
 			stale: p.stale,
 			onBack: p.onBack
 		}),
-		/* @__PURE__ */ u("div", {
-			class: "cards autos",
-			children: p.data == null ? /* @__PURE__ */ u("p", {
-				class: "autos-dim",
-				children: "reading…"
-			}) : p.editing ? /* @__PURE__ */ u(Editor, { ...p }, p.editing) : /* @__PURE__ */ u(List, { ...p })
-		}),
+		p.data == null ? p.error ? /* @__PURE__ */ u(Failed, {
+			error: p.error,
+			onRetry: p.onRetry
+		}) : /* @__PURE__ */ u(Loading, {}) : p.editing ? /* @__PURE__ */ u(Editor, { ...p }, p.editing) : /* @__PURE__ */ u(List, { ...p }),
 		p.toast ? /* @__PURE__ */ u("div", {
 			class: ("toast " + (p.toast.kind || "")).trim(),
 			children: p.toast.text
 		}) : null
 	] });
 }
-function List({ data, onEdit, onSave, onDelete, onRun, onSeen }) {
+var Bar = ({ children }) => /* @__PURE__ */ u("div", {
+	class: "autos-bar",
+	children
+});
+function Loading() {
+	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
+		class: "cards autos",
+		"aria-busy": "true",
+		"aria-label": "reading the automations",
+		children: [
+			0,
+			1,
+			2
+		].map((i) => /* @__PURE__ */ u("div", {
+			class: "card skel",
+			children: [
+				/* @__PURE__ */ u("div", { class: "skel-bar w1" }),
+				/* @__PURE__ */ u("div", { class: "skel-bar w2" }),
+				/* @__PURE__ */ u("div", { class: "skel-bar w3" })
+			]
+		}, i))
+	}), /* @__PURE__ */ u(Bar, { children: /* @__PURE__ */ u("div", {
+		class: "autos-acts",
+		children: /* @__PURE__ */ u("button", {
+			type: "button",
+			class: "go",
+			disabled: true,
+			children: "new automation"
+		})
+	}) })] });
+}
+function Failed({ error, onRetry }) {
+	return /* @__PURE__ */ u("div", {
+		class: "cards autos",
+		children: /* @__PURE__ */ u("div", {
+			class: "autos-empty",
+			role: "alert",
+			children: [
+				/* @__PURE__ */ u("h3", { children: "could not read the automations" }),
+				/* @__PURE__ */ u("p", { children: error }),
+				/* @__PURE__ */ u("button", {
+					type: "button",
+					class: "go",
+					onClick: onRetry,
+					children: "try again"
+				})
+			]
+		})
+	});
+}
+function List({ data, onEdit, onSave, onSeen, onSay }) {
 	const list = data.automations || [];
 	const unseen = (data.notices || []).filter((n) => !n.seen);
-	return /* @__PURE__ */ u(S, { children: [
-		unseen.length ? /* @__PURE__ */ u("section", {
-			class: "autos-notices",
-			children: [unseen.map((n) => /* @__PURE__ */ u("div", {
+	const runs = data.runs || [];
+	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
+		class: "cards autos",
+		children: [
+			unseen.length ? /* @__PURE__ */ u(Notices, {
+				list: unseen,
+				onSeen
+			}) : null,
+			!list.length ? /* @__PURE__ */ u("div", {
+				class: "autos-empty",
+				children: [/* @__PURE__ */ u("h3", { children: "no automations yet" }), /* @__PURE__ */ u("p", { children: "One is a trigger and some steps. For example: \"weekdays at 09:00, send the lead of acme-api: review what is open\", or \"when any session in acme-web needs you, tell me\"." })]
+			}) : null,
+			list.map((a) => /* @__PURE__ */ u(Item, {
+				a,
+				onEdit,
+				onSave,
+				onSay
+			}, a.id)),
+			runs.length ? /* @__PURE__ */ u("section", {
+				class: "autos-block autos-wide",
+				children: [/* @__PURE__ */ u("h3", { children: "last runs" }), /* @__PURE__ */ u(Capped, {
+					items: runs,
+					n: 10,
+					render: (r, i) => /* @__PURE__ */ u(Run, { r }, i)
+				})]
+			}) : null
+		]
+	}), /* @__PURE__ */ u(Bar, { children: /* @__PURE__ */ u("div", {
+		class: "autos-acts",
+		children: /* @__PURE__ */ u("button", {
+			type: "button",
+			class: "go",
+			onClick: () => onEdit("new"),
+			children: "new automation"
+		})
+	}) })] });
+}
+function Capped({ items, n, render }) {
+	const [all, setAll] = d(false);
+	const shown = all ? items : items.slice(0, n);
+	return /* @__PURE__ */ u(S, { children: [shown.map(render), items.length > shown.length ? /* @__PURE__ */ u("button", {
+		type: "button",
+		onClick: () => setAll(true),
+		children: [
+			"show ",
+			items.length - shown.length,
+			" more"
+		]
+	}) : null] });
+}
+function Notices({ list, onSeen }) {
+	return /* @__PURE__ */ u("section", {
+		class: "autos-block autos-wide",
+		"aria-label": "needs a look",
+		children: [/* @__PURE__ */ u("div", {
+			class: "autos-head",
+			children: [/* @__PURE__ */ u("h3", { children: "needs a look" }), /* @__PURE__ */ u("button", {
+				type: "button",
+				onClick: onSeen,
+				children: "mark as seen"
+			})]
+		}), /* @__PURE__ */ u(Capped, {
+			items: list,
+			n: 3,
+			render: (n) => /* @__PURE__ */ u("div", {
 				class: `autos-notice k-${n.kind}`,
 				children: [
 					/* @__PURE__ */ u("span", {
@@ -652,278 +907,425 @@ function List({ data, onEdit, onSave, onDelete, onRun, onSeen }) {
 					" ",
 					n.text
 				]
-			}, n.id)), /* @__PURE__ */ u(Btn, {
-				label: "seen",
-				onClick: onSeen
-			})]
-		}) : null,
-		/* @__PURE__ */ u("div", {
-			class: "autos-top",
-			children: /* @__PURE__ */ u(Btn, {
-				label: "new automation",
-				cls: "go",
-				onClick: () => onEdit("new")
-			})
-		}),
-		!list.length ? /* @__PURE__ */ u("p", {
-			class: "autos-dim",
-			children: "None yet. One is a trigger and some steps — for example \"weekdays at 09:00, send the lead of acme-api: review what is open\", or \"when any session in acme-web needs you, tell me\"."
-		}) : null,
-		list.map((a) => /* @__PURE__ */ u(Item, {
-			a,
-			onEdit,
-			onSave,
-			onDelete,
-			onRun
-		}, a.id)),
-		(data.runs || []).length ? /* @__PURE__ */ u("section", {
-			class: "autos-runs",
-			children: [/* @__PURE__ */ u("h3", { children: "last runs" }), data.runs.map((r, i) => /* @__PURE__ */ u("details", {
-				class: "autos-run",
-				children: [/* @__PURE__ */ u("summary", { children: [
-					/* @__PURE__ */ u("span", {
-						class: `autos-st s-${r.status}`,
-						children: r.status === "ok" ? "✓" : r.status === "skipped" ? "↷" : "✕"
-					}),
-					/* @__PURE__ */ u("span", {
-						class: "autos-when",
-						children: when(r.at)
-					}),
-					/* @__PURE__ */ u("b", { children: r.name }),
-					/* @__PURE__ */ u("span", {
-						class: "autos-dim",
-						children: r.status === "skipped" ? `skipped: ${r.text}` : r.trigger
-					})
-				] }), (r.steps || []).map((s, j) => /* @__PURE__ */ u("div", {
-					class: `autos-step-run${s.ok ? "" : " bad"}`,
-					children: [
-						s.halt ? "⏹" : s.ok ? "✓" : "✕",
-						" ",
-						s.what,
-						s.text ? /* @__PURE__ */ u("small", { children: [" — ", s.text] }) : null
-					]
-				}, j))]
-			}, i))]
-		}) : null
-	] });
+			}, n.id)
+		})]
+	});
 }
-function Item({ a, onEdit, onSave, onDelete, onRun }) {
-	const [sure, setSure] = d(false);
-	const status = a.running ? "running now…" : a.nextRun ? `next ${when(a.nextRun)}` : a.enabled && a.trigger.type === "event" ? "waiting for the event" : a.enabled ? "" : "off";
+var RUN_WORD = {
+	ok: "✓ ran",
+	error: "✕ failed",
+	skipped: "– skipped",
+	stopped: "■ stopped"
+};
+function Run({ r }) {
+	const steps = r.steps || [];
+	const head = /* @__PURE__ */ u(S, { children: [
+		/* @__PURE__ */ u("span", {
+			class: `autos-st s-${r.status}`,
+			children: RUN_WORD[r.status] || r.status
+		}),
+		/* @__PURE__ */ u("b", {
+			class: "autos-run-name",
+			children: r.name
+		}),
+		/* @__PURE__ */ u("span", {
+			class: "autos-when",
+			children: when(r.at)
+		}),
+		/* @__PURE__ */ u("span", {
+			class: "autos-run-why",
+			children: r.status === "skipped" || r.status === "stopped" ? r.text : r.trigger
+		})
+	] });
+	if (!steps.length) return /* @__PURE__ */ u("div", {
+		class: "autos-run",
+		children: /* @__PURE__ */ u("div", {
+			class: "autos-run-head",
+			children: head
+		})
+	});
+	return /* @__PURE__ */ u("details", {
+		class: "autos-run",
+		children: [/* @__PURE__ */ u("summary", {
+			class: "autos-run-head",
+			children: head
+		}), steps.map((s, j) => /* @__PURE__ */ u("div", {
+			class: `autos-step-run${s.ok ? "" : " bad"}`,
+			children: [
+				s.halt ? "■" : s.ok ? "✓" : "✕",
+				" ",
+				s.what,
+				s.text ? /* @__PURE__ */ u("small", { children: [" — ", s.text] }) : null
+			]
+		}, j))]
+	});
+}
+function Switch({ on, label, busy, onClick }) {
+	return /* @__PURE__ */ u("button", {
+		type: "button",
+		class: `autos-sw${on ? " on" : ""}`,
+		role: "switch",
+		"aria-checked": on ? "true" : "false",
+		"aria-label": label,
+		"aria-busy": busy ? "true" : null,
+		onClick,
+		children: /* @__PURE__ */ u("span", {
+			class: "autos-knob",
+			"aria-hidden": "true"
+		})
+	});
+}
+function Item({ a, onEdit, onSave, onSay }) {
+	const [want, setWant] = d(null);
+	const on = want == null ? a.enabled : want;
+	const toggle = async () => {
+		if (want != null) return;
+		setWant(!a.enabled);
+		const r = await onSave({
+			...a,
+			enabled: !a.enabled
+		}, !a.enabled && needsPasskey(a));
+		setWant(null);
+		if (r && r.error) onSay(r.error);
+	};
+	const failed = a.lastRun && !a.lastRun.ok;
+	const hue = a.running ? "var(--cyan)" : !on ? "var(--dim)" : failed ? "var(--red)" : "var(--green)";
+	const status = a.running ? "running now" : !on ? "off" : a.nextRun ? `next ${when(a.nextRun)}` : a.trigger.type === "event" ? "waiting for the event" : "";
+	const more = a.steps.length - 3;
 	return /* @__PURE__ */ u("article", {
-		class: `autos-item${a.enabled ? "" : " off"}`,
+		class: `card autos-card${on ? "" : " off"}`,
+		style: `--c: ${hue}`,
 		children: [
 			/* @__PURE__ */ u("div", {
-				class: "autos-head",
+				class: "c-top",
 				children: [/* @__PURE__ */ u("button", {
-					class: `autos-sw${a.enabled ? " on" : ""}`,
-					role: "switch",
-					"aria-checked": a.enabled,
-					"aria-label": `${a.enabled ? "switch off" : "switch on"} ${a.name}`,
-					onClick: () => onSave({
-						...a,
-						enabled: !a.enabled
-					}, !a.enabled && needsPasskey(a)),
-					children: a.enabled ? "● on" : "○ off"
-				}), /* @__PURE__ */ u("b", {
-					class: "autos-name",
+					type: "button",
+					class: "c-name autos-open",
+					onClick: () => onEdit(a.id),
 					children: a.name
+				}), /* @__PURE__ */ u(Switch, {
+					on,
+					label: a.name,
+					busy: want != null,
+					onClick: toggle
 				})]
 			}),
-			/* @__PURE__ */ u("div", {
-				class: "autos-flow",
-				children: [/* @__PURE__ */ u("span", {
-					class: "autos-trigger",
-					children: describeTrigger(a.trigger)
-				}), a.steps.map((s, i) => /* @__PURE__ */ u("span", {
-					class: "autos-chip",
-					children: ["→ ", describeStep(s)]
-				}, i))]
+			/* @__PURE__ */ u("p", {
+				class: "autos-say",
+				children: describeTrigger(a.trigger)
+			}),
+			/* @__PURE__ */ u("ol", {
+				class: "autos-steps",
+				children: [a.steps.slice(0, 3).map((s, i) => /* @__PURE__ */ u("li", { children: describeStep(s) }, i)), more > 0 ? /* @__PURE__ */ u("li", {
+					class: "autos-dim",
+					children: [
+						"and ",
+						more,
+						" more"
+					]
+				}) : null]
 			}),
 			/* @__PURE__ */ u("div", {
-				class: "autos-foot",
-				children: [
-					/* @__PURE__ */ u("span", {
-						class: "autos-dim",
-						children: [status, a.lastRun ? ` · last ${when(a.lastRun.at)} ${a.lastRun.ok ? "✓" : "✕"}` : ""]
-					}),
-					/* @__PURE__ */ u("span", { class: "autos-grow" }),
-					/* @__PURE__ */ u(Btn, {
-						label: "run now",
-						onClick: () => onRun(a.id, needsPasskey(a), a.name)
-					}),
-					/* @__PURE__ */ u(Btn, {
-						label: "edit",
-						onClick: () => onEdit(a.id)
-					}),
-					sure ? /* @__PURE__ */ u(Btn, {
-						label: "delete it",
-						cls: "danger",
-						onClick: () => onDelete(a.id)
-					}) : /* @__PURE__ */ u(Btn, {
-						label: "delete",
-						onClick: () => setSure(true)
-					})
-				]
+				class: "autos-status",
+				children: [status ? /* @__PURE__ */ u("span", { children: status }) : null, a.lastRun ? /* @__PURE__ */ u("span", {
+					class: failed ? "bad" : "",
+					children: [
+						failed ? "failed" : "last ran",
+						" ",
+						when(a.lastRun.at)
+					]
+				}) : null]
 			})
 		]
 	});
 }
-function Editor({ data, editing, onSave, onDraft, onCancel }) {
+function Editor({ data, editing, onSave, onDelete, onRun, onDraft, onCancel }) {
 	const existing = editing !== "new" ? (data.automations || []).find((a) => a.id === editing) : null;
 	const [draft, setDraft] = d(() => existing ? clone(existing) : blankAutomation());
+	const [opened] = d(() => JSON.stringify(draft));
 	const [tab, setTab] = d("steps");
 	const [busy, setBusy] = d(false);
-	if (editing !== "new" && !existing) return /* @__PURE__ */ u("p", {
-		class: "autos-dim",
-		children: "that automation is not there any more."
+	const [err, setErr] = d("");
+	const [chat, setChat] = d({
+		msgs: [],
+		text: ""
 	});
+	const [menu, setMenu] = d(null);
+	const refocus = A(null);
+	h(() => {
+		const tries = refocus.current;
+		if (!tries) return;
+		refocus.current = null;
+		for (const q of tries) {
+			const el = document.querySelector(q);
+			if (el && !el.disabled) {
+				el.focus();
+				return;
+			}
+		}
+	});
+	if (editing !== "new" && !existing) return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
+		class: "cards autos",
+		children: /* @__PURE__ */ u("div", {
+			class: "autos-empty",
+			children: /* @__PURE__ */ u("h3", { children: "that automation is not there any more" })
+		})
+	}), /* @__PURE__ */ u(Bar, { children: /* @__PURE__ */ u("div", {
+		class: "autos-acts",
+		children: /* @__PURE__ */ u("button", {
+			type: "button",
+			onClick: onCancel,
+			children: "back to the list"
+		})
+	}) })] });
 	const fleet = data.fleet || [];
-	const set = (patch) => setDraft((d) => ({
+	const edit = (fn) => {
+		setErr("");
+		setDraft(fn);
+	};
+	const set = (patch) => edit((d) => ({
 		...d,
 		...patch
 	}));
-	const setTrigger = (patch) => setDraft((d) => ({
+	const setTrigger = (patch) => edit((d) => ({
 		...d,
 		trigger: {
 			...d.trigger,
 			...patch
 		}
 	}));
-	const setStep = (i, patch) => setDraft((d) => ({
+	const setStep = (i, patch) => edit((d) => ({
 		...d,
 		steps: d.steps.map((s, j) => j === i ? {
 			...s,
 			...patch
 		} : s)
 	}));
-	const move = (i, to) => setDraft((d) => {
-		const steps = [...d.steps];
-		const [s] = steps.splice(i, 1);
-		steps.splice(to, 0, s);
-		return {
+	const move = (i, to) => {
+		const dir = to < i ? "up" : "down";
+		refocus.current = [`[data-move="${to}:${dir}"]`, `[data-move="${to}:${dir === "up" ? "down" : "up"}"]`];
+		setMenu(to);
+		edit((d) => {
+			const steps = [...d.steps];
+			const [s] = steps.splice(i, 1);
+			steps.splice(to, 0, s);
+			return {
+				...d,
+				steps
+			};
+		});
+	};
+	const remove = (i) => {
+		setMenu(null);
+		refocus.current = [".autos-add select"];
+		edit((d) => ({
 			...d,
-			steps
-		};
-	});
+			steps: d.steps.filter((_, j) => j !== i)
+		}));
+	};
 	const key = needsPasskey(draft) && draft.enabled;
 	const save = async () => {
+		if (busy) return;
+		if (key) try {
+			normalize(draft);
+		} catch (e) {
+			setErr(e.message);
+			return;
+		}
 		setBusy(true);
+		setErr("");
+		const r = await onSave(draft, key);
+		setBusy(false);
+		if (r && r.error) setErr(r.error);
+	};
+	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
+		class: "cards autos autos-form",
+		children: /* @__PURE__ */ u("div", {
+			class: "autos-col",
+			children: [
+				/* @__PURE__ */ u("label", {
+					class: "autos-field",
+					children: [/* @__PURE__ */ u("span", { children: "name" }), /* @__PURE__ */ u("input", {
+						type: "text",
+						value: draft.name,
+						placeholder: "morning review",
+						autocomplete: "off",
+						onInput: (e) => set({ name: e.currentTarget.value })
+					})]
+				}),
+				/* @__PURE__ */ u(Seg, {
+					label: "how to build it",
+					cls: "tabs",
+					value: tab,
+					options: [["steps", "steps"], ["ask", "ask for it"]],
+					onChange: setTab
+				}),
+				tab === "ask" ? /* @__PURE__ */ u(Ask, {
+					draft,
+					chat,
+					setChat,
+					onDraft,
+					onApply: (a) => {
+						edit((d) => ({
+							...d,
+							...a,
+							id: d.id,
+							enabled: d.enabled
+						}));
+						setTab("steps");
+					}
+				}) : /* @__PURE__ */ u(S, { children: [
+					/* @__PURE__ */ u(Trigger, {
+						t: draft.trigger,
+						fleet,
+						onChange: setTrigger,
+						onType: (type) => set({ trigger: blankTrigger(type) })
+					}),
+					draft.steps.map((s, i) => /* @__PURE__ */ u(Step, {
+						s,
+						i,
+						n: draft.steps.length,
+						isEvent: draft.trigger.type === "event",
+						fleet,
+						open: menu === i,
+						onMenu: () => setMenu(menu === i ? null : i),
+						onChange: (patch) => setStep(i, patch),
+						onMove: (to) => move(i, to),
+						onRemove: () => remove(i)
+					}, i)),
+					/* @__PURE__ */ u("label", {
+						class: "autos-field autos-add",
+						children: [/* @__PURE__ */ u("span", { children: "add a step" }), /* @__PURE__ */ u("select", {
+							value: "",
+							onChange: (e) => {
+								const v = e.currentTarget.value;
+								if (v) edit((d) => ({
+									...d,
+									steps: [...d.steps, blankStep(v)]
+								}));
+								e.currentTarget.value = "";
+							},
+							children: [/* @__PURE__ */ u("option", {
+								value: "",
+								children: "choose…"
+							}), Object.entries(ACTIONS).map(([k, d]) => /* @__PURE__ */ u("option", {
+								value: k,
+								children: d.label
+							}, k))]
+						})]
+					}),
+					/* @__PURE__ */ u("div", {
+						class: "autos-block",
+						children: [/* @__PURE__ */ u("div", {
+							class: "autos-line",
+							children: [/* @__PURE__ */ u("div", { children: [/* @__PURE__ */ u("b", { children: draft.enabled ? "switched on" : "switched off" }), draft.enabled ? null : /* @__PURE__ */ u("small", { children: "Saved, and it does nothing until it is switched on." })] }), /* @__PURE__ */ u(Switch, {
+								on: draft.enabled,
+								label: "switched on",
+								onClick: () => set({ enabled: !draft.enabled })
+							})]
+						}), key ? /* @__PURE__ */ u("p", {
+							class: "autos-note",
+							children: "It can start or stop sessions on its own, so saving it asks for your passkey, the same one a tap on start or stop would."
+						}) : null]
+					}),
+					existing ? /* @__PURE__ */ u(Manage, {
+						a: existing,
+						dirty: JSON.stringify(draft) !== opened,
+						onRun,
+						onDelete
+					}) : null
+				] })
+			]
+		})
+	}), /* @__PURE__ */ u(Bar, { children: [err ? /* @__PURE__ */ u("p", {
+		class: "autos-err",
+		role: "alert",
+		children: err
+	}) : null, /* @__PURE__ */ u("div", {
+		class: "autos-acts",
+		children: [/* @__PURE__ */ u("button", {
+			type: "button",
+			onClick: onCancel,
+			children: "cancel"
+		}), /* @__PURE__ */ u("button", {
+			type: "button",
+			class: tab === "ask" ? null : "go",
+			disabled: busy,
+			onClick: save,
+			children: busy ? "saving…" : "save"
+		})]
+	})] })] });
+}
+function Manage({ a, dirty, onRun, onDelete }) {
+	const [sure, setSure] = d(false);
+	const [running, setRunning] = d(false);
+	const refused = a.running ? "It is running now." : eventOnly(a) ? "It uses the event's session, so it can only run when the event happens." : dirty ? "This runs what is saved. Save your changes first." : "";
+	const run = async () => {
+		setRunning(true);
 		try {
-			await onSave(draft, key);
+			await onRun(a.id, needsPasskey(a), a.name);
 		} finally {
-			setBusy(false);
+			setRunning(false);
 		}
 	};
-	return /* @__PURE__ */ u(S, { children: [
-		/* @__PURE__ */ u("label", {
-			class: "autos-field",
-			children: [/* @__PURE__ */ u("span", { children: "name" }), /* @__PURE__ */ u("input", {
-				type: "text",
-				value: draft.name,
-				placeholder: "morning review",
-				onInput: (e) => set({ name: e.currentTarget.value })
+	return /* @__PURE__ */ u("section", {
+		class: "autos-block",
+		children: [/* @__PURE__ */ u("div", {
+			class: "autos-line",
+			children: [/* @__PURE__ */ u("div", { children: [/* @__PURE__ */ u("b", { children: "run it once" }), refused ? /* @__PURE__ */ u("small", { children: refused }) : needsPasskey(a) ? /* @__PURE__ */ u("small", { children: "Asks for your passkey." }) : null] }), /* @__PURE__ */ u("button", {
+				type: "button",
+				disabled: !!refused || running,
+				onClick: run,
+				children: running ? "starting…" : "run now"
 			})]
-		}),
-		/* @__PURE__ */ u("div", {
-			class: "seg autos-tabs",
-			children: [/* @__PURE__ */ u(Btn, {
-				label: "steps",
-				cls: tab === "steps" ? "on" : "",
-				onClick: () => setTab("steps")
-			}), /* @__PURE__ */ u(Btn, {
-				label: "ask for it",
-				cls: tab === "ask" ? "on" : "",
-				onClick: () => setTab("ask")
-			})]
-		}),
-		tab === "ask" ? /* @__PURE__ */ u(Ask, {
-			draft,
-			onDraft,
-			onApply: (a) => {
-				setDraft((d) => ({
-					...d,
-					...a,
-					id: d.id,
-					enabled: d.enabled
-				}));
-				setTab("steps");
-			}
-		}) : /* @__PURE__ */ u(S, { children: [
-			/* @__PURE__ */ u(Trigger, {
-				t: draft.trigger,
-				fleet,
-				onChange: setTrigger,
-				onType: (type) => set({ trigger: blankTrigger(type) })
-			}),
-			draft.steps.map((s, i) => /* @__PURE__ */ u(Step, {
-				s,
-				i,
-				n: draft.steps.length,
-				isEvent: draft.trigger.type === "event",
-				fleet,
-				onChange: (patch) => setStep(i, patch),
-				onMove: (to) => move(i, to),
-				onRemove: () => setDraft((d) => ({
-					...d,
-					steps: d.steps.filter((_, j) => j !== i)
-				}))
-			}, i)),
-			/* @__PURE__ */ u("label", {
-				class: "autos-field",
-				children: [/* @__PURE__ */ u("span", { children: "add a step" }), /* @__PURE__ */ u("select", {
-					value: "",
-					onChange: (e) => {
-						const v = e.currentTarget.value;
-						if (v) setDraft((d) => ({
-							...d,
-							steps: [...d.steps, blankStep(v)]
-						}));
-						e.currentTarget.value = "";
-					},
-					children: [/* @__PURE__ */ u("option", {
-						value: "",
-						children: "choose…"
-					}), Object.entries(ACTIONS).map(([k, d]) => /* @__PURE__ */ u("option", {
-						value: k,
-						children: d.label
-					}, k))]
-				})]
-			})
-		] }),
-		/* @__PURE__ */ u("label", {
-			class: "autos-check",
-			children: [/* @__PURE__ */ u("input", {
-				type: "checkbox",
-				checked: draft.enabled,
-				onChange: (e) => set({ enabled: e.currentTarget.checked })
-			}), " switched on"]
-		}),
-		key ? /* @__PURE__ */ u("p", {
-			class: "autos-note",
-			children: "It can start or stop sessions on its own, so saving it asks for your passkey — the same one a tap on start or stop would."
-		}) : null,
-		/* @__PURE__ */ u("div", {
-			class: "row autos-save",
-			children: [/* @__PURE__ */ u(Btn, {
-				label: "cancel",
-				onClick: onCancel
-			}), /* @__PURE__ */ u(Btn, {
-				label: busy ? "saving…" : "save",
-				cls: "go",
-				onClick: busy ? void 0 : save
-			})]
-		})
-	] });
+		}), /* @__PURE__ */ u("div", {
+			class: "autos-line",
+			children: [
+				/* @__PURE__ */ u("div", { children: [/* @__PURE__ */ u("b", { children: "delete this automation" }), sure ? /* @__PURE__ */ u("small", { children: "This cannot be undone." }) : null] }),
+				sure ? /* @__PURE__ */ u("button", {
+					type: "button",
+					onClick: () => setSure(false),
+					children: "keep it"
+				}) : null,
+				sure ? /* @__PURE__ */ u("button", {
+					type: "button",
+					class: "danger",
+					onClick: () => onDelete(a.id),
+					children: "delete it"
+				}) : /* @__PURE__ */ u("button", {
+					type: "button",
+					onClick: () => setSure(true),
+					children: "delete"
+				})
+			]
+		})]
+	});
 }
-function Seg({ value, options, onChange }) {
+function Seg({ label, value, options, onChange, cls = "" }) {
 	return /* @__PURE__ */ u("div", {
-		class: "seg",
-		children: options.map(([v, label]) => /* @__PURE__ */ u(Btn, {
-			label,
-			cls: value === v ? "on" : "",
+		class: `seg autos-seg ${cls}`.trim(),
+		role: "group",
+		"aria-label": label,
+		children: options.map(([v, text]) => /* @__PURE__ */ u(Tog, {
+			on: value === v,
+			label: text,
 			onClick: () => value !== v && onChange(v)
 		}, v))
+	});
+}
+var Tog = ({ on, label, onClick }) => /* @__PURE__ */ u("button", {
+	type: "button",
+	class: on ? "on" : null,
+	"aria-pressed": on ? "true" : "false",
+	onClick,
+	children: label
+});
+function Gone({ value, known }) {
+	if (!value || known.includes(value)) return null;
+	const words = value === "{project}" ? "the event's project (needs a trigger on a session)" : value === "{session}" ? "the event's session (needs a trigger on a session)" : `${value} (not in the fleet now)`;
+	return /* @__PURE__ */ u("option", {
+		value,
+		children: words
 	});
 }
 function Trigger({ t, fleet, onChange, onType }) {
@@ -933,12 +1335,14 @@ function Trigger({ t, fleet, onChange, onType }) {
 		children: [
 			/* @__PURE__ */ u("h3", { children: "when" }),
 			/* @__PURE__ */ u(Seg, {
+				label: "what starts it",
 				value: t.type,
 				options: [["schedule", "scheduled"], ["event", "when a session changes"]],
 				onChange: onType
 			}),
 			t.type === "schedule" ? /* @__PURE__ */ u(S, { children: [
 				/* @__PURE__ */ u(Seg, {
+					label: "how often",
 					value: t.mode,
 					options: [
 						["days", "weekly"],
@@ -948,7 +1352,7 @@ function Trigger({ t, fleet, onChange, onType }) {
 					onChange: (mode) => onChange({ mode })
 				}),
 				t.mode === "days" ? /* @__PURE__ */ u("div", {
-					class: "seg autos-days",
+					class: "seg autos-seg autos-days",
 					role: "group",
 					"aria-label": "days",
 					children: [
@@ -959,9 +1363,9 @@ function Trigger({ t, fleet, onChange, onType }) {
 						5,
 						6,
 						0
-					].map((d) => /* @__PURE__ */ u(Btn, {
+					].map((d) => /* @__PURE__ */ u(Tog, {
 						label: DAY_NAMES[d],
-						cls: t.days.includes(d) ? "on" : "",
+						on: t.days.includes(d),
 						onClick: () => onChange({ days: t.days.includes(d) ? t.days.filter((x) => x !== d) : [...t.days, d] })
 					}, d))
 				}) : null,
@@ -1016,13 +1420,20 @@ function Trigger({ t, fleet, onChange, onType }) {
 							project: e.currentTarget.value,
 							session: "*"
 						}),
-						children: [/* @__PURE__ */ u("option", {
-							value: "*",
-							children: "any project"
-						}), fleet.map((p) => /* @__PURE__ */ u("option", {
-							value: p.name,
-							children: p.name
-						}, p.name))]
+						children: [
+							/* @__PURE__ */ u("option", {
+								value: "*",
+								children: "any project"
+							}),
+							/* @__PURE__ */ u(Gone, {
+								value: t.project,
+								known: ["*", ...fleet.map((p) => p.name)]
+							}),
+							fleet.map((p) => /* @__PURE__ */ u("option", {
+								value: p.name,
+								children: p.name
+							}, p.name))
+						]
 					})]
 				}),
 				/* @__PURE__ */ u("label", {
@@ -1031,23 +1442,34 @@ function Trigger({ t, fleet, onChange, onType }) {
 						value: t.session,
 						disabled: t.project === "*",
 						onChange: (e) => onChange({ session: e.currentTarget.value }),
-						children: [/* @__PURE__ */ u("option", {
-							value: "*",
-							children: "any session"
-						}), sessions.map((s) => /* @__PURE__ */ u("option", {
-							value: s.name,
-							children: s.lead ? `${s.name} (lead)` : s.name
-						}, s.name))]
+						children: [
+							/* @__PURE__ */ u("option", {
+								value: "*",
+								children: "any session"
+							}),
+							/* @__PURE__ */ u(Gone, {
+								value: t.session,
+								known: ["*", ...sessions.map((s) => s.name)]
+							}),
+							sessions.map((s) => /* @__PURE__ */ u("option", {
+								value: s.name,
+								children: s.lead ? `${s.name} (lead)` : s.name
+							}, s.name))
+						]
 					})]
 				}),
 				/* @__PURE__ */ u("label", {
 					class: "autos-field",
 					children: [/* @__PURE__ */ u("span", { children: "not again for the same session within (min)" }), /* @__PURE__ */ u("input", {
 						type: "number",
+						inputmode: "numeric",
 						min: "1",
 						max: "1440",
 						value: t.cooldown,
-						onInput: (e) => onChange({ cooldown: Number(e.currentTarget.value) })
+						onInput: (e) => {
+							const v = e.currentTarget.value;
+							onChange({ cooldown: v === "" ? "" : Number(v) });
+						}
 					})]
 				})
 			] }),
@@ -1058,39 +1480,54 @@ function Trigger({ t, fleet, onChange, onType }) {
 		]
 	});
 }
-function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
+function Step({ s, i, n, isEvent, fleet, open, onMenu, onChange, onMove, onRemove }) {
 	const d = ACTIONS[s.action];
 	const has = (f) => d.needs.includes(f) || (d.optional || []).includes(f);
 	const fromEvent = s.project === EVENT_PROJECT;
 	const sessions = fleet.find((p) => p.name === s.project)?.sessions || [];
+	const shown = fromEvent ? [] : sessions;
 	return /* @__PURE__ */ u("section", {
 		class: `autos-block${d.passkey ? " key" : ""}`,
 		children: [
 			/* @__PURE__ */ u("div", {
 				class: "autos-head",
+				children: [/* @__PURE__ */ u("h3", { children: [
+					i + 1,
+					". ",
+					d.label
+				] }), /* @__PURE__ */ u("button", {
+					type: "button",
+					class: "autos-icon",
+					"aria-label": `actions for step ${i + 1}`,
+					"aria-expanded": open ? "true" : "false",
+					onClick: onMenu,
+					children: "⋯"
+				})]
+			}),
+			open ? /* @__PURE__ */ u("div", {
+				class: "autos-step-acts",
 				children: [
-					/* @__PURE__ */ u("h3", { children: [
-						i + 1,
-						". ",
-						d.label
-					] }),
-					/* @__PURE__ */ u("span", { class: "autos-grow" }),
-					/* @__PURE__ */ u(Btn, {
-						label: "↑",
-						onClick: i ? () => onMove(i - 1) : void 0,
-						cls: i ? "" : "off"
+					/* @__PURE__ */ u("button", {
+						type: "button",
+						"data-move": `${i}:up`,
+						disabled: !i,
+						onClick: () => onMove(i - 1),
+						children: "move up"
 					}),
-					/* @__PURE__ */ u(Btn, {
-						label: "↓",
-						onClick: i < n - 1 ? () => onMove(i + 1) : void 0,
-						cls: i < n - 1 ? "" : "off"
+					/* @__PURE__ */ u("button", {
+						type: "button",
+						"data-move": `${i}:down`,
+						disabled: i >= n - 1,
+						onClick: () => onMove(i + 1),
+						children: "move down"
 					}),
-					/* @__PURE__ */ u(Btn, {
-						label: "✕",
-						onClick: onRemove
+					/* @__PURE__ */ u("button", {
+						type: "button",
+						onClick: onRemove,
+						children: "remove"
 					})
 				]
-			}),
+			}) : null,
 			has("project") ? /* @__PURE__ */ u("label", {
 				class: "autos-field",
 				children: [/* @__PURE__ */ u("span", { children: "project" }), /* @__PURE__ */ u("select", {
@@ -1114,6 +1551,10 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 							value: EVENT_PROJECT,
 							children: "the event's project"
 						}) : null,
+						/* @__PURE__ */ u(Gone, {
+							value: s.project,
+							known: [...isEvent ? [EVENT_PROJECT] : [], ...fleet.map((p) => p.name)]
+						}),
 						fleet.map((p) => /* @__PURE__ */ u("option", {
 							value: p.name,
 							children: p.name
@@ -1136,10 +1577,14 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 							value: EVENT_SESSION,
 							children: "the event's session"
 						}) : null,
-						!fromEvent ? sessions.map((x) => /* @__PURE__ */ u("option", {
+						/* @__PURE__ */ u(Gone, {
+							value: s.session,
+							known: [...isEvent ? [EVENT_SESSION] : [], ...shown.map((x) => x.name)]
+						}),
+						shown.map((x) => /* @__PURE__ */ u("option", {
 							value: x.name,
 							children: x.lead ? `${x.name} (lead)` : x.name
-						}, x.name)) : null
+						}, x.name))
 					]
 				})]
 			}) : null,
@@ -1149,6 +1594,7 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 					type: "text",
 					value: s.name,
 					placeholder: "review-{date}",
+					autocomplete: "off",
 					onInput: (e) => onChange({ name: e.currentTarget.value })
 				})]
 			}) : null,
@@ -1166,6 +1612,7 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 				children: [/* @__PURE__ */ u("span", { children: "branch (optional)" }), /* @__PURE__ */ u("input", {
 					type: "text",
 					value: s.branch,
+					autocomplete: "off",
 					onInput: (e) => onChange({ branch: e.currentTarget.value })
 				})]
 			}) : null,
@@ -1183,18 +1630,18 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 				children: [
 					/* @__PURE__ */ u("span", { children: "…if it is now" }),
 					/* @__PURE__ */ u("div", {
-						class: "seg autos-days",
+						class: "seg autos-seg",
 						role: "group",
 						"aria-label": "statuses",
-						children: STATES.map((k) => /* @__PURE__ */ u(Btn, {
+						children: STATES.map((k) => /* @__PURE__ */ u(Tog, {
 							label: k,
-							cls: s.status.includes(k) ? "on" : "",
+							on: s.status.includes(k),
 							onClick: () => onChange({ status: s.status.includes(k) ? s.status.filter((x) => x !== k) : [...s.status, k] })
 						}, k))
 					}),
 					/* @__PURE__ */ u("small", {
 						class: "autos-dim",
-						children: "If it is not, the run ends here — not an error."
+						children: "If it is not, the run ends here. That is not an error."
 					})
 				]
 			}) : null,
@@ -1202,25 +1649,32 @@ function Step({ s, i, n, isEvent, fleet, onChange, onMove, onRemove }) {
 				class: "autos-field",
 				children: [/* @__PURE__ */ u("span", { children: "minutes (1–60)" }), /* @__PURE__ */ u("input", {
 					type: "number",
+					inputmode: "numeric",
 					min: "1",
 					max: "60",
 					value: s.minutes,
-					onInput: (e) => onChange({ minutes: Number(e.currentTarget.value) })
+					onInput: (e) => {
+						const v = e.currentTarget.value;
+						onChange({ minutes: v === "" ? "" : Number(v) });
+					}
 				})]
 			}) : null
 		]
 	});
 }
-function Ask({ draft, onDraft, onApply }) {
-	const [msgs, setMsgs] = d([]);
-	const [text, setText] = d("");
+function Ask({ draft, chat, setChat, onDraft, onApply }) {
+	const { msgs, text } = chat;
 	const [busy, setBusy] = d(false);
 	const end = A(null);
+	const setMsgs = (fn) => setChat((c) => ({
+		...c,
+		msgs: fn(c.msgs)
+	}));
 	h(() => {
-		try {
+		if (msgs.length) try {
 			end.current?.scrollIntoView({ block: "end" });
 		} catch {}
-	}, [msgs, busy]);
+	}, [msgs.length, busy]);
 	const ask = async () => {
 		const t = text.trim();
 		if (!t || busy) return;
@@ -1228,8 +1682,10 @@ function Ask({ draft, onDraft, onApply }) {
 			role: "user",
 			text: t
 		}];
-		setMsgs(next);
-		setText("");
+		setChat({
+			msgs: next,
+			text: ""
+		});
 		setBusy(true);
 		try {
 			const r = await onDraft(next, draft.steps.length || draft.name ? {
@@ -1243,48 +1699,85 @@ function Ask({ draft, onDraft, onApply }) {
 				automation: r.automation || null
 			}]);
 		} catch (e) {
-			setMsgs((m) => [...m, {
-				role: "ai",
-				text: `could not: ${e.message}`,
-				error: true
-			}]);
+			setChat((c) => ({
+				msgs: [...msgs, {
+					role: "ai",
+					text: e.message,
+					error: true
+				}],
+				text: c.text || t
+			}));
 		} finally {
 			setBusy(false);
 		}
 	};
 	return /* @__PURE__ */ u("section", {
-		class: "autos-ask",
+		class: "autos-block autos-ask",
 		children: [
 			!msgs.length ? /* @__PURE__ */ u("p", {
 				class: "autos-dim",
-				children: "Say it in a sentence — \"every weekday at 09:00, wake the workers in acme-api and tell the lead to share out what is open\". It fills in the steps; you check them and save."
+				children: "Say it in a sentence: \"every weekday at 09:00, wake the workers in acme-api and tell the lead to share out what is open\". It fills in the steps. You check them and save."
 			}) : null,
 			msgs.map((m, i) => /* @__PURE__ */ u("div", {
 				class: `autos-msg ${m.role}${m.error ? " bad" : ""}`,
-				children: [m.text, m.automation ? /* @__PURE__ */ u("div", { children: /* @__PURE__ */ u(Btn, {
-					label: "put it in the editor",
-					cls: "go",
-					onClick: () => onApply(m.automation)
-				}) }) : null]
+				role: m.error ? "alert" : null,
+				children: [m.text, m.automation ? /* @__PURE__ */ u(Proposal, {
+					a: m.automation,
+					replaces: draft.steps.length > 0,
+					onApply: () => onApply(m.automation)
+				}) : null]
 			}, i)),
 			busy ? /* @__PURE__ */ u("div", {
 				class: "autos-msg ai autos-dim",
 				children: "writing it…"
 			}) : null,
 			/* @__PURE__ */ u("div", { ref: end }),
-			/* @__PURE__ */ u("textarea", {
-				rows: 2,
-				value: text,
-				placeholder: "what should happen, and when?",
-				onInput: (e) => setText(e.currentTarget.value)
-			}),
 			/* @__PURE__ */ u("div", {
-				class: "row",
-				children: /* @__PURE__ */ u(Btn, {
-					label: "ask",
-					cls: "go",
-					onClick: busy || !text.trim() ? void 0 : ask
-				})
+				class: "autos-compose",
+				children: [/* @__PURE__ */ u("textarea", {
+					rows: 2,
+					value: text,
+					placeholder: "what should happen, and when?",
+					"aria-label": "what should happen, and when?",
+					onInput: (e) => {
+						const v = e.currentTarget.value;
+						setChat((c) => ({
+							...c,
+							text: v
+						}));
+					}
+				}), /* @__PURE__ */ u("button", {
+					type: "button",
+					disabled: busy || !text.trim(),
+					onClick: ask,
+					children: "ask"
+				})]
+			})
+		]
+	});
+}
+function Proposal({ a, replaces, onApply }) {
+	return /* @__PURE__ */ u("div", {
+		class: "autos-proposal",
+		children: [
+			/* @__PURE__ */ u("b", { children: a.name }),
+			/* @__PURE__ */ u("p", {
+				class: "autos-say",
+				children: describeTrigger(a.trigger)
+			}),
+			/* @__PURE__ */ u("ol", {
+				class: "autos-steps full",
+				children: (a.steps || []).map((s, i) => /* @__PURE__ */ u("li", { children: describeStep(s) }, i))
+			}),
+			needsPasskey(a) ? /* @__PURE__ */ u("p", {
+				class: "autos-note",
+				children: "It can start or stop sessions on its own, so saving it asks for your passkey."
+			}) : null,
+			/* @__PURE__ */ u("button", {
+				type: "button",
+				class: "go",
+				onClick: onApply,
+				children: replaces ? "replace the steps with this" : "put it in the editor"
 			})
 		]
 	});
