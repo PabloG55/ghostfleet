@@ -136,7 +136,7 @@ outgoing_id() {
   # (lib/codex-rollout.mjs). A codex that never took a turn holds none, and like claude's
   # unresolved case that is "nothing to come back to", not "fall back to an older record".
   if [ "$agent" = codex ]; then
-    local ppid_; ppid_="$(tmux -L "$SOCK" display-message -p -t "$SLOT" '#{pane_pid}' 2>/dev/null)"
+    local ppid_; ppid_="$(tmux -u -L "$SOCK" display-message -p -t "$SLOT" '#{pane_pid}' 2>/dev/null)"
     if [ -n "$ppid_" ] && out="$(node "$LIB_DIR/codex-rollout.mjs" resolve --pid "$ppid_" 2>/dev/null)" && [ -n "$out" ]; then
       printf '%s' "${out%%$'\x1f'*}"; return 0
     fi
@@ -171,7 +171,7 @@ capture_env() {
       CLAUDE_FLEET_AGENT|CLAUDE_FLEET_RESUME|CLAUDE_FLEET_FRESH|CLAUDE_FLEET_MODEL|CLAUDE_FLEET_SOCK) continue ;;
     esac
     ENV_ARGS+=(-e "$line")
-  done < <(tmux -L "$SOCK" show-environment -t "$SLOT" 2>/dev/null)
+  done < <(tmux -u -L "$SOCK" show-environment -t "$SLOT" 2>/dev/null)
 }
 launch() {   # agent id model cwd
   local agent="$1" id="$2" model="$3" cwd="$4" fresh=0
@@ -281,10 +281,10 @@ do_switch() {
     revert_setting "$from"
     return 1
   fi
-  cwd="$(tmux -L "$SOCK" display-message -p -t "$SLOT" '#{pane_current_path}' 2>/dev/null)"
+  cwd="$(tmux -u -L "$SOCK" display-message -p -t "$SLOT" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$cwd" ] && [ -d "$cwd" ] || cwd="$HOME"
   capture_env
-  omodel="$(tmux -L "$SOCK" show-environment -t "$SLOT" CLAUDE_FLEET_MODEL 2>/dev/null)"
+  omodel="$(tmux -u -L "$SOCK" show-environment -t "$SLOT" CLAUDE_FLEET_MODEL 2>/dev/null)"
   case "$omodel" in CLAUDE_FLEET_MODEL=*) omodel="${omodel#CLAUDE_FLEET_MODEL=}" ;; *) omodel="" ;; esac
 
   # THE RECORD GOES DOWN BEFORE THE KILL. If writing it fails, nothing is killed.

@@ -70,8 +70,8 @@ done
 # and anyone on the command line have only the `cf-<project>` name that -L takes. Telling
 # them apart by the slash beats making callers care which flag this wants.
 case "$SOCK" in
-  /*) T() { tmux -S "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
-  *)  T() { tmux -L "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
+  /*) T() { tmux -u -S "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
+  *)  T() { tmux -u -L "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
 esac
 
 # The four options that make a tab point at its origin, as one step so there is one copy:

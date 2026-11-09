@@ -105,7 +105,7 @@ fi
 # environment holds the name it was LAUNCHED with, so after a rename the old guard compared
 # against a name nobody has and let a session stop itself. Either one matching refuses.
 _me=""; [ -n "${TMUX_PANE:-}" ] && case "${TMUX:-}" in *"/$SOCK,"*)
-  _me="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+  _me="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
 { [ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ]; } || { [ -n "$_me" ] && [ "$SESSION" = "$_me" ]; } \
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
@@ -166,7 +166,7 @@ fi
 KEPT="$FLEET_DIR/$SOCK.$SESSION.reclaim-kept"
 WT=""
 if [ "$RECLAIM" = 1 ]; then
-  WT="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  WT="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$WT" ] || WT="$(head -1 "$KEPT" 2>/dev/null)"
   [ -n "$WT" ] || WT="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
   # the pane may be deeper in the tree than the checkout root; resolve to the worktree
@@ -211,7 +211,7 @@ bounded() {   # bounded <seconds> <cmd...>
   return "$rc"
 }
 if [ "$SESSION" != master ]; then
-  _lwt="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  _lwt="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$_lwt" ] || _lwt="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
   if [ -n "$_lwt" ] && [ -d "$_lwt" ] \
      && [ "$(git -C "$_lwt" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$_lwt" rev-parse --git-common-dir 2>/dev/null)" ]; then

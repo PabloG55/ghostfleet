@@ -227,7 +227,7 @@ budget() {
   local p="" s="" w=""
   BUDGET_PCT=0; BUDGET_BLIND=""; BUDGET_FROZEN=""; BUDGET_FROM=""
   mod_budget && return 0
-  for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
+  for s in $(tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
     if is_parked "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s"; continue; fi
     # ...and a session we resumed that has not repainted yet is the same stopped clock,
@@ -237,7 +237,7 @@ budget() {
     if [ -n "$p" ]; then
       [ "$p" -gt "$BUDGET_PCT" ] && BUDGET_PCT="$p"
     else
-      w="$(tmux -L "$SOCK" display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
+      w="$(tmux -u -L "$SOCK" display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
       BUDGET_BLIND="$BUDGET_BLIND $s(${w:-?}c)"
     fi
   done
@@ -246,7 +246,7 @@ budget() {
 # account, so the ceiling never parks a worker it isn't measuring
 workers_newest_first() {
   local s=""
-  tmux -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
+  tmux -u -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
     | grep -vE ' master$' | sort -rn | awk '{print $2}' \
     | while IFS= read -r s; do meterable "$s" && printf '%s\n' "$s"; done
 }
@@ -602,7 +602,7 @@ if [ "$ONCE" = 1 ]; then
   resource_tick || accounts_tick || tick
 else
   while true; do
-    tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
+    tmux -u -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
     env_tick
     resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process

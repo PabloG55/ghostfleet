@@ -165,7 +165,7 @@ if [ -z "${CLAUDE_FLEET_SOCK:-}" ]; then
   command -v tmux >/dev/null 2>&1 || exit 0
   PROJ="$(registered_project "$GITROOT")" || exit 0
   [ -n "$PROJ" ] || exit 0
-  tmux -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
+  tmux -u -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
   OUTSIDE=1
 fi
 
@@ -390,7 +390,7 @@ if [ "$MERGE" = 1 ]; then
   # Which fleet, session and settings: the session's own override first, then its project.
   _bsock="${CLAUDE_FLEET_SOCK:-}"; [ -n "$_bsock" ] || _bsock="cf-$PROJ"
   _bdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-  _bsess="$(tmux -L "$_bsock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
+  _bsess="$(tmux -u -L "$_bsock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
   [ -n "$_bsess" ] || _bsess="${CLAUDE_FLEET_SLOT:-}"
   _blib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib"
   . "$_blib/boundary.sh" 2>/dev/null; . "$_blib/review-gate.sh" 2>/dev/null
@@ -442,7 +442,7 @@ if [ "$MERGE" = 1 ]; then
       _kbr=""                                  # the children's branches: manifest, then pane
       for _k in $_kids; do
         _b="$(awk -F'\t' -v s="$_k" '$2==s{print $3; exit}' "$_bdir/$_bsock.manifest.tsv" 2>/dev/null)"
-        [ -n "$_b" ] || _b="$(git -C "$(tmux -L "$_bsock" display-message -p -t "$_k" '#{pane_current_path}' 2>/dev/null)" \
+        [ -n "$_b" ] || _b="$(git -C "$(tmux -u -L "$_bsock" display-message -p -t "$_k" '#{pane_current_path}' 2>/dev/null)" \
                                rev-parse --abbrev-ref HEAD 2>/dev/null)"
         [ -n "$_b" ] && _kbr="$_kbr $_b"
       done
@@ -492,7 +492,7 @@ _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 # asks: the pane first (a renamed session keeps its launch-time env), then the env.
 _me=""
 case "${TMUX:-}" in *"/${CLAUDE_FLEET_SOCK:-/},"*)
-  [ -n "${TMUX_PANE:-}" ] && _me="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+  [ -n "${TMUX_PANE:-}" ] && _me="$(tmux -u -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
 [ -n "$_me" ] || _me="${CLAUDE_FLEET_SLOT:-}"
 _fdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 SUBWORKER=0

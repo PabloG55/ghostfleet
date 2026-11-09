@@ -1944,7 +1944,7 @@ async function readTmuxPresence() {
   if (now() - tmuxCache.at < AT_MAC_CACHE) return tmuxCache.v;
   const socks = [...new Set([...sockProjects().keys(), STACK_SOCK])];
   const mine = new Set([...terms].map(b => b.pid).filter(Boolean));
-  const outs = await Promise.all(socks.map(s => tmuxOut(['-L', s, 'list-clients', '-F', '#{client_pid}\t#{client_activity}'])));
+  const outs = await Promise.all(socks.map(s => tmuxOut(['-u', '-L', s, 'list-clients', '-F', '#{client_pid}\t#{client_activity}'])));
   let newest = null;
   for (const o of outs) { const n = parseClientActivity(o, mine); if (n != null) newest = Math.max(newest ?? 0, n); }
   tmuxCache = { at: now(), v: newest == null ? null : { idle: Math.max(0, now() - newest), locked: false } };
@@ -2907,7 +2907,7 @@ function agentCatalogue() {
     const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
     const counted = await Promise.all(all.map(async (t) => {
       let live = 0;
-      try { live = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
+      try { live = execFileSync('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean).length; } catch {}
       const row = { name: t.name, profile: t.profile, path: t.path, agent: t.agent || 'claude', model: projectModel(t), sock: t.sock, live };
       if (!rollup) return row;
@@ -3010,7 +3010,7 @@ function agentCatalogue() {
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     let names = [];
-    try { names = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
+    try { names = execFileSync('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean); } catch {}
     return send(res, 200, nudgeSettings(t, names));
   }

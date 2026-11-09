@@ -380,7 +380,7 @@ master_with_live_workers() {
     case "$other" in _*) continue ;; esac
     st="$(field_for "$sock" "$other" 5)"
     case "$st" in working|need-you) return 0 ;; esac
-  done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
+  done < <(tmux -u -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
   return 1
 }
 
@@ -395,7 +395,7 @@ skips_trust_dialog() {
 }
 
 pane_pid_of() {
-  tmux -L "$1" list-panes -t "$2" -F '#{pane_pid}' 2>/dev/null | head -1
+  tmux -u -L "$1" list-panes -t "$2" -F '#{pane_pid}' 2>/dev/null | head -1
 }
 is_uuid() {
   case "$1" in
@@ -580,7 +580,7 @@ _live_sid() {
     age="$(proc_age "$p")"
     case "$age" in ''|*[!0-9]*) return 1 ;; esac
     since=$(( $(now) - age ))
-    cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+    cwd="$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
     LIVE_TR=""
     while IFS= read -r cfg; do
       [ -n "$cfg" ] || continue
@@ -768,7 +768,7 @@ build_plan() {
         # whole. It is the record's status and ts that matter here: the id and transcript
         # are replaced by the live ones below either way.
         if [ -z "$id" ]; then
-          _rs="$(slot_by_pane "$sock" "$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_id}@#{pid}' 2>/dev/null)")"
+          _rs="$(slot_by_pane "$sock" "$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_id}@#{pid}' 2>/dev/null)")"
           [ -z "$_rs" ] && [ "$live" = yes ] && _rs="$(slot_by_sid "$sock" "$LIVE_ID")"
           if [ -n "$_rs" ] && [ "$_rs" != "$slot" ]; then
             st="$(field_for "$sock" "$_rs" 5)"; ts="$(field_for "$sock" "$_rs" 3)"
@@ -777,7 +777,7 @@ build_plan() {
           else _rs=""; fi
         fi
         if [ "$live" = yes ]; then
-          [ -n "$cwd" ] || cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+          [ -n "$cwd" ] || cwd="$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
           [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}" "$FOLLOW_PREV"
           # the live transcript or none: falling back to the recorded one is the bug itself
           id="$LIVE_ID"; tr="$LIVE_TR"
@@ -799,7 +799,7 @@ build_plan() {
 "
     # A TAB between the two, and nothing else will do: tmux <= 3.5 escapes \x1f in -F output
     # (CLAUDE.md), and a session name cannot hold a tab.
-    done < <(tmux -L "$sock" list-sessions -F '#{session_name}	#{session_created}' 2>/dev/null)
+    done < <(tmux -u -L "$sock" list-sessions -F '#{session_name}	#{session_created}' 2>/dev/null)
   done < <(sockets)
 }
 
@@ -861,7 +861,7 @@ tilde() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s
 pane_state() {   # sock slot
   local d
   tmux -L "$1" has-session -t "=$2" 2>/dev/null || { echo gone; return; }
-  d="$(tmux -L "$1" display-message -p -t "$2" '#{pane_dead}:#{pane_dead_status}' 2>/dev/null)"
+  d="$(tmux -u -L "$1" display-message -p -t "$2" '#{pane_dead}:#{pane_dead_status}' 2>/dev/null)"
   case "$d" in 1:*) echo "dead:${d#1:}" ;; *) echo up ;; esac
 }
 
@@ -1132,7 +1132,7 @@ case "$MODE" in
   resolve)
     live_sid "$ONLY_SOCK" "$NAMED" || exit 1
     _old="$(field_for "$ONLY_SOCK" "$NAMED" 4)"; _cwd="$(field_for "$ONLY_SOCK" "$NAMED" 7)"
-    [ -n "$_cwd" ] || _cwd="$(tmux -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$_cwd" ] || _cwd="$(tmux -u -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
     [ "$LIVE_ID" = "$_old" ] || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd" "$NAMED" "$FOLLOW_PREV"
     printf '%s\x1f%s\x1f%s\n' "$LIVE_ID" "$LIVE_TR" "$LIVE_HOW"
     exit 0 ;;

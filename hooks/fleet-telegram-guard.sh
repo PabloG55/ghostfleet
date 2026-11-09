@@ -67,7 +67,7 @@ slot() {
   local live=""
   if [ -n "${TMUX_PANE:-}" ]; then
     case "${TMUX:-}" in *"/$SOCK,"*)
-      live="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;;
+      live="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;;
     esac
   fi
   case "$live" in ''|_*|+*) live="${CLAUDE_FLEET_SLOT:-}" ;; esac
@@ -200,7 +200,7 @@ in_scratch() {
 # checkout. `=name:` needs none. Measured on 3.4 and 3.7b: the exact session answers, master-2
 # does not answer for master, and a name that is no session prints nothing.
 session_start_dir() {
-  tmux -L "$SOCK" display-message -p -t "=$SLOT:" '#{session_path}' 2>/dev/null
+  tmux -u -L "$SOCK" display-message -p -t "=$SLOT:" '#{session_path}' 2>/dev/null
 }
 
 # Is this physical directory one git itself lists as a worktree of that checkout?

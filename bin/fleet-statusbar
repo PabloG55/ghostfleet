@@ -8,5 +8,5 @@
 proj="${1:-}"; sock="${2:-}"
 [ -n "$proj" ] || exit 0
 n=0
-[ -n "$sock" ] && n="$(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null | grep -vc '^master$')"
+[ -n "$sock" ] && n="$(tmux -u -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null | grep -vc '^master$')"
 if [ "${n:-0}" -gt 0 ]; then printf '%s · %s running' "$proj" "$n"; else printf '%s' "$proj"; fi

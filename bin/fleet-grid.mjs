@@ -86,6 +86,12 @@ const PROFILE = OWN?.profile || process.env.CLAUDE_FLEET_PROFILE || 'work';
 // leaves it alone because VIS_TAB is not in that flag set). And a tab cannot appear
 // INSIDE these fields — tmux sanitizes a tab in a session name to the literal `\t` on
 // 3.4 and rejects the name outright on 3.7b. test/run.sh pins both halves.
+//
+// AND EVERY READ PASSES -u, or none of that holds. All of the above is what tmux prints to a
+// UTF-8 client. A client that is not inside tmux and finds no UTF-8 in LC_ALL, LC_CTYPE or
+// LANG gets utf8_sanitize() on top, on every version measured: the tab comes back as `_`, and
+// so does every byte of a non-ASCII path. A daemon started by launchd or a systemd unit is
+// that client, and so is a stock container. -u is the switch that wins over all three.
 const US = '\x1f'; // our own wire, to bin/ghostfleet — never crosses tmux
 const TF = '\t';   // the separator inside a tmux -F format — see above
 
@@ -160,7 +166,7 @@ function tmuxVersion() {
 }
 function tmuxList() {
   try {
-    const args = ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F',
+    const args = ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F',
       `#{session_name}${TF}#{session_path}${TF}#{session_attached}`];
     const out = execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return out.split('\n').filter(Boolean).map(l => {
@@ -775,7 +781,7 @@ function recordOfPane(name) {
   if (hit && Date.now() - hit.at < 10000) return hit.rec;
   let rec = null;
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const f = tmuxRecord(out.split('\n')[0] || '', 2);
     if (f) rec = recordFor(f[0], f[1]);
@@ -1056,14 +1062,14 @@ function nestRows(rows, sub) {
 // renamed by hand still owns the pane its old record names.
 function livePanes() {
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return new Set(out.split('\n').filter(Boolean));
   } catch { return new Set(); }
 }
 function allLiveNames() {
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return new Set(out.split('\n').filter(Boolean));
   } catch { return new Set(); }     // no server on this socket: that IS the crash case
@@ -3544,7 +3550,7 @@ function sessionStatuses(proj, includeTabs = false) {
   const sock = sockOf(proj);
   let names = [];
   try {
-    const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const o = execFileSync('tmux', ['-u', '-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     // TABS ARE FILTERED HERE BY DEFAULT, and the default is the part worth keeping: this
     // is the ONE status reader the Projects cards and the stack screen share, so counting
     // tabs would make a project with a terminal open report a session it does not have.

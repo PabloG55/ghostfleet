@@ -55,7 +55,7 @@ tmux -L "$SOCK" has-session -t "$NEW" 2>/dev/null \
   && { echo "fleet-rename: '$NEW' is already a live session on $SOCK" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-OLD_PATH="$(tmux -L "$SOCK" display-message -p -t "$OLD" '#{pane_current_path}' 2>/dev/null)"
+OLD_PATH="$(tmux -u -L "$SOCK" display-message -p -t "$OLD" '#{pane_current_path}' 2>/dev/null)"
 [ -n "$OLD_PATH" ] || { echo "fleet-rename: could not resolve '$OLD's checkout path" >&2; exit 1; }
 NEW_PATH="$(dirname "$OLD_PATH")/$NEW"
 [ -e "$NEW_PATH" ] && { echo "fleet-rename: $NEW_PATH already exists" >&2; exit 1; }
@@ -64,7 +64,7 @@ NEW_PATH="$(dirname "$OLD_PATH")/$NEW"
 # not change, and it is how a state record written by a hook that raced this script (or
 # one written before the hook learned to record `pane`) is still recognised as this one.
 # Same shape the hook records: `<pane_id>@<server_pid>`.
-OLD_PANE="$(tmux -L "$SOCK" display-message -p -t "$OLD" '#{pane_id}@#{pid}' 2>/dev/null)"
+OLD_PANE="$(tmux -u -L "$SOCK" display-message -p -t "$OLD" '#{pane_id}@#{pid}' 2>/dev/null)"
 
 GITROOT="$(git -C "$OLD_PATH" rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$GITROOT" ] || { echo "fleet-rename: '$OLD_PATH' isn't a git checkout" >&2; exit 1; }
@@ -193,12 +193,12 @@ tmux -L "$SOCK" set-environment -t "$NEW" CLAUDE_FLEET_SLOT "$NEW" 2>/dev/null |
 # Renamed only when the new tab name is free: a tab already called that belongs to
 # somebody, and two sessions cannot share a name.
 TAB_BIN="$(dirname "$0")/fleet-tab"; [ -x "$TAB_BIN" ] || TAB_BIN="fleet-tab"
-tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r tab; do
+tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r tab; do
   case "$tab" in _*) ;; *) continue ;; esac
   # Bare -t, never `=`: show-options answers EMPTY for an `=` target (CLAUDE.md). Safe
   # because a tab name starts with `_`.
-  [ "$(tmux -L "$SOCK" show-options -qv -t "$tab" @cf_tab_from 2>/dev/null)" = "$OLD" ] || continue
-  kind="$(tmux -L "$SOCK" show-options -qv -t "$tab" @cf_tab_kind 2>/dev/null)"
+  [ "$(tmux -u -L "$SOCK" show-options -qv -t "$tab" @cf_tab_from 2>/dev/null)" = "$OLD" ] || continue
+  kind="$(tmux -u -L "$SOCK" show-options -qv -t "$tab" @cf_tab_kind 2>/dev/null)"
   case "$kind" in term|edit) ;; *) continue ;; esac
   newtab="$("$TAB_BIN" name "$kind" "$NEW" 2>/dev/null)"
   [ -n "$newtab" ] || continue

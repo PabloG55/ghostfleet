@@ -28,7 +28,7 @@ if [ -z "$TARGET" ]; then
 elif [ -d "$TARGET" ]; then
   DIR="$TARGET"
 elif tmux -L "$SOCK" has-session -t "$TARGET" 2>/dev/null; then
-  DIR="$(tmux -L "$SOCK" display-message -t "$TARGET" -p '#{pane_current_path}' 2>/dev/null)"
+  DIR="$(tmux -u -L "$SOCK" display-message -t "$TARGET" -p '#{pane_current_path}' 2>/dev/null)"
   [ -n "$DIR" ] || { echo "fleet-companion: could not read '$TARGET' cwd" >&2; exit 1; }
 else
   echo "fleet-companion: '$TARGET' is neither a directory nor a session on $SOCK (see: fleet-list)" >&2; exit 1

@@ -237,12 +237,12 @@ if [ -n "$SOCK" ] && [ -n "${TMUX_PANE:-}" ]; then
     # restart at %0 with every server, so a bare `%3` in a record left from a server that
     # has since died would claim whichever new session got that id.
     _r="${TMUX#*,}"; PANE="$TMUX_PANE@${_r%%,*}"
-    _live="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+    _live="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
     case "$_live" in ''|_*|+*) ;; *) SLOT="$_live" ;; esac
   ;; esac
 fi
 if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
-  SLOT="$(tmux -L "$SOCK" display-message -p '#{session_name}' 2>/dev/null)"
+  SLOT="$(tmux -u -L "$SOCK" display-message -p '#{session_name}' 2>/dev/null)"
   # A leading `_` is a tab, not an agent (CLAUDE.md), and a `+` name is a tmux expression
   # rather than a name — neither is a slot this should claim.
   case "$SLOT" in _*|+*) SLOT="" ;; esac

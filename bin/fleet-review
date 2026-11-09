@@ -64,7 +64,7 @@ _rg_main() {
   local sock="${CLAUDE_FLEET_SOCK:-}" t="${TMUX:-}" sess="" dir
   case "${t%%,*}" in */cf-*) sock="${t%%,*}"; sock="${sock##*/}" ;; esac
   dir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-  [ -n "${TMUX_PANE:-}" ] && [ -n "$sock" ] && sess="$(tmux -L "$sock" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+  [ -n "${TMUX_PANE:-}" ] && [ -n "$sock" ] && sess="$(tmux -u -L "$sock" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
   [ -n "$sess" ] || sess="${CLAUDE_FLEET_SLOT:-}"
   [ -n "$sock" ] || { echo "fleet-review: not in a fleet — review records are kept per fleet socket" >&2; return 1; }
   [ -n "$sess" ] || sess=master

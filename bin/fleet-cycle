@@ -20,7 +20,7 @@ set -uo pipefail
 
 DIR="${1:-next}"; SOCK="${2:-}"; CUR="${3:-}"
 [ -n "$SOCK" ] || exit 0
-T() { tmux -S "$SOCK" "$@"; }
+T() { tmux -u -S "$SOCK" "$@"; }
 [ -n "$CUR" ] || CUR="$(T display-message -p '#{session_name}' 2>/dev/null)"
 
 # master first, then the workers in CARD order. This has to match the grid's numbering

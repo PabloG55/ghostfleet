@@ -64,7 +64,7 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # Who: the pane this runs in, then the name it was launched with (as fleet-inbox asks).
 if [ -z "$SESSION" ]; then
   case "${TMUX:-}" in *"/$SOCK,"*)
-    [ -n "${TMUX_PANE:-}" ] && SESSION="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+    [ -n "${TMUX_PANE:-}" ] && SESSION="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
   SESSION="${SESSION:-${CLAUDE_FLEET_SLOT:-}}"
   [ -n "$SESSION" ] || { echo "fleet-ledger: which session? (not run inside one; pass a name)" >&2; exit 1; }
 fi

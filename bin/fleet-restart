@@ -139,7 +139,7 @@ agent_for() {
 
 cwd_for() {
   local sock="$1" slot="$2"
-  tmux -L "$sock" display-message -t "$slot" -p '#{pane_current_path}' 2>/dev/null
+  tmux -u -L "$sock" display-message -t "$slot" -p '#{pane_current_path}' 2>/dev/null
 }
 
 # ── what a restarted session is told, and only when it was MID-TURN ───────────
@@ -278,7 +278,7 @@ live_id() {
   # unresolved codex keeps its recorded id — a codex that has not taken a turn since it was
   # (re)opened holds nothing open yet, and its record is the one the watcher wrote for it.
   if [ "$agent" = codex ]; then
-    local ppid_; ppid_="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_pid}' 2>/dev/null)"
+    local ppid_; ppid_="$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_pid}' 2>/dev/null)"
     [ -n "$ppid_" ] && out="$(node "$LIB/codex-rollout.mjs" resolve --pid "$ppid_" 2>/dev/null)" \
       && [ -n "$out" ] && RID="${out%%"$US"*}"
     return 0
@@ -306,7 +306,7 @@ plan_rows() {
         [ -z "$ONLY_SLOT" ] || [ "$slot" = "$ONLY_SLOT" ] || continue
         PLAN="$PLAN$sock$US$slot$US-${US}unknown${US}skip$US$US$(cwd_for "$sock" "$slot")$US$(unowned "$sock")
 "
-      done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
+      done < <(tmux -u -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
       continue
     fi
     load_records
@@ -338,7 +338,7 @@ plan_rows() {
       [ -n "$FORCE_CONT" ] && [ "$act" = resume-idle ] && act=resume-continue
       PLAN="$PLAN$sock$US$slot$US$agent$US$st$US$act$US$id$US$cwd$US$why
 "
-    done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
+    done < <(tmux -u -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
   done < <(sockets)
 }
 

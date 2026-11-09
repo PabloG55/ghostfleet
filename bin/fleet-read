@@ -90,7 +90,7 @@ fi
 # agent under it. The session heals for good on its next turn, when the hook rewrites the
 # record under the live name; this is what makes it readable until then.
 if [ -z "$row" ] && [ "$SESSION" != master ] && [ -n "$SOCK" ]; then
-  IFS=$'\t' read -r _pane _ppid < <(tmux -L "$SOCK" list-panes -t "$SESSION" \
+  IFS=$'\t' read -r _pane _ppid < <(tmux -u -L "$SOCK" list-panes -t "$SESSION" \
       -F '#{pane_id}@#{pid}'$'\t''#{pane_pid}' 2>/dev/null | head -1)
   if [ -n "${_pane:-}" ]; then
     row="$(scan --arg p "$_pane" --arg k "$SOCK" \
@@ -124,7 +124,7 @@ sid="$(printf '%s' "$row" | cut -f3)"
 # conversation), so newest-wins would print a DIFFERENT session's output — worse than
 # saying nothing.
 if { [ -z "$tr" ] || [ ! -f "$tr" ]; } && [ -n "$sid" ]; then
-  cwd="$(tmux -L "$SOCK" display-message -t "$SESSION" -p '#{pane_current_path}' 2>/dev/null)"
+  cwd="$(tmux -u -L "$SOCK" display-message -t "$SESSION" -p '#{pane_current_path}' 2>/dev/null)"
   if [ -n "$cwd" ]; then
     enc="$(printf '%s' "$cwd" | sed 's#[/.]#-#g')"
     cand="$CFG/projects/$enc/$sid.jsonl"

@@ -62,7 +62,7 @@ case "${_t##*/}" in cf-*)
   # session ID ($7), not its name — look the name up rather than trusting
   # CLAUDE_FLEET_SLOT, which a --resume'd/--fork'd session can hold stale.
   _sid="${_t##*,}"; case "$_sid" in ''|*[!0-9]*) _sid="" ;; esac
-  [ -n "$_sid" ] && SELF_SESS="$(tmux -L "$SELF_SOCK" list-sessions \
+  [ -n "$_sid" ] && SELF_SESS="$(tmux -u -L "$SELF_SOCK" list-sessions \
       -F '#{session_id} #{session_name}' 2>/dev/null | awk -v i="\$$_sid" '$1==i{print $2; exit}')"
   [ -n "$SELF_SESS" ] || SELF_SESS="${CLAUDE_FLEET_SLOT:-}"
 ;; esac
@@ -445,7 +445,7 @@ MOD_SID=""; MOD_STATE=""; MOD_NOW=""; MOD_DIR=""
 # THE SERVER THIS SEND ADDRESSES, so a record of the same name on another one is not taken
 # for it (lib/mod-target.mjs). Empty when tmux cannot say, which refuses every record that
 # names a server: the paste, on the server that was named.
-MOD_SRV="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pid}' 2>/dev/null)"
+MOD_SRV="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pid}' 2>/dev/null)"
 _mod_look() {
   local out
   out="$(node "$MOD_TARGET" "$MOD_DIR" "$SOCK" "$SESSION" "$MOD_SRV" 2>/dev/null)" || { MOD_SID=""; return 1; }
@@ -454,10 +454,10 @@ _mod_look() {
 }
 if { [ -z "$_a" ] || [ "$_a" = claude ]; } \
    && [ "${CLAUDE_FLEET_MOD_DELIVER:-on}" != off ] && [ -f "$MOD_TARGET" ] && command -v node >/dev/null 2>&1; then
-  MOD_DIR="$(tmux -L "$SOCK" show-environment -t "$SESSION" CLAUDE_FLEET_DIR 2>/dev/null)"
+  MOD_DIR="$(tmux -u -L "$SOCK" show-environment -t "$SESSION" CLAUDE_FLEET_DIR 2>/dev/null)"
   MOD_DIR="${MOD_DIR#CLAUDE_FLEET_DIR=}"; case "$MOD_DIR" in /*) ;; *) MOD_DIR="" ;; esac
   if [ -z "$MOD_DIR" ]; then
-    _c="$(tmux -L "$SOCK" show-environment -t "$SESSION" CLAUDE_CONFIG_DIR 2>/dev/null)"
+    _c="$(tmux -u -L "$SOCK" show-environment -t "$SESSION" CLAUDE_CONFIG_DIR 2>/dev/null)"
     _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) MOD_DIR="$_c/fleet" ;; esac
   fi
   [ -n "$MOD_DIR" ] || MOD_DIR="$FLEET_DIR"
@@ -552,11 +552,11 @@ if [ -n "$REPLY_TO" ]; then
 
   rdir="$REPLY_DIR"
   if [ -z "$rdir" ]; then                       # ask the asker's own session env
-    rdir="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_FLEET_DIR 2>/dev/null)"
+    rdir="$(tmux -u -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_FLEET_DIR 2>/dev/null)"
     rdir="${rdir#CLAUDE_FLEET_DIR=}"; case "$rdir" in /*) ;; *) rdir="" ;; esac
   fi
   if [ -z "$rdir" ]; then                       # ...then its profile, the usual case
-    _c="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
+    _c="$(tmux -u -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
     _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) rdir="$_c/fleet" ;; esac
   fi
   if [ -z "$rdir" ] && command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
@@ -642,7 +642,7 @@ if [ -n "$RSESS" ]; then
   # wrong warning would send a caller to poll an inbox when a message was already coming.
   XPROF=0
   _ourcfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-  _askcfg="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
+  _askcfg="$(tmux -u -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
   _askcfg="${_askcfg#CLAUDE_CONFIG_DIR=}"
   case "$_askcfg" in /*) [ "$_askcfg" = "$_ourcfg" ] || XPROF=1 ;; esac
   mkdir -p "$FLEET_DIR" 2>/dev/null
@@ -1100,7 +1100,7 @@ fi
 # reflects fleet-send work too (not just fleet-spawn --prompt). Keyed by the target's
 # worktree path, matching fleet-spawn. Best-effort; never affects the send result.
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
-cwd="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+cwd="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
 if [ -n "$cwd" ]; then
   subject="$(printf '%s' "$MSG" | tr '\n\r\t' '   ' | sed 's/^ *//' | cut -c1-200)"
   br="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"

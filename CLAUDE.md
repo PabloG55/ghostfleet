@@ -150,6 +150,23 @@ prefer proof over assertion:
   separators behave identically and an assertion about this would otherwise pass either
   way. Do NOT "just un-escape it": `VIS_NOSLASH` means a backslash is not doubled, so a
   literal `\037` in the data is indistinguishable from an escaped `0x1f`.
+- **…and all of that is what tmux prints to a UTF-8 client. Every read passes `-u`.** A
+  client that is not inside tmux and finds no UTF-8 in `LC_ALL`, `LC_CTYPE` or `LANG` gets
+  `utf8_sanitize()` on top: a tab, and every byte of a non-ASCII character, comes back as
+  `_`. Measured on 3.4 and on 3.7b, so it is not a Linux bug either; it reads as one because
+  a stock container is where the locale is missing, and a run inside a fleet pane cannot see
+  it because `$TMUX` being set also makes a client UTF-8. launchd and a systemd unit start a
+  daemon with no locale on any platform. `-u` is the one switch that wins, `LC_ALL=C`
+  included. It stays off `attach`, where it would force UTF-8 onto a real terminal, and
+  `capture-pane` does not need it. The symptoms name none of this: 38 rows in one run read
+  as an empty fleet, a spawn with "no fleet session in it", and a child's done in the wrong
+  inbox. `test/helpers/tmux-read-sweep.mjs` catches the next read, in each spelling it has
+  been written in so far.
+- **A glyph in a C-locale regex is three bytes, and a bracket expression holds one.**
+  `[^[:alnum:][:space:]]?` could not get past `✻`, so a spinning claude read as idle under
+  no locale, and an agent switch that waits for idle killed it mid-turn. Spell glyphs as
+  alternatives, or leave room for the bytes; the suite asks every detector the same question
+  in both locales over every capture.
 - **The leftover lands on the last variable, and it looks like data.** `read -r n p prof`
   against a four-column line puts the 4th field *inside* `prof` — and anything derived
   from it (the fleet socket) is wrong too. Its expansion cousin: `${x#*$SEP}` on a string

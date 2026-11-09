@@ -9909,7 +9909,7 @@ if command -v tmux >/dev/null 2>&1; then
   pn() { tmux -L $MS list-panes -t "=stack" -F '#{@cf_sock}' 2>/dev/null | tr '\n' ' '; }
   fl() { tr '\n' ' ' < "$T/stack.tsv" | sed 's/	master//g'; }
   ac() { tmux -L $MS list-panes -t "=stack" -F '#{?pane_active,#{@cf_sock},}' 2>/dev/null | tr -d ' \n'; }
-  ti() { tmux -L $MS list-panes -t "=stack" -F '#{pane_title}' 2>/dev/null | tr '\n' ' '; }
+  ti() { tmux -u -L $MS list-panes -t "=stack" -F '#{pane_title}' 2>/dev/null | tr '\n' ' '; }
   # the tty of the pane with the focus is what a binding hands over, from either side of
   # the nest (`#{pane_tty}` from the stack, `#{client_tty}` from the session inside it)
   MV() { "$ROOT/bin/fleet-stack" move "$1" \
@@ -9993,11 +9993,13 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # 3.4 to 3.7b unchanged. Asserted of the shim, and of whatever tmux is actually here —
   # that second one is the assertion that would catch a tmux which broke the premise.
   is "a tab survives the shim"          "$(printf 'A\tB')"    "$(vis35 'A\tB')"
+  # -u, because this group is about the VERSION and not the caller's locale: without it a
+  # client with no UTF-8 locale gets a `_` back on any tmux. The group after this one.
   is "...and this machine's real tmux"  "2" \
-     "$(tmux -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
+     "$(tmux -u -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
         | awk -F'\t' '{print NF}' | head -1)"
   is "...and the shim over that tmux"   "2" \
-     "$(shimmed tmux -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
+     "$(shimmed tmux -u -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
         | awk -F'\t' '{print NF}' | head -1)"
 
   # 3. THE GRID, end to end, on a tmux that escapes. Before the fix this printed
@@ -10065,6 +10067,162 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   tmux -L $MS kill-server 2>/dev/null; rm -rf "$VS"
 else
   skip "tmux <= 3.5 escaping" "tmux or node missing"
+fi
+
+# ── A CLIENT WITH NO UTF-8 LOCALE: tmux sanitizes what it prints ──────────────
+# The group above is about tmux's VERSION. This one is about the CALLER'S LOCALE, and it
+# took both to explain one red run. A tmux client that is not inside tmux and finds no UTF-8
+# in LC_ALL, LC_CTYPE or LANG gets its output pushed through utf8_sanitize(): a tab, and
+# every byte of a non-ASCII character, comes back as `_`. Measured on 3.4 and on 3.7b, so
+# this is not a Linux bug: it reads as one because a Linux container is where the locale is
+# usually missing, and because a Mac run inside a fleet pane has TMUX set, which is the
+# other thing that makes a client UTF-8. launchd and a systemd unit start a daemon with no
+# locale either, on any platform.
+#   38 rows went red from it in one run, and none of them said so. A record that does not
+# split is an empty fleet to the grid, "no fleet session in it" to a spawn, and a child's
+# done filed in the wrong inbox. And a glyph in a C-locale regex is three bytes where a
+# bracket expression holds one, so a working claude read as idle and an agent switch killed
+# it mid-turn: the same missing locale, a different mechanism, and the worse of the two.
+#   So every row below strips the whole environment that hides it, and this group goes red
+# on either leg rather than only where the locale happens to be missing.
+group "a tmux read does not depend on the caller's locale"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  NU="$(cd "$(mktemp -d)" && pwd -P)"; NUF="$NU/fleet"; NUW="$NU/café"
+  mkdir -p "$NU/home/.config/ghostfleet" "$NU/stub" "$NUF" "$NUW" "$NU/café-docs"
+  nolocale() { env -u TMUX -u TMUX_PANE -u LANG -u LC_ALL -u LC_CTYPE "$@"; }
+  printf '#!/usr/bin/env bash\nprintf "────────\\n❯ \\n────────\\n"; sleep 300\n' > "$NU/stub/agent-here"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent"\n' "$NU" > "$NU/stub/fleet-send"
+  chmod +x "$NU/stub/agent-here" "$NU/stub/fleet-send"
+  git init -q -b main "$NUW/acme-api" 2>/dev/null
+  git -C "$NUW/acme-api" config user.email t@t; git -C "$NUW/acme-api" config user.name t
+  : > "$NUW/acme-api/f"; git -C "$NUW/acme-api" add f; git -C "$NUW/acme-api" commit -qm init 2>/dev/null
+  git -C "$NUW/acme-api" worktree add -q "$NUW/api-fix" -b feat/api-fix 2>/dev/null
+  tmux -L cfnoloc kill-server 2>/dev/null
+  tmux -L cfnoloc new-session -d -x 120 -y 30 -s master  -c "$NUW/acme-api" "$NU/stub/agent-here"
+  tmux -L cfnoloc new-session -d -x 120 -y 30 -s api-fix -c "$NUW/api-fix"  "$NU/stub/agent-here"
+  tmux -L cfnoloc new-session -d -x 120 -y 30 -s docs-pass -c "$NU/café-docs" "$NU/stub/agent-here"
+  tmux -L cfnoloc new-session -d -x 120 -y 30 -s spinning -c "$NU" \
+    "printf '✻ Cooking… (3s · esc to interrupt)\n'; sleep 300"
+  wait_for 10 "the panes to draw" 'grep -q Cooking <<< "$(tmux -L cfnoloc capture-pane -p -t spinning)" && grep -q "❯" <<< "$(tmux -L cfnoloc capture-pane -p -t master)"' || true
+  TAB="$(printf '\t')"
+  # 1. THE PREMISE, in both directions. Without these the rest could pass for a different
+  # reason, and on a tmux that stops sanitizing this group would claim to prove something.
+  is "such a client gets a tab back as _"        "A_B" "$(nolocale tmux -L cfnoloc display-message -p "A${TAB}B")"
+  is "...and -u keeps it"                        "A${TAB}B" "$(nolocale tmux -u -L cfnoloc display-message -p "A${TAB}B")"
+  is "...over LC_ALL=C too"                      "A${TAB}B" "$(nolocale LC_ALL=C tmux -u -L cfnoloc display-message -p "A${TAB}B")"
+  is "...and from after the socket, where a wrapper puts it" "A${TAB}B" "$(nolocale tmux -L cfnoloc -u display-message -p "A${TAB}B")"
+  # 2. THE COMMANDS, for real. The paths have an accent, so a read that only got the
+  # separator back and still lost the path would fail here too.
+  nug() { nolocale HOME="$NU/home" CLAUDE_FLEET_DIR="$NUF" PATH="$NU/stub:$ROOT/bin:$PATH" node "$ROOT/bin/fleet-grid.mjs" cfnoloc --json 2>/dev/null; }
+  is "the grid still finds the sessions"         "api-fix docs-pass master spinning" "$(nug | jq -r '[.cards[].name] | sort | join(" ")' 2>/dev/null)"
+  is "...and the path behind one, accent and all" "café-docs" "$(nug | jq -r '.cards[] | select(.name=="docs-pass") | .folder' 2>/dev/null)"
+  nuw="$(cd "$NUW/acme-api" && nolocale HOME="$NU/home" CLAUDE_FLEET_SOCK=cfnoloc CLAUDE_FLEET_DIR="$NUF" PATH="$NU/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-worktrees" 2>&1)"
+  is "fleet-worktrees sees who is in a worktree" "api-fix" "$(awk '$1=="api-fix"{print $3}' <<< "$nuw")"
+  # A spawn from a linked worktree makes a child of the session standing there, and it finds
+  # that session by reading the panes: the row that opened this whole investigation.
+  nus="$(cd "$NUW/api-fix" && nolocale HOME="$NU/home" CLAUDE_FLEET_SOCK=cfnoloc CLAUDE_FLEET_DIR="$NUF" CLAUDE_FLEET_SLOTS="$NU/slots" \
+         CLAUDE_FLEET_NOTIFIER=off PATH="$NU/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" api-fix-tests --new 2>&1)"
+  is "a worker's spawn still finds its parent"   "api-fix" "$(cat "$NUF/cfnoloc.api-fix-tests.parent" 2>/dev/null)"
+  is "...and starts the child"                   "1" "$(tmux -L cfnoloc has-session -t api-fix-tests 2>/dev/null && echo 1 || echo 0)"
+  # THE LAUNCHER'S READS BRING THEIR OWN -u. The suite lifts _new_session and hands it a TM of its
+  # own, as any caller may, so a read that relied on a wrapper only bin/ghostfleet defines was
+  # "command not found", and the 2>/dev/null on it said the session had not started. This TM has
+  # no -u and writes down what it was asked, so it shows what the read itself passed.
+  nun="$NU/new-session.sh"
+  { printf 'SOCK=cfnolocn; CFG_DIR=%q; TM() { printf "%%s\n" "$*" >> %q; tmux -L "$SOCK" "$@"; }\n' "$NU" "$NU/tm-calls"
+    sed -n '/^_new_session() {/,/^}/p' "$ROOT/bin/ghostfleet"
+    printf '_new_session started %q "" "" && echo OK || echo FAILED\n' "$NU"; } > "$nun"
+  tmux -L cfnolocn kill-server 2>/dev/null
+  is "the launcher sees a session start, through a TM with no -u" "OK" "$(nolocale PATH="$NU/stub:$PATH" bash "$nun" 2>&1)"
+  is "...because the read says -u itself"        "1" "$(grep -c '^-u list-sessions ' "$NU/tm-calls" || true)"
+  tmux -L cfnolocn kill-server 2>/dev/null
+  # 3. THE DETECTOR, against a real pane and both ways: a spinner is busy, a composer is not.
+  # busy exits 0 for busy, and it reads the agent's own marker, which here is the default.
+  nolocale HOME="$NU/home" CLAUDE_FLEET_DIR="$NUF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-agent" busy spinning -s cfnoloc >/dev/null 2>&1
+  is "a spinning claude reads as busy"           "0" "$?"
+  nolocale HOME="$NU/home" CLAUDE_FLEET_DIR="$NUF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-agent" busy master -s cfnoloc >/dev/null 2>&1
+  is "...and an idle one does not"               "1" "$?"
+  # 4. EVERY DETECTOR, against every capture: the C locale must answer as a UTF-8 one does.
+  # The list is the point rather than a verdict per agent, because it names the regex and
+  # the captures that disagree. The positive rows beside it keep this from passing on two
+  # empty lists.
+  nuu="$(locale -a 2>/dev/null | grep -iE 'utf-?8$' | head -1)"
+  if [ -n "$nuu" ]; then
+    nud=""
+    for a in $("$ROOT/bin/fleet-agent" list 2>/dev/null | awk '{print $1}'); do
+      for fld in busy_re blocked_re ready_re limit_re interrupt_re; do
+        re="$("$ROOT/bin/fleet-agent" field "$a" "$fld" 2>/dev/null)"; [ -n "$re" ] || continue
+        [ "$(cd "$FIX" && LC_ALL=C grep -lE -- "$re" ./*.txt 2>/dev/null | sort)" = "$(cd "$FIX" && LC_ALL="$nuu" grep -lE -- "$re" ./*.txt 2>/dev/null | sort)" ] || nud="$nud $a.$fld"
+      done
+    done
+    is "every detector answers the same in the C locale" "" "$nud"
+    nur="$("$ROOT/bin/fleet-agent" field claude busy_re 2>/dev/null)"
+    is "...claude's spinner among what it finds"  "1" "$([ "$(LC_ALL=C grep -cE -- "$nur" "$FIX/claude-busy.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and not an idle pane"                  "0" "$(LC_ALL=C grep -cE -- "$nur" "$FIX/claude-idle-wide.txt" || true)"
+    # prose that opens with markup is not a spinner, and widening the class would make it one
+    is "...nor prose that opens with markup"      "0" "$(printf '%s\n' '**Baking… (notes)' | LC_ALL=C grep -cE -- "$nur" || true)"
+  else
+    skip "every detector in both locales" "a UTF-8 locale is not available here"
+  fi
+  # 5. THE NEXT ONE. Both directions on a planted file first, so a sweep that matches nothing
+  # cannot read as a clean tree, then the tree, then proof that it looked at something.
+  nup="$NU/plant.sh"
+  cat > "$nup" <<'PLANT'
+a="$(tmux -L "$SOCK" list-sessions -F '#{session_name}')"
+b="$(tmux -L "$SOCK" -f "$CONF" display-message -p '#{pid}')"
+c = spawnSync('tmux', ['-L', sock, ...a]);
+d = execFileSync('tmux', ['-L', s, 'list-panes', '-a', '-F', 'x']);
+TM list-sessions -F '#{session_id}'
+e="$(tmux -S "$PATH_" show-options -gqv @x)"
+T() { tmux -S "$SOCK" "$@"; }
+ST() { tmux "$ST_FLAG" "$ST_ADDR" "$@"; }
+f="$(tmux -L "$SOCK" "${_args[@]}" 2>/dev/null)"
+g="$(tmux -S "$PATH_" "${_args[@]}")"
+h="$(tmux -L "$SOCK" set-option -g @x 1 \; display-message -p '#{pid}')"
+i="$(tmux -L "$SOCK" set-option -g @x 1 ';' list-panes -a)"
+TM "${_args[@]}"
+j = ['-L', sock, ...batch];
+k = execFileSync('tmux', ['-S', p, 'set-option', '@x', '1', ';', 'list-panes']);
+PLANT
+  is "the sweep names a plain read, in every spelling" "15" "$(node "$ROOT/test/helpers/tmux-read-sweep.mjs" "$nup" | wc -l | tr -d ' ')"
+  cat > "$nup" <<'PLANT'
+a="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}')"
+b="$(tmux -u -L "$SOCK" -f "$CONF" display-message -p '#{pid}')"
+c = spawnSync('tmux', ['-u', '-L', sock, ...a]);
+d = execFileSync('tmux', ['-u', '-L', s, 'list-panes', '-a', '-F', 'x']);
+TM -u list-sessions -F '#{session_id}'
+e="$(tmux -u -S "$PATH_" show-options -gqv @x)"
+T() { tmux -u -S "$SOCK" "$@"; }
+ST() { tmux -u "$ST_FLAG" "$ST_ADDR" "$@"; }
+TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# tmux -L "$SOCK" list-sessions is how this used to read
+tmux -L "$SOCK" capture-pane -p -t "$s"
+tmux -L "$SOCK" attach-session -t "$s"
+f="$(tmux -L "$SOCK" -u "${_args[@]}" 2>/dev/null)"
+g="$(tmux -u -S "$PATH_" "${_args[@]}")"
+h="$(tmux -u -L "$SOCK" set-option -g @x 1 \; display-message -p '#{pid}')"
+i="$(tmux -L "$SOCK" -u list-sessions -F x)"
+j = ['-L', sock, '-u', ...batch];
+k = execFileSync('tmux', ['-L', s, '-u', 'list-panes']);
+tmux -L "$SOCK" set-option -g @x 'a;b'
+tmux -L "$SOCK" set-option -g @x 1; echo list-panes
+tmux -L "$SOCK" bind-key X display-message hello
+env "${penv[@]}" tmux -L "$s" ${conf[@]+"${conf[@]}"} new-session -d -s x
+tmux -L "$SOCK" capture-pane -p -t "$s" | node "$D" "${dargs[@]}"
+PLANT
+  is "...and passes the same reads with -u, and what is not a read" "" "$(node "$ROOT/test/helpers/tmux-read-sweep.mjs" "$nup")"
+  # Saying nothing is also what a sweep says when it cannot see a spelling, which is how a batch
+  # with no -u came back clean. So it has to have COUNTED these, the batches and arrays among them.
+  is "...having counted each of them as a read"  "13" "$(node "$ROOT/test/helpers/tmux-read-sweep.mjs" --count "$nup")"
+  nuf="$(cd "$ROOT" && git ls-files bin lib hooks mcp)"
+  # shellcheck disable=SC2086
+  is "no read in the product goes without -u"    "" "$(cd "$ROOT" && node test/helpers/tmux-read-sweep.mjs $nuf)"
+  # shellcheck disable=SC2086
+  is "...out of the reads there are"             "1" "$([ "$(cd "$ROOT" && node test/helpers/tmux-read-sweep.mjs --count $nuf)" -ge 50 ] && echo 1 || echo 0)"
+  tmux -L cfnoloc kill-server 2>/dev/null
+  rm -rf "${NU:?}"
+else
+  skip "a tmux read in any locale" "tmux, node, jq or git missing"
 fi
 
 # THE TWO PARSES, side by side, because the choice between them is the whole reason the
@@ -12360,7 +12518,7 @@ if command -v tmux >/dev/null 2>&1; then
   sleep 4
   is "one pane per member"        "2" "$(tmux -L cfstkwin list-panes -t stack 2>/dev/null | grep -c . || true)"
   # Every project has a `master`; the pane border is the only thing that can say whose.
-  is "panes are labelled by socket" "2" "$(tmux -L cfstkwin list-panes -t stack -F '#{pane_title}' 2>/dev/null | grep -cE '^cfstk[ab] · master$' || true)"
+  is "panes are labelled by socket" "2" "$(tmux -u -L cfstkwin list-panes -t stack -F '#{pane_title}' 2>/dev/null | grep -cE '^cfstk[ab] · master$' || true)"
   is "both members have a client" "1 1" "$( { tmux -L cfstka list-sessions -F '#{session_attached}' 2>/dev/null; tmux -L cfstkb list-sessions -F '#{session_attached}' 2>/dev/null; } | tr '\n' ' ' | sed 's/ $//')"
   # Without this, opening a stack silently crops whatever you view full-screen next.
   is "window-size largest on member A" "largest" "$(tmux -L cfstka show-options -gv window-size 2>/dev/null)"
@@ -20407,9 +20565,20 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\nprintf "%%s\\n" "${CLAUDE_FLEET_DIR:-}" >> "%s/sent.dir"\n' "$JW" "$JW" > "$JW/bin/fleet-send"; chmod +x "$JW/bin/fleet-send"
   # A pane that draws an EMPTY composer — the frame _input_state looks for, rule lines
   # either side of the prompt glyph — so the immediate path is the one exercised.
-  jv_pane() { tmux -L cf-jarvis kill-server 2>/dev/null
-              tmux -L cf-jarvis new-session -d -x 100 -y 20 -s master \
-                "printf '────────────────────────────\n❯ %s\n────────────────────────────\n' '$1'; sleep 300"; sleep 0.5; }
+  # kill-server RETURNS BEFORE THE SERVER HAS GONE. A new-session that reaches it on the way
+  # out says "server exited unexpectedly" and exits 1, and then no session exists until the
+  # next call here. Every row in between reads as the product failing, because with no session
+  # the hook rightly wakes nobody and arms nothing: one lost race turned "a re-check is armed"
+  # red, another turned five batch and delivery rows red, and none of them mentioned a server.
+  # So the start is retried until it takes, a drawn composer rather than half a second says the
+  # pane is ready, and a fixture that never came up says so in a row of its own.
+  jv_start() { tmux -L cf-jarvis new-session -d -x 100 -y 20 -s master \
+                 "printf '────────────────────────────\n❯ %s\n────────────────────────────\n' '$JV_TEXT'; sleep 300" 2>/dev/null; }
+  jv_pane() { JV_TEXT="$1"; tmux -L cf-jarvis kill-server 2>/dev/null
+              wait_for 15 "Jarvis's session to start" jv_start \
+                || is "Jarvis's pane came up" "up" "timeout: $WAIT_UNMET"
+              wait_for 15 "Jarvis's composer to draw" 'grep -q "❯" <<< "$(tmux -L cf-jarvis capture-pane -p -t master 2>/dev/null)"' \
+                || is "Jarvis's pane came up" "up" "timeout: $WAIT_UNMET"; }
   jfire() {            # $1=event $2=sock $3=slot $4=profile config dir $5=note
     printf '{"hook_event_name":"%s","session_id":"s-%s-%s","cwd":"%s","message":"%s","prompt":"%s"}' \
       "$1" "$2" "$3" "$JW" "${5:-}" "${5:-}" \
@@ -20472,6 +20641,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   jv_pane "merge the"
   : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
   CLAUDE_FLEET_NOTIFY_RETRY_EVERY=30 jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  # A backgrounded hook writes the marker, so wait for it and not for a number. The second that
+  # follows is what the absence below it is worth: by then the hook has decided, so a paste it
+  # was going to make has had time to land.
+  wait_for 20 "the re-check to be armed" '[ -s "$WC/fleet/cf-jarvis.jarvis.retry" ]' || true
   sleep 1
   is "a half-typed box gets no paste"                 "0" "$(sent)"
   jr="$(cat "$WC/fleet/cf-jarvis.jarvis.retry" 2>/dev/null)"

@@ -62,7 +62,7 @@ done
 lost=""
 if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
   _lib="$LIB_DIR/fleet-scan.mjs"
-  _panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
+  _panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
   [ -f "$_lib" ] && lost="$(LIB="$_lib" DIR="$FLEET_DIR" SOCK="$SOCK" NAMES="$names" PANES="$_panes" \
     CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" node --input-type=module -e '
       const { lostSessions, serverStart } = await import(process.env.LIB);
@@ -227,7 +227,7 @@ else
   _i=0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    _la="$(tmux -L "$SOCK" show-environment -t "$name" CLAUDE_FLEET_MODEL_LAUNCH 2>/dev/null)"
+    _la="$(tmux -u -L "$SOCK" show-environment -t "$name" CLAUDE_FLEET_MODEL_LAUNCH 2>/dev/null)"
     case "$_la" in CLAUDE_FLEET_MODEL_LAUNCH=*) LAUNCH[$_i]="${_la#CLAUDE_FLEET_MODEL_LAUNCH=}" ;; esac
     _i=$((_i + 1))
   done <<< "$names"

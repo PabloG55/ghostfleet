@@ -294,6 +294,11 @@ _fail() {
   _clear
 }
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# -u IS NOT IN TM, because TM also attaches, and on an attach it would force UTF-8 onto the
+# person's real terminal. A read says `TM -u <verb>` itself, which keeps tmux from rewriting what
+# it prints (see fleet-grid.mjs). On the line and not in a second wrapper: the suite lifts these
+# functions out and runs them against a TM of its own, where a wrapper only this file defines is
+# "command not found", and the 2>/dev/null on a read turns that into "the session did not start".
 # CREATE A SESSION AND PROVE IT EXISTS — the same check #70 put in fleet-spawn, which
 # this path never got. Both grid_loop branches used a bare `TM new-session` whose result
 # was never tested, followed by an attach that swallowed its own failure with
@@ -327,7 +332,7 @@ _new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "
   sid="${sid%%$'\n'*}"
   [ -n "$sid" ] || return 1
   sleep 0.5
-  TM list-sessions -F '#{session_id}' 2>/dev/null | grep -qxF -- "$sid"
+  TM -u list-sessions -F '#{session_id}' 2>/dev/null | grep -qxF -- "$sid"
 }
 
 # Re-source the bindings on a LIVE server (a cf-sync only reaches a running fleet
@@ -372,7 +377,7 @@ grid_sessions() {
   else
     # Tabs are excluded here too, or this fallback would disagree with the grid it is
     # standing in for — and this list IS the card numbering (JUMP_SESS counts it).
-    tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-'
+    tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-'
   fi
 }
 
@@ -601,7 +606,7 @@ enter_master() {
   TM set-option -t master status-left \
     "#[bg=colour148,fg=colour16,bold] ● master · #($BIN_DIR/fleet-statusbar '$PROJECT' '$SOCK') #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null || true
   local sp marker curf cur
-  sp="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null)"
+  sp="$(TM -u display-message -t master -p '#{socket_path}' 2>/dev/null)"
   marker="$sp.goto"; curf="$sp.cur"
   rm -f "$marker" "$curf" 2>/dev/null                  # clear any stale signal
   _loading "opening $PROJECT · master"
@@ -718,7 +723,7 @@ grid_loop() {
         fi
         # C-p inside a session drops a "projects" marker then detaches (see
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
-        gsp="$(TM display-message -p '#{socket_path}' 2>/dev/null)"
+        gsp="$(TM -u display-message -p '#{socket_path}' 2>/dev/null)"
         gmark="$gsp.goto"; gcur="$gsp.cur"; rm -f "$gmark" "$gcur" 2>/dev/null
         TM attach -t "$name" 2>/dev/null || true; _clear
         gv="$(cat "$gmark" 2>/dev/null)"; rm -f "$gmark" 2>/dev/null

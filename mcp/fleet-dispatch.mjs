@@ -59,7 +59,7 @@ export function self() {
   let sess = '';
   if (/^\d+$/.test(sid || '')) {                        // that field is the ID, not the name
     try {
-      const rows = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_id} #{session_name}'],
+      const rows = execFileSync('tmux', ['-u', '-L', sock, 'list-sessions', '-F', '#{session_id} #{session_name}'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       for (const line of rows.split('\n')) {
         const [id, name] = line.split(' ');
@@ -344,7 +344,7 @@ export function argError(name, a) {
 function projectTable() {
   const rows = projects().map(p => {
     let n = '0';
-    try { n = String(execFileSync('tmux', ['-L', p.sock, 'list-sessions', '-F', '#{session_name}'],
+    try { n = String(execFileSync('tmux', ['-u', '-L', p.sock, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean).length); } catch {}
     return `${p.name.padEnd(18)} ${p.profile.padEnd(9)} ${p.sock.padEnd(26)} ${n.padEnd(8)} ${p.path}`;
   });
