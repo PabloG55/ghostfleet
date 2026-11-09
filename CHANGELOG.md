@@ -291,9 +291,8 @@ it.
   comments.
 - **`fleet-merged` serves a good cache when `gh` is absent** (#153), rather than exiting.
 
-Nothing to upgrade for: the suite and CI (#77, #84, #98, #143, #149), and docs alone (#113,
-#118,
-#120).
+Nothing to upgrade for: the suite and CI (#77, #84, #98, #143, #149), and docs alone
+(#113, #118, #120).
 
 ## 0.6.1 — 2026-10-16
 
