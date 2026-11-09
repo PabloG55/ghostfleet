@@ -2,6 +2,17 @@ import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 
 // The browser only ever talks to server/index.mjs; in development vite proxies /api to it.
+//
+// ansi.js, grid.js and md.js are the repo's own web/ files (the phone client's), imported by a
+// relative path from web/src/ui.jsx and session.jsx rather than copied, so a glyph is the same
+// number of cells here as on the phone. They sit outside this package, and still nothing below
+// widens server.fs.allow, on purpose. The build follows a relative import anywhere. The dev
+// server's allow list stops at ee/team (its own pnpm-workspace.yaml makes it the workspace
+// root), but vite serves any file that a served module imports whatever that list says: its
+// import analysis adds each resolved import to a safe set before the list is consulted. So
+// web/ansi.js, web/grid.js (through ansi.js) and web/md.js load in dev, while a direct request
+// for web/app.js, which nothing here imports, is refused, which is the only thing a wider allow
+// list would change.
 export default defineConfig({
   root: 'web',
   plugins: [preact()],

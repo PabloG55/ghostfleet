@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import { api, ATTACH_PER_MESSAGE } from './api.js';
 import { Ship } from './fleet.jsx';
 import { statusOf, StatusPill, Avatar, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
-import { render as renderAnsi } from './vendor/ansi.js';
+import { render as renderAnsi } from '../../../../web/ansi.js';   // the repo's own; see vite.config.mjs
 import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
 

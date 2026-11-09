@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
-import { render as renderMd } from './vendor/md.js';
+// The repo's own web/md.js and web/ansi.js (the phone client's), not copies: see vite.config.mjs.
+import { render as renderMd } from '../../../../web/md.js';
 import { colorOf } from './lights.js';
 import { PIXELS } from './sprite.js';
 import { Led } from './fleet.jsx';

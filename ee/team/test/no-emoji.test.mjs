@@ -12,8 +12,9 @@
 // An emoji may stand only where a sprite physically cannot: plain text that leaves the app (a
 // Telegram message, a system or push notification, the tab title) and a native <option>. Even
 // there no symbol is preferred, and today every one of those reads fine without, so ALLOWED names
-// no product file. Nothing read aloud may carry one, ever. The renderer in web/src/vendor shows
-// whatever the session printed, so it is not ours to scan.
+// no product file. Nothing read aloud may carry one, ever. The pane's renderer is the repo's own
+// web/ansi.js, outside this folder, and it shows whatever the session printed, so it is not
+// ours to scan.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -38,7 +39,7 @@ const ALLOWED = [
 const TEXT = /\.(m?js|jsx|css|html|json|md|sh|txt|svg|webmanifest)$/;
 function files() {
   return execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' }).split('\n')
-    .filter(f => f && TEXT.test(f) && !f.startsWith('web/src/vendor/') && fs.existsSync(path.join(ROOT, f)));
+    .filter(f => f && TEXT.test(f) && fs.existsSync(path.join(ROOT, f)));
 }
 
 function emojiIn(text) {
@@ -81,7 +82,7 @@ test('every icon a table names is drawn', async () => {
   for (const [k, a] of Object.entries(ACTIONS)) assert.ok(drawn.has(a.icon), `action '${k}' names icon '${a.icon}'`);
   const ui = fs.readFileSync(path.join(ROOT, 'web/src/ui.jsx'), 'utf8');
   const named = [...ui.matchAll(/icon: '([a-z]+)'/g), ...fs.readdirSync(path.join(ROOT, 'web/src'), { recursive: true })
-    .filter(f => /\.jsx$/.test(f) && !f.startsWith('vendor'))
+    .filter(f => /\.jsx$/.test(f))
     .flatMap(f => [...fs.readFileSync(path.join(ROOT, 'web/src', f), 'utf8').matchAll(/<Icon name="([a-z]+)"|icon="([a-z]+)"/g)])]
     .map(m => m[1] || m[2]);
   assert.ok(named.length > 30, `found ${named.length} icon uses`);
