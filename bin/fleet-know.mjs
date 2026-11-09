@@ -23,6 +23,8 @@
 //   --json             data, not text (the fleet_know MCP tool reads this)
 //   --no-sync          do not ask paired machines; read their last fetched state
 //   --trusted          on a project's page: only what the owner or a lead said
+//   --all              on a project's page: decisions from workers too (the page lists the owner's
+//                      and the lead's, and counts the rest)
 //
 //   fleet-know describe <project> "<one line>"            what the project is
 //   fleet-know decide <project> "<decision>" [--why "…"] [--supersedes <id>]
@@ -68,7 +70,7 @@ const flags = {};
 const pos = [];
 for (let i = 0; i < args.length; i++) {
   const x = args[i];
-  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync' || x === '--trusted' || x === '--purge' || x === '--dry-run') flags[x.slice(2)] = true;
+  if (x === '--json' || x === '--check' || x === '--off' || x === '--no-sync' || x === '--trusted' || x === '--all' || x === '--purge' || x === '--dry-run') flags[x.slice(2)] = true;
   else if (x === '-h' || x === '--help') flags.help = true;
   else if (['--at', '--known-at', '--why', '--profile', '--scope', '--quote', '--supersedes', '--reason', '--since', '--until', '--via'].includes(x)) { flags[x.slice(2)] = args[++i]; if (flags[x.slice(2)] === undefined) die(`${x} needs a value`); }
   else if (x === '--') { pos.push(...args.slice(i + 1)); break; }
@@ -412,7 +414,9 @@ switch (verb) {
     const q = verb === 'brief' ? pos[1] : verb;
     if (!q) die('brief <project>');
     const v = await getView();
-    const b = K.brief(v, q, { at, known, now, ...(flags.trusted ? { authority: K.TRUSTED } : {}) });
+    const b = K.brief(v, q, { at, known, now, ...(flags.trusted ? { authority: K.TRUSTED } : {}),
+      // --json is data an agent reads: every decision stays in it, each with its authority.
+      workers: !!(flags.all || flags.json) });
     noted('about', q, b ? 1 : 0);
     if (!b) {
       const names = [...new Set(K.projectsIn(v).map(p => p.name))];

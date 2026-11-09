@@ -226,6 +226,15 @@ The project page prints it as a short tag: `• [lead] Keep the v1 export endpoi
 because almost every one is a lead's and the tag would be noise. A request carries its authority
 in `--json` only.
 
+The DECISIONS list on the page is the owner's and the lead's only. Every worker's `fleet-ack` is
+stored as a worker decision, so on a busy project they outnumbered what the owner decided and pushed it
+below the cap. The section ends with one line counting what was left out (`+7 from workers: --all`),
+and no line when nothing was; `--all` (the `all` argument of `fleet_know`) lists them as before. It is a
+read-time filter: nothing stored is rewritten, so a decision recorded before this reads the same, and
+`fleet-worktrees` still reads the ack's UNDERSTOOD line from the spawn manifest. `--json` is data an agent
+reads, so it keeps every decision, each with its `authority`. `history`, `find`, the briefing, rules,
+facts and waits are not filtered.
+
 `--trusted`, or `authority: K.TRUSTED` to `brief()`, narrows the page to the owner's and the
 lead's word: decisions, relations, and what the project is. If a worker has described the project
 since, it shows the last line a lead or the owner wrote, and if neither ever did, it says so. What
