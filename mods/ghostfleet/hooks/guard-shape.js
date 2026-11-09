@@ -10,6 +10,104 @@
 // folds it there, so a merge split across lines is still one.
 const fold = cmd => String(cmd || '').replace(/[\n\t]/g, ' ')
 
+// ── what a command RUNS, as opposed to what it says ─────────────────────────
+//
+// The patterns below are words, and a worker's own messages are made of the same words. A
+// brief about merging invites the acknowledgement "I push, the lead runs gh pr merge", and
+// the guard read that quoted sentence as a merge: the fleet-ack the contract requires was
+// refused twice before a reworded third got through. Nothing in the sentence runs. So the
+// patterns are matched against this instead — the command with the ARGUMENTS of a messaging
+// command (fleet-ack, fleet-send, fleet-ledger, git commit) taken out, since those reach a
+// file or another session's input box and never a shell.
+//
+// Only a simple command whose command word IS one of those, bare and at the start, is
+// trimmed; everything else is passed through verbatim. And it fails toward the old answer:
+//   - a `$(`, a backtick, `<(` or `>(` anywhere in that command keeps the whole of it — the
+//     shell runs those even inside double quotes, which is how a merge would be smuggled
+//   - an unterminated quote or a trailing backslash returns the command unchanged
+//   - `; & | ( )` and a NEWLINE end a simple command, so a merge chained after a message is
+//     its own command and is judged. This runs BEFORE whitespace is folded: folded, the
+//     newline between `fleet-ack x` and `gh pr merge 5` would vanish and make the merge an
+//     argument of the ack.
+// A misreading in the cautious direction (a `(` taken for an operator, a `{` for a word)
+// only keeps text that is then judged as before. hooks/fleet-guard.sh what_runs is the same
+// scan in awk, and test/run.sh holds the two to one answer.
+const MESSAGING = new Set(['fleet-ack', 'fleet-send', 'fleet-ledger'])
+const SUBST = /\$\(|`|[<>]\(/
+
+// the leading NAME=value words are assignments, not the command
+const commandAt = words => {
+  let i = 0
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++
+  return i
+}
+// `git [-C dir] [-c k=v] [--opt] commit …`: the first word that is not an option or an
+// option's value has to be `commit`
+function gitCommits(words, i) {
+  for (let j = i + 1; j < words.length; j++) {
+    if (words[j] === '-C' || words[j] === '-c') { j++; continue }
+    if (words[j].startsWith('-')) continue
+    return words[j] === 'commit'
+  }
+  return false
+}
+function trimmed(seg) {
+  if (SUBST.test(seg.raw)) return seg.raw
+  const i = commandAt(seg.words)
+  const w = seg.words[i]
+  if (MESSAGING.has(w)) return ` ${w} `
+  if (w === 'git' && gitCommits(seg.words, i)) return ' git commit '
+  return seg.raw
+}
+
+export function whatRuns(cmd) {
+  const s = String(cmd || '')
+  let out = ''
+  let seg = { raw: '', words: [] }
+  let cur = null
+  const endWord = () => { if (cur !== null) seg.words.push(cur); cur = null }
+  const endSeg = op => { endWord(); out += trimmed(seg) + op; seg = { raw: '', words: [] } }
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === "'" || (c === '$' && s[i + 1] === "'")) {
+      const ansi = c === '$'
+      let j = ansi ? i + 2 : i + 1
+      let t = ''
+      for (; j < s.length && s[j] !== "'"; j++) {
+        if (ansi && s[j] === '\\' && j + 1 < s.length) j++
+        t += s[j]
+      }
+      if (j >= s.length) return s
+      seg.raw += s.slice(i, j + 1); cur = (cur ?? '') + t; i = j; continue
+    }
+    if (c === '"') {
+      let j = i + 1
+      let t = ''
+      for (; j < s.length && s[j] !== '"'; j++) {
+        if (s[j] === '\\' && j + 1 < s.length) j++
+        t += s[j]
+      }
+      if (j >= s.length) return s
+      seg.raw += s.slice(i, j + 1); cur = (cur ?? '') + t; i = j; continue
+    }
+    if (c === '\\') {
+      if (i + 1 >= s.length) return s
+      seg.raw += s.slice(i, i + 2)
+      if (s[i + 1] !== '\n') cur = (cur ?? '') + s[i + 1]
+      i++; continue
+    }
+    if ((c === '$' || c === '<' || c === '>') && s[i + 1] === '(') {
+      seg.raw += s.slice(i, i + 2); cur = (cur ?? '') + s.slice(i, i + 2); i++; continue
+    }
+    if (';&|()\n'.includes(c)) { endSeg(c); continue }
+    seg.raw += c
+    if (c === ' ' || c === '\t') { endWord(); continue }
+    cur = (cur ?? '') + c
+  }
+  endSeg('')
+  return out
+}
+
 const MERGES = [
   // `gh pr merge`, with --auto too: that is a merge scheduled for later
   /(^|[^A-Za-z0-9_.-])gh\s([^|;&]*\s)?pr\s+merge(\s|$)/,
@@ -17,13 +115,17 @@ const MERGES = [
   /(^|[^A-Za-z0-9_.-])gh\s([^|;&]*\s)?api\s[^|;&]*pulls\/[^\s/]+\/merge/,
   /mergePullRequest|enablePullRequestAutoMerge/,
 ]
-export const mergesAPr = cmd => MERGES.some(re => re.test(fold(cmd)))
+export const mergesAPr = cmd => MERGES.some(re => re.test(fold(whatRuns(cmd))))
 
 const BOUNDARY_WRITES = [
   /(^|[^A-Za-z0-9_.-])fleet-project\s+set(\s|$)/,
-  /\.(workers-merge|agents-approve)(-off)?([^A-Za-z0-9_-]|$)/,
+  /\.(workers-merge|agents-approve|review-gate)(-off)?([^A-Za-z0-9_-]|$)/,
+  // the review gate's records (lib/review-gate.sh), whose one writer is fleet-review. The
+  // gate itself — a merge with no pass at the PR's head — is the shell guard's alone: it is
+  // installed for every session, so this door passing a merge leaves the next one to judge.
+  /\.reviews(\/|[^A-Za-z0-9_-]|$)/,
 ]
-export const changesABoundary = cmd => BOUNDARY_WRITES.some(re => re.test(fold(cmd)))
+export const changesABoundary = cmd => BOUNDARY_WRITES.some(re => re.test(fold(whatRuns(cmd))))
 
 // The MCP tools the merge guard stands in front of: any server's merge_pull_request.
 export const isMergeTool = tool => /^mcp__.+__merge_pull_request$/.test(String(tool || ''))

@@ -52,6 +52,10 @@ const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US 
 // Chrome. A skipped group that says why beats a green one that proved nothing, and beats
 // a weakened assertion that proves less than its name claims.
 const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
+// SAID, NOT ASSERTED: something the run recovered from, which test/run.sh prints dimmed and
+// does not count. Not stderr — run.sh holds that to empty, so a recovery written there
+// would turn the run red for the very thing it recovered from.
+const note = (what) => rows.push('#NOTE' + US + what + US);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
 
@@ -105,6 +109,11 @@ let chromeErr = '';
 const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-extensions', '--mute-audio',
   '--use-mock-keychain', '--password-store=basic',
+  // A PHONE'S POINTER: coarse, and no hover. `mobile: true` alone reports a fine pointer that
+  // hovers — a desk's — and since the desk opens a chat with the composer focused (with a
+  // keyboard, web/README.md "On a desk"), every phone section here was measuring a desk:
+  // the box took the focus on open and the poll waited for the typing to stop.
+  '--blink-settings=primaryPointerType=2,availablePointerTypes=2,primaryHoverType=1,availableHoverTypes=1',
   `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
 chrome.stderr.on('data', (d) => { chromeErr += String(d); });
@@ -157,7 +166,7 @@ function wsConnect(url) {
     });
     sock.on('error', reject);
     let buf = Buffer.alloc(0), open = false, frag = Buffer.alloc(0);
-    const onText = [];
+    const onText = [], onClose = [];
     sock.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (!open) {
@@ -199,27 +208,38 @@ function wsConnect(url) {
     }
     const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
     const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+    sock.on('close', () => { for (const f of onClose) f(); });
     const api = {
       onMessage: (f) => onText.push(f),
+      onClose: (f) => onClose.push(f),
       send: (text) => sock.write(frame(Buffer.from(text, 'utf8'))),
       close: () => { try { sock.end(); } catch {} },
     };
   });
 }
 
+// A REPLY THAT NEVER COMES gets a deadline, as in lib/browser.mjs (this file keeps its own
+// client). Seen with a client that threw while booting: history.back() from a page that
+// had pushed nothing navigated away mid-evaluate, the reply never arrived, and the run sat
+// for 33 minutes instead of failing. A minute is far above any one call this file makes.
+const CALL_MS = 60000;
 async function connect(wsUrl) {
   const ws = await wsConnect(wsUrl);
-  let id = 0; const waits = new Map();
+  let id = 0; const waits = new Map(), events = [];
   ws.onMessage(data => {
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.id && waits.has(m.id)) { waits.get(m.id)(m); waits.delete(m.id); }
+    else if (m.method) for (const f of events) f(m.method, m.params || {});
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const i = ++id;
-    waits.set(i, m => (m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result)));
+    const t = setTimeout(() => { waits.delete(i); rej(new Error(`${method}: no answer from Chrome in ${CALL_MS / 1000}s`)); }, CALL_MS);
+    t.unref();
+    waits.set(i, m => { clearTimeout(t); m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result); });
     ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
-  return { send, close: () => ws.close() };
+  ws.onClose(() => { for (const [i, f] of waits) { waits.delete(i); f({ error: { message: 'the debugging socket closed with this call unanswered' } }); } });
+  return { send, on: (f) => events.push(f), close: () => ws.close() };
 }
 // A browser that will not be driven is an environment, not a regression: say so and let
 // run.sh skip, the same as having no Chrome at all.
@@ -231,6 +251,34 @@ const { sessionId } = await browserWs.send('Target.attachToTarget', { targetId, 
 const call = (m, p = {}) => browserWs.send(m, p, sessionId);
 await call('Page.enable');
 await call('Runtime.enable');
+// EVERY SCRIPT THE PAGE ASKED FOR, and what came of it — so a boot whose module graph
+// died can be told apart by its CAUSE (see goto): a module the server would not give
+// (a status) is the client's fault, a module that never answered at all is not.
+await call('Network.enable');
+const scripts = new Map();         // requestId -> { loader, url, status, failed }
+browserWs.on((method, p) => {
+  if (method === 'Network.requestWillBeSent' && p.type === 'Script')
+    scripts.set(p.requestId, { loader: p.loaderId, url: p.request.url, status: 0, failed: '' });
+  else if (method === 'Network.responseReceived' && scripts.has(p.requestId))
+    scripts.get(p.requestId).status = p.response.status;
+  else if (method === 'Network.loadingFailed' && scripts.has(p.requestId))
+    scripts.get(p.requestId).failed = p.errorText || 'failed';
+});
+// What the page threw, recorded by the page itself on every navigation: a boot that broke
+// is told apart from one that is slow (see goto), and a row that times out says which.
+//   ...AND A SCRIPT THAT NEVER LOADED, which throws nothing. A module graph that fails to
+// fetch fires `error` on its <script> element and never on window, so the first listener
+// cannot see it — and the page it leaves is the static shell, readyState complete, an
+// empty #app, `errors: []`, which is exactly what a slow boot looks like. It is caught in
+// the CAPTURE phase because a resource error does not bubble; `SCRIPT` keeps out a failed
+// icon, which costs nothing and must not end a wait.
+await call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+  const e = window.__bootErrs = [];
+  addEventListener('error', (ev) => { const t = ev.target;
+    if (t && t.tagName === 'SCRIPT') e.push('could not load ' + (t.src || 'an inline script')); }, true);
+  addEventListener('error', (ev) => e.push(String((ev.error && ev.error.message) || ev.message || 'error')));
+  addEventListener('unhandledrejection', (ev) => e.push('unhandled: ' + String((ev.reason && ev.reason.message) || ev.reason)));
+})();` });
 // FOCUS EMULATION, because a headless browser is not a focused one. Element.focus() only
 // takes when the page is CONSIDERED focused, and a headless window on the macOS runner is
 // never activated while the Linux one is — so document.activeElement never became the
@@ -282,6 +330,8 @@ const onScreen = async () => {
       const app = document.getElementById('app'), sheet = document.getElementById('sheet');
       return JSON.stringify({
         url: location.pathname,
+        ready: document.readyState,
+        errors: (window.__bootErrs || []).slice(0, 3),
         app: app ? (app.className || '-') : '(no #app on this page)',
         kids: app ? app.children.length : 0,
         cards: document.querySelectorAll('#app .card').length,
@@ -363,13 +413,63 @@ const seeing = (k, label, budget) => waitFor(label || k, SEEN[k], budget);
 const seeingCard = (re) => waitFor(`a card named ${re}`, (re) =>
   [...document.querySelectorAll('#app .card .c-name')]
     .some(n => new RegExp('^(?:' + re + ')$').test(n.textContent.trim())), WAIT_MS, re);
+// A BOOT IS A PAGE LOAD, and it does not get a screen's budget. WAIT_MS is for a screen
+// that is already running to draw its next state; a navigation is that PLUS fetching and
+// parsing every module and the first render, and on a loaded macOS runner it took longer
+// than 8s once — `{url:/, app:-, kids:0}` at the deadline, then the very next rows of the
+// same flow measured the page it had become. So the boot waits up to BOOT_MS, and returns
+// the moment the app mounts. What it must NOT do is wait that long on a boot that broke:
+// a page that threw is answered at once, with what it threw.
+const BOOT_MS = 30000;
+// A BOOT THE BROWSER ABORTED IS NOT A BOOT THAT FAILED, and waiting cannot rescue it.
+// Red on the macOS leg as `{ready: complete, app: -, kids: 0, errors: []}` at the 30s
+// deadline, and green on a re-run. Reproduced here under parallel load (about one run in
+// forty, at 8-16 runs at once) and caught with the network log on: one module of app.js's
+// graph — api.js once, passkey.js once — ended `net::ERR_ABORTED, canceled` with no
+// response, while its siblings were answered from the service worker's cache in the same
+// milliseconds, and nothing navigated or threw. One dropped import fails the whole graph,
+// so app.js never evaluates and the page is the static shell for good: a deadline of 30s
+// or 300s answers the same. None of the client's own code has run when a graph's import is
+// dropped, and the one piece that has — sw.js's fetch handler — has no path that cancels:
+// a handler that fails rejects, which reads ERR_FAILED, not a cancel. The next navigation
+// boots clean.
+//   So the boot is navigated AGAIN — but only for that cause, and only twice. The test is
+// narrow on purpose: nothing thrown, and every script that did answer answered < 400. A
+// module that 404s, a renamed import, a client that throws on load — those are the client's
+// own failures, and they still go red on the first attempt, now at once rather than after
+// the full budget (the self-test at the foot of this file shows both directions).
+const BOOT_TRIES = 3;
+const aborted = async (loader, errs) => {
+  if (!errs.every(e => e.startsWith('could not load '))) return '';
+  // The page's error and CDP's loadingFailed travel separately; give the second a moment
+  // to land rather than deciding on half the evidence. Bounded, and usually instant.
+  const mine = () => [...scripts.values()].filter(r => r.loader === loader);
+  for (const t0 = Date.now(); mine().some(r => !r.status && !r.failed) && Date.now() - t0 < 2000;) await sleep(25);
+  const rs = mine();
+  if (rs.some(r => r.status >= 400)) return '';
+  const gone = rs.filter(r => r.failed && !r.status);
+  return gone.length ? `the browser dropped ${gone.map(r => `${r.url.replace(/^.*\//, '')} (${r.failed})`).join(', ')}` : '';
+};
 const goto = async (u, ready) => {
-  await call('Page.navigate', { url: u });
   // Not `readyState === 'complete'` alone: that is true of the static shell, which is an
   // empty #app and a <script type=module> the browser has not run yet. The self-test page
   // at the foot of this file is a plain document with no #app at all, so it passes its
   // own predicate rather than waiting forever for a client that is not there.
-  await waitFor(`${u} to be ready`, ready || SEEN.booted);
+  const want = ready || SEEN.booted;
+  for (let attempt = 1; ; attempt++) {
+    scripts.clear();
+    const { loaderId } = await call('Page.navigate', { url: u });
+    const settled = await waitFor(`${u} to be ready`, (src) =>
+      (window.__bootErrs || []).length > 0 || (0, eval)(src)(), BOOT_MS, `(${want})`);
+    if (!settled) return;
+    const errs = await evaluate(() => (window.__bootErrs || []).slice(0, 3));
+    if (!errs.length || await evaluate(want)) return;
+    const why = await aborted(loaderId, errs);
+    // Said in the run's output: a retry nobody can see is how a rate creeps up.
+    if (why && attempt < BOOT_TRIES) { note(`boot of ${u}: ${why} — navigated again (${attempt + 1}/${BOOT_TRIES})`); continue; }
+    is(`${u} boots`, 'without failing', `it did not: ${errs.join(' | ')}${why ? ` — ${why}, ${BOOT_TRIES} times running` : ''}`);
+    return;
+  }
 };
 // A FLOW THAT MUST START LOCKED HAS TO SAY SO. restore() brings back the screen the client
 // was last on, so a bare goto after an earlier flow left the session screen up returns to
@@ -614,6 +714,17 @@ async function walk(w, h) {
   // and a resolved origin printed as prose, which is one unbreakable 480px word.
   await clickVerb('settings'); await seeing('sheet', 'the settings sheet');
   await at('projects/settings sheet');
+  // EVERY PROJECT'S NAME, WHOLE. The per-project table gained a fourth button (model), and
+  // the loose row squeezed the name instead of wrapping: at 390 acme-api and acme-web both
+  // read `a…`, so the rows could not be told apart. An ellipsis is not an overflow, so the
+  // fit checks above passed it. Asked of every name in the sheet, not of one class the fix
+  // added, so the old layout fails it; and no rows at all is a failure, not a pass.
+  is(`${w}px projects/settings sheet: every project's name is whole`, '',
+     await evaluate(() => {
+       const nm = [...document.querySelectorAll('#sheet .srow > .nm')];
+       if (!nm.length) return 'no project rows in the sheet';
+       return nm.filter(n => n.scrollWidth > n.clientWidth + 1).map(n => n.textContent).join(',');
+     }));
   await escSheet(); await seeing('noSheet', 'the sheet to close');
   // THE SCHEDULE SHEET, WHICH THIS FILE HAS NEVER ACTUALLY MEASURED, and two separate
   // things were hiding that. It was asked of the GRID, whose verbs are
@@ -837,7 +948,7 @@ async function loadingSkeletons() {
   await shot('chat-loading-390');
   is('loading chat: skeleton bubbles stand where the messages will', true, held.n >= 4 || `${held.n} bubbles`);
   is('...alternating agent left, owner right', 'la,ru,la,ru,la', held.sides);
-  is("...with the agent bubble's own corners", '4px/16px', held.radius);
+  is("...with the agent bubble's own corners", '6px/18px', held.radius);
   is('...each a bubble with bars in it, not an empty sliver', true, held.bars);
   is('...and no loading text anywhere on the screen', false, held.text);
   is('...nor any words in the chat at all', '', held.words);
@@ -902,6 +1013,12 @@ async function loadingSkeletons() {
 // sheet — it is scrollable by eight pixels, which is a finger's worth of pan on a screen
 // that should not need one. Re-measure and restate it when the sheet gains content; do not
 // delete the row to make it quiet.
+//   RESTATED: THERE IS NO CEILING ANY MORE. The redesign set the sheet's prose and buttons in
+// the UI face instead of the terminal's, and a proportional face is narrower at every size.
+// Measured at 320px, same sheet, same fixtures: the monospace client needed 328 at 38, 380
+// at 44 and 457 at 53; this one needs 320 at all three. 53px is iOS's largest accessibility
+// size (AX5), so the sheet now fits at every text size a phone can ask for, and the row
+// pins THAT — a sheet that starts needing a pan again goes red here.
 async function sheetCeiling() {
   await viewport(320, 568);
   await fresh();
@@ -917,15 +1034,55 @@ async function sheetCeiling() {
                scrolls: sh ? getComputedStyle(sh).overflowX : '', page: d.scrollWidth - d.clientWidth };
     });
   };
-  for (const fs of [16, 24, 30]) {
+  for (const fs of [16, 24, 30, 38]) {
     const m = await at(fs);
     is(`320px/${fs} the settings sheet fits without panning`, true, m.need != null && m.need <= m.box + 1);
   }
-  // ...and past the ceiling, the promise that is left.
-  const big = await at(38);
-  is('320px/38 the settings sheet is past its ceiling, as documented', true, big.need > big.box + 1);
-  is('...and takes the overflow itself', 'auto', big.scrolls);
+  // ...through the largest size there is, and the promise that stands behind it.
+  const big = await at(53);
+  is('320px/53 (AX5) the settings sheet still fits without panning', true, big.need != null && big.need <= big.box + 1);
+  is('...and would take any overflow itself', 'auto', big.scrolls);
   is('...rather than handing it to the page', 0, big.page);
+  await evaluate(() => { document.body.style.fontSize = ''; return null; });
+}
+
+// ── the grid's count tiles, every label whole ──────────────────────────────
+// The four tiles under the grid's header each set their label on one line and ellipsize
+// the rest — and four `flex: 1 1 0` tiles across a 320px phone leave each label about 42px,
+// so two of the four read "need …" and "worki…". Nothing in this file saw it: the page does
+// not pan, the strip does not exceed its own box, and an ellipsis is the clip working as
+// designed. The question that was missing is whether the WORD is visible, asked of each
+// label: its text needs no more than its box holds.
+//   At every rung of the ladder, because that is the sweep this file promises — even though
+// the tiles are set in px today and do not move with it, which is exactly the kind of thing
+// that stops being true without anyone looking here.
+//   And 390 stays ONE ROW: the labels fit there, and the fix for 320 must not reach it.
+async function countTiles(w, h) {
+  await viewport(w, h);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  for (const fs of [16, 24, 30, 38, 44, 53]) {
+    await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
+    await settle(`the count tiles at ${fs}px`);
+    const m = await evaluate(() => {
+      const d = document.documentElement;
+      const tiles = [...document.querySelectorAll('#app .strip .stat')];
+      return {
+        words: tiles.map(t => t.querySelector('.l')?.textContent.trim() || '').join(','),
+        clipped: tiles.map(t => t.querySelector('.l')).filter(l => l && l.scrollWidth > l.clientWidth)
+          .map(l => `${l.textContent.trim()} needs ${l.scrollWidth} in ${l.clientWidth}`).join(','),
+        past: tiles.filter(t => t.getBoundingClientRect().right > d.clientWidth + 0.5).length,
+        rows: new Set(tiles.map(t => Math.round(t.getBoundingClientRect().top))).size,
+        page: d.scrollWidth - d.clientWidth,
+      };
+    });
+    is(`${w}px/${fs} the grid's count tiles are the four words`, 'need you,working,ready,parked', m.words);
+    is(`${w}px/${fs} ...and every label is whole, not ellipsized`, '', m.clipped);
+    is(`${w}px/${fs} ...with no tile past the right edge`, 0, m.past);
+    is(`${w}px/${fs} ...and no sideways pan`, 0, m.page);
+    if (w >= 390) is(`${w}px/${fs} ...in one row`, 1, m.rows);
+  }
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
 }
 
@@ -1124,11 +1281,19 @@ try {
   await walk(320, 568);
   // #78 unpinned rotation, and a landscape tablet is where the card grid switches to more
   // than one track — a different layout, and so a different chance to overflow.
+  //   AS A TOUCH SCREEN, which a tablet is. `mobile: true` alone reports a fine pointer, so
+  // this walk was a 1024px window with a mouse — which is now the desk's two-pane layout
+  // (web/README.md, "On a desk"), not the tablet's. Touch is what keeps it the tablet.
+  //   AND LEFT ON: turning touch emulation off hands Chrome back a fine pointer whatever
+  // the launch declared (measured), and every section after this one is a phone.
+  await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await walk(1024, 768);
   await bigText();
   await placeholderSweep();
   await loadingSkeletons();
   await sheetCeiling();
+  await countTiles(320, 640);
+  await countTiles(390, 844);
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });
 
@@ -1196,7 +1361,10 @@ try {
       keyLetters: bs.filter(b => /^[⏎a-zA-Z,] /.test(b.textContent.trim())).length,
     };
   });
-  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,more,settings,projects',
+  // `terminal` is the project's terminal tab (the desk's Ctrl-t) and `editor` its editor tab
+  // (the desk's Ctrl-n), neither with a TUI letter; `stack` is the desk's `t`, the phone's way
+  // into the stack picker.
+  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,stack,terminal,editor,more,settings,projects',
      (sheetRows.labels || []).join(','));
   is('...every row at least 44px tall', 0, sheetRows.short);
   is('...with at least 8px between them', true, sheetRows.minGap === null || sheetRows.minGap >= 8);
@@ -1259,8 +1427,11 @@ try {
   await tapCard('api-fix'); await seeing('session', 'the session screen');
   const swipeChat = (x0, y0, x1, y1) => evaluate((a) => {
     const c = document.querySelector('#app .chat'); if (!c) return false;
-    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: a[0], clientY: a[1], pointerId: 1 }));
-    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: a[2], clientY: a[3], pointerId: 1 }));
+    // A FINGER, said so: since the desk, a swipe is a touch gesture only (touchGesture in
+    // app.js), and an event that names no pointer type is judged by this emulation's
+    // pointer, which `mobile: true` alone reports as fine.
+    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', clientX: a[0], clientY: a[1], pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', clientX: a[2], clientY: a[3], pointerId: 1 }));
     return true;
   }, [x0, y0, x1, y1]);
   const openName = () => evaluate(() => {
@@ -1459,6 +1630,43 @@ try {
   const proof = rows.splice(before).join(' ');
   is('a wait that never holds returns false', false, rc);
   is('...and leaves a row naming what it waited for', true, proof.includes('a condition that cannot hold'));
+
+  // ── and a boot is retried for the browser's failure, never for the client's ──
+  // goto() navigates again when a module was DROPPED, and that is a rule which could just
+  // as easily retry everything, or nothing, and stay green either way on a quiet machine
+  // where nothing is ever dropped. So both causes are made on purpose: one module of the
+  // graph aborted once (it must boot, on the second navigation), and the same module
+  // answered 404 every time (it must go red, on the first). Intercepted in the network
+  // layer, so the service worker is bypassed for these two — a cached module never reaches
+  // the network to be intercepted.
+  await call('Network.setBypassServiceWorker', { bypass: true });
+  let mode = '', paused = 0;
+  browserWs.on((method, p) => {
+    if (method !== 'Fetch.requestPaused') return;
+    paused++;
+    const once = mode === 'abort' && paused === 1;
+    (once ? call('Fetch.failRequest', { requestId: p.requestId, errorReason: 'Aborted' })
+      : mode === '404' ? call('Fetch.fulfillRequest', { requestId: p.requestId, responseCode: 404, body: '' })
+      : call('Fetch.continueRequest', { requestId: p.requestId })).catch(() => {});
+  });
+  await call('Fetch.enable', { patterns: [{ urlPattern: '*/passkey.js' }] });
+  mode = 'abort'; paused = 0;
+  const r0 = rows.length;
+  await goto(BASE);
+  // Taken back out like the proof row above — but not before checking the retry SAID so.
+  const abortRows = rows.splice(r0), noted = abortRows.filter(r => r.startsWith('#NOTE'));
+  is('a module the browser dropped is navigated again, and boots', '1 retry, 0 red rows, booted',
+     `${paused - 1} retr${paused === 2 ? 'y' : 'ies'}, ${abortRows.length - noted.length} red rows, ${await evaluate(SEEN.booted) ? 'booted' : 'blank'}`);
+  is('...and the run says it did, naming the module', true, noted.length === 1 && noted[0].includes('dropped passkey.js'));
+  mode = '404'; paused = 0;
+  const r1 = rows.length, t404 = Date.now();
+  await goto(BASE);
+  const missRows = rows.splice(r1).join(' ');
+  is('a module that 404s is NOT navigated again', 1, paused);
+  is('...it goes red, naming what did not load', true, /boots.*could not load .*app\.js/.test(missRows));
+  is('...and at once, not at the deadline', true, Date.now() - t404 < BOOT_MS / 3);
+  await call('Fetch.disable');
+  await call('Network.setBypassServiceWorker', { bypass: false });
 } catch (e) {
   is('the walk completed', '', String((e && e.message) || e));
 }

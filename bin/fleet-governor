@@ -227,7 +227,7 @@ budget() {
   local p="" s="" w=""
   BUDGET_PCT=0; BUDGET_BLIND=""; BUDGET_FROZEN=""; BUDGET_FROM=""
   mod_budget && return 0
-  for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
+  for s in $(tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
     if is_parked "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s"; continue; fi
     # ...and a session we resumed that has not repainted yet is the same stopped clock,
@@ -237,7 +237,7 @@ budget() {
     if [ -n "$p" ]; then
       [ "$p" -gt "$BUDGET_PCT" ] && BUDGET_PCT="$p"
     else
-      w="$(tmux -L "$SOCK" display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
+      w="$(tmux -u -L "$SOCK" display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
       BUDGET_BLIND="$BUDGET_BLIND $s(${w:-?}c)"
     fi
   done
@@ -246,7 +246,7 @@ budget() {
 # account, so the ceiling never parks a worker it isn't measuring
 workers_newest_first() {
   local s=""
-  tmux -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
+  tmux -u -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
     | grep -vE ' master$' | sort -rn | awk '{print $2}' \
     | while IFS= read -r s; do meterable "$s" && printf '%s\n' "$s"; done
 }
@@ -552,6 +552,45 @@ tick() {
   log "budget ${pct}% (running full-throttle; ceiling ${PAUSE_AT}%)${BUDGET_FROM:+ — $BUDGET_FROM}"
 }
 
+# ── SEVERAL ACCOUNTS ON THIS PROFILE (experimental) ──────────────────────────
+# With `fleet-experimental enable accounts` and two or more logins saved for this fleet's
+# profile (fleet-accounts), the BUDGET ceiling is lib/accounts.mjs's, not tick()'s: at the
+# threshold it moves the profile to the next login with room, and parks the workers only when
+# every login is spent. tick() must not also run — it takes the max 5h figure of EVERY record
+# in the fleet dir, so the account just switched away from would go on reading 98% and park
+# the fleet that had just been moved onto a fresh one.
+#   0 = the accounts engine owns the budget this pass; 1 = not managed, tick() as before. The
+# switch file is checked here first so a fleet with the feature off pays one grep, not a node.
+LIB_DIR="$(cd "$BIN_DIR/../lib" 2>/dev/null && pwd)"
+accounts_tick() {
+  local out rc
+  grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" || return 1
+  command -v node >/dev/null 2>&1 && [ -f "$LIB_DIR/accounts.mjs" ] || return 1
+  out="$(node "$LIB_DIR/accounts.mjs" tick "$SOCK" $([ "$DRY" = 1 ] && echo --dry-run) 2>&1)"; rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r line; do log "$line"; done
+  [ "$rc" = 0 ]
+}
+
+# ── THE SERVER'S ENVIRONMENT IS THE PROJECT'S ─────────────────────────────────
+# A tmux server's global env is whatever its first client exported, and a fleet started
+# from a session of ANOTHER profile's project took that profile's config and fleet dir:
+# every session opened on it without its own -e then wrote its records, inbox and status
+# where neither the phone nor a --reply-to look (lib/fleet-env.mjs has the whole account).
+# The launch paths pass the fleet's own now, but a server started wrong before that, or by
+# a path nobody has thought of, stays wrong until somebody looks — so the one process that
+# is alive exactly as long as the fleet looks every tick. It corrects the server and names,
+# once, in this fleet's inbox, the sessions whose process still writes elsewhere. It never
+# restarts one: that is the owner's call, and the notice says how.
+#   Its own step, not a link in the chain below: a machine or budget ceiling short-circuits
+# that chain, and a fleet under pressure is no reason to leave its records invisible.
+env_tick() {
+  command -v node >/dev/null 2>&1 && [ -f "$LIB_DIR/fleet-env.mjs" ] || return 0
+  local out
+  out="$(node "$LIB_DIR/fleet-env.mjs" heal "$SOCK" $([ "$DRY" = 1 ] && echo --dry-run) 2>&1)"
+  [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r line; do log "env: $line"; done
+  return 0
+}
+
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
 reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}%, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
@@ -559,11 +598,13 @@ log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<
 # a token reading is beside the point, and letting the budget path also act on the same
 # pass could resume for one ceiling what the other just parked for.
 if [ "$ONCE" = 1 ]; then
-  resource_tick || tick
+  env_tick
+  resource_tick || accounts_tick || tick
 else
   while true; do
-    tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
-    resource_tick || tick
+    tmux -u -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
+    env_tick
+    resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process
     # that is already alive exactly as long as Jarvis is, so the restart needs no daemon, cron
     # entry or launchd job of its own. Every other fleet's governor sees a socket that is not

@@ -8,8 +8,8 @@
 #
 # For each worktree it shows: branch · live fleet session (if any) · state ·
 # git (clean/dirty + ahead/behind) · ASKED, the task it was spun up for (from the
-# manifest) · and UNDERSTOOD, what its worker said it heard (fleet-ack, same
-# manifest). A worktree is FREE = it exists, has NO live session on this fleet,
+# manifest, led by its [kind] when it was spawned with --kind) · and UNDERSTOOD,
+# what its worker said it heard (fleet-ack, same manifest). A worktree is FREE = it exists, has NO live session on this fleet,
 # and its working tree is clean (a dirty, sessionless worktree has unfinished
 # work, so it's left alone, not offered for reuse).
 #
@@ -43,7 +43,7 @@ MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 
 # pane cwd -> session, once. `exec agent-here` keeps the pane cwd at the session
 # checkout, so a worktree is "occupied" when some session's pane sits in it.
-panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 
 sess_for() {                       # first session whose pane cwd is at/under $1
   local wt="$1" p="" s=""
@@ -82,6 +82,10 @@ is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 MERGED="$("$(dirname "$0")/fleet-merged" "$PWD" 2>/dev/null || true)"
 is_merged() { [ -n "$MERGED" ] && printf '%s\n' "$MERGED" | grep -qxF -- "$1"; }
 asked_for() { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
+# Column 7, the KIND the worker was spawned as (fleet-spawn --kind). Shown as a [kind] prefix
+# on ASKED rather than as a column of its own: most rows have none, and a column that is blank
+# on nearly every row widens a table that is already the width of a terminal.
+kind_for()  { awk -F'\t' -v w="$1" '$1==w{print $7; exit}' "$MANIFEST" 2>/dev/null; }
 # Columns 5 and 6 (fleet-ack). A four-column row — every row written before this existed,
 # and every spawn whose worker has not acknowledged yet — yields empty ones under
 # `awk -F'\t'`, which is the whole reason the manifest is read with awk and not with
@@ -201,6 +205,7 @@ while IFS=$'\t' read -r wt br; do
   fi
   sess="$(sess_for "$wt")"
   state=""; git=""; asked="$(asked_for "$wt")"; [ -n "$asked" ] || asked="-"
+  kind="$(kind_for "$wt")"; [ -n "$kind" ] && asked="[$kind] $asked"
   und="$(und_for "$wt")"; [ -n "$und" ] || und="-"
   git="$(git_state "$wt")"
   if is_root "$wt"; then                          # a clone's own checkout — a lead's home

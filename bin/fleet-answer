@@ -136,7 +136,7 @@ if [ "${#KEYS[@]}" -gt 0 ]; then again="$(printf ' --key %q' "${KEYS[@]}")"; els
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 CSOCK=""; CSESS=""
 _t="${TMUX:-}"; if [ -n "$_t" ]; then CSOCK="${_t%%,*}"; CSOCK="${CSOCK##*/}"
-  CSESS="$(tmux -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
+  CSESS="$(tmux -u -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
 JMARK="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}/jarvis"
 IS_JARVIS=0
 [ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" \

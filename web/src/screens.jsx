@@ -74,6 +74,11 @@ import { useLayoutEffect, useRef } from 'preact/hooks';
 // vite.config.mjs. The specifier is '../' here because that is where the file is from this
 // one, and rollup rewrites it to './' in the output, which is where it is from there.
 import { clockLabel } from '../grid.js';
+// The Reviews screens (fleet-shots' runs). They import Header and CardScreen back from
+// here — a cycle, and a harmless one: vite emits both files into one chunk, and nothing is
+// called until mount() runs, long after both modules have finished evaluating.
+import { ReviewsScreen, ReviewScreen } from './reviews.jsx';
+import { AutomationsScreen } from './automations.jsx';
 
 // ── a button whose key letter stays in the label ──────────────────────────────────────
 // The TUI's footer is muscle memory, and a button that says "p pause" transfers where one
@@ -84,7 +89,7 @@ import { clockLabel } from '../grid.js';
 // noticed. The bound is on the KEY, not the label: `⏎ open` splits and `remove anyway`
 // must not.
 const VERB = /^(\S+) (.+)$/;
-function Btn({ label, onClick, cls = '' }) {
+export function Btn({ label, onClick, cls = '' }) {
   const m = VERB.exec(label);
   if (m && [...m[1]].length <= 2) {
     return <button class={(cls + ' k').trim()} onClick={onClick}><b>{m[1]}</b>{' ' + m[2]}</button>;
@@ -103,6 +108,9 @@ function Btn({ label, onClick, cls = '' }) {
 // This is a stroked path in the button's own currentColor.
 const ICONS = {
   more: ['M6 12h.01M12 12h.01M18 12h.01'],
+  // The confirm bar's X. The same path as app.js's ICON_CLOSE, which draws it on every sheet
+  // and on the bar the session screen renders: one picture of "close" across both renderers.
+  close: ['M6 6l12 12M18 6 6 18'],
 };
 function Icon({ name }) {
   const ds = ICONS[name];
@@ -126,10 +134,14 @@ function Icon({ name }) {
 // screens now agree instead of one having a footer and the other a header button.
 //   The verbs did not go away and neither did the gestures: both are in the sheet, which
 // names what it is acting on before it offers anything destructive.
-function Header({ scope, mode, stale, counts, onMore }) {
+export function Header({ scope, mode, stale, counts, onMore, onBack }) {
   return (
     <Fragment>
       <div class="hdr">
+        {/* THE CONVERSATION'S BACK, NOT A SECOND ONE: the same `‹` button app.js's btn()
+            draws first in a session's .sbar, in the same corner, calling the same back(). A
+            screen one level down gets it; Projects and a project's grid hand no onBack. */}
+        {onBack ? <Btn label="‹" cls="back" onClick={onBack} /> : null}
         <span class="name">ghostfleet</span>
         <span class="scope">{scope}</span>
         <span class={'mode ' + mode.kind} title={mode.detail || null}>{mode.text}</span>
@@ -165,6 +177,26 @@ function ProfileTabs({ tabs, onTab }) {
   );
 }
 
+// ── the phone's search, on Projects and on a project's grid ──────────────────────────
+// Everything it says and does arrives from app.js's findSpec(), which says why it is always
+// drawn and never focused for you — its words included, since the two screens find
+// different things. What lives here is only the box: an input, the count and a clear
+// button laid over its right end, so neither changes the row's height or the input's width
+// as they come and go.
+function FindField({ find }) {
+  if (!find) return null;
+  return (
+    <div class="find">
+      <input type="search" value={find.q} placeholder={find.placeholder}
+             aria-label={find.placeholder} enterkeyhint="search"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false}
+             onInput={(e) => find.onInput(e.currentTarget.value)} onKeyDown={find.onKey} />
+      <span class="count">{find.count}</span>
+      {find.q ? <button class="clear" onClick={find.onClear} aria-label="clear the search">×</button> : null}
+    </div>
+  );
+}
+
 // ── the count strip ───────────────────────────────────────────────────────────────────
 // The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED: a
 // strip where every tile is lit says nothing, and the question this app exists to answer is
@@ -193,6 +225,9 @@ function ConfirmBar({ confirm }) {
   if (!confirm) return null;
   return (
     <div class={'confirm ' + confirm.cls}>
+      {confirm.close
+        ? <button type="button" class="sheet-x confirm-x" aria-label="close" title="close · esc" onClick={confirm.close}><Icon name="close" /></button>
+        : null}
       <span class="q">{' ' + confirm.q}</span>
       <span class="keys">{'  ' + confirm.keys}</span>
       {confirm.buttons.length
@@ -249,10 +284,10 @@ function CardList({ nodes, listRef }) {
 // its position on screen, and the one place it must never be is over a control ("dont blok
 // the chat with toasts"). Two copies of this order is one screen where that is true and one
 // where it is true until somebody appends something.
-function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, listRef, toast }) {
+export function CardScreen({ scope, mode, stale, counts, onMore, onBack, band, confirm, cards, listRef, toast }) {
   return (
     <Fragment>
-      <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} />
+      <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} onBack={onBack} />
       {band}
       <ConfirmBar confirm={confirm} />
       <CardList nodes={cards} listRef={listRef} />
@@ -299,13 +334,22 @@ function NotifyBar({ notify }) {
 
 function ProjectsScreen(p) {
   return <CardScreen {...p} band={<Fragment>
+    <FindField find={p.find} />
     <NotifyBar notify={p.notify} />
     <JarvisBar jarvis={p.jarvis} />
     <ProfileTabs tabs={p.tabs} onTab={p.onTab} />
   </Fragment>} />;
 }
 function GridScreen(p) {
-  return <CardScreen {...p} band={<CountStrip strip={p.strip} />} />;
+  return <CardScreen {...p} band={<Fragment>
+    <FindField find={p.find} />
+    <CountStrip strip={p.strip} />
+  </Fragment>} />;
+}
+// What the masters hold for the owner. No band: the list is the whole screen, and the line
+// that opens it is a card on Projects (app.js queueRow), not a band here.
+function QueueScreen(p) {
+  return <CardScreen {...p} band={null} />;
 }
 
 // ── what app.js calls ─────────────────────────────────────────────────────────────────
@@ -321,7 +365,7 @@ function GridScreen(p) {
 // tears the old tree down and builds the new one, which is exactly what crossing between
 // two screens means. Preact would also tear down on the differing component type alone;
 // the key is here so that stays true if these two ever become one component with a prop.
-const SCREENS = { projects: ProjectsScreen, grid: GridScreen };
+const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen, reviews: ReviewsScreen, review: ReviewScreen, automations: AutomationsScreen };
 export function mount(container, screen, props) {
   const S = SCREENS[screen];
   // Not a silent no-op: a typo here would leave the container holding the PREVIOUS screen

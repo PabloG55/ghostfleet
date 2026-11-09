@@ -1,0 +1,92 @@
+{
+  "ok": true,
+  "run": {
+    "id": "2026-03-03_16-45-12",
+    "profile": "personal",
+    "project": "toolbox",
+    "branch": "docs-pass",
+    "at_ago": 180000,
+    "kind": "stills",
+    "video": null,
+    "duration": null,
+    "problems": 0,
+    "provenance": {
+      "commit": "0d5a8c3",
+      "dirty": false,
+      "base": "staging",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "session": "docs-pass",
+      "slot": null
+    },
+    "steps": [
+      {
+        "n": 1,
+        "name": "install page",
+        "file": "docs-install.png",
+        "url": "https://docs.toolbox.example/install",
+        "title": "Install · toolbox",
+        "expect": {
+          "text": "npm i -g toolbox",
+          "found": true
+        },
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://docs.toolbox.example/install",
+            "type": "Document",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://docs.toolbox.example/app.css",
+            "type": "Stylesheet",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://docs.toolbox.example/app.js",
+            "type": "Script",
+            "status": 200
+          },
+          {
+            "method": "GET",
+            "url": "https://docs.toolbox.example/logo.svg",
+            "type": "Image",
+            "status": 200
+          }
+        ]
+      },
+      {
+        "n": 2,
+        "name": "config page",
+        "file": "docs-config.png",
+        "url": "https://docs.toolbox.example/config",
+        "title": "Config · toolbox",
+        "expect": null,
+        "notes": [],
+        "requests": [
+          {
+            "method": "GET",
+            "url": "https://docs.toolbox.example/config",
+            "type": "Document",
+            "status": 200
+          }
+        ]
+      }
+    ],
+    "verdict": {
+      "1": {
+        "v": "ok",
+        "note": ""
+      },
+      "2": {
+        "v": "ok",
+        "note": "the snippet wraps on a phone; fine for now"
+      }
+    }
+  }
+}

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# fleet-web — open the web client on this Mac, at http://localhost:<port>, no Tailscale.
+#
+#     fleet-web            open it in the default browser (also: ghostfleet web)
+#     fleet-web --print    print the URL instead of opening it
+#
+# fleet-serve listens on 127.0.0.1 beside its tailnet address, with its own rp_id
+# (`localhost`), so the Mac enrols its own passkey the first time — fleet-serve enroll
+# <id>, then the code, then Touch ID — and signs in with it after that (docs/mobile.md §5).
+#
+# IT STARTS NOTHING. A daemon that is not running is reported with the command that starts
+# it; this never runs that command, for the same reason fleet-phone never does: the port it
+# opens is remote code execution, and a word that sounds like "show me" must not open one.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+
+CONFIG="${GHOSTFLEET_SERVE_CONFIG:-$HOME/.config/ghostfleet/serve.json}"
+
+MODE=open
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --print)   MODE=print; shift ;;
+    -h|--help) sed -n '2,13p' "$src" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "fleet-web: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v node >/dev/null 2>&1 || { echo "fleet-web: node is required (>=18)" >&2; exit 1; }
+# One read, three fields, \x1f between them: the bind can be an IPv6 literal, and a field
+# the config leaves out must stay an empty field rather than shift the rest left.
+IFS=$'\x1f' read -r BIND PORT RP <<< "$(node -e '
+  let c = {};
+  try { c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch {}
+  process.stdout.write([c.bind || "", c.port || 8787, c.rp_id || ""].join("\x1f"));
+' "$CONFIG" 2>/dev/null)"
+
+if [ -z "$BIND" ] || [ -z "$RP" ]; then
+  echo "fleet-web: fleet-serve is not set up yet ($CONFIG has no bind and rp_id)." >&2
+  echo "  fleet-phone     # says which step is next" >&2
+  exit 1
+fi
+case "$PORT" in ''|*[!0-9]*) echo "fleet-web: port '$PORT' in $CONFIG is not a number" >&2; exit 1 ;; esac
+
+# The one shape with no localhost listener: the configured bind IS 127.0.0.1, for another
+# name (a tunnel's). fleet-serve says the same at startup; this is not the place to guess.
+if [ "$RP" != localhost ] && [ "$BIND" = 127.0.0.1 ]; then
+  echo "fleet-web: this fleet-serve is bound to 127.0.0.1 for '$RP', so it does not also serve localhost" >&2
+  echo "  (one socket cannot be two passkey origins). Open its own origin instead." >&2
+  exit 1
+fi
+URL="http://localhost:$PORT"
+
+# ASKED OF THE LISTENER, NOT OF A PROCESS LIST. `/` with Host localhost:<port> is a 200
+# only from a fleet-serve that has a localhost listener: anything else on the port answers
+# something else, and a fleet-serve started before it had one answers its tailnet socket
+# only. 127.0.0.1 rather than the name, because `localhost` can resolve to ::1 first and
+# that is not where the listener is.
+code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' -H "Host: localhost:$PORT" "http://127.0.0.1:$PORT/" 2>/dev/null)"
+if [ "$code" != 200 ]; then
+  if [ "$code" = 000 ] || [ -z "$code" ]; then
+    # Nothing on 127.0.0.1. Is the daemon up on its configured bind? Then it is an old one.
+    lit="$BIND"; case "$BIND" in *:*) lit="[$BIND]" ;; esac
+    if curl -sk -m 3 "http://$lit:$PORT/healthz" 2>/dev/null | grep -q '^ok' ||
+       curl -sk -m 3 "https://$lit:$PORT/healthz" 2>/dev/null | grep -q '^ok'; then
+      echo "fleet-web: fleet-serve is running on $lit:$PORT but not on localhost — it was started" >&2
+      echo "  before it had a localhost listener. Restart it (stop it, then run: fleet-serve)." >&2
+    else
+      echo "fleet-web: fleet-serve is not running, so there is nothing at $URL yet. Start it:" >&2
+      echo "  fleet-serve" >&2
+    fi
+  else
+    echo "fleet-web: something on 127.0.0.1:$PORT answered HTTP $code, not fleet-serve's localhost listener." >&2
+    echo "  fleet-serve check     # what it expects to be listening" >&2
+  fi
+  exit 1
+fi
+
+if [ "$MODE" = print ]; then printf '%s\n' "$URL"; exit 0; fi
+
+# The default browser, per platform. WSL has neither `open` nor a desktop xdg-open as a
+# rule, and its browser is Windows': wslview when wslu is installed, else explorer.exe.
+opener=""
+case "$(uname -s)" in
+  Darwin) opener=open ;;
+  *) if grep -qi microsoft /proc/version 2>/dev/null; then
+       if command -v wslview >/dev/null 2>&1; then opener=wslview; else opener=explorer.exe; fi
+     elif command -v xdg-open >/dev/null 2>&1; then opener=xdg-open; fi ;;
+esac
+if [ -z "$opener" ] || ! command -v "$opener" >/dev/null 2>&1; then
+  echo "fleet-web: no way to open a browser here; open it yourself: $URL" >&2
+  exit 1
+fi
+echo "fleet-web: opening $URL"
+# explorer.exe exits 1 when it has opened the page, so its status says nothing.
+if ! "$opener" "$URL" >/dev/null 2>&1 && [ "$opener" != explorer.exe ]; then
+  echo "fleet-web: $opener could not open it; open it yourself: $URL" >&2
+  exit 1
+fi
+exit 0

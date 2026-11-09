@@ -31,13 +31,10 @@ section in the README, and a one-line notice in `ghostfleet` when npm has a newe
 cannot find them. **Done when:** `fleet_list` shows asleep sessions with their age, and the
 `fleet_stop` description names the case.
 
-### 9. `fleet-shots`: one recording per flow, and a better review page
-Instead of a folder of stills, the worker records **one video of the whole flow** — every
-button of the new feature pressed in order, in the same phone-sized browser — with each step
-as a **chapter** (named by what it asked for) you can jump to. Stills only where a step
-failed. Approve or reject the **flow**, with an optional note per chapter. The review page is
-rebuilt in the phone client's palette and type: video beside the chapter list on desktop,
-stacked on a phone; space plays, ←/→ step chapters, `a` approves, `r` rejects.
+### 9. Reviews: the paired machine's runs too
+The Reviews screen (web/README.md, *Reviews*) lists the runs in this machine's fleet dirs.
+A paired machine's runs are the next step: the API is shaped for a `host` beside
+`profile`/`run`, and the shots routes are deliberately not in PAIR_READS/PAIR_VERBS yet.
 
 ### 11. Make a folder from the add-project browser
 `n` = new folder here: asks a name, creates it, offers `git init` (a root with no git has

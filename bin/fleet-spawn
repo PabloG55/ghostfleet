@@ -26,6 +26,11 @@
 #             objection happens in the lead and the outcome happens in the worker, and
 #             nothing else joins those two transcripts.
 #   --model   model for the new session (e.g. opus); default = account default
+#   --kind    what kind of task this is: verify | ci | docs | video | build. Picks the model
+#             from the project's map (fleet-project set <project> model-<kind> <model>) when
+#             --model is not given and the map has an entry; with no entry the worker starts
+#             on the account default exactly as without --kind. Recorded in the manifest, so
+#             fleet-worktrees shows it. See lib/model-kind.sh.
 #   --agent   which coding CLI runs the session (claude | opencode | codex | agy | cursor).
 #             Default claude. See bin/fleet-agent for what each one can actually
 #             report back — a non-claude worker is not metered by the governor, and
@@ -60,7 +65,7 @@
 #   the fleet has said the last word, and a silent re-route is the same class of bug.
 set -uo pipefail
 
-NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
+NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0; KIND=""
 SOCK_FORCE="${CLAUDE_FLEET_SOCK_FORCE:-}"
 AGENT="${CLAUDE_FLEET_AGENT:-claude}"
 while [ $# -gt 0 ]; do
@@ -69,6 +74,7 @@ while [ $# -gt 0 ]; do
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
     --model)  MODEL="${2:?}";  shift 2 ;;
+    --kind)   KIND="${2:?}";   shift 2 ;;
     --agent)  AGENT="${2:?}";  shift 2 ;;
     --reuse)  REUSE="${2:?}";  shift 2 ;;
     --new)    NEW=1;           shift ;;
@@ -77,7 +83,18 @@ while [ $# -gt 0 ]; do
     *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
   esac
 done
-[ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--prompt \"...\"]" >&2; exit 1; }
+[ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--kind k] [--prompt \"...\"]" >&2; exit 1; }
+
+# THE KIND IS CHECKED HERE, before anything is created. An unknown one is refused rather than
+# treated as "no kind": a typo'd `--kind verfiy` would otherwise start the worker on the
+# expensive default while the lead believes it asked for the cheap one, and nothing would say.
+_src_mk="${BASH_SOURCE[0]}"
+while [ -L "$_src_mk" ]; do _l="$(readlink "$_src_mk")"; case "$_l" in /*) _src_mk="$_l" ;; *) _src_mk="$(dirname "$_src_mk")/$_l" ;; esac; done
+. "$(cd "$(dirname "$_src_mk")/../lib" 2>/dev/null && pwd)/model-kind.sh" \
+  || { echo "fleet-spawn: lib/model-kind.sh is missing — run ./install.sh" >&2; exit 1; }
+if [ -n "$KIND" ] && ! model_kind_valid "$KIND"; then
+  echo "fleet-spawn: unknown --kind '$KIND' (known: $MODEL_KINDS)" >&2; exit 1
+fi
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 # Prefer $TMUX (the live tmux server this session actually runs in) over the env
@@ -384,9 +401,31 @@ route_to_owner() {
 }
 route_to_owner
 
+# ── THE SOCKET IS FINAL; NOW THE FLEET'S OWN PROFILE ─────────────────────────
+# Two paths above settle the socket and neither settled the fleet dir. -s kept the
+# CALLER's config dir outright, and route_to_owner moved the config dir but left
+# $CLAUDE_FLEET_DIR as the caller exported it — so a worker spawned from a default-profile
+# session into a project on another profile had its parent tag, agent marker and park
+# markers written into the default profile's directory, and, when this new-session was the
+# one that started the server, the server's global env was the caller's. Every session
+# anybody opened there afterwards inherited that fleet dir. Resolved from the socket, the
+# same way the phone and fleet-restart resolve it; a socket no project owns keeps what it
+# had (lib/fleet-env.mjs).
+_src_fe="${BASH_SOURCE[0]}"
+while [ -L "$_src_fe" ]; do _l="$(readlink "$_src_fe")"; case "$_l" in /*) _src_fe="$_l" ;; *) _src_fe="$(dirname "$_src_fe")/$_l" ;; esac; done
+FLEET_ENV="$(cd "$(dirname "$_src_fe")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+   && _env="$(node "$FLEET_ENV" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+  IFS=$'\x1f' read -r _cfg _dir _prof _ <<< "$_env"
+  if [ -n "$_cfg" ] && [ -n "$_dir" ]; then
+    CFG_DIR="$_cfg"
+    export CLAUDE_CONFIG_DIR="$_cfg" CLAUDE_FLEET_DIR="$_dir" CLAUDE_FLEET_PROFILE="$_prof"
+  fi
+fi
+
 # who's live where — so we can tell free worktrees from occupied ones (same test
 # as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
-panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 sess_for() {
   local wt="$1" p="" s=""
   while IFS=$'\t' read -r p s; do
@@ -406,14 +445,36 @@ EOF
 # `master` is never a parent: the lead is the top of the tree by definition, and a master
 # whose pane has wandered into a worktree is still spawning top-level workers.
 FLEET_DIR_NOW="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}"
+
+# ── THE MODEL FOR THIS KIND (lib/model-kind.sh) ──────────────────────────────
+# Resolved only now, for the reason the parent is: the map belongs to the project the worker
+# lands in, and route_to_owner can move it to another project's fleet and profile. An explicit
+# --model has already won by being non-empty. The note is printed after the "started" line,
+# on stdout, which is the stream the fleet_spawn MCP tool returns.
+KIND_NOTE=""
+if [ -n "$KIND" ] && [ -z "$MODEL" ]; then
+  if [ "$AGENT" != claude ]; then
+    KIND_NOTE="kind '$KIND' recorded; the model map is for claude workers, so $AGENT starts on its own default"
+  else
+    MODEL="$(model_kind_resolve "$FLEET_DIR_NOW" "$SOCK" "$KIND")"
+    if [ -n "$MODEL" ]; then
+      KIND_NOTE="kind '$KIND' runs on $MODEL (this project's map)"
+    else
+      KIND_NOTE="kind '$KIND' has no model in this project's map, so the account default — map one with: fleet-project set -s $SOCK model-$KIND <model>"
+    fi
+  fi
+elif [ -n "$KIND" ]; then
+  KIND_NOTE="kind '$KIND' recorded; --model $MODEL was given, so the project's map was not read"
+fi
+
 PARENT_SESS=""; PARENT_BRANCH=""
 if [ -n "$LINKED_ROOT" ]; then
   case "${TMUX:-}" in *"/$SOCK,"*)
-    [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+    [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
   if [ -z "$PARENT_SESS" ] && [ -n "${CLAUDE_FLEET_SLOT:-}" ]; then
     _here="$(sess_for "$LINKED_ROOT")"
     [ -n "$_here" ] && tmux -L "$SOCK" has-session -t "$CLAUDE_FLEET_SLOT" 2>/dev/null \
-      && case "$(tmux -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
+      && case "$(tmux -u -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
            "$LINKED_ROOT"|"$LINKED_ROOT"/*) PARENT_SESS="$CLAUDE_FLEET_SLOT" ;; esac
   fi
   [ -n "$PARENT_SESS" ] || PARENT_SESS="$(sess_for "$LINKED_ROOT")"
@@ -780,6 +841,17 @@ else
   rm -f "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
 fi
 
+# THE MODEL PIN (lib/session-model.sh), for the same reason and one more. CLAUDE_FLEET_MODEL
+# reaches this start only: a wake, a restart and a reopen build a new tmux session without
+# it, so a worker spawned on haiku came back on the profile default the first time it slept.
+# The pin is what bin/agent-here reads at every start. No model, no pin — and a stale one a
+# killed same-named session left behind goes, or the new worker would inherit its model.
+if [ -n "$MODEL" ] && [ "$AGENT" = claude ]; then
+  printf '%s\n' "$MODEL" > "$FLEET_DIR_NOW/$SOCK.$name.model" 2>/dev/null
+else
+  rm -f "$FLEET_DIR_NOW/$SOCK.$name.model" 2>/dev/null
+fi
+
 # SAY "STARTED" ONLY WHEN A SESSION IS ACTUALLY THERE.
 #
 # This printed the success line unconditionally, one line below a `new-session` whose
@@ -802,10 +874,16 @@ fi
 # never reaches stdout — the grid parses that stream, and a stray line in it is a hazard
 # for no benefit.
 sid="$(tmux -L "$SOCK" new-session -d -P -F '#{session_id}' -s "$name" -c "$WT" \
-  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" \
+  -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
   -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_SLOT=$SLOT" \
   "exec agent-here \"$name\"")" || sid=""
 sid="${sid%%$'\n'*}"
+# A server that was ALREADY running may have been started by somebody else's environment;
+# the new session is right either way (-e outranks the global), and this puts the server
+# right too and names whoever is still running on the wrong dir.
+[ -n "$sid" ] && command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+  && node "$FLEET_ENV" heal "$SOCK" 2>/dev/null | sed 's/^/fleet-spawn: /' >&2
 
 # ...AND EXIT 0 ONLY THEN. tmux can return 0 and the session still be gone a moment
 # later: the pane runs `exec agent-here <name>`, and if that cannot exec — not on PATH
@@ -831,7 +909,7 @@ session_live() {                   # is $sid still a session on this fleet?
   # this to has-session.
   local s
   while IFS= read -r s; do [ "$s" = "$sid" ] && return 0; done < <(
-    tmux -L "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null)
+    tmux -u -L "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null)
   return 1
 }
 #   ACTION BEFORE RATIONALE, and short lines. fleet-grid.mjs's new-worktree form shows
@@ -878,6 +956,7 @@ session_live || spawn_failed \
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
 # A LINE OF ITS OWN, after the one fleet-grid.mjs parses (/started '([^']+)'/), so that
 # parse is untouched and a reader of either stream sees the tree.
+[ -n "$KIND_NOTE" ] && echo "fleet-spawn: $KIND_NOTE"
 [ -n "$PARENT_SESS" ] && echo "fleet-spawn: '$name' is a child of '$PARENT_SESS' — branched from $PARENT_BRANCH, its PR goes into $PARENT_BRANCH, and its done/need-you go to '$PARENT_SESS'"
 
 # record what this worktree is for, so fleet-worktrees (and a lead that restarted
@@ -890,8 +969,23 @@ mkdir -p "$(dirname "$MANIFEST")" 2>/dev/null
 task="${PROMPT:--}"; task="$(printf '%s' "$task" | tr '\n\r\t' '   ' | cut -c1-200)"
 mtmp="$MANIFEST.$$.tmp"
 { [ -f "$MANIFEST" ] && awk -F'\t' -v w="$WT" '$1!=w' "$MANIFEST"
-  printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"; } >"$mtmp" 2>/dev/null \
+  if [ -n "$KIND" ]; then
+    printf '%s\t%s\t%s\t%s\t\t\t%s\n' "$WT" "$name" "$BRANCH" "$task" "$KIND"
+  else
+    printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"
+  fi; } >"$mtmp" 2>/dev/null \
   && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
+# The memory's event (docs/MEMORY.md) for the same claim, kept after the row is replaced by
+# the next dispatch into this worktree — with the WHOLE brief, which the row cuts at 200
+# characters (the writer keeps 1500). The writer never fails, so neither can this.
+"$(dirname "$0")/fleet-know-event" spawn "fleet=${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" "sock=$SOCK" "cwd=$WT" \
+  "worker=$name" "branch=$BRANCH" "worktree=$WT" "task=${PROMPT:--}" "kind=$KIND" \
+  "parent=${PARENT_SESS:-${CLAUDE_FLEET_SLOT:-}}" "base=${FROM:-$PARENT_BRANCH}" "agent=$AGENT" </dev/null >/dev/null 2>&1
+#
+# THE KIND IS COLUMN SEVEN, written only when there is one, so a spawn without --kind still
+# writes the four-column row every reader was built for. Five and six are left EMPTY rather
+# than skipped: the manifest is read with `awk -F'\t'`, which keeps an empty field in place,
+# and an empty fifth column is exactly what "not acknowledged yet" already looks like.
 #
 # FOUR COLUMNS, and the fifth and sixth are not ours to write. fleet-ack appends what the
 # WORKER understood and which of the decisions it is working from; a row written here
@@ -950,8 +1044,17 @@ if [ -n "$PROMPT" ]; then
   if [ "$AGENT" != claude ] && command -v fleet-agent >/dev/null 2>&1; then
     READY_RE="$(fleet-agent field "$AGENT" ready_re 2>/dev/null)"
   fi
+  # A BRIEF THAT IS NOT DELIVERED SAYS SO. This send runs after fleet-spawn has returned,
+  # with its output going nowhere, so a refusal (a brief opening with a slash command the
+  # mod could not run, a session gone before it was ready) used to leave a worker that
+  # "never started" and nothing to say why. Its failure is filed in the inbox of the lead
+  # the worker reports to, naming the worker and fleet-send's own words, and printed on
+  # the terminal fleet-spawn ran in, when it ran in one.
+  _inbox="$FLEET_DIR_NOW/$SOCK.inbox"
+  case "$PARENT_SESS" in ''|master) ;; *) _inbox="$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.inbox" ;; esac
+  _tty=""; [ -t 2 ] && _tty="$(tty <&2 2>/dev/null)"; case "$_tty" in /dev/*) ;; *) _tty="" ;; esac
   nohup bash -c '
-    sock="$1"; name="$2"; msg="$3"; re="$4"
+    sock="$1"; name="$2"; msg="$3"; re="$4"; inbox="$5"; tty="$6"
     if [ -n "$re" ]; then
       for _ in $(seq 1 90); do
         tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null | grep -qE "$re" && break
@@ -961,7 +1064,11 @@ if [ -n "$PROMPT" ]; then
       sleep 15                      # no ready marker for this agent — best effort
     fi
     sleep 1
-    fleet-send -s "$sock" "$name" "$msg"
-  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" >/dev/null 2>&1 &
-  echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input"
+    out="$(fleet-send -s "$sock" "$name" "$msg" 2>&1)" && exit 0
+    why="$(printf "%s\n" "$out" | grep -v "^[[:space:]]*$" | tail -1 | tr "\t\r" "  " | cut -c1-300)"
+    printf "%s\t%s\tfailed\t%s\n" "$(date +%s)" "$name" "its initial prompt was not delivered — ${why:-fleet-send failed without a reason}" >> "$inbox" 2>/dev/null
+    [ -n "$tty" ] && printf "\nfleet-spawn: %s: its initial prompt was NOT delivered — %s\n" "$name" "${why:-fleet-send failed without a reason}" > "$tty" 2>/dev/null
+    exit 1
+  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" "$_inbox" "$_tty" >/dev/null 2>&1 &
+  echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input (a failure goes to fleet-inbox)"
 fi

@@ -83,10 +83,13 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 13e765c2fd74
+// CLIENT-HASH: 89055f618579
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
+// v85 is one client for several machines: a project addressed `<name>@<host>` lives on a
+// paired fleet-serve, its tab and its row say which machine, a machine that does not answer
+// is a card saying since when, and the settings sheet lists the machines and unpairs one.
 // v21 puts the project's agent on a screen: the 4th column of the projects list has been
 // read by bin/ghostfleet for a while and nothing could WRITE it, so "the master cant be
 // selected as open code or codex" had no answer that was not a text editor.
@@ -362,15 +365,100 @@
 // left drawn on the band and a tap to send now), lets the owner talk over an answer to cut
 // in with a follow-up, and reads a long reply to the end in chunks instead of stopping at
 // 1200 characters. A phone still on v71 sends after a second of quiet and stops long replies.
-const VERSION = 'ghostfleet-v72';
+// v73 says what a Claude account notice is (fleet-accounts): a profile that switched login,
+// ran out, or needs /login. A phone still on v72 shows such a push as "a session has an answer".
+// v74 keeps every session's talk button with Jarvis switched off: the Mac's ears are read
+// from /api/voice and heard through /api/voice/hear, which answer either way. A phone still
+// on v73 keeps hiding talk while Jarvis is off, and with it on goes on using /api/jarvis and
+// /api/jarvis/hear, which still answer — so it only gets talk back once it is RELAUNCHED
+// (swiped away, not resumed from the app switcher; CLAUDE.md, "an installed PWA").
+// v75 shows what every master holds for the owner ("waiting on you", at the top of Projects,
+// read from /api/waiting), answers one from a tap, and says what a `waiting` push is: a phone
+// still on v74 has no section and shows such a push as "a session has an answer".
+// v76 draws the Claude accounts line at the top of Projects, and the sheet of every account
+// behind it (read from /api/usage): a phone still on v75 shows neither until it is relaunched.
+// v77 keeps an open chat in step with the transcript: it goes on reading while the owner
+// types, after "load older" and across a resume, one read at a time, honouring a 429's
+// Retry-After and dropping an answer older than the one on screen — and asks with
+// If-None-Match, so an idle chat's poll is a 304. It opens a chat every time (retrying the
+// first page, and saying so), updates the list instead of rebuilding it (a scrolled table or
+// code line stays scrolled) and loads older messages by scrolling up. A phone still on v76
+// can hold a reply back until the chat is reopened; it reads the daemon's new answers unchanged.
+// v78 is the desk: two panes from 1024px up with a mouse, the Mac grid's keys (a letter on
+// the session screen now types into the composer instead of pausing or killing), ⏎ sends
+// with a mouse and keyboard, and an image pasted or dropped into the conversation attaches;
+// a mouse gets no phone gestures. It adds grid-search.js to the shell — a byte-for-byte copy
+// of lib/grid-search.mjs, the desk's `/` matcher.
+// A desktop still on v77 keeps the phone column. On the phone a finger keeps every
+// gesture; what v78 adds there is an attached keyboard (the keys, ⏎ to send) and an image
+// pasted from iOS's own Paste menu. And a draft is the session's, kept until it is sent:
+// a phone still on v77 blanks the box whenever a chat is opened. With a keyboard, a chat
+// opens with the box focused.
+// v79 says what all-exhausted did to the workers: a project whose budget limit is ignored is
+// not parked by the accounts engine, so the push and the accounts line say they keep running.
+// A phone still on v78 says "workers paused" for those too.
+// v80 moves what the masters hold for the owner off Projects onto a queue screen of its own:
+// Projects keeps one `queue · n ›` row, the queue carries the conversation's `‹` to leave it
+// by and opens in the right pane at a desk, and a tapped "waiting on you" notification opens
+// it. A phone still on v79 goes on drawing the whole list at the top of Projects until it is
+// relaunched.
+// v81 stops at a failed wake: the tap used to open the session whatever the wake answered, so
+// a wake that failed showed its reason and then an empty pane. A phone still on v80 does that.
+// v82 adds the terminal: a real shell in a fleet tab, off per device, a passkey at each open.
+// v83 names the device on the lock screen: a desktop Mac, which can now open the client at
+// http://localhost, is offered "enrol this Mac" and "unlock with Touch ID"; every other device
+// keeps the phone's words. A Mac still on v82 says "this phone" and "Face ID".
+// v84 finds a project by typing its name: a field at the top of Projects on a phone, `/` at
+// a desk, both through the grid's matcher. A phone still on v83 has no field.
+// v86 adds the stack: several sessions, across projects, on screen at once — side by side at
+// a desk, a swipe apart on a phone. A phone still on v85 has no `stack` behind its ⋯.
+// v87 is the redesign: the same screens and the same colours, set in a UI face with the
+// terminal's kept for names, data and the pane, on one spacing and radius scale. Stylesheet
+// only — a phone still on v86 works exactly as before, it just looks like v86.
+// v88 lets the grid's four count tiles wrap two by two below 375px, where four across cut
+// `need you` and `working` to an ellipsis. Stylesheet only; a phone on v87 keeps the cut.
+// v89 lands every login on Projects (a tapped notification still opens its screen on top of
+// it), and touches the history only once a screen is painted, so a back swipe never previews
+// the lock screen. A phone still on v88 reopens the last screen after Face ID, and can flash
+// the lock screen on the first back swipe after a cold open.
+// v90 gives every sheet and the confirm bar an X, closes a sheet on a tap beside it (keeping
+// what was typed in it), makes a press outside the confirm bar cancel it, and adds the
+// editor — the desk's Ctrl-n — beside the terminal. A phone on v89 has none of it.
+// v91 makes the Projects search find sessions too, across every project and paired machine,
+// and gives a project's grid its own "find a session" field. A phone still on v90 finds
+// projects only, and its grid has no field.
+// v93 lists a held wake in the queue: a lead whose input box has kept the fleet's wake out
+// for ten minutes is a red `▲ wake held` card, and a tap opens that lead. A phone on v92
+// shows the queue without it.
+// v94 lets a photo go to another machine's session: the camera no longer refuses a project
+// on a paired machine. A phone on v93 still says a photo does not cross.
+// v95 adds Reviews: fleet-shots' runs, one card per branch, a run's video by chapter, its
+// steps and requests, and the verdict saved to the Mac. A phone on v94 has no Reviews row,
+// and `fleet-shots serve` — which used to be where reviews lived — is retired.
+// v96 lists every paired machine's runs in Reviews, each card naming its machine, and opens,
+// plays and judges one through this host — the verdict lands on the machine that recorded
+// it. A phone on v95 lists this machine's runs only.
+// v98 keeps a tab's place in its address: a reload lands where it was, each desk tab on its
+// own, and a link (?screen=session&p=…&s=…) opens its screen after the unlock. The installed
+// app still opens start_url and restores from the stored state. A phone on v97 ignores the
+// query and reopens whatever the last tab stored.
+// v100 adds Automations (experimental): a menu entry on Projects while the Mac's switch is
+// on, and their screen. A phone on v99 has neither, and the Mac runs them all the same.
+const VERSION = 'ghostfleet-v100';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js', './md.js',
+  './ansi.js', './md.js', './grid-search.js', './place.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
   // where that is the whole reason hashing is switched off.
   './screens.js', './preact.js',
+  // The terminal: web/term.js and the xterm.js it drives, vendored from npm with pinned
+  // digests (scripts/vendor-xterm.sh). Precached like everything else even though most
+  // opens never load them, because "every shipped file is precached" is what keeps an
+  // offline open from half-working — and an installed app that cannot load its terminal
+  // after a deploy until it happens to be online is that half.
+  './term.js', './xterm.js', './xterm-fit.js', './xterm.css',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
@@ -382,6 +470,14 @@ const SHELL = [
   './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
   './fixtures/pane-acme-api-master.json',
   './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
+  './fixtures/waiting.json',
+  './fixtures/usage.json',
+  './fixtures/paired.json',
+  './fixtures/shots.json',
+  './fixtures/shots-run-2026-03-05_14-02-11.json', './fixtures/shots-run-2026-03-04_10-15-40.json',
+  './fixtures/shots-run-sign-in-flow.json', './fixtures/shots-run-2026-03-05_09-30-00.json',
+  './fixtures/shots-run-2026-03-03_16-45-12.json',
+  './fixtures/shots-run-vm-2026-03-05_13-20-00.json', './fixtures/shots-run-vm-2026-03-02_08-10-00.json',
 ];
 
 self.addEventListener('install', e => {
@@ -433,8 +529,16 @@ function pushText(d) {
   // this is not the surface that knows what.
   const usable = d && typeof d.n === 'number' && d.n > 0 && typeof d.kind === 'string';
   if (!usable) return { title: 'ghostfleet', body: 'something needs you — open to see which' };
+  if (d.kind === 'account' && d.account && typeof d.account === 'object') return accountText(d.account);
   const n = d.n;
   const named = Array.isArray(d.sessions) ? d.sessions.filter(x => x && x.project && x.session) : [];
+  // A MASTER HOLDING AN ITEM FOR THE OWNER (fleet-serve waitingEvents): one event per project, so
+  // `n` counts projects. Named by project, because "master" is every fleet's lead's name.
+  if (d.kind === 'waiting') {
+    return n === 1
+      ? { title: named.length === 1 ? `${named[0].project} is waiting on you` : 'a master is waiting on you', body: 'open to answer it' }
+      : { title: `${n} projects are waiting on you`, body: named.length ? named.map(x => x.project).join(' · ') : 'open to answer them' };
+  }
   const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
   const verb = kind === 'needs-you' ? 'needs you' : kind === 'mixed' ? 'needs you' : 'has an answer';
   if (n === 1) {
@@ -452,6 +556,33 @@ function pushText(d) {
            // the other one, so it says what to do instead of showing an empty list.
            body: named.length ? named.map(x => `${x.project}/${x.session}`).join(' · ') : 'open ghostfleet to see which' };
 }
+// A Claude account notice (fleet-accounts): which profile moved to which login, or ran out.
+// Every word is here; the payload carries an event word, names (absent in anonymous mode),
+// a limit, a percentage and an epoch second.
+function accountText(a) {
+  const p = a.profile || 'a profile';
+  const at = (t) => { try { return new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+  if (a.event === 'exhausted') {
+    const nl = Array.isArray(a.needs_login) && a.needs_login.length ? ` · needs /login: ${a.needs_login.join(', ')}` : '';
+    // A project whose budget limit is ignored is not parked (lib/accounts.mjs step 6).
+    const w = a.workers === 'running' ? 'workers keep running (budget ignored)'
+      : a.workers === 'mixed' ? 'workers paused, except where the budget is ignored' : 'workers paused';
+    return a.until
+      ? { title: `all ${p} accounts exhausted`, body: `until ${at(a.until)} — ${w}${a.workers === 'running' ? '' : ', they resume then'}${nl}` }
+      : { title: `no ${p} account can run`, body: `${w}${nl || ' · open ghostfleet at the desk'}` };
+  }
+  if (a.event === 'needs-login') {
+    const who = a.account ? `${p}/${a.account}` : 'a Claude account';
+    return { title: `${who} needs /login`, body: a.account ? `run /login as it in a ${p} session, then: fleet-accounts add ${p} ${a.account}` : 'see the inbox at the desk' };
+  }
+  if (a.event === 'blocked') {
+    const who = a.account ? `${p}/${a.account}` : 'a Claude account';
+    return { title: `${who} is blocked`, body: 'its organization has turned off Claude Code for it — only that organization\'s admin can turn it back on; skipped until then' };
+  }
+  if (a.event === 'resumed') return { title: `${p}: resumed`, body: a.to ? `on ${a.to}` : 'an account has room again' };
+  const why = a.cause === 'limit' && a.limit ? ` (${a.limit} at ${a.pct}%)` : a.cause === 'needs-login' ? ' (it needs /login)' : a.cause === 'blocked' ? ' (it is blocked by its organization)' : a.cause === 'by-hand' ? ' (by hand)' : '';
+  return { title: `${p}: switched${a.to ? ' to ' + a.to : ' account'}`, body: `${a.from ? 'from ' + a.from : 'to another login'}${why}` };
+}
 self.addEventListener('push', e => {
   let d = null;
   try { d = e.data ? e.data.json() : null; } catch { d = null; }
@@ -463,7 +594,7 @@ self.addEventListener('push', e => {
     icon: './icons/icon-192.png',
     badge: './icons/icon-192.png',
     // WHICH SCREEN A TAP OPENS, from the payload's one-word enum (fleet-serve pushPayload).
-    data: { at: (d && d.at) || 0, open: d && d.open === 'jarvis' ? 'jarvis' : '' },
+    data: { at: (d && d.at) || 0, open: d && (d.open === 'jarvis' || d.open === 'waiting') ? d.open : '' },
   }));
 });
 
@@ -475,14 +606,16 @@ self.addEventListener('push', e => {
 // gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  const jarvis = !!(e.notification.data && e.notification.data.open === 'jarvis');
+  // ...AND A SECOND: an item a master is waiting on opens the queue, where the list is.
+  const open = e.notification.data && e.notification.data.open;
+  const to = open === 'jarvis' || open === 'waiting' ? open : '';
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) if ('focus' in c) {
-      if (jarvis) { try { c.postMessage({ open: 'jarvis' }); } catch {} }
+      if (to) { try { c.postMessage({ open: to }); } catch {} }
       return c.focus();
     }
-    return self.clients.openWindow(jarvis ? './#jarvis' : './');
+    return self.clients.openWindow(to ? `./#${to}` : './');
   })());
 });
 
@@ -523,6 +656,13 @@ self.addEventListener('fetch', e => {
     e.respondWith(caches.open(VERSION).then(c => c.match(req)).then(r => r || new Response('', { status: 404 })));
     return;
   }
+  // A BYTE RANGE IS THE NETWORK'S, ALWAYS. A <video> asks for its file in ranges — one per
+  // seek — and a range answers 206, which the Cache API refuses outright: c.put() of a
+  // partial response throws, and the shell path below would turn that into a failed fetch,
+  // which iOS shows as a player that never starts. A run's media is also ticketed and
+  // per-run (/api/shots/media), so a cached copy would be a stale ticket's bytes kept for
+  // nobody. Left to the browser, untouched.
+  if (req.headers.has('range') || url.pathname === '/api/shots/media' || url.pathname.includes('/fixtures/shots/')) return;
   const isApi = url.pathname.startsWith('/api/');
 
   if (isApi) {
@@ -543,10 +683,16 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  // A PLACE IN THE ADDRESS IS THE PAGE'S, NOT THE SERVER'S. `?screen=session&p=…` is read by
+  // app.js from location; every server answers it with the same index.html. Keyed by the
+  // query, each address a tab had ever reloaded on was a cache miss — the cache-first shell
+  // became network-first exactly for a reload — and then a copy of the shell of its own.
+  // So a navigation is looked up, and kept, without its query.
+  const key = req.mode === 'navigate' && url.search ? url.origin + url.pathname : req;
   e.respondWith((async () => {
     const c = await caches.open(VERSION);
-    const hit = await c.match(req, { ignoreSearch: false });
-    const net = fetch(req).then(r => { if (r.ok) c.put(req, r.clone()); return r; });
+    const hit = await c.match(key, { ignoreSearch: false });
+    const net = fetch(req).then(r => { if (r.ok) c.put(key, r.clone()); return r; });
     if (hit) { net.catch(() => {}); return hit; }       // revalidate behind the paint
     try { return await net; }
     catch (err) {

@@ -6,6 +6,16 @@
 # $CLAUDE_FLEET_SOCK.
 set -uo pipefail
 
+# WHERE THIS FILE REALLY LIVES. It is installed as a symlink (~/.local/bin/fleet-list ->
+# the staged runtime), and `dirname "$0"` is the link's directory, not the target's: `$0/..`
+# was ~/.local, whose `lib/` does not exist. Every lib lookup below then found nothing and said
+# so in silence — the model column read `?` on every row and lost sessions were never listed —
+# while the suite, which runs bin/fleet-list by its real path, stayed green. Resolve the link
+# the way fleet-model does.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _l="$(readlink "$_self")"; case "$_l" in /*) _self="$_l" ;; *) _self="$(dirname "$_self")/$_l" ;; esac; done
+LIB_DIR="$(cd "$(dirname "$_self")/../lib" 2>/dev/null && pwd -P)"
+
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 # Prefer $TMUX (the live server this session runs in) over the env var — it's
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
@@ -21,7 +31,17 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 SELF="${CLAUDE_FLEET_SLOT:-}"
 [ "$SOCK" = "$AMBIENT" ] || SELF=""
 
-names="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)"
+# ONE tmux read gives each session's name AND its pane's cwd (the orphan test below). A tab is
+# the separator at the tmux boundary (CLAUDE.md: tmux <= 3.5 escapes \x1f); the path is the last
+# field, so an empty one cannot shift anything. `-u`: tmux 3.4 in a locale that is not UTF-8
+# (a bare container, cron, launchd) prints a tab in a -F format as `_`, which fused every name
+# with its path and made each session look like a different one; -u says the terminal is UTF-8.
+names=""; CWDA=()
+while IFS=$'\t' read -r _n _c; do
+  [ -n "$_n" ] || continue
+  CWDA[${#CWDA[@]}]="$_c"; names="$names$_n"$'\n'
+done < <(tmux -L "$SOCK" -u list-sessions -F $'#{session_name}\t#{pane_current_path}' 2>/dev/null)
+names="${names%$'\n'}"
 # A HIBERNATED SESSION HAS NO TMUX SESSION — its asleep marker is the whole of it, and it
 # is a card on the grid and the phone. Walking tmux alone left an agent asked to "clean up
 # the asleep ones" with nothing to find, and a fleet whose every session slept read as
@@ -32,7 +52,7 @@ for f in "$FLEET_DIR/$SOCK".*.asleep; do
   [ -f "$f" ] || continue
   a="${f##*/}"; a="${a#"$SOCK".}"; a="${a%.asleep}"
   # a live session under the name wins: the marker is stale, and the wake clears it
-  grep -qxF -- "$a" <<< "$names" && continue
+  case $'\n'"$names"$'\n' in *$'\n'"$a"$'\n'*) continue ;; esac
   asleep="$asleep$a"$'\n'
 done
 # A LOST SESSION HAS NEITHER — the machine killed it (a crash, a reboot) and left only its
@@ -41,8 +61,8 @@ done
 # One line per session: name, then the record's epoch.
 lost=""
 if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
-  _lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/lib/fleet-scan.mjs"
-  _panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
+  _lib="$LIB_DIR/fleet-scan.mjs"
+  _panes="$(tmux -u -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
   [ -f "$_lib" ] && lost="$(LIB="$_lib" DIR="$FLEET_DIR" SOCK="$SOCK" NAMES="$names" PANES="$_panes" \
     CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" node --input-type=module -e '
       const { lostSessions, serverStart } = await import(process.env.LIB);
@@ -53,11 +73,14 @@ if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
         console.log(l.name + "\t" + l.at);
     ' 2>/dev/null)"
 fi
+LOSTNAMES=""
+while IFS=$'\t' read -r _n _; do [ -n "$_n" ] && LOSTNAMES="$LOSTNAMES$_n"$'\n'; done <<< "$lost"
 [ -n "$names$asleep$lost" ] || { echo "(no sessions on $SOCK)"; exit 0; }
 
 # 3h / 2d / 5m — the age a person reads, from the marker's first column (epoch seconds).
 age() {
-  local s; s="$(head -1 "$1" 2>/dev/null | cut -f1)"
+  local s=""
+  [ -f "$1" ] && IFS=$'\t' read -r s _ < "$1"
   age_of "$s"
 }
 age_of() {
@@ -69,26 +92,157 @@ age_of() {
   else printf '%dm' $(( s / 60 )); fi
 }
 
-printf '%-22s %-10s %s\n' "SESSION" "STATUS" ""
+# ── THE MODEL COLUMN ──────────────────────────────────────────────────────────
+# The cheapest place to see "everything is on the big model" — and that is the default state
+# of a fleet nobody has right-sized, so it belongs on the list a lead already reads, not on a
+# screen it has to go and open. For a running Claude session it is what the process is ON
+# (lib/session-model.mjs current: its last reply's model, a /model since, or what agent-here
+# started it on, whichever is newest); for an asleep or lost one, what it will START on (its
+# pin or the project default, lib/session-model.sh). `default` is the profile's own, `?` is a
+# session that has neither replied nor been started by an agent-here that records it, and `-`
+# is another agent, whose model is not a Claude model name. Short: the `claude-` every id
+# starts with is dropped. Computed in ONE node run for every row, after the walk, because a
+# node start per session is most of a second on a fleet of twenty.
+_sm_lib="$LIB_DIR"
+# shellcheck source=lib/session-model.sh
+[ -f "$_sm_lib/session-model.sh" ] && . "$_sm_lib/session-model.sh" 2>/dev/null
+short_model() {
+  case "$1" in
+    '') printf '?' ;; -) printf 'default' ;; claude-*) printf '%s' "${1#claude-}" ;; *) printf '%s' "$1" ;;
+  esac
+}
+# ASLEEP AND LOST ROWS. No process, so nothing to ask the pane: the model is what it will START
+# on when its pin or the project default says so (lib/session-model.sh — that is what a wake
+# launches with, and it wins over anything the conversation last used), else the last model its
+# conversation recorded (the same reader as a running row, one node run for all of them), else
+# `-`. `default` is no longer printed for these: "the profile default" was a guess about a
+# session that may well have last run on something else.
+DORMANT_MODELS=""
+dormant_models() {
+  local names="$1" recs batch="" n tr id
+  # nothing asleep or lost: nothing to ask (a node run for an empty batch is ~80 ms of nothing)
+  case "$names" in *[!$'\n']*) ;; *) return 0 ;; esac
+  command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
+    && [ -f "$_sm_lib/session-model.mjs" ] || return 0
+  # ONE jq over the status records, newest per session; scoped by socket (every fleet has a master).
+  # ONE awk then picks each wanted session's newest record that names a transcript.
+  recs="$(jq -r --arg k "$SOCK" 'select((.sock // "") == $k) | [.slot, (.ts // 0), (.transcript // "")] | @tsv' \
+    "$FLEET_DIR"/*.json 2>/dev/null | sort -t$'\t' -k2,2rn \
+    | NAMES="$names" awk -F'\t' 'BEGIN { n = split(ENVIRON["NAMES"], w, "\n"); for (i = 1; i <= n; i++) want[w[i]] = 1 }
+        ($1 in want) && $3 != "" && !($1 in got) { got[$1] = $3 }
+        END { for (i = 1; i <= n; i++) if (w[i] != "") print w[i] "\t" got[w[i]] }')"
+  while IFS=$'\t' read -r n tr; do
+    [ -n "$n" ] || continue
+    # An asleep session's status record is gone; its marker keeps the conversation id
+    # (<epoch> <id> <cwd> <idle>), and the transcript is <config>/projects/<dir>/<id>.jsonl.
+    if [ -z "$tr" ] && [ -f "$FLEET_DIR/$SOCK.$n.asleep" ]; then
+      IFS=$'\t' read -r _ id _ < "$FLEET_DIR/$SOCK.$n.asleep"
+      case "$id" in ''|*[!A-Za-z0-9-]*) ;; *) for tr in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$id".jsonl; do [ -f "$tr" ] && break; tr=""; done ;; esac
+    fi
+    batch="$batch$n"$'\t'"${tr:--}"$'\t-\n'
+  done <<< "$recs"
+  DORMANT_MODELS="$(printf '%s' "$batch" | node "$_sm_lib/session-model.mjs" current 2>/dev/null)"
+}
+dormant_model() {
+  local r m n line
+  command -v session_model_resolve >/dev/null 2>&1 && {
+    r="$(session_model_resolve "$FLEET_DIR" "$SOCK" "$1" "" 2>/dev/null)"; m="${r%%$'\t'*}"
+    [ -n "$m" ] && { short_model "$m"; return; }
+  }
+  line="$(awk -F'\t' -v n="$1" '$1==n {print $2; exit}' <<< "$DORMANT_MODELS")"
+  case "$line" in ''|-) printf '%s' - ;; *) short_model "$line" ;; esac
+}
+# a tab or a shell is not a Claude session and has no model to show
+dormant_row_model() { case "$1" in _*) printf '%s' - ;; *) dormant_model "$1" ;; esac; }
+
+printf '%-22s %-10s %-12s %s\n' "SESSION" "STATUS" "MODEL" ""
+
+# ── THE STATUS RECORDS, READ ONCE ─────────────────────────────────────────────
+# This used to run one jq per record FILE per session (a fleet dir holds a record for every
+# conversation every fleet ever ran: ~100 files here), so a 12-session list spawned ~1400 jq
+# and took 11 s. Now ONE jq reads every file and tags each matching record with the INDEX of
+# the session it belongs to (the compare is done in jq, so a name needing @tsv escaping still
+# matches), and ONE awk keeps the newest per session. The rule per session is unchanged:
+# scope by sock — matching slot alone collides across fleets (every one has a `master`) — with
+# unscoped legacy records a last resort, never for the ambiguous `master`; the mod's state when
+# its heartbeat is recent, else the hook's status; and the mod's pid is asked whether it is still
+# alive, the same two tests lib/mod-status.mjs applies for the grid. "-" and 0 stand in for an
+# absent field: tab is IFS whitespace, so an empty one would collapse and shift the rest left.
+_jqprog='
+  ($names | split("\n")) as $n
+  | (.slot // null) as $slot
+  | select($slot != null)
+  | ([range(0; $n | length)] | map(select($n[.] == $slot)) | .[0]) as $i
+  | select($i != null)
+  | if ((.sock // "") == $k) then
+      ["A", $i, (.ts//0), (.status // "?"),
+       (if .source == "mod" and ((.mod.hb // 0) / 1000) > (now - 150) then (.state // "-") else "-" end),
+       (.mod.pid // 0), (.transcript // "-" | if . == "" then "-" else . end)] | @tsv
+    elif ((.sock // "") == "") then ["L", $i, (.ts//0), .status] | @tsv
+    else empty end'
+SREC=""
+if command -v jq >/dev/null 2>&1 && [ -n "$names" ]; then
+  SREC="$(jq -r --arg k "$SOCK" --arg names "$names" "$_jqprog" "$FLEET_DIR"/*.json 2>/dev/null)" || {
+    # ONE unreadable record aborts a multi-file jq where the per-file loop skipped just that file;
+    # fall back to a jq per FILE (not per file per session) so a bad record still hides nothing.
+    SREC=""; for f in "$FLEET_DIR"/*.json; do
+      SREC="$SREC$(jq -r --arg k "$SOCK" --arg names "$names" "$_jqprog" "$f" 2>/dev/null)"$'\n'
+    done; }
+  # newest record per (kind, session) — the old `sort -rn | head -1`; on an equal timestamp the
+  # greater line wins, as the reversed last-resort compare of sort did
+  SREC="$(awk -F'\t' 'NF >= 4 { k = $1 SUBSEP $2; if (!(k in b) || $3 + 0 > t[k] + 0 || ($3 + 0 == t[k] + 0 && $0 > b[k])) { b[k] = $0; t[k] = $3 } }
+    END { for (k in b) print b[k] }' <<< "$SREC")"
+fi
+SA=(); SL=()      # indexed arrays (bash 3.2 has no associative ones): record per session index
+while IFS=$'\t' read -r _k _i _rest; do
+  case "$_k" in A) SA[$_i]="$_rest" ;; L) SL[$_i]="$_rest" ;; esac
+done <<< "$SREC"
+
+# ── THE LAUNCH MODEL, READ ONCE ───────────────────────────────────────────────
+# `show-environment -t <name> VAR` fails for a session without VAR, and a failure ends a chained
+# tmux command line — so ask for the WHOLE session environment, one command per session after a
+# marker line, in a single tmux call. The marker is text, not a tab: tmux 3.4 turns a tab in its
+# output into `_` outside a UTF-8 locale. No environment line starts with it.
+# A name ending in `;` would read as a command separator, and a session that vanishes mid-read
+# fails the chain: either way, fall back to one call per session.
+LAUNCH=()
+_args=(); _i=0; _safe=1
 while IFS= read -r name; do
   [ -n "$name" ] || continue
-  st="?"
+  case "$name" in *\;) _safe=0 ;; esac
+  [ "$_i" -gt 0 ] && _args+=(';')
+  _args+=(display-message -p -t "$name" "@@gf-fleet-list@@$_i" ';' show-environment -t "$name"); _i=$((_i + 1))
+done <<< "$names"
+_envout=""; _ok=0
+if [ "$_i" -gt 0 ] && [ "$_safe" = 1 ]; then _envout="$(tmux -L "$SOCK" -u "${_args[@]}" 2>/dev/null)" && _ok=1; fi
+if [ "$_ok" = 1 ]; then
+  _i=-1
+  while IFS= read -r _l; do
+    case "$_l" in
+      "@@gf-fleet-list@@"*) _i="${_l#@@gf-fleet-list@@}" ;;
+      CLAUDE_FLEET_MODEL_LAUNCH=*) [ "$_i" -ge 0 ] && [ -z "${LAUNCH[$_i]+x}" ] && LAUNCH[$_i]="${_l#CLAUDE_FLEET_MODEL_LAUNCH=}" ;;
+    esac
+  done <<< "$_envout"
+else
+  _i=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    _la="$(tmux -u -L "$SOCK" show-environment -t "$name" CLAUDE_FLEET_MODEL_LAUNCH 2>/dev/null)"
+    case "$_la" in CLAUDE_FLEET_MODEL_LAUNCH=*) LAUNCH[$_i]="${_la#CLAUDE_FLEET_MODEL_LAUNCH=}" ;; esac
+    _i=$((_i + 1))
+  done <<< "$names"
+fi
+
+ROWS=""; BATCH=""; _i=0
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  st="?"; _tr="-"
   if command -v jq >/dev/null 2>&1; then
-    # scope by sock: matching slot alone collides across fleets (every one has a
-    # `master`), so it would report another project's status here. Legacy entries
-    # (no sock) are a last resort, never for the ambiguous `master`.
-    # The mod's state (mods/ghostfleet) when its heartbeat is recent, else the hook's
-    # status — then the mod's pid is asked whether it is still alive, the same two tests
-    # lib/mod-status.mjs applies for the grid. "-" and 0 stand in for an absent field:
-    # tab is IFS whitespace, so an empty one would collapse and shift the rest left.
-    IFS=$'\t' read -r _ts st _ms _mp < <(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" --arg k "$SOCK" \
-      'select(.slot==$s and ((.sock // "") == $k))
-       | [(.ts//0), (.status // "?"),
-          (if .source == "mod" and ((.mod.hb // 0) / 1000) > (now - 150) then (.state // "-") else "-" end),
-          (.mod.pid // 0)] | @tsv' "$f" 2>/dev/null; done | sort -rn | head -1)
+    _ts=""; st=""; _ms=""; _mp=""; _tr=""
+    IFS=$'\t' read -r _ts st _ms _mp _tr <<< "${SA[$_i]-}"
     if [ "${_ms:--}" != "-" ] && { [ "${_mp:-0}" = 0 ] || kill -0 "$_mp" 2>/dev/null; }; then st="$_ms"; fi
     if [ -z "$st" ] && [ "$name" != master ]; then
-      st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
+      _lts=""; IFS=$'\t' read -r _lts st <<< "${SL[$_i]-}"
     fi
   fi
   # a parked worker's hook status is stale (Escape doesn't fire Stop) — the marker
@@ -97,21 +251,43 @@ while IFS= read -r name; do
   # ORPHAN: its git worktree was removed but the tmux session lingers, so its pane
   # cwd no longer exists. Surface it as dead (+ how to clean it) — it's effectively
   # gone; don't dispatch to it.
-  cwd="$(tmux -L "$SOCK" display-message -p -t "$name" '#{pane_current_path}' 2>/dev/null)"
+  cwd="${CWDA[$_i]-}"
   { [ -n "$cwd" ] && [ ! -d "$cwd" ]; } && st="dead"
   mark=""
   # the caller is, by definition, alive and mid-turn (it's running this) — so its
   # own row showing a stale 'need-you' is just confusing. Label it plainly.
   if   [ "$name" = "$SELF" ]; then mark="(you)"; [ "$st" = "need-you" ] && st="working"
   elif [ "$st" = dead ];      then mark="worktree gone → fleet-stop $name"; fi
-  printf '%-22s %-10s %s\n' "$name" "${st:-?}" "$mark"
+  # Which CLI: a tab (`_…`) is a shell, and the agent marker names anything but claude.
+  # (Tested before read: `tr < missing 2>/dev/null` silences tr, not the shell's redirect.)
+  _ag=""; [ -f "$FLEET_DIR/$SOCK.$name.agent" ] && { IFS= read -r -d '' _ag < "$FLEET_DIR/$SOCK.$name.agent"; _ag="${_ag//[[:space:]]/}"; }
+  case "$name" in _*) _ag=shell ;; esac
+  _la="${LAUNCH[$_i]-}"; [ "${LAUNCH[$_i]+x}" = x ] || _la="-"
+  ROWS="$ROWS$name"$'\x1f'"${st:-?}"$'\x1f'"${_ag:-claude}"$'\x1f'"$mark"$'\n'
+  BATCH="$BATCH$name"$'\t'"${_tr:--}"$'\t'"${_la:--}"$'\n'
+  _i=$((_i + 1))
 done <<EOF
 $names
 EOF
+MODELS=""
+[ -n "$BATCH" ] && [ -f "$_sm_lib/session-model.mjs" ] && command -v node >/dev/null 2>&1 \
+  && MODELS="$(printf '%s' "$BATCH" | node "$_sm_lib/session-model.mjs" current 2>/dev/null)"
+# Row by row against the batch's answers, in order (no associative arrays: /bin/bash 3.2).
+while IFS=$'\x1f' read -r name st _ag mark; do
+  [ -n "$name" ] || continue
+  IFS=$'\t' read -r _n _m _at _how <&3 || { _n=""; _m=""; _how=""; }
+  if [ "$_ag" != claude ]; then _mo="-"
+  elif [ "$_n" != "$name" ] || [ "$_how" = none ]; then _mo="?"
+  else _mo="$(short_model "$_m")"; fi
+  printf '%-22s %-10s %-12s %s\n' "$name" "$st" "$_mo" "$mark"
+done 3<<<"$MODELS" <<EOF
+$ROWS
+EOF
 
+dormant_models "$asleep$LOSTNAMES"
 while IFS= read -r name; do
   [ -n "$name" ] || continue
-  printf '%-22s %-10s %s\n' "$name" "asleep" \
+  printf '%-22s %-10s %-12s %s\n' "$name" "asleep" "$(dormant_row_model "$name")" \
     "$(age "$FLEET_DIR/$SOCK.$name.asleep") · wake: fleet-hibernate --wake $name · clear: fleet-stop $name"
 done <<EOF
 $asleep
@@ -119,7 +295,7 @@ EOF
 
 while IFS=$'\t' read -r name at; do
   [ -n "$name" ] || continue
-  printf '%-22s %-10s %s\n' "$name" "lost" \
+  printf '%-22s %-10s %-12s %s\n' "$name" "lost" "$(dormant_row_model "$name")" \
     "$(age_of "$at") ago, no session · reopen: fleet-restart -s $SOCK --reopen $name · forget: fleet-stop -s $SOCK $name"
 done <<EOF
 $lost

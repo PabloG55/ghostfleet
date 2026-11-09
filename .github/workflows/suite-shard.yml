@@ -1,0 +1,159 @@
+name: suite-shard
+
+# ONE PLATFORM'S SUITE, AS SHARDS. test.yml calls this once per OS. It is a called workflow
+# rather than a matrix over os × shard because the required checks are per OS — `test
+# (ubuntu-latest)` and `test (macos-latest)` — and an aggregator can only `needs:` a whole
+# job. One job holding both platforms' shards would make each aggregator wait for, and
+# answer for, the other platform's.
+#
+# WHY SHARDS. The suite was one `./test/run.sh` step of 32 minutes on Linux and 36 on macOS
+# (staging run 41161159898), and that step was all of the job. Its groups already run apart
+# safely — each run has its own $TMUX_TMPDIR and sweeps what dead runs left — so N runners
+# each take a slice and the wall time is the slowest slice. Which slice is
+# test/helpers/shard-plan.mjs's answer, balanced by test/shard-times.tsv; see run.sh's
+# `--shard` comment for what is kept together and why.
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}
+    strategy:
+      # Not fail-fast. A red shard says nothing about the other three slices, and cancelling
+      # them would throw away exactly the rows that would have said whether the failure is
+      # one group or a pattern. The aggregator in test.yml is what turns any red into red.
+      fail-fast: false
+      matrix:
+        # THE SHARD COUNT LIVES HERE AND NOWHERE ELSE. Each shard is told N through
+        # strategy.job-total, and records it in its artifact's name; the aggregator reads N
+        # back from those names rather than from a second copy of this list.
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ inputs.os }}
+    env:
+      # Not a skip: the ^N assertion still runs and still proves what it is for.
+      # bin/fleet-tab defaults the editor to nvim and correctly REFUSES when it is
+      # absent, which is what neither runner image has — so the grid emits no choice
+      # and the test reads empty. CLAUDE_FLEET_EDITOR is the product's own documented
+      # override for exactly this, and vi is on both images. Checked in both
+      # directions on a Mac with tmux 3.7b: with the editor missing the assertion is
+      # red with an empty `got`, matching CI exactly; with this set it is green.
+      CLAUDE_FLEET_EDITOR: vi
+
+    # A hung tmux server would otherwise sit on the runner's 6-hour default. The bound used to
+    # be 45 for a whole 36-minute suite, with the reasoning that it must sit ~50% above a GREEN
+    # run so the clock never cancels a passing one (a cancel reads as red and says nothing about
+    # the code). A shard is planned at ~9 minutes on the slower platform, and its slowest group
+    # is 3.5, so 25 keeps that margin and more while making a hang readable three times sooner.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ONE PARENT, NOT A WHOLE HISTORY. A push run compares this commit against the
+          # staging it was merged ONTO, which is its first parent, because origin/staging
+          # moves: protection is deliberately not `strict`, two PRs land a minute apart as
+          # a matter of routine, and a run that fetches the branch after the next merge
+          # reads somebody else's newer client. 8ee5980 was told its v33 was below v34 by
+          # a run testing 8ee5980. Depth 1 has no parent to read, and depth 2 is the
+          # whole of the fix — the ancestry that a full clone would buy is not needed,
+          # only the commit this one sits on.
+          fetch-depth: 2
+
+      # THE CLONE ABOVE IS SHALLOW and fetches only the ref under test, so there is no
+      # `origin/staging` in it at all. Measured against a real `git clone --depth=1
+      # --single-branch`: `git rev-parse origin/staging` fails, and so does every comparison
+      # built on it.
+      #   test/helpers/sw-version.mjs needs it, because the thing it checks is ORDER: this
+      # branch's client VERSION against the one already on main. #83 took v17, #81 was
+      # numbered v16 before it and merged after, main went backwards, and #84 existed only to
+      # put it back. The pin in pwa-check cannot see that — a version bumped DOWNWARDS still
+      # matches its own bytes.
+      #   ONE REF, ONE COMMIT DEEP. That is all the check reads (main's web/sw.js and whether
+      # HEAD is already contained in it), and it keeps this step at a few hundred milliseconds
+      # instead of unshallowing the whole history.
+      #   `|| true` and NOT a hard failure here, deliberately: if the ref does not arrive, the
+      # helper is the thing that refuses — on a pull_request run it FAILS, in a readable
+      # sentence, rather than skipping. A guard that silently no-ops in CI reads as covered
+      # and is worse than no guard. Letting the fetch kill the job would replace that sentence
+      # with a git error, and on the push-to-main leg there is nothing to compare anyway.
+      #   EVERY SHARD FETCHES IT, though only one runs sw-version: which one is the plan's
+      # business, and a step that guessed would go stale the first time the plan moved it.
+      - name: Fetch staging, for the client-version ordering check
+        run: git fetch --depth=1 origin +refs/heads/staging:refs/remotes/origin/staging || true
+
+      # tmux is on neither runner image; jq is on both today, and that is not a
+      # promise. Both are installed rather than assumed. No npm step: the suite has
+      # no dependencies and the repo has no lockfile.
+      #   ffmpeg too, because fleet-shots RECORDS a flow and the recording is the feature:
+      # without an encoder the recorded-run groups skip, and a skip that only names a
+      # missing tool is refused by the suite's own skip rule. Neither image ships it.
+      # --no-install-recommends keeps the apt side to the codecs it needs.
+      #   neovim too, because the editor tab's drag-to-copy is only proven by a real nvim
+      # taking a real drag. The two legs differ on purpose: apt's is 0.9, which has no
+      # getregion and runs lib/nvim-copy-on-select.lua's yank fallback, and Homebrew's is
+      # current. CLAUDE_FLEET_EDITOR above still says vi, so nothing else starts using it.
+      #   EVERY SHARD INSTALLS ALL FOUR. Which groups need which tool is, again, the plan's to
+      # decide, and a shard that skipped a tool it turned out to need would skip rows, not fail.
+      - name: Install tmux, jq, ffmpeg and neovim (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg neovim
+
+      - name: Install tmux, jq, ffmpeg and neovim (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for p in tmux jq ffmpeg neovim; do
+            brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
+          done
+
+      # package.json says node >=18. The runner images ship one, but which one drifts,
+      # and a suite that fails because an image moved should not read as a code bug.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # A platform difference in the suite shows up as a red assertion that never
+      # mentions the platform. These lines are what makes such a leg diagnosable.
+      #
+      # `tmux -V` earned its place: this leg opened with 125 failures that were not about
+      # Linux at all. Ubuntu 24.04's apt tmux is 3.4 and Homebrew's is 3.7b, and tmux
+      # <= 3.5 vis-escapes command output, which broke every `-F` record ghostfleet
+      # parsed. Put tmux 3.4 on a Mac's PATH and the same suite fails the same way. So
+      # read this line FIRST when a leg is red and the other one is green — and do not
+      # "fix" a red leg by installing a newer tmux here: a stock distro tmux is the
+      # thing being tested.
+      - name: Versions
+        run: |
+          bash --version | head -1
+          node --version
+          tmux -V
+          jq --version
+          ffmpeg -hide_banner -version | head -1
+          nvim --version | head -1
+
+      # No isolation needed beyond what the suite already does: it puts every tmux
+      # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers
+      # of runs that died before their teardown (test/run.sh §0), which is why two
+      # runs can share a machine. A CI runner is the easy case of that.
+      #   $CF_RAN is the record of the groups this shard REACHED, which the aggregator holds
+      # against the plan — and whose timestamps are the timing table's next refresh.
+      - name: ./test/run.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+        env:
+          CF_RAN: ${{ runner.temp }}/groups-run.txt
+        run: ./test/run.sh --shard "${{ matrix.shard }}/${{ strategy.job-total }}"
+
+      # always(): a red shard's record is the one most worth reading, and a missing record is
+      # itself the aggregator's evidence that the shard never got as far as the suite.
+      - name: Keep the record of the groups this shard ran
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: groups-run-${{ inputs.os }}-${{ matrix.shard }}-of-${{ strategy.job-total }}
+          path: ${{ runner.temp }}/groups-run.txt
+          if-no-files-found: ignore
+          retention-days: 14

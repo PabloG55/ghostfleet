@@ -6,24 +6,31 @@
 // waiting for it. Each test drives one event the way a session raises it and reads the
 // record the shell hook would read next.
 import { test, expect, mock } from 'claude-code/testing'
+import { codeId } from '../hooks/shape.js'
 
 const DIR = '/fleet'
 const ID = 'sess-1'
 const FILE = `${DIR}/${ID}.json`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; order: string[] }
+// `hang`: commands whose run never settles, as a run whose environment a reload dropped never
+// does. `takeBack`: an entry the sender renames away in the instant the mod marks it submitted.
+// `code`: the files of the plugin's own hooks folder, wherever `$.plugin.root` puts it, each read
+// held until `codeGate` resolves when one is set.
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; commands: any[]; order: string[]; hang: Set<string>; takeBack: string; code: Record<string, string> | null; codeGate: Promise<void> | null }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], order: [] }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], commands: [], order: [], hang: new Set(), takeBack: '', code: null, codeGate: null }
+  const codeAt = (p: string) => (w.code && /\/hooks\/[^/]+$/.test(p) ? w.code[p.slice(p.lastIndexOf('/') + 1)] : undefined)
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
   on('session.id', () => ({ value: ID }))
   on('session.turns', () => ({ value: 0 }))
-  on('fs.read', (_$: any, e: any) => {
+  on('fs.read', async (_$: any, e: any) => {
     if (w.stall) return new Promise(() => {})
-    const text = w.files.get(e.path)
+    if (w.codeGate && codeAt(e.path) !== undefined) await w.codeGate
+    const text = w.files.get(e.path) ?? codeAt(e.path)
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -37,6 +44,9 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
       // `mv [-f|-n] src dst`: a rename, which fails when there is nothing to rename. The
       // handoff's claims and revokes are decided by exactly that failure.
       const [src, dst] = argv.slice(-2)
+      if (w.takeBack && dst === `${src.slice(0, -'.taken'.length)}.sent` && src.endsWith(`/${w.takeBack}.taken`)) {
+        w.files.set(`${src.slice(0, -'.taken'.length)}.revoked`, w.files.get(src) ?? ''); w.files.delete(src)
+      }
       if (w.files.has(src)) { w.files.set(dst, w.files.get(src) ?? ''); w.files.delete(src) } else exitCode = 1
     }
     if (argv[0] === 'rm') for (const f of argv.slice(2)) w.files.delete(f)
@@ -46,12 +56,21 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   })
   on('fs.exists', (_$: any, e: any) => ({ value: w.files.has(e.path) }))
   on('fs.list', (_$: any, e: any) => {
+    if (w.code && e.path.endsWith('/hooks')) return { value: Object.keys(w.code).map(name => ({ name, kind: 'file', size: 1 })) }
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
   })
   on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); w.order.push(`submit ${e.text}`); return { text: e.text } })
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
+  // A slash command the plugin runs: it runs and answers no text, as a skill does (its turn
+  // follows). `no-such` is left unanswered, and the harness rejects that run as the host
+  // rejects an unknown name (measured: "$.command.run: no command named /x in this session").
+  on('command.run', (_$: any, e: any, next: any) => {
+    if (e.command === 'no-such') return next(e)
+    w.commands.push(e); w.order.push(`command /${e.command} ${e.args}`.trim())
+    return w.hang.has(e.command) ? new Promise(() => {}) : {}
+  })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
   on('session.measure', (_$: any, e: any) => ({ changed: e.changed }))
@@ -128,6 +147,51 @@ test('with no record the mod writes nothing: the shell hook owns its existence',
   expect(w.files.size).toBe(0)
 })
 
+// WHICH CODE THIS PROCESS LOADED, for `fleet-mod reload` to hold against the runtime's
+// (shape.js codeId): the hooks folder's code files, read at the module's first session.start.
+// A /clear starts the session again in the same module, and must not read the disk again: what
+// is there now may be a deploy this process never loaded.
+test('the record names the code this module loaded, read once: a /clear does not read it again', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two', 'hooks.json': '{}', '.shape.js.swp': 'no', 'notes.md': 'no' }
+  await start($)
+  const first = rec(w).mod.code
+  expect(first).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  expect(first).not.toBe(codeId([{ name: 'register.js', text: 'one!' }, { name: 'shape.js', text: 'two' }, { name: 'hooks.json', text: '{}' }]))
+  w.code['register.js'] = 'deployed after this process loaded'
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(rec(w).mod.code).toBe(first)
+})
+
+// Measured on a scratch session started on a busy machine: the read outlasted the start, and an
+// idle session's record then named no code at all, which reads as stale.
+test('a code read that outlasts the start is patched into the record when it lands', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.code = { 'register.js': 'one', 'shape.js': 'two' }
+  let open = () => {}
+  w.codeGate = new Promise<void>(r => { open = r })
+  const started = start($)
+  await clock.advance(6000)
+  await started
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
+  open()
+  await clock.settle()
+  expect(rec(w).mod.code).toBe(codeId([{ name: 'register.js', text: 'one' }, { name: 'shape.js', text: 'two' }]))
+  expect(rec(w).state).toBe('idle')
+})
+
+test('a hooks folder that cannot be read names no code, rather than a wrong one', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  expect(rec(w).mod.pid).toBe(4242)
+  expect(rec(w).mod.code).toBeUndefined()
+})
+
 test('the budget lands in the record with the moment its window resets', async ($, on) => {
   mock.clock(on, { now: 5_000_000 })
   const w = world(on)
@@ -169,6 +233,17 @@ test('a backgrounded process with no record names no fleet, whatever its env say
   expect(w.runs.some(a => a[0].endsWith('/bin/fleet-list'))).toBe(false)
 })
 
+// A probe a worker started from its Bash tool: the worker's pane, server and slot in its env,
+// and a record the shell hook wrote with no slot because the process tree says it is nested.
+test('a nested agent names no fleet, though its env is the worker\'s whole', async ($, on) => {
+  mock.clock(on)
+  const w = world(on, { TMUX: '/tmp/tmux-1/cf-acme-api,1,0', TMUX_PANE: '%3', CLAUDE_FLEET_SOCK: 'cf-acme-api', CLAUDE_FLEET_SLOT: 'w1' },
+    { ...BASE, sock: '', slot: '', pane: '', nested_under: 4242 })
+  const out = await $.command.run({ command: 'fleet', args: '' } as any)
+  expect(out.text).toContain('not in a fleet')
+  expect(w.runs.some(a => a[0].endsWith('/bin/fleet-list'))).toBe(false)
+})
+
 test('a stalled filesystem cannot hold a turn open', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on)
@@ -204,6 +279,138 @@ test('an idle session takes a handed-over prompt and names the turn it started',
   expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't7' }))
   expect(w.files.has(`${SPOOL}/1000-1.taken`)).toBe(false)
   expect(rec(w).turnId).toBe('t7')
+})
+
+// A claim whose turn never comes, on a session that then sits idle: no turn.start will ever
+// arrive to notice it, so the poll does. Before, `pending` stayed set and every later handoff
+// waited out its claim window unclaimed, with no receipt saying why.
+test('a claim whose turn never starts is written off on the poll, and the spool takes the next', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up'])
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(60_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up'])
+  await clock.advance(61_000)
+  const r = json(w, `${SPOOL}/1000-1.done`)
+  expect(r.error).toBe('its turn never started')
+  expect(r.head).toBe('wake up')
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up', 'the next one'])
+})
+
+test('a claim the sender took back is let go without a failure receipt', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  // fleet-send gave up on it and renamed it away (a wake it then pasted)
+  w.files.delete(`${SPOOL}/1000-1.sent`)
+  await clock.advance(121_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['wake up', 'the next one'])
+})
+
+test('a plain prompt is submitted, never run as a command', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', 'fix the build, see /tmp/log for the error'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['fix the build, see /tmp/log for the error'])
+  expect(w.commands).toEqual([])
+})
+
+// A brief that opens with a skill. The host refuses `prompt.submit` for a text beginning
+// with "/", and that refusal used to be the receipt nobody read; the worker sat idle.
+const commandTurn = (name: string, args: string) =>
+  `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`
+
+test('a prompt that starts with a slash command runs as that command, and its receipt names the turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, {}, { ...BASE, transcript: '/t/sess-1.jsonl' })
+  await start($)
+  w.files.set(...entry('1000-1', '/some-skill redo the page\n\nkeep the colours  ', { sock: 'cf-toolbox', sess: 'master', dir: '/fleet' }))
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  expect(w.commands.map(e => [e.command, e.args])).toEqual([['some-skill', 'redo the page\n\nkeep the colours']])
+  // A person's own command in the same second is theirs, not this delivery's turn.
+  await $.turn.start({ text: commandTurn('other-skill', 'x'), turnId: 't1' })
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  await $.turn.complete(complete('answer') as any)
+  await $.turn.start({ text: commandTurn('some-skill', 'redo the page\n\nkeep the colours'), turnId: 't2' })
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't2' }))
+  expect(w.files.get(`${DIR}/cf-acme-api.w1.reply-to.armed`)).toBe('17\nturn t2\n')
+  await clock.advance(20_000)
+  expect(json(w, `${SPOOL}/1000-1.done`).ran).toBeUndefined()
+})
+
+test('a command that starts no turn is receipted as ran, not left to time out', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/compact'))
+  await clock.advance(500)
+  expect(w.commands.map(e => [e.command, e.args])).toEqual([['compact', '']])
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  await clock.advance(10_500)
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', ran: '/compact' }))
+  // ...and the spool is free again for the next prompt.
+  w.files.set(...entry('2000-1', 'next'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['next'])
+})
+
+test('a refused delivery names the error and the session it failed in', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/no-such arg'))
+  await clock.advance(500)
+  const r = json(w, `${SPOOL}/1000-1.done`)
+  expect(r).toEqual(expect.objectContaining({ id: '1000-1', sock: 'cf-acme-api', slot: 'w1' }))
+  expect(r.error).toContain('command.run')
+  expect(r.turnId).toBeUndefined()
+})
+
+test('a // or a bare / names no command: refused in words, nothing run or submitted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '//literal slash'))
+  await clock.advance(500)
+  expect(w.commands).toEqual([])
+  expect(w.submitted).toEqual([])
+  expect(json(w, `${SPOOL}/1000-1.done`).error).toContain('reword it')
+})
+
+test('the mod\'s own commands are refused, not reported as run: the host skips its own hooks', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(...entry('1000-1', '/inbox'))
+  await clock.advance(500)
+  expect(w.commands).toEqual([])
+  expect(json(w, `${SPOOL}/1000-1.done`).error).toContain('run fleet-inbox instead')
+})
+
+test('past the hour a delivered receipt is cleared, a failed one is kept for the inbox', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const w = world(on)
+  w.files.set(`${SPOOL}/1000-1.done`, JSON.stringify({ id: '1000-1', turnId: 't1' }))
+  w.files.set(`${SPOOL}/1000-2.done`, JSON.stringify({ id: '1000-2', error: 'refused', sock: 'cf-acme-api', slot: 'w1' }))
+  await start($)
+  await clock.advance(500)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  expect(w.files.has(`${SPOOL}/1000-2.done`)).toBe(false)
+  expect(json(w, `${SPOOL}/1000-2.failed`).error).toBe('refused')
 })
 
 test('a running turn is never handed a prompt: it waits for the turn to end', async ($, on) => {
@@ -277,6 +484,65 @@ test('a claim a dead process left behind is delivered by the next one', async ($
   await start($)
   await clock.advance(500)
   expect(w.submitted.map(e => e.text)).toEqual(['stranded'])
+})
+
+// THE RELOAD THAT DELIVERED ITSELF. `/reload-plugins` handed over through the spool reloads this
+// mod from inside its own command run: the old environment is dropped before that run settles
+// (so its receipt is never written), and the new one starts on the same conversation. The run
+// here never settles, as the dropped one never does, and the second session.start is the
+// reload's. It used to find the claim, put it back, and run the reload again: a loop.
+test('a command that reloads the mod mid-delivery runs once, and is receipted as ran by the reload', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.hang.add('reload-plugins')
+  await start($)
+  w.files.set(...entry('1000-1', '/reload-plugins'))
+  await clock.advance(500)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  await start($)                                   // the reload's own session.start
+  await clock.advance(30_000)
+  expect(w.commands.map(e => e.command)).toEqual(['reload-plugins'])
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', ran: '/reload-plugins' }))
+  expect([...w.files.keys()].filter(f => /1000-1\.(json|taken|sent)$/.test(f))).toEqual([])
+  // ...and the spool is free again: the next prompt goes through, once.
+  w.files.set(...entry('2000-1', 'next'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['next'])
+})
+
+// A prompt the last process submitted is waited for, not submitted again: its turn.start, when
+// it comes in the new process, still names it. A claim it never submitted goes out once, after.
+test('after a restart a submitted prompt is never resubmitted, and a claim never submitted is', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.files.set(`${SPOOL}/1000-1.sent`, JSON.stringify({ id: '1000-1', text: 'already in' }))
+  w.files.set(`${SPOOL}/1000-2.taken`, JSON.stringify({ id: '1000-2', text: 'never sent' }))
+  await start($)
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await $.turn.start({ text: 'already in', turnId: 't4' })
+  expect(json(w, `${SPOOL}/1000-1.done`)).toEqual(expect.objectContaining({ id: '1000-1', turnId: 't4' }))
+  expect(w.files.has(`${SPOOL}/1000-1.sent`)).toBe(false)
+  await $.turn.complete(complete('answer') as any)
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['never sent'])
+})
+
+// The sender's takeback (fleet-send renames a wake it gave up on) races the submit's own rename:
+// whichever lands first owns it. Lost by the mod, nothing is submitted and nothing receipted.
+test('a claim the sender takes back before its submit is never submitted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.takeBack = '1000-1'
+  await start($)
+  w.files.set(...entry('1000-1', 'wake up'))
+  await clock.advance(500)
+  expect(w.submitted).toEqual([])
+  await clock.advance(121_000)
+  expect(w.files.has(`${SPOOL}/1000-1.done`)).toBe(false)
+  w.files.set(...entry('2000-1', 'the next one'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['the next one'])
 })
 
 test('SessionEnd withdraws .ready, and the spool keeps what is waiting', async ($, on) => {

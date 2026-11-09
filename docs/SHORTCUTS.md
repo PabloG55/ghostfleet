@@ -46,6 +46,7 @@ control plane).
 | key | does |
 | --- | --- |
 | `↑↓←→` / `hjkl` | move |
+| `/` | **find a project** — type part of its name or its folder's name; matches are highlighted, the rest dimmed, the cursor on the first. `⏎` keeps the search, then `n` / `N` step through the matches and `⏎` opens one. `Esc` clears it |
 | `⏎` | open that project's **Master Claude** |
 | `Ctrl-s` | skip master, go **straight to that project's grid** |
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
@@ -61,6 +62,7 @@ control plane).
 | --- | --- |
 | `↑↓←→` / `hjkl` | move |
 | `⇧h` `⇧j` `⇧k` `⇧l` | **reorder** the selected card (persisted — see below) |
+| `/` | **find an agent** — type part of its name or label; matches are highlighted, the rest dimmed, the cursor on the first. `⏎` keeps the search, then `n` / `N` step through the matches and `⏎` opens one. `Esc` clears it |
 | `⏎` | enter the selected card full-screen |
 | a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
@@ -238,6 +240,7 @@ holding an assertion. [UPSTREAM]
 | `↑↓` / `k j` | move selection | README |
 | `←→` / `h l` | move selection (column) | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected project in the list (persisted to the file) | README |
+| `/` | **find a project** — the grid's `/`, one screen up: every printable key types into the query (`x`, `s` and the digits included), matched against each project's name and its folder's name, case-insensitive. Matching cards are drawn bold with the matched letters reversed; the rest are dimmed in place; the cursor jumps to the first. `⏎` locks it — then `n` / `N` next / previous (wrapping), `⏎` opens, `/` or `⌫` edits again, `q` / `` ` `` clear it. `Esc` (or `Ctrl-C`, which then does not arm the quit) clears it from either step. Matching lives in `lib/grid-search.mjs` | [CODE] |
 | `⏎` | enters that project's **Master Claude** | README |
 | `Ctrl-x` | the **stack** screen, from anywhere — Projects, master, the grid, or inside a session. (It was `Ctrl-t` everywhere until tabs took that key; the Projects screen kept its own copy of the binding, which is why it lagged behind the others for a while) |
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab at the selected project's root**, without booting its master first — you often want a shell in a repo, not a Claude session in it. Opens the project's tmux server if it has never been entered |
@@ -259,7 +262,7 @@ toggles or cycles the selected cell. The columns are:
 | column | what it toggles | values | source |
 |---|---|---|---|
 | **AUTO-NUDGE** | whether a worker that finishes/needs help wakes the master | `on` / `off` | README (the only one it mentions) |
-| **BUDGET LIMIT** | whether the budget governor (`fleet-governor`) can park workers once usage hits the ceiling | `enforced` / `ignored` | **[CODE] — not in the README at all.** This is the visual toggle for what the README only describes as touching the `governor-off` file by hand. |
+| **BUDGET LIMIT** | whether the budget governor (`fleet-governor`) can park workers once usage hits the ceiling — and, with several accounts (`fleet-accounts`), whether the accounts engine parks them when every account is spent | `enforced` / `ignored` | **[CODE] — not in the README at all.** This is the visual toggle for what the README only describes as touching the `governor-off` file by hand. |
 | **AGENT** | the project's **default agent** — what its master runs, and what a new session in it inherits | cycles through the agents actually **installed** | **[CODE]** — the 4th column of the projects file, which used to be reachable only by editing it by hand |
 
 `space` **cycles** on AGENT rather than toggling, because there are more than two and the
@@ -281,6 +284,11 @@ with `switching to <agent>…` on the row until it does. Switching back resumes 
 conversation that agent had (codex cannot, and the row says it starts fresh). A failed
 switch leaves the old agent running and puts its reason on the row. See
 [docs/OPERATIONS.md](OPERATIONS.md) for the details.
+
+The screen fits its window at any size. A row is cut to the width and the text under the title
+shows all of what the cursor is on; a list that does not fit scrolls with the cursor, between a
+title and keys that stay (`↑ N more` / `↓ N more`); and setting columns that do not fit scroll
+the same way with `←`/`→` (`← N` / `→ N` beside the column names).
 
 `Esc`/`` ` ``/`Ctrl-C` closes the settings screen, no confirmation needed.
 
@@ -306,6 +314,7 @@ explaining it's a keyboard-navigable mini file browser.
 |---|---|---|
 | `↑↓←→` / `hjkl` | move selection | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected session's card (persisted per fleet — see below) | README |
+| `/` | **find an agent**: every printable key types into the query (card verbs included — `p` or `x` there is a letter, not a pause or a kill), matched against each card's label and session name, case-insensitive. Matching cards are drawn bold with the matched letters reversed; the rest are dimmed in place; the cursor jumps to the first match. `⏎` locks the search — then `n` / `N` next / previous (wrapping), `⏎` opens, `/` or `⌫` edits again. `Esc` clears it from either step; `q` / `` ` `` clear a locked one before they would leave the grid. Matching lives in `lib/grid-search.mjs` | [CODE] |
 | `⏎` | enters the selected session in full | README |
 | `n` | new session on a checkout — lands on the **naming screen** below (edit or accept the suggested name), then **resumes** if a conversation already exists there | README + [CONFIRMED] nuance |
 | `N` | new session, conversation **forced blank** | README + [CONFIRMED] nuance |
@@ -478,12 +487,14 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-worktrees` | inventory of worktrees + which are free |
 | `fleet-list` | live sessions + status |
 | `fleet-inbox` | who needs attention / who finished |
+| `fleet-know [<project>\|waiting\|touched <path>\|find <text>] [--at <time>]` | the fleet's memory: one page on where a project stands and why, across every profile and paired machine ([docs/MEMORY.md](MEMORY.md)); `fleet-know privacy` for its include/private/exclude switch |
 | `fleet-ledger [s] [list\|all\|close <id>\|clear]` | a Claude session's open requests and promises (the mod's ledger); `/ledger` inside the session |
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |
 | `fleet-send <s> "..."` | new task (only if the session is free) |
 | `fleet-send --reply-to me <s> "..."` | **ask** instead of dispatch: the target is told to answer you by name with `SendMessage`, so the reply lands in your session even mid-turn; if it can't reach you, the hook relays its turn-end message into YOUR inbox instead. Works across projects (`-s <sock>`), which is the case it exists for — a plain send's `done` only ever reaches the target's OWN master. [not upstream yet] |
 | `fleet-read <s> [n]` | a worker's last N messages |
+| `fleet-telegram link <project>/<s>` · `start` · `stop` · `status` | a Telegram chat connected to one session: your messages arrive as yours, the turn's answer goes back. `send "<text>" [--file <path>]` messages you; `config secret-cmd\|transcribe-cmd\|speak-cmd\|voice-ack\|allow\|disallow` sets it up — see [TELEGRAM.md](TELEGRAM.md) |
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
 | `fleet-stop <s>` | shut down for good + clear its state |

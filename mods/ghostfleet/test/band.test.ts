@@ -6,10 +6,10 @@ const DIR = '/fleet'
 const ID = 'sess-1'
 const NOW = 10_000_000
 
-type World = { files: Map<string, string>; runs: string[][]; alive: string; prs: string | null }
+type World = { files: Map<string, string>; mtimes: Map<string, number>; runs: string[][]; alive: string; prs: string | null }
 
-function world(on: any, slot: string): World {
-  const w: World = { files: new Map(), runs: [], alive: 'master\nw1\nw2\nw3\n_term-master\n', prs: '[]' }
+function world(on: any, slot: string, engine?: string): World {
+  const w: World = { files: new Map(), mtimes: new Map(), runs: [], alive: 'master\nw1\nw2\nw3\n_term-master\n', prs: '[]' }
   const rec = (id: string, s: string, extra: object) =>
     w.files.set(`${DIR}/${id}.json`, JSON.stringify({ session_id: id, sock: 'cf-acme-api', slot: s, ts: 5, ...extra }))
   rec(ID, slot, { status: 'ready' })
@@ -31,7 +31,7 @@ function world(on: any, slot: string): World {
   on('fs.write', (_$: any, e: any) => { w.files.set(e.path, e.text); return { value: undefined } })
   on('fs.list', (_$: any, e: any) => ({
     value: [...w.files.keys()].filter(k => k.startsWith(`${e.path}/`))
-      .map(k => ({ name: k.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: w.files.get(k)!.length, isLink: false })),
+      .map(k => ({ name: k.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: w.mtimes.get(k) ?? w.files.get(k)!.length, isLink: false })),
   }))
   on('process.run', (_$: any, e: any) => {
     const argv = [...e.argv]
@@ -46,6 +46,9 @@ function world(on: any, slot: string): World {
   })
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+  // The engine's own AbovePrompt: nothing of its own here. The band always calls `next(e)`.
+  // `engine`, a marker in its place to tell a slot the band left alone or passed on.
+  on('ui.render', ($: any, e: any) => { const { Box, Text } = $.ui.resolve(e); return engine ? h(Text, {}, engine) : h(Box, {}) })
   return w
 }
 
@@ -99,9 +102,8 @@ test('when gh cannot answer, the band says PRs ?', async ($, on) => {
 
 test('a worker with no children draws no band, and never asks tmux or gh', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const w = world(on, 'w1')
   // What the engine draws when the mod passes: a marker the band would have replaced.
-  on('ui.render', ($: any, e: any) => { const { Text } = $.ui.resolve(e); return h(Text, {}, 'ENGINE') })
+  const w = world(on, 'w1', 'ENGINE')
   const [terminal] = await band($, clock)
   expect(terminal).toBe('ENGINE')
   expect(w.runs.some(a => a[0] === 'tmux' || a[0] === 'gh')).toBe(false)
@@ -119,4 +121,57 @@ test('a sub-lead sees its children only, and the PRs into its branch', async ($,
   ])
   const [terminal] = await band($, clock)
   expect(terminal).toBe('1 worker · 1 need you · 1 red')
+})
+
+// The age is drawn against a minute bucket (so the band redraws once a minute), in seconds.
+const MINUTE = Math.floor(NOW / 60_000) * 60
+
+// hooks/fleet-event.sh holds a wake it cannot paste (the lead's box never read empty) and
+// rewrites <sock>.<kind>.blocked on every retry. The band says so above the box that is the
+// cause, and only while the file is fresh: a retry killed without its trap says nothing.
+test('a held wake is drawn above the team, and a stale one is not', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = world(on, 'master')
+  const file = `${DIR}/cf-acme-api.notify.blocked`
+  w.files.set(file, `${MINUTE - 725}\x1f1\x1fmaster\n`)
+  w.mtimes.set(file, NOW - 5_000)
+  const [terminal] = await band($, clock, 120)
+  expect(terminal.startsWith('wake held 12m · this input box has unsent text')).toBe(true)
+  expect(terminal).toContain('3 workers')
+  w.mtimes.set(file, NOW - 600_000)
+  const [stale] = await band($, clock, 120)
+  expect(stale).not.toContain('held')
+})
+
+test("a sub-lead's held wake is its own, never master's", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = world(on, 'w1')
+  w.alive = 'master\nw1\nw1-a\n'
+  w.files.set(`${DIR}/cf-acme-api.w1-a.parent`, 'w1\n')
+  w.files.set(`${DIR}/cf-acme-api.notify.blocked`, `${MINUTE - 60}\x1f1\x1fmaster\n`)
+  w.mtimes.set(`${DIR}/cf-acme-api.notify.blocked`, NOW)
+  const [none] = await band($, clock, 120)
+  expect(none).not.toContain('held')
+  w.files.set(`${DIR}/cf-acme-api.w1.notify.blocked`, `${MINUTE - 60}\x1f2\x1fw1\n`)
+  w.mtimes.set(`${DIR}/cf-acme-api.w1.notify.blocked`, NOW)
+  const [mine] = await band($, clock, 120)
+  expect(mine).toContain('wake held 1m · no input box is showing')
+})
+
+// THE SLOT IS SHARED. AbovePrompt is one slot for every mod: a hook that answers its own tree
+// without `next(e)` swallows whatever another mod (or the engine) puts there. Found live: the
+// band showing its team made a second mod's row above the prompt vanish. The stub below sits
+// beneath the mod as another plugin's hook would.
+test('the band passes the slot on: what sits beneath it is still drawn, after its rows', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, 'master', 'another mod')
+  await $.session.start({ cwd: '/w/acme-api', surface: null, isInteractive: true })
+  await clock.advance(10)
+  await clock.advance(10)
+  const ui = await $.ui.mount({ plugin: 'ghostfleet', surface: 'terminal', ...PROPS(90) } as any)
+  const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+  // The band shows something here (a master with workers), so this is the case that swallowed.
+  expect(texts.join('')).toContain('3 workers')
+  expect(texts.at(-1)).toBe('another mod')
+  await ui.unmount()
 })

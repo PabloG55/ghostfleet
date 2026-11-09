@@ -51,7 +51,9 @@ const CSS = read('app.css');
 // the tailnet as a hand-written file doing the same thing. The list is spelled out rather
 // than globbed for the reason the SHELL list is: a new file in web/ should have to be
 // thought about once, here, and `readdirSync` would silently adopt anything that appeared.
-const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js'];
+// term.js is the terminal screen, and xterm.js / xterm-fit.js are what it drives — vendored
+// from npm and pinned by digest (scripts/vendor-xterm.sh --check, in the suite).
+const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js', 'term.js', 'xterm.js', 'xterm-fit.js'];
 const JS = Object.fromEntries(JS_FILES.map(f => [f, read(f)]));
 
 // ── 1. nothing loads from off this machine ────────────────────────────────
@@ -194,10 +196,13 @@ is('...and the shell does not hand the scrollport back', false,
 // that refuses what the server would have taken is a feature that looks broken, and the
 // other way round is a wasted upload.
 {
+  // The server's number lives in lib/attach.mjs since the photo store became shared (the
+  // Telegram channel stores photos through it too); the body cap is still fleet-serve's own.
   const serveSrc = fs.readFileSync(path.join(ROOT, 'bin', 'fleet-serve.mjs'), 'utf8');
+  const attachSrc = fs.readFileSync(path.join(ROOT, 'lib', 'attach.mjs'), 'utf8');
   const nOf = (src, name) => (new RegExp(`${name} = ([0-9*\\s]+);`).exec(src) || [])[1];
   const ev = (x) => { try { return x ? Function(`return (${x})`)() : null; } catch { return null; } };
-  const server = ev(nOf(serveSrc, 'ATTACH_MAX_BYTES'));
+  const server = ev(nOf(attachSrc, 'ATTACH_MAX_BYTES'));
   const client = ev(nOf(JS['api.js'], 'ATTACH_MAX_BYTES'));
   is('the photo limit is a real number on the server', true, server > 0);
   is('...and the client refuses at exactly the same one', server, client);
@@ -329,7 +334,7 @@ is('the precache list is where it says it is', true, !!shellBlock);
 const shell = [...shellBlock.matchAll(/'(\.\/[^']*)'/g)].map(m => m[1].replace(/^\.\//, '')).filter(Boolean);
 is('every precached file exists', '', shell.filter(f => f && !exists(f)).join(','));
 const shipped = [
-  'index.html', 'app.css', ...JS_FILES.filter(f => f !== 'sw.js'), 'manifest.webmanifest',
+  'index.html', 'app.css', 'xterm.css', ...JS_FILES.filter(f => f !== 'sw.js'), 'manifest.webmanifest',
   ...fs.readdirSync(path.join(WEB, 'icons')).filter(f => f.endsWith('.png')).map(f => `icons/${f}`),
   ...fs.readdirSync(path.join(WEB, 'fixtures')).filter(f => f.endsWith('.json')).map(f => `fixtures/${f}`),
 ];
@@ -834,12 +839,25 @@ is('resume is not guarded', true, /function resumeSession\(name\) \{\s*\n?\s*if 
 // rows left unfiltered. A regex that matches somewhere else is a test that cannot fail.
 is('the settings rows skip the lead', true,
    /S\.grid\.cards\) \|\| \[\]\)\.filter\(c => !c\.lead\)/.test(APP));
-// The two things §7 says cannot transfer. A substitute for either is the mistake; the
-// app is required to SAY they are absent rather than leave a gap.
-is('the stack is not rebuilt', 0, (APP.match(/renderStack|stackScreen/g) || []).length);
-is('...and is named as deliberately absent', true, /a phone has no side/.test(APP));
-is('no terminal or editor tab', 0, (APP.match(/fleet_tab|fleet-tab/g) || []).length);
-is('...and that is named too', true, /no local shell/.test(APP));
+// The things §7 said cannot transfer. A substitute for one is the mistake; the app is
+// required to SAY it is absent rather than leave a gap.
+// THE STACK IS NO LONGER ONE OF THEM — the owner decided several agents on screen at once was
+// worth it on the web too: columns at a desk, a swipe apart on a phone (test/helpers/
+// stack-check.mjs drives it). So the app must not go on calling it absent.
+is('the stack is no longer named absent', false, /a phone has no side/.test(APP));
+is('...it is here: a picker and its columns', true, /function paintPicker\(/.test(APP) && /function paintStack\(/.test(APP));
+// THE TERMINAL IS NO LONGER ONE OF THEM — the owner decided it was worth its surface — and
+// what replaced the absence is a rule about WHO names the shell: the server makes the tab
+// with bin/fleet-tab, so the client must never spell a tab name of its own. One that did
+// would be a second copy of the naming rule, and the one a phone could get wrong.
+is('the client never builds a tab name itself', 0, (APP.match(/['"]_(term|edit)-/g) || []).length);
+// THE EDITOR IS NO LONGER ONE OF THEM EITHER — the owner asked for the desk's LazyVim on the
+// web. It is the terminal's screen with the other tab in it, so the rows that matter are that
+// it has no path of its own to the server (term-check.mjs drives the gates in a browser), and
+// that nothing calls it absent any more.
+is('the editor opens through the terminal\'s own path', true,
+   /function openEditor\([^)]*\) \{ openTerminal\(project, 'edit'\); \}/.test(APP) && /api\.termOpen\(TS\.project, TS\.h\.size\(\), a, TS\.kind\)/.test(APP));
+is('...and it is no longer named as absent', false, /not here, on purpose|the Ctrl-n editor tab/.test(APP));
 is('the page bound is 20', 20, api.PAGE);
 
 // ── 5b. nothing runs before its declarations exist ────────────────────────
@@ -1020,10 +1038,15 @@ is('the load-more marker is set in exactly one place', 1,
 // taken before the fetch and armed after it, or a poll landing in the gap spends it.
 is('...and the measurement is its argument', true,
    /function holdScrollFromEnd\(key, fromEnd\)/.test(APP));
+// In loadOlder() now — the scroll to the ceiling is the press — and of the list ON SCREEN:
+// the chat is updated rather than rebuilt (keepScreen), so a closure's own list can be one
+// that was never attached, which measures 0 from the end, the one place this must never send
+// anybody. Where the DOM can measure a message, the anchor on it supersedes this hold
+// (holdAnchor); the hold is what is left where it cannot.
 is('...measured before the fetch', true,
-   /const held = measureFromEnd\('chat', wrap\);\n *try \{/.test(APP));
+   /const held = live \? measureFromEnd\(chatSK, live\) : null;[^]{0,600}?const older = await api\.getSession/.test(APP));
 is('...and armed after it, next to the render that spends it', true,
-   /holdScrollFromEnd\('chat', held\);\n *render\(\);/.test(APP));
+   /const older = await api\.getSession[^]{0,1200}?holdScrollFromEnd\(chatSK, held\);[^]{0,500}?paintChat\(\);/.test(APP));
 
 // A tap on a card lands on the CHAT, and that is a change of mind with a reason: #45 made
 // it the pane because a message list could not show a command, and the person using the app
@@ -1038,8 +1061,10 @@ is('...and the pane is one tap away', true, /btn\('pane', \(\) => setView\('pane
 is('a blocked session is called out in the chat', true, /card\.status === 'need-you'/.test(APP));
 is('...with a way to the pane from there', true, /btn\('open the pane', \(\) => setView\('pane'\)\)/.test(APP));
 // The chat's scroll is remembered the way the pane's is, or every poll throws the reader —
-// through the same helper now, and so are both card lists.
-is('the chat is watched', true, /watchScroll\('chat', wrap\)/.test(APP));
+// through the same helper now, and so are both card lists. Under the chat's key: `chat` on the
+// session screen, `chat:<column>` for each column of the stack (chatSK), so two columns never
+// share one reader's place.
+is('the chat is watched', true, /watchScroll\(chatSK, wrap\)/.test(APP) && /let chatSK = 'chat';/.test(APP));
 is('...and so is the projects list', true, /watchScroll\('projects', list\)/.test(APP));
 is('...and the grid\'s', true, /watchScroll\('grid', list\)/.test(APP));
 // Attaching the listener and restoring the position are two halves of one thing, and a
@@ -1051,12 +1076,15 @@ is('...by the call that does both halves', true,
 is('the shell owns the viewport', true, /document\.documentElement\.classList\.toggle\('shell', shell\)/.test(APP));
 is('...and the pane stops measuring under it', true, /classList\.contains\('shell'\)\) return;/.test(APP));
 
-// ── 5d. the back gesture, and no URLs ─────────────────────────────────────
+// ── 5d. the back gesture, and the address ─────────────────────────────────
 // "if I go back it takes me to the last page I was, not back." The app had nothing on the
-// history stack, so the system gesture left it. The entries carry a DEPTH and reuse the
-// current href — no routes to invent, nothing to parse on a cold open, and no URL ever
-// appears (there is no address bar in standalone mode anyway).
-is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', location\.href\)/.test(APP));
+// history stack, so the system gesture left it. The entries carry a DEPTH; their address is
+// the place they were pushed at (web/place.js), written by the app and read only at boot —
+// popstate goes by depth. Under the lock an entry keeps the address it had: the lock screen
+// is not a place. What the address SAYS is test/helpers/place-check.mjs's; what it does to
+// a reload and to back is place-nav-check.mjs's.
+is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', S\.locked \? location\.href : placeHref\(\)\)/.test(APP));
+is('...and everything else replaces the current one', true, /history\.replaceState\(history\.state, '', placeHref\(\)\)/.test(APP));
 is('...and never a url of its own', 0,
    (APP.match(/pushState\([^)]*,\s*'\/[^']*'\)/g) || []).length);
 // The listener also records whether the platform already animated the move (slideNav), so
@@ -1065,7 +1093,8 @@ is('...popstate is what moves back', true, /addEventListener\('popstate', \((e)?
 is('...and the back button asks the platform', true, /if \(navDepth > 0 &&[^\n]*history\.back/.test(APP));
 // A sheet and a confirmation are back-steps too: the gesture must close them rather than
 // leaving the screen under them.
-is('back closes a sheet first', true, /if \(S\.sheet\) \{ closeSheet\(\); return; \}/.test(APP));
+// dismissSheet, not closeSheet: back is one of the ways out that keeps what was typed.
+is('back closes a sheet first', true, /if \(S\.sheet\) \{ dismissSheet\(\); return; \}/.test(APP));
 is('...then a confirmation', true, /if \(S\.confirm\) \{ cancel\(\); return; \}/.test(APP));
 
 // ── 5e. reading a message aloud ───────────────────────────────────────────
@@ -1120,8 +1149,10 @@ is('the last payload is kept for a cold open', true, /localStorage\.setItem\(LS_
 is('...and a stale screen says how old it is', true, /offline — last fetched/.test(JS['screens.js']));
 // the half that stays in app.js — a screen cannot report staleness it was never handed, and
 // a props builder that quietly stopped passing it would leave the sentence above intact and
-// unreachable, which is the silent version of this bug.
-is('...and app.js still hands the staleness over', 2,
+// unreachable, which is the silent version of this bug. One per props builder — Projects,
+// the grid, the queue, the reviews list and a run — so 4 is a screen that stopped saying
+// how old it is.
+is('...and app.js still hands the staleness over', 5,
    (APP.match(/^\s*stale: S\.stale,$/gm) || []).length);
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,

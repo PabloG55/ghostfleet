@@ -173,7 +173,7 @@ close_stack() {
   # this screen, and test/run.sh asserts it rather than assuming it.
   tmux -L "$STACK_SOCK" kill-session -t "=$STACK_SESS" 2>/dev/null || true
   # Don't leave an empty tmux server behind for a screen you've left.
-  tmux -L "$STACK_SOCK" list-sessions >/dev/null 2>&1 || \
+  tmux -u -L "$STACK_SOCK" list-sessions >/dev/null 2>&1 || \
     tmux -L "$STACK_SOCK" kill-server 2>/dev/null || true
 }
 
@@ -345,7 +345,7 @@ EOF
 # stack's own binding hands us (`#{socket_path}`). The path is exact — and it is how the
 # tests drive a stack that must not be the lead's real one.
 ST_FLAG=-L; ST_ADDR="$STACK_SOCK"
-ST() { tmux "$ST_FLAG" "$ST_ADDR" "$@"; }
+ST() { tmux -u "$ST_FLAG" "$ST_ADDR" "$@"; }
 
 # WHICH PANE MOVES: the one that owns <tty>. Not "the active pane", and not a member
 # name.

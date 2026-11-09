@@ -1,10 +1,17 @@
-# lib/boundary.sh — the two boundary SETTINGS, read in one place. Sourced, not run.
+# lib/boundary.sh — the boundary SETTINGS, read in one place. Sourced, not run.
 #
 #   workers-merge    a session in a linked worktree may merge a PR (hooks/fleet-guard.sh)
 #   agents-approve   an agent may send an approving key to a permission dialog
 #                    (bin/fleet-answer)
+#   review-gate      no session merges a PR until a review passed at its head commit
+#                    (lib/review-gate.sh; refused in hooks/fleet-guard.sh)
 #
-# Both default OFF. Some fleets run workers that are the master of their own task and
+# The third shares the storage and the precedence and reverses the polarity: the first two
+# LIFT a line when on, review-gate DRAWS one. So the writing rule turns over with it — a
+# lead may switch it on, and no session may switch it off (fleet-guard.sh). Everything else
+# here — markers, most specific wins, set, rename, stop — is the same for all three.
+#
+# All three default OFF. Some fleets run workers that are the master of their own task and
 # legitimately merge and approve for it, so each is a setting rather than a hard block —
 # per PROJECT, and per SESSION for the one worker that is the sub-master of its task while
 # its siblings stay blocked. Markers in the fleet dir, the same shape as notify-lead:
@@ -17,7 +24,7 @@
 # grid's settings page, which calls it); moved by fleet-rename, cleared by fleet-stop.
 # Jarvis never consults these: its confirm-list stays on whatever a project says.
 
-BOUNDARY_SETTINGS="workers-merge agents-approve"
+BOUNDARY_SETTINGS="workers-merge agents-approve review-gate"
 
 # boundary_on <setting> <fleet-dir> <sock> [<session>] -> 0 when on
 boundary_on() {
@@ -35,6 +42,7 @@ boundary_label() {
   case "$1" in
     workers-merge)  printf 'workers can merge' ;;
     agents-approve) printf 'agents can approve tool calls' ;;
+    review-gate)    printf 'review gate' ;;
   esac
 }
 

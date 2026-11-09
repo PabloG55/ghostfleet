@@ -17,6 +17,10 @@ type World = {
   heard: string[] | null
   unreadable: Set<string>
   tools: any[]
+  // a submit the session refuses ({ drop }); directories listed as given; real paths by fs.stat
+  refuse: boolean
+  lists: Record<string, any[]>
+  real: Record<string, string>
 }
 
 // What the judge model would answer: every item it is shown, with the status `status(id)`.
@@ -26,7 +30,7 @@ const verdict = (status: (id: string) => string, promises: string[] = []) => (pr
 }
 
 function world(on: any, env: Record<string, string> = {}): World {
-  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set(), tools: [] }
+  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set(), tools: [], refuse: false, lists: {}, real: {} }
   w.files.set(FILE, JSON.stringify(BASE))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   on('session.id', () => ({ value: ID }))
@@ -44,7 +48,12 @@ function world(on: any, env: Record<string, string> = {}): World {
     return { value: text }
   })
   on('fs.write', (_$: any, e: any) => { w.files.set(e.path, e.text); return { value: undefined } })
+  on('fs.stat', (_$: any, e: any) => {
+    if (!(e.path in w.real)) throw new Error(`ENOENT ${e.path}`)
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: w.real[e.path] } }
+  })
   on('fs.list', (_$: any, e: any) => {
+    if (w.lists[e.path]) return { value: w.lists[e.path] }
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
@@ -62,10 +71,12 @@ function world(on: any, env: Record<string, string> = {}): World {
   })
   on('model.complete', async (_$: any, e: any) => { w.judged.push(e.prompt); return { value: await w.judge(e.prompt, e) } })
   on('ui.log', () => ({ value: undefined }))
-  on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); return { text: e.text } })
+  on('prompt.submit', (_$: any, e: any) => { if (w.refuse) return { drop: 'refused' }; w.submitted.push(e); return { text: e.text } })
   on('command.register', (_$: any, e: any) => { w.registered.push(e.name); return { value: { command: e.name } } })
   on('tool.register', (_$: any, e: any) => { w.tools.push(e); return { value: { tool: `mcp__ghostfleet__${e.name}` } } })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+  // The engine's own AbovePrompt, empty: the band always passes the slot on (band.test.ts).
+  on('ui.render', ($: any, e: any) => { const { Box } = $.ui.resolve(e); return h(Box, {}) })
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   // The model's side of a step: what the step's response said, as the engine returns it.
@@ -97,7 +108,7 @@ const step = async ($: any, turnId: string, index: number, text: string, extra: 
 const COOLDOWN = 5 * 60_000 + 1000
 const nags = (w: World) => w.submitted.filter(e => e.origin?.kind === 'plugin' && !e.origin?.asUser)
 
-test('a task and two messages typed mid-turn are three open items, on the record and the band', async ($, on) => {
+test('a task and two messages typed mid-turn are three items, owed on the record and the band once their turn leaves them open', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
@@ -106,9 +117,15 @@ test('a task and two messages typed mid-turn are three open items, on the record
   await type($, 'also bump the version', 't1')
   await type($, 'and add a changelog line', 't1')
   const l = book(w)
-  expect(l.items.map((i: any) => [i.id, i.state, i.source, i.turnId ?? ''])).toEqual([
-    ['1', 'open', 'user', 't1'], ['2', 'open', 'user', 't1'], ['3', 'open', 'user', 't1'],
+  expect(l.items.map((i: any) => [i.id, i.state, i.source, i.turnId ?? '', Boolean(i.inTurn)])).toEqual([
+    ['1', 'open', 'user', 't1', true], ['2', 'open', 'user', 't1', true], ['3', 'open', 'user', 't1', true],
   ])
+  // inside their turn: nothing owed yet
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0, promises: 0 }))
+  w.heard = ['fix the login redirect', 'also bump the version', 'and add a changelog line']
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  expect(book(w).items.some((i: any) => i.inTurn)).toBe(false)
   expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 3, promises: 0 }))
   await clock.advance(10)
   const ui = await $.ui.mount({ plugin: 'ghostfleet', surface: 'terminal', component: 'AbovePrompt',
@@ -242,6 +259,77 @@ test('a judge that fails fails OPEN: nothing closes, nothing is re-prompted, the
   expect(nags(w)).toEqual([])
 })
 
+// WHAT THE JUDGE COSTS (ledger.js countJudge). `judge` is the last judged turn only; `judged`
+// sums every one, so a fleet's judge spend can be counted. Tokens only from calls that
+// reported usage: a host that reports none reads as unreported, never as zero cost.
+test('every judged turn adds to running totals: calls, failures, items, and the tokens the host reported', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  w.judge = (prompt: string) => ({ ...verdict(() => 'open')(prompt), usage: { input_tokens: 900, output_tokens: 40 } })
+  await $.turn.complete(done('t1', 'Started on it.'))
+  await settle(clock)
+  expect(book(w).judged).toEqual({ since: 1_000_000, at: 1_000_000, turns: 1, calls: 1, failedCalls: 0, items: 1, reported: 1, inputTokens: 900, outputTokens: 40 })
+  await clock.advance(60_000)
+  w.judge = () => ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: { input_tokens: 0, output_tokens: 0 } })
+  await $.turn.complete(done('t1', 'Still on it.'))
+  await settle(clock)
+  await clock.advance(60_000)
+  w.judge = (prompt: string) => { const r: any = verdict(() => 'done')(prompt); delete r.usage; return r }
+  await $.turn.complete(done('t1', 'Refactored: the parser is one pass now.'))
+  await settle(clock)
+  const j = book(w).judged
+  expect([j.turns, j.calls, j.failedCalls, j.items, j.reported, j.inputTokens, j.outputTokens]).toEqual([3, 3, 1, 2, 2, 900, 40])
+  expect(j.since).toBe(1_000_000)
+  // the last result is still the last result
+  expect(book(w).judge).toEqual(expect.objectContaining({ ok: true, items: 1, calls: 1 }))
+})
+
+// A SESSION RESUMED UNDER ANOTHER PROFILE (ledger.js adoptLedger). Its ledger in the other
+// profile's fleet dir holds what it still owed; the mod brings that here once and leaves the
+// old file with nothing open. A fleet dir that is THIS one through a link is never "another".
+test('what a session owed under another profile is brought here and marked moved there; a link to this dir is not another profile', async ($, on) => {
+  const clock = mock.clock(on, { now: 9_000_000 })
+  const w = world(on, { HOME: '/home/u' })
+  const OTHER = `/home/u/.claude/fleet/${ID}.ledger`
+  const ALIAS = `/home/u/.claude-alias/fleet/${ID}.ledger`
+  const item = (id: string, text: string, state: string, source: string, at: number, extra: object = {}) =>
+    ({ id, text, at, state, source, prompt: 1, ...extra })
+  // the old file: a brief it shares with this one (copied with the transcript), a closed ask,
+  // and a question waiting on the person that this file never had
+  w.files.set(OTHER, JSON.stringify({ v: 1, seq: 3, items: [
+    item('1', 'add the acme-api export endpoint', 'open', 'fleet', 1_000),
+    item('2', 'rename the flag', 'done', 'user', 2_000),
+    item('3', 'which branch holds the export?', 'waiting', 'user', 3_000, { progress: { at: 3_500, reason: 'waits on the person' } }),
+  ] }))
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, items: [
+    item('1', 'add the acme-api export endpoint', 'open', 'fleet', 1_000),
+    item('2', 'check the toolbox CI', 'open', 'user', 8_000_000),
+  ] }))
+  // the same dir reached through a link: its "file" is this one, and must be left alone
+  const SELF = JSON.stringify({ v: 1, seq: 1, items: [item('1', 'look at the billing-svc logs', 'open', 'user', 5_000)] })
+  w.files.set(ALIAS, SELF)
+  w.real = { '/fleet': '/fleet', '/home/u/.claude/fleet': '/home/u/.claude/fleet', '/home/u/.claude-alias/fleet': '/fleet' }
+  w.lists['/home/u'] = [{ name: '.claude', kind: 'dir' }, { name: '.claude-alias', kind: 'other', isLink: true }, { name: '.claude.json', kind: 'file' }, { name: 'Documents', kind: 'dir' }]
+  await start($)
+  await settle(clock)
+  const here = book(w).items
+  expect(here.map((i: any) => [i.id, i.text, i.state, i.source])).toEqual([
+    ['1', 'add the acme-api export endpoint', 'open', 'fleet'],
+    ['2', 'check the toolbox CI', 'open', 'user'],
+    ['3', 'which branch holds the export?', 'waiting', 'user'],
+  ])
+  expect(here[2]).toEqual(expect.objectContaining({ at: 3_000, movedFrom: { dir: '/home/u/.claude/fleet', id: '3' }, progress: { at: 3_500, reason: 'waits on the person' } }))
+  expect(here[2].prompt).toBeUndefined()
+  const old = JSON.parse(w.files.get(OTHER) ?? 'null').items
+  expect(old.map((i: any) => [i.id, i.state, i.movedTo?.id])).toEqual([['1', 'moved', '1'], ['2', 'done', undefined], ['3', 'moved', '3']])
+  expect(old[0].movedTo.dir).toBe('/fleet')
+  expect(w.files.get(ALIAS)).toBe(SELF)
+  expect([...w.files.keys()].filter(f => f.includes('.moved.tmp'))).toEqual([])
+})
+
 test('a message queued behind the turn starts the next one first: no re-prompt over it', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on)
@@ -362,14 +450,50 @@ test('a prompt fleet-send handed over is a fleet item', async ($, on) => {
   expect(book(w).items.map((i: any) => [i.source, i.text, i.turnId])).toEqual([['fleet', 'run the tests', 't7']])
 })
 
+// The owner's own words from the phone reached a session as a lead's brief: `fleet`, open until
+// proven, and a proof prompt for every question answered in prose (82 in 14 days). Marked as
+// the owner's by the one sender that authenticated them, they are the person's.
+test("the owner's words a sender marked as theirs are the person's: split into asks, judged closed, no proof prompt", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: THREE, kind: 'owner' }))
+  await clock.advance(500)
+  await $.turn.start({ text: THREE, turnId: 't1' })
+  expect(book(w).items.map((i: any) => [i.source, i.turnId])).toEqual([['user', 't1'], ['user', 't1'], ['user', 't1']])
+  w.heard = [THREE]
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Shortened the intro, added the pricing table, and here is the preview link.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.state, i.closedBy])).toEqual([['done', 'judge'], ['done', 'judge'], ['done', 'judge']])
+  expect(nags(w)).toEqual([])
+  // the same words with no mark are a lead's brief, exactly as before: one item, held for proof
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: 'add the acme-api export endpoint' }))
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'add the acme-api export endpoint', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Added the export endpoint; all done.'))
+  await settle(clock)
+  expect(book(w).items[3]).toEqual(expect.objectContaining({ source: 'fleet', state: 'open', answered: expect.objectContaining({ turnId: 't2' }) }))
+  expect(nags(w).length).toBe(1)
+  // and a mark that is neither is no mark at all
+  w.files.set(`${SPOOL}/1000-3.json`, JSON.stringify({ id: '1000-3', text: 'run the billing-svc tests', kind: 'lead' }))
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'run the billing-svc tests', turnId: 't3' })
+  expect(book(w).items[4].source).toBe('fleet')
+})
+
 test('/ledger lists, closes by hand, and clears, without a turn', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on)
   await start($)
   await type($, 'fix the login redirect')
   await type($, 'also bump the version')
+  // inside their turn they are a count under the list, and `all` lists them, marked
   const list = await $.command.run({ command: 'ledger', args: '' } as any)
-  expect(list.text).toContain('fix the login redirect')
+  expect(list.text).toContain('+2 in the turn answering them')
+  expect(list.text).not.toContain('fix the login redirect')
+  const all = await $.command.run({ command: 'ledger', args: 'all' } as any)
+  expect(all.text).toContain('fix the login redirect  [this turn]')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: closed 1')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: no open item 1')
   expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'person' }))
@@ -527,11 +651,13 @@ test('a message stopped before it was answered and sent again a minute later is 
   await $.turn.complete({ ...done('t1', ''), reason: 'aborted', isAborted: true })
   await settle(clock)
   expect(book(w).items[0].interrupted).toBe(true)
-  // sent again as it came back (the live resend added a few words past the excerpt's head)
+  // sent again with a word added at its end, as the live resend was: not the same words, so
+  // not one item by repeatOf, and past RESEND_MS the transcript decides
+  const AGAIN = `${RESENT} pls`
   await clock.advance(61_000)
-  await type($, RESENT)
-  await $.turn.start({ text: RESENT, turnId: 't2' })
-  w.heard = [RESENT]
+  await type($, AGAIN)
+  await $.turn.start({ text: AGAIN, turnId: 't2' })
+  w.heard = [AGAIN]
   w.judge = verdict(() => 'open')
   await step($, 't2', 0, 'It reads more like an orchestration layer than a harness.')
   await $.turn.complete(done('t2', 'It reads more like an orchestration layer than a harness.'))
@@ -542,7 +668,10 @@ test('a message stopped before it was answered and sent again a minute later is 
   expect(book(w).items[0].text).toContain('what do u think')
 })
 
-test('the same words sent twice a minute apart and both answered are two requests; a stopped message that reached the model stays (and, older, is not re-prompted)', async ($, on) => {
+// THE SAME WORDS AGAIN (ledger.js repeatOf). Inside REPEAT_MS of an open item they are that
+// item, counted; past it, a message of their own. Measured: 31 of 101 exact repeats in two
+// weeks came within ten minutes of the first copy, each a second item for one ask.
+test('the same words sent again a minute apart, the first still open, are ONE request: counted, re-prompted once', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
@@ -557,12 +686,66 @@ test('the same words sent twice a minute apart and both answered are two request
   w.judge = verdict(() => 'open')
   await $.turn.complete(done('t2', 'Looking at something else.'))
   await settle(clock)
-  expect(book(w).items.map((i: any) => [i.id, i.state])).toEqual([['1', 'open'], ['2', 'open']])
+  expect(book(w).items.map((i: any) => [i.id, i.state, i.repeated, i.turnId, Boolean(i.interrupted)])).toEqual([['1', 'open', 1, 't2', false]])
+  expect(book(w).items[0].at).toBe(1_000_000)
   expect(nags(w).length).toBe(1)
-  // the gate names the latest prompt's item only; the first send stays open, on the band
   expect(nags(w)[0].text).toContain('One request is')
-  expect(nags(w)[0].text).toContain('2. "run the tests"')
-  expect(nags(w)[0].text).not.toContain('1. "run the tests"')
+  expect(nags(w)[0].text).toContain('1. "run the tests"')
+})
+
+// One message, typed idle, answered with `answer`, judged.
+const asked = async ($: any, clock: any, turnId: string, text: string, answer: string) => {
+  await type($, text)
+  await $.turn.start({ text, turnId })
+  await $.turn.complete(done(turnId, answer))
+  await settle(clock)
+}
+
+test('the same words more than ten minutes apart are two requests, and so are the same words after the first closed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.judge = verdict(() => 'open')
+  await asked($, clock, 't1', 'run the tests', 'Not yet.')
+  await clock.advance(10 * 60_000 + 1_000)
+  await asked($, clock, 't2', 'run the tests', 'Not yet.')
+  expect(book(w).items.map((i: any) => [i.id, i.state, i.repeated ?? 0])).toEqual([['1', 'open', 0], ['2', 'open', 0]])
+  // inside the window again, against the NEWER copy: that one, not the first
+  await clock.advance(60_000)
+  await asked($, clock, 't3', 'Run the tests.', 'Not yet.')
+  expect(book(w).items.map((i: any) => [i.id, i.repeated ?? 0])).toEqual([['1', 0], ['2', 1]])
+  // closed, the same words a minute later are asking again
+  w.judge = verdict(() => 'done')
+  await asked($, clock, 't4', 'and the lint', 'Ran both: 41 pass.')
+  await clock.advance(60_000)
+  await asked($, clock, 't5', 'run the tests', 'Ran them again.')
+  expect(book(w).items.filter((i: any) => i.text === 'run the tests').length).toBe(3)
+})
+
+test('a brief delivered twice inside ten minutes is one fleet item; a second delivery that never lands leaves the first', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const BRIEF = 'add the acme-api export endpoint and open a PR against staging'
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: BRIEF }))
+  await clock.advance(500)
+  await $.turn.start({ text: BRIEF, turnId: 't1' })
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Started on the endpoint.'))
+  await settle(clock)
+  await clock.advance(4 * 60_000)
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: BRIEF }))
+  await clock.advance(500)
+  await $.turn.start({ text: BRIEF, turnId: 't2' })
+  expect(book(w).items.map((i: any) => [i.id, i.source, i.repeated, i.turnId])).toEqual([['1', 'fleet', 1, 't2']])
+  await $.turn.complete(done('t2', 'Still on it.'))
+  await settle(clock)
+  // a third send the session refuses: undone, and the item it folded into stays
+  w.refuse = true
+  w.files.set(`${SPOOL}/1000-3.json`, JSON.stringify({ id: '1000-3', text: BRIEF }))
+  await clock.advance(500)
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state])).toEqual([['1', 'open']])
 })
 
 test('a long message with an inline paste keeps the words typed after it', async ($, on) => {
@@ -838,19 +1021,33 @@ test('decision 2: the prompt carries a note of the open items by id, requests fi
   // a notification with nothing open: no note at all
   await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
   expect(notes(w)).toEqual([''])
+  // a message is not noted in its own turn: the agent is about to carry it out
   await type($, THREE)
-  const note = notes(w)[1]
+  expect(notes(w)[1]).toBe('')
+  await $.turn.start({ text: THREE, turnId: 't1' })
+  w.heard = [THREE]
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  await type($, 'fix a')
+  const note = notes(w)[notes(w).length - 1]
   expect(note.split('\n')[0]).toBe('[ghostfleet ledger: open items]')
-  // its own three asks, newest first, by id
+  // the three asks its turn left open, newest first, by id; not the message it rides on
   expect(note).toContain('3 (asked): And send me the preview link when it is done.\n2 (asked): Can you add the pricing table under it?\n1 (asked): Shorten the intro to three lines.')
-  expect(note).toContain(`call ${CLOSE} with its id and the proof`)
+  expect(note).not.toContain('fix a')
+  // the rule in one line, the Bash form only: no session had the tools to call (ledger.js CLI)
+  expect(note).toContain('fleet-ledger close <id> "<proof>" (proof required')
+  expect(note).not.toContain('mcp__ghostfleet__')
   // a promise sorts after every request, and past eight items the rest is a count
   const l = book(w)
-  l.items.push({ id: '4', text: 'merge once CI is green', at: 1_000_000, state: 'open', source: 'promise' })
-  l.seq = 4
+  l.items.push({ id: '5', text: 'merge once CI is green', at: 1_000_000, state: 'open', source: 'promise' })
+  l.seq = 5
   w.files.set(LEDGER, JSON.stringify(l))
-  for (const t of ['fix a', 'fix b', 'fix c', 'fix d', 'fix e', 'fix f']) await type($, t)
+  for (const t of ['fix b', 'fix c', 'fix d', 'fix e', 'fix f']) await type($, t)
+  // nothing settled those (no turn ran them): past the ceiling they are owed anyway
+  await clock.advance(30 * 60_000)
+  await type($, 'fix g')
   const last = notes(w)[notes(w).length - 1]
+  expect(last).not.toContain('fix g')
   const rows = last.split('\n').filter(r => /^\d+ \(/.test(r))
   expect(rows.length).toBe(8)
   expect(rows.every(r => r.includes('(asked)'))).toBe(true)
@@ -1215,13 +1412,18 @@ test('a message stopped and resent within a minute is the SAME item, whether res
   const items = book(w).items
   expect(items.length).toBe(3)
   expect(items.map((i: any) => [i.text, i.turnId, Boolean(i.interrupted)])).toEqual(pairs.map(([, again], k) => [again, `b${k + 1}`, false]))
-  // a minute later is a message of its own again
+  // a minute later, the SAME words are still that item (repeatOf, inside REPEAT_MS); edited
+  // words a minute later are a message of their own again
   await type($, 'check the scratch branch')
   await $.turn.start({ text: 'check the scratch branch', turnId: 'c1' })
   await $.turn.complete({ ...done('c1', ''), reason: 'aborted', isAborted: true })
   await settle(clock)
   await clock.advance(61_000)
   await type($, 'check the scratch branch')
+  expect(book(w).items.length).toBe(4)
+  expect(book(w).items[3].repeated).toBe(1)
+  await clock.advance(61_000)
+  await type($, 'check the scratch branch and its CI')
   expect(book(w).items.length).toBe(5)
 })
 
@@ -1283,19 +1485,24 @@ test('an item whose progress says it waits on the person is waiting: not open, n
   expect(book(w).items[0].state).toBe('open')
 })
 
-test('the reminders name the fleet-ledger command beside the tools, for a session older than the tools', async ($, on) => {
+test('the reminders name the fleet-ledger command and nothing else, and the tools still answer', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
   await type($, 'fix the login redirect')
   await type($, 'and bump the version')
-  expect(notes(w)[1]).toContain('fleet-ledger close <id>')
   await $.turn.start({ text: 'and bump the version', turnId: 't1' })
   w.heard = ['fix the login redirect', 'and bump the version']
   w.judge = verdict(() => 'open')
   await $.turn.complete(done('t1', 'Looked at something else.'))
   await settle(clock)
   expect(nags(w)[0].text).toContain('fleet-ledger close <id>')
+  await type($, 'and one more thing')
+  expect(notes(w)[notes(w).length - 1]).toContain('fleet-ledger close <id>')
+  expect(nags(w)[0].text).not.toContain('mcp__ghostfleet__')
+  // the handlers stay, for a session that has them
+  const r: any = await $.tool.call({ tool: CLOSE, id: '1', proof: 'commit 1a2b3c' } as any)
+  expect(r.result).toBe('ledger: 1 closed')
 })
 
 test('a bare answer to the agent\'s numbered question folds into the item that asked; the same words after no question are an ask', async ($, on) => {
@@ -1322,4 +1529,376 @@ test('a bare answer to the agent\'s numbered question folds into the item that a
   await clock.advance(COOLDOWN)
   await type($, '4')
   expect(book(w).items.length).toBe(2)
+})
+
+// A brief from the lead is done only with proof (ledger.js needsProof): the judge reading it as
+// done leaves it open, and the gate asks for the proof once per brief, ever.
+test('a brief from the lead the judge reads as done stays open; one nudge asks for its proof, never a second', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'add the acme-api export endpoint' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'add the acme-api export endpoint', turnId: 't1' })
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Added the export endpoint; all done.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ source: 'fleet', state: 'open', answered: expect.objectContaining({ turnId: 't1' }) }))
+  expect(book(w).items[0].closedBy).toBeUndefined()
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('A brief from the lead reads as answered')
+  expect(nags(w)[0].text).toContain('1. "add the acme-api export endpoint"')
+  expect(nags(w)[0].text).not.toContain('still open from this session')
+  // the nudge's turn answers in prose again: judged done again, still open, not nudged again
+  await $.turn.start({ text: nags(w)[0].text, turnId: 't2' })
+  await $.turn.complete(done('t2', 'It is done, as I said.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  // nor on a later ordinary turn, past the cooldown and after a reload would have reset memory
+  await clock.advance(COOLDOWN)
+  await type($, 'what next?')
+  await $.turn.start({ text: 'what next?', turnId: 't3' })
+  w.heard = ['what next?']
+  await $.turn.complete(done('t3', 'Nothing; the endpoint is done.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(book(w).items[0].state).toBe('open')
+  // the agent's own close with proof is what closes it
+  expect(await tool($, CLOSE, { id: '1', proof: 'PR #41' })).toBe('ledger: 1 closed')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'agent', proof: 'PR #41' }))
+})
+
+test("the person's own request is still closed by the judge; a brief beside it waits for proof", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'rename the toolbox flag' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'rename the toolbox flag', turnId: 't1' })
+  await type($, 'and what does the scratch fixture hold?', 't1')
+  w.heard = ['rename the toolbox flag', 'and what does the scratch fixture hold?']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Renamed the flag. The scratch fixture holds two sessions.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.source, i.state, i.closedBy ?? '-'])).toEqual([['fleet', 'open', '-'], ['user', 'done', 'judge']])
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('1. "rename the toolbox flag"')
+  expect(nags(w)[0].text).not.toContain('scratch fixture')
+})
+
+test('a proof nudge inside the cooldown is held, not lost, and goes out at a later answered turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  w.heard = ['fix the login redirect']
+  await $.turn.complete(done('t1', 'Looked around.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  // a brief lands and is answered inside the cooldown: held
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'bump the billing-svc version' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'bump the billing-svc version', turnId: 't2' })
+  w.judge = verdict(id => (id === '2' ? 'done' : 'open'))
+  await $.turn.complete(done('t2', 'Bumped it.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(book(w).judge.held).toBe('cooldown')
+  expect(book(w).items[1].proofAskedAt).toBeUndefined()
+  // past it, the next turn the judge reads it as done again asks, once
+  await clock.advance(COOLDOWN)
+  await type($, 'status?')
+  await $.turn.start({ text: 'status?', turnId: 't3' })
+  w.heard = ['fix the login redirect', 'status?']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t3', 'Redirect fixed, version bumped.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(2)
+  expect(nags(w)[1].text).toContain('2. "bump the billing-svc version"')
+})
+
+// A WAITING ITEM WAS NEVER IN FRONT OF THE MODEL AGAIN. contextNote lists open items only, so
+// "whats the status" was answered from whatever the model remembered of the turn that asked
+// the person, and the items that were holding the session up were the ones it left out.
+// A reply like "1 a" or "yes" shares too few words with the item it answers to wake it, so the
+// item waited on: 27 of 35 waiting items had three or more messages from the person since. A
+// turn the person's own message started shows the judge their waiting items, word match or not.
+test("a turn the person's own message started shows the judge their waiting items; a nudge's or a brief's does not", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'pick the export format and ship it')
+  await $.turn.start({ text: 'pick the export format and ship it', turnId: 't1' })
+  w.heard = ['pick the export format and ship it']
+  w.judge = said('waits on the person: their pick between CSV and JSON', () => 'in-progress')
+  await $.turn.complete(done('t1', 'Which do you want, CSV or JSON?'))
+  await settle(clock)
+  expect(book(w).items[0].state).toBe('waiting')
+  // a lead's brief starts a turn: the judge is not shown the person's waiting item
+  w.judged = []
+  w.judge = verdict(() => 'open')
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'rebase onto staging' }))
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'rebase onto staging', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Rebased.'))
+  await settle(clock)
+  expect(w.judged.join('\n')).not.toContain('pick the export format')
+  // neither is a nudge's
+  w.judged = []
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: 'run fleet-inbox', kind: 'nudge' }))
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'run fleet-inbox', turnId: 't3' })
+  await $.turn.complete(done('t3', 'Nothing new.'))
+  await settle(clock)
+  expect(w.judged.join('\n')).not.toContain('pick the export format')
+  // the person answers in a word no item shares: their turn's judge is shown it, and closes it
+  w.judged = []
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await type($, '2')
+  expect(book(w).items[0].state).toBe('waiting')
+  await $.turn.start({ text: '2', turnId: 't4' })
+  await $.turn.complete(done('t4', 'Went with JSON and shipped it: PR #41.'))
+  await settle(clock)
+  expect(w.judged.join('\n')).toContain('1 [request to the agent]: pick the export format')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
+})
+
+// A waiting item waited as long as the band kept it, a week: 34 of 35 were over a day old.
+test('a waiting item untouched for a day expires: off the queue and the note, still listed by all, still closable', async ($, on) => {
+  const day = 86_400_000
+  const now = 10 * day
+  const clock = mock.clock(on, { now })
+  const w = world(on)
+  await start($)
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, items: [
+    { id: '1', text: 'open the app to load the new version', at: now - day - 60_000, state: 'waiting', source: 'user', progress: { at: now - day - 60_000, reason: 'waits on the person: reload the app' } },
+    { id: '2', text: 'tell me which region', at: now - 60_000, state: 'waiting', source: 'user', progress: { at: now - 60_000, reason: 'waits on the person: their pick of region' } },
+  ] }))
+  // the status note is the queue's list (heldItems): the fresh one is on it, the day-old one not
+  await type($, 'status?')
+  const held = notes(w)[0]
+  expect(held).toContain('2 (waiting on them')
+  expect(held).not.toContain('open the app to load the new version')
+  await $.turn.start({ text: 'status?', turnId: 't1' })
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'One thing waits on you: the region.'))
+  await settle(clock)
+  expect(book(w).items.slice(0, 2).map((i: any) => i.state)).toEqual(['expired', 'waiting'])
+  const all: any = await $.command.run({ command: 'ledger', args: 'all' } as any)
+  expect(all.text).toContain('open the app to load the new version')
+  const shut: any = await $.command.run({ command: 'ledger', args: 'close 1' } as any)
+  expect(shut.text).toBe('ledger: closed 1')
+})
+
+test('a status question carries what waits on the person, with the instruction to ask each; other prompts do not', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * 3_600_000 })
+  const w = world(on)
+  await start($)
+  const now = 100 * 3_600_000
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, prompt: 2, window: 2, items: [
+    { id: '1', text: 'merge #12 or wait for the review', at: now - 3 * 3_600_000, state: 'waiting', source: 'user',
+      progress: { at: now - 2 * 3_600_000, reason: 'waits on the person: pick merge now or wait' } },
+    { id: '2', text: 'rename the cache keys', at: now - 60_000, state: 'open', source: 'user' },
+  ] }))
+  await type($, 'fix the status bar colour')
+  expect(notes(w)[0]).not.toContain('[ghostfleet ledger: waiting on the person]')
+  expect(notes(w)[0]).not.toContain('merge #12')
+  await type($, 'whats the status')
+  const note = notes(w)[1]
+  expect(note).toContain('[ghostfleet ledger: open items]')
+  expect(note).toContain('[ghostfleet ledger: waiting on the person]')
+  expect(note).toContain('1 (waiting on them 2h): merge #12 or wait for the review — you said: waits on the person: pick merge now or wait')
+  expect(note).toContain('ASK the person about each one')
+  // the fresh open item is on the open list, not held: four hours untouched is the bar
+  expect(note).not.toContain('2 (open, untouched')
+  await type($, 'qué falta?')
+  expect(notes(w)[2]).toContain('merge #12 or wait for the review')
+  await clock.advance(10)
+})
+
+// A PERSON'S REQUEST IS OWED ONLY ONCE IT OUTLIVES ITS TURN (ledger.js owed, settleTurn).
+// Measured over fourteen days: 75% of the person's own items closed before their next message,
+// yet each was counted on the band, listed in the note, and closed by the agent through a Bash
+// call of its own. Each row below fails if the mark is never set, never settled, or settled at
+// the wrong turn's end.
+test('a plain instruction the judge reads as done in its turn is never on the band, the record or the note', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  expect(notes(w)[0]).toBe('')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  // a message about it mid-turn is no note either
+  await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
+  expect(notes(w)[1]).toBe('')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Fixed the redirect in web/login.ts.'))
+  await settle(clock)
+  // the judge still read it, and closed it
+  expect(w.judged.length).toBe(1)
+  expect(w.judged[0]).toContain('1 [request to the agent]: fix the login redirect')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  expect(nags(w)).toEqual([])
+})
+
+// The owner's words from the phone are `user` (ledger.js deliverySource), so they are turn-scoped
+// exactly like a typed message: made `inTurn` when DELIVERY records them, settled at the end of
+// the turn they start. A lead's brief is not: it is owed from the moment it arrives.
+test("an --owner delivery done in its turn is never on the record, the note or the held list; a brief is owed at once", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'fix the login redirect', kind: 'owner' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ source: 'user', inTurn: true, turnId: 't1' }))
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  // the note a delivered prompt gets on its turn's first tool result: nothing owed, so none
+  const first: any = await $.tool.call({ tool: ADD, text: '' } as any)
+  expect((first.context ?? []).join('\n')).not.toContain('fix the login redirect')
+  // nor is it held for the person, asked mid-turn
+  await type($, 'whats the status', 't1')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('fix the login redirect')
+  w.heard = ['fix the login redirect', 'whats the status']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Fixed the redirect in web/login.ts; nothing else is pending.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0 }))
+  expect(nags(w)).toEqual([])
+  await type($, 'and bump the version')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('fix the login redirect')
+  // the same words without the mark: a brief, owed (on the record) the moment its turn starts
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: 'add the acme-api export endpoint' }))
+  await $.turn.start({ text: 'and bump the version', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Bumped to 0.6.2.'))
+  await settle(clock)
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: 'add the acme-api export endpoint', turnId: 't3' })
+  const brief = book(w).items.find((i: any) => i.text === 'add the acme-api export endpoint')
+  expect(brief).toEqual(expect.objectContaining({ source: 'fleet', state: 'open' }))
+  expect(brief.inTurn).toBeUndefined()
+  expect(rec(w).ledger.open).toBeGreaterThanOrEqual(1)
+})
+
+test('one the judge leaves open is owed after its turn: on the record and the note, and re-prompted once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  w.heard = ['fix the login redirect']
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Looked at something else.'))
+  await settle(clock)
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('1. "fix the login redirect"')
+  await type($, 'and bump the version')
+  expect(notes(w)[notes(w).length - 1]).toContain('1 (asked): fix the login redirect')
+  expect(notes(w)[notes(w).length - 1]).not.toContain('bump the version')
+})
+
+test('a judge that fails leaves the turn-scoped item owed: it fails open, never shut', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  w.judge = () => ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: {} })
+  await $.turn.complete(done('t1', 'Refactored.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'open' }))
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+})
+
+test('an Esc and a headless session settle the mark too: the item is owed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await $.turn.start({ text: 'refactor the parser', turnId: 't1' })
+  await $.turn.complete(done('t1', '', { reason: 'aborted', isAborted: true }))
+  await settle(clock)
+  expect(book(w).items[0].inTurn).toBeUndefined()
+  w.surfaces = []
+  await type($, 'rename the cache keys')
+  await $.turn.start({ text: 'rename the cache keys', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Renamed.'))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  expect(book(w).items.map((i: any) => Boolean(i.inTurn))).toEqual([false, false])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 2 }))
+})
+
+test('a message typed over a turn that the next turn runs is settled at THAT turn\'s end, not at the one it was typed over', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'list forty fruits')
+  await $.turn.start({ text: 'list forty fruits', turnId: 't1' })
+  await type($, 'and the capital of Australia', 't1')
+  let answer: (v: any) => void = () => {}
+  w.judge = () => new Promise(r => { answer = r })
+  await $.turn.complete(done('t1', 'Apple, banana, cherry...'))
+  await clock.advance(10)
+  // the queued message starts the next turn while t1's judge is out
+  await $.turn.start({ text: 'and the capital of Australia', turnId: 't2' })
+  answer(verdict(() => 'open')('1 [x\n2 [x'))
+  await settle(clock)
+  const at1 = book(w).items
+  expect(at1.map((i: any) => [i.id, Boolean(i.inTurn)])).toEqual([['1', false], ['2', true]])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t2', 'Canberra.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.inTurn)])).toEqual([['1', 'done', false], ['2', 'done', false]])
+})
+
+test('...and one the turn folded in, with no turn after it, is settled at that turn\'s end', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'list forty fruits')
+  await $.turn.start({ text: 'list forty fruits', turnId: 't1' })
+  await type($, 'and the capital of Australia', 't1')
+  w.heard = ['list forty fruits', 'and the capital of Australia']
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await $.turn.complete(done('t1', 'Apple, banana, cherry...'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.inTurn)])).toEqual([['1', 'done', false], ['2', 'open', false]])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+})
+
+// fleet-ledger closes from Bash, with no turn on the close: the judge-skip has to see it.
+test('a close from Bash during the turn skips the judge, as the tool\'s does; one from before the turn does not', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const cli = (id: string, at: number) => {
+    const l = book(w)
+    l.items = l.items.map((i: any) => (i.id === id ? { ...i, state: 'done', closedAt: at, closedBy: 'agent', proof: 'PR #7' } : i))
+    w.files.set(LEDGER, JSON.stringify(l))
+  }
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  cli('1', 1_000_000)
+  await $.turn.complete(done('t1', "Fixed. I'll keep the preview server running."))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  // the other direction: a close made before t2 began is not t2's own, and the promise is read
+  await clock.advance(60_000)
+  await type($, 'rename the cache keys')
+  cli('2', 1_000_000)
+  await $.turn.start({ text: 'rename the cache keys', turnId: 't2' })
+  await $.turn.complete(done('t2', "Renamed. I'll keep the preview server running."))
+  await settle(clock)
+  expect(w.judged.length).toBe(1)
 })

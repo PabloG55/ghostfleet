@@ -1,0 +1,40 @@
+  [ghostfleet ledger] One request is still open from this session:
+  1. "I am testing permission dialogs in this scratch repo. Please run exactly this one Bash
+  command and nothing else: mkdir -p build/cache && rm -rf build/cache"
+     Finish each one now and close it with mcp__ghostfleet__ledger_close and its proof, or say for
+  each that it is not done and why (mcp__ghostfleet__ledger_drop if it was not a real ask; no such
+  tools in this session? the same from Bash: fleet-ledger close <id> "<proof>", fleet-ledger drop
+  <id> "<reason>", fleet-ledger add "<ask>"). (Asked once per item; it will not be asked again.)
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in
+  the user's place. Address the message above.
+
+⏺ The command from item 1 didn't run. You rejected the permission prompt for mkdir -p build/cache &&
+  rm -rf build/cache, so build/cache was never created or deleted.
+
+  I haven't closed or dropped the ledger item. That would mean running fleet-ledger through Bash,
+  and you asked me to stop after rejecting the prompt. Tell me whether you want the command run
+  again, the ledger item dropped, or something else.
+
+✻ Cogitated for 7s · done 9:24 AM
+
+❯ Use the AskUserQuestion tool to ask me ONE question: "Which cache should billing-svc use for its
+  scratch builds?" header "Cache", options "Local disk" (desc "Fast, stays on this machine"),
+  "Object store" (desc "Shared, one network trip per job"), "No cache" (desc "Always rebuild").
+  Then repeat my answer in one line.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Cache
+
+Which cache should billing-svc use for its scratch builds?
+
+❯ 1. Local disk
+     Fast, stays on this machine
+  2. Object store
+     Shared, one network trip per job
+  3. No cache
+     Always rebuild
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

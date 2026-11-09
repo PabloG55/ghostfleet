@@ -7,18 +7,22 @@
 // keyboard bindings are wired too, because a keyboard is how this gets driven for a
 // screenshot and how it behaves on a desktop browser.
 //
-// Two things are deliberately missing and are not to be substituted (§7): the STACK
-// (it exists to put sessions side by side, and a phone has no side — at nc = 1 it is
-// this list) and the Ctrl-t / Ctrl-n terminal and editor tabs (they open a shell and
-// neovim in the session's folder, and there is no local shell on a phone; streaming a
-// remote one is a larger surface than the whole rest of the design). The settings sheet
-// says so out loud rather than leaving a hole where a key used to be.
+// One thing is deliberately missing and is not to be substituted (§7): the Ctrl-n editor
+// tab. The settings sheet says so out loud rather than leaving a hole where a key used to
+// be. The TERMINAL and the STACK were the second and third, until the owner decided each was
+// worth its surface: the terminal is here, off per device and behind a passkey at every open
+// (see "the terminal" below, and fleet-serve's TERMINAL for the gates), and so is the stack
+// — side-by-side columns at a desk, a swipe apart on a phone (see "the stack").
 
 import * as G from './grid.js';
 import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+// Where the app is, as an address, and the clamps a restored place goes through (see the file).
+import * as PL from './place.js';
+// The desk's own matcher for `/` — one answer to "which cards does `bil` mean" (see the file).
+import { matchIndices, stepMatch, sessionMatches } from './grid-search.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
 // vite's output from web/src/screens.jsx, committed beside its source. It holds BOTH card
 // screens — Projects and the grid — which is why it is no longer called projects.js. The
@@ -28,11 +32,12 @@ import * as screensUI from './screens.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
-  screen: 'projects',   // projects | grid | session
+  screen: 'projects',   // projects | queue | reviews | review | grid | session
   project: null,        // the fleet being looked at
   session: null,        // the card opened on the session screen
   projects: null,       // last /api/projects payload
   profile: 'all',       // the projects screen's tab: 'all' | a profile name (see PROFILES)
+  hosts: null,          // /api/projects' `hosts` once another machine is paired; null = this one alone
   grid: null,           // last §4 payload
   sub: '',              // '' = the top grid; else the sub-lead whose sub-grid is open
   sess: null,           // last /api/session payload  { messages, next_before, … }
@@ -58,11 +63,48 @@ const S = {
   speaking: '',         // the text currently being read aloud, '' when silent
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
   jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
+  autosOn: null,        // the automations switch (/api/projects automations_enabled): null = not told yet
+  autosUnseen: 0,       // notices about automations nobody has looked at (a run that failed or was skipped)
+  autos: null,          // last /api/automations payload, while that screen is open
+  autosErr: '',         // why the first read of it failed: with nothing to show, that IS the screen
+  autosEdit: null,      // the automation open in the editor: an id, 'new', or null for the list
   speak: null,          // the Mac's voice (/api/projects speak) — reported with Jarvis off too
+  voice: null,          // last /api/voice payload (the Mac's ears) — null until asked, false = a daemon without the route
   jarvisMode: false,    // the session screen is showing JARVIS (see openJarvis): back goes to Projects
   wantJarvis: false,    // a notification from Jarvis was tapped; open it once unlocked
   pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
   talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
+  waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
+  usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
+  wantWaiting: false,   // a "waiting on you" notification was tapped; open the queue once unlocked
+  qsel: 0,              // the queue's cursor, for the desk's keys (index into S.waiting)
+  shots: null,          // last /api/shots (fleet-shots' runs, by branch); null = not told, or the switch is off
+  wantReviews: false,   // opened on #reviews (where `fleet-shots serve` now points); open the list once unlocked
+  rvOpen: [],           // the branches whose earlier runs are unfolded (group keys)
+  rvsel: 0,             // the list's cursor, for the desk's keys (index into reviewStops())
+  rv: null,             // the run on the review screen: { profile, run }
+  rvRun: null,          // last /api/shots/run for it — the verdict being edited lives in .run.verdict
+  rvErr: '',            // why that run could not be read
+  rvSave: '',           // '' | 'saving' | 'saved' | 'failed' — the verdict's way to the Mac
+  entry: '',            // 'projects' when this session is a master entered the desk's way (⏎ on a
+                        // project, ` on its grid, Ctrl-f n m) — one level under Projects, not two
+  srch: null,           // the grid's `/` search: { q, typing } — see "the keyboard" at the bottom
+  foundBack: null,      // a session opened from the Projects search: { q, sel } to put back on the way out
+  jump: null,           // the Ctrl-f chord in progress: { stage: 'first'|'proj'|'grid', proj }
+  prefix: false,        // Ctrl-a was pressed in a session: the next key is a tmux-prefixed one
+  wantCard: 0,          // Ctrl-f <p> <s>: open card s once project p's grid has been read
+  termOn: null,         // /api/term's answer for THIS device: may it open a terminal. null = not asked
+  termBack: null,       // where the terminal screen was opened from, which is where back goes
+  termSt: { state: 'checking', why: '' },   // what the terminal screen says (see termState)
+  termKind: 'term',     // which fleet tab that screen holds: 'term' (a shell) | 'edit' (the desk's Ctrl-n editor)
+  // THE STACK (see "the stack"): what is in it, which column has the focus, the picker's own
+  // state, and where back goes from either screen.
+  stackSel: [],         // [{ project, session }] in column order — this device's, in localStorage
+  stackAt: 0,           // the focused member: an index into stackSel
+  pick: null,           // the picker: { cur: column key, q: null | query, typing, msg }
+  stackBack: null,      // the screen the picker or the stack was opened from
+  pickBack: '',         // 'stack' when the picker was opened from the stack itself
+  fromStack: false,     // the session screen was opened from a column: back is the stack
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -90,40 +132,54 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode,
-      projects: S.projects, grid: S.grid, sub: S.sub,
+      session: S.screen === 'stack' ? null : S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
+      projects: S.projects, hosts: S.hosts, grid: S.grid, sub: S.sub,
+      rv: S.screen === 'review' ? S.rv : null,
     }));
   } catch {}
 }
+// THE PLACE THIS TAB'S ADDRESS NAMES, read once, at boot: null when it names none — which is
+// every open of the installed home-screen app, since it launches start_url and never the
+// address it was on, and so keeps restoring from the stored state exactly as it did. When
+// there is one it wins over the stored state, which is the origin's and so whichever tab
+// wrote last (web/place.js). Spent by the first unlock: see loggedIn.
+const bootPlace = (() => { try { return PL.fromQuery(location.search); } catch { return null; } })();
+let linkPlace = !!bootPlace;
+// A tab the address names but the cached projects cannot vouch for, because there is no
+// cache yet (a link opened in a fresh browser). The clamp sends it to `all`, as it would a
+// stored one; the first projects read puts it back if the tab is real (spendTabWant).
+let tabWant = '';
 function restore() {
-  let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { return; }
-  if (!j) return;
+  loadStack();
+  let j; try { j = JSON.parse(localStorage.getItem(LS_LAST) || 'null'); } catch { j = null; }
+  if (!j && !bootPlace) return;
+  // The URL's place over the stored one; the payloads stay, to paint before the network answers.
+  j = PL.overlay(j || {}, bootPlace);
   S.projects = j.projects || null; S.grid = j.grid || null;
-  S.project = j.project || null; S.screen = j.screen || 'projects';
-  S.session = j.session || null;
-  // the sub-grid you were in; the next grid read falls back to the top if it has gone
-  S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
-  S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
-  // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
-  // falls to the default rather than rendering neither.
-  S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
-  // THE SAME CLAMP, FOR THE SAME REASON. A profile is free text and a projects file is
-  // edited between opens, so the stored tab can name something that no longer exists —
-  // and a tab matching nothing would draw an empty screen over a fleet that has projects
-  // in it. Unknown falls to `all`, which is also the default: hiding projects on a first
-  // run would be a surprise, and "is anything blocked on me" must not need two looks.
-  const tabs = profileTabs(S.projects || []);
-  S.profile = (j.profile && (j.profile === PROFILE_ALL || tabs.includes(j.profile))) ? j.profile : PROFILE_ALL;
-  // A CLAMP, not a trust. Half-written state is how the screen above happened, and the
-  // rule is simple enough to state: you cannot be on a screen whose subject is missing.
-  if (S.screen === 'session' && !S.session) S.screen = S.project ? 'grid' : 'projects';
-  if (S.screen === 'grid' && !S.project) S.screen = 'projects';
+  S.hosts = Array.isArray(j.hosts) ? j.hosts : null;
+  // THE CLAMPS, in place.js since there are two ways in — a stored state and an address —
+  // and both must land where the other would with the same hole in it.
+  const c = PL.clamp(j, { tabs: profileTabs(S.projects || []), stackLen: S.stackSel.length });
+  S.screen = c.screen; S.project = c.project; S.session = c.session; S.sub = c.sub;
+  S.jarvisMode = c.jarvisMode; S.entry = c.entry; S.view = c.view; S.profile = c.profile; S.rv = c.rv;
+  if (bootPlace && !S.projects && bootPlace.profile !== c.profile) tabWant = bootPlace.profile;
+  // ...and what was being typed there, which a relaunch used to throw away.
+  if (S.screen === 'session' && S.session) S.draft = draftGet(draftKey());
+  if (S.screen === 'stackpick') S.pick = { cur: '', q: null, typing: false, msg: '' };
   S.stale = j.at || 0;
-  // ...and give the back gesture the trail it would have had if you had walked here. A
-  // cold open is at the root of its own history, so without this the first swipe out of a
-  // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? (S.jarvisMode ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
+  // ...and the trail the back gesture would have had if you had walked here. A cold open is
+  // at the root of its own history, so without it the first swipe out of a restored session
+  // screen leaves the app. MEASURED HERE, PUSHED LATER (resumedSession, loggedIn): this runs
+  // while the lock screen is up, and an entry pushed under the lock screen is previewed AS
+  // the lock screen by a back swipe (see loggedIn).
+  restoredDepth = c.depth;
 }
+function spendTabWant() {
+  if (!tabWant || !S.projects) return;
+  if (S.profile === PROFILE_ALL && profileTabs(S.projects).includes(tabWant)) S.profile = tabWant;
+  tabWant = '';
+}
+let restoredDepth = 0;
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
 // The card is 32 columns (CW + 2) and it should span the phone. Measured rather than
@@ -146,37 +202,145 @@ function fitCards() {
 }
 
 // ── loading ───────────────────────────────────────────────────────────────
-async function refresh() {
+// ONE REFRESH AT A TIME FOR ONE SCREEN. Every caller — the 5 s poll, conversation mode's
+// 1.5 s one, a resume, a verb landing — used to start its own, and each is three reads in a
+// row. Against a daemon that answered in 8-26 s that stacked: a new refresh every interval
+// while the last ones still waited, then the whole backlog answering at once — measured in
+// the daemon's log as one phone's 399 reads in under three minutes, the rate limit, and
+// nineteen 429s in two seconds. So a call while one is running for the SAME screen is folded
+// into it plus one more after, which is what "refresh" means to every caller: what they want
+// is an answer from after they asked. A DIFFERENT screen does not wait behind the old one —
+// opening a session must not queue behind a slow read of the last — and what the old one
+// brings back is checked against where the app is before it is used (readChat, chatLanded).
+let refreshing = null, refreshKey = '', refreshAgain = false;
+const screenKey = () => [S.screen, S.project, S.sub, S.session, S.view, S.jarvisMode].join('\x1f');
+function refresh() {
+  const key = screenKey();
+  if (refreshing && refreshKey === key) { refreshAgain = true; return refreshing; }
+  refreshKey = key; refreshAgain = false;
+  const run = (async () => {
+    try { await refreshOnce(); }
+    finally { if (refreshing === run) refreshing = null; }
+    if (refreshAgain && !refreshing && screenKey() === key) { refreshAgain = false; return refresh(); }
+  })();
+  refreshing = run;
+  return run;
+}
+async function refreshOnce() {
   // Once per unlock, and only ever a no-op after that: a rotated push endpoint is
   // invisible from the phone (push simply stops), so the check rides along with the poll
   // that is already running rather than waiting for someone to open the settings sheet.
   maybeSyncPush();
   maybePushOffer();
   // A tapped notification from Jarvis, once there is a session to open it with.
-  if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
+  // Not while an unwind is still on its way (setDepth): the entry a deep link pushes would
+  // land above the trail the pop is about to remove, and the pop would then take it back.
+  if (S.wantJarvis && !S.locked && !navSkip) { S.wantJarvis = false; openJarvis(); return; }
+  // A tapped "waiting on you" opens the queue, wherever the app was left.
+  if (S.wantWaiting && !S.locked && !navSkip) { S.wantWaiting = false; if (S.screen !== 'queue') { openQueue(); return; } }
+  // #reviews — the address `fleet-shots serve` prints now that it no longer serves.
+  if (S.wantReviews && !S.locked && !navSkip) { S.wantReviews = false; if (S.screen !== 'reviews' && S.screen !== 'review') { openReviews(); return; } }
   try {
-    if (S.screen === 'projects') {
+    // The queue is read by the same request as Projects, and in two panes Projects is
+    // beside it, so the one read serves both.
+    if (S.screen === 'projects' || S.screen === 'queue') {
       // The payload carries the agent CATALOGUE beside the projects, and both are needed:
       // the list draws the cards, the catalogue fills the picker. Keeping only `.projects`
       // (which is what this line did) left the picker with nothing to offer and no way to
       // tell that apart from a machine with one agent installed.
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
+      spendTabWant();
+      // Another machine paired: the hosts it answers for, online or not (PAIRED HOSTS in
+      // fleet-serve). Absent is one machine, and every screen draws exactly as before.
+      S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null;
       // JARVIS IS EXPERIMENTAL and the Mac says whether it is on. Off is GONE: no band, no
-      // Jarvis screen, no talk — and no /api/jarvis request, which would only 404. A daemon
+      // Jarvis screen, no talking to Jarvis — and no /api/jarvis request, which would only
+      // 404. Talking to a session stays (talkShown). A daemon
       // older than the switch sends no field, and keeps the old behaviour.
       if (typeof j.jarvis_enabled === 'boolean') S.jarvisOn = j.jarvis_enabled;
+      // AUTOMATIONS ARE EXPERIMENTAL TOO, and the same rule holds: off, the menu has no entry.
+      if (typeof j.automations_enabled === 'boolean') { S.autosOn = j.automations_enabled; S.autosUnseen = Number(j.automations_unseen) || 0; }
       if (j.speak) S.speak = j.speak;
       // The Jarvis band. Its own request, and allowed to fail on its own: a daemon older
       // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
+      // The Mac's ears beside it, on their own route: talk is every session's, not Jarvis's.
       if (S.jarvisOn === false) S.jarvis = null;
-      else try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); }
+      // WHAT THE MASTERS HOLD FOR THE OWNER, on its own request and allowed to fail on its own like
+      // the band: a daemon older than the list answers null, which is no section.
+      await Promise.all([
+        readVoice(),
+        S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
+        api.getWaiting().then((j) => { S.waiting = j && Array.isArray(j.items) ? j.items : null; },
+                              (e) => { if (e instanceof api.AuthError) throw e; }),
+        // THE REVIEWS ROW: null is the switch off (or a daemon older than Reviews), and no row.
+        api.getShots().then((j) => { S.shots = j; }, (e) => { if (e instanceof api.AuthError) throw e; }),
+        // THE ACCOUNTS LINE, on its own slower clock (readUsage), and allowed to fail like the rest.
+        readUsage(),
+        // THE SESSIONS A SEARCH FINDS, while there is a query: the picker's grid reads (every
+        // project not yet read, then a few a tick), so a session that starts or stops while
+        // the search is up is found or dropped without retyping it.
+        S.screen === 'projects' && S.srch && S.srch.q ? readGrids(foundProjects().map(p => p.name)) : null,
+      ]);
+    }
+    else if (S.screen === 'reviews' || S.screen === 'review') {
+      const sh = await api.getShots();
+      // SWITCHED OFF WHILE IT WAS OPEN: there is no Reviews screen to stay on.
+      if (sh === null) { S.shots = null; S.rv = null; S.rvRun = null; toast('Reviews are switched off on the Mac'); toProjects(); return; }
+      S.shots = sh;
+      // Two panes: Projects is the list beside the reviews, and it is read by its own request.
+      if (S.screen === 'reviews' && wideNow()) { const j = await api.getProjects(); S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+      // A run is read when it is opened, NOT on every poll: the verdict on screen is being
+      // edited, and a poll that replaced it would take back what was just typed.
+      if (S.screen === 'review' && S.rv && !S.rvRun && !S.rvErr) await readReview();
     }
     else if (S.screen === 'grid') {
+      termAsk();
       S.grid = await api.getGrid(S.project, S.sub);
       // The sub-lead went away while its grid was open: the server answers the top grid's
       // shape with no cards, and staying on an empty screen with a name on it is the lie.
       if (S.sub && S.grid && !S.grid.sub) { S.sub = ''; S.grid = await api.getGrid(S.project); }
+      // Ctrl-f <p> <s>: the card is only known once project p's grid is. No such card is
+      // the desk's answer too — you are left on the grid it would have been on.
+      if (S.wantCard && S.screen === 'grid') {
+        const it = items()[S.wantCard - 1];
+        S.wantCard = 0;
+        if (it && it.card) { S.sel = items().indexOf(it); save(); openItem(it); return; }
+      }
+    }
+    else if (S.screen === 'automations') {
+      // Switched off while it was open answers 404: there is no screen to stay on.
+      try { S.autos = await api.getAutomations(); S.autosErr = ''; }
+      catch (e) {
+        if (e.status === 404) { S.autosOn = false; S.autos = null; S.autosEdit = null; S.autosErr = ''; S.screen = 'projects'; setDepth(0); render(); refresh(); return; }
+        // A list already on screen stays, with its age, like every other screen. With nothing
+        // there yet the wait would otherwise never end, under a toast that fades.
+        if (S.autos || e instanceof api.AuthError || e instanceof api.RateLimitedError) throw e;
+        S.autosErr = e instanceof api.OfflineError ? 'fleet-serve did not answer. Check the connection and try again.'
+          : `fleet-serve answered with an error (HTTP ${e.status || '?'}). Its log on the Mac says why.`;
+      }
+      // Two panes: Projects is the list beside this one, and it is read by its own request. Without
+      // it the list beside the automations stopped moving for as long as they were open.
+      if (wideNow()) {
+        const j = await api.getProjects();
+        S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null;
+        // A relaunch lands here without ever having read Projects, and the menu beside it asks this.
+        if (typeof j.automations_enabled === 'boolean') { S.autosOn = j.automations_enabled; S.autosUnseen = Number(j.automations_unseen) || 0; }
+      }
+    }
+    else if (S.screen === 'stackpick') {
+      await refreshPicker();
+      // Two panes: the Projects list beside the picker is read by its own request.
+      if (wideNow()) { const j = await api.getProjects(); S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+    }
+    else if (S.screen === 'stack') {
+      if (!S.projects) { const j = await api.getProjects(); S.projects = j.projects; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+      await refreshStack();
+    }
+    else if (S.screen === 'term') {
+      // The grid beside it (two panes), and nothing of the terminal's own: its bytes arrive
+      // on the socket, never on this poll.
+      S.grid = await api.getGrid(S.project, S.sub);
     }
     else if (S.screen === 'session') {
       // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
@@ -188,11 +352,14 @@ async function refresh() {
         if (!S.jarvis || !S.jarvis.present) { S.stale = 0; renderUnlessTyping(); return; }
         S.project = S.jarvis.project; S.session = 'master';
       }
+      termAsk();
       S.grid = await api.getGrid(S.project, S.sub);
-      // THE MAC'S EARS, for a session's `talk`: whether it can transcribe is reported by
-      // /api/jarvis, which a session screen opened straight from a notification has never
-      // asked. Once, and allowed to fail like the Projects band's read of it.
-      if (!S.jarvisMode && !S.jarvis && S.jarvisOn !== false) { try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); } }
+      // THE MAC'S EARS, for a session's `talk`: a session screen opened straight from a
+      // notification has never asked the Projects poll's question. Once, whatever Jarvis's
+      // switch says — and on a daemon from before /api/voice, /api/jarvis is still where its
+      // ears are reported, so that is asked too while Jarvis can be on.
+      if (S.voice === null) await readVoice();
+      if (S.voice === false && !S.jarvisMode && !S.jarvis && S.jarvisOn !== false) { try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); } }
       // The pane has its OWN faster timer (panePoll below), so this loop only has to
       // fetch it once, to fill the box on the way in rather than up to a poll later.
       if (S.view === 'pane' && !S.pane) await readPane();
@@ -207,12 +374,12 @@ async function refresh() {
       // nothing is the kind of waste that is invisible until it is a phone bill.
       // ...and while a spoken turn is owed an answer, whatever was paged in: the answer is
       // looked for in the newest page, and conversation mode cannot wait on a frozen one.
+      //   ...AND ONCE "LOAD MORE" HAS BEEN PRESSED, STILL. That used to stop the re-read for
+      // good, for the reason above — and a reply that arrived after it never appeared until the
+      // chat was left and reopened. The newest page is laid on top of the older ones now
+      // (mergeNewest), so nothing paged in is thrown away and nothing new is missed.
       const owed = !!(S.talk && S.talk.phase === 'waiting');
-      if ((S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) || owed) {
-        const seq = ++sessSeq;
-        const fresh = await api.getSession(S.project, S.session);
-        S.sess = { ...fresh, pages: 1, seq };
-      }
+      if (S.view !== 'pane' || owed) await readChat();
       // Whatever the transcript and the queue now say decides whether each bubble in the
       // outbox is still telling the truth.
       reconcileOutbox();
@@ -222,6 +389,14 @@ async function refresh() {
     save();
   } catch (e) {
     if (e instanceof api.AuthError) return lock();
+    // TOLD TO WAIT is not offline and not broken: say it once, when the daemon says it, and
+    // not again for every read the hold then refuses without asking.
+    if (e instanceof api.RateLimitedError) {
+      if (!S.stale) S.stale = lastFetchedAt();
+      if (!e.local) toast(e.message);
+      renderUnlessTyping();
+      return;
+    }
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -257,6 +432,9 @@ function markStandalone() {
 function lock() {
   // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
   if (S.talk) talkStop('');
+  // ...AND NO SHELL. The server would end the socket on its own idle clock; a lock is the
+  // owner saying so now.
+  disposeTerm();
   S.locked = true; api.clearToken(); render();
   // Coming back to an expired session: the one attempt this resume was armed for.
   tryAutoUnlock();
@@ -309,10 +487,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'reviews', 'review', 'term', 'stack', 'stackpick', 'automations']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, grid: 1, session: 2 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, reviews: 1, automations: 1, grid: 1, review: 2, stackpick: 2, stack: 2, session: 2, term: 3 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -344,6 +522,9 @@ function markNav(app, screen) {
 let uaSlid = false;
 function slideNav() {
   if (S.locked || !SHELL_SCREENS.has(S.screen) || navFrom === null || navFrom === S.screen) return false;
+  // Not in two panes: a slide says "this screen replaced that one", and beside each other
+  // neither replaced anything. The whole window sliding left to open a chat is a lie.
+  if (wideNow()) { navFrom = S.screen; return false; }
   const d = (SCREEN_DEPTH[S.screen] ?? 0) - (SCREEN_DEPTH[navFrom] ?? 0);
   if (!d) return false;
   if (uaSlid) { navFrom = S.screen; return false; }
@@ -352,19 +533,108 @@ function slideNav() {
     if (typeof document.startViewTransition !== 'function' || matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
     navFrom = S.screen;                   // the render inside paints with no wipe of its own
     root.dataset.nav = d > 0 ? 'fwd' : 'back';
-    document.startViewTransition(() => render()).finished.finally(() => { try { delete root.dataset.nav; } catch {} });
+    const vt = document.startViewTransition(() => render());
+    // A transition cut short by the next one (back pressed mid-slide) rejects `ready` with
+    // an AbortError nobody is waiting on — a console error on every quick double step.
+    vt.ready.catch(() => {});
+    vt.finished.finally(() => { try { delete root.dataset.nav; } catch {} });
     return true;
   } catch { return false; }
 }
-// THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
-const PREACT_SCREENS = new Set(['projects', 'grid']);
+// THE SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
+const PREACT_SCREENS = new Set(['projects', 'grid', 'queue', 'reviews', 'review', 'automations']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
 let preactUp = false;
+// ── two panes, on a wide window ───────────────────────────────────────────────
+// The SAME two screens the phone walks between, side by side: #side gets the list the phone
+// would be showing (Projects, or this project's grid), #app gets the session — or one line
+// saying nothing is open. No component is new; each pane is drawn by exactly the code that
+// draws it on a phone. app.css (html.duo) says why 1024px, and the number lives here once.
+//   WIDE AND A MOUSE, NOT WIDE ALONE. A tablet held sideways is 1024 and up, and it is a
+// touch screen: the brief was that touch stays exactly as it is, and on a tablet that is
+// #78's card grid in several tracks. So the pointer decides too — a trackpad or a mouse —
+// the same question enterSends() asks, for the same reason: it is what a page can see.
+const DUO_MIN_PX = 1024;
+const DUO_QUERY = `(min-width: ${DUO_MIN_PX}px) and (hover: hover) and (pointer: fine)`;
+let duoMq = null, sideUp = false, wasWide = false;
+export function wideNow() {
+  try { duoMq = duoMq || matchMedia(DUO_QUERY); return !!duoMq.matches; } catch { return false; }
+}
+const sideNode = () => { try { return document.getElementById('side'); } catch { return null; } };
+function leaveDuo() {
+  try { document.documentElement.classList.remove('duo'); } catch {}
+  const side = sideNode();
+  if (!sideUp || !side) return;
+  screensUI.unmount(side);
+  side.textContent = '';
+  side.classList.remove('shell');
+  sideUp = false;
+}
+function renderDuo(app, side) {
+  document.documentElement.classList.toggle('duo', true);
+  side.classList.toggle('shell', true);
+  navFrom = S.screen;
+  // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
+  const queue = S.screen === 'queue' || S.screen === 'automations';
+  // Reviews too, and a run opens beside the LIST of runs — the way a session opens beside
+  // its grid — so the next branch is one click away rather than a back and a click.
+  const reviews = S.screen === 'reviews', review = S.screen === 'review';
+  // The stack spans projects, so the list beside it is Projects too.
+  const stacky = S.screen === 'stack' || S.screen === 'stackpick';
+  const left = review ? 'reviews'
+    : (S.screen === 'projects' || queue || reviews || stacky || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
+  // The terminal is a right-pane screen like a session: its project's grid stays beside it.
+  const inSession = S.screen === 'session' || S.screen === 'term' || stacky;
+  const props = left === 'grid' ? gridProps() : left === 'reviews' ? reviewsProps() : projectsProps();
+  // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
+  // session's; drawn in both, a `y` would read as answering two questions.
+  if (inSession || queue || reviews || review) { props.confirm = null; props.toast = null; }
+  // The list beside a run is not a screen of its own: it has nothing to go back to.
+  if (review) props.onBack = null;
+  screensUI.mount(side, left, props);
+  sideUp = true;
+  if (inSession) { paintElScreen(app); return; }
+  // THE QUEUE OPENS ON THE RIGHT, where a conversation would: it is the list of things to
+  // answer, and Projects stays where it was beside it.
+  if (queue) { mountPreact(app, S.screen, S.screen === 'automations' ? automationsProps() : queueProps()); return; }
+  if (reviews || review) { mountPreact(app, S.screen, reviews ? reviewsProps() : reviewProps()); return; }
+  if (preactUp) { screensUI.unmount(app); preactUp = false; }
+  // The session's nodes leave with it: keepScreen() must not later take this line for a
+  // chat it can patch, so its memory goes too.
+  app.textContent = '';
+  screenMem = null;
+  paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+  composerNode = null;
+  app.append(el('div', { class: 'duo-empty', text: left === 'projects'
+    ? 'no session open — ⏎ on a project opens its master, Ctrl-s its grid'
+    : 'no session open — ⏎ or 1-9 opens one, / finds one' }));
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
+}
 function render() {
+  // The address follows the screen — replaced, never pushed (see "back, and what the address is for").
+  syncUrl();
+  // Leaving the terminal's screen, by any route, closes its socket; the tab stays in tmux.
+  if (TS && S.screen !== 'term') disposeTerm();
+  // ...and leaving the stack by one that did not go through leaveStackState (Ctrl-f, a card
+  // in the list beside it, Ctrl-p): the open chat is not a column any more. Its draft is in
+  // the stored drafts already; its transcript is read again on the way back.
+  if (S.screen !== 'stack' && stackActiveKey) { stackActiveKey = ''; chatSK = 'chat'; stopStackPoll(); }
   if (slideNav()) return;
   const app = document.getElementById('app');
+  const side = sideNode();
+  if (side && !S.locked && SHELL_SCREENS.has(S.screen) && wideNow()) {
+    // toggle(…, true), NOT add(): add() rewrites the class attribute even when the token is
+    // already there, and that is a DOM mutation on every 5s poll of a screen where nothing
+    // changed — the kept chat (#86) is measured by exactly that count. toggle with force
+    // does nothing when the answer is already true.
+    try { app.classList.toggle('shell', true); document.documentElement.classList.toggle('shell', true); } catch {}
+    renderDuo(app, side);
+    return;
+  }
+  leaveDuo();
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
   // viewport, or a drag near the edge slides the whole app and the scroller under the
   // finger never moves. Guarded — the fake DOM the suite renders into has no classList on
@@ -388,15 +658,9 @@ function render() {
   // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
   // card list being the screen's scrolling region and let the whole page scroll.
   if (!S.locked && PREACT_SCREENS.has(S.screen)) {
-    if (!preactUp) {
-      app.textContent = '';
-      paneBoxNode = paneNode = paneGeomNode = null;
-      composerNode = null;
-      preactUp = true;
-    }
-    screensUI.mount(app, S.screen, S.screen === 'grid' ? gridProps() : projectsProps());
-    renderSheet();
-    syncPanePoll();
+    mountPreact(app, S.screen, S.screen === 'grid' ? gridProps() : S.screen === 'queue' ? queueProps()
+      : S.screen === 'reviews' ? reviewsProps() : S.screen === 'review' ? reviewProps()
+      : S.screen === 'automations' ? automationsProps() : projectsProps());
     return;
   }
   // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
@@ -404,13 +668,58 @@ function render() {
   // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
   // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
   // there to be removed.
-  if (preactUp) { screensUI.unmount(app); preactUp = false; }
-  app.textContent = '';
+  paintElScreen(app);
+}
+function mountPreact(app, screen, props) {
+  if (!preactUp) {
+    app.textContent = '';
+    screenMem = null;
+    paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+    composerNode = null;
+    preactUp = true;
+  }
+  screensUI.mount(app, screen, props);
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
+}
+// Everything app.js still draws with el() — the lock screen and the session screen — into
+// #app. One body for both layouts: two panes put this same column on the right.
+// ── A CHAT OPENS READY TO TYPE IN — WITH A KEYBOARD ─────────────────────────────────────
+// Opening a session focused nothing, so the first key a person at a desk pressed went
+// nowhere (or, since the desk's keys, into the composer by way of typeIntoComposer — one
+// key late to feel like a box that was ready). So a chat that has just been opened takes
+// the focus, the caret after any draft it is holding.
+//   ONLY WITH A KEYBOARD, by the same evidence ⏎-to-send uses (enterSends): a fine pointer
+// that hovers, or a key from a real keyboard on an iPhone or iPad. On a touch-only phone a
+// focused box raises the on-screen keyboard over the conversation the person opened to
+// read — every time, on every chat — so there nothing is focused, as before.
+//   Once per open, not per render: the poll redraws, and a box that grabbed the focus back
+// each time would steal it from the search field of a sheet, or from a reader who had
+// deliberately left the box with Esc.
+let focusOnOpen = false;
+function focusIfOpened() {
+  if (!focusOnOpen || !chatScreen() || S.sheet || S.locked) return;
+  focusOnOpen = false;
+  if (enterSends()) focusComposerAt(null);     // null: the end of the draft
+}
+function paintElScreen(app) {
+  paintElScreenBody(app);
+  focusIfOpened();
+}
+function paintElScreenBody(app) {
+  if (preactUp) { screensUI.unmount(app); preactUp = false; screenMem = null; }
+  // What is on screen now, before the build below re-points these at nodes it has not yet
+  // decided to use (keepScreen()).
+  const liveChat = chatNode, liveComposer = composerNode;
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
-  paneBoxNode = paneNode = paneGeomNode = null;
+  paneBoxNode = paneNode = paneGeomNode = chatNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
-  if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
+  if (S.locked) { app.textContent = ''; screenMem = null; app.append(lockScreen()); renderSheet(); syncPanePoll(); syncChatPoll(); return; }
+  if (S.screen === 'term') { paintTerm(app); return; }
+  if (S.screen === 'stackpick') { pickRoot = pickRoot && pickRoot.bar.parentNode === app ? pickRoot : null; stackRoot = null; paintPicker(app); syncPanePoll(); syncChatPoll(); stopStackPoll(); return; }
+  if (S.screen === 'stack') { pickRoot = null; paintStack(app); syncPanePoll(); syncChatPoll(); syncStackPoll(); return; }
+  pickRoot = null; stackRoot = null;
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
@@ -431,12 +740,145 @@ function render() {
     const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
     if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
   }
+  if (keepScreen(app, screen, liveChat, liveComposer)) {
+    renderSheet();
+    syncPanePoll(); syncChatPoll();
+    return;
+  }
+  app.textContent = '';
   app.append(...screen);
+  rememberScreen(screen);
   renderSheet();
   // Every state change that matters to the pane's timer — the screen, the view, a sheet,
   // a confirmation, the lock — has already been applied by the time we get here, which is
   // why this is the single place that starts and stops it.
-  syncPanePoll();
+  syncPanePoll(); syncChatPoll();
+}
+
+// ── an open chat is UPDATED, not rebuilt ─────────────────────────────────────
+// "A wide table snaps back to its start every time I scroll it sideways" — on the phone and
+// in a desktop browser. render() emptied #app and built the session screen from nothing on
+// every poll, and a new element starts at scrollLeft 0: every table and code block in the
+// conversation (each scrolls sideways in its own box, md.js) went back to its first column
+// every five seconds, and a selection in a bubble went with the node it was in.
+//   So in the chat view the screen is built as before, and then COMPARED, not appended:
+//   · a poll that brought nothing new changes no DOM at all — every part of the new build
+//     reads the same as the part on screen, and the build is dropped;
+//   · otherwise each part that reads the same KEEPS ITS NODE, and only what differs is put
+//     in. Inside the message list that is per message, keyed by msgKey() (arrived() tags
+//     it), so a new message is an insertion and every bubble above it — its scroll offsets,
+//     its selection, its open <details> — is the element it was.
+//   · the list's own node is never replaced or moved, so its scrollTop is never lost either;
+//     restoreScroll() then follows the end only for a reader who was at it.
+// "Reads the same" is the part's HTML with the entrance animation's class and delay left
+// out (they are what the same message carries for its first quarter-second), plus the draft
+// for the composer, whose text lives in a property the HTML does not show.
+//   Not in the pane view: paneView() hands out nodes the pane's own poll paints into, and the
+// pane has its own in-place repaint (paintPane).
+let screenMem = null;          // { who, draft, parts: Map(key -> { node, sig }) } of #app
+let chatMem = null;            // { node, parts } of the message list
+const ANIM = new Set(['enter', 'sent', 'settle']);
+const chatWho = () => `${S.project}\x1f${S.session}\x1f${S.jarvisMode ? 'j' : ''}`;
+function baseClass(n) {
+  return String((n.getAttribute && n.getAttribute('class')) || '').split(/\s+/).filter((c) => c && !ANIM.has(c)).join(' ');
+}
+function sigOf(n) {
+  if (!n || n.nodeType !== 1) return String(n && n.textContent);
+  const cls = n.getAttribute('class'), st = n.getAttribute('style');
+  if (cls != null) n.setAttribute('class', baseClass(n));
+  if (st != null) { const rest = st.replace(/--gf-in:[^;]*;?\s*/g, '').trim(); if (rest) n.setAttribute('style', rest); else n.removeAttribute('style'); }
+  const h = n.outerHTML;
+  if (cls != null) n.setAttribute('class', cls);
+  if (st != null) n.setAttribute('style', st);
+  return h;
+}
+// Keys for a run of sibling parts: a message's own (arrived()), else its tag and class. The
+// n-th repeat of a key is `key#n`, so two messages in one second are two keys.
+function partsOf(nodes, skip) {
+  const seen = new Map();
+  return nodes.filter(Boolean).map((n) => {
+    const k0 = n.__gfk || `${n.nodeName}.${baseClass(n)}`;
+    const i = seen.get(k0) || 0; seen.set(k0, i + 1);
+    return { key: i ? `${k0}#${i}` : k0, node: n, sig: skip && skip(n) ? '' : sigOf(n) };
+  });
+}
+// Put `nodes` under `parent` in this order, touching only what is out of place. A kept node
+// already in sequence is never moved: moving it would detach it, and that is a reset too.
+function place(parent, nodes) {
+  const want = new Set(nodes);
+  for (const c of Array.from(parent.childNodes)) if (!want.has(c)) parent.removeChild(c);
+  let cur = parent.firstChild;
+  for (const n of nodes) {
+    if (n === cur) { cur = cur.nextSibling; continue; }
+    parent.insertBefore(n, cur);
+  }
+}
+const sameKids = (parent, nodes) => parent.childNodes.length === nodes.length && nodes.every((n, i) => parent.childNodes[i] === n);
+function rememberScreen(screen) {
+  const chat = S.screen === 'session' && S.view === 'chat' && isLive(chatNode) && canCompare(chatNode) ? chatNode : null;
+  if (!chat) { screenMem = chatMem = null; return; }
+  screenMem = { who: chatWho(), draft: S.draft || '',
+                parts: new Map(partsOf(screen, (n) => n === chat).map((p) => [p.key, p])) };
+  chatMem = { node: chat, parts: new Map(partsOf(Array.from(chat.childNodes)).map((p) => [p.key, p])) };
+}
+// ONLY WHERE THE DOM CAN SAY WHAT IT HOLDS. Every comparison here is of outerHTML, and a
+// DOM without it (the suite's stub) would hand back `undefined` for every part — all equal,
+// so every old node kept: a composer still holding a message that was just sent. There the
+// screen is rebuilt, as it always was.
+const canCompare = (n) => !!n && typeof n.outerHTML === 'string';
+// The message list: `live` is on screen, `built` is the list just drawn for the same chat.
+function syncChat(live, built) {
+  const prev = chatMem && chatMem.node === live ? chatMem.parts : new Map();
+  const parts = partsOf(Array.from(built.childNodes));
+  const nodes = parts.map((p) => { const h = prev.get(p.key); return h && h.sig === p.sig && h.node.parentNode === live ? h.node : p.node; });
+  const busy = built.getAttribute('aria-busy');
+  if (busy == null) { if (live.getAttribute('aria-busy') != null) live.removeAttribute('aria-busy'); }
+  else if (live.getAttribute('aria-busy') !== busy) live.setAttribute('aria-busy', busy);
+  const changed = !sameKids(live, nodes);
+  if (changed) place(live, nodes);
+  chatMem = { node: live, parts: new Map(parts.map((p, i) => [p.key, { node: nodes[i], sig: p.sig }])) };
+  // Follow the end for a reader who was at it, hold the place of one who was not (and the
+  // place "load older" asked to keep) — the list's node is the same, so this only moves it
+  // when something new arrived at the bottom of a reader who was watching the bottom.
+  if (changed) restoreScroll(chatSK, live);
+  return changed;
+}
+// The whole screen. False sends render() down its old path: another screen, another chat,
+// the pane view, or no list on screen to keep.
+function keepScreen(app, screen, liveChat, liveComposer) {
+  const builtChat = chatNode;
+  if (!(S.screen === 'session' && S.view === 'chat' && screenMem && screenMem.who === chatWho()
+        && builtChat && screen.includes(builtChat) && liveChat && liveChat.parentNode === app
+        && canCompare(liveChat))) return false;
+  const parts = partsOf(screen, (n) => n === builtChat);
+  // THE BOX'S OWN TEXT, NOT THE DRAFT AS LAST REMEMBERED. screenMem.draft is written by a
+  // render, and renders wait while someone types — so after a send it still says '' from
+  // before the typing, S.draft is '' again, the two agree, and the kept box went on holding
+  // the message that had just gone. Measured on the send button with the box focused, and
+  // every ⏎ from a keyboard is that case. What the box holds is the thing to compare.
+  const onScreen = isLive(liveComposer) && typeof liveComposer.value === 'string' ? liveComposer.value : screenMem.draft;
+  const draftSame = (S.draft || '') === onScreen;
+  const nodes = parts.map((p) => {
+    if (p.node === builtChat) return liveChat;
+    const isComposer = p.node.classList && p.node.classList.contains('composer');
+    const h = screenMem.parts.get(p.key);
+    return h && h.sig === p.sig && h.node.parentNode === app && (!isComposer || draftSame) ? h.node : p.node;
+  });
+  syncChat(liveChat, builtChat);
+  if (!sameKids(app, nodes)) place(app, nodes);
+  chatNode = liveChat;
+  // The composer kept is the composer on screen; the one just built was never attached.
+  const ci = parts.findIndex((p) => p.node.classList && p.node.classList.contains('composer'));
+  if (ci >= 0 && nodes[ci] !== parts[ci].node) {
+    composerNode = liveComposer;
+    // ...and so is its photo strip. composer() pointed photoStripNode at the strip it built,
+    // which is never attached when the old row is kept, so an image added while the box has
+    // the focus — a paste, always — was painted into a strip nobody can see.
+    try { const strip = nodes[ci].querySelector && nodes[ci].querySelector('.photos'); if (strip) photoStripNode = strip; } catch {}
+  }
+  screenMem = { who: chatWho(), draft: S.draft || '',
+                parts: new Map(parts.filter((p) => p.node !== builtChat).map((p) => [p.key, { node: nodes[parts.indexOf(p)], sig: p.sig }])) };
+  return true;
 }
 
 // header() USED TO LIVE HERE AND IS GONE. It drew the one-line header for the two screens
@@ -466,6 +908,14 @@ function modeSpec() {
         : '\u26a0 fixtures',
   };
 }
+// The grid's `[profile:project]`, with the machine in front of the profile once there are
+// two — `[vm · work:toolbox]` — and the project by its name, not its address.
+function gridScope() {
+  const prof = (S.grid && S.grid.profile) || '';
+  if (!isRemote(S.project) && !S.hosts) return `${prof}:${S.project || ''}`;
+  const host = isRemote(S.project) ? hostLabelOf(S.project) : ((S.hosts || []).find(h => h.self) || {}).label || '';
+  return `${[host, prof].filter(Boolean).join(' · ')}:${G.bareName(S.project || '')}`;
+}
 function modeChip() {
   const m = modeSpec();
   return el('span', { class: 'mode ' + m.kind, text: m.text, title: m.detail });
@@ -486,12 +936,33 @@ function modeChip() {
 //   (docs/OPERATIONS.md said the project digit was "its position in its profile's list".
 // It was not, and that sentence is corrected in this change: it is exactly the belief
 // that would turn this into a per-tab index.)
-const PROFILE_ALL = 'all';
+const PROFILE_ALL = PL.PROFILE_ALL;
 // `profile || 'work'` is readProjects()'s own default (bin/fleet-grid.mjs), so a project
 // whose column is blank lands in the same tab the desk puts it in. The field is free
 // text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
 // nobody anticipated gets its own tab rather than disappearing.
 const profileOf = (p) => (p && p.profile) || 'work';
+// ONE CLIENT, SEVERAL MACHINES. Once a second fleet-serve is paired, a profile name is not
+// enough to say which tab a project belongs in — both machines can have a `work` — so the
+// tab carries the host: `laptop · work`, `vm · work`. Each row already carries its host
+// (the daemon stamps it), and with one machine there is no host to carry and the tab is the
+// profile, exactly as before. profileOf stays the bare profile: the demo rule below is
+// about the profile, wherever it runs.
+//   NO-BREAK SPACES around the dot, for two reasons that are both about the button: a tab
+// never wraps between its machine and its profile, and a short label (`vm`) is not read as
+// a key letter by btn()'s `^(\S+) (.+)$` — which would draw `vm` in bold like the `p` of
+// `p pause`, as if it were a key to press.
+const tabOf = (p) => (S.hosts && p && p.host ? `${p.host}${PL.TAB_SEP}${profileOf(p)}` : profileOf(p));
+// The machine a project ADDRESS names, by its label; '' for this one.
+function hostLabelOf(name) {
+  const k = G.hostKeyOf(name);
+  if (!k) return '';
+  const h = (S.hosts || []).find(x => x.key === k);
+  return h ? h.label : k;
+}
+const isRemote = (name) => !!G.hostKeyOf(name);
+// How a sentence names a project: `acme-api`, or `acme-api on vm` when it is the vm's.
+const said = (name) => (isRemote(name) ? `${G.bareName(name)} on ${hostLabelOf(name)}` : String(name || ''));
 
 // ── the demo fleet, and when it is in the way ─────────────────────────────
 // "hide the demo account from the real phone."
@@ -542,7 +1013,7 @@ export function demoHidden(projects) {
 // this count exists to prevent, arriving from the other side.
 export function tabNeed(projects, name) {
   return shownProjects(projects)
-    .filter(({ p }) => name === PROFILE_ALL || profileOf(p) === name)
+    .filter(({ p }) => name === PROFILE_ALL || tabOf(p) === name)
     .reduce((n, { p }) => n + (((p.sessions || {}).need) || 0), 0);
 }
 export function shownProjects(projects) {
@@ -554,7 +1025,7 @@ export function profileTabs(projects) {
   // Built from what is DRAWN, so a hidden demo takes its tab with it. Leaving the tab
   // would answer "hide the demo" with the word `demo` still on screen, one tap from the
   // thing that was meant to be gone.
-  for (const { p } of shownProjects(projects)) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
+  for (const { p } of shownProjects(projects)) { const k = tabOf(p); if (!seen.includes(k)) seen.push(k); }
   return seen;                     // in the projects file's own order, which is the address order
 }
 // Every entry carries the index it has in the WHOLE list, because that index is the name.
@@ -564,7 +1035,7 @@ export function profileTabs(projects) {
 function visibleProjects() {
   const rows = shownProjects(S.projects || []);
   if (S.profile === PROFILE_ALL) return rows;
-  const mine = rows.filter(({ p }) => profileOf(p) === S.profile);
+  const mine = rows.filter(({ p }) => tabOf(p) === S.profile);
   // The fallback is why this cannot leak the demo back: a stored `demo` tab survives in
   // S.profile until the next load clamps it (see restore), and while it does, `mine` is
   // empty — so this returns the SHOWN rows rather than the raw list. Returning `all` here
@@ -572,11 +1043,12 @@ function visibleProjects() {
   return mine.length ? mine : rows;
 }
 function setProfile(name) {
-  S.profile = name;
+  S.profile = name; tabWant = '';
   // The cursor is a GLOBAL index too, so switching tabs has to move it to something that
   // is on screen — otherwise `⏎ open` and `x remove` act on a card nobody can see.
   const vis = visibleProjects();
   S.sel = vis.length ? vis[0].i : 0;
+  if (S.srch) srchFirst();           // a search follows the tab: its first match on THIS tab
   save();
   render();
 }
@@ -596,7 +1068,12 @@ function projectsProps() {
   // no ring anywhere, and `⏎ open` acting on a project that is not on screen. Same clamp
   // the file already applies on the grid screen, for the same reason.
   const shown = shownProjects(projects);
-  if (shown.length && !shown.some(v => v.i === S.sel) && S.sel !== projects.length) S.sel = shown[0].i;
+  // (A session the search found sits past `+ new project`, and is drawn too.)
+  if (shown.length && !shown.some(v => v.i === S.sel) && !(S.sel >= projects.length && S.sel < projectList().length)) S.sel = shown[0].i;
+  // A `/` search dims what it does not match, in place — the grid's dimUnmatched, so the
+  // numbering and the order never move under the reader.
+  const hits = S.srch && S.srch.q ? new Set(srchMatches()) : null;
+  const dim = (i, node) => { if (hits && node && node.classList) node.classList.toggle('miss', !hits.has(i)); return node; };
   return {
     scope: '— projects',
     mode: modeSpec(),
@@ -616,9 +1093,10 @@ function projectsProps() {
       need: tabNeed(projects, name),
     })) : null,
     onTab: setProfile,
+    find: findSpec(),
     jarvis: jarvisBarSpec(),
     notify: notifySpec(),
-    confirm: confirmSpec(),
+    confirm: withClose(confirmSpec()),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
     // else about them; see web/src/screens.jsx.
@@ -632,14 +1110,19 @@ function projectsProps() {
     // An empty list is a real answer and gets the first-run path; a null one has not been
     // answered yet and gets the wait.
     cards: S.projects == null ? skeletonCards(4) : [
+      ...usageCards(),
+      ...queueRow(),
+      ...reviewsRow(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
-        cardEl(G.projectModel(p, i, i === S.sel), {
+        dim(i, cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
-        }, i)),
-      cardEl(G.addProjectModel(S.sel === projects.length), {
+        }, i))),
+      ...offlineHostCards(),
+      dim(projects.length, cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
-      }, projects.length),
+      }, projects.length)),
+      ...foundCards(projects.length + 1),
     ],
     // THE SCROLL MEMORY STAYS HERE, and it is still the same one call that does both
     // halves. It fires once, when Preact creates the list, rather than on every render —
@@ -655,31 +1138,706 @@ function projectsProps() {
       { label: 'open', cls: 'go', onClick: () => openProject((projects[S.sel] || {}).name) },
       // the projects screen schedules a message to THAT project's master
       { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      // Several sessions, from any project, on screen at once — the desk's Ctrl-x.
+      { label: 'stack', onClick: () => openStackPicker() },
+      // EXPERIMENTAL, and absent while it is off — the switch is the Mac's (lib/automations.mjs).
+      ...(S.autosOn ? [{ label: S.autosUnseen ? `automations · ${S.autosUnseen}` : 'automations', onClick: () => openAutomations() }] : []),
       { label: 'settings', onClick: () => sheetSettings() },
-      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+      // Registering and removing a project is the desk's job on the machine it is on.
+      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p && isRemote(p.name)) { toast(`${said(p.name)}: remove it on ${hostLabelOf(p.name)} itself`, 'bad'); render(); } else if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
     ], PROJECTS_HINT),
     toast: S.toast,
   };
 }
 const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
+
+// A PAIRED MACHINE THAT DOES NOT ANSWER IS STILL ON THE LIST. Its projects cannot be listed —
+// nobody is there to count them — but leaving it out would make a sleeping laptop look like a
+// laptop with no projects, which is the silence this client must never offer as an answer.
+// So it is one card, under every tab: the machine, the word offline, and when it last spoke.
+// The age is worked out here from the epoch, so it keeps moving while the poll fails.
+export function offlineHostModel(h, nowS = Math.floor(Date.now() / 1000)) {
+  const seen = Number(h.last_seen) || 0;
+  // The whole sentence in the chip — `offline · last seen 3h0m ago` — where a project's chip
+  // says what it is doing; a chip saying `offline` beside a line saying it again reads twice.
+  return { kind: 'host', selected: false, color: 'grey', num: null,
+           title: h.label, statusLabel: `offline · last seen ${seen ? `${G.humanAge(Math.max(0, nowS - seen))} ago` : 'never'}`,
+           where: '', path: '', when: '', msg: h.why ? `not answering: ${h.why}` : '', one: true,
+           placeholder: '', agent: '', pr: '', lead: false, exited: false };
+}
+function offlineHostCards() {
+  return (S.hosts || []).filter(h => !h.self && h.online === false).map(h => {
+    const m = offlineHostModel(h);
+    return cardEl(m, { tap: () => toast(`${h.label} is ${m.statusLabel} — its projects come back when it answers`, 'bad') }, -1);
+  });
+}
+
+// ── finding a project on a phone ──────────────────────────────────────────
+// The desk's `/` needs a key nobody has on a phone, so a touch screen gets a FIELD instead:
+// the same search (S.srch, srchMatches, the same dimming and the cursor on the first match),
+// typed into a box. Two rules from the owner shape it:
+//   IT IS ALWAYS THERE. A box that appears when you start searching pushes the list down
+// under the thumb that is reaching for it; one that is always drawn, at its own fixed
+// height, never moves anything. The count sits INSIDE it for the same reason.
+//   IT IS NEVER FOCUSED FOR YOU. Focus is what raises the on-screen keyboard, which covers
+// half the list, so nothing here calls focus() — only the reader's own tap does (and `/`
+// on a keyboard attached to a tablet, which is a reader asking for it).
+//   A mouse does not get it: a desk has `/` and the prompt row, as on the grid.
+//   ONE PROJECT'S GRID GETS THE SAME FIELD, by the same rules and the same code — it is the
+// grid's own `/` search (items(), its matcher, its dimming), typed into a box. Projects'
+// finds sessions too, so its words say so.
+function projectField() { return !finePointer(); }
+function findSpec() {
+  if (!projectField()) return null;
+  const q = (S.srch && S.srch.q) || '';
+  const n = q ? srchMatches().length : 0;
+  const onGrid = S.screen === 'grid';
+  return {
+    q,
+    placeholder: onGrid ? 'find a session' : 'find a project or session',
+    count: !q ? '' : n ? `${n} match${n === 1 ? '' : 'es'}` : onGrid ? 'no session matches' : 'no project or session matches',
+    onInput: (v) => {
+      if (!v) S.srch = null;
+      else { S.srch = { q: v, typing: true }; srchFirst(); }
+      render();
+      revealSel();
+      readFoundSoon();
+    },
+    // ⏎ on the phone's keyboard puts it away and keeps the search; a tap on a lit card opens
+    // it, as a tap always does. Esc (a tablet's keyboard) clears, as at the desk.
+    onKey: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); try { e.target.blur(); } catch {} }
+      else if (e.key === 'Escape') { e.preventDefault(); S.srch = null; render(); try { e.target.blur(); } catch {} }
+    },
+    onClear: () => { S.srch = null; render(); },
+  };
+}
+function focusProjectField() {
+  try { const f = document.querySelector('#app .find input, #side .find input'); if (f) f.focus(); } catch {}
+}
+// The first match may be below the fold; bring it into view only if it is not already, so
+// typing never jolts a list whose match is on screen.
+//   THE LIST SCROLLS, AND NOTHING ELSE DOES. scrollIntoView() scrolls every scrollable
+// ancestor it takes to show the card — on a phone with the keyboard up that includes the
+// page and the visual viewport, which slides the field (and the caret in it) out from under
+// the thumb that is typing. Setting the list's own scrollTop moves only the cards: the field
+// keeps the focus and its place, and the keyboard stays exactly as it was.
+//   ...MEASURED AGAINST WHAT IS VISIBLE, which with the keyboard up is the visual viewport,
+// not the list's box: the bottom of the list is behind the keyboard, and a card "in view"
+// there is a card nobody can see.
+function revealSel() {
+  try {
+    const c = document.querySelector('#app .cards .card.sel, #side .cards .card.sel');
+    const l = c && c.closest('.cards');
+    if (!l) return;
+    const a = l.getBoundingClientRect(), r = c.getBoundingClientRect();
+    const vv = typeof visualViewport !== 'undefined' && visualViewport;
+    const bottom = Math.min(a.bottom, vv ? vv.offsetTop + vv.height : innerHeight);
+    if (r.top < a.top) l.scrollTop -= a.top - r.top;
+    // the card's top line when it is taller than the room: its name is what is looked for
+    else if (r.bottom > bottom) l.scrollTop += Math.min(r.bottom - bottom, r.top - a.top);
+  } catch {}
+}
+
+// ── waiting on you: the queue ─────────────────────────────────────────────
+// WHAT EVERY MASTER IS HOLDING FOR THE OWNER, on a screen of its own: one card per ledger item a
+// master keeps in state `waiting` (mods/ghostfleet/hooks/ledger.js heldItems), across every
+// project and profile, whatever tab is open — a tab that hid one would be the failure the
+// tab's need-you count exists to prevent. A master goes on with everything else and waits on
+// these; how soon the owner sees them is how long an unattended run lasts.
+//   ON ITS OWN SCREEN, AND ONE ROW ON PROJECTS. It was the top of Projects, and a list that
+// grows by itself does not belong above the thing the screen is for: at seventeen items, some
+// of them days old, it was a phone screen and more, and the projects started below the fold.
+// Projects keeps one line — `queue · n ›`, red while anything waits on the owner — and the
+// list is a tap (or ⏎ on that line) away. At a desk it opens on the right, as a session does.
+//   THE CARD IS THE CARD: cardEl(), the rail, the chip, the two text rows. Its words are
+// the project, the ask, how long it has waited, and what the master said it needs. The hue
+// is from the fixed palette — need-you red for an item waiting on the owner, yellow for a request
+// nobody has touched in hours, grey for one the owner replied to that the master has not closed.
+//   A TAP REPLIES (sheetReply). There is no close here, on purpose: an item leaves the list
+// when its master closes or drops it, which is the master saying it is done.
+const WAITING_LOOK = {
+  waiting: { label: '● waiting on you', color: 'red' },
+  open: { label: '○ open, untouched', color: 'yellow' },
+  replied: { label: '↩ you replied', color: 'grey' },
+  // not a ledger item: a wake the fleet is holding because a lead's input box never read
+  // empty (fleet-serve heldWakes). Red, because the lead hears nothing until the owner acts.
+  held: { label: '▲ wake held', color: 'red' },
+};
+// "waits on the person: pick A or B" is the judge's sentence; the card already says whom.
+const needOf = (reason) => String(reason || '').replace(/^\s*(?:waits?|waiting)\s+on\s+(?:the\s+)?(?:person|user|owner|you)\s*[:,—-]?\s*/i, '').trim();
+export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
+  const look = WAITING_LOOK[row.state] || WAITING_LOOK.waiting;
+  const need = needOf(row.reason);
+  return {
+    kind: 'waiting', selected: false, num: null, color: look.color,
+    title: G.bareName(row.project), statusLabel: look.label,
+    when: G.humanAge(Math.max(0, nowS - (Number(row.since) || nowS))),
+    // the machine, once there are two (the daemon stamps `host` on every merged item)
+    where: row.state === 'held' ? `${row.host ? `${row.host} · ` : ''}${row.session || 'master'}`
+      : `${row.host ? `${row.host} · ` : ''}master · #${row.id}`, path: '',
+    msg: row.state === 'held' ? row.text : `“${row.text}”`, one: true,
+    need: row.state === 'held' ? 'send or clear what is in that box — the fleet never will; its wake goes in once it is empty'
+        : row.state === 'replied' ? 'you replied — the master has not closed it yet'
+        : need ? `needs: ${need}`
+        // carried from a stopped worker (ledger.js carryItems): its text is the worker's ask,
+        // so the row says whose, and what the worker last said about it
+        : row.from ? `${row.from} stopped while ${row.was || 'open'}${row.note ? `: ${row.note}` : ''}`
+        : row.state === 'open' ? 'no word on it for hours' : '',
+    placeholder: '', agent: '', pr: '', lead: false, exited: false,
+  };
+}
+// The line on Projects. n is every item the queue lists, the answered ones too: it is the
+// length of the page the row opens, and a row that read 0 over a page of three would be the
+// row disagreeing with what it opens. The HUE carries the urgent part: red only while some
+// item waits on the owner, the muted grey of the TUI when every item is answered or untouched.
+// Nothing held is no row at all.
+function queueRow() {
+  const rows = S.waiting || [];
+  if (!rows.length) return [];
+  const hot = rows.some((r) => r.state === 'waiting' || r.state === 'held');
+  const row = el('button', { class: 'queue-row' + (hot ? ' hot' : ''), type: 'button',
+    'aria-label': `queue: ${rows.length} held for you${hot ? ', some waiting on you' : ''}`, onclick: openQueue }, [
+    el('span', { class: 'qt', text: `queue · ${rows.length}` }),
+    el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+  ]);
+  // THE FOCUS SURVIVES THE POLL. Every render builds the card list's nodes afresh, so a row
+  // Tabbed to at a desk was a detached node five seconds later, and the ⏎ meant for it went
+  // to Projects' ⏎ and opened a master. The new row takes the focus the old one had, once
+  // the list has placed it.
+  try {
+    const a = document.activeElement;
+    if (a && a.classList && a.classList.contains('queue-row')) queueMicrotask(() => { try { if (row.isConnected) row.focus(); } catch {} });
+  } catch {}
+  return [row];
+}
+// One level under Projects wherever it is opened from — the row, or a tapped notification
+// from inside a session — so back is always Projects.
+function openQueue() {
+  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.screen = 'queue'; S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.qsel = 0;
+  setDepth(1);
+  save(); render(); refresh();
+}
+// ── automations (EXPERIMENTAL) ─────────────────────────────────────────────
+// One level under Projects, like the queue; the editor one level under the list. A reload or a
+// relaunch comes back to the list, with the trail back to Projects (web/place.js), and never to
+// the editor: a draft is not kept. It was restored with no trail, so the first swipe back left
+// the app. The switch still rules: off, the first read answers 404 and that lands on Projects.
+function openAutomations() {
+  if (!S.autosOn) return;
+  S.screen = 'automations'; S.autosEdit = null; S.autos = null; S.autosErr = ''; S.srch = null;
+  setDepth(1);
+  render(); refresh();
+}
+async function autoDo(fn, ok) {
+  try { const r = await fn(); if (ok) toast(ok); return r; }
+  catch (e) { toast(e.message || String(e), 'bad'); return null; }
+  finally { render(); refresh(); }
+}
+function automationsProps() {
+  return {
+    mode: modeSpec(), stale: S.stale, toast: S.toast,
+    data: S.autos, editing: S.autosEdit, error: S.autosErr,
+    onBack: () => back(),
+    onEdit: (id) => { S.autosEdit = id; pushNav(); render(); },
+    onCancel: () => back(),
+    onRetry: () => { S.autosErr = ''; render(); refresh(); },
+    onSay: (text) => { toast(text, 'bad'); render(); },
+    // A save that can start or stop sessions asks for the passkey first, as a tap on start
+    // or stop would; the daemon refuses it without one (428), so this is not the only check.
+    // It ANSWERS rather than toasts, because the answer belongs beside the thing that was
+    // tapped: a refused form stays open with what was typed, and the reason stays with it.
+    onSave: async (a, key) => {
+      try {
+        const assertion = key ? await assertFor(`automation ${a.name || 'new'}`) : null;
+        const r = await api.saveAutomation(a, assertion);
+        toast(`saved ${a.name || 'the automation'}`);
+        // The answer is the row, so a switch does not fall back to the old state until the poll.
+        if (S.autos && r.automation) {
+          const rows = S.autos.automations || [];
+          S.autos = { ...S.autos, automations: rows.some(x => x.id === r.automation.id)
+            ? rows.map(x => (x.id === r.automation.id ? { ...x, ...r.automation } : x)) : [...rows, r.automation] };
+        }
+        if (S.autosEdit) back(); else { render(); refresh(); }
+        return { ok: true };
+      } catch (e) { return { error: e.message || String(e) }; }
+    },
+    onDelete: async (id) => { const r = await autoDo(() => api.deleteAutomation(id), 'deleted'); if (r && S.autosEdit) back(); },
+    // By hand, so one that can start or stop sessions asks what that tap asks; the daemon refuses
+    // it otherwise. What it says is what happened: a long run is still running, and one that
+    // failed at once has its reason.
+    onRun: async (id, key, name) => {
+      let assertion = null;
+      if (key) {
+        try { assertion = await assertFor(`run automation ${name || ''}`.trim()); }
+        catch (e) { toast(e.message || String(e), 'bad'); render(); return; }
+      }
+      const r = await autoDo(() => api.runAutomation(id, assertion));
+      if (r) toast(r.running ? 'it is running' : r.ok ? 'it ran' : (r.text || 'it failed'), r.running || r.ok ? undefined : 'bad');
+      render();
+    },
+    // Marked before the request and not after it, or the count and the list say two things for a
+    // poll. A failure comes back on the next one.
+    onSeen: () => {
+      S.autosUnseen = 0;
+      if (S.autos) S.autos = { ...S.autos, notices: (S.autos.notices || []).map(n => ({ ...n, seen: true })) };
+      return autoDo(() => api.automationsSeen());
+    },
+    // Not autoDo: the editor shows what went wrong in its own conversation.
+    onDraft: (messages, draft) => api.automationDraft(messages, draft),
+  };
+}
+function queueProps() {
+  const rows = S.waiting || [];
+  S.qsel = Math.max(0, Math.min(S.qsel, rows.length - 1));
+  return {
+    scope: `— queue · ${rows.length}`,
+    mode: modeSpec(),
+    // What a tap on the screen offers to leave it: the gesture, ` and q are not on screen.
+    onBack: () => back(),
+    stale: S.stale,
+    confirm: null,
+    // The same cards, in the same order, with the same tap as on Projects before: the
+    // answer sheet. Null is "not read yet" and gets the wait, as on Projects.
+    cards: S.waiting == null ? skeletonCards(2)
+      : rows.length ? rows.map((r, i) => cardEl({ ...waitingModel(r), selected: i === S.qsel }, { tap: () => (r.state === 'held' ? openHeld(r) : sheetReply(r)) }, -1))
+      : [el('div', { class: 'sect', text: 'nothing is waiting on you' })],
+    listRef: (list) => { if (list) watchScroll('queue', list); },
+    toast: S.toast,
+  };
+}
+// ── reviews: what fleet-shots recorded, and the verdict on it ─────────────────
+// THE REVIEW PAGE MOVED HERE FROM `fleet-shots serve`, which listened on loopback and so
+// could never be opened from the phone — the device a worker's "please review" reaches. It
+// is EXPERIMENTAL, behind the `shots` switch: off is a 404 (api.getShots → null), and then
+// there is no row on Projects, no screen and no key that reaches one.
+//   ONE CARD PER BRANCH, its newest run's state on the rail. The old index listed every run
+// of every branch flat, so six runs of one branch sat above the one run of another that was
+// actually waiting. The runs before the newest fold under the card as "N earlier".
+//   THE CARD IS THE CARD (cardEl), the same as the queue's: the hue is the fixed palette's —
+// green for approved, yellow for anything still owed (unreviewed, a step with no verdict),
+// red for rejected or a step marked a problem.
+const RV_HUE = { ok: 'green', warn: 'yellow', bad: 'red' };
+// A run's age in the unit that reads at a glance: G.humanAge's `72h0m` is right for a
+// session that has been idle a while and wrong for a recording from three days ago.
+export function rvAge(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m` : s < 48 * 3600 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
+}
+const rvAgeOf = (iso, nowS = Math.floor(Date.now() / 1000)) => rvAge(nowS - Math.floor((Date.parse(iso) || 0) / 1000));
+// ONCE A MACHINE IS PAIRED every card names its host, the way every Projects row does once
+// there are two (`tabOf`: host, then profile) — so a card reads `acme-api · vm · work`, and
+// the laptop's own carry the laptop's label rather than nothing, which would read as "here"
+// only to someone who knows which phone this is. One machine: no host, as before.
+const rvPaired = () => !!(S.shots && Array.isArray(S.shots.hosts) && S.shots.hosts.length > 1);
+const rvHostLabel = (key) => (((S.shots && S.shots.hosts) || []).find(h => (h.key || '') === (key || '')) || {}).label || key || '';
+const rvWhere = (g) => [g.project, rvPaired() ? g.host : '', S.shots && S.shots.multi ? g.profile : ''].filter(Boolean).join(' · ');
+const rvCommit = (r) => r.commit ? `${r.commit}${r.dirty ? '*' : ''}` : 'no commit';
+export function reviewModel(g, sel = false) {
+  const r = g.latest;
+  return {
+    kind: 'review', selected: sel, num: null, color: RV_HUE[r.state.cls] || 'grey',
+    title: g.branch || '(no branch)', statusLabel: r.state.label, when: rvAgeOf(r.at),
+    where: rvWhere(g), path: '',
+    msg: `${r.kind === 'recorded' ? 'video' : 'stills'} · ${r.steps} step${r.steps === 1 ? '' : 's'} · ${rvCommit(r)}`
+       + (r.flagged ? ` · ${r.flagged} flagged by the run` : ''),
+    one: true, need: '', placeholder: '', agent: '', pr: '', lead: false, exited: false,
+  };
+}
+// The line on Projects. n is the branches the page lists; the second word, while there is
+// one, is how many of them wait on a verdict — and that is what turns the row yellow.
+function reviewsRow() {
+  const sh = S.shots;
+  if (!sh) return [];
+  const n = sh.groups.length, w = sh.waiting || 0;
+  const row = el('button', { class: 'rv-row' + (w ? ' due' : ''), type: 'button',
+    'aria-label': `reviews: ${n} branch${n === 1 ? '' : 'es'}${w ? `, ${w} to review` : ''}`, onclick: openReviews }, [
+    el('span', { class: 'qt', text: `reviews · ${n}` }),
+    w ? el('span', { class: 'qn', text: `${w} to review` }) : null,
+    el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+  ].filter(Boolean));
+  try {
+    const a = document.activeElement;
+    if (a && a.classList && a.classList.contains('rv-row')) queueMicrotask(() => { try { if (row.isConnected) row.focus(); } catch {} });
+  } catch {}
+  return [row];
+}
+function openReviews() {
+  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.screen = 'reviews'; S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0;
+  S.rv = null; S.rvRun = null; S.rvErr = '';
+  setDepth(1);
+  save(); render(); refresh();
+}
+// One run, a level under the list — or, from the list beside it at a desk, in place of the
+// run that was open (the same depth: the right pane changes, the trail does not grow).
+// `host` is the paired machine's key ('' for this one): the run is named by it as well,
+// since two machines can hold a run of the same name.
+function openReview(host, profile, run) {
+  const swap = S.screen === 'review';
+  rvFlushNow();
+  S.screen = 'review'; S.rv = { host: host || '', profile, run }; S.rvRun = null; S.rvErr = ''; S.rvSave = '';
+  if (!swap) pushNav();
+  save(); render();
+  readReview();
+}
+async function readReview() {
+  const want = S.rv;
+  if (!want) return;
+  try {
+    const j = await api.getShotsRun(want.profile, want.run, want.host);
+    if (S.rv !== want) return;                      // another run was opened meanwhile
+    S.rvRun = j; S.rvErr = '';
+  } catch (e) {
+    if (e instanceof api.AuthError) return lock();
+    if (S.rv !== want) return;
+    S.rvErr = e && e.status === 404 ? `that run is not on ${want.host ? 'that machine' : 'this machine'} any more`
+      : e && e.status === 502 ? `${rvHostLabel(want.host)} did not answer — its run cannot be opened now`
+      : `could not read the run — ${e && e.message || e}`;
+  }
+  render();
+}
+// The cards, and the earlier runs under each. Flattened into one list of stops for the
+// desk's j/k: a branch card, then (while it is open) each of its earlier runs.
+function reviewStops() {
+  const out = [];
+  for (const g of (S.shots && S.shots.groups) || []) {
+    out.push({ g, r: g.latest });
+    if (S.rvOpen.includes(g.key)) for (const r of g.earlier) out.push({ g, r, old: true });
+  }
+  return out;
+}
+function rvToggle(key) {
+  S.rvOpen = S.rvOpen.includes(key) ? S.rvOpen.filter(k => k !== key) : [...S.rvOpen, key];
+  render();
+}
+function reviewsProps() {
+  const sh = S.shots;
+  const stops = reviewStops();
+  S.rvsel = Math.max(0, Math.min(S.rvsel, stops.length - 1));
+  // ONE highlighted row: the open run when there is one (the list beside it at a desk), else
+  // the keys' cursor — two lit cards would be two answers to "which one is this".
+  const selOf = (r) => !(S.screen === 'review' && S.rv) && stops[S.rvsel] && stops[S.rvsel].r === r;
+  const cur = S.screen === 'review' && S.rv ? S.rv : null;
+  const isCur = (g, r) => !!cur && (cur.host || '') === (g.host_key || '') && cur.profile === g.profile && cur.run === r.id;
+  const groups = sh ? sh.groups : [];
+  return {
+    scope: `— reviews · ${groups.length}`,
+    mode: modeSpec(),
+    onBack: () => back(),
+    stale: S.stale,
+    confirm: null,
+    // A GROUP IS A CARD AND WHAT FOLDS UNDER IT, wrapped so the pair is ONE grid item: on a
+    // tablet the list is several tracks wide, and an "earlier" row that was its own item
+    // would land in the next column, under somebody else's branch.
+    cards: sh == null ? skeletonCards(2)
+      : (groups.length ? groups.map((g) => {
+          const open = S.rvOpen.includes(g.key);
+          const kids = [cardEl({ ...reviewModel(g, selOf(g.latest) || isCur(g, g.latest)) }, { tap: () => openReview(g.host_key, g.profile, g.latest.id) }, -1)];
+          if (g.earlier.length) {
+            kids.push(el('button', { class: 'rv-more', type: 'button', 'aria-expanded': open ? 'true' : 'false',
+              onclick: () => rvToggle(g.key) }, [
+              el('span', { text: open ? `hide ${g.earlier.length} earlier` : `${g.earlier.length} earlier run${g.earlier.length === 1 ? '' : 's'}` }),
+            ]));
+            if (open) for (const r of g.earlier) {
+              kids.push(el('button', { class: 'rv-old' + (selOf(r) || isCur(g, r) ? ' sel' : ''), type: 'button',
+                style: `--c:${G.COLORS[RV_HUE[r.state.cls]] || G.COLORS.grey}`,
+                'aria-label': `${g.branch} run ${r.id}: ${r.state.label}`, onclick: () => openReview(g.host_key, g.profile, r.id) }, [
+                el('span', { class: 'rv-ol', text: r.state.label }),
+                el('span', { class: 'rv-ow', text: `${rvAgeOf(r.at)} · ${rvCommit(r)}` }),
+                el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+              ]));
+            }
+          }
+          return el('div', { class: 'rv-group' }, kids);
+        })
+      : [el('div', { class: 'sect', text: 'no runs recorded yet — `fleet-shots <flow>` records one' })]).concat(rvMissing(sh)),
+    listRef: (list) => { if (list) watchScroll('reviews', list); },
+    toast: S.toast,
+  };
+}
+// A PAIRED MACHINE THAT DID NOT ANSWER costs its own runs and one quiet line after the cards
+// (the list's own `.sect`, full width and dim): never an error screen, never a spinner that
+// waits on it, and never the other machines' runs with it. A machine with Reviews switched
+// off is not in `missing` at all — off is the owner's choice there, not something to report.
+function rvMissing(sh) {
+  return ((sh && sh.missing) || []).map(m => el('div', { class: 'sect rv-missing', role: 'status', text: `${m.host} ${m.why} · its runs are not listed` }));
+}
+// EVERY WORD ON THE RUN SCREEN, here and not in the component (screens.jsx, "the strings").
+const REVIEW_WORDS = {
+  loading: 'reading the run…', noBranch: '(no branch)', noPage: 'no page — the step threw',
+  chapters: 'chapters', provenance: 'recorded from', dirty: '(uncommitted changes)',
+  steps: (n) => `${n} step${n === 1 ? '' : 's'}`,
+  calls: (n) => `${n} call${n === 1 ? '' : 's'}`, failed: (n) => `${n} failed`, noneFailed: 'none failed',
+  noCalls: 'no calls of its own',
+  assets: (n, bad) => `${n} asset${n === 1 ? '' : 's'} · ${bad ? `${bad} failed` : 'all fine'}`,
+  expect: (x) => `${x.found ? 'found' : 'did not find'} “${x.text}”`,
+  playFrom: (name, at) => `play “${name}” from ${at}`,
+  marks: [{ v: 'ok', label: 'ok' }, { v: 'problem', label: 'problem' }, { v: 'skip', label: 'skip' }],
+  markLabel: (n) => `verdict on step ${n}`,
+  stepNoteLabel: (n) => `note on step ${n}`, chapterNoteLabel: (n) => `note on chapter ${n}`,
+  flowNoteLabel: 'note on the whole flow',
+  reasonPlaceholder: 'why is this acceptable? a note is what clears the flag',
+  flagNotePlaceholder: 'the run flagged this — a note on why it is fine is optional',
+  chapterPlaceholder: 'a note on this chapter', notePlaceholder: 'note',
+  flowPlaceholder: 'a note on the whole flow — what to fix, or why it is fine',
+  reject: 'reject', approve: 'approve', approved: '✓ approved',
+  restOk: (n) => `mark the other ${n} ok`,
+  retry: 'not saved — retry',
+  save: { saving: 'saving…', saved: 'saved', failed: '' },
+  keys: { approve: 'a', reject: 'r' },
+  prov: { commit: 'commit', base: 'base', viewport: 'viewport', at: 'recorded', session: 'session', run: 'run' },
+  when: (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso; } },
+};
+// THE GATE LINE IS `fleet-shots --check`'s ANSWER, said as what to do next. A worker that
+// asked for a review waits on exactly this, so an unreviewed run says what to do next.
+function rvGate(run) {
+  const st = run.state || {};
+  const v = run.verdict || {};
+  const pass = 'approved — fleet-shots --check passes this run';
+  if (run.kind === 'recorded') {
+    const fv = (v.flow || {}).v || '';
+    if (fv === 'reject') return { cls: 'bad', text: 'rejected — --check refuses this run' };
+    if (!fv) return { cls: 'warn', text: 'not reviewed — watch it, then approve or reject' };
+    // The owner's approve is the decision; a chapter the run flagged stays on the record
+    // (--check prints it as accepted) and no longer owes a written reason.
+    return { cls: 'ok', text: pass };
+  }
+  if (st.problem) return { cls: 'bad', text: `${st.problem} step${st.problem === 1 ? '' : 's'} need${st.problem === 1 ? 's' : ''} changes — --check refuses` };
+  if (st.marked < st.total) return { cls: 'warn', text: `${st.total - st.marked} unreviewed — mark each step` };
+  if (st.flagged) return { cls: 'warn', text: `${st.flagged} flagged step${st.flagged === 1 ? '' : 's'} need${st.flagged === 1 ? 's' : ''} a reason` };
+  return { cls: 'ok', text: pass };
+}
+function reviewProps() {
+  const j = S.rvRun, run = j && j.run;
+  const g = run && { project: run.project, profile: run.profile, host: run.host || rvHostLabel('') };
+  return {
+    scope: '— review',
+    mode: modeSpec(),
+    stale: S.stale,
+    onBack: () => back(), toast: S.toast,
+    t: REVIEW_WORDS, run: run || null, err: S.rvErr,
+    where: run ? `${rvWhere(g)} · ${rvAgeOf(run.at)} · ${run.kind === 'recorded' ? 'video' : 'stills'}` : '',
+    verdict: run ? run.verdict || {} : {},
+    gate: run ? rvGate(run) : { cls: 'warn', text: '' },
+    save: S.rvSave,
+    onFlow: (v) => rvEdit((x) => ({ ...x, flow: v ? { v, note: (x.flow || {}).note || '' } : { v: '', note: (x.flow || {}).note || '' } }), 0),
+    onFlowNote: (t) => rvEdit((x) => ({ ...x, flow: { v: (x.flow || {}).v || '', note: t } }), RV_TYPE_MS),
+    onChapterNote: (n, t) => rvEdit((x) => ({ ...x, chapters: { ...(x.chapters || {}), [n]: t } }), RV_TYPE_MS),
+    onStep: (n, v) => rvEdit((x) => ({ ...x, [n]: { ...(x[n] || {}), v } }), 0),
+    onStepNote: (n, t) => rvEdit((x) => ({ ...x, [n]: { v: (x[n] || {}).v || '', note: t } }), RV_TYPE_MS),
+    onRestOk: () => rvEdit((x) => {
+      const y = { ...x };
+      for (const s of run.steps) if (!(y[s.n] || {}).v) y[s.n] = { v: 'ok', note: (y[s.n] || {}).note || '' };
+      return y;
+    }, 0),
+    onRetry: () => rvFlushNow(),
+    onPlayer: (h) => { rvPlayer = h; },
+  };
+}
+// ── saving a verdict ────────────────────────────────────────────────────────
+// A TAP SAVES AT ONCE AND TYPING SAVES WHEN IT PAUSES. There is no save button: the old
+// page's "copy this text and paste it into a terminal" was the step that never happened
+// from a phone, and a note that waits for a button is a note lost to a back swipe. The
+// state on screen moves the moment the verdict does (api.shotsState, the same rule the Mac
+// runs), and the Mac's answer replaces it when it lands.
+//   ONE WRITE IN FLIGHT. A second edit while one is saving waits and sends the newer whole
+// verdict after it, so the file on the Mac is always the last thing on the screen.
+const RV_TYPE_MS = 700;
+let rvTimer = 0, rvBusy = false, rvAgain = false, rvPlayer = null;
+function rvEdit(fn, delay) {
+  const j = S.rvRun;
+  if (!j || !j.run) return;
+  const v = fn({ ...(j.run.verdict || {}) });
+  j.run.verdict = v;
+  j.run.state = api.shotsState(j.run, v);
+  S.rvSave = 'saving';
+  clearTimeout(rvTimer);
+  if (delay) rvTimer = setTimeout(rvFlush, delay); else rvFlush();
+  render();
+}
+function rvFlushNow() { if (rvTimer) { clearTimeout(rvTimer); rvTimer = 0; if (S.rvSave === 'saving') rvFlush(); } else if (S.rvSave === 'failed') rvFlush(); }
+async function rvFlush() {
+  rvTimer = 0;
+  const j = S.rvRun, want = S.rv;
+  if (!j || !want) return;
+  if (rvBusy) { rvAgain = true; return; }
+  rvBusy = true;
+  const run = j.run, v = run.verdict || {};
+  // Only what the Mac keeps: a flow with no choice is no flow (its note waits on screen for
+  // one), and a step with no mark is not a verdict. A run cleared of every mark sends an
+  // empty state, which is a real answer — "I take that back".
+  const body = run.kind === 'recorded'
+    ? { profile: want.profile, run: want.run, flow: (v.flow && v.flow.v) ? v.flow : { v: '' }, chapters: v.chapters || {} }
+    : { profile: want.profile, run: want.run, state: Object.fromEntries(Object.entries(v).filter(([, x]) => x && x.v)) };
+  // A PAIRED MACHINE'S RUN is judged THERE: the host rides along and this machine forwards it,
+  // so the verdict lands beside the run, where that machine's --check reads it.
+  if (want.host) body.host = want.host;
+  try {
+    const r = await api.postShotsVerdict(body);
+    if (S.rvRun === j && r.state) j.run.state = r.state;
+    if (S.rvRun === j) S.rvSave = rvAgain || rvTimer ? 'saving' : 'saved';
+    // the card on the list beside it, and the row on Projects, follow the verdict
+    api.getShots().then((sh) => { S.shots = sh; render(); }, () => {});
+  } catch (e) {
+    rvBusy = false; rvAgain = false;
+    if (e instanceof api.AuthError) return lock();
+    if (S.rvRun === j) { S.rvSave = 'failed'; toast(`the verdict was not saved — ${e && e.message || e}`, 'bad'); }
+    render();
+    return;
+  }
+  rvBusy = false;
+  if (rvAgain) { rvAgain = false; return rvFlush(); }
+  render();
+}
+// A HELD WAKE IS ANSWERED AT THE BOX, NOT BY A MESSAGE: a message to that lead would queue
+// behind the very box that is holding it. So the tap opens the lead, one level under
+// Projects as a master entered from there is, where the owner can see what is typed.
+function openHeld(row) {
+  if (S.project !== row.project) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  S.project = row.project; S.sub = ''; S.foundBack = null;
+  openSession(row.session || 'master', { depth: 1, entry: 'projects' });
+}
+// The reply is an ordinary message to that master, and it QUOTES the item: the master reads
+// which ask it answers, and its ledger wakes the item on the quoted words (wakeWaiting).
+export function replyText(row, text) {
+  return `Re your ledger item ${row.id}: "${row.text}"\n\n${String(text || '').trim()}`;
+}
+// THE CHAT'S OWN SEND PATH: the outbox entry, then fleet_send, then the ack — so the bubble
+// is in that master's chat when the owner opens it, queued behind a turn or typed in, exactly as a
+// message from the composer. A send that does not go gives the words back.
+function sheetReply(row) {
+  const t = el('textarea', { placeholder: 'your answer…', autocapitalize: 'sentences', spellcheck: 'false' });
+  t.value = row.draft || '';
+  t.addEventListener('input', () => { row.draft = t.value; });
+  const go = async () => {
+    const typed = (t.value || '').trim();
+    if (!typed) { toast('nothing to send', 'bad'); renderUnlessTyping(); return; }
+    const text = replyText(row, typed);
+    closeSheet();
+    const item = outboxAdd(text, row.project, 'master', { typed });
+    const r = await doVerb('fleet_send', { project: row.project, session: 'master', prompt: text }, { quiet: true });
+    if (r) { outboxAcked(item, r); row.draft = ''; toast(`sent to ${said(row.project)}'s master`, 'good'); renderUnlessTyping(); return; }
+    outboxDrop(item);
+    row.draft = typed;
+    render();
+  };
+  const need = needOf(row.reason);
+  openSheet(sheet('answer', `→ ${said(row.project)} · master · #${row.id}`, [
+    el('p', { class: 'q', text: `“${row.text}”` }),
+    need ? el('p', { text: `needs: ${need}` }) : null,
+    field('reply', t),
+    el('p', { text: 'sent to the master as a message quoting this item; it leaves the list when the master closes it.' }),
+    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', dismissSheet)]),
+  ]));
+}
+
+// ── the Claude accounts (fleet-accounts) ──────────────────────────────────
+// WHICH LOGIN EACH PROFILE IS SPENDING, at the top of Projects: one line per profile, its
+// active account and that account's 5h and 7d figures, from /api/usage — which is
+// `fleet-accounts list`'s own data (lib/accounts.mjs describe()), so every word below that
+// names a state is the desk's word, not one invented here. A tap opens every account of every
+// profile, laid out as `list` lays them out. Read only: switching stays at the desk.
+//   THE HUE IS THE FIXED PALETTE: green while the active account runs on figures read in the
+// last six hours, yellow when they are older than that (stale) or the login in use is not a
+// saved one, red when it cannot run — out, over the line, needs a login, blocked, or every
+// account exhausted — and grey for the experiment switched off, which is said and nothing else.
+//   POLLED GENTLY, on its own clock: the Projects poll runs every few seconds and the figures
+// only move when a turn lands, so this asks every USAGE_POLL_MS and on a resume, never per tick.
+const USAGE_POLL_MS = 45000;
+const USAGE_RED = new Set(['out', 'exhausted', 'needs-login', 'blocked']);
+// What all-exhausted did to the workers: a project whose budget is ignored keeps running.
+// The words are lib/accounts.mjs WORKERS', keyed by the word /api/usage carries.
+const USAGE_WORKERS = { paused: 'workers paused', running: 'workers keep running (budget ignored)', mixed: 'workers paused, except where the budget is ignored' };
+const usageWorkers = (x) => USAGE_WORKERS[x && x.workers] || USAGE_WORKERS.paused;
+const USAGE_FLOOR_MS = 10000;
+let usageAt = 0, usageBusy = false, usageWanted = false;
+function readUsage() {
+  const since = Date.now() - usageAt;
+  if (usageBusy || (since < USAGE_POLL_MS && !(usageWanted && since >= USAGE_FLOOR_MS))) return null;
+  usageBusy = true; usageWanted = false;
+  // Stamped either way, so a daemon that refuses it is asked again in 45s and not in 5.
+  return api.getUsage().then((j) => { S.usage = j; },
+                              (e) => { if (e instanceof api.AuthError) throw e; })
+    .finally(() => { usageBusy = false; usageAt = Date.now(); });
+}
+// A resume, or a desk window taking focus back (which hides nothing, so no visibilitychange):
+// due on the next poll — but never sooner than USAGE_FLOOR_MS after the last read, so a window
+// clicked in and out of is not a burst. A FLAG, not an earlier stamp: the first version moved
+// the stamp back on each call, so the second of five focuses in a row read the stamp the first
+// had already moved, and the line was read 5s after the read before it.
+function usageSoon() { usageWanted = true; }
+export function usageWin(w, label, short = false) {
+  if (!w) return `${label} —`;
+  return short ? `${label} ${w.pct}% (${label === '5h' ? w.left : w.day})` : `${label} ${w.pct}% (resets ${w.resets_at}, read ${w.read})`;
+}
+const usageHue = (a) => (USAGE_RED.has(a.kind) ? 'red' : a.kind === 'stale' ? 'yellow' : a.active ? (a.stale ? 'yellow' : 'green') : 'grey');
+// The line, as data: [{ profile, text, color }] — the profile named only when there are two.
+export function usageLines(u) {
+  if (!u) return [];
+  if (!u.enabled) return [{ profile: '', text: u.off || 'accounts are off', color: 'grey' }];
+  const ps = u.profiles || [];
+  if (!ps.length) return [{ profile: '', text: 'accounts: no profile has an account yet', color: 'grey' }];
+  return ps.map((p) => {
+    const profile = ps.length > 1 ? p.profile : '';
+    if (p.exhausted) return { profile, text: `all accounts exhausted${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''} — ${usageWorkers(p.exhausted)}`, color: 'red' };
+    if (p.unsaved) return { profile, text: 'on a login that is not saved — failover paused', color: 'yellow' };
+    const a = (p.accounts || []).find((x) => x.active);
+    if (!a) return { profile, text: 'no account is active', color: 'grey' };
+    if (a.kind !== 'active') return { profile, text: `${a.name} · ${a.state}`, color: usageHue(a) };
+    const read = a.stale ? ` · read ${(a.seven_day || a.five_hour || {}).read || 'never'}` : '';
+    return { profile, text: `${a.name} · ${usageWin(a.five_hour, '5h', true)} · ${usageWin(a.seven_day, '7d', true)}${read}`, color: usageHue(a) };
+  });
+}
+function usageCards() {
+  const lines = usageLines(S.usage);
+  if (!lines.length) return [];
+  const kids = lines.map((l) => el('div', { class: `u-line u-${l.color}` }, [
+    l.profile ? el('span', { class: 'u-prof', text: l.profile }) : null, el('span', { class: 'u-text', text: l.text })]));
+  // Off is a sentence with nothing behind it, so it is not a control.
+  if (!S.usage.enabled) return [el('div', { class: 'usage' }, kids)];
+  return [el('button', { class: 'usage', type: 'button', 'aria-label': 'Claude accounts: open every account', onclick: sheetUsage }, kids)];
+}
+function sheetUsage() {
+  const u = S.usage;
+  if (!u || !u.enabled) return;
+  const kids = [el('p', { text: `switch at ${u.threshold}% of the 5h or 7d limit, spending the week that ends first` })];
+  if (!(u.profiles || []).length) kids.push(el('p', { text: 'no profile has an account yet — fleet-accounts add <profile> <name>' }));
+  for (const p of u.profiles || []) {
+    kids.push(el('h3', { class: 'u-prof', text: p.profile + (p.unsaved ? ' — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)'
+      : p.exhausted ? ` — ALL EXHAUSTED${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''}, ${usageWorkers(p.exhausted)}` : '') }));
+    if (!p.accounts.length) { kids.push(el('p', { text: '(no accounts)' })); continue; }
+    if (p.accounts.length < 2) kids.push(el('p', { text: 'one account: nothing to fail over to yet — add another' }));
+    if (p.pin) kids.push(el('p', { class: 'u-pin', text: `on '${p.pin.account}' by hand until ${p.pin.until_at} — the planner leaves it there unless it runs out` }));
+    for (const a of p.accounts) kids.push(el('div', { class: `u-acct u-${usageHue(a)}` }, [
+      el('div', { class: 'u-head' }, [el('span', { class: 'u-name', text: `${a.active ? '* ' : ''}${a.name}` }),
+        el('span', { class: 'u-state', text: a.state + (a.active && a.state !== 'active' ? ' (active)' : '') })]),
+      el('div', { class: 'u-win', text: usageWin(a.five_hour, '5h') }),
+      el('div', { class: 'u-win', text: usageWin(a.seven_day, '7d') }),
+      a.fix ? el('p', { class: 'u-fix', text: a.fix }) : null,
+    ]));
+  }
+  kids.push(el('p', { text: 'read only — an account is switched at the desk: fleet-accounts use <profile> <name>' }));
+  kids.push(el('div', { class: 'row' }, [btn('esc back', dismissSheet)]));
+  openSheet(sheet('accounts', 'fleet-accounts list', kids), false);
+}
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
 // alone would make the first back-gesture from Projects exit the app.
 function toProjects() {
-  const n = navDepth;
-  S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
+  S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null; S.fromStack = false; S.pick = null;
   stopSpeaking(); S.jarvisMode = false; talkStop('');
-  navDepth = 0;
-  if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
-    try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
-  }
+  S.entry = ''; S.srch = null; S.wantCard = 0; S.foundBack = null;
+  S.autos = null; S.autosEdit = null; S.autosErr = '';
+  setDepth(0);
   render(); refresh();
 }
 
 function openProject(name) {
   if (!name) return;
-  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = '';
+  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = ''; S.srch = null; S.foundBack = null;
   // Another project's card list is a different list; row 12 of it means nothing here.
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
@@ -747,7 +1905,7 @@ function gridProps() {
   const counts = G.countsFrom(g.cards || []);
   const sel = its[S.sel] || {};
   return {
-    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` + (S.sub ? ` › ${S.sub}` : ''),
+    scope: `[${gridScope()}]` + (S.sub ? ` › ${S.sub}` : ''),
     mode: modeSpec(),
     stale: S.stale,
     // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
@@ -755,7 +1913,8 @@ function gridProps() {
     // of the seam so that screens.jsx contains no hex at all.
     counts: G.countsSegments(counts).map(seg => ({ text: seg.text, color: seg.color ? G.COLORS[seg.color] : null })),
     strip: stripTiles(counts),
-    confirm: confirmSpec(),
+    find: findSpec(),
+    confirm: withClose(confirmSpec()),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
     // else about them; see web/src/screens.jsx.
@@ -768,7 +1927,7 @@ function gridProps() {
     // Same rule as the projects screen: a null grid has not been answered yet, an empty one
     // has. `its` always carries the `+ new session` card, so length alone cannot tell them
     // apart — ask S.grid itself.
-    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => {
+    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => dimUnmatched(idx, (() => {
       const isSel = idx === S.sel;
       if (it.newCard) return cardEl(G.newModel(isSel), { tap: () => sheetPicker() }, idx);
       if (it.freeWt) {
@@ -788,7 +1947,7 @@ function gridProps() {
         swipeRight: () => resumeSession(c.name),
         reorder: d => reorder(c.name, d),
       }, idx);
-    }),
+    })())),
     // ONCE, WHEN PREACT BUILDS THE LIST — not on every render, which is what the old
     // `out.push(watchScroll('grid', list))` amounted to. What it still has to do is restore
     // a position after the screen has been LEFT and come back to; what it no longer has to
@@ -809,24 +1968,35 @@ function gridProps() {
     // 844 points, 21% of the screen, and the card list got 536 — three of nine sessions.
     // The verbs are the same verbs with the same words, reached from the `⋯` in the header,
     // which is the control the session screen has had since #7.
-    onMore: () => sheetMore('actions', `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`, [
+    onMore: () => sheetMore('actions', `[${gridScope()}]`, [
       { label: 'open', cls: 'go',
         onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
       { label: 'new', onClick: () => sheetPicker() },
       { label: 'worktrees', onClick: () => sheetWorktree() },
+      { label: 'stack', onClick: () => openStackPicker() },
+      // The project's terminal tab — the desk's Ctrl-t, from its Projects-level origin — and
+      // its editor tab beside it, the desk's Ctrl-n. ABSENT for another machine's project,
+      // both of them, and the sheet's last line says why (below).
+      isRemote(S.project) ? null : { label: 'terminal', onClick: () => openTerminal() },
+      isRemote(S.project) ? null : { label: 'editor', onClick: () => openEditor() },
       // Only when there is something for it to act on — see sheetMore on why a disabled
       // row earns a line in a footer and not in a sheet.
       sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
                : { label: 'more', cls: 'off', onClick: () => {} },
       { label: 'settings', onClick: () => sheetSettings() },
       { label: 'projects', onClick: () => toProjects() },
-    ], GRID_HINT),
+    ].filter(Boolean), GRID_HINT, isRemote(S.project) ? TERM_REMOTE : ''),
     toast: S.toast,
   };
 }
 // THE GRID'S HINT, STILL THIS FILE'S STRING. It is the TUI's own wording (§7) and pwa-check
 // greps web/app.js for it; it moved out of a permanent band and into the sheet, not out of
 // this file.
+// While a `/` search has a query, the cards it does not match are dimmed in place.
+function dimUnmatched(idx, node) {
+  if (S.srch && S.srch.q && node && node.classList) node.classList.toggle('miss', !srchMatches().includes(idx));
+  return node;
+}
 const GRID_HINT = 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder';
 
 // ⇧hjkl → drag. reorderSession(name, delta) is the TUI's own move, and at nc = 1 all
@@ -1346,10 +2516,28 @@ try { localStorage.removeItem('gf.autospeak'); } catch {}
 // WHAT JARVIS'S SWITCH LEAVES ON SCREEN, as data, so the suite can drive both directions
 // without a phone. `on` is the daemon's word (true, false, or null for a daemon older than
 // the switch, which keeps the old behaviour); `j` is the last /api/jarvis answer.
+//   `talk` is talking to JARVIS. Talking to a session is not Jarvis's at all — see talkShown.
 export function jarvisSurfaces(on, j) {
   const off = on === false;
   return { bar: !off && !!j, screen: !off, talk: !off };
 }
+// WHETHER A SESSION'S COMPOSER HAS `talk`, as data. It used to be jarvisSurfaces().talk, so
+// switching Jarvis off — to be rid of its session — also took talk off every session, with
+// nothing on the switch saying it would. Hearing is the Mac's whisper, which /api/voice
+// reports whatever the switch says: so the button is drawn whenever the daemon has that
+// route (`v` an answer, or null while it is being asked), and a Mac that cannot hear is the
+// tap's refusal, not a missing button. Only a daemon from before /api/voice (`v` false)
+// with Jarvis off has no ears to offer — its hearing was under /api/jarvis, which is a 404.
+export function talkShown(on, v) {
+  return v !== false || on !== false;
+}
+// A 404 is a daemon from before the route; anything else is a failed read, and keeps what it had.
+async function readVoice() {
+  try { S.voice = await api.getVoice(); }
+  catch (e) { if (e instanceof api.AuthError) throw e; if (e && e.status === 404) S.voice = false; }
+}
+// The Mac's ears as last reported: /api/voice, or for a daemon before it, /api/jarvis's copy.
+const voiceNow = () => (S.voice && S.voice.voice) || (S.jarvis && S.jarvis.voice) || null;
 // A 404 FROM /api/jarvis IS THE SWITCH, said by the daemon: Jarvis is off (or the daemon is
 // older than Jarvis, which comes to the same screen). Anything else is a failed read, and the
 // screens keep what they had.
@@ -1368,8 +2556,9 @@ function openJarvis() {
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
+  focusOnOpen = true;
   pushNav();
   render(); refresh();
 }
@@ -1495,6 +2684,7 @@ function jarvisScreen() {
   }
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
@@ -1618,7 +2808,8 @@ const talkLive = (g) => !!S.talk && S.talk.gen === g;
 // to have (not on a session screen).
 export function talkTarget() {
   if (S.screen !== 'session') return null;
-  if (S.jarvisMode) {
+  // With Jarvis switched off the target is never Jarvis, even on a screen left in its mode.
+  if (S.jarvisMode && S.jarvisOn !== false) {
     const j = S.jarvis;
     return { jarvis: true, project: (j && j.project) || S.project, session: 'master', label: 'Jarvis' };
   }
@@ -1626,19 +2817,22 @@ export function talkTarget() {
   return { jarvis: false, project: S.project, session: S.session, label: (c && c.label) || S.session };
 }
 // WHY `talk` CANNOT START, in words about the thing tapped, or '' when it can. The voice is
-// the Mac's (one transcriber for every target), and /api/jarvis reports it whether or not
-// Jarvis exists — so a session can be talked to on a Mac that never set Jarvis up.
-// Pure, so the suite can drive every reason without a phone: `j` is /api/jarvis's answer,
-// `card` the target's grid card, `caps` what this browser has.
-export function talkRefusal(t, j, card, caps) {
+// the Mac's (one transcriber for every target), and /api/voice reports it whether or not
+// Jarvis exists or is switched on — so a session can be talked to on a Mac that never set
+// Jarvis up, or switched it off.
+// Pure, so the suite can drive every reason without a phone: `j` is /api/jarvis's answer
+// (null when there is none, or it is off), `card` the target's grid card, `caps` what this
+// browser has, and `voice` the Mac's ears as /api/voice reported them — defaulting to the
+// copy /api/jarvis carries, which is all a daemon from before /api/voice has.
+export function talkRefusal(t, j, card, caps, voice = j && j.voice) {
   if (!t) return 'there is nothing on this screen to talk to';
   if (t.jarvis && (!j || !j.present)) return 'there is no Jarvis to talk to yet';
   if (!t.jarvis) {
     if (!card) return `'${t.session}' is not on this fleet's grid any more`;
     if (card.status === 'parked') return `${t.label} is parked — resume it from ⋯ before talking to it`;
   }
-  if (!j || !j.voice) return 'still asking the Mac whether it can hear — try again in a moment';
-  if (!j.voice.ready) return `voice is off — ${j.voice.why || 'the Mac has no transcriber'}`;
+  if (!voice) return 'still asking the Mac whether it can hear — try again in a moment';
+  if (!voice.ready) return `voice is off — ${voice.why || 'the Mac has no transcriber'}`;
   if (!caps.mic) return 'this browser gives web apps no microphone';
   if (!caps.audio) return 'this browser has no Web Audio to listen with';
   return '';
@@ -1647,7 +2841,7 @@ function talkWhyNot(t = talkTarget()) {
   return talkRefusal(t, S.jarvis, t && !t.jarvis ? cardOf(t.session) : null, {
     mic: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
     audio: !!(window.AudioContext || window.webkitAudioContext),
-  });
+  }, voiceNow());
 }
 function talkToggle() { if (S.talk) talkStop('conversation mode off'); else talkStart(); }
 function talkStart() {
@@ -1781,7 +2975,7 @@ async function endUtterance() {
   if (spoke < TALK.MIN_SPEECH_MS) { talkReopen(); return; }     // a cough, a door, a chair
   S.talk.phase = 'hearing'; render();
   let text = '';
-  try { text = String((await api.jarvisHear(encodeWav(frames, T.rate))).text || '').trim(); }
+  try { text = String((await api.hear(encodeWav(frames, T.rate))).text || '').trim(); }
   catch (e) {
     if (!talkLive(g)) return;
     if (e instanceof api.AuthError) { talkStop(''); lock(); return; }
@@ -1958,24 +3152,84 @@ export function encodeWav(frames, rate) {
 // WHOLE transcript, which the pane cannot do (a pane is what fits on a screen plus
 // whatever scrollback tmux kept), and prose reads better in it. Two views of two
 // different things, not two attempts at one.
-function openSession(name) {
+// `opts.depth` puts the session at that level of the back-stack instead of one below the
+// current screen — a master entered the desk's way sits one level under Projects, and a
+// ⇧←/⇧→ step replaces the session rather than stacking on it (tmux's switch-client).
+// `opts.entry` is how it was entered; see S.entry.
+function openSession(name, opts = {}) {
   if (!name) return;
-  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
+  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop(''); S.fromStack = false;
+  S.entry = opts.entry || ''; S.srch = null; S.wantCard = 0;
+  focusOnOpen = true;
+  // The open session is the selected card, so the list beside it (two panes) marks it.
+  const at = items().findIndex(i => i.card && i.card.name === name);
+  if (at >= 0) S.sel = at;
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
-  pushNav();
+  if (Number.isInteger(opts.depth)) setDepth(opts.depth); else pushNav();
   render(); refresh();
+}
+// ── the desk's other ways in ──────────────────────────────────────────────────
+// AT THE DESK, A PROJECT OPENS ON ITS MASTER. ⏎ or a digit on Projects attaches master,
+// Ctrl-s goes to the grid instead, and from the grid ` goes back UP to master — "however
+// you reached the grid" (docs/SHORTCUTS.md §3). The phone's taps keep their own walk
+// (Projects → grid → session); these are what the same KEYS do, which is the desk's walk.
+function leadOf(project = S.project) {
+  const c = S.project === project && S.grid && (S.grid.cards || []).find(x => x.lead);
+  return (c && c.name) || 'master';
+}
+function enterMaster(name) {
+  if (!name) return;
+  if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  S.project = name; S.sub = ''; S.foundBack = null;
+  openSession(leadOf(name), { depth: 1, entry: 'projects' });
+}
+// Straight to a project's grid (Ctrl-s), and — for Ctrl-f <p> <s> — to card s on it once
+// the grid has been read (refresh() spends S.wantCard).
+function toGridOf(name, want = 0) {
+  if (!name) return;
+  if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  if (S.screen === 'session' || S.screen === 'stack') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.project = name; S.screen = 'grid'; S.sub = ''; S.jarvisMode = false; S.entry = ''; S.srch = null; S.foundBack = null;
+  S.wantCard = want; S.fromStack = false; S.pick = null;
+  setDepth(1);
+  render(); refresh();
+}
+// What ⏎ (and a digit) does to an item — the same thing a tap on its card does, which is
+// the same thing the desk's openSelected() does: a sub-lead opens its sub-grid, a lost or
+// sleeping card is reopened or woken, a free worktree asks for a name, `+ new` picks.
+function openItem(it) {
+  if (!it) return;
+  if (it.newCard) return sheetPicker();
+  if (it.freeWt) return sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path });
+  const c = it.card;
+  if (!c) return;
+  if (c.lost) return reopenSession(c.name);
+  if (c.asleep) return wakeSession(c.name);
+  if (G.cardModel(c, false, 0).rollup) return openSub(c.name);
+  openSession(c.name);
+}
+// ⇧← / ⇧→ inside a session: bin/fleet-cycle's ring — the cards in grid order (master
+// first), only those with a live tmux session, wrapping at BOTH ends. Deliberately not the
+// swipe's stepSession(), which stops at the ends for a reason that is about a finger.
+function cycleSession(dir) {
+  const ring = items().filter(i => i.card && !i.card.lost && !i.card.asleep).map(i => i.card.name);
+  if (ring.length < 2) return;
+  let i = ring.indexOf(S.session);
+  if (i < 0) i = 0;                      // not in the ring: start at the top, as fleet-cycle does
+  const to = ring[(i + dir + ring.length) % ring.length];
+  openSession(to, { depth: navDepth, entry: S.entry });
 }
 // A sub-lead's card opens its SUB-GRID — itself first, then only its workers — one level
 // down, so back (the ‹, the swipe, popTo) comes up to the top grid rather than out.
 function openSub(name) {
   if (!name) return;
-  S.sub = name; S.sel = 0; S.grid = null;
+  S.sub = name; S.sel = 0; S.grid = null; S.srch = null;
   scrollMem.delete('grid');
   pushNav();
   render(); refresh();
@@ -2006,7 +3260,8 @@ function sessionScreen() {
         // The folder earns its place only when it says something the two names either side
         // of it do not. A lead sits in the main checkout, which is usually named after the
         // project — printing both gave "acme-api · acme-api".
-        el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
+        // the project by its name and, when it is another machine's, that machine after it
+        el('span', { class: 'scope', text: ` ${said(S.project || '')}${c && c.folder && c.folder !== S.session && c.folder !== G.bareName(S.project) ? ' · ' + c.folder : ''}` }),
         // WHICH FLEET, ON THE DETAIL LINE RATHER THAN AS ITS OWN CONTROL. It was a
         // top-row flex item and the row could not hold five of them: measured at 390px,
         // back 27 + name 150 + chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a
@@ -2030,11 +3285,1049 @@ function sessionScreen() {
   if (lead) out.push(el('div', { class: 'hint lead1', text: "the fleet's lead — no stop, reclaim, rename or pause" }));
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
 
+// ── the stack: several sessions on screen at once, across projects ─────────────────
+// The desk's stack screen (bin/fleet-grid.mjs sRender, bin/fleet-stack) on this client: a
+// PICKER that lists every session of every project shown on Projects — grouped by machine
+// once another one is paired, then by project — where space, a click or a tap toggles one,
+// `/` finds one with the desk's own matcher, and ⏎ opens them together. Then:
+//   · ON A DESK (two panes), the stack is the right pane, cut into side-by-side columns —
+//     at most STACK_COLS, the FIRST that many of the selection, and a chip for each of the
+//     rest that swaps it in for the focused column. Each column is a whole conversation:
+//     its own list, its own composer, its own draft, ⏎ to send, paste and drop.
+//   · ON A PHONE, one conversation at a time and a swipe to the next (touch only, as the
+//     chat's swipe always was), with `2/4` and the agent's name in the bar.
+//
+// ONE CHAT IS OPEN AND THE REST ARE DRAWN. Everything this file knows about "the chat" —
+// S.session, S.sess, S.draft, the outbox, the composer's listeners, the poll, the scroll
+// memory — is about ONE conversation, and rewriting all of it as N would be rewriting the
+// client. So the stack keeps a CONTEXT per column (ctxOf) and the FOCUSED one is the open
+// chat, with every existing path working on it unchanged: ⏎ sends from it, paste lands in
+// it, its own poll reads it. The other columns are drawn by swapping their context in for
+// exactly as long as a synchronous build takes (withCol) — and a click, a tap or a focus
+// anywhere in a column makes it the focused one FIRST (pointerdown, before the click lands),
+// so a button in a column always acts on that column.
+//
+// THE READ RATE. One open chat polls its transcript every 2 s while something is owed and
+// every 5 s otherwise (chatPeriod); four of them doing that independently, plus a grid read
+// per column, is the shape that already drew a burst of 429s from one phone (api.js, "THE
+// DAEMON SAID WAIT"). So the stack shares: the focused column keeps its own poll, and
+// EVERYTHING ELSE — the other columns' transcripts and the grids every column's status comes
+// from (one project per STACK_GRID_MS, the focused column's and the others in turn) — is read
+// by ONE poller, one read at a time, never two starts closer than STACK_GAP_MS. With four
+// columns all working the ceiling is 30 (focused) + 60 (the rest, held by the gap) = 90 reads
+// a minute against the daemon's 240 per device (fleet-serve `rate.read`).
+//   The grids are the poller's and not the 5 s refresh's because that one holds while a box
+// has the focus (pollPaused) — and at a desk a column's box nearly always has it, so the
+// columns' statuses would freeze for as long as anyone was typing.
+// On a phone only the conversation on screen is read; the others are read when swiped to.
+const LS_STACK = 'gf.stack';      // { members: [{ project, session }], at } — this device's stack
+const STACK_COLS = 4;             // side by side at a desk; the rest wait behind a chip
+const STACK_GAP_MS = 1000;        // the stack poller's floor between two reads it starts
+const STACK_GIVEUP_MS = 30000;    // ...and how long one may take before it is dropped
+const STACK_GRID_MS = 5000;       // a grid read for the columns' statuses, one project at a time
+const PICK_GRIDS_PER_TICK = 3;    // the picker re-reads this many projects' grids per tick
+const stackCtx = new Map();       // column key -> its context (ctxOf)
+const stackGrids = new Map();     // project -> its last grid, shared by the picker and the stack
+let stackActiveKey = '';          // the column whose state is in S right now ('' = none)
+let stackRoot = null, pickRoot = null;
+let stackRR = 0, pickRR = 0;      // round-robin cursors for the grid reads (above)
+const colKey = (project, session) => `${project}\x1f${session}`;
+
+// Per device, and allowed to be missing or broken: the stack is a convenience, not state
+// anyone else reads, so a private window or a full quota starts empty and works.
+function loadStack() {
+  try {
+    const j = JSON.parse(localStorage.getItem(LS_STACK) || 'null');
+    if (j && Array.isArray(j.members)) {
+      S.stackSel = j.members
+        .filter(m => m && typeof m.project === 'string' && typeof m.session === 'string' && m.project && m.session)
+        .map(m => ({ project: m.project, session: m.session }));
+      S.stackAt = Number.isInteger(j.at) ? j.at : 0;
+    }
+  } catch {}
+  S.stackAt = Math.max(0, Math.min(S.stackAt, S.stackSel.length - 1));
+}
+function saveStack() {
+  try { localStorage.setItem(LS_STACK, JSON.stringify({ members: S.stackSel, at: S.stackAt })); } catch {}
+}
+const inStack = (project, session) => S.stackSel.some(m => m.project === project && m.session === session);
+function stackToggle(project, session) {
+  if (inStack(project, session)) {
+    const at = S.stackSel.findIndex(m => m.project === project && m.session === session);
+    S.stackSel.splice(at, 1);
+    if (S.stackAt > at || S.stackAt >= S.stackSel.length) S.stackAt = Math.max(0, S.stackAt - 1);
+  } else S.stackSel.push({ project, session });
+  saveStack();
+}
+
+// ── a column's context ──────────────────────────────────────────────────────────────────
+function ctxOf(m) {
+  const key = colKey(m.project, m.session);
+  let c = stackCtx.get(key);
+  if (!c) {
+    c = { key, project: m.project, session: m.session, sess: null, draft: draftGet(draftKey(m.project, m.session)),
+          caret: null, chatMem: null, chatLoad: { key, tries: 0, why: '' },
+          drawn: { who: '', keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() },
+          // the column on screen: its root, its bar, its list and its composer row, kept across
+          // renders exactly as keepScreen keeps the session screen's (paintCol)
+          root: null, bar: null, barSig: '', chat: null, comp: null, compSig: '', box: null, strip: null,
+          due: 0, busy: false };
+    stackCtx.set(key, c);
+  }
+  return c;
+}
+const stackActive = () => stackCtx.get(stackActiveKey) || null;
+const cardFor = (c) => ((stackGrids.get(c.project) || {}).cards || []).find(x => x.name === c.session) || null;
+// The open chat's half of S and of this file, into a column and back out of one.
+function stashInto(c) {
+  c.sess = S.sess; c.draft = S.draft; c.caret = S.caret;
+  c.chatMem = chatMem; c.chatLoad = chatLoad; c.drawn = { ...drawn };
+}
+function loadFrom(c) {
+  S.project = c.project; S.session = c.session; S.sess = c.sess; S.draft = c.draft; S.caret = c.caret;
+  S.grid = stackGrids.get(c.project) || null; S.sub = ''; S.view = 'chat';
+  chatMem = c.chatMem; chatLoad = c.chatLoad; Object.assign(drawn, c.drawn);
+  chatNode = c.chat; composerNode = c.box; photoStripNode = c.strip;
+  chatSK = 'chat:' + c.key;
+}
+// Run `fn` with column `c` as the open chat, synchronously, and put the focused one back.
+function withCol(c, fn) {
+  const a = stackActive();
+  if (a === c) return fn();
+  if (a) stashInto(a);
+  loadFrom(c);
+  try { return fn(); }
+  finally { stashInto(c); if (a) loadFrom(a); }
+}
+
+// ── which columns are on screen ────────────────────────────────────────────────────────
+// A desk shows the first STACK_COLS of the selection; a phone shows the focused one.
+function stackShown() {
+  const ms = S.stackSel;
+  if (!ms.length) return [];
+  if (!wideNow()) return [ctxOf(ms[Math.min(S.stackAt, ms.length - 1)])];
+  return ms.slice(0, STACK_COLS).map(ctxOf);
+}
+function stackProjects() {
+  const a = stackActive();
+  const ps = [...new Set(stackShown().map(c => c.project))];
+  return a ? [a.project, ...ps.filter(p => p !== a.project)] : ps;
+}
+
+// ── moving the focus ───────────────────────────────────────────────────────────────────
+// Makes member `i` the open chat. Cheap on purpose — it runs on every pointerdown in a
+// column — so a column that is already focused costs nothing, and a switch moves the
+// classes and the globals rather than redrawing (the render it asks for is deferred while
+// the owner types, like every other).
+function stackFocus(i, { draw = true } = {}) {
+  const ms = S.stackSel;
+  if (!ms.length) return;
+  i = Math.max(0, Math.min(i, ms.length - 1));
+  const c = ctxOf(ms[i]);
+  S.stackAt = i; saveStack();
+  if (stackActiveKey === c.key) return;
+  const a = stackActive();
+  if (a) stashInto(a);
+  stackActiveKey = c.key;
+  loadFrom(c);
+  for (const x of stackCtx.values()) if (x.root) try { x.root.classList.toggle('on', x === c); } catch {}
+  // The focused column's poll takes over from the stack poller's — at once if nothing has
+  // been drawn for it yet.
+  stopChatPoll();
+  if (!chatHas()) readChat(); else syncChatPoll();
+  if (draw) renderUnlessTyping();
+}
+// ⇧← / ⇧→: the desk stack's focus ring, which wraps (`select-pane -t :.+` / `:.-`).
+function stackCycle(d) {
+  const n = wideNow() ? Math.min(S.stackSel.length, STACK_COLS) : S.stackSel.length;
+  if (n < 2) return;
+  const at = Math.min(S.stackAt, n - 1);
+  stackFocus((at + d + n) % n);
+  if (enterSends()) focusComposerAt(null);
+}
+// A swipe: STOPS AT THE ENDS, as the chat's swipe to the next session does, for the same
+// reason (stepSession) — a flick at the last one must not silently show the first.
+function stackStep(d) {
+  const to = S.stackAt + d;
+  if (to < 0 || to >= S.stackSel.length) return;
+  stackFocus(to, { draw: false });
+  render();
+}
+// Ctrl-a < / Ctrl-a >: the desk's move, which ROTATES — pushed off one end, a column comes
+// back at the other (bin/fleet-stack swap_plan) — over the whole selection, so moving the
+// last column shown to the right is also how the next hidden one comes in.
+function stackMove(d) {
+  const ms = S.stackSel, n = ms.length;
+  if (n < 2) return;
+  const at = Math.min(S.stackAt, n - 1);
+  const [it] = ms.splice(at, 1);
+  const to = d > 0 ? (at === n - 1 ? 0 : at + 1) : (at === 0 ? n - 1 : at - 1);
+  ms.splice(to, 0, it);
+  S.stackAt = to;
+  if (wideNow() && to >= STACK_COLS) {
+    // Pushed past the last column: it is hidden now, and the focus stays on screen.
+    S.stackAt = STACK_COLS - 1;
+    stackActiveKey = '';
+    stackFocus(S.stackAt, { draw: false });
+  }
+  saveStack();
+  render();
+}
+// A hidden member's chip: it takes the focused column's place, and the focused one goes
+// to where the chip's member was — a swap, so nothing else on screen moves.
+function stackSwapIn(j) {
+  const ms = S.stackSel, at = Math.min(S.stackAt, ms.length - 1);
+  if (j === at || !ms[j]) return;
+  [ms[at], ms[j]] = [ms[j], ms[at]];
+  stackActiveKey = '';
+  stackFocus(at, { draw: false });
+  saveStack();
+  render();
+}
+function stackClose(c) {
+  stackToggle(c.project, c.session);
+  if (c.root && c.root.parentNode) try { c.root.parentNode.removeChild(c.root); } catch {}
+  stackCtx.delete(c.key);
+  if (stackActiveKey === c.key) stackActiveKey = '';
+  if (!S.stackSel.length) { leaveStack(); return; }
+  stackFocus(S.stackAt, { draw: false });
+  render(); refresh();
+}
+
+// ── in and out ─────────────────────────────────────────────────────────────────────────
+// Where back goes from the picker or the stack: the screen the picker was opened from.
+function stackOrigin() {
+  if (S.screen === 'stack' || S.screen === 'stackpick') return S.stackBack || { screen: 'projects' };
+  return { screen: S.screen === 'session' || S.screen === 'grid' || S.screen === 'queue' ? S.screen : 'projects',
+           project: S.project, sub: S.sub, session: S.session, entry: S.entry, view: S.view };
+}
+function openStackPicker() {
+  if (S.screen === 'stackpick') return;
+  if (S.screen === 'stack') { S.pickBack = 'stack'; leaveStackState(); }
+  else {
+    S.stackBack = stackOrigin(); S.pickBack = '';
+    talkStop(''); stopSpeaking(); S.jarvisMode = false;
+  }
+  S.screen = 'stackpick'; S.srch = null; S.confirm = null;
+  S.pick = { cur: S.pick && S.pick.cur || '', q: null, typing: false, msg: '' };
+  scrollMem.delete('pick');
+  pushNav();
+  render(); refresh();
+}
+function openStack() {
+  if (!S.stackSel.length) { S.pick = { ...(S.pick || {}), msg: 'the stack is empty — press space on a session first' }; render(); return; }
+  const fromPick = S.screen === 'stackpick';
+  if (!fromPick) { S.stackBack = stackOrigin(); talkStop(''); stopSpeaking(); S.jarvisMode = false; }
+  S.screen = 'stack'; S.pick = null; S.confirm = null; S.pane = null; S.paneErr = '';
+  S.pickBack = '';
+  // Every column re-reads its stored draft: a session screen may have changed it since.
+  for (const m of S.stackSel) { const c = ctxOf(m); if (c.key !== stackActiveKey) c.draft = draftGet(draftKey(c.project, c.session)); }
+  stackActiveKey = '';
+  stackFocus(S.stackAt, { draw: false });
+  focusOnOpen = true;
+  if (!fromPick) pushNav();
+  render(); refresh();
+}
+// Leaving the stack's screen by any route: the focused column's state goes back into its
+// context, so coming back finds the conversation (and the half-typed message) where it was.
+function leaveStackState() {
+  const a = stackActive();
+  if (a) stashInto(a);
+  stackActiveKey = '';
+  chatSK = 'chat';
+  stopStackPoll();
+}
+// Back out of the stack (or a picker opened from outside it) to where it was opened from.
+function leaveStack() {
+  leaveStackState();
+  const b = S.stackBack || { screen: 'projects' };
+  S.stackBack = null; S.pick = null; S.pickBack = '';
+  S.sess = null; S.pane = null; S.paneErr = ''; S.view = b.view === 'pane' ? 'pane' : DEFAULT_VIEW;
+  S.project = b.project || null; S.sub = b.sub || ''; S.entry = b.entry || '';
+  if (b.screen === 'session' && b.session) { S.screen = 'session'; S.session = b.session; S.draft = draftGet(draftKey()); S.grid = null; }
+  else if (b.screen === 'grid' && b.project) { S.screen = 'grid'; S.session = null; S.grid = null; }
+  else if (b.screen === 'queue') { S.screen = 'queue'; S.session = null; }
+  else { S.screen = 'projects'; S.session = null; }
+}
+// The pane from inside a column ("open the pane" on a blocked session): the session screen,
+// one level down, and back from it is the stack again.
+function openFromStack(view) {
+  const a = stackActive();
+  if (!a) return;
+  leaveStackState();
+  S.fromStack = true;
+  S.screen = 'session'; S.project = a.project; S.session = a.session; S.sess = null;
+  S.grid = stackGrids.get(a.project) || null; S.entry = '';
+  S.view = view; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.draft = draftGet(draftKey()); scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+
+// ── the picker's list ──────────────────────────────────────────────────────────────────
+// Every session of every project Projects is showing, from each project's grid. A project
+// whose rollup says it has nothing running is not read at all.
+function pickProjects() {
+  return visibleProjects().map(({ p }) => p).filter(p => !p.sessions || (p.sessions.total || 0) > 0);
+}
+function pickItems() {
+  const out = [];
+  let host = null;
+  for (const p of pickProjects()) {
+    const g = stackGrids.get(p.name);
+    const cards = ((g && g.cards) || []).filter(c => !c.lost);
+    if (g && !cards.length) continue;
+    // BY MACHINE, THEN BY PROJECT, once there is more than one machine — the tab's grouping
+    // (tabOf), so the picker and Projects agree about where a project lives.
+    if (S.hosts && p.host !== host) { host = p.host || ''; out.push({ header: 'host', text: host }); }
+    out.push({ header: 'project', text: G.bareName(p.name), project: p.name, profile: profileOf(p) });
+    if (!g) { out.push({ waiting: true, project: p.name }); continue; }
+    for (const c of cards) out.push({ project: p.name, card: c, key: colKey(p.name, c.name) });
+  }
+  return out;
+}
+// The rows the list shows: all of them, or — while a search matches something — the
+// matches and the headers above them. A query that matches nothing leaves the whole list
+// up, as the desk does, and the prompt says so.
+function pickMatches(list) {
+  const q = S.pick && S.pick.q;
+  return q ? matchIndices(list, q, it => it.card ? { label: G.bareName(it.project), name: it.card.label || it.card.name } : null) : [];
+}
+function pickView(list) {
+  const m = pickMatches(list);
+  if (!m.length) return list.map((_, i) => i);
+  const keep = new Set(m), view = [];
+  let hp = -1, hh = -1;
+  list.forEach((it, i) => {
+    if (it.header === 'host') { hh = i; hp = -1; return; }
+    if (it.header === 'project') { hp = i; return; }
+    if (!keep.has(i)) return;
+    if (hh >= 0) { view.push(hh); hh = -1; }
+    if (hp >= 0) { view.push(hp); hp = -1; }
+    view.push(i);
+  });
+  return view;
+}
+// The cursor is a SESSION, not a position (the desk's sBuild): a session that starts or
+// stops above it must not walk it onto something else between two polls.
+function pickCursor(list, view) {
+  const rows = view.filter(i => list[i].card);
+  if (!rows.length) return -1;
+  const at = list.findIndex(it => it.key && it.key === (S.pick && S.pick.cur));
+  if (at >= 0 && rows.includes(at)) return at;
+  const m = pickMatches(list);
+  const first = m.length ? m[0] : rows[0];
+  if (S.pick) S.pick.cur = list[first].key;
+  return first;
+}
+function pickMove(d) {
+  const list = pickItems(), view = pickView(list);
+  const rows = view.filter(i => list[i].card);
+  const at = rows.indexOf(pickCursor(list, view));
+  const to = rows[at + d];
+  if (to != null) S.pick.cur = list[to].key;
+}
+function pickToggleCur() {
+  const list = pickItems(), i = pickCursor(list, pickView(list)), it = list[i];
+  if (it && it.card) stackToggle(it.project, it.card.name);
+}
+function pickStepMatch(d) {
+  const list = pickItems(), m = pickMatches(list);
+  const i = stepMatch(m, pickCursor(list, pickView(list)), d);
+  if (i >= 0) S.pick.cur = list[i].key;
+}
+
+// ── drawing the picker ─────────────────────────────────────────────────────────────────
+// Its own column, kept across polls: the list is rebuilt only when what it says changed, so
+// a 5 s tick that brought nothing new leaves every card — and the list's scroll — alone.
+function paintPicker(app) {
+  if (!pickRoot || pickRoot.bar.parentNode !== app) {
+    app.textContent = ''; screenMem = null;
+    pickRoot = { bar: el('div', { class: 'sbar' }), barSig: '', find: null, line: el('div', { class: 'confirm search' }),
+                 list: el('div', { class: 'cards pick-list' }), sig: '' };
+    watchScroll('pick', pickRoot.list);
+    app.append(pickRoot.bar, pickRoot.line, pickRoot.list);
+  }
+  const P = pickRoot;
+  const list = pickItems(), view = pickView(list), cur = pickCursor(list, view);
+  const n = S.stackSel.length;
+  // ── the bar: back, what this is, and the button that opens it ──
+  const barSig = `${n}`;
+  if (P.barSig !== barSig) {
+    P.barSig = barSig;
+    P.bar.textContent = '';
+    P.bar.append(
+      btn('‹', () => back()),
+      el('div', { class: 'who' }, [
+        el('span', { class: 'nm', text: 'stack' }),
+        el('span', { class: 'st' }, [el('span', { class: 'scope', text: n ? `${n} stacked` : 'several sessions on screen at once, across projects' })]),
+      ]),
+      btn(n ? `open ${n}` : 'open', () => openStack(), 'go'),
+    );
+  }
+  // ── the find field (touch) — the desk's `/` answers keys instead ──
+  const touch = !finePointer();
+  if (touch && !P.find) {
+    const inp = el('input', { type: 'search', placeholder: 'find a session or project', 'aria-label': 'find a session or project',
+                              enterkeyhint: 'search', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' });
+    inp.addEventListener('input', () => { S.pick.q = inp.value || null; S.pick.typing = false; S.pick.cur = ''; render(); });
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); try { inp.blur(); } catch {} }
+      else if (e.key === 'Escape') { e.preventDefault(); inp.value = ''; S.pick.q = null; render(); try { inp.blur(); } catch {} }
+    });
+    P.find = el('div', { class: 'find' }, [inp]);
+    app.insertBefore(P.find, P.line);
+  }
+  // ── the one line under it: the search, or what space and ⏎ do ──
+  const m = pickMatches(list);
+  const q = S.pick.q;
+  let line;
+  if (S.pick.msg) line = S.pick.msg;
+  else if (q != null && !touch) {
+    const at = m.indexOf(cur);
+    line = `/${q}${S.pick.typing ? '▏' : ''}  ` + (!q ? 'type part of a session or project name · esc cancel'
+      : !m.length ? `nothing matches '${q}'`
+      : S.pick.typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · space add · ⏎ keep · esc clear`
+      : `${at >= 0 ? `${at + 1} of ${m.length}` : `${m.length} matches`} · n/N next/prev · space add · ⏎ open the stack · / edit · esc clear`);
+  } else if (q && touch) line = m.length ? `${m.length} match${m.length === 1 ? '' : 'es'} — tap to add or remove` : `nothing matches '${q}'`;
+  else line = touch ? 'tap a session to add or remove it · open shows them together'
+    : '↑↓/jk move · / find · space or click add/remove · ⏎ open the stack · c clear · esc back';
+  if (P.line.textContent !== line) P.line.textContent = line;
+  // The search speaks in the confirm row's yellow, as the grid's does; otherwise a hint.
+  const cls = (q != null && !touch) || S.pick.msg ? 'confirm search' : 'hint';
+  if (P.line.className !== cls) P.line.className = cls;
+  // ── the list ──
+  const sig = JSON.stringify([view.map(i => { const it = list[i]; return it.card ? [it.key, it.card.status, it.card.label, inStack(it.project, it.card.name), i === cur] : [it.header || 'w', it.text || it.project]; }), q]);
+  if (P.sig !== sig) {
+    P.sig = sig;
+    // ROW BY ROW, NOT THE LIST. Each project's grid arrives on its own, and rebuilding every
+    // card when one more project landed replaced the node under a finger between its
+    // pointerdown and its pointerup — the tap was lost. A row whose model reads the same
+    // keeps its node; only what changed is new.
+    const was = P.rows || new Map(), now = new Map();
+    const keep = (key, sig2, make) => {
+      const h = was.get(key);
+      const node = h && h.sig === sig2 ? h.node : make();
+      now.set(key, { sig: sig2, node });
+      return node;
+    };
+    const nodes = [];
+    if (!S.projects) nodes.push(...skeletonCards(3));
+    else if (!list.length) nodes.push(keep('none', '', () => el('div', { class: 'sect', text: 'no live sessions in any project' })));
+    for (const i of view) {
+      const it = list[i];
+      if (it.header === 'host') { nodes.push(keep('h:' + it.text, '', () => el('div', { class: 'sect pick-host', text: it.text }))); continue; }
+      if (it.header === 'project') {
+        const t = it.text + (it.profile && it.profile !== 'work' ? ` · ${it.profile}` : '');
+        nodes.push(keep('p:' + it.project, t, () => el('div', { class: 'sect pick-proj', text: t })));
+        continue;
+      }
+      if (it.waiting) { nodes.push(keep('w:' + it.project, '', () => skeletonCards(1)[0])); continue; }
+      const on = inStack(it.project, it.card.name);
+      const mdl = { ...G.cardModel(it.card, i === cur, -1), num: null };
+      nodes.push(keep('c:' + it.key, JSON.stringify([mdl, on]), () => {
+        const node = cardEl(mdl, { tap: () => { S.pick.cur = it.key; S.pick.msg = ''; stackToggle(it.project, it.card.name); render(); } }, -1);
+        node.classList.add('pickrow');
+        node.classList.toggle('stacked', on);
+        node.dataset.key = it.key;
+        node.setAttribute('aria-pressed', on ? 'true' : 'false');
+        const top = node.querySelector && node.querySelector('.c-top');
+        if (top) top.insertBefore(el('span', { class: 'chip ' + (on ? 'lead' : 'tag'), text: on ? '✓ stacked' : '+ add' }), top.firstChild);
+        return node;
+      }));
+    }
+    P.rows = now;
+    if (!sameKids(P.list, nodes)) place(P.list, nodes);
+  }
+  renderSheet();
+}
+
+// ── drawing the stack ──────────────────────────────────────────────────────────────────
+// The bar across the top, then one column per conversation on screen. Every node is KEPT
+// across renders and only what changed is replaced — the column's bar by its signature, its
+// list message by message (syncChat), its composer while the box still holds the draft — so a
+// poll that brought nothing changes no DOM, a focused box keeps its focus and its keyboard,
+// and every list keeps its scroll.
+function paintStack(app) {
+  if (!stackRoot || stackRoot.head.parentNode !== app) {
+    app.textContent = ''; screenMem = null;
+    stackRoot = { head: el('div', { class: 'sbar stack-bar' }), headSig: '', toast: null, cols: el('div', { class: 'stack' }) };
+    app.append(stackRoot.head, stackRoot.cols);
+  }
+  const R = stackRoot;
+  const shown = stackShown();
+  const wide = wideNow();
+  if (wide && S.stackAt >= shown.length) stackFocus(shown.length - 1, { draw: false });
+  // Reopened on the stack (a reload, a relaunch): nothing is focused yet, so the column the
+  // stack was left on is.
+  if (!stackActive() && shown.length) { stackFocus(S.stackAt, { draw: false }); focusOnOpen = true; }
+  const a = stackActive();
+  // ── the bar ──
+  const hidden = wide ? S.stackSel.slice(STACK_COLS) : [];
+  const ac = a ? cardFor(a) : null;
+  const am = ac && G.STATUS[ac.status];
+  const headSig = JSON.stringify([wide, S.stackSel.length, S.stackAt, hidden.map(m => colKey(m.project, m.session)),
+    a && a.key, ac && [ac.status, ac.label], modeSpec().text]);
+  if (R.headSig !== headSig) {
+    R.headSig = headSig;
+    R.head.textContent = '';
+    if (wide) {
+      R.head.append(...[
+        btn('‹', () => back()),
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: 'stack' }),
+          el('span', { class: 'st' }, [el('span', { class: 'scope', text: `${S.stackSel.length} stacked · ⇧← ⇧→ focus · Ctrl-a < > move` }), modeChip()]),
+        ]),
+        hidden.length ? el('div', { class: 'seg stack-hidden', 'aria-label': `${hidden.length} more stacked, not shown` },
+          hidden.map((m, j) => {
+            const b = btn(`${G.bareName(m.session)}`, () => stackSwapIn(STACK_COLS + j));
+            b.setAttribute('title', `show ${m.session} (${said(m.project)}) in place of the focused column`);
+            return b;
+          })) : null,
+        btn('+', () => openStackPicker()),
+      ].filter(Boolean));
+      R.head.lastChild.setAttribute('aria-label', 'pick sessions for the stack');
+    } else {
+      // ONE CONVERSATION ON SCREEN: its name is the bar's, with where it is in the stack.
+      const nm = (ac && ac.label) || (a && a.session) || '';
+      R.head.append(
+        btn('‹', () => back()),
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: nm }),
+          el('span', { class: 'st' }, [
+            am ? el('span', { style: `color:${G.COLORS[am.color]}`, text: am.label }) : null,
+            el('span', { class: 'scope', text: ` ${a ? said(a.project) : ''}` }),
+          ]),
+        ]),
+        el('div', { class: 'seg stack-pos' }, [
+          btn('◂', () => stackStep(-1)),
+          el('span', { class: 'pos', 'aria-label': 'position in the stack', text: `${Math.min(S.stackAt, S.stackSel.length - 1) + 1}/${S.stackSel.length}` }),
+          btn('▸', () => stackStep(1)),
+        ]),
+        btn('×', () => { if (a) stackClose(a); }),
+        btn('+', () => openStackPicker()),
+      );
+    }
+  }
+  // ── one toast, above the columns ──
+  if (R.toast && R.toast.parentNode) R.toast.parentNode.removeChild(R.toast);
+  R.toast = null;
+  if (S.toast) {
+    const t = S.toast, act = t.action;
+    R.toast = act ? el('div', { class: ('toast act ' + (t.kind || '')).trim() }, [el('span', { text: t.text }), btn(act.label, () => { S.toast = null; act.fn(); })])
+                  : el('div', { class: ('toast ' + (t.kind || '')).trim(), text: t.text });
+    app.insertBefore(R.toast, R.cols);
+  }
+  // ── the columns ──
+  for (const c of shown) paintCol(c, wide);
+  if (a) { chatNode = a.chat; composerNode = a.box; photoStripNode = a.strip; }
+  const roots = shown.map(c => c.root);
+  if (!sameKids(R.cols, roots)) place(R.cols, roots);
+  R.cols.classList.toggle('one', !wide);
+  renderSheet();
+}
+// One column: its bar, its conversation and its composer, with column `c` as the open chat.
+function paintCol(c, wide) {
+  const on = c.key === stackActiveKey;
+  if (!c.root) {
+    c.root = el('div', { class: 'scol' });
+    c.root.dataset.key = c.key;
+    // FOCUS FIRST, THEN THE CLICK. pointerdown runs before the click it starts and before
+    // the focus it moves, so whatever was pressed in this column acts on this column.
+    const focusMe = () => { const i = S.stackSel.findIndex(m => colKey(m.project, m.session) === c.key); if (i >= 0) stackFocus(i); };
+    c.root.addEventListener('pointerdown', focusMe, true);
+    c.root.addEventListener('focusin', focusMe, true);
+  }
+  c.root.classList.toggle('on', on);
+  withCol(c, () => {
+    const card = cardFor(c);
+    // ── its bar (a desk only: on a phone the stack's bar is this column's) ──
+    const meta = card && G.STATUS[card.status];
+    const barSig = wide ? JSON.stringify([card && card.label, card && card.status, c.project, S.hosts && S.hosts.length]) : '';
+    if (!wide) { if (c.bar && c.bar.parentNode) c.bar.parentNode.removeChild(c.bar); c.bar = null; c.barSig = ''; }
+    else if (c.barSig !== barSig || !c.bar) {
+      c.barSig = barSig;
+      const bar = el('div', { class: 'sbar scol-bar' }, [
+        el('div', { class: 'who' }, [
+          el('span', { class: 'nm', text: (card && card.label) || c.session }),
+          el('span', { class: 'st' }, [
+            meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
+            el('span', { class: 'scope', text: ` ${said(c.project)}` }),
+          ]),
+        ]),
+        btn('×', () => stackClose(c)),
+      ]);
+      bar.lastChild.setAttribute('aria-label', `close ${c.session}`);
+      bar.lastChild.setAttribute('title', 'take this conversation out of the stack');
+      if (c.bar && c.bar.parentNode === c.root) c.root.replaceChild(bar, c.bar);
+      c.bar = bar;
+    }
+    const gone = !card && stackGrids.has(c.project)
+      ? el('div', { class: 'hint', text: `'${c.session}' is not on ${said(c.project)}'s grid any more.` }) : null;
+    // ── its conversation ──
+    const built = chatView(card);
+    if (c.chat && isLive(c.chat) && canCompare(c.chat)) { syncChat(c.chat, built); chatNode = c.chat; }
+    else c.chat = built;
+    // ── its composer: kept while the box on screen still holds this column's draft ──
+    const row = composer(card, {});
+    const sig = sigOf(row);
+    const liveText = c.box && isLive(c.box) ? c.box.value : null;
+    if (c.comp && isLive(c.comp) && c.compSig === sig && liveText === (S.draft || '')) {
+      composerNode = c.box;
+      try { const strip = c.comp.querySelector && c.comp.querySelector('.photos'); if (strip) photoStripNode = strip; } catch {}
+    } else {
+      c.comp = row; c.compSig = sig; c.box = composerNode;
+    }
+    c.strip = photoStripNode;
+    const kids = [c.bar, gone, c.chat, c.comp].filter(Boolean);
+    if (!sameKids(c.root, kids)) place(c.root, kids);
+  });
+}
+// A column's list, redrawn after a read the stack poller made for it — into its own node,
+// message by message, touching nothing else on screen (the patchChat of a column).
+//   The whole column, by paintCol, which keeps every node that reads the same: the bar is
+// replaced only if its status changed, and the box only if it no longer holds the draft — so
+// a focused box being typed into is never touched.
+function patchCol(c) {
+  if (S.screen !== 'stack' || !c.root || !isLive(c.root) || !c.chat || !isLive(c.chat)) { if (S.screen === 'stack' && !pollPaused()) render(); return; }
+  paintCol(c, wideNow());
+  const a = stackActive();
+  if (a) { chatNode = a.chat; composerNode = a.box; photoStripNode = a.strip; }
+}
+
+// ── the stack's own poll, for the columns that are not focused ─────────────────────────
+// One read at a time, the most overdue first, never two starts closer than STACK_GAP_MS —
+// see the read rate at the top of this section. Conditional like the chat's own (ETag), so
+// an idle column costs the tunnel a 304.
+let stackTimer = null, stackLastAt = 0, stackGridDue = 0;
+const stackPollWanted = () => !document.hidden && !S.locked && S.screen === 'stack';
+function stopStackPoll() { if (stackTimer) { clearTimeout(stackTimer); stackTimer = null; } }
+function colPeriod(c) {
+  if (!c.sess) return Math.min(1000 * 2 ** Math.max(0, c.chatLoad.tries - 1), CHAT_RETRY_MAX_MS);
+  const card = cardFor(c);
+  const live = S.outbox.some(o => o.project === c.project && o.session === c.session)
+            || (card && (card.status === 'working' || card.status === 'starting'));
+  return live ? CHAT_POLL_LIVE_MS : CHAT_POLL_IDLE_MS;
+}
+function syncStackPoll() {
+  if (!stackPollWanted()) return stopStackPoll();
+  if (!stackTimer) armStackPoll(0);
+}
+function armStackPoll(ms) {
+  stopStackPoll();
+  if (!stackPollWanted()) return;
+  stackTimer = setTimeout(stackTick, Math.max(ms, api.heldFor()));
+}
+async function stackTick() {
+  stackTimer = null;
+  if (!stackPollWanted()) return;
+  const now = Date.now();
+  // The most overdue of: each column that is not focused, and the next grid.
+  const others = stackShown().filter(c => c.key !== stackActiveKey);
+  const col = others.length ? others.reduce((x, c) => (c.due < x.due ? c : x)) : null;
+  const gridFirst = !col || stackGridDue <= col.due;
+  const due = gridFirst ? stackGridDue : col.due;
+  if (due > now) return armStackPoll(due - now);
+  const gap = stackLastAt + STACK_GAP_MS - now;
+  if (gap > 0) return armStackPoll(gap);
+  stackLastAt = now;
+  if (gridFirst) { await stackGridRead(); stackGridDue = Date.now() + STACK_GRID_MS; }
+  else { await stackRead(col); col.due = Date.now() + colPeriod(col); }
+  armStackPoll(STACK_GAP_MS);
+}
+// One project's grid: the focused column's every other time, the rest in turn. What it says
+// is drawn into the column bars and lists that changed, never into a composer.
+async function stackGridRead() {
+  const ps = stackProjects();
+  if (!ps.length) return;
+  const p = (stackRR++ % 2 === 0 || ps.length === 1) ? ps[0] : ps[1 + (Math.floor(stackRR / 2) % (ps.length - 1))];
+  try {
+    const g = await api.getGrid(p);
+    const was = JSON.stringify(((stackGrids.get(p) || {}).cards || []).map(c => [c.name, c.status, c.label]));
+    stackGrids.set(p, g);
+    if (S.screen !== 'stack') return;
+    const a = stackActive();
+    if (a && a.project === p) S.grid = g;
+    if (JSON.stringify((g.cards || []).map(c => [c.name, c.status, c.label])) === was) return;
+    // A status changed: the whole screen if nobody is typing, else just the lists.
+    if (!pollPaused()) render();
+    else for (const c of stackShown()) if (c.project === p) patchCol(c);
+  } catch (e) {
+    if (e instanceof api.AuthError) lock();
+  }
+}
+async function stackRead(c) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const giveUp = setTimeout(() => { try { ctl && ctl.abort(); } catch {} }, STACK_GIVEUP_MS);
+  const seq = ++sessSeq;
+  try {
+    const r = await api.getSession(c.project, c.session, null, { etag: (c.sess && c.sess.etag) || '', signal: ctl ? ctl.signal : undefined });
+    // Focused meanwhile: its own poll owns it now, and has (or will have) newer.
+    if (c.key === stackActiveKey || !stackCtx.has(c.key)) return;
+    c.chatLoad = { key: c.key, tries: 0, why: '' };
+    if (r && r.notModified) { if (c.sess) c.sess.seq = seq; return; }
+    c.sess = { ...mergeNewest(c.sess, r), of: c.key, seq };
+    withCol(c, () => reconcileOutbox());
+    patchCol(c);
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock(); return; }
+    if (e instanceof api.RateLimitedError) return;           // the hold moves the next tick
+    if (c.sess || c.key === stackActiveKey) return;
+    const why = ctl && ctl.signal.aborted ? 'the Mac has not answered yet'
+      : e instanceof api.OfflineError ? 'the Mac is not answering' : String((e && e.message) || e);
+    c.chatLoad = { key: c.key, tries: c.chatLoad.tries + 1, why };
+    patchCol(c);
+  } finally { clearTimeout(giveUp); }
+}
+// What refresh() reads for the stack: only a grid no column has had yet, so a first open has a
+// status for every column. After that the grids are the stack poller's (stackGridRead).
+async function refreshStack() {
+  const missing = stackProjects().filter(p => !stackGrids.has(p));
+  await Promise.all(missing.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); })));
+  const a = stackActive();
+  if (a) S.grid = stackGrids.get(a.project) || null;
+  if (a && !chatHas()) await readChat();
+  reconcileOutbox();
+}
+// ...and for the picker: the projects list if there is none yet, every grid on the way in,
+// then a few at a time.
+async function refreshPicker() {
+  if (!S.projects) { const j = await api.getProjects(); S.projects = j.projects; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null; }
+  await readGrids(pickProjects().map(p => p.name));
+}
+// Every grid in `ps` not read yet; once all are, PICK_GRIDS_PER_TICK of them in turn. Shared
+// by the picker and the Projects search, which list the same sessions from the same cache.
+async function readGrids(ps) {
+  const missing = ps.filter(p => !stackGrids.has(p));
+  let want = missing;
+  if (!missing.length && ps.length) {
+    want = [];
+    for (let k = 0; k < Math.min(PICK_GRIDS_PER_TICK, ps.length); k++) want.push(ps[(pickRR++) % ps.length]);
+  }
+  await Promise.all(want.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); }, (e) => { if (e instanceof api.AuthError) throw e; })));
+}
+
+// ── the keys ───────────────────────────────────────────────────────────────────────────
+// The picker is the desk's onKeyStack: ↑↓/jk move, space toggles, ⏎ opens, `/` finds (every
+// printable key but space types into the query; ⏎ keeps it, then n/N step), c clears the
+// whole stack, Esc / q / ` go back.
+function pickKey(e, k, lk, ctrl) {
+  const P = S.pick;
+  P.msg = '';
+  if (ctrl) {
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'c' && P.q == null) { back(); return true; }
+    return false;
+  }
+  const enter = k === 'Enter';
+  if (P.q != null) {
+    const shorter = () => [...P.q].slice(0, -1).join('');
+    if (k === 'Escape') { P.q = null; render(); return true; }
+    if (k === 'ArrowUp') { pickMove(-1); render(); return true; }
+    if (k === 'ArrowDown') { pickMove(1); render(); return true; }
+    if (k === ' ') { pickToggleCur(); render(); return true; }
+    if (P.typing) {
+      if (enter) { if (pickMatches(pickItems()).length) P.typing = false; render(); return true; }
+      if (k === 'Backspace') { if (!P.q) P.q = null; else { P.q = shorter(); P.cur = ''; } render(); return true; }
+      if (k.length === 1) { P.q += k; P.cur = ''; render(); return true; }
+      return false;
+    }
+    if (k === 'q' || k === '`') { P.q = null; render(); return true; }
+    if (k === '/') { P.typing = true; render(); return true; }
+    if (k === 'Backspace') { P.typing = true; P.q = shorter(); P.cur = ''; render(); return true; }
+    if (enter) { openStack(); return true; }
+    if (k === 'n' || k === 'N') { pickStepMatch(k === 'n' ? 1 : -1); render(); return true; }
+    if (k === 'j') { pickMove(1); render(); return true; }
+    if (k === 'k') { pickMove(-1); render(); return true; }
+    return true;                      // inert while a search is kept, as at the desk
+  }
+  if (k === 'Escape' || k === 'q' || k === '`') { back(); return true; }
+  if (k === 'ArrowUp' || k === 'k') { pickMove(-1); render(); return true; }
+  if (k === 'ArrowDown' || k === 'j') { pickMove(1); render(); return true; }
+  if (k === '/') { P.q = ''; P.typing = true; render(); return true; }
+  if (k === ' ') { pickToggleCur(); render(); return true; }
+  if (k === 'c' || k === 'C') { S.stackSel = []; S.stackAt = 0; saveStack(); render(); return true; }
+  if (enter) { openStack(); return true; }
+  return false;
+}
+// The stack: ⇧←/⇧→ move the focus round the columns, Ctrl-a < / > move the focused column,
+// Ctrl-a x (or Ctrl-x) is the picker, ` and Ctrl-a g/d go back, and every other key goes to
+// the focused column's agent — typed into its composer, as on the session screen.
+function stackKey(e, k, lk, ctrl) {
+  if (S.prefix) {
+    S.prefix = false;
+    if (ctrl) return lk === 'a';
+    if (k === '<' || k === '{') stackMove(-1);
+    else if (k === '>' || k === '}') stackMove(1);
+    else if (lk === 'x') openStackPicker();
+    else if (lk === 'g' || lk === 'd') back();
+    else if (lk === 'p') toProjects();
+    else if (lk === 'f') startJump();
+    else if (k === 'ArrowRight') stackCycle(1);
+    else if (k === 'ArrowLeft') stackCycle(-1);
+    return true;
+  }
+  if (ctrl) {
+    if (lk === 'a') { S.prefix = true; return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  if (k === '`') { back(); return true; }
+  if (e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) { stackCycle(k === 'ArrowRight' ? 1 : -1); return true; }
+  if (k.length === 1 && !e.altKey) return typeIntoComposer(k);
+  if (k === 'Enter') { focusComposerAt(null); return true; }
+  return false;
+}
+
+// ── the terminal: a fleet tab, on this screen ─────────────────────────────────
+// A real shell in the project's folder — the same terminal tab Ctrl-t opens at the desk,
+// made by the server with the desk's own script and attached through fleet-serve, so the desk's grid shows the
+// session the phone is typing into. The gates are the server's (fleet-serve TERMINAL): off
+// per device until switched on in settings, and a fresh passkey every time one opens. This
+// file only decides what to SAY about each refusal.
+//
+// ONE NODE FOR AS LONG AS IT IS OPEN. Every other screen here is rebuilt by render(), on a
+// poll as often as every two seconds, and a terminal cannot be: rebuilding it would drop
+// the xterm instance, its scrollback and the keyboard's focus mid-word. So TS holds the
+// screen's root and render() only updates its words; leaving the screen is what disposes it.
+let TS = null;              // { project, kind, root, host, msg, act, rowNode, h, state, why, session }
+let termLib = null;         // web/term.js, imported the first time a terminal opens
+const termWord = {
+  fixtures: 'the terminal needs the fleet server — the fixture fleet has no shell to open',
+  checking: 'checking whether this device may open a terminal…',
+  off: 'the terminal is off for this device. Settings turns it on — it asks for the passkey, and the Mac records which device did it.',
+  gate: 'a terminal asks for the passkey every time it opens',
+  asking: 'waiting for the passkey…',
+  opening: 'opening the terminal…',
+};
+// fleet-serve's TERM_REMOTE_WHY, in the client's own words and one line: the shell is a
+// thing the host it runs on opens, never one proxied through a second machine.
+const TERM_REMOTE = 'no terminal or editor for another machine\'s project — a shell is opened only on the machine it runs on';
+// THE EDITOR IS THE SAME SCREEN WITH THE OTHER TAB IN IT: the desk's Ctrl-n, neovim on the
+// project's folder, opened by the same request with kind 'edit' and so behind the same four
+// gates — the device switch, a fresh passkey per open, the one-use ticket, the Origin check.
+// No gate of its own, because it needs none less: nvim's `:terminal` is a shell. Ctrl-n is
+// the browser's (a new window, and no page may take it), so the desk's own fallback is the
+// key here: Ctrl-a n, as `bind n` in tmux/cf.tmux.conf.
+const TERM_NOUN = { term: 'terminal', edit: 'editor' };
+const termNoun = (kind = S.termKind) => TERM_NOUN[kind] || 'terminal';
+function openEditor(project = S.project) { openTerminal(project, 'edit'); }
+// The editor's own words where they differ. OFF names the terminal's switch, because that
+// is the switch it is behind, and calling it anything else would send the reader looking
+// for a second one.
+const editWord = {
+  fixtures: 'the editor needs the fleet server — the fixture fleet has no folder to open',
+  checking: 'checking whether this device may open the editor…',
+  off: 'the editor is behind the terminal\'s switch, and it is off for this device. Settings turns it on — it asks for the passkey, and the Mac records which device did it.',
+  gate: 'the editor asks for the passkey every time it opens, as the terminal does',
+  opening: 'opening the editor…',
+};
+const termSays = (state, kind) => (kind === 'edit' && editWord[state]) || termWord[state] || '';
+function termTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
+// THE PHONE'S FONT SIZE, AND SO ITS COLUMNS. The desk keeps 13px. A phone at 13px fits 37
+// columns at 390pt — LazyVim's explorer and a file beside it do not fit in that, and the
+// owner's first look at the editor was "I can't do anything". So the default is the size
+// that fits about seventy columns across the phone's SHORT side: floor(short / 42), because
+// a monospace cell is about 0.6em and 0.6 × 70 = 42. At 390pt that is 9px and 68 columns
+// (the suite asks for at least 64); a 320pt phone gets 8px, a 430pt one 10px. The short side,
+// so that turning the phone does not change the font — landscape is the same text with more
+// columns, not the same columns in bigger text.
+//   A pinch or A−/A+ replaces the default, and is remembered on this device (gf.termFont):
+// what is readable is a matter of eyes and of the phone, and both belong to the device.
+const TERM_FONT_KEY = 'gf.termFont';
+function termFontDefault() {
+  const w = Number(screen && screen.width) || innerWidth, h = Number(screen && screen.height) || innerHeight;
+  return Math.max(8, Math.min(12, Math.floor(Math.min(w, h) / 42)));
+}
+function termFont() {
+  if (!termTouch()) return 13;
+  let v = 0;
+  try { v = Number(localStorage.getItem(TERM_FONT_KEY)) || 0; } catch {}
+  return v >= 6 && v <= 24 ? v : termFontDefault();
+}
+const termFontSave = (px) => { try { localStorage.setItem(TERM_FONT_KEY, String(px)); } catch {} };
+// The tap. Everything the passkey needs happens BEFORE the first await, so WebKit still
+// counts this as the tap (passkey.js freshNow). Then the screen, then the rest.
+function openTerminal(project = S.project, kind = 'term') {
+  if (!project) return;
+  // Another machine's project has no terminal from here, by decision — and Ctrl-t is a key,
+  // so this guard is for the key as much as for any button that forgot to hide.
+  if (isRemote(project)) { toast(TERM_REMOTE, 'bad'); render(); return; }
+  const asking = api.mode() === 'server' && S.termOn === true && pk.available() && pk.registered()
+    ? pk.freshNow(`${termNoun(kind)} ${project}`) : null;
+  if (S.screen !== 'term') S.termBack = { screen: S.screen, session: S.session, view: S.view, entry: S.entry, sub: S.sub };
+  if (TS && (TS.project !== project || TS.kind !== kind)) disposeTerm();
+  S.project = project; S.termKind = kind; S.screen = 'term'; S.srch = null;
+  S.termSt = { state: asking ? 'asking' : 'checking', why: '' };
+  if (S.termBack.screen !== 'term') pushNav();
+  render();
+  if (asking) return startTerm(asking);
+  if (api.mode() !== 'server') return termState('fixtures');
+  if (S.termOn === null) {
+    termState('checking');
+    api.getTerm().then((j) => { S.termOn = !!j.enabled; termState(S.termOn ? 'gate' : 'off'); if (S.termOn) pk.prepareFresh().catch(() => {}); },
+                       (e) => termState('gate', String(e.message || e)));
+    return;
+  }
+  termState(S.termOn ? 'gate' : 'off');
+  if (S.termOn) pk.prepareFresh().catch(() => {});
+}
+// Asked once per unlock, off the screens that offer a terminal, so the tap that opens one
+// already knows whether it may — and, when it may, has a challenge ready for the passkey.
+// A daemon from before the terminal answers 404: that is "no", not an error to show.
+function termAsk() {
+  if (api.mode() !== 'server') return;
+  if (S.termOn === true) { pk.prepareFresh().catch(() => {}); return; }
+  if (S.termOn !== null || termAsking) return;
+  termAsking = true;
+  api.getTerm().then((j) => { S.termOn = !!j.enabled; if (S.termOn) pk.prepareFresh().catch(() => {}); },
+                     (e) => { if (e && e.status === 404) S.termOn = false; })
+     .finally(() => { termAsking = false; });
+}
+let termAsking = false;
+// THE STATE IS S's, NOT THE NODE's. render() can hand the paint to a view transition that
+// runs a frame later (slideNav), so the screen's node may not exist yet when the first
+// state arrives — measured: the "off for this device" answer landed in that frame and the
+// screen sat on "checking…" for good. Kept here, painted whenever the node is.
+function termState(state, why = '') { S.termSt = { state, why }; if (TS && S.screen === 'term') paintTerm(); }
+async function startTerm(asking) {
+  termState('asking');
+  let a;
+  try { a = await asking; }
+  catch (e) { return termState('gate', e && e.name === 'NotReady' ? e.message : pk.describe(e).replace(/Tap unlock/g, 'Tap open')); }
+  if (!TS) return;
+  termState('opening');
+  try {
+    termLib = termLib || await import('./term.js');
+    if (!TS) return;
+    paintTerm();                      // the key row, and the host shown before xterm measures it
+    if (!TS.h) {
+      TS.h = termLib.mount(TS.host, {
+        onState: ({ state, why }) => termState(state === 'open' ? 'open' : state === 'closed' ? 'closed' : 'opening', why),
+        onLeave: () => { if (TS && TS.h) TS.h.blur(); try { (document.querySelector('#side .cards') || document.body).focus(); } catch {} },
+        fontSize: termFont(),
+        onFont: (px) => { if (termTouch()) termFontSave(px); },
+        onFocus: (up) => { if (TS && TS.kbd) TS.kbd.classList.toggle('on', up); },
+        onCopy: () => toast('copied'),
+      });
+    }
+    const r = await api.termOpen(TS.project, TS.h.size(), a, TS.kind);
+    if (!TS) return;
+    TS.session = r.session;
+    TS.h.connect(r.ticket);
+    if (!termTouch()) TS.h.focus();
+  } catch (e) {
+    if (e instanceof api.AuthError) { disposeTerm(); return lock(); }
+    if (e && e.needs === 'enable') { S.termOn = false; return termState('off'); }
+    termState('gate', String((e && e.message) || e));
+  }
+}
+function disposeTerm() {
+  if (!TS) return;
+  try { if (TS.h) TS.h.dispose(); } catch {}
+  TS = null;
+}
+function termScreenRoot() {
+  const msg = el('div', { class: 'term-msg' });
+  const act = el('div', { class: 'term-act' });
+  const host = el('div', { class: 'term-host' });
+  const title = el('span', { class: 'nm' });
+  const st = el('span', { class: 'st' });
+  // THE PHONE'S THREE CONTROLS, on touch only: smaller and larger text (a pinch does the
+  // same, but a pinch is not something a screen announces), and the KEYBOARD. Nothing else
+  // raises it: a tap on the terminal is a mouse click there (term.js touchAsMouse), and a
+  // click that also raised the keyboard would cover half of nvim at every tap on a file.
+  // Each acts on its click, with pointerdown and mousedown prevented so the tap moves no
+  // focus of its own — iOS raises the keyboard only for a focus inside a user gesture, and
+  // the click is one.
+  const tool = (label, aria, act) => {
+    const b = el('button', { type: 'button', class: 'tt', text: label, 'aria-label': aria });
+    b.addEventListener('pointerdown', (ev) => ev.preventDefault());
+    b.addEventListener('mousedown', (ev) => ev.preventDefault());
+    b.addEventListener('click', () => { if (TS && TS.h) act(TS.h); });
+    return b;
+  };
+  const kbd = tool('⌨', 'Keyboard', (h) => h.keyboard());
+  kbd.classList.add('kbd');
+  const tools = el('div', { class: 'term-tools' }, [
+    tool('A−', 'Smaller text', (h) => h.zoom(-1)), tool('A+', 'Larger text', (h) => h.zoom(1)), kbd]);
+  const bar = el('div', { class: 'sbar' }, [
+    btn('‹', () => back()),
+    el('div', { class: 'who' }, [title, st]),
+    tools,
+  ]);
+  // THE KEY ROW, on touch only: a hardware keyboard has every one of these keys, and at a
+  // desk the row would be fifteen buttons of nothing. pointerdown and preventDefault, so a
+  // tap never takes the focus from the terminal — the on-screen keyboard stays up.
+  const row = el('div', { class: 'term-keys' });
+  return { root: el('div', { class: 'term-screen' }, [bar, msg, act, host, row]), host, msg, act, title, st, row, tools, kbd };
+}
+// The row's two bands, each one line that scrolls sideways where a phone is too narrow for it.
+function termKeyRows(row) {
+  for (const band of termLib.KEY_ROWS) {
+    const b = el('div', { class: 'tk-band' });
+    for (const k of band) b.append(termKeyBtn(k));
+    row.append(b);
+  }
+}
+function termKeyBtn(k) {
+  const b = el('button', { type: 'button', class: 'tk' + (k.latch ? ' latch' : '') + (k.wide ? ' wide' : ''), text: k.label, 'aria-label': k.aria || k.label });
+  const press = (ev) => { ev.preventDefault(); if (TS && TS.h) TS.h.key(k, b); };
+  b.addEventListener('pointerdown', press);
+  b.addEventListener('mousedown', (ev) => ev.preventDefault());
+  return b;
+}
+function paintTerm(app = document.getElementById('app')) {
+  if (!app) return;
+  if (!TS || TS.project !== S.project || TS.kind !== S.termKind) {
+    disposeTerm();
+    const r = termScreenRoot();
+    TS = { project: S.project, kind: S.termKind, ...r, h: null, session: '' };
+  }
+  if (TS.root.parentNode !== app) {
+    if (preactUp) { screensUI.unmount(app); preactUp = false; }
+    app.textContent = '';
+    screenMem = null;
+    paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+    composerNode = null;
+    app.append(TS.root);
+  }
+  // The row needs term.js's KEY_ROWS, which arrive with the first open.
+  if (termLib && !TS.row.firstChild) termKeyRows(TS.row);
+  TS.row.hidden = TS.tools.hidden = !termTouch() || !TS.h;
+  const noun = termNoun(TS.kind);
+  TS.title.textContent = `${noun} · ${TS.project}`;
+  const { state, why } = S.termSt;
+  const live = state === 'open';
+  TS.st.textContent = live ? ` ${TS.session}${termTouch() ? '' : ' · ⇧Esc leaves it'}` : '';
+  const words = state === 'closed' ? `closed — ${why || 'the connection ended'}. The tab is still open on the desk.`
+    : (why && (state === 'gate' || state === 'off') ? why : termSays(state, TS.kind));
+  TS.msg.textContent = words;
+  TS.msg.hidden = !words || live;
+  TS.act.textContent = '';
+  if (state === 'off') TS.act.append(btn('settings', () => sheetSettings()));
+  if (state === 'gate' || state === 'closed')
+    TS.act.append(btn(state === 'closed' ? 'open it again — passkey' : `open the ${noun} — passkey`, () => {
+      if (TS && TS.h) { TS.h.dispose(); TS.h = null; TS.host.textContent = ''; }
+      startTerm(pk.freshNow(`${noun} ${S.project}`));
+    }, 'go'));
+  TS.act.hidden = !TS.act.firstChild;
+  TS.host.hidden = !TS.h && state !== 'opening';
+  if (S.toast) { TS.msg.hidden = false; TS.msg.textContent = S.toast.text; }
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
+}
+
 function setView(v) {
+  if (S.screen === 'stack') { if (v === 'pane') openFromStack('pane'); return; }
   if (S.view === v) return;
   S.view = v;
   render();
@@ -2075,7 +4368,8 @@ const SWIPE_NEXT = 60, EDGE = 24;
 function wireSessionSwipe(node) {
   let x0 = 0, y0 = 0, live = false;
   node.addEventListener('pointerdown', ev => {
-    live = ev.clientX > EDGE;             // the left edge belongs to the system
+    // A finger only (touchGesture): with a mouse this drag is selecting text in a bubble.
+    live = touchGesture(ev) && ev.clientX > EDGE;   // the left edge belongs to the system
     x0 = ev.clientX; y0 = ev.clientY;
   });
   node.addEventListener('pointerup', ev => {
@@ -2085,7 +4379,9 @@ function wireSessionSwipe(node) {
     // Mostly horizontal, and far enough to be deliberate — the same two tests wire() makes
     // for a card swipe, with the same constants, so the two gestures feel like one gesture.
     if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
-    stepSession(dx < 0 ? 1 : -1);
+    // In the stack the next conversation is the next in the STACK, not the next on the grid.
+    if (S.screen === 'stack') stackStep(dx < 0 ? 1 : -1);
+    else stepSession(dx < 0 ? 1 : -1);
   });
   return node;
 }
@@ -2104,6 +4400,16 @@ function stepSession(delta) {
 
 function chatView(card) {
   const wrap = wireSessionSwipe(el('div', { class: 'chat' }));
+  // Set HERE and not at the end: two of the returns below are early (nothing loaded yet, no
+  // messages yet), and a list the patch and keepScreen() cannot find is one they cannot fill.
+  //   ...and its scroll is watched from here for the same reason. The list drawn while the
+  // conversation loads is now the list that gets FILLED (keepScreen keeps it), so a list
+  // with no listener would never record the reader scrolling up — measured: scrolled up to
+  // 589, and the next message threw them to the end at 1408. The restore is deferred to the
+  // next frame, so the content appended below is there by the time it measures.
+  chatNode = wrap;
+  watchScroll(chatSK, wrap);
+  try { wrap.addEventListener('scroll', () => nearTop(wrap)); } catch {}
   const s = S.sess;
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
@@ -2113,7 +4419,18 @@ function chatView(card) {
     ]));
   }
   // A session opened afresh draws its history as history: forget what the last visit drew.
-  if (!s) { drawn.who = ''; wrap.setAttribute('aria-busy', 'true'); wrap.append(...skeletonChat()); return wrap; }
+  // NOT AN EMPTY LIST, AND NOT A SILENT ONE WHEN IT IS STUCK. While the first page is on its
+  // way the skeleton IS the loading state, in shape and without words (v70: the phone waits in
+  // skeletons, never in a "reading…" line). Once a read has FAILED, one line says so — why,
+  // and that it is being asked again — because a skeleton that never resolves is exactly the
+  // "it does not load until I send" this was reported as.
+  if (!s) {
+    drawn.who = ''; wrap.setAttribute('aria-busy', 'true');
+    if (chatLoad.key === chatKey() && chatLoad.tries > 0)
+      wrap.append(el('div', { class: 'loading', role: 'status', text: `could not load the conversation — ${chatLoad.why} · retrying` }));
+    wrap.append(...skeletonChat());
+    return wrap;
+  }
   // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
   // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
   // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
@@ -2123,29 +4440,19 @@ function chatView(card) {
     wrap.append(el('div', { class: 'hint empty', text: 'No messages yet — send one below' }));
     return wrap;
   }
-  // Older messages load at the TOP, where they belong in this order — the button is the
-  // ceiling of the conversation, not a footer.
+  // OLDER MESSAGES LOAD BY THEMSELVES, at the TOP, where they belong in this order: scrolling
+  // up to the ceiling of the conversation asks for the page above it (nearTop, loadOlder).
+  // What the ceiling says is the state of that, quietly: older ones on their way, the start
+  // of the conversation, or — only when a fetch failed — the old button, to ask again.
   if (s.next_before) {
-    wrap.append(el('div', { class: 'row l' }, [
-      btn(`load ${api.PAGE} older`, async () => {
-        // Hold the reader's place: a page prepended above them would otherwise throw them
-        // to the top of a conversation they were reading the middle of.
-        //   MEASURED BEFORE THE AWAIT, armed after it. A 5s poll landing mid-fetch rebuilds
-        // this list and leaves `wrap` detached, and a detached node measures a scrollHeight
-        // of 0 — which would record a distance-from-the-end of 0, and 0 from the end IS the
-        // end, the one place this must never send anybody.
-        const held = measureFromEnd('chat', wrap);
-        try {
-          const older = await api.getSession(S.project, S.session, s.next_before);
-          S.sess = { ...older, messages: [...(older.messages || []), ...(s.messages || [])],
-                     next_before: older.next_before, pages: (s.pages || 1) + 1 };
-        } catch (e) { toast(String(e.message || e), 'bad'); }
-        holdScrollFromEnd('chat', held);
-        render();
-      }),
+    const here = olderFor === chatKey();
+    if (here && olderBusy) wrap.append(el('div', { class: 'meta l older', role: 'status', text: 'loading older messages…' }));
+    else if (here && olderErr) wrap.append(el('div', { class: 'row l older' }, [
+      el('span', { class: 'meta', text: `older messages did not load — ${olderErr}` }),
+      btn(`load ${api.PAGE} older`, () => { olderErr = ''; loadOlder(); }),
     ]));
   } else if (s.total) {
-    wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
+    wrap.append(el('div', { class: 'meta l start', text: 'start of conversation' }));
   }
   for (const m of (s.messages || [])) {
     // EVENTS ARE CARDS, NOT BUBBLES. A compaction and a run of tool calls used to arrive as
@@ -2187,7 +4494,6 @@ function chatView(card) {
   // fetched, and `working` is the same verdict the grid card shows — no second signal, no
   // second endpoint, and nothing for the two to disagree about.
   if (card && card.status === 'working') wrap.append(thinking());
-  watchScroll('chat', wrap);
   return wrap;
 }
 // NOT A MESSAGE, AND DELIBERATELY NOT BUILT BY turn(). It looks like an agent bubble
@@ -2314,6 +4620,75 @@ function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_B
 // belongs to the session that picked it, not to whatever composer is on screen when its
 // bytes land — the same discipline readPane() keeps for a capture that arrives late.
 let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
+// ── a DRAFT PER SESSION, kept until it is sent ─────────────────────────────────────────
+// Typing in a chat, leaving it and coming back used to find the box empty, and so did a
+// reload or relaunching the installed app: the draft was one S.draft for the whole app,
+// and every way into a session blanked it. Now each session has its own, here.
+//   KEYED BY PROFILE, SOCKET AND SESSION. Every project has a session called `master`, so
+// a session name alone is two projects' drafts in one box; the socket is what the rest of
+// the fleet scopes a session by (CLAUDE.md: "a session's status must be scoped by its
+// fleet socket"), and the profile keeps two profiles' same-named projects apart.
+//   NOT THE OUTBOX. The outbox holds what has been SENT and not yet seen in the transcript;
+// a draft is what has not been sent at all. A failed send hands its words back to the box
+// (sendDraft), which writes them here like any other typing, so the two never hold the
+// same text twice.
+//   localStorage, mirrored from memory and wrapped like every other read here: in a
+// private window, or with site data blocked, the draft still lives for the page's life.
+//   PHOTOS stay with their draft for as long as the page lives (S.photos, keyed by
+// session, is never cleared by leaving a chat). They cannot survive a reload — a picked
+// File is not something a page can store — so the draft remembers how many it had, and a
+// reload that lost them says so above the composer instead of quietly sending less.
+const LS_DRAFTS = 'gf.drafts';
+const DRAFT_DAYS = 30;               // a draft nobody has touched in a month is let go
+const drafts = new Map();            // key -> { text, photos, at }
+const draftLost = new Map();         // key -> photos a reload dropped, until said and seen
+let draftsLoaded = false;
+export function draftKey(project = S.project, session = S.session) {
+  const p = (S.projects || []).find((x) => x && x.name === project);
+  const profile = (p && p.profile) || (S.grid && project === S.project && S.grid.profile) || '';
+  const sock = (p && p.socket) || `project:${project || ''}`;
+  return `${profile}\x1f${sock}\x1f${session || ''}`;
+}
+function loadDrafts() {
+  if (draftsLoaded) return;
+  draftsLoaded = true;
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_DRAFTS) || '{}') || {};
+    const old = Date.now() / 1000 - DRAFT_DAYS * 86400;
+    for (const [k, v] of Object.entries(o)) {
+      if (!v || typeof v.text !== 'string' || (v.at || 0) < old) continue;
+      drafts.set(k, v);
+      if (v.photos > 0) draftLost.set(k, v.photos);   // this page never had them
+    }
+  } catch {}
+}
+function persistDrafts() {
+  try { localStorage.setItem(LS_DRAFTS, JSON.stringify(Object.fromEntries(drafts))); } catch {}
+}
+export function draftGet(key = draftKey()) { loadDrafts(); const d = drafts.get(key); return d ? d.text : ''; }
+function draftPut(key, text, photos) {
+  loadDrafts();
+  if (!text && !photos) drafts.delete(key);
+  else drafts.set(key, { text: String(text || ''), photos: photos || 0, at: Math.floor(Date.now() / 1000) });
+  persistDrafts();
+}
+// The open session's draft, as the box holds it now.
+function saveDraft() { draftPut(draftKey(), S.draft || '', photosFor().length); }
+// A session's photo count changed (added, removed, sent) — wherever the screen is now.
+function savePhotosOf(project, session) {
+  const key = draftKey(project, session);
+  const here = project === S.project && session === S.session;
+  if (photosFor(photoKey(project, session)).length) draftLost.delete(key);
+  draftPut(key, here ? (S.draft || '') : draftGet(key), photosFor(photoKey(project, session)).length);
+}
+function lostPhotosHint() {
+  const key = draftKey(), n = draftLost.get(key);
+  if (!n) return null;
+  const ok = btn('ok', () => { draftLost.delete(key); draftPut(key, S.draft || '', photosFor().length); render(); });
+  return el('div', { class: 'hint lost', role: 'status' }, [
+    el('span', { text: `${n} photo${n > 1 ? 's' : ''} attached to this draft did not survive the reload — attach ${n > 1 ? 'them' : 'it'} again ` }), ok,
+  ]);
+}
 const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
 const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
 
@@ -2446,6 +4821,10 @@ export function pickInput() {
 // WHERE THE CARET WAS, taken at the tap. The box may still have focus (then it says), or
 // the tap took it (then the blur recorded it in S.caret), and with neither the photo goes
 // at the end, which is where a caret in a box nobody touched is anyway.
+//   ANOTHER MACHINE'S SESSION IS NO DIFFERENT. The home host forwards the photo to the
+// machine the session runs on and hands back THAT machine's path, which is the one the send
+// after it needs; a machine that does not answer comes back as an ordinary failed upload,
+// naming it, on the tile and in the toast like any other.
 function openPicker() {
   const box = composerNode;
   const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
@@ -2477,6 +4856,7 @@ function addPhotos(files, card, want = { project: S.project, session: S.session 
     S.photos.push(item);
     photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
   }
+  savePhotosOf(want.project, want.session);
   paintPhotos();
   // The caret back where it was, so the sentence carries on from the photo.
   if (take.length && here) focusComposerAt(at);
@@ -2502,6 +4882,8 @@ async function uploadPhoto(item, file, want, card) {
 
 function removePhoto(item) {
   S.photos = S.photos.filter((p) => p !== item);
+  const [project, session] = String(item.key).split(' ');
+  savePhotosOf(project, session);
   paintPhotos();
 }
 
@@ -2560,6 +4942,7 @@ function arrived(node, m, key) {
   const who = `${S.project} ${S.session} ${S.jarvisMode ? 'j' : ''}`;
   if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() });
   if (!key) return node;
+  node.__gfk = key;                  // what keepScreen() matches this bubble by on the next render
   if (drawn.keys.has(key)) {
     drawn.past = true;
     const mv = drawn.moving.get(key);
@@ -2750,7 +5133,7 @@ function copyText(t) {
 //   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
 // indicator, the keyboard covers the home indicator, and stacking one on the other is the
 // "too much space between the text box and the bottom" half of the same report.
-let vvTallest = 0, vvWidth = 0;
+let vvTallest = 0, vvWidth = 0, softKeyboardUp = false;
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
@@ -2763,6 +5146,7 @@ function syncViewport() {
     // keyboard takes a third of the screen. 120px is well above the former, well below the
     // latter.
     const keyboard = vvTallest - h > 120;
+    softKeyboardUp = keyboard;
     const root = document.documentElement.style;
     // A list that was showing the newest message keeps showing it as it shrinks — the
     // keyboard opening must not leave the reader looking at whatever was mid-screen.
@@ -2815,6 +5199,15 @@ function composer(card, opts = {}) {
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
   composerNode = box;      // pollPaused() compares document.activeElement against this
+  // WHOSE BOX THIS IS. With a stack on screen there are several composers and one open chat
+  // (S.project/S.session — the focused column); a box that belongs to another column must
+  // not write ITS text or caret into the focused one's draft. Its blur is the case that
+  // happens: clicking into the next column focuses that column first (stackFocus, on the
+  // pointerdown) and blurs this box after, so its caret would land in the new column.
+  // Asked only while a stack is open: one chat on screen has one box, and its owner moving
+  // under it (Jarvis learning its project) must not strand what is being typed.
+  const who = chatKey();
+  const mine = () => isLive(box) && (S.screen !== 'stack' || chatKey() === who);
   // The draft lives in state, not in the DOM: render() rebuilds this element every poll,
   // and a half-typed message must survive that. That saves the TEXT and not the caret:
   // the element the keyboard is attached to is gone, and a mobile browser lowers the
@@ -2833,9 +5226,10 @@ function composer(card, opts = {}) {
   // still reach the app's state at all, so the guard is on the property and not on the
   // trigger — which is also the only half of this a desktop engine can be made to prove.
   box.addEventListener('input', () => {
-    if (!isLive(box)) return;
+    if (!mine()) return;
     const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
+    saveDraft();
     const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : null;
     if (caret != null) S.caret = caret;
     // Every photo's place follows the edit (anchorAfterEdit).
@@ -2843,7 +5237,36 @@ function composer(card, opts = {}) {
   });
   // Where the caret was when the box let go — the camera tap is what usually takes it, and
   // that is the place the photo keeps (openPicker).
-  box.addEventListener('blur', () => { if (isLive(box) && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
+  box.addEventListener('blur', () => { if (mine() && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
+  // THE THREE KEYS THE BOX KEEPS. Everything else typed here is text; the window's key
+  // handler ignores a focused text box entirely (onKey), so `q` is a letter in a message
+  // and never a way out of the screen.
+  //   ⏎ SENDS WITH A KEYBOARD AND IS A NEW LINE ON A PHONE. With the on-screen keyboard the
+  // return key is how a second line is typed and `send` is a button under the thumb, which
+  // is how the phone has always worked and is not changed here; with a real keyboard —
+  // a desk, or an iPhone or iPad with one attached — Enter-to-send is every chat's contract
+  // and ⇧⏎ is the new line. enterSends() says which, and what it counts as evidence.
+  //   Never mid-composition: an IME's own Enter commits the characters, and sending then
+  // would ship half a word.
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); try { box.blur(); } catch {} return; }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends() && mine()) {
+      e.preventDefault();
+      sendDraft();
+    }
+  });
+  // AN IMAGE PASTED INTO THE BOX IS A PHOTO, through the picker's own path: addPhotos keys it
+  // to this session, caps it at ATTACH_PER_MESSAGE, and api.attach sends it with the same
+  // size limit to the same attach directory. It lands at the caret, like a picked one.
+  // Text on the clipboard is left to the browser; an image's file name riding along with
+  // it (a copy from Finder carries both) is not pasted as text.
+  box.addEventListener('paste', (e) => {
+    const files = imagesOf(e.clipboardData);
+    if (!files.length || !mine()) return;
+    e.preventDefault();
+    const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : String(S.draft || '').length;
+    addPhotos(files, cardOf(S.session), { project: S.project, session: S.session, caret });
+  });
   // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
   // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
   // poured back in — so a two-line message came back as one line and a clipped sliver of
@@ -2872,9 +5295,9 @@ function composer(card, opts = {}) {
   // place. One more control, the same size as the two beside it, and it is the whole of
   // conversation mode's UI besides the band above: tap once and the conversation runs itself
   // until you tap it again (see talkStart).
-  // TALK IS PART OF JARVIS — its hearing is the Mac's whisper, which exists for Jarvis — so
-  // with Jarvis switched off there is no button at all, not a button that refuses.
-  if (opts.talk && jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+  // TALK IS NOT PART OF JARVIS: its hearing is the Mac's whisper, and a session is spoken to
+  // directly. So Jarvis switched off leaves the button on every session (talkShown).
+  if (opts.talk && talkShown(S.jarvisOn, S.voice)) {
     const t = btn(S.talk ? 'stop' : 'talk', () => talkToggle(), 'talk' + (S.talk ? ' on' : ''));
     const tg = talkTarget();
     t.setAttribute('aria-label', S.talk ? 'stop conversation mode' : `talk to ${(tg && tg.label) || 'this session'}`);
@@ -2882,6 +5305,90 @@ function composer(card, opts = {}) {
   }
   kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
+}
+// ⏎ SENDS WHEN THERE IS A KEYBOARD, and a page cannot ask whether there is one. Two kinds
+// of evidence, either enough:
+//   - a fine pointer that hovers: a mouse or a trackpad, which is to say a computer;
+//   - a real keydown only a physical keyboard can send (hwKeyboard below). This is the
+//     iPhone or iPad with a keyboard attached: a touch screen, and still a keyboard.
+// With only the on-screen keyboard there is neither, and ⏎ stays the new line it has
+// always been on a phone.
+export function enterSends() { return finePointer() || hwKeyboard; }
+// A PHYSICAL KEYBOARD, PROVEN BY WHAT IT SENT. Sticky for the life of the page, and set by
+// any trusted keydown the on-screen keyboard cannot produce:
+//   - one that arrives with no text field focused — the on-screen keyboard only exists
+//     while one is, so a key from nowhere came from a real keyboard;
+//   - a key the on-screen keyboard does not have: Esc, Tab, the arrows, the F-keys, a
+//     modifier pressed on its own, or a Ctrl / ⌘ / Alt chord;
+//   - a key typed into a field while the on-screen keyboard is NOT up. syncViewport() knows
+//     that from the visual viewport: an on-screen keyboard takes a third of the screen,
+//     a connected one leaves at most a shortcut bar (the 120px threshold there).
+// Never by device, model or width — an iPad with a keyboard and an iPad without one are
+// the same device at the same width.
+let hwKeyboard = false;
+const SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
+export function noteKeyboard(e) {
+  // isTrusted TRUE, not merely "not false": only the browser's own input sets it, so a
+  // keydown a script built — or a test harness's plain object, which has no such field —
+  // is never taken for a keyboard someone attached.
+  if (hwKeyboard || !e || e.isTrusted !== true) return;
+  const t = e.target;
+  const field = !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+  if (!field || SOFTLESS_KEY.test(e.key || '') || e.ctrlKey || e.metaKey || e.altKey || !softKeyboardUp) hwKeyboard = true;
+}
+export function keyboardSeen() { return hwKeyboard; }
+// The image files a paste or a drop carries — `files` first, then the item list, which is
+// where some browsers put a screenshot copied to the clipboard.
+function imagesOf(dt) {
+  if (!dt) return [];
+  const out = [...(dt.files || [])].filter(f => f && /^image\//.test(f.type || ''));
+  if (!out.length) {
+    for (const it of dt.items || []) {
+      if (it && it.kind === 'file' && /^image\//.test(it.type || '')) { const f = it.getAsFile(); if (f) out.push(f); }
+    }
+  }
+  return out;
+}
+const carriesFiles = (dt) => !!dt && [...(dt.types || [])].includes('Files');
+// AN IMAGE DROPPED ON THE CONVERSATION — the chat, the pane or the composer, which is all of
+// #app when a session is open (two panes or one). Same path as the paste above.
+//   The WINDOW refuses every file drop it does not take, because a browser's default for a
+//   dropped file is to navigate to it: one image dropped a few pixels into the list would
+//   replace the whole app with a picture and throw the draft away.
+function wireDrop() {
+  const app = document.getElementById('app');
+  const here = () => chatScreen() && !S.locked && !S.sheet;
+  try {
+    addEventListener('dragover', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
+    addEventListener('drop', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
+    app.addEventListener('dragover', (e) => {
+      if (!carriesFiles(e.dataTransfer) || !here()) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'copy'; } catch {}
+      app.classList.add('drop-on');
+    });
+    app.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !app.contains(e.relatedTarget)) app.classList.remove('drop-on'); });
+    app.addEventListener('drop', (e) => {
+      app.classList.remove('drop-on');
+      if (!carriesFiles(e.dataTransfer) || !here()) return;
+      e.preventDefault();
+      const files = imagesOf(e.dataTransfer);
+      // DRAWN NOW, not when the typing stops: a drop is the mouse, not the keyboard, and on a
+      // desk the box usually holds the focus (a chat opens focused there) — waiting for it to
+      // blur would leave the refusal unsaid. The focus goes back where it was.
+      if (!files.length) {
+        const had = typingNow(), at = isLive(composerNode) && Number.isInteger(composerNode.selectionStart) ? composerNode.selectionStart : null;
+        toast('only images attach — the same as the photo picker', 'bad');
+        render();
+        if (had) focusComposerAt(at);
+        return;
+      }
+      const box = composerNode;
+      const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
+        ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
+      addPhotos(files, cardOf(S.session), { project: S.project, session: S.session, caret });
+    });
+  } catch {}
 }
 async function sendDraft() {
   const mine = photosFor();
@@ -2908,17 +5415,29 @@ async function sendDraft() {
   // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
   // as whatever synced them last. Counting occurrences needs no clock at all.
   const item = outboxAdd(text, S.project, S.session, { typed, photos: mine });
+  // THE BOX EMPTIES NOW; THE DRAFT IS KEPT UNTIL THE SEND IS KNOWN TO HAVE GONE. A reload,
+  // a relaunch or a dropped connection in between must find the words still there, so the
+  // stored draft is only cleared on success — and only if it still holds what was sent:
+  // anything typed while the send was in flight is a new draft and stays.
+  const key = draftKey(item.project, item.session);
   S.draft = ''; S.caret = null;
-  scrollMem.delete('chat');          // a message you just sent belongs on screen
+  scrollMem.delete(chatSK);          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
-  if (r) { outboxAcked(item, r); renderUnlessTyping(); return; }
+  if (r) {
+    if (draftGet(key) === typed) draftPut(key, '', photosFor(photoKey(item.project, item.session)).length);
+    // Came back to this chat mid-send: the box was refilled from the stored draft, which
+    // has just been sent.
+    if (S.project === item.project && S.session === item.session && S.draft === typed) { S.draft = ''; render(); }
+    outboxAcked(item, r); renderUnlessTyping(); return;
+  }
   outboxDrop(item);                              // doVerb already said why
   // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
   // daemon answers a send fleet-send could not deliver with ok:false, so this is the path
   // that runs when the mod refuses a prompt.
   if (mine.length) S.photos = [...mine, ...S.photos];
-  if (!S.draft) S.draft = typed;
+  if (S.project === item.project && S.session === item.session) { if (!S.draft) S.draft = typed; saveDraft(); }
+  else savePhotosOf(item.project, item.session);
   render();
 }
 // ── the outbox ────────────────────────────────────────────────────────────
@@ -3101,6 +5620,7 @@ export async function editOutbox(row, node) {
   }
   if (photos.length) adoptPhotos(photos, photoKey(), S.draft ? back.length + 1 : 0);
   S.draft = S.draft ? `${back}\n${S.draft}` : back;
+  saveDraft();
   const box = composerNode;
   if (isLive(box) && document.activeElement === box) {
     box.value = S.draft;
@@ -3152,15 +5672,18 @@ function focusComposerAt(pos = null) {
 //   THE GESTURES COME WITH IT. They were a permanent three-line band saying what a swipe
 // and a long-press do; here they are one line at the bottom of the sheet you open when you
 // want to know what you can do, which is the moment they are worth reading.
-function sheetMore(title, sub, verbs, hint) {
+// `note`: one line of its own above the hint — what a missing row would otherwise leave
+// unexplained (another machine's project has no terminal, and says so).
+function sheetMore(title, sub, verbs, hint, note = '') {
   const go = (fn) => () => { closeSheet(); fn(); };
   const rows = (verbs || [])
     .filter(v => v.cls !== 'off')
     .map(v => btn(v.label, go(v.onClick), v.cls || ''));
   openSheet(sheet(title, sub, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
+    note ? el('p', { class: 'gest term-why', text: note }) : null,
     hint ? el('p', { class: 'gest', text: hint }) : null,
-    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
   ].filter(Boolean)), false);
 }
 
@@ -3184,6 +5707,10 @@ function sheetActions(name = S.session) {
       : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
     btn('s sched', go(() => sheetSchedule(name))),
     btn('l label', go(() => sheetLabel(name))),
+    // The PROJECT's terminal, not this worker's worktree: one shell per project is what the
+    // passkey and the per-device switch are guarding, and it is the tab the grid shows.
+    isRemote(S.project) ? null : btn('terminal', go(() => openTerminal())),
+    isRemote(S.project) ? null : btn('editor', go(() => openEditor())),
     lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
     lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
@@ -3194,7 +5721,8 @@ function sheetActions(name = S.session) {
   openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself. Interrupting its turn is fine: it stays on" }) : null,
-    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    isRemote(S.project) ? el('p', { class: 'gest term-why', text: TERM_REMOTE }) : null,
+    el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
   ].filter(Boolean)), false);
 }
 
@@ -3238,7 +5766,7 @@ const PFS_DEFAULT = 11;         // px: small, and still readable on a phone held
 const PFS_MIN = 6, PFS_MAX = 28;
 const PANE_HISTORY = 200;       // rows of scrollback the `history` toggle asks for
 
-let paneBoxNode = null, paneNode = null, paneGeomNode = null;
+let paneBoxNode = null, paneNode = null, paneGeomNode = null, chatNode = null;
 
 // ── where the reader had scrolled to ────────────────────────────────────────
 // KEPT OUTSIDE THE NODES, BECAUSE THE NODES DO NOT SURVIVE. refresh()'s 5s poll ends in
@@ -3272,10 +5800,17 @@ const SCROLLERS = {
   projects: { end: false, slack: 24 },
   grid:     { end: false, slack: 24 },
 };
+// A STACKED COLUMN IS A CHAT OF ITS OWN, and it scrolls on its own: `chat:<project><US><session>`
+// is a chat's rules under that column's own memory, so wheeling one column records nothing
+// about the column beside it (see "the stack").
+const scrollerOf = (key) => SCROLLERS[key] || SCROLLERS[String(key || '').split(':')[0]];
+// The memory the chat being drawn writes to: the one chat of the session screen, or the
+// stacked column swapped in (withCol).
+let chatSK = 'chat';
 const numOf = v => Number(v) || 0;
 
 function rememberScroll(key, box) {
-  const s = SCROLLERS[key]; if (!s || !box) return;
+  const s = scrollerOf(key); if (!s || !box) return;
   const h = numOf(box.scrollHeight), top = numOf(box.scrollTop), ch = numOf(box.clientHeight);
   // A NODE THAT IS NOT IN THE DOCUMENT MEASURES ZERO, AND ZERO READS AS "AT THE END".
   // Measured in Chrome 151: tear a box that was scrolled to 400 out of the page and it
@@ -3379,8 +5914,11 @@ function reapplyScroll(key, box, want, left, n) {
 }
 
 function restoreScroll(key, box, prepare) {
-  const s = SCROLLERS[key]; if (!s || !box) return;
+  const s = scrollerOf(key); if (!s || !box) return;
   const go = () => {
+    // A list built and then not used (keepScreen kept the one on screen) is detached by the
+    // time this runs, and writing its 0 back would overwrite where the reader really is.
+    if (box.isConnected === false) return;
     try {
       if (prepare) prepare(box);
       const m = scrollMem.get(key);
@@ -3492,7 +6030,7 @@ export function gridColsFrom(tracks) {
 }
 function gridCols() {
   try {
-    const list = document.querySelector('#app .cards');
+    const list = document.querySelector('#app .cards, #side .cards');
     if (!list) return 1;
     return gridColsFrom(getComputedStyle(list).gridTemplateColumns);
   } catch { return 1; }
@@ -3803,6 +6341,13 @@ let composerNode = null;
 
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
 let paneTimer = null, paneTimerMs = 0, paneBusy = false;
+// The chat's poll, declared here for the same reason (see "the chat's own poll" below).
+const CHAT_POLL_LIVE_MS = 2000, CHAT_POLL_IDLE_MS = 5000, CHAT_SUPERSEDE_MS = 3000;
+const CHAT_FIRST_GIVEUP_MS = 8000, CHAT_GIVEUP_MS = 30000, CHAT_RETRY_MAX_MS = 15000;
+let chatTimer = null, chatDue = 0, chatRead = null, chatErr = '', hiddenAt = 0;
+let chatLoad = { key: '', tries: 0, why: '' };   // the first page of the open chat, until it lands
+const OLDER_NEAR_PX = 240;
+let olderFor = '', olderBusy = false, olderErr = '';   // the older-page fetch of chat `olderFor`
 
 const panePeriod = () => (S.pscroll ? PANE_POLL_HISTORY_MS : PANE_POLL_MS);
 // Paused for a sheet or a confirmation for the same reason refresh() is: those are forms
@@ -3868,17 +6413,283 @@ function paintPane() {
   if (paneGeomNode) paneGeomNode.textContent = `${r.cols}×${r.rows}`;
 }
 
-// ── back, and why there are no URLs ─────────────────────────────────────────
+// ── older messages, by scrolling up ─────────────────────────────────────────
+// "Today the conversation needs a 'load more' press." Now the reader scrolling to within
+// OLDER_NEAR_PX of the top is the press: the page above is fetched, prepended, and the message
+// they were looking at stays exactly where it was on screen. One fetch at a time; none once
+// fleet-read says there is nothing before (next_before null), which is drawn as the start of
+// the conversation; and after a failure none until the button drawn in its place is pressed,
+// because retrying on every scroll event would be a retry loop at the speed of a thumb.
+//   ANCHORED ON THE MESSAGE, NOT ON THE DISTANCE FROM THE END. The button held "how far from
+// the bottom", which is the same thing only while nothing arrives at the bottom — and the
+// chat's poll now runs during the fetch, so a reply landing below would have moved the reader
+// by its height. Where the DOM can measure (getBoundingClientRect with a top), the topmost
+// message on screen is the anchor and the list is shifted by exactly how far it moved; where
+// it cannot, the old distance-from-end hold is the fallback. Either way the reader's place is
+// written back through rememberScroll, so the poll's own restore keeps it rather than undoing it.
+function nearTop(box) {
+  if (box.isConnected === false || olderBusy || (olderErr && olderFor === chatKey())) return;
+  // A stacked column that is not focused is drawn, not open: its older page waits for a click.
+  if (S.screen === 'stack' && box !== chatNode) return;
+  const s = S.sess;
+  if (!s || !s.next_before || s.of !== chatKey()) return;
+  if (!(numOf(box.scrollHeight) > numOf(box.clientHeight)) || numOf(box.scrollTop) > OLDER_NEAR_PX) return;
+  loadOlder();
+}
+function anchorOf(box) {
+  try {
+    const top = box.getBoundingClientRect().top;
+    if (typeof top !== 'number') return null;
+    for (const n of Array.from(box.childNodes)) {
+      const r = n.getBoundingClientRect && n.getBoundingClientRect();
+      if (n.__gfk && r && typeof r.top === 'number' && r.bottom > top) return { node: n, top: r.top };
+    }
+  } catch {}
+  return null;
+}
+async function loadOlder() {
+  const s = S.sess, key = chatKey();
+  if (!s || !s.next_before || olderBusy || s.of !== key) return;
+  const live = isLive(chatNode) ? chatNode : null;
+  const want = { project: S.project, session: S.session };
+  olderFor = key; olderBusy = true; olderErr = '';
+  // MEASURED BEFORE THE AWAIT, armed after it — a poll landing mid-fetch must not spend it.
+  const held = live ? measureFromEnd(chatSK, live) : null;
+  const anchor = live ? anchorOf(live) : null;
+  paintChat();
+  holdAnchor(anchor);                       // the "loading older" line went in above it
+  let landed = false;
+  try {
+    const older = await api.getSession(want.project, want.session, s.next_before);
+    // Another session by now: these are its older messages, not this one's.
+    if (S.project !== want.project || S.session !== want.session) return;
+    // ...and the poll may have landed while this was in flight. The older page goes under
+    // what was on screen when it was asked for, and whatever is on screen NOW goes back on
+    // top — rebuilding from `s` alone dropped a reply that arrived meanwhile.
+    const cur = S.sess && S.sess.of === key ? S.sess : s;
+    const base = { ...cur, messages: [...(older.messages || []), ...(s.messages || [])],
+                   next_before: older.next_before, pages: (s.pages || 1) + 1 };
+    S.sess = mergeNewest(base, cur);
+    if (held != null) holdScrollFromEnd(chatSK, held);
+    landed = true;
+  } catch (e) {
+    if (e instanceof api.AuthError) { olderBusy = false; lock(); return; }
+    olderErr = String((e && e.message) || e);
+  } finally { if (olderFor === key) olderBusy = false; }
+  paintChat();
+  holdAnchor(anchor);
+}
+// The anchor, where it can be measured: the same element (keepScreen kept it) moved down by
+// exactly the height of what was put above it, so the list moves down by the same amount.
+function holdAnchor(anchor) {
+  const box = isLive(chatNode) ? chatNode : null;
+  if (!box || !anchor || !isLive(anchor.node) || anchor.node.parentNode !== box) return;
+  const d = anchor.node.getBoundingClientRect().top - anchor.top;
+  if (d) box.scrollTop = numOf(box.scrollTop) + d;
+  rememberScroll(chatSK, box);             // the reader's place now, which supersedes the hold
+}
+
+// ── the chat's own poll ───────────────────────────────────────────────────
+// AN OPEN CHAT CONVERGES TO THE TRANSCRIPT WITHOUT BEING REOPENED, and this is the one place
+// that makes it so. Reported as "the reply is not there until I leave the chat and open it
+// again", and there was more than one way to get there:
+//   · TYPING STOPPED IT. The 5 s poll is held while the composer has focus, because a
+//     render() under the keyboard closes it (pollPaused) — and the transcript was read only
+//     by that poll, so a reply waited for the owner to stop typing their next message.
+//   · OVERLAP. Nothing stopped a second read starting while the first was still out, and
+//     whichever answered LAST was drawn. A read asked before the reply was written, and slow
+//     to answer, put the screen back to how it was before the reply: there, then gone.
+//   · "LOAD MORE" FROZE IT for good (see refresh()).
+// So the transcript has a poll of its own, beside the pane's, and it is not held by typing or
+// by an open sheet: what it brings back is drawn into the chat list alone (patchChat), which
+// leaves the composer, its focus and its keyboard where they were. One read at a time; a read
+// that answers after a newer one has landed is dropped by its sequence number; a resume, a
+// pageshow or a focus asks again at once; and it never stops while the chat is on screen —
+// every 2 s while an answer is owed, every 5 s while the session is idle, so a reply that
+// lands long after anyone was expecting it still appears.
+//   Conditional, too: the daemon tags each page (ETag) and a page that has not changed comes
+// back as a bodyless 304, so a poll of an idle session costs the tunnel almost nothing.
+// THE SCREENS WITH AN OPEN CHAT: the session screen, and the stack, whose focused column is one.
+const chatScreen = () => S.screen === 'session' || (S.screen === 'stack' && !!stackActiveKey);
+const chatPollWanted = () =>
+  !document.hidden && !S.locked && chatScreen() && S.view === 'chat' && !!S.session;
+const chatKey = () => `${S.project}\x1f${S.session}`;
+// LIVE while there is something to wait for: a message of ours the transcript has not shown,
+// a session that is working, or conversation mode owed an answer. Idle otherwise.
+function chatPeriod() {
+  // NOTHING ON SCREEN YET: the first page is retried on its own clock, quickly at first and
+  // backing off — 1, 2, 4, 8, then every 15 s — and never stops while the chat is open.
+  if (!chatHas()) return Math.min(1000 * 2 ** Math.max(0, chatLoad.tries - 1), CHAT_RETRY_MAX_MS);
+  const c = cardOf(S.session);
+  const live = S.outbox.some(outHere) || (c && (c.status === 'working' || c.status === 'starting'))
+            || (S.talk && S.talk.phase === 'waiting');
+  return live ? CHAT_POLL_LIVE_MS : CHAT_POLL_IDLE_MS;
+}
+function stopChatPoll() { if (chatTimer) { clearTimeout(chatTimer); chatTimer = null; chatDue = 0; } }
+// A chain of timeouts rather than an interval, so the next read is timed from the end of the
+// last one — a read slower than the period can never have another started behind it — and
+// so a hold from the daemon (Retry-After) moves the next read rather than being met by it.
+function armChatPoll(ms = chatPeriod()) {
+  stopChatPoll();
+  if (!chatPollWanted()) return;
+  const wait = Math.max(ms, api.heldFor());
+  chatDue = Date.now() + wait;
+  chatTimer = setTimeout(() => {
+    chatTimer = null; chatDue = 0;
+    if (!chatPollWanted()) return;
+    // Re-armed NOW, not when the read settles: a read that never answers would otherwise be
+    // the last thing this timer ever did. A tick that finds a read still out joins it (no
+    // second request), and the one that finds it out too long gives up on it (readChat).
+    readChat();
+    armChatPoll();
+  }, wait);
+}
+// Idempotent, and called from render() like syncPanePoll(). It also brings a waiting read
+// FORWARD when the cadence has just become live — a message sent while the idle timer was
+// set should not wait out the idle period.
+//   Armed even while a read is out: the tick then joins that read instead of starting one,
+// and re-arms when it lands — so there is never a moment with nothing scheduled.
+function syncChatPoll() {
+  if (!chatPollWanted()) return stopChatPoll();
+  const period = chatPeriod();
+  if (chatTimer && chatDue <= Date.now() + period) return;
+  armChatPoll(period);
+}
+// Read the newest page. Joins a read already out for the same chat, unless `fresh` and that
+// read is one not worth waiting for: started before the app last went to the background (it
+// carries what the transcript held then, if its socket survived at all), or out longer than
+// CHAT_SUPERSEDE_MS. Then it is dropped and a new one asked — the drop is an abort, and the
+// sequence check in chatLanded() is what makes it safe if the old one answers anyway.
+//   Never throws: a locked token locks, a hold waits, anything else is said once.
+//   And a read that has not answered at all is given up on — CHAT_FIRST_GIVEUP_MS while the
+// chat is still empty, CHAT_GIVEUP_MS after — and asked again, so a socket that died under
+// it (an iOS resume does that) cannot hold the chat, and every refresh() waiting on it,
+// forever. Asking again costs the Mac nothing: the daemon joins a second ask for the same
+// page to the read already running (fleet-serve, sessionMessages).
+const chatHas = () => !!(S.sess && S.sess.of === chatKey());
+function chatFailed(why) {
+  if (chatHas()) return false;
+  chatLoad.tries++; chatLoad.why = why;
+  paintChat();
+  return true;
+}
+function readChat({ fresh = false } = {}) {
+  const key = chatKey();
+  if (chatLoad.key !== key) chatLoad = { key, tries: 0, why: '' };
+  if (chatRead && chatRead.key === key) {
+    const age = Date.now() - chatRead.at;
+    const stale = chatRead.at < hiddenAt || age > CHAT_SUPERSEDE_MS;
+    const dead = age > (chatHas() ? CHAT_GIVEUP_MS : CHAT_FIRST_GIVEUP_MS);
+    if (!dead && (!fresh || !stale)) return chatRead.p;
+    if (dead) chatFailed('the Mac has not answered yet');
+  }
+  if (chatRead && chatRead.ctl) { try { chatRead.ctl.abort(); } catch {} }
+  const want = { project: S.project, session: S.session, key };
+  const cur = S.sess && S.sess.of === key ? S.sess : null;
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const me = { key, seq: ++sessSeq, ctl, at: Date.now(), p: null };
+  chatRead = me;
+  me.p = (async () => {
+    try {
+      const r = await api.getSession(want.project, want.session, null,
+        { etag: (cur && cur.etag) || '', signal: ctl ? ctl.signal : undefined });
+      return chatLanded(want, me.seq, r);
+    } catch (e) {
+      if (ctl && ctl.signal.aborted) return false;          // we let it go
+      if (e instanceof api.AuthError) { lock(); return false; }
+      // Before the first page, every failure is said IN the chat, where the conversation
+      // should be, and the poll retries it (chatPeriod). After it, a hold or a dropped
+      // connection is refresh()'s to say, and anything else is said once.
+      if (e instanceof api.RateLimitedError) { chatFailed('the Mac asked this device to slow down'); return false; }
+      if (e instanceof api.OfflineError) { chatFailed('the Mac is not answering'); return false; }
+      const msg = String((e && e.message) || e);
+      if (chatFailed(msg)) return false;
+      if (msg !== chatErr) { chatErr = msg; toast(msg, 'bad'); paintChat(); }
+      return false;
+    } finally { if (chatRead === me) chatRead = null; }
+  })();
+  return me.p;
+}
+// Where a page lands, and the three ways it is turned away: the screen is somewhere else now;
+// a read started AFTER this one has already been drawn; or it is a 304, which changes nothing
+// but does count as a snapshot taken now (reconcileOutbox reads S.sess.seq for that).
+function chatLanded(want, seq, r) {
+  if (!chatScreen() || S.project !== want.project || S.session !== want.session) return false;
+  const cur = S.sess && S.sess.of === want.key ? S.sess : null;
+  if (cur && (cur.seq || 0) > seq) return false;
+  chatErr = ''; chatLoad = { key: want.key, tries: 0, why: '' };
+  const before = outboxSig();
+  if (r && r.notModified) {
+    if (!cur) return false;
+    cur.seq = seq;
+    afterChat(outboxSig() !== before);
+    return false;
+  }
+  S.sess = { ...mergeNewest(cur, r), of: want.key, seq };
+  afterChat(true);
+  return true;
+}
+const outboxSig = () => S.outbox.map(o => `${o.id}:${o.state}`).join(',');
+function afterChat(changed) {
+  const before = outboxSig();
+  reconcileOutbox();
+  talkAfterRefresh();
+  if (changed || outboxSig() !== before) paintChat();
+}
+// THE NEWEST PAGE, ON TOP OF WHATEVER WAS PAGED IN ABOVE IT. Joined where the new page's first
+// message sits in what is already held; everything before that point is the reader's paged-in
+// history and is kept. No overlap means more arrived than a page holds, and then the newest
+// page alone is the truth — a gap drawn as if it were continuous would be worse.
+const pageKey = (m) => `${m && m.role}|${m && m.ts}|${String((m && m.text) || '').slice(0, 200)}`;
+export function mergeNewest(cur, fresh) {
+  const ms = (fresh && fresh.messages) || [];
+  if (!cur || (cur.pages || 1) <= 1 || !ms.length) return { ...fresh, pages: 1 };
+  const old = cur.messages || [], k = pageKey(ms[0]);
+  let at = -1;
+  for (let i = old.length - 1; i >= 0; i--) if (pageKey(old[i]) === k) { at = i; break; }
+  if (at < 0) return { ...fresh, pages: 1 };
+  return { ...fresh, messages: [...old.slice(0, at), ...ms], next_before: cur.next_before, pages: cur.pages };
+}
+// Drawn as a whole screen when nothing is in the way, and as the chat list alone when the
+// owner is typing or has a sheet open — the render those would lose is deferred, as
+// renderUnlessTyping() defers it, and spent by the next poll that may.
+function paintChat() {
+  if (!chatScreen()) return;
+  if (!pollPaused()) { render(); return; }
+  renderDeferred = true;
+  patchChat();
+}
+function patchChat() {
+  if (S.screen === 'stack') { const c = stackActive(); if (c) patchCol(c); return; }
+  const live = chatNode, box = composerNode;
+  if (S.view !== 'chat' || !isLive(live) || !live.parentNode) return;
+  const built = chatView(cardOf(S.session));   // re-points chatNode at the list it built
+  if (!canCompare(live)) { try { live.parentNode.replaceChild(built, live); } catch { chatNode = live; } return; }
+  chatNode = live; composerNode = box;
+  syncChat(live, built);
+}
+// Coming back: a resume, a page restored from the back-forward cache, or the window taking
+// focus. Asked at once, and the timer re-armed from now.
+function resumeChat(fresh) {
+  if (!chatPollWanted()) return;
+  readChat({ fresh }).finally(() => armChatPoll());
+}
+
+// ── back, and what the address is for ───────────────────────────────────────
 // "if I go back it takes me to the last page I was, not back." An installed PWA gets the
 // system back gesture, and this app had nothing on the history stack — so back left the
 // app entirely (or returned to whatever page the tab held before it), skipping every
 // screen you had actually walked through.
 //
-// The fix is history ENTRIES WITHOUT A URL. pushState is called with the CURRENT href, so
-// the stack gains a step the gesture can pop while the address never changes: no routes to
-// invent, nothing to parse on a cold open, no way for a stale link to name a session that
-// is gone. In standalone mode there is no address bar to show a URL anyway; what the user
-// asked for and what the platform wants are the same thing here.
+// The fix is history entries that carry a DEPTH, not a route: the stack gains a step the
+// gesture can pop, and popTo() decides where that step goes from the app's own state. No
+// URL is read on the way back — a stale address in an old entry cannot send it anywhere.
+//
+// THE ADDRESS IS WRITTEN, AND READ ONCE. It names the place (web/place.js) so a reload or a
+// link lands there and each tab keeps its own; it is read at boot (restore) and never again.
+// Writing it never changes how deep the history is: pushNav() pushes exactly where it always
+// did, now with the new place as that entry's address, and everything else — a tab, the
+// pane/chat switch, a pop landing — REPLACES the current entry's (syncUrl, from render()).
 //
 // ONE DIRECTION OF TRUTH: going deeper pushes, and every backward move goes through
 // popstate. The app's own `‹`/`q` calls history.back() rather than changing the screen
@@ -3886,20 +6697,130 @@ function paintPane() {
 let navDepth = 0;
 function pushNav() {
   navDepth++;
-  try { history.pushState({ gf: navDepth }, '', location.href); } catch {}
+  try { history.pushState({ gf: navDepth }, '', S.locked ? location.href : placeHref()); } catch {}
 }
+// The place on screen, for the address. The terminal is not a place a URL may name (a
+// passkey at every open), so it is written as where back from it goes.
+function placeOf() {
+  if (S.screen === 'term') {
+    const b = S.termBack || { screen: 'grid' };
+    const scr = b.screen === 'session' && b.session ? 'session' : b.screen === 'projects' ? 'projects' : 'grid';
+    return { screen: scr, project: S.project, session: b.session, sub: b.sub || '', view: b.view, entry: b.entry, profile: profileForUrl() };
+  }
+  return { screen: S.screen, project: S.project, session: S.session, sub: S.sub, view: S.view,
+           profile: profileForUrl(), entry: S.entry, jarvisMode: S.jarvisMode, rv: S.rv };
+}
+// A tab the link named and nothing has ruled on yet (tabWant) stays in the address, or a
+// reload before the first projects read would forget it.
+function profileForUrl() { return S.profile === PROFILE_ALL && tabWant ? tabWant : S.profile; }
+function placeHref() { return (location.pathname || '') + PL.toQuery(placeOf()) + (location.hash || ''); }
+// The current entry's address brought into line with the screen, without a new entry. Only
+// when it differs — render() runs on every poll, and WebKit refuses a page that replaces its
+// state a hundred times in ten seconds. Never under the lock: the address there is the
+// place the unlock will land on, and the lock screen is not a place. Never while a pop of
+// setDepth's is on the way, either: the screen has already changed and the entry has not, so
+// a replaceState then writes the place being landed on into the entry being LEFT: go forward
+// to that session and reload, and it opens Projects. The popstate that lands
+// the pop syncs instead, onto the entry that is now current.
+function syncUrl() {
+  if (S.locked || navSkip || typeof history === 'undefined' || typeof history.replaceState !== 'function') return;
+  const want = PL.toQuery(placeOf());
+  if (location.search === want) return;
+  try { history.replaceState(history.state, '', placeHref()); } catch {}
+}
+// MOVE TO A DEPTH WITHOUT WALKING IT. The desk's keys jump across the stack — Ctrl-p from
+// a session, Ctrl-s from a master, Ctrl-f from anywhere — so the screen is changed by the
+// caller and the history is only brought into line: deeper pushes, shallower pops in one
+// go. That pop fires popstate, and popTo() must not ALSO move the screen it answers to,
+// so it is counted out here and skipped there.
+let navSkip = 0;
+function setDepth(d) {
+  if (navDepth > d) {
+    // never past the first entry that is not this page's: see ownBelow
+    const n = Math.min(navDepth - d, ownBelow());
+    navDepth = d;
+    if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
+      navSkip++;
+      try { history.go(-n); } catch { navSkip--; }
+    }
+  } else while (navDepth < d) pushNav();
+}
+// HOW MANY OF THE ENTRIES BELOW THIS ONE ARE THIS PAGE'S. navDepth counts the entries this page
+// pushed above its own, and the browser may have thrown some away: a tab's history is capped
+// (50 in Chrome), and a full one prunes the oldest entry the user could not have meant to
+// keep — one its page pushed past without a gesture — before the oldest entry. That is often
+// the app's own root. Then go(-navDepth) is counted correctly and lands one entry too far, on
+// the page the tab held before, which loads (or comes back from the cache) where Projects was
+// asked for. Measured: a desk tab fifty entries deep, root gone, Ctrl-p from a master went to
+// the grid of an earlier page instead. The pruned entries cannot be put back, so the oldest
+// entry of this page that is left becomes the root, and the next back leaves the app as it
+// should. No Navigation API, no way to ask: the count stands.
+function ownBelow() {
+  const nav = typeof navigation !== 'undefined' ? navigation : null;
+  const cur = nav && nav.currentEntry;
+  if (!cur || typeof nav.entries !== 'function') return Infinity;
+  const es = nav.entries();
+  let k = 0;
+  for (let i = cur.index - 1; i >= 0 && es[i] && es[i].sameDocument; i--) k++;
+  return k;
+}
+// ...and what has to wait for that pop to land: a push made before it would be pushed above
+// the entries it is about to remove. The timer is for a pop that never answers (a history the
+// platform clamped), which must not hold the caller forever.
+let navWaiters = [];
+function afterNav(fn) {
+  if (!navSkip) { fn(); return; }
+  navWaiters.push(fn);
+  setTimeout(navSettled, 600);
+}
+function navSettled() { const w = navWaiters; navWaiters = []; for (const f of w) { try { f(); } catch {} } }
 // The actual screen change. Called ONLY by popstate (and by the pop-less fallbacks below,
 // for a browser that gave us no history object at all).
 function popTo() {
-  if (S.sheet) { closeSheet(); return; }
+  if (S.sheet) { dismissSheet(); return; }
   if (S.confirm) { cancel(); return; }
+  // THE STACK: a picker opened from the stack goes back to it, and a session opened from a
+  // column (its pane) goes back to the column; otherwise out to where the stack was opened from.
+  if (S.screen === 'stackpick' && S.pickBack === 'stack' && S.stackSel.length) {
+    S.screen = 'stack'; S.pick = null; S.pickBack = ''; stackActiveKey = ''; stackFocus(S.stackAt, { draw: false });
+  }
+  else if (S.screen === 'session' && S.fromStack && S.stackSel.length) {
+    talkStop(''); stopSpeaking(); S.fromStack = false; S.pane = null; S.paneErr = '';
+    S.screen = 'stack'; stackActiveKey = ''; stackFocus(S.stackAt, { draw: false });
+  }
+  else if (S.screen === 'stackpick' || S.screen === 'stack') leaveStack();
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
-  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  else if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  // A master entered the desk's way is one level under Projects, like Jarvis — and so is a
+  // session opened from the Projects search, which comes back to that search as it was left.
+  else if (S.screen === 'session' && S.entry === 'projects') {
+    talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking();
+    const f = S.foundBack;
+    S.foundBack = null;
+    if (f) { S.srch = { q: f.q, typing: false }; S.sel = f.sel; }
+  }
   else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  // Back from the terminal is wherever it was opened from — the grid, or the session whose
+  // ⋯ (or Ctrl-a t) opened it.
+  else if (S.screen === 'term') {
+    const b = S.termBack || { screen: 'grid' };
+    disposeTerm();
+    S.screen = b.screen === 'session' && b.session ? 'session' : b.screen === 'projects' ? 'projects' : 'grid';
+    S.session = S.screen === 'session' ? b.session : null; S.view = b.view || DEFAULT_VIEW; S.entry = b.entry || ''; S.sub = b.sub || '';
+    S.sess = null; S.pane = null; S.paneErr = ''; S.termBack = null;
+  }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
-  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
-  else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
+  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; S.srch = null; }
+  else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; S.srch = null; }
+  else if (S.screen === 'queue') S.screen = 'projects';
+  // A run goes back to the list it was opened from, its verdict saved on the way out rather
+  // than left on a timer that would fire after the screen it belongs to has gone.
+  else if (S.screen === 'review') { rvFlushNow(); S.screen = 'reviews'; S.rv = null; S.rvRun = null; S.rvErr = ''; S.rvSave = ''; }
+  else if (S.screen === 'reviews') S.screen = 'projects';
+  // The editor is one level under the list, and the list one under Projects.
+  else if (S.screen === 'automations' && S.autosEdit) S.autosEdit = null;
+  else if (S.screen === 'automations') { S.screen = 'projects'; S.autos = null; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
@@ -3908,7 +6829,7 @@ function back() {
   // Ask the platform to pop, so a tap and a swipe take the identical path. With no entry
   // of ours on the stack (or no history at all) there is nothing to pop, so move directly
   // rather than doing nothing — a back button that silently fails is worse than no gesture.
-  if (navDepth > 0 && typeof history !== 'undefined' && typeof history.back === 'function') history.back();
+  if (navDepth > 0 && ownBelow() > 0 && typeof history !== 'undefined' && typeof history.back === 'function') history.back();
   else popTo();
 }
 
@@ -4026,8 +6947,10 @@ function cardEl(m, h, idx) {
   } else if (m.exited) {
     d.append(el('div', { class: 'c-msg none', text: 'the agent exited — open it and press enter to resume this conversation' }));
   } else if (m.msg || m.placeholder) {
-    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
+    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none') + (m.one ? ' one' : ''), text: m.msg || m.placeholder }));
   }
+  // A waiting item's second row: what its master said it needs (waitingModel).
+  if (m.need) d.append(el('div', { class: 'c-need', text: m.need }));
   // THE GRIP IS STILL EXACTLY ONE LINE, and it is now the title row rather than the top
   // border. `.c-top` carries `touch-action: none` in app.css so a drag that starts there
   // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
@@ -4050,23 +6973,42 @@ function cardEl(m, h, idx) {
 // The grip is why reorder does not fight the page scroll: only that one line sets
 // touch-action:none, so a vertical drag anywhere else on the card still scrolls.
 const LONG_PRESS = 600, MOVE_SLOP = 10, SWIPE = 60;
+// ── a GESTURE IS A FINGER'S ───────────────────────────────────────────────────────────
+// Every gesture below — long-press, the two swipes, the drag by the title, and the chat's
+// swipe to the next session — exists because a phone has no keys. On a desk they misfire:
+// a mouse held still for 600ms is not a decision to kill, and a drag to select text across
+// a card is not a request to pause it. So a mouse or a pen gets the plain click and the
+// keys (web/README.md, "On a desk"), and a finger gets everything it always had.
+//   ASKED OF THE EVENT, NOT THE WINDOW. pointerType says what is pressing right now — a
+// laptop with a touch screen gets gestures from the finger and none from its trackpad, in
+// the same session at the same width. Only an event that names no type at all (one built
+// by a script) falls back to the screen's primary pointer.
+const finePointer = () => { try { return !!matchMedia('(hover: hover) and (pointer: fine)').matches; } catch { return false; } };
+export function touchGesture(ev) {
+  const t = ev && ev.pointerType;
+  if (t === 'touch') return true;
+  if (t === 'mouse' || t === 'pen') return false;
+  return !finePointer();
+}
 function wire(node, h, idx) {
   // `travelled` is NOT derivable from the pointerup position, and that is the whole reason
   // this variable exists: a finger that went down, moved 40px and came back to where it
   // started reports dx = dy = 0 at the end, exactly like one that never moved. They are
   // different gestures — the second is a tap, the first is a drag the reader thought
   // better of — and only a flag set DURING the move can tell them apart.
-  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false;
+  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false, finger = true;
   const clear = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', ev => {
     if (idx >= 0) { S.sel = idx; markSel(); }
     x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false; travelled = false;
-    dragging = !!h.reorder && ev.target.classList.contains('t');
+    finger = touchGesture(ev);
+    // A mouse arms nothing: no grip, no long-press timer. What is left for it is the click.
+    dragging = finger && !!h.reorder && ev.target.classList.contains('t');
     if (dragging) {
       rowH = node.getBoundingClientRect().height;
       node.setPointerCapture(ev.pointerId);
       node.classList.add('lift');
-    } else if (h.longPress) {
+    } else if (finger && h.longPress) {
       timer = setTimeout(() => { held = true; clear(); h.longPress(); }, LONG_PRESS);
     }
   });
@@ -4106,6 +7048,13 @@ function wire(node, h, idx) {
       return;
     }
     if (held) return;                                        // long-press already fired
+    // A mouse: a click opens, and anything that moved — a text selection, a drag that
+    // went nowhere — does nothing but leave the selection where the press put it.
+    if (!finger) {
+      if (!travelled && Math.hypot(dx, dy) <= MOVE_SLOP && h.tap) { h.tap(); return; }
+      if (idx >= 0) render();
+      return;
+    }
     if (Math.abs(dx) > SWIPE && Math.abs(dx) > Math.abs(dy) * 2) {
       if (dx < 0 && h.swipeLeft) h.swipeLeft(); else if (dx > 0 && h.swipeRight) h.swipeRight();
       return;
@@ -4124,7 +7073,7 @@ function wire(node, h, idx) {
 // Moving the selection must not re-render: a re-render during a pointer sequence
 // replaces the node under the finger and the gesture dies half-finished.
 function markSel() {
-  for (const n of document.querySelectorAll('#app .card')) {
+  for (const n of document.querySelectorAll('#app .card, #side .card')) {
     n.classList.toggle('sel', n.dataset.idx === String(S.sel));
   }
 }
@@ -4140,7 +7089,7 @@ function markSel() {
 // that check can no longer see. One spelling, two renderers.
 function confirmSpec() {
   const c = S.confirm;
-  if (!c) return null;
+  if (!c) return S.jump ? jumpSpec() : (S.srch && (S.screen === 'grid' || S.screen === 'projects') && !projectField()) ? searchSpec() : null;
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
@@ -4180,18 +7129,173 @@ function confirmSpec() {
   }
   return null;
 }
+// The Ctrl-f chord's prompt, word for word what tmux/cf.tmux.conf's display-message says at
+// each step — the chord is the desk's, so its instructions are too.
+function jumpSpec() {
+  const j = S.jump;
+  const q = j.stage === 'grid' ? 'jump → grid of project? 1-9  ·  esc'
+    : j.stage === 'proj' ? `jump → project ${j.proj}: session? 1-9  ·  ⏎ or m = master  ·  s = grid  ·  esc`
+    : "jump → project? 1-9  ·  s + digit = that project's grid  ·  p = projects  ·  esc";
+  return { cls: 'jump', q, keys: '', buttons: [] };
+}
+// The `/` prompt, in the row the desk's searchLine() uses, with its wording — on Projects
+// the desk says "project" where the grid says "agent" (fleet-grid.mjs searchLineOf).
+function searchSpec() {
+  const { q, typing } = S.srch;
+  const m = srchMatches();
+  const what = S.screen === 'projects' ? 'project or session' : 'agent';
+  const keys = !q ? `type part of ${what === 'agent' ? 'an agent' : 'a project\'s or a session'}'s name · esc cancel`
+    : !m.length ? `no ${what} matches '${q}'`
+    : typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · ⏎ keep · esc clear`
+    : `${m.indexOf(S.sel) >= 0 ? `${m.indexOf(S.sel) + 1} of ${m.length}` : `${m.length} match${m.length === 1 ? '' : 'es'}`} · n next · N prev · ⏎ open · / edit · esc clear`;
+  return { cls: 'search', q: '/' + q + (typing ? '▏' : ''), keys, buttons: [] };
+}
+function srchMatches() {
+  if (!S.srch || !S.srch.q) return [];
+  if (S.screen !== 'projects') return matchIndices(items(), S.srch.q, it => it.card);
+  // A found session is in the list only because it matched, so every one is a match.
+  const list = projectList();
+  return matchIndices(list, S.srch.q, projectCard()).concat(list.flatMap((it, i) => (it.found ? [i] : [])));
+}
+// PROJECTS, as the desk's pItems: every project at its GLOBAL index (the index the digits
+// and S.sel use), then `+ new project`. A project answers to the name its card shows and to
+// its folder's name — the desk's pCardOf — and one the profile tab hides answers to nothing:
+// a match nobody can see is a cursor that disappears.
+//   THEN THE SESSIONS THE QUERY FINDS, after `+ new project`, so every index above is the
+// one it always was: the digits, the cursor and the dimming of the projects do not move
+// because a session matched. n / N walk on from the last project match into them.
+function projectList() {
+  return [...(S.projects || []).map(p => ({ project: p })), { add: true }, ...foundSessions(S.srch && S.srch.q)];
+}
+
+// ── sessions, found from Projects ─────────────────────────────────────────────────────
+// "a search for projects or sessions on web". The cards come from each project's GRID — the
+// same reads, and the same cache, the stack picker fills (stackGrids, readGrids) — because
+// that is the only place a session's name, label and branch are known; /api/projects carries
+// counts, not cards. A project whose rollup says nothing is running is not read at all.
+//   EVERY PROJECT PROJECTS COULD SHOW, NOT ONLY THE OPEN TAB'S. A project the tab hides is
+// not found because its card is not drawn — but a session is drawn in its own row, naming
+// its project and its machine, so one in another tab (or on another machine, which is
+// another tab) is visible the moment it matches. The hidden demo stays hidden.
+//   A LOST card is left out, as the picker leaves it: there is no conversation to open,
+// only a crash to reopen, and that is its grid's job.
+function foundProjects() {
+  return shownProjects(S.projects || []).map(({ p }) => p).filter(p => !p.sessions || (p.sessions.total || 0) > 0);
+}
+function foundSessions(q) {
+  if (!q) return [];
+  const out = [];
+  for (const p of foundProjects()) {
+    const g = stackGrids.get(p.name);
+    for (const c of (g && g.cards) || []) if (!c.lost && sessionMatches(c, q)) out.push({ found: true, project: p, card: c });
+  }
+  return out;
+}
+// A query that starts before the grids are known reads them NOW rather than at the next
+// 5 s poll — the first letter typed is when someone wants the answer. One read at a time;
+// a project already in the cache is the poll's to re-read (refreshOnce).
+//   THE ANSWER CAN ARRIVE AFTER THE LAST KEY. A query typed faster than a grid read — or
+// committed as one word, which is how a phone's predictive text types — matched nothing
+// when it was typed, so the cursor stayed where it was and every reveal had already run.
+// When the read lands the session rows appear under every project, below the fold on a
+// phone, and the count said `1 match` over a screen with no match on it. So the read's
+// return does what a keystroke does: the cursor to the first match (only if it is not on
+// one already — a cursor the reader moved onto a match stays), and that match into view.
+let foundReading = null;
+function readFoundSoon() {
+  if (foundReading || S.screen !== 'projects' || !S.srch || !S.srch.q) return;
+  const miss = foundProjects().map(p => p.name).filter(n => !stackGrids.has(n));
+  if (!miss.length) return;
+  foundReading = Promise.all(miss.map(p => api.getGrid(p).then(g => { stackGrids.set(p, g); }, () => {})))
+    .finally(() => {
+      foundReading = null;
+      if (S.screen !== 'projects' || !S.srch || !S.srch.q) return;
+      if (!srchMatches().includes(S.sel)) srchFirst();
+      render();
+      revealSel();
+    });
+}
+// The card a found session draws as: the grid's own card, with its PROJECT (and, once there
+// are two machines, its machine) leading the line that says where it is — the same session
+// name can be in every project, `master` always is. No digit: on Projects a digit opens a
+// project, and this session's digit is an address in its own grid.
+function foundModel(it, selected) {
+  const m = G.cardModel(it.card, selected, -1);
+  const p = it.project;
+  const whose = [G.bareName(p.name), S.hosts ? (p.host || hostLabelOf(p.name)) : ''].filter(Boolean).join(' · ');
+  return { ...m, num: null, where: m.where ? `${whose} · ${m.where}` : whose };
+}
+function foundCards(base) {
+  const found = projectList().slice(base);
+  if (!found.length) return [];
+  return [el('div', { class: 'sect found', text: `sessions · ${found.length}` }),
+    ...found.map((it, k) => cardEl(foundModel(it, base + k === S.sel), { tap: () => openFound(it, S.srch, base + k) }, base + k))];
+}
+// OPENING ONE IS OPENING ITS CONVERSATION, from wherever it lives: one level under Projects,
+// as a master entered the desk's way is (entry 'projects'), so back is Projects — and the
+// search is put back as it was left, locked on the session that was opened.
+function openFound(it, from, at = S.sel) {
+  if (!it || !it.card) return;
+  const name = it.project.name, back = from && from.q ? { q: from.q, sel: at } : null;
+  if (S.project !== name) { S.sel = 0; scrollMem.delete('grid'); }
+  // The grid the search read, so the session's card (its status, the lead's rules) is there
+  // before the first poll of this screen comes back.
+  S.project = name; S.sub = ''; S.grid = stackGrids.get(name) || null;
+  openSession(it.card.name, { depth: 1, entry: 'projects' });
+  S.foundBack = back;
+}
+function projectCard() {
+  const shown = new Set(visibleProjects().map(v => v.p));
+  // (A found session carries its project too, and is not a project: it is matched as a session.)
+  return (it) => it.project && !it.found && shown.has(it.project) ? { label: it.project.name, name: G.basename(it.project.path || '') } : null;
+}
+// The cursor follows the first match on every keystroke — and stays put when nothing
+// matches, because the card you were on is a better place to be left than the top.
+function srchFirst() { const m = srchMatches(); if (m.length) S.sel = m[0]; }
 function confirmBar() {
   const s = confirmSpec();
-  return s ? bar(s) : null;
+  return s ? bar(withClose(s)) : null;
+}
+// The X on a QUESTION, never on the `/` or Ctrl-f prompts that share the row: those are the
+// keyboard's and end with esc. Not while busy, when there is nothing left to cancel.
+function withClose(s) {
+  return s && S.confirm && !S.confirm.busy ? { ...s, close: cancel } : s;
 }
 function bar(s) {
   return el('div', { class: 'confirm ' + s.cls }, [
+    s.close ? closeX(s.close, 'sheet-x confirm-x') : null,
     el('span', { class: 'q', text: ' ' + s.q }),
     el('span', { class: 'keys', text: '  ' + s.keys }),
     s.buttons.length ? el('div', { class: 'row' }, s.buttons.map(b => btn(b.label, b.onClick, b.cls || ''))) : null,
   ]);
 }
 function cancel() { S.confirm = null; render(); }
+// THE CONFIRM BAR IS MODAL, AS ITS KEYS ALWAYS WERE: "y = yes · any other key = cancel". The
+// pointer had no such rule — a tap on a card while `kill session 'x'?` stood under the header
+// opened the card and left the question standing over a different screen. Now a press
+// anywhere outside the bar is that "any other key": it cancels, and it is EATEN, so the card,
+// the swipe or the button under it does not also act. Never a yes: the yes is a button in the
+// bar, and nothing outside it can reach confirmedKill().
+//   The whole gesture, not just its click. Cards act on pointerup (wire(): tap, long-press,
+// swipe, reorder), so stopping the click alone would cancel the question AND open the card.
+// So the press is stopped in the capture phase at the window, before any of that sees it, and
+// so are the release and the click that belong to it.
+//   A press that starts INSIDE the bar is the bar's, wherever it ends — a drag off its yes is
+// not a tap outside. While it is busy (a worktree being removed) a press outside is eaten and
+// cancels nothing: there is nothing left to cancel, the same as the keys then.
+let confirmEat = false;
+function confirmOutside(e) {
+  if (e.type === 'pointerdown') {
+    confirmEat = !!(S.confirm && !S.sheet && !(e.target && e.target.closest && e.target.closest('.confirm')));
+    if (!confirmEat) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!S.confirm.busy) cancel();
+    return;
+  }
+  if (!confirmEat) return;
+  e.preventDefault(); e.stopPropagation();
+  if (e.type === 'click') confirmEat = false;
+}
 
 // THE LEAD IS NOT A WORKER, and the card no longer looks any different from one — which
 // is the whole hazard of putting master on the grid at all. So every path into the two
@@ -4241,7 +7345,10 @@ function resumeSession(name) {
 async function wakeSession(name) {
   if (!name) return;
   const r = await doVerb('fleet_wake', { project: S.project, session: name });
-  if (r && r.ok === false) return;          // doVerb has already surfaced the reason
+  // NULL IS THE FAILURE. doVerb answers a refused verb by toasting its reason and returning
+  // null, never {ok:false} — so `r && r.ok === false` let every failed wake through to open a
+  // session that was not there. reopenSession below already read it this way.
+  if (!r || r.ok === false) return;         // doVerb has already surfaced the reason
   openSession(name);
 }
 
@@ -4375,14 +7482,14 @@ function lockScreen() {
       // no window and no one-time code authorised. That refusal is not a bug to route
       // around — the endpoint is remote code execution — so the phone gets a field to
       // type the code into, which is the half that was missing.
-      if (server) row.append(btn('enrol this phone', () => sheetEnrol(), 'go'));
+      if (server) row.append(btn(`enrol ${pk.device().noun}`, () => sheetEnrol(), 'go'));
       else row.append(btn('register a passkey', async () => {
-        try { await pk.register(); S.locked = false; render(); refresh(); }
+        try { await pk.register(); loggedIn(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     } else if (pk.available()) {
       const going = pk.unlocking();
-      const b = btn(going ? 'unlocking…' : 'unlock with Face ID', unlockTap, 'go');
+      const b = btn(going ? 'unlocking…' : `unlock with ${pk.device().sensor}`, unlockTap, 'go');
       if (going) b.setAttribute('disabled', 'disabled');
       row.append(b);
       // The challenge the tap will sign, fetched NOW so the tap has nothing to wait for
@@ -4393,7 +7500,7 @@ function lockScreen() {
       }
     }
     if (pk.bypassAllowed()) {
-      row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
+      row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); loggedIn(); }));
     }
     // Only when the probe is the reason. A daemon started after this page was opened is
     // the ordinary way to be here, and it is one request to find out — not a reload,
@@ -4430,7 +7537,71 @@ function unlocked() {
   pk.release();
   S.unlockErr = '';
   if (!S.locked) return;
-  S.locked = false; render(); refresh();
+  loggedIn();
+}
+// ── where a login lands ───────────────────────────────────────────────────
+// "When you log in it should always show you the main page." restore() puts back the screen
+// the app was left on, which is right for a reload that kept its session (resumedSession)
+// and wrong for a login: a face at the lock screen is a fresh start, and the session it
+// restored was whatever happened to be open an hour ago. So every way through the lock —
+// the sensor, an automatic attempt, enrolling (the Mac's localhost one included), the
+// fixture bypass — lands on Projects. A TAPPED NOTIFICATION is the one thing that goes
+// further, because it is the only thing that said where to go: it set wantJarvis or
+// wantWaiting before the lock came down, and the refresh below opens that ON TOP of
+// Projects, so back from it is Projects too.
+//   PAINT FIRST, THEN TOUCH THE HISTORY. A back swipe on iOS previews the entry it is going
+// to with a picture of that entry, taken as the page left it — so an entry pushed while the
+// lock screen is what is painted is previewed as the lock screen, for as long as the swipe
+// takes, and then the real screen replaces it: "you see the login page for a second and
+// then it takes you back". restore() used to seed the restored screen's trail at boot,
+// under the lock, so every entry below a restored screen held that picture. Now nothing is
+// pushed or popped until Projects has been drawn: a trail a relock left behind is unwound
+// from there, and only after that does a deep link push its one entry. The same rule keeps
+// the lock out of the slide (slideNav): a view transition's old snapshot is the last frame
+// painted, which used to be the lock screen when a notification opened the queue.
+//   A LINK IS THE OTHER THING THAT SAYS WHERE TO GO. An address naming a place — a link
+// opened, or a desk tab reloaded after its session ran out — was read at boot (bootPlace)
+// and restore() is already on it, clamped; so the FIRST unlock of that page lands there, with
+// the trail a walk would have left, pushed by the same paint-first rule. The lock screen is
+// not skipped and nothing of the place is drawn under it. Spent once: a relock later in the
+// same page is a login like any other and lands on Projects.
+function loggedIn() {
+  pk.release();
+  if (linkPlace) { linkPlace = false; landOnLink(); return; }
+  S.locked = false; S.unlockErr = ''; S.termOn = null; restoredDepth = 0;
+  S.screen = 'projects'; S.sel = 0; S.sub = ''; S.session = null; S.sess = null; S.pane = null; S.paneErr = '';
+  S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.fromStack = false; S.pick = null; S.pickBack = '';
+  S.draft = '';
+  save(); render();
+  afterPaint(() => { setDepth(0); afterNav(() => { if (!S.locked) refresh(); }); });
+}
+// A RELOAD THAT KEPT ITS SESSION IS NOT A LOGIN (pk.resume: the app took a new client in the
+// same page process). It goes back to the screen it was on, with the trail restore() measured
+// — pushed once that screen is what is painted, for loggedIn's reason.
+function landOnLink() {
+  S.locked = false; S.unlockErr = ''; S.termOn = null;
+  S.srch = null; S.wantCard = 0; S.fromStack = false; S.pickBack = '';
+  const d = restoredDepth; restoredDepth = 0;
+  save(); render();
+  afterPaint(() => { setDepth(0); afterNav(() => { if (S.locked) return; if (!navDepth) seedNav(d); refresh(); }); });
+}
+function resumedSession() {
+  pk.release();
+  S.unlockErr = '';
+  linkPlace = false;     // restore() already put this page's address back: nothing left to land on
+  if (!S.locked) return;
+  S.locked = false; S.termOn = null; render(); refresh();
+  const d = restoredDepth; restoredDepth = 0;
+  afterPaint(() => { if (!navDepth && !S.locked) seedNav(d); });
+}
+// After the frame that is being built now has been painted: a rAF callback runs just BEFORE
+// a paint, and a task it queues runs after it. The timer is for a page with no frames to
+// give (hidden, or a DOM without rAF), which must still get there.
+function afterPaint(fn) {
+  let done = false;
+  const go = () => { if (!done) { done = true; fn(); } };
+  try { requestAnimationFrame(() => setTimeout(go, 0)); } catch {}
+  setTimeout(go, 150);
 }
 // Whether the last hide was the Face ID sheet's (see the visibilitychange listener).
 let hidByCeremony = false;
@@ -4449,6 +7620,7 @@ function tryAutoUnlock() {
 // ── sheets (the TUI's forms) ──────────────────────────────────────────────
 function renderSheet() {
   const host = document.getElementById('sheet');
+  wireScrim();
   // Already mounted: leave it ALONE. Re-appending a live node moves it, and moving it
   // blurs whatever is focused inside — a toast arriving while you type a prompt would
   // otherwise throw the caret back to the first field mid-sentence.
@@ -4459,10 +7631,78 @@ function renderSheet() {
   const first = host.querySelector('input, textarea, select');
   if (first && S.sheet.focus !== false) first.focus();
 }
-function openSheet(node, focus = true) { S.sheet = { node, focus }; renderSheet(); }
-function closeSheet() { S.sheet = null; renderSheet(); render(); }
+// EVERY WAY OUT OF A SHEET THAT IS NOT ITS OWN ACTION IS ONE WAY: esc, back, the `esc back`
+// button, the X in its corner and a tap on the room behind it all call dismissSheet(), and
+// so all of them do the same thing. "Same as esc" is only true while it is the same call.
+//
+// AND NONE OF THEM THROWS TYPED TEXT AWAY. A tap beside a sheet is the easiest accident on a
+// phone, and before it closed anything the only way out was a button you had to mean. So a
+// dismissed sheet's text fields are kept — in memory, per sheet (its title and subject: one
+// session's schedule is not another's), for the page's life — and put back when the same
+// sheet opens again. Only fields the reader CHANGED: a rename box still holding the name it
+// was opened with is not a draft. The sheet's own action is what spends them (closeSheet),
+// so a sent answer does not come back. This is the one store for every sheet with a field:
+// the answer, send-a-prompt, schedule, session name, new worktree, rename, label, add
+// project, the question's own words and a paired machine's label. The queue answer ALSO
+// keeps row.draft, as it did, for the other way its words come back — a send that failed.
+const sheetDrafts = new Map();       // title \x1f subject -> the fields' values, in order
+const sheetFields = (node) => [...node.querySelectorAll('input[type=text], textarea')];
+function openSheet(node, focus = true) {
+  const key = node.dataset.key || '';
+  const fields = sheetFields(node);
+  S.sheet = { node, focus, key, start: fields.map(f => f.value) };
+  const kept = key && sheetDrafts.get(key);
+  if (kept && kept.length === fields.length) fields.forEach((f, i) => {
+    if (f.value === kept[i]) return;
+    f.value = kept[i];
+    f.dispatchEvent(new Event('input', { bubbles: true }));   // a preview, or row.draft, follows it
+  });
+  renderSheet();
+}
+// The sheet's own action, or a move to another sheet: what was typed was used.
+function closeSheet() { if (S.sheet && S.sheet.key) sheetDrafts.delete(S.sheet.key); shutSheet(); }
+function dismissSheet() {
+  const sh = S.sheet;
+  if (!sh) return;
+  if (sh.key) {
+    const now = sheetFields(sh.node).map(f => f.value);
+    if (now.some((v, i) => v !== sh.start[i])) sheetDrafts.set(sh.key, now); else sheetDrafts.delete(sh.key);
+  }
+  shutSheet();
+}
+function shutSheet() { S.sheet = null; renderSheet(); render(); }
+// THE ROOM BEHIND A SHEET CLOSES IT — a click with a mouse, a tap with a finger — and only a
+// press that STARTED there. A drag that begins inside (selecting a line of a prompt, a
+// scroll that overshoots) and lets go over the scrim is a click on the scrim as far as the
+// browser is concerned, because it fires click on the nearest common ancestor; it is not a
+// request to leave. So the press arms it and the click spends it.
+let scrimPressed = false;
+function wireScrim() {
+  const host = document.getElementById('sheet');
+  if (!host || host.dataset.wired) return;
+  host.dataset.wired = '1';
+  host.addEventListener('pointerdown', (e) => { scrimPressed = e.target === host; });
+  host.addEventListener('click', (e) => {
+    const armed = scrimPressed;
+    scrimPressed = false;
+    if (armed && e.target === host && S.sheet) dismissSheet();
+  });
+}
+// The X, one component for every sheet and the confirm bar. A stroked path (iconSvg), not
+// the character: a glyph is a different picture in every font, and the button carries the
+// name, "close", because the picture says nothing to a screen reader.
+const ICON_CLOSE = 'M6 6l12 12M18 6 6 18';
+function closeX(onclick, cls = 'sheet-x') {
+  const b = el('button', { type: 'button', class: cls, 'aria-label': 'close', title: 'close · esc', onclick });
+  b.append(iconSvg(ICON_CLOSE));
+  return b;
+}
 function sheet(title, sub, kids) {
-  const s = el('div', { class: 'sheet' });
+  const s = el('div', { class: 'sheet', role: 'dialog', 'aria-label': title });
+  s.dataset.key = title + '\x1f' + (sub || '');
+  // FIRST IN THE SHEET, so it is first in the tab order and sticks to the top corner while a
+  // long sheet (settings) scrolls under it.
+  s.append(closeX(dismissSheet));
   s.append(el('h2', {}, [document.createTextNode(title), sub ? el('span', { class: 'sub', text: ' — ' + sub }) : null]));
   for (const k of kids) if (k) s.append(k);
   return s;
@@ -4484,10 +7724,10 @@ async function sheetPicker() {
     ]));
   }
   if (!(data.checkouts || []).length) {
-    list.append(el('p', { class: 'warn', text: 'no git checkouts found. looked in: ' + (data.roots || []).map(G.homeTilde).join(', ') }));
+    list.append(el('p', { class: 'warn', text: 'no git checkouts found. looked in: ' + (data.roots || []).map(r => G.homeTilde(r)).join(', ') }));
     list.append(el('p', { text: 'fix: put one path per line in ~/.config/ghostfleet/checkouts' }));
   }
-  openSheet(sheet('new session', `pick a checkout under ~/${S.project || ''}`, [list, el('div', { class: 'row' }, [btn('esc back', closeSheet)])]), false);
+  openSheet(sheet('new session', `pick a checkout under ~/${S.project || ''}`, [list, el('div', { class: 'row' }, [btn('esc back', dismissSheet)])]), false);
 }
 
 // the naming screen: a live session with the same name gets -2/-3 appended automatically
@@ -4502,7 +7742,7 @@ function sheetName({ cwd, name, reuse }) {
     field('name', nm),
     el('p', { text: 'a live session with the same name gets -2/-3 appended automatically' }),
     el('p', { class: 'warn', text: 'spawn asks for the passkey — it creates a checkout and runs shell commands (§7).' }),
-    el('div', { class: 'row' }, [btn('⏎ create', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ create', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   nm.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
 }
@@ -4526,7 +7766,7 @@ function sheetWorktree() {
     field('name', name), field('branch  (blank = same as the name)', branch),
     field('from  (base ref for a new branch)', from), field('agent', agent),
     el('p', { class: 'warn', text: 'creating the worktree runs git and boots a session — the passkey prompt comes first.' }),
-    el('div', { class: 'row' }, [btn('⏎ create + open', go, 'go'), btn('esc cancel', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ create + open', go, 'go'), btn('esc cancel', dismissSheet)]),
   ]));
 }
 
@@ -4560,7 +7800,7 @@ function sheetSchedule(name, project = S.project) {
     existing ? el('p', { class: 'warn', text: `currently: @${G.clockLabel(existing.at)} "${existing.msg || ''}" — a new time replaces it; empty clears it` }) : null,
     field('send at', box), preview, msgLine,
     el('p', { text: 'examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>' }),
-    el('div', { class: 'row' }, [btn('⏎ schedule', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ schedule', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   update();
 }
@@ -4578,7 +7818,7 @@ function sheetSend(name) {
     // The trap from CLAUDE.md, where it can actually be read by the person about to
     // step in it.
     el('p', { text: 'a prompt sent to a BUSY session queues behind the turn already running.' }),
-    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -4608,7 +7848,7 @@ async function sheetAnswer(name, project = S.project) {
   if (!prompt) {
     openSheet(sheet('answer keys', `→ ${name}`, [
       el('p', { class: 'warn', text: 'no prompt on screen — keys sent now would land in its input box as a message. Nothing to answer.' }),
-      el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+      el('div', { class: 'row' }, [btn('esc back', dismissSheet)]),
     ]));
     return;
   }
@@ -4621,7 +7861,7 @@ async function sheetAnswer(name, project = S.project) {
     opts.length ? el('div', { class: 'rows' }, opts.map(b => el('div', { class: 'srow' }, [b]))) : null,
     field('or keys', t),
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
-    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', dismissSheet)]),
   ].filter(Boolean)));
 }
 
@@ -4705,7 +7945,7 @@ function sheetQuestion(name, project, prompt, note = '') {
     el('p', { class: 'q', text: prompt.question || '' }),
     el('div', { class: 'rows' }, rows),
     freeOpt ? field(`${freeOpt.n}. type an answer`, freeBox) : null,
-    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', closeSheet)].filter(Boolean)),
+    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', dismissSheet)].filter(Boolean)),
   ].filter(Boolean)), false);
 }
 
@@ -4726,7 +7966,7 @@ function sheetRename(name) {
     field('new name', nm),
     el('p', { text: 'renames the tmux session AND moves its worktree folder (git worktree move)' }),
     el('p', { class: 'warn', text: 'a destructive verb (§7) — the passkey prompt comes first.' }),
-    el('div', { class: 'row' }, [btn('⏎ rename', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ rename', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -4737,7 +7977,7 @@ function sheetLabel(name) {
   openSheet(sheet('label', `what the card calls ${name}`, [
     field('label', nm),
     el('p', { text: `Display only. The session is still '${name}' — that is what fleet-send addresses, and the card keeps showing it. Empty clears the label.` }),
-    el('div', { class: 'row' }, [btn('⏎ save', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('⏎ save', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -4812,7 +8052,42 @@ function sheetProjectAgent(p) {
   };
   openSheet(sheet(`agent · ${p.name}`, NEXT_MASTER, [
     pick.row, pick.note,
-    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', dismissSheet)]),
+  ]));
+}
+
+// THE PROJECT'S MODEL (lib/session-model.sh), the same table's next setting. What it does NOT
+// do is the sentence that matters, so it is the sheet's subtitle: a running session keeps the
+// model it has (fleet-model moves one), and master is never given it.
+const MODEL_WHEN = "what this project's claude sessions start on, from their next start — a new worker, a restart, a wake. Running sessions keep theirs, and master never takes it: a lead moves one with fleet-model.";
+const MODEL_OPTS = [
+  { name: '', label: 'default', hint: "the profile's own default — whatever this machine's Claude Code is set to." },
+  { name: 'opus', label: 'opus', hint: 'opus — for graded, sworn or high-stakes reasoning.' },
+  { name: 'sonnet', label: 'sonnet', hint: 'sonnet — everyday code work.' },
+  { name: 'haiku', label: 'haiku', hint: 'haiku — lists, lookups and formatting.' },
+];
+function sheetProjectModel(p) {
+  let model = p.model || '';
+  const note = el('p', { class: 'hint' });
+  const row = el('div', { class: 'seg wrap' });
+  // A model set by hand that is not one of the four is shown, and stays selected, rather than
+  // being silently replaced by "default" the moment the sheet opens.
+  const opts = MODEL_OPTS.some(o => o.name === model) ? MODEL_OPTS
+    : [...MODEL_OPTS, { name: model, label: model, hint: `${model} — set by hand on the machine that runs the fleet.` }];
+  const draw = () => {
+    row.textContent = '';
+    for (const o of opts) row.append(btn(o.label, () => { model = o.name; draw(); }, model === o.name ? 'on' : ''));
+    note.textContent = (opts.find(o => o.name === model) || MODEL_OPTS[0]).hint;
+  };
+  draw();
+  const go = async () => {
+    closeSheet();
+    await doVerb('fleet_project_model', { name: p.name, model });
+    refresh();
+  };
+  openSheet(sheet(`model · ${p.name}`, MODEL_WHEN, [
+    row, note,
+    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -4832,7 +8107,7 @@ function sheetAddProject() {
     field('path', p), field('name  (default: the folder name)', nm),
     el('div', { class: 'field' }, [el('label', { text: "master's agent" }), pick.row, pick.note]),
     el('label', { class: 'field' }, [start, document.createTextNode(' also start its master session')]),
-    el('div', { class: 'row' }, [btn('add', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('add', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
 }
 
@@ -4853,16 +8128,17 @@ function sheetEnrol() {
     err.textContent = '';
     try {
       await pk.register(code.value);
-      S.locked = false;
+      S.sheet = null; renderSheet();
+      loggedIn();
       toast('enrolled — the server minted this session', 'good');
-      closeSheet();
-      refresh();
+      render();
     } catch (e) { err.textContent = String((e && e.message) || e); }
   };
-  openSheet(sheet('enrol this phone', api.modeLabel(), [
-    el('p', { text: 'On the Mac: fleet-serve enroll <client-id> — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.' }),
+  const dev = pk.device();
+  openSheet(sheet(`enrol ${dev.noun}`, api.modeLabel(), [
+    el('p', { text: `${dev.enrol} — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.` }),
     note, field('enrolment code', code), err,
-    el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', closeSheet)]),
+    el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', dismissSheet)]),
   ]));
   // Asked before anything is typed, and before Face ID: a closed window is knowable in
   // advance, and finding out afterwards means biometrics spent on a refusal.
@@ -4870,7 +8146,7 @@ function sheetEnrol() {
     note.className = st.open ? 'ok' : 'warn';
     note.textContent = st.open
       ? `a window is open for '${st.client}' — enter the code it printed.`
-      : 'no enrolment is open. On the Mac: fleet-serve enroll <client-id>, then come back.';
+      : `no enrolment is open. ${dev.enrol}, then come back.`;
   }).catch(e => {
     note.className = 'warn';
     note.textContent = `could not ask the server: ${String((e && e.message) || e)}`;
@@ -4916,18 +8192,27 @@ async function sheetSettings() {
     // which is all of them — had no edit path at all on the phone, so a picker that only
     // worked at creation time would not have answered the request.
     kids.push(el('p', { text: "agent: which coding CLI this project's master runs — " + NEXT_MASTER }));
+    kids.push(el('p', { text: 'model: ' + MODEL_WHEN }));
     const rows = el('div', { class: 'rows' });
-    for (const p of S.projects || []) {
+    // This machine's projects only: these settings are files on the machine that runs the
+    // fleet, and a paired host's are set there (the pairing covers reading and messaging).
+    for (const p of (S.projects || []).filter(x => !isRemote(x.name))) {
+      // The settings sit in ONE group after the name (app.css `.pset`), so a narrow screen
+      // wraps the four of them under the name as a unit instead of squeezing the name.
       rows.append(el('div', { class: 'srow' }, [
         el('div', { class: 'nm', text: p.name }),
+        el('div', { class: 'pset' }, [
         // Labelled with what it IS, not with a verb: the row is a state readout first.
         // 'claude' rather than blank, because a blank cell reads as "not loaded" — the
         // empty COLUMN is a storage detail and this is the only place it should not leak.
         btn(p.agent && p.agent !== 'claude' ? p.agent : 'claude',
             () => { closeSheet(); sheetProjectAgent(p); },
             p.agent && p.agent !== 'claude' ? 'on' : ''),
+        // 'default' for none, for the reason 'claude' is written above rather than a blank.
+        btn(p.model || 'default', () => { closeSheet(); sheetProjectModel(p); }, p.model ? 'on' : ''),
         btn(p.nudge ? '● on' : '○ off', async () => { await doVerb('fleet_nudge', { project: p.name, state: p.nudge ? 'off' : 'on' }); closeSheet(); }, p.nudge ? 'on' : 'off'),
         btn(p.budget === 'ignored' ? '● ignored' : '○ enforced', async () => { await doVerb('fleet_budget', { project: p.name, state: p.budget === 'ignored' ? 'enforced' : 'ignored' }); closeSheet(); }),
+        ]),
       ]));
     }
     kids.push(rows);
@@ -4948,6 +8233,73 @@ async function sheetSettings() {
     el('option', { value: 'url', text: 'a URL I type below', selected: p.kind === 'server' }),
   ]);
   const base = input(p.kind === 'server' ? p.base : '', { placeholder: 'http://mac.tailnet.ts.net:8787' });
+  // ── the terminal, for THIS device ──────────────────────────────────────────
+  // Off until switched on here, per device: the server records the switch on this
+  // device's enrolment, with when and from where. ON asks for the passkey (it is a grant);
+  // OFF never does, and closes any terminal this device has open.
+  if (api.mode() === 'server') {
+    kids.push(el('h2', { text: 'terminal' }));
+    const line = el('p', { class: 'term-set', text: 'asking the Mac…' });
+    const tbtn = btn('…', () => {}, '');
+    kids.push(line, el('div', { class: 'row' }, [tbtn]));
+    const show = (on, why = '') => {
+      line.textContent = (on ? 'on for this device — a terminal still asks for the passkey every time it opens.'
+                             : 'off for this device. Turning it on asks for the passkey; the Mac records that this device did it.') + (why ? ` (${why})` : '');
+      tbtn.textContent = on ? 'turn the terminal off' : 'turn the terminal on — passkey';
+      tbtn.className = on ? '' : 'go';
+      tbtn.onclick = () => {
+        // The passkey inside the tap (passkey.js freshNow), before anything awaits.
+        const asking = on ? null : pk.freshNow('terminal on');
+        tbtn.disabled = true;
+        (async () => {
+          try {
+            const r = await api.termEnable(!on, asking ? await asking : null);
+            S.termOn = !!r.enabled; show(S.termOn);
+            if (S.termOn) pk.prepareFresh().catch(() => {});
+            // Opened from the terminal screen's "off" (its settings button): that screen now
+            // offers the open, and switched off it says off again.
+            if (S.screen === 'term' && (S.termSt.state === 'off' || S.termSt.state === 'gate'))
+              termState(S.termOn ? 'gate' : 'off');
+          } catch (e) {
+            if (e instanceof api.AuthError) { closeSheet(); return lock(); }
+            show(on, e && e.name === 'NotReady' ? e.message : String((e && e.message) || e));
+          } finally { tbtn.disabled = false; }
+        })();
+      };
+    };
+    pk.prepareFresh().catch(() => {});
+    api.getTerm().then((j) => { S.termOn = !!j.enabled; show(S.termOn); },
+                       (e) => { line.textContent = `could not ask: ${String((e && e.message) || e)}`; });
+  }
+
+  // ── the machines this one answers for (fleet-serve pair) ───────────────────
+  // Listed only once one is paired: pairing is begun at a terminal on each machine, never
+  // from here, so a sheet with nothing paired has nothing to show. Unpair revokes at once,
+  // on both machines if the other answers and on this one regardless — and takes a second
+  // tap, because the way back is a terminal on each side. A label is how a tab names the
+  // machine; renaming it never moves an address.
+  if (S.hosts) {
+    kids.push(el('h2', { text: 'machines' }));
+    kids.push(el('p', { text: 'one app for every paired machine: this one answers for the others. Pair another with fleet-serve pair on each.' }));
+    const rows = el('div', { class: 'rows hosts' });
+    for (const h of S.hosts) {
+      const state = h.self ? 'this machine' : h.online === false ? offlineHostModel(h).statusLabel : h.online ? 'online' : 'not asked yet';
+      const name = input(h.label, { 'aria-label': `label for ${h.label}`, maxlength: '24' });
+      const relabel = btn('rename', async () => {
+        try { await api.relabelHost(h.self ? 'self' : h.key, name.value.trim()); toast(`now '${name.value.trim()}'`, 'good'); closeSheet(); refresh(); }
+        catch (e) { toast(String((e && e.message) || e), 'bad'); render(); }
+      });
+      let armed = false;
+      const unpair = h.self ? null : btn('unpair', async () => {
+        if (!armed) { armed = true; unpair.textContent = `unpair ${h.label}? tap again`; return; }
+        try { const r = await api.unpairHost(h.key); toast(r.text || `unpaired ${h.label}`, r.told ? 'good' : 'bad'); closeSheet(); refresh(); }
+        catch (e) { toast(String((e && e.message) || e), 'bad'); render(); }
+      }, 'danger');
+      rows.append(el('div', { class: 'srow' }, [el('div', { class: 'nm', text: `${h.label} · ${state}` }), name, relabel, unpair].filter(Boolean)));
+    }
+    kids.push(rows);
+  }
+
   kids.push(el('h2', { text: 'connection' }));
   kids.push(el('p', { text: `right now: ${api.resolution().detail}` }));
   kids.push(field('where the fleet is', how));
@@ -4979,7 +8331,7 @@ async function sheetSettings() {
     : `unavailable: ${pk.unavailableReason()}` }));
   kids.push(el('div', { class: 'row' }, [
     pk.available() && !pk.registered() && api.mode() === 'server'
-      ? btn('enrol this phone', () => { closeSheet(); sheetEnrol(); }) : null,
+      ? btn(`enrol ${pk.device().noun}`, () => { closeSheet(); sheetEnrol(); }) : null,
     pk.available() && !pk.registered() && api.mode() === 'fixtures'
       ? btn('register', async () => { try { await pk.register(); toast('passkey registered', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); } closeSheet(); }) : null,
     pk.registered() ? btn('forget this device\'s passkey', () => { pk.forget(); toast('forgotten — a lost phone is revoked server-side too', 'good'); closeSheet(); }, 'danger') : null,
@@ -5030,16 +8382,13 @@ async function sheetSettings() {
   if (!log.length) ul.append(el('li', { text: 'nothing yet. Every mutating call lands here, and on a server it also lands in fleet-inbox.' }));
   kids.push(ul);
 
-  kids.push(el('div', { class: 'absent' }, [el('div', { text: 'not here, on purpose (§7):' }),
-    el('div', { text: '· the stack — it exists to put sessions side by side, and a phone has no side. At nc = 1 that is the card list.' }),
-    el('div', { text: '· Ctrl-t terminal / Ctrl-n editor tabs — they open a shell and neovim in the session\'s folder, and there is no local shell here.' })]));
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
   //   THE MAC'S VOICE COMES FIRST under the heading, because when it is there it is what
-  // reads, and the list below is only the fallback. Said only once /api/jarvis has answered:
+  // reads, and the list below is only the fallback. Said only once the daemon has answered:
   // an old daemon without `speak` says nothing rather than something wrong.
-  const k = (S.jarvis && S.jarvis.speak) || S.speak;
+  const k = (S.voice && S.voice.speak) || (S.jarvis && S.jarvis.speak) || S.speak;
   const macVoice = k && k.state ? el('div', { class: 'dim small', text:
     k.ready ? "the Mac reads replies with Kokoro — this device's voice below is only the fallback"
     : k.state === 'off' ? "the Mac's Kokoro is switched off, so this device's voice reads replies"
@@ -5116,7 +8465,7 @@ async function sheetSettings() {
   }
   // HOW LONG A PAUSE IS, in conversation mode: the one thing about it that is a matter of
   // the owner's own speech rather than of the machine. Shown wherever the talk button is.
-  if (jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+  if (talkShown(S.jarvisOn, S.voice)) {
     const q = savedQuiet();
     const setQ = (v) => { try { localStorage.setItem(LS_QUIET, String(Math.min(QUIET.MAX, Math.max(QUIET.MIN, v)))); } catch {} render(); };
     kids.push(el('h2', { text: 'conversation mode' }));
@@ -5126,7 +8475,7 @@ async function sheetSettings() {
       btn('+ later', () => setQ(q + QUIET.STEP)),
     ]));
   }
-  kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
+  kids.push(el('div', { class: 'row' }, [btn('esc back', dismissSheet)]));
   // Last row, and deliberately plain: it is diagnostic, not a setting. `no worker` means
   // you are on the network rather than a cached shell; `unknown` means the worker serving
   // you is too old to answer, which is itself the thing you wanted to know.
@@ -5134,15 +8483,69 @@ async function sheetSettings() {
   openSheet(sheet('settings', S.screen === 'projects' ? 'per project' : 'per session', kids), false);
 }
 
-// ── keyboard: the same keys, for a desktop browser and a BT keyboard ──────
+// ── the keyboard: THE MAC GRID'S KEYS, the same key doing the same thing ──────
+// Reported from a desktop browser: the keys here differed from the desk's, so a hand that
+// knows the grid did the wrong thing in the browser. The map below is taken from the desk
+// itself, not from memory of it — bin/fleet-grid.mjs's grid and Projects handlers (including
+// `/` search) for the two list screens, and tmux/cf.tmux.conf's bindings for a session —
+// and web/README.md carries it as a table, desk key → what it does here, including every
+// key the browser keeps for itself and every desk feature this client deliberately lacks.
+// test/helpers/desktop-check.mjs presses each key in that table.
+//
+// THREE RULES THAT ARE NOT IN ANY ONE BINDING:
+//   - A TEXT BOX OWNS THE KEYBOARD. Nothing here fires while an input, a textarea or a
+//     select has focus — `q` in a message is a letter. The composer keeps ⏎, ⇧⏎ and Esc
+//     for itself (see composer()); Esc is how you leave it and give these back.
+//   - A SESSION IS ATTACHED. At the desk, inside a session every key goes to the agent
+//     except the handful tmux binds with -n (` ⇧←→ Ctrl-s Ctrl-p Ctrl-f Ctrl-x Ctrl-t
+//     Ctrl-n, and Ctrl-a's prefix table). Here the agent's input is the composer, so a
+//     printable key on the session screen is typed into it — the p/P/x/r/l/s/q letters
+//     this screen used to take were this client's own invention and did something the
+//     desk's same key never does.
+//   - CMD IS THE BROWSER'S. The desk binds Ctrl, never ⌘, so nothing here answers a key
+//     with metaKey held: ⌘C, ⌘V, ⌘R and the rest keep doing what the OS says.
+// Some Ctrl keys cannot be had at all — Ctrl-n, Ctrl-t and Ctrl-w open, open and close a
+// tab before any page hears them, installed PWA or not — and the README table says which.
+const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+// THE KEYS TMUX TAKES EVEN WHILE YOU TYPE TO THE AGENT. At the desk a session is attached
+// and every key goes to the agent — except the ones tmux/cf.tmux.conf binds with -n, which
+// tmux answers first: ` (back), ⇧← / ⇧→ (the next session), Ctrl-s, Ctrl-p, Ctrl-f, and
+// Ctrl-a's prefix table. The composer is the agent's input here, so from inside it those
+// same keys act, and nothing else does — including the desk's two costs: a literal ` cannot
+// be typed into a message (the desk documents the same), and ⇧←/⇧→ move between sessions
+// rather than selecting text. A chord or a prefix already started takes its next key whole.
+// Only the composer, and only a session's: an input in a sheet is never a session.
+function deskKeyFromComposer(e) {
+  if ((S.screen !== 'session' && S.screen !== 'stack') || !insideComposer(e.target)) return false;
+  if (S.jump || S.prefix) return true;
+  const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
+  if (e.metaKey || e.altKey) return false;
+  // Ctrl-x is the stack at the desk, and cut on Linux and Windows: it is the stack's only
+  // while nothing in the box is selected, so cutting a selection still cuts.
+  const t = e.target, sel = t && Number.isInteger(t.selectionStart) && t.selectionStart !== t.selectionEnd;
+  if (e.ctrlKey && lk === 'x') return !sel;
+  if (e.ctrlKey && S.screen === 'stack') return lk === 'p' || lk === 'f' || lk === 'a';
+  if (e.ctrlKey) return lk === 's' || lk === 'p' || lk === 'f' || lk === 'a';
+  if (k === '`') return true;
+  return !!e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight');
+}
+const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
 function onKey(e) {
   if (S.sheet) {                       // a form owns the keyboard while it is open
-    if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
+    if (e.key === 'Escape') { e.preventDefault(); dismissSheet(); }
     return;
   }
-  if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || ''))) return;
+  if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
+  // ⏎ ON THE QUEUE'S ROW (and the Reviews row beside it) IS THE ROW'S: the browser turns it into the button's click. Taken
+  // here it would be Projects' ⏎ and open the project under the cursor instead.
+  if (S.screen === 'projects' && (e.key === 'Enter' || e.key === ' ') && e.target && e.target.classList
+      && (e.target.classList.contains('queue-row') || e.target.classList.contains('rv-row'))) return;
   const k = e.key;
-  if (S.locked) return;
+  if (S.locked || !k || e.metaKey) return;
+  // A modifier on its own is not a key: the chord arrives with the next event.
+  if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta') return;
+  const ctrl = !!e.ctrlKey && !e.altKey;
+  const lk = k.length === 1 ? k.toLowerCase() : k;
   if (S.confirm) {
     e.preventDefault();
     const c = S.confirm;
@@ -5159,108 +8562,404 @@ function onKey(e) {
     } else cancel();
     return;
   }
-  // The session screen has one subject — the session you opened — and the grid's `sel`
-  // is not it. Wired to `items()` as well, `p` on this screen paused whichever card the
-  // grid cursor happened to be on: the right verb, the wrong worker, no error.
-  if (S.screen === 'session') {
-    switch (k) {
-      case 'q': case '`': back(); break;
-      case 'Q': toProjects(); break;
-      case 'p': pauseSession(S.session); break;
-      case 'P': resumeSession(S.session); break;
-      case 's': sheetSchedule(S.session); break;
-      case 'r': sheetRename(S.session); break;
-      case 'l': sheetLabel(S.session); break;
-      case 'x': case 'X': askKill(S.session); break;
-      case ',': sheetSettings(); break;
-      default: return;
-    }
-    e.preventDefault();
-    return;
+  // The search comes BEFORE the chord, as at the desk: while `/` is typing, every key is a
+  // letter of the query, and a Ctrl key is dropped rather than obeyed.
+  if ((S.screen === 'grid' || S.screen === 'projects') && S.srch) { if (searchKey(e, k, lk, ctrl)) e.preventDefault(); return; }
+  if (S.jump) { e.preventDefault(); jumpKey(k, lk, ctrl); return; }
+  let used;
+  if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
+  else if (S.screen === 'stack') used = stackKey(e, k, lk, ctrl);
+  else if (S.screen === 'stackpick') used = pickKey(e, k, lk, ctrl);
+  else if (S.screen === 'term') used = termKey(e, k, lk, ctrl);
+  else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
+  else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
+  else if (S.screen === 'reviews') used = reviewsKey(e, k, lk, ctrl);
+  else if (S.screen === 'automations') used = automationsKey(e, k, lk, ctrl);
+  else if (S.screen === 'review') used = reviewKey(e, k, lk, ctrl);
+  else used = projectsKey(e, k, lk, ctrl);
+  if (used) e.preventDefault();
+}
+
+// ── Ctrl-f: the jump chord, every step of tmux/cf.tmux.conf's cfjump tables ────────────
+// Ctrl-f <p> <s> → project p, its card s · Ctrl-f <p> ⏎|m → its master · Ctrl-f <p> s and
+// Ctrl-f s <p> → its grid · Ctrl-f p → Projects. Esc (or Ctrl-f, or Ctrl-c) cancels and
+// any other key aborts. The prompt for each step is jumpSpec()'s. Live on every screen.
+function startJump() { S.jump = { stage: 'first', proj: 0 }; render(); }
+function jumpKey(k, lk, ctrl) {
+  const j = S.jump;
+  const digit = !ctrl && /^[1-9]$/.test(k);
+  S.jump = null;
+  if (k === 'Escape' || (ctrl && (lk === 'f' || lk === 'c'))) return render();
+  if (j.stage === 'first') {
+    if (digit) { S.jump = { stage: 'proj', proj: Number(k) }; return render(); }
+    if (!ctrl && lk === 's') { S.jump = { stage: 'grid', proj: 0 }; return render(); }
+    if (!ctrl && lk === 'p') return toProjects();
+    return render();
   }
-  const list = S.screen === 'projects'
-    ? [...(S.projects || []).map(p => ({ project: p })), { add: true }]
-    : items();
+  if (j.stage === 'grid') return digit ? jumpTo(Number(k), 'grid') : render();
+  if (digit) return jumpTo(j.proj, 'card', Number(k));
+  if (k === 'Enter' || (!ctrl && lk === 'm')) return jumpTo(j.proj, 'master');
+  if (!ctrl && lk === 's') return jumpTo(j.proj, 'grid');
+  render();
+}
+// The Nth project of the whole list — the same count the desk's proj_nth makes and the
+// digits on Projects use, whatever tab the Projects screen is showing.
+async function jumpTo(n, what, card = 0) {
+  if (!S.projects) { try { S.projects = (await api.getProjects()).projects; } catch {} }
+  const p = (S.projects || [])[n - 1];
+  if (!p) return render();                 // no project there: the desk does nothing either
+  if (what === 'master') return enterMaster(p.name);
+  toGridOf(p.name, what === 'card' ? card : 0);
+}
+
+// ── a session: tmux's -n bindings, and the agent's input for the rest ─────────────────
+function sessionKey(e, k, lk, ctrl) {
+  // Ctrl-a, then: g / d back · s the grid · p Projects · f the jump chord · ←/→ cycle.
+  // t and n are the tabs — the terminal and the editor — and x is the stack. (< > { } move
+  // a stack column, which only the stack screen has.)
+  if (S.prefix) {
+    S.prefix = false;
+    if (ctrl) return lk === 'a';           // Ctrl-a Ctrl-a: a literal Ctrl-a for the agent — nothing to send it to here
+    if (lk === 'g' || lk === 'd') sessionBack();
+    else if (lk === 's') toGridOf(S.project);
+    else if (lk === 'p') toProjects();
+    else if (lk === 'f') startJump();
+    else if (lk === 't' && !S.jarvisMode) openTerminal();
+    else if (lk === 'n' && !S.jarvisMode) openEditor();
+    else if (lk === 'x') openStackPicker();
+    else if (k === 'ArrowRight' && !S.jarvisMode) cycleSession(1);
+    else if (k === 'ArrowLeft' && !S.jarvisMode) cycleSession(-1);
+    return true;
+  }
+  if (ctrl) {
+    if (lk === 'a') { S.prefix = true; return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 's') { toGridOf(S.project); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;                          // the rest are the browser's (copy, find-in-page …)
+  }
+  if (k === '`') { sessionBack(); return true; }
+  if (e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) {
+    if (!S.jarvisMode) cycleSession(k === 'ArrowRight' ? 1 : -1);
+    return true;
+  }
+  // Everything else at the desk goes to the agent. Here that is the composer: the key is
+  // typed into it, at its caret, and it keeps the focus, so the rest of the sentence follows.
+  if (k.length === 1 && !e.altKey) return typeIntoComposer(k);
+  if (k === 'Enter') { focusComposerAt(null); return true; }
+  return false;
+}
+// ` from a session is tmux's detach: a worker goes back to the grid it came from, a master
+// goes back to Projects — at the desk master IS the project's front door (enter_master).
+function sessionBack() {
+  if (S.jarvisMode) return back();
+  // Opened from the Projects search: back to it, a worker included.
+  if (S.foundBack) return back();
+  if (isLeadCard(S.session) || (S.entry === 'projects' && S.session === leadOf())) return toProjects();
+  if (navDepth >= 2) back();               // up to the grid (or sub-grid) it was opened from
+  else toGridOf(S.project);
+}
+function typeIntoComposer(text) {
+  const box = composerNode;
+  if (!isLive(box)) return false;
+  try {
+    box.focus();
+    const a = Number.isInteger(box.selectionStart) ? box.selectionStart : box.value.length;
+    const b = Number.isInteger(box.selectionEnd) ? box.selectionEnd : a;
+    box.setRangeText(text, a, b, 'end');
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  } catch { return false; }
+  return true;
+}
+
+// ── the terminal, when it does NOT have the focus ─────────────────────────────────────
+// With the focus every key is the shell's (xterm.js has it, and onKey never sees it — the
+// focused element is a textarea). After ⇧Esc, or a click outside it, these are the desk's
+// keys again: ` and q go back where it was opened from, ⏎ goes back into it.
+function termKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 's') { toGridOf(S.project); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  if (k === '`' || k === 'q') { back(); return true; }
+  if (k === 'Enter' && TS && TS.h && S.termSt.state === 'open') { TS.h.focus(); return true; }
+  return false;
+}
+
+// ── the grid: fleet-grid.mjs's onKey, mode 'grid' ──────────────────────────────────────
+function gridKey(e, k, lk, ctrl) {
+  const list = items();
   const it = list[S.sel] || {};
-  // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. `list` is deliberately the unfiltered
-  // one, so `5` opens project 5 the way `Ctrl-f 5` does at the desk and the way the card
-  // says — the digit is an address and an address does not change with the tab. Stepping
-  // is the other thing: j/k through cards that are not on screen is a cursor that
-  // disappears, so on the projects screen a step goes to the next VISIBLE index (plus the
-  // `+ new project` card, which is always drawn).
-  const move = d => {
-    let n = S.sel + d;
-    // WAS `S.profile !== PROFILE_ALL`, and a hidden demo is exactly the case that breaks:
-    // on the `all` tab the visible set is now smaller than the list, so the old condition
-    // walked j/k straight onto demo cards that are not drawn — a cursor that disappears,
-    // which is the failure this branch already existed to prevent. Ask whether anything is
-    // hidden, not which tab is on.
-    if (S.screen === 'projects' && visibleProjects().length !== (S.projects || []).length) {
-      const stops = [...visibleProjects().map(v => v.i), (S.projects || []).length];
-      const at = stops.indexOf(S.sel);
-      n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
-      if (n == null) return;
-    }
-    if (n >= 0 && n < list.length) { S.sel = n; render(); }
-  };
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    // Ctrl-c is back at the desk. Here it is also copy, and copy wins whenever something
+    // is selected to copy.
+    if (lk === 'c' && !hasSelection()) { gridBack(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
   // HOW MANY COLUMNS ARE ACTUALLY ON SCREEN, asked of the browser rather than computed
   // from an assumed character width. The CSS picks the count with auto-fill (see
   // app.css), so the only place the truth lives is the resolved grid — and reading it back
-  // means the keys agree with what the eye sees at any viewport, including the one the
-  // rotation unlock just made possible. Falls back to 1, which is every phone.
+  // means the keys agree with what the eye sees at any viewport. Falls back to 1, which is
+  // every phone and the left pane of two.
   const nc = gridCols();
+  const move = d => { const n = S.sel + d; if (n >= 0 && n < list.length) { S.sel = n; render(); } };
+  const sub = () => { toast(`this is ${S.sub}'s sub-grid — its workers are spawned by ${S.sub} (fleet-spawn from its worktree); \` goes back up`); render(); };
   switch (k) {
-    // Up and down cross a ROW, which is nc cards — the TUI's ⇧K/⇧J arithmetic, and at
-    // nc = 1 it is the one-card step it has always been.
+    // Up and down cross a ROW, which is nc cards — the TUI's ⇧K/⇧J arithmetic.
     case 'ArrowUp': case 'k': move(-nc); break;
     case 'ArrowDown': case 'j': move(nc); break;
-    // Left and right are always one card. At nc = 1 that makes them the same step as up
-    // and down, which is what they used to be unconditionally.
     case 'ArrowLeft': case 'h': move(-1); break;
     case 'ArrowRight': case 'l': move(1); break;
-    case 'H': case 'K': if (it.card) reorder(it.card.name, -1); break;
-    case 'L': case 'J': if (it.card) reorder(it.card.name, 1); break;
-    case 'Enter':
-      if (S.screen === 'projects') { it.add ? sheetAddProject() : openProject(it.project.name); }
-      else if (it.card) openSession(it.card.name);
-      else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path });
-      else sheetPicker();
-      break;
-    case 'n': case 'N': if (S.screen !== 'projects') sheetPicker(); break;
-    case 'w': case 'W': if (S.screen !== 'projects') sheetWorktree(); break;
-    case 's':
-      if (S.screen === 'projects') { if (it.project) sheetSchedule('master', it.project.name); }
-      else if (it.card) sheetSchedule(it.card.name);
-      break;
+    // Not in a sub-grid: the order file is the TOP grid's numbering.
+    case 'H': case 'K': if (it.card && !S.sub) reorder(it.card.name, k === 'H' ? -1 : -nc); break;
+    case 'L': case 'J': if (it.card && !S.sub) reorder(it.card.name, k === 'L' ? 1 : nc); break;
+    case '/': if (projectField()) focusProjectField(); else { S.srch = { q: '', typing: true }; render(); } break;
+    case 'Enter': openItem(it); break;
+    // The web has one way to start a session (fleet_spawn), so n and N open the same picker.
+    case 'n': case 'N': if (S.sub) sub(); else sheetPicker(); break;
+    // t = the sTack, as at the desk (s/S and n/N were taken).
+    case 't': case 'T': openStackPicker(); break;
+    case 'w': case 'W': if (S.sub) sub(); else sheetWorktree(); break;
+    case 's': case 'S': if (it.card) sheetSchedule(it.card.name); break;
     case 'p': if (it.card) pauseSession(it.card.name); break;
     case 'P': if (it.card) resumeSession(it.card.name); break;
     case 'x': case 'X':
-      // Not on the projects screen: there `remove` is reached through `⋯` only (see the
-      // seam in the projects spec), and a key would be a second way in.
       if (it.card) askKill(it.card.name);
       else if (it.freeWt) askRemoveWorktree(it.freeWt);
       break;
     case ',': sheetSettings(); break;
-    case 'q': case '`': back(); break;
     case 'Q': toProjects(); break;
+    case 'q': case '`': gridBack(); break;
     default:
-      if (k >= '1' && k <= '9') {
+      if (k >= '1' && k <= '9' && k.length === 1) {
         const i = Number(k) - 1;
         const t = list[i];
-        if (!t) break;
+        // Cards and free worktrees, as at the desk; `+ new` is not a digit's to open.
+        if (!t || !(t.card || t.freeWt)) return true;
         S.sel = i;
-        if (S.screen === 'projects') { t.project ? openProject(t.project.name) : sheetAddProject(); }
-        else if (t.card) openSession(t.card.name);
-        else if (t.freeWt) sheetName({ cwd: t.freeWt.path, name: G.basename(t.freeWt.path), reuse: t.freeWt.path });
-        else sheetPicker();
-      } else if (e.ctrlKey && (k === 'p' || k === 'P')) { toProjects(); }
-      // Ctrl-f is a chord in the terminal because there is no other way to point at a
-      // project from inside a session. Here the two screens ARE the chord: projects,
-      // then a card.
-      else if (e.ctrlKey && (k === 'f' || k === 'F')) { toProjects(); }
-      return;
+        openItem(t);
+        return true;
+      }
+      return false;
   }
-  e.preventDefault();
+  return true;
+}
+// q / ` / Ctrl-c on the grid: a sub-grid goes up to the top grid; the top grid goes up to
+// the project's MASTER, however the grid was reached (docs/SHORTCUTS.md §3).
+function gridBack() {
+  if (S.sub) return back();
+  enterMaster(S.project);
+}
+// ...and while `/` is up (the desk's searchKey). Typing: every printable key is the query,
+// ⏎ locks it onto a match. Locked: n / N step, ⏎ opens, / or ⌫ edit again, q / ` clear,
+// hjkl still move, and every card verb is inert. Esc clears from either step; the arrows
+// move in both. Returns whether the key was taken.
+function searchKey(e, k, lk, ctrl) {
+  const s = S.srch;
+  const onProj = S.screen === 'projects';
+  const nc = gridCols(), n = items().length;
+  const move = onProj ? stepProject : d => { const i = S.sel + d; if (i >= 0 && i < n) S.sel = i; };
+  const shorter = () => [...s.q].slice(0, -1).join('');
+  if (k === 'Escape' || (ctrl && lk === 'c' && !hasSelection())) S.srch = null;
+  else if (k === 'ArrowUp') move(-nc);
+  else if (k === 'ArrowDown') move(nc);
+  else if (k === 'ArrowLeft') move(-1);
+  else if (k === 'ArrowRight') move(1);
+  else if (ctrl || e.altKey) return false;
+  else if (s.typing) {
+    if (k === 'Enter') { if (srchMatches().length) s.typing = false; }
+    else if (k === 'Backspace') { if (!s.q) S.srch = null; else { s.q = shorter(); srchFirst(); } }
+    else if (k.length === 1) { s.q += k; srchFirst(); if (onProj) readFoundSoon(); }
+    else return false;
+  } else {
+    if (k === 'q' || k === '`') S.srch = null;
+    else if (k === '/') s.typing = true;
+    else if (k === 'Backspace') { s.typing = true; s.q = shorter(); srchFirst(); }
+    // The item is read BEFORE the search is cleared: a found session is in the list only
+    // while there is a query to find it.
+    else if (k === 'Enter') { const it = onProj ? projectList()[S.sel] : items()[S.sel]; S.srch = null; if (onProj) openProjectItem(it, s); else openItem(it); return true; }
+    else if (k === 'n' || k === 'N') { const i = stepMatch(srchMatches(), S.sel, k === 'n' ? 1 : -1); if (i >= 0) S.sel = i; }
+    else if (k === 'k') move(-nc);
+    else if (k === 'j') move(nc);
+    else if (k === 'h') move(-1);
+    else if (k === 'l') move(1);
+  }
+  render();
+  // On Projects the cursor can land on a session found below the fold — below every project
+  // — and a match nobody can see is a count with nothing under it. Brought into view only
+  // when it is not already (revealSel), so a match on screen moves nothing.
+  if (onProj) revealSel();
+  return true;
+}
+
+// ── Projects: fleet-grid.mjs's onKeyProjects ───────────────────────────────────────────
+function projectsKey(e, k, lk, ctrl) {
+  const projects = S.projects || [];
+  const list = [...projects.map(p => ({ project: p })), { add: true }];
+  const it = list[S.sel] || {};
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    // Ctrl-s: straight to that project's grid, skipping master.
+    if (lk === 's') { if (it.project) toGridOf(it.project.name); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  const move = d => { if (stepProject(d)) render(); };
+  const nc = gridCols();
+  switch (k) {
+    case 'ArrowUp': case 'k': move(-nc); break;
+    case 'ArrowDown': case 'j': move(nc); break;
+    case 'ArrowLeft': case 'h': move(-1); break;
+    case 'ArrowRight': case 'l': move(1); break;
+    case 'H': case 'K': if (it.project) reorderProject(it.project.name, k === 'H' ? -1 : -nc); break;
+    case 'L': case 'J': if (it.project) reorderProject(it.project.name, k === 'L' ? 1 : nc); break;
+    case '/': if (projectField()) focusProjectField(); else { S.srch = { q: '', typing: true }; render(); } break;
+    case 'Enter': openProjectItem(it); break;
+    case 's': case 'S': if (it.project) sheetSchedule('master', it.project.name); break;
+    // The desk's `x`, with the desk's question. Only the KEY: a long-press on a project
+    // card still asks nothing (see wire()), because a resting thumb is not a decision.
+    case 'x': if (it.project) { S.confirm = { kind: 'project', name: it.project.name }; render(); } break;
+    case ',': sheetSettings(); break;
+    default:
+      if (k >= '1' && k <= '9' && k.length === 1) {
+        const i = Number(k) - 1;
+        if (!projects[i]) return true;
+        S.sel = i;
+        enterMaster(projects[i].name);
+        return true;
+      }
+      return false;
+  }
+  return true;
+}
+// ── the queue: a list to answer, so the cursor, ⏎, and the grid's ways out ─────────────
+function queueKey(e, k, lk, ctrl) {
+  const rows = S.waiting || [];
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  const move = (d) => { const n = S.qsel + d; if (n >= 0 && n < rows.length) { S.qsel = n; render(); } };
+  switch (k) {
+    case 'ArrowUp': case 'k': move(-1); break;
+    case 'ArrowDown': case 'j': move(1); break;
+    case 'Enter': if (rows[S.qsel]) (rows[S.qsel].state === 'held' ? openHeld : sheetReply)(rows[S.qsel]); break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
+// The reviews list: j/k walk the cards and the unfolded runs, ⏎ opens one, space (or l)
+// folds a branch's earlier runs in and out.
+function reviewsKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  const stops = reviewStops();
+  const move = (d) => { const n = S.rvsel + d; if (n >= 0 && n < stops.length) { S.rvsel = n; render(); } };
+  const at = stops[S.rvsel];
+  switch (k) {
+    case 'ArrowUp': case 'k': move(-1); break;
+    case 'ArrowDown': case 'j': move(1); break;
+    case 'Enter': if (at) openReview(at.g.host_key, at.g.profile, at.r.id); break;
+    case ' ': case 'l': if (at && at.g.earlier.length) rvToggle(at.g.key); break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
+// Falling through to Projects' keys meant ⏎ opened the project under a screen nobody could see, and
+// n started a new one. Its controls are real buttons, so Tab and ⏎ are the browser's. In the editor
+// a bare key does nothing: `q` from a seg button would have thrown away the form.
+function automationsKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  if (S.autosEdit) return false;
+  switch (k) {
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    case 'n': S.autosEdit = 'new'; pushNav(); render(); break;
+    default: return false;
+  }
+  return true;
+}
+// A run: space plays, ← → step chapters, a approves, r rejects — the old page's keys, and
+// never while a note is being typed (onKey leaves a focused field alone).
+function reviewKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  const run = S.rvRun && S.rvRun.run;
+  const fv = run && ((run.verdict || {}).flow || {}).v || '';
+  switch (k) {
+    case ' ': if (rvPlayer) rvPlayer.toggle(); break;
+    case 'ArrowLeft': if (rvPlayer) rvPlayer.step(-1); break;
+    case 'ArrowRight': if (rvPlayer) rvPlayer.step(1); break;
+    case 'a': if (run && run.kind === 'recorded') reviewProps().onFlow(fv === 'approve' ? '' : 'approve'); else return false; break;
+    case 'r': if (run && run.kind === 'recorded') reviewProps().onFlow(fv === 'reject' ? '' : 'reject'); else return false; break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
+// ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. The digit is an address — `5` opens
+// project 5 the way `Ctrl-f 5` does at the desk — so it counts the unfiltered list.
+// Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
+// j/k onto a card the profile tab hides is a cursor that disappears. Moves S.sel and says
+// whether it did; the caller renders. Shared by the plain keys and the `/` search's.
+// The sessions a search finds come after `+ new project` and are stops too.
+function stepProject(d) {
+  const projects = S.projects || [];
+  const last = projectList().length - 1;
+  let n = S.sel + d;
+  if (visibleProjects().length !== projects.length) {
+    const stops = [...visibleProjects().map(v => v.i)];
+    for (let i = projects.length; i <= last; i++) stops.push(i);
+    const at = stops.indexOf(S.sel);
+    n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
+    if (n == null) return false;
+  }
+  if (n >= 0 && n <= last) { S.sel = n; return true; }
+  return false;
+}
+// ⏎ enters the project's MASTER, as at the desk; on `+ new project` it adds one. The same
+// from a search as without one.
+function openProjectItem(it, from = S.srch) {
+  if (it && it.found) openFound(it, from);
+  else if (it && it.add) sheetAddProject();
+  else if (it && it.project) enterMaster(it.project.name);
+}
+// ⇧hjkl on Projects: the desk's reorderProject. The daemon refuses fleet_project_order by
+// name today (fleet-serve NOT_YET — the order file is written only by the desk's Projects
+// screen), exactly as it refuses the grid's fleet_order; the refusal is shown, not hidden.
+async function reorderProject(name, delta) {
+  const names = (S.projects || []).map(p => p.name);
+  const i = names.indexOf(name);
+  const ni = Math.max(0, Math.min(names.length - 1, i + delta));
+  if (i < 0 || ni === i) return;
+  names.splice(ni, 0, ...names.splice(i, 1));
+  S.sel = ni;
+  await doVerb('fleet_project_order', { order: names }, { quiet: true });
 }
 
 // ── boot ──────────────────────────────────────────────────────────────────
@@ -5273,8 +8972,11 @@ function onKey(e) {
 // declaration exists. test/helpers/pwa-check.mjs asserts the ordering.
 restore();
 fitCards();
+wasWide = wideNow();
 addEventListener('resize', () => {
   fitCards();
+  // Crossing the two-pane breakpoint is a different layout, not a resize of this one.
+  if (wideNow() !== wasWide) { wasWide = wideNow(); if (!typingNow()) render(); }
   syncViewport();
   // An orientation change moves the fold, and the pane box was sized against the old one.
   if (paneBoxNode) sizePaneBox(paneBoxNode);
@@ -5291,14 +8993,23 @@ try {
     visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
+// CAPTURE, so the keydown that proves a keyboard is counted before the composer decides
+// what its ⏎ means — the first ⏎ from an iPad's keyboard sends.
+addEventListener('keydown', noteKeyboard, true);
 addEventListener('keydown', onKey);
+for (const t of ['pointerdown', 'pointerup', 'click']) addEventListener(t, confirmOutside, true);
+wireDrop();
 // NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
 // long after the tap; speak mode is gone, and the listener went on claiming the phone's
 // audio session on every first tap — which paused the owner's music. See unlockAudio().
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
-// this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', (e) => { uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
+// this is what answers). No URL is read here: the entries carry a depth, not a route.
+// The entry it lands on keeps the address it was given when it was pushed, which is not the
+// screen popTo() now draws — a trail seeded for a link holds the link's address all the way
+// down — so the address is brought into line on every landing, a counted-out one included,
+// and before a waiter pushes anything above it.
+addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; if (!navSkip) { syncUrl(); navSettled(); } return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; syncUrl(); } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
@@ -5310,7 +9021,8 @@ document.addEventListener('visibilitychange', () => {
     // sheet, not the owner leaving, so coming back from it is not a resume and arms nothing
     // — otherwise a dismissed sheet would re-try itself forever.
     hidByCeremony = pk.busy();
-    stopPanePoll();
+    hiddenAt = Date.now();
+    stopPanePoll(); stopChatPoll(); stopStackPoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
     if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
@@ -5318,11 +9030,25 @@ document.addEventListener('visibilitychange', () => {
   }
   const act = onVisibleAction();
   if (!hidByCeremony && act !== 'wait') pk.arm();
+  usageSoon();   // a resume reads the accounts again on the next poll
   hidByCeremony = false;
   if (act === 'lock') { if (S.locked) tryAutoUnlock(); else lock(); }
-  else if (act === 'refresh') refresh().then(() => { if (!S.locked) pk.release(); });
-  syncPanePoll();
+  else if (act === 'refresh') {
+    // The chat first, and FRESH: whatever read was out when the app left is from before, and
+    // refresh() below joins this one rather than that one.
+    resumeChat(true);
+    syncStackPoll();             // the stack's other columns, on their own clock (see "the stack")
+    refresh().then(() => { if (!S.locked) pk.release(); });
+  }
+  syncPanePoll(); syncChatPoll();
 });
+// A desk window taking focus back is a resume that hides nothing (usageSoon).
+addEventListener('focus', usageSoon);
+// A page restored from the back-forward cache gets no visibilitychange of its own on every
+// engine, and a desktop window brought to the front gets only `focus`. Both ask again; a
+// focus joins a read that is already out unless that read has been out too long to wait for.
+addEventListener('pageshow', (e) => { if (e && e.persisted) resumeChat(true); });
+addEventListener('focus', () => resumeChat(true));
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
 // until something re-navigates — and the first re-navigation runs the OLD app.js while the
 // new one installs behind it, so it takes TWO cold opens to pick up a fix. Measured: a
@@ -5344,6 +9070,7 @@ if ('serviceWorker' in navigator) {
   // or opens one on #jarvis). Opened after the unlock, never instead of it.
   navigator.serviceWorker.addEventListener('message', (ev) => {
     if (ev && ev.data && ev.data.open === 'jarvis') { S.wantJarvis = true; if (!S.locked) refresh(); }
+    if (ev && ev.data && ev.data.open === 'waiting') { S.wantWaiting = true; if (!S.locked) refresh(); }
   });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) { hadController = true; return; }
@@ -5353,6 +9080,14 @@ if ('serviceWorker' in navigator) {
 }
 if (location.hash === '#jarvis') {
   S.wantJarvis = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
+if (location.hash === '#waiting') {
+  S.wantWaiting = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
+if (location.hash === '#reviews') {
+  S.wantReviews = true;
   try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
 }
 markStandalone();
@@ -5374,7 +9109,7 @@ api.ready().then(() => render());
 // 'offline' gets no attempt: an assertion that cannot be posted is a Face ID spent for nothing.
 pk.arm();
 pk.resume().then((r) => {
-  if (r === 'ok') return unlocked();
+  if (r === 'ok') return resumedSession();
   if (r !== 'offline') tryAutoUnlock();
 }).catch(() => {});
 

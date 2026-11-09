@@ -28,7 +28,7 @@ fi
 
 # 2) land on the exact session inside the fleet
 if [ -n "$SLOT" ] && [ -n "$SOCK" ] && command -v tmux >/dev/null 2>&1; then
-  cl="$(tmux -L "$SOCK" list-clients -F '#{client_name}' 2>/dev/null | head -1)"
+  cl="$(tmux -u -L "$SOCK" list-clients -F '#{client_name}' 2>/dev/null | head -1)"
   if [ -n "$cl" ]; then
     # a session is attached in the pane — flip it straight to the target
     tmux -L "$SOCK" switch-client -c "$cl" -t "$SLOT" 2>/dev/null || true

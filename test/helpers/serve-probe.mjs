@@ -224,6 +224,10 @@ if (phase === 'reads') {
   row('inbox', await a.api(base, 'GET', '/api/inbox?project=demo'));
   row('audit', await a.api(base, 'GET', '/api/audit?limit=5'));
   row('health', await a.api(base, 'GET', '/api/health'));
+  row('waiting', await a.api(base, 'GET', '/api/waiting'));
+  row('waiting.noToken', await request(base, 'GET', '/api/waiting'));
+  row('usage', await a.api(base, 'GET', '/api/usage'));
+  row('usage.noToken', await request(base, 'GET', '/api/usage'));
 }
 
 // ── Jarvis: the digest, the marker, a yes, and a voice ─────────────────────
@@ -262,6 +266,7 @@ if (phase === 'jarvis') {
 }
 
 // ── Jarvis's switch: every /api/jarvis* route, the project list, and the Mac's voice ──
+// (both halves of it: /api/speak reads replies, /api/voice hears the owner).
 //     node serve-probe.mjs <base> jarvisswitch <enrol-code> <wav-file>
 // Run once with Jarvis switched on and once off; run.sh compares the two, so an "off" row
 // can only pass because the switch changed something.
@@ -271,8 +276,64 @@ if (phase === 'jarvisswitch') {
   row('jarvis', await a.api(base, 'GET', '/api/jarvis'));
   row('confirm', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
   row('hear', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+  // THE MAC'S EARS ARE NOT JARVIS'S: every session's talk needs them, so their own routes
+  // answer either way. Asked with no token as well, so "answers with Jarvis off" cannot
+  // be bought by dropping the auth in front of them.
+  row('voice.noToken', await request(base, 'GET', '/api/voice'));
+  row('voice', await a.api(base, 'GET', '/api/voice'));
+  row('voice.hear.noToken', await request(base, 'POST', '/api/voice/hear', { body: wav, contentType: 'audio/wav' }));
+  row('voice.hear', await a.api(base, 'POST', '/api/voice/hear', wav, { contentType: 'audio/wav' }));
+  row('voice.hear.text', await a.api(base, 'POST', '/api/voice/hear', Buffer.from('this is not audio at all, only text wearing a header'), { contentType: 'audio/wav' }));
   row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
   row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
+}
+
+// ── automations: the one list, with a token, for a row that changed something first ──
+if (phase === 'automations-list') {
+  await a.enroll(base, arg);
+  row('list', await a.api(base, 'GET', '/api/automations'));
+}
+
+// ── automations (EXPERIMENTAL): every route, once switched on and once off ──────────
+//     node serve-probe.mjs <base> automations <enrol-code>
+// run.sh compares the two runs, so an "off" row can only pass because the switch changed
+// something. A step that starts a session is the one that needs a passkey AT SAVE TIME —
+// nobody is holding the phone when it runs — so a save is tried without one, with a forged
+// one, with a real one, and switched off (which needs none: it cannot run until it is on).
+if (phase === 'automations') {
+  await a.enroll(base, arg);
+  const save = (automation, assertion = null) => a.api(base, 'POST', '/api/automations', { automation },
+    assertion ? { headers: { 'x-fleet-assertion': JSON.stringify(assertion) } } : {});
+  const daily = { type: 'schedule', mode: 'days', at: '09:00', days: [1, 2, 3, 4, 5] };
+  row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
+  row('list.noToken', await request(base, 'GET', '/api/automations'));
+  row('list', await a.api(base, 'GET', '/api/automations'));
+  const send = await save({ name: 'morning review', enabled: true, trigger: daily,
+    steps: [{ action: 'send', project: 'demo', session: 'w1', prompt: 'review what is open on {date}' }] });
+  row('save.send', send);
+  row('save.noSteps', await save({ name: 'nothing', enabled: true, trigger: daily, steps: [] }));
+  row('run.send', await a.api(base, 'POST', '/api/automations/run', { id: send.json?.automation?.id || 'NOPE' }));
+  // The same session, the same verb, from the owner's own thumb: run.sh tells the two apart by
+  // the mark the receiving session's ledger reads as the person speaking.
+  row('verb.phone', await a.api(base, 'POST', '/api/verb', { tool: 'fleet_send', args: { project: 'demo', session: 'w1', prompt: 'the owner typed this' } }));
+  const spawn = { name: 'nightly check', enabled: true, trigger: daily,
+    steps: [{ action: 'spawn', project: 'demo', name: 'nightly', prompt: 'run the checks' }] };
+  row('save.spawnNoKey', await save(spawn));
+  row('save.spawnForged', await save(spawn, await a.signChallenge({ purpose: 'automation nightly check', tamper: { signature: Buffer.alloc(64) } })));
+  const keyed = await save(spawn, await a.fresh(base, 'automation nightly check'));
+  row('save.spawnKey', keyed);
+  row('save.spawnOff', await save({ ...spawn, name: 'nightly, later', enabled: false }));
+  const runKeyed = (assertion = null) => a.api(base, 'POST', '/api/automations/run', { id: keyed.json?.automation?.id || 'NOPE' },
+    assertion ? { headers: { 'x-fleet-assertion': JSON.stringify(assertion) } } : {});
+  row('run.spawnNoKey', await runKeyed());
+  row('run.spawnForged', await runKeyed(await a.signChallenge({ purpose: 'run nightly check', tamper: { signature: Buffer.alloc(64) } })));
+  row('run.spawn', await runKeyed(await a.fresh(base, 'run nightly check')));
+  row('draft', await a.api(base, 'POST', '/api/automations/draft', { messages: [{ role: 'user', text: 'every weekday at nine, say good morning' }] }));
+  row('draft.empty', await a.api(base, 'POST', '/api/automations/draft', { messages: [] }));
+  row('list.full', await a.api(base, 'GET', '/api/automations'));
+  row('delete', await a.api(base, 'POST', '/api/automations/delete', { id: send.json?.automation?.id || 'NOPE' }));
+  row('seen', await a.api(base, 'POST', '/api/automations/seen', {}));
+  row('list.after', await a.api(base, 'GET', '/api/automations'));
 }
 
 // THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7

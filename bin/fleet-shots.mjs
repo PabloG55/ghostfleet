@@ -7,8 +7,9 @@
 //     fleet-shots <url> [<url> ...]              one step per url, no flow file
 //     fleet-shots verdict <dir>                  record the page's copied verdict (stdin)
 //     fleet-shots --check <dir>                  exit non-zero unless every step is ok
-//     fleet-shots serve [--port N] [--dir D]     a loopback review UI: pictures + approve
-//     fleet-shots list [--dir D]                 the same states, as text, for a pane
+//     fleet-shots list [--dir D]                 every run's state, newest first, for a pane
+//     fleet-shots page <dir>                     rewrite a run's index.html from its manifest
+//     reviewing is a screen in the app now: Projects → reviews (`serve` is retired)
 //
 // WHY THIS EXISTS, and it is not the same reason as fleet-look's. fleet-look answers "does
 // this one screen look right" and it answers it for the AGENT, by printing a path the agent
@@ -44,8 +45,9 @@
 // note, and one button copies the verdict as text to paste back to whoever did the work.
 // Deliberately NOT a server in this version. The workflow that already proved itself was a
 // folder opened in a browser, a server is a process to leak (this repo has paid for that
-// twice this week), and file:// cannot POST anywhere anyway. The manifest is there so a
-// later `fleet-serve` route can render the same data without this command changing.
+// twice this week), and file:// cannot POST anywhere anyway. The manifest is what the
+// phone app's Reviews screen renders (lib/shots.mjs, through fleet-serve) — the same data,
+// with verdicts written straight to the run folder.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -53,6 +55,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { launch, sleep } from '../lib/browser.mjs';
 import * as X from '../lib/experimental.mjs';
+import { VERDICT, stepUrl, readManifest as readRun, readVerdict, isRecorded, chapterNote, runState, listRuns } from '../lib/shots.mjs';
 
 const ARGV = process.argv.slice(2);
 const die = (m) => { console.error('fleet-shots: ' + m); process.exit(1); };
@@ -61,7 +64,8 @@ const has = (n) => ARGV.includes(n);
 
 if (has('-h') || has('--help')) {
   const src = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n');
-  console.log(src.slice(1, 7).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+  // Through the usage block, which ends at the first bare `//`.
+  console.log(src.slice(1, src.findIndex((l, i) => i > 5 && l.trim() === '//')).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(0);
 }
 // EXPERIMENTAL, AND OFF MEANS EVERY SUBCOMMAND: a flow, verdict, --check, list and serve all
@@ -71,12 +75,6 @@ if (has('-h') || has('--help')) {
 X.settle('shots');
 if (!X.enabled('shots')) die(X.disabledWhy('shots', 'fleet-shots'));
 
-// EVERYTHING THE RENDERERS TOUCH LIVES ABOVE THE SERVE BLOCK. NOT AESTHETIC. `serve` parks the module
-// with `await new Promise(() => {})`, so a `const` written below that point is never
-// initialised and every request dies in the temporal dead zone. There is a comment
-// twenty lines down saying exactly this about readVerdict and VERDICT — and this file
-// still shipped a stylesheet below the park, which failed on the first page served with
-// "SKIN is not defined". A warning next to one hazard does not fence the hazard.
 // ONE STYLESHEET FOR BOTH SCREENS, because they are one instrument and two stylesheets
 // drift — the same reason sessionStatuses is shared between the Projects cards and the
 // stack screen. Inlined rather than served as a file: the page must open over file://
@@ -85,7 +83,6 @@ if (!X.enabled('shots')) die(X.disabledWhy('shots', 'fleet-shots'));
 // rename, and folders written then are still on disk and still worth reading — a redesign
 // that made yesterday's runs display "no page" would be a regression dressed as a
 // refactor.
-const stepUrl = (s) => s.url || s.at || '';
 
 const SKIN = `
 :root{
@@ -404,8 +401,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;max-
 .ch .reqs tr.bad td{color:var(--red)} .ch .reqs tr.warn td{color:var(--yellow)}
 .ch textarea{margin-top:8px;min-height:2.6em;resize:vertical;display:none}
 .ch.here textarea,.ch.has textarea,.ch.flag textarea{display:block}
-.ch textarea.wants{border-color:var(--yellow)}
-.ch .needs{font-size:12px;color:var(--yellow);margin-top:4px}
 
 /* the verdict: pinned to the bottom, because it is the one thing every visit ends with */
 .verdict{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid var(--hair);
@@ -442,50 +437,10 @@ main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;max-
 // rejected one, because the whole point of the standing contract's "name the criterion you
 // could not check" is that an unchecked thing must not read as a passed thing. A run of
 // twelve steps with two marked ok is not 2/2.
-const VERDICT = 'verdict.json';
-const readManifest = (dir) => {
-  try { return JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); }
-  catch { die(`no manifest.json in ${dir} — is that a fleet-shots folder?`); }
-};
-const readVerdict = (dir) => {
-  try { return JSON.parse(fs.readFileSync(path.join(dir, VERDICT), 'utf8')); } catch { return {}; }
-};
-
-// ── two kinds of run, one answer ────────────────────────────────────────────
-// A RECORDED run (manifest.video) is reviewed as ONE thing: the flow is approved or
-// rejected, and each chapter may carry a note. A run from before the recording has a still
-// per step and a verdict per step. Both are on disk and both stay readable, so every
-// reader of "what state is this run in" — list, the index, --check — asks this one
-// function rather than growing a second copy of the rule per kind.
-//   THE FLAG RULE IS THE SAME FOR BOTH: a step the run itself flagged (a 404, a missed
-// expect) is not approved by silence. A note on that chapter is the reason, and the reason
-// is what clears it; approving the flow without one leaves it flagged.
-const isRecorded = (m) => !!(m && m.video);
-const chapterNote = (v, n) => String(((v.chapters || {})[String(n)]) || '').trim();
-function runState(m, v) {
-  if (isRecorded(m)) {
-    const fv = (v.flow || {}).v || '';
-    const flagged = m.steps.filter(st => st.notes && st.notes.length && !chapterNote(v, st.n)).length;
-    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : flagged ? `${flagged} flagged` : 'approved';
-    return { total: 1, marked: fv ? 1 : 0, problem: fv === 'reject' ? 1 : 0, flagged, label,
-             cls: fv === 'reject' ? 'bad' : (!fv || flagged) ? 'warn' : 'ok',
-             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed' : flagged ? `${flagged} need a reason` : 'approved' };
-  }
-  const total = m.steps.length;
-  const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
-  const problem = m.steps.filter(st => (v[String(st.n)] || {}).v === 'problem').length;
-  const flagged = m.steps.filter(st => st.notes && st.notes.length &&
-    !(['ok', 'skip'].includes((v[String(st.n)] || {}).v) && ((v[String(st.n)] || {}).note || '').trim())).length;
-  const label = problem ? `${problem} problem` : flagged ? `${flagged} flagged`
-    : marked < total ? `${total - marked} unreviewed` : 'approved';
-  // ACTIONABLE, NOT MERELY RED. "2 flagged" on a run where every step was marked reads
-  // as a broken screen: the reviewer did everything offered and it stayed red. When the
-  // only thing left is a missing reason, say THAT — it is a different job from reviewing.
-  const text = problem ? `${problem} needs changes` : marked < total ? `${total - marked} unreviewed`
-    : flagged ? `${flagged} need a reason` : 'approved';
-  return { total, marked, problem, flagged, label, text,
-           cls: problem ? 'bad' : (marked < total || flagged) ? 'warn' : 'ok' };
-}
+// The rules themselves — what a run is, what state it is in, the flag rule — live in
+// lib/shots.mjs, shared with fleet-serve's Reviews routes, so the phone and this gate cannot
+// disagree about a run. Here, a folder that is not one of ours is an error, not a skip.
+const readManifest = (dir) => readRun(dir) || die(`no manifest.json in ${dir} — is that a fleet-shots folder?`);
 
 if (ARGV[0] === 'verdict') {
   const dir = path.resolve(ARGV[1] || die('usage: fleet-shots verdict <dir>   (text on stdin)'));
@@ -541,8 +496,11 @@ if (has('--check')) {
   const v = readVerdict(dir);
   if (isRecorded(m)) {
     // ONE VERDICT, FOR THE FLOW. Silence is still not approval: no verdict fails exactly as
-    // a rejection does. And a chapter the run flagged needs its reason even under an
-    // approve — the flag rule the per-step review had, carried over whole.
+    // a rejection does. But an approve is the whole decision, flags included: the owner is
+    // the reviewer, he watched the run with its flags drawn on it, and making him type a
+    // reason before his own approve counted read as "approved, but refused". The flags are
+    // still PRINTED — as accepted by the approve, or with his note when he wrote one — so the
+    // record keeps what the run found. Only the per-step branch below still wants a note.
     const fv = v.flow || {};
     const accepted = [], flagged = [];
     for (const st of m.steps.filter(x => x.notes && x.notes.length)) {
@@ -553,18 +511,19 @@ if (has('--check')) {
       const st = m.steps.find(x => String(x.n) === n);
       if (st && !(st.notes || []).length && String(note).trim()) console.log(`note  ${st.n}. ${st.name} — ${note}`);
     }
-    for (const { st, nt } of flagged) console.log(`flagged  ${st.n}. ${st.name} — ${nt}` +
-      (fv.v === 'approve' ? '   (approved with no reason on this chapter — a note is what clears a flag)' : ''));
+    for (const { st, nt } of flagged) console.log(fv.v === 'approve'
+      ? `accepted  ${st.n}. ${st.name} — ${nt}   (accepted by the approve)`
+      : `flagged  ${st.n}. ${st.name} — ${nt}`);
     for (const { st, why } of accepted) console.log(`accepted  ${st.n}. ${st.name} — ${why}`);
-    if (fv.v === 'approve' && !flagged.length) {
+    if (fv.v === 'approve') {
+      const nFlags = flagged.length + accepted.length;
       console.log(`fleet-shots: the flow (${m.steps.length} chapter${m.steps.length === 1 ? '' : 's'}) is approved` +
         (fv.note ? ` — ${fv.note}` : '') +
-        (accepted.length ? `, ${accepted.length} flag${accepted.length === 1 ? '' : 's'} accepted with a reason` : ''));
+        (nFlags ? `, ${nFlags} flagged chapter${nFlags === 1 ? '' : 's'} accepted by the approve` : ''));
       process.exit(0);
     }
     console.log(fv.v === 'reject' ? `fleet-shots: NOT approved — the flow was rejected${fv.note ? ` — ${fv.note}` : ''}`
-      : !fv.v ? 'fleet-shots: NOT approved — the flow has not been reviewed'
-      : `fleet-shots: NOT approved — ${flagged.length} flagged by the run itself, with no reason given`);
+      : 'fleet-shots: NOT approved — the flow has not been reviewed');
     process.exit(1);
   }
   const problems = [], unreviewed = [];
@@ -615,220 +574,59 @@ if (has('--check')) {
 if (ARGV[0] === 'list') {
   const root = path.resolve(flag('--dir') || path.join(
     process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'), 'shots'));
-  let names = [];
-  try { names = fs.readdirSync(root).filter(d => fs.existsSync(path.join(root, d, 'manifest.json'))); } catch {}
-  if (!names.length) { console.log(`fleet-shots: nothing in ${root}`); process.exit(0); }
+  // NEWEST FIRST BY WHEN THE RUN HAPPENED, not by folder name. Sorting by name was right only
+  // while every folder was an ISO stamp; a run recorded with `--out <name>` sorted wherever
+  // its name fell. lib/shots.mjs's runTime reads provenance.at, and skips foreign manifests
+  // (another program's manifest.json in a shared --dir) by content.
+  const runs = listRuns(root);
+  if (!runs.length) { console.log(`fleet-shots: nothing in ${root}`); process.exit(0); }
   let waiting = 0;
-  for (const d of names.sort().reverse()) {
-    const dir = path.join(root, d);
-    let m; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { continue; }
-    // Not ours, so not listed — the same check `serve` makes above, for the same reason
-    // and against the same real case: another program's manifest.json in a shared --dir.
-    // Here the consequence is quieter and exactly as wrong — it aborts the whole listing
-    // on the first foreign file instead of taking a server down.
-    if (!m || !Array.isArray(m.steps)) continue;
-    const state = runState(m, readVerdict(dir)).label;
-    if (state !== 'approved') waiting++;
-    const p = m.provenance || {};
-    console.log(`${state.padEnd(14)} ${d}  ${p.branch || ''}${p.commit ? ' ' + p.commit.slice(0, 8) : ''}${p.dirty ? '+dirty' : ''}`);
+  for (const r of runs) {
+    if (r.state.label !== 'approved') waiting++;
+    const p = r.m.provenance || {};
+    const when = new Date(r.at).toISOString().slice(0, 16).replace('T', ' ');
+    console.log(`${r.state.label.padEnd(14)} ${r.name}  ${when}  ${p.branch || ''}${p.commit ? ' ' + p.commit.slice(0, 8) : ''}${p.dirty ? '+dirty' : ''}`);
   }
   // THE COUNT LAST, because it is the answer. A list you have to add up yourself is a
   // directory listing with extra steps.
-  console.log(waiting ? `fleet-shots: ${waiting} of ${names.length} waiting on you`
-                      : `fleet-shots: all ${names.length} approved`);
+  console.log(waiting ? `fleet-shots: ${waiting} of ${runs.length} waiting on you`
+                      : `fleet-shots: all ${runs.length} approved`);
   process.exit(0);
 }
 
-// ── the review server ───────────────────────────────────────────────────────
-// LOOPBACK ONLY, AND FOREGROUND. Two constraints, both of them scars rather than taste.
-//
-//   127.0.0.1 and nothing else. The fleet already has an internet-reachable server —
-// fleet-serve, on the tailnet, behind passkeys — and a second one would be a second
-// surface guarding a folder of screenshots of your own product. --bind is deliberately
-// absent rather than defaulted: an option that CAN open this up is an option somebody
-// eventually passes.
-//
-//   NOT A DAEMON. It runs in the foreground, prints its URL, and dies with the terminal.
-// Twenty-odd leaked servers were reaped from this machine in one day, one of them orphaned
-// to launchd by a `( … ) &` subshell — so the answer to "how do we not leak another one" is
-// that nothing outlives the shell that started it. There is no init, no pidfile, no
-// restart-on-crash, on purpose.
-if (ARGV[0] === 'serve') {
-  const http = await import('node:http');
-  const root = path.resolve(flag('--dir') || path.join(
-    process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'), 'shots'));
-  const want = Number(flag('--port', 0)) || 0;
-
-  const runs = () => {
-    let names = [];
-    try { names = fs.readdirSync(root).filter(d => fs.existsSync(path.join(root, d, 'manifest.json'))); } catch {}
-    // Newest first, by name, which IS chronological: the default folder is an ISO stamp.
-    // A caller who passed --out gets sorted-by-name, which is the honest fallback rather
-    // than an mtime that a later verdict write would reorder under them.
-    return names.sort().reverse().map(d => {
-      const dir = path.join(root, d);
-      let m = null; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { return null; }
-      // ...AND IT HAS TO BE *OURS*. `manifest.json` is one of the most common filenames in
-      // computing, and --dir is frequently a directory we do not exclusively own — a shared
-      // temp dir, a downloads folder, anywhere a run was written beside other programs'
-      // work. The guard above asks only whether the bytes are JSON, which is a PROXY for
-      // the real question and lets anything well-formed through.
-      //   SEEN LIVE, AND IT TOOK THE WHOLE SERVER DOWN RATHER THAN SKIPPING ONE ROW. A
-      // browser update unpacked its components into the directory this was serving, each
-      // component directory holding a manifest.json of a completely different schema —
-      // valid JSON, no `steps`. The next request read m.steps.length, threw inside the
-      // request handler, and node exited 1. From the client that is a connection refused
-      // with no body; from here, a review UI that worked in the morning and was dead in the
-      // afternoon with nothing in this repo changed. One stranger's file, every run
-      // unreachable, and the crash is on the FIRST request rather than at startup — so the
-      // process prints its banner, claims a port, and dies the moment it is used.
-      //   The general shape: any long-lived scan of a directory you do not own must decide
-      // whether each hit is yours by its CONTENT, and must survive the answer being no.
-      if (!m || !Array.isArray(m.steps)) return null;
-      return { d, m, st: runState(m, readVerdict(dir)) };
-    }).filter(Boolean);
-  };
-
-  // THE AGENTS, asked for rather than remembered — and allowed to be absent. This screen is
-  // useful with no fleet running at all (you review yesterday's flows), so a tmux that is
-  // not there must read as "no sessions", never as an error page over the reviews.
-  const sessions = () => {
-    const out = [];
-    try {
-      const socks = execFileSync('sh', ['-c', "ls -1 ${TMUX_TMPDIR:-/tmp}/tmux-$(id -u) 2>/dev/null || true"],
-        { encoding: 'utf8' }).split('\n').filter(x => x.startsWith('cf-'));
-      for (const sock of socks) {
-        try {
-          const names = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'],
-            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean);
-          for (const n of names) {
-            if (/^_(?:term|edit)-/.test(n)) continue;      // a tab is not an agent
-            out.push({ project: sock.replace(/^cf-/, ''), name: n });
-          }
-        } catch {}
-      }
-    } catch {}
-    return out;
-  };
-
-  const send = (res, code, type, body) => {
-    res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
-    res.end(body);
-  };
-  const server = http.createServer((req, res) => {
-    const u = new URL(req.url, 'http://127.0.0.1');
-    if (req.method === 'POST' && u.pathname === '/api/verdict') {
-      let body = '';
-      req.on('data', c => { body += c; if (body.length > 1e6) req.destroy(); });
-      req.on('end', () => {
-        let j; try { j = JSON.parse(body); } catch { return send(res, 400, 'text/plain', 'bad json'); }
-        // THE PATH COMES FROM A BROWSER, so it is not trusted to be inside root. A verdict
-        // POST naming ../../something is the whole of the attack surface here, and the
-        // check is one line: resolve it and require the prefix.
-        const dir = path.resolve(root, String(j.dir || ''));
-        if (dir !== root && !dir.startsWith(root + path.sep)) return send(res, 403, 'text/plain', 'outside the shots dir');
-        if (!fs.existsSync(path.join(dir, 'manifest.json'))) return send(res, 404, 'text/plain', 'no such run');
-        let rm = null; try { rm = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch {}
-        if (isRecorded(rm)) {
-          // THE FLOW'S VERDICT: approve / reject / none, and a note per chapter. Chapters
-          // are checked against the manifest so a stale page cannot write numbers this run
-          // does not have; an empty flow verdict is allowed — un-choosing is a real thing.
-          const fv = String((j.flow || {}).v || '');
-          if (fv && !['approve', 'reject'].includes(fv)) return send(res, 400, 'application/json', '{"ok":false,"error":"flow verdict is approve or reject"}');
-          const chapters = {};
-          for (const [k, val] of Object.entries(j.chapters || {})) {
-            if (!/^[0-9]+$/.test(k) || !rm.steps.some(x => String(x.n) === k)) continue;
-            const t = String(val || '').slice(0, 2000);
-            if (t.trim()) chapters[k] = t;
-          }
-          const out = { flow: fv ? { v: fv, note: String((j.flow || {}).note || '').slice(0, 2000) } : null, chapters };
-          try { fs.writeFileSync(path.join(dir, VERDICT), JSON.stringify(out, null, 2)); }
-          catch (e) { return send(res, 500, 'text/plain', String(e.message || e)); }
-          return send(res, 200, 'application/json', JSON.stringify({ ok: true, flow: fv || null, notes: Object.keys(chapters).length }));
-        }
-        const clean = {};
-        for (const [k, val] of Object.entries(j.state || {})) {
-          if (!/^[0-9]+$/.test(k)) continue;
-          const v = String((val || {}).v || '');
-          if (!['ok', 'problem', 'skip'].includes(v)) continue;
-          clean[k] = { v, note: String((val || {}).note || '').slice(0, 2000) };
-        }
-        // A POST THAT STORED NOTHING IS NOT OK, and this said `{"ok":true}` over exactly
-        // that: a state whose every entry was rejected got a success and an empty file.
-        // The page shows a green `saved` off this reply, so the one thing it must not do
-        // is agree when nothing was written. An EMPTY state is different and is allowed —
-        // clearing every mark is a real thing to do, and it is what the page sends then.
-        const sent = Object.keys(j.state || {}).length;
-        if (sent && !Object.keys(clean).length)
-          return send(res, 400, 'application/json', '{"ok":false,"error":"no usable verdicts in that state"}');
-        try { fs.writeFileSync(path.join(dir, VERDICT), JSON.stringify(clean, null, 2)); }
-        catch (e) { return send(res, 500, 'text/plain', String(e.message || e)); }
-        send(res, 200, 'application/json', JSON.stringify({ ok: true, stored: Object.keys(clean).length }));
-      });
-      return;
-    }
-    if (u.pathname === '/') return send(res, 200, 'text/html', index(runs(), sessions(), root));
-    // /r/<run>/...  — the run page, and its images
-    const mm = u.pathname.match(/^\/r\/([^/]+)\/?(.*)$/);
-    if (mm) {
-      const dir = path.resolve(root, decodeURIComponent(mm[1]));
-      if (dir !== root && !dir.startsWith(root + path.sep)) return send(res, 403, 'text/plain', 'outside the shots dir');
-      const rest = mm[2] || '';
-      if (!rest) {
-        let m; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); }
-        catch { return send(res, 404, 'text/plain', 'no such run'); }
-        m.dir = decodeURIComponent(mm[1]);
-        m.verdict = readVerdict(dir);
-        return send(res, 200, 'text/html', page(m, true));
-      }
-      // Only the files this page references, by extension: the folder is ours, but a path
-      // handed over by a browser is not, and "serve whatever is under here" is how a
-      // review surface becomes a file browser for the home directory.
-      if (!/^[A-Za-z0-9._-]+\.(png|jpg|json|mp4|webm)$/.test(rest)) return send(res, 403, 'text/plain', 'not a shot');
-      const type = { png: 'image/png', jpg: 'image/jpeg', json: 'application/json', mp4: 'video/mp4', webm: 'video/webm' }[rest.split('.').pop()];
-      let size = 0; try { size = fs.statSync(path.join(dir, rest)).size; } catch { return send(res, 404, 'text/plain', 'not found'); }
-      // RANGES, OR THE CHAPTERS DO NOT WORK. A <video> seeks by asking for a byte range.
-      // Measured: served whole, with a 200 and no Accept-Ranges, every seek was refused, so
-      // → and a chapter click both left the video at 0:00 — a chapter list that looks
-      // right and does nothing.
-      const rg = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
-      if (rg && (rg[1] || rg[2])) {
-        let a = rg[1] ? Number(rg[1]) : Math.max(0, size - Number(rg[2]));
-        let z = rg[1] && rg[2] ? Math.min(Number(rg[2]), size - 1) : size - 1;
-        if (a >= size || a > z) { res.writeHead(416, { 'content-range': `bytes */${size}` }); return res.end(); }
-        res.writeHead(206, { 'content-type': type, 'content-length': z - a + 1, 'accept-ranges': 'bytes',
-                             'content-range': `bytes ${a}-${z}/${size}`, 'cache-control': 'no-store' });
-        return fs.createReadStream(path.join(dir, rest), { start: a, end: z }).pipe(res);
-      }
-      res.writeHead(200, { 'content-type': type, 'content-length': size, 'accept-ranges': 'bytes', 'cache-control': 'no-store' });
-      return fs.createReadStream(path.join(dir, rest)).pipe(res);
-    }
-    send(res, 404, 'text/plain', 'not found');
-  });
-  server.on('error', (e) => die(`cannot listen: ${e.message}`));
-  server.listen(want, '127.0.0.1', () => {
-    const a = server.address();
-    console.log(`http://127.0.0.1:${a.port}/`);
-    console.log(`fleet-shots: serving ${root} — loopback only, and it dies with this terminal (Ctrl-C)`);
-  });
-  // A drain on the way out, for the reason fleet-serve documents about truncation: a
-  // socket write is asynchronous, so exiting while a PNG is still going out cuts it at the
-  // pipe buffer with no error either side.
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
-    server.close(() => process.exit(0));
-    server.closeIdleConnections?.();
-    setTimeout(() => process.exit(0), 2000).unref();
-  });
-
-  // PARKED, and both halves of that matter. Without it the module falls through into the
-  // flow parser, which finds no URL and calls die() — the server would print its address
-  // and vanish half a second later. And it is parked HERE, after the gate, because
-  // readVerdict and VERDICT are `const`: declared below this point they would never be
-  // initialised, since a parked module never finishes evaluating, and the first request
-  // would throw ReferenceError from inside a handler nobody is watching.
-  await new Promise(() => {});
+// ── a run's page, rewritten ──────────────────────────────────────────────────
+// The page a run folder opens on is written once, when the run is recorded. This rewrites it
+// from the manifest with the CURRENT generator — for a run recorded before a fix to the page,
+// and so the suite can drive the page this checkout would write rather than one on disk.
+if (ARGV[0] === 'page') {
+  const dir = path.resolve(ARGV[1] || die('usage: fleet-shots page <dir>'));
+  const m = readManifest(dir);
+  fs.writeFileSync(path.join(dir, 'index.html'), page(m));
+  console.log(path.join(dir, 'index.html'));
+  process.exit(0);
 }
 
+// ── where reviews live now ───────────────────────────────────────────────────
+// RETIRED. `serve` was a loopback server on a port of its own: unreachable from the phone,
+// laid out for a desk, and listing every run of every branch flat. Reviews are a screen in
+// the phone app now (lib/shots.mjs, behind fleet-serve's passkey), one card per branch.
+// Exit non-zero so a script that still starts it fails where it can be seen, rather than
+// waiting on a URL that never prints.
+if (ARGV[0] === 'serve') {
+  let where = 'the app fleet-serve answers on, at #reviews (fleet-serve status names it)';
+  try {
+    const cfgPath = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(os.homedir(), '.config', 'ghostfleet', 'serve.json');
+    const c = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The origins fleet-serve was configured with ARE its URLs, and its localhost listener
+    // shares the port (see fleet-serve's "the Mac's own door").
+    const urls = [...new Set([...(c.origins || []), `http://localhost:${c.port || 8787}`])].map(u => u.replace(/\/?$/, '/'));
+    where = urls.map(u => u + '#reviews').join('  or  ');
+  } catch {}
+  console.error('fleet-shots: `serve` is retired — reviews live in the app now: Projects → reviews.');
+  console.error(`fleet-shots: open ${where}`);
+  console.error('fleet-shots: `list`, `verdict` and `--check` are unchanged; a run folder still opens over file:// on its own.');
+  process.exit(2);
+}
 
 // ── the flow ─────────────────────────────────────────────────────────────────
 // A file, or bare URLs. The bare form exists because the commonest case is "photograph
@@ -1263,42 +1061,6 @@ console.log(`fleet-shots: ${results.length} step${results.length === 1 ? '' : 's
   (prov.commit ? ` · ${prov.commit.slice(0, 8)}${prov.dirty ? '+dirty' : ''}` : ''));
 if (failed) console.log('fleet-shots: a step with a note is NOT a pass — open the page and read it');
 
-// ── the index: every run, and who is working ────────────────────────────────
-// WHAT THIS SCREEN IS FOR is deciding what to open, so the only thing that earns the top
-// of a row is its STATE. A list of timestamps is a directory listing; the useful question
-// is "which of these is waiting on me", so unreviewed and problem sort visually first and
-// a fully-approved run is deliberately quiet.
-function index(runs, sess, root) {
-  const rows = runs.map(r => {
-    const p = r.m.provenance || {};
-    const st = { c: r.st.cls, t: r.st.text };
-    return `<tr>
-      <td class="st ${st.c}">${esc(st.t)}</td>
-      <td><a href="/r/${encodeURIComponent(r.d)}/">${esc(p.branch || r.d)}</a></td>
-      <td class="b mono">${p.commit ? esc(p.commit.slice(0, 8)) : ''}${p.dirty === true ? '+' : ''}</td>
-      <td class="n mono">${isRecorded(r.m) ? `▶ ${r.m.steps.length}` : r.m.steps.length}</td>
-      <td class="b mono">${esc(p.base || '')}</td>
-      <td class="w mono">${esc(String(r.d).replace('_', ' ').replace(/-(\d\d)-(\d\d)$/, ':$1:$2'))}</td>
-    </tr>`;
-  }).join('\n');
-  const byProj = new Map();
-  for (const x of sess) byProj.set(x.project, (byProj.get(x.project) || []).concat(x.name));
-  const projs = [...byProj.entries()].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1));
-  const who = sess.length
-    ? `<span>${sess.length} sessions / ${projs.length} projects</span>`
-      + projs.map(([n, l]) => `<span class="k">${esc(n)} ${l.length}</span>`).join('')
-      + `<details><summary>names</summary>${projs.map(([n, l]) => `<div class="pr"><b>${esc(n)}</b> ${l.map(esc).join(' ')}</div>`).join('')}</details>`
-    : '<span>no fleet sessions up</span>';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>reviews</title><style>${SKIN}</style></head><body>
-<div class="bar"><span class="who">reviews</span><div class="facts">${esc(root)}</div></div>
-<div class="wrap">${rows ? `<table class="runs"><thead><tr><th>state</th><th>branch</th><th>commit</th><th style="text-align:right">steps</th><th>base</th><th>when</th></tr></thead><tbody>${rows}</tbody></table>`
-  : '<div class="empty">Nothing here yet.</div>'}</div>
-<div class="foot">${who}</div>
-</body></html>`;
-}
-
 // ── the review page ──────────────────────────────────────────────────────────
 // Self-contained on purpose: no CDN, no fonts, no fetch. It has to open over file:// from
 // a folder somebody synced, and every one of those would be a silent blank.
@@ -1317,12 +1079,11 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 // So: the video, its chapters named by what each step asked for, a note per chapter where
 // there is something to say, and approve or reject for the whole.
 //   KEYS: space plays, ← → step chapters, a approves, r rejects — never while typing a note.
-//   Same channels as the per-step page: served, a verdict writes verdict.json directly;
-// over file:// it goes to localStorage and the text to paste is built below the bar.
-// A DECLARATION, NOT A `const`: `serve` parks the module above this line, and a const down
-// here would be in its dead zone for every page the server renders.
+//   Same channel as the per-step page: over file:// a verdict goes to localStorage and the
+// text to paste is built below the bar. Writing verdict.json directly is the app's Reviews
+// screen (lib/shots.mjs), which replaced the loopback server that used to serve this page.
 function fmtT(t) { t = Math.max(0, Math.floor(Number(t) || 0)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
-function flowPage(m, served) {
+function flowPage(m) {
   const p = m.provenance || {};
   const facts = [
     p.branch ? `<b>${esc(p.branch)}</b>` : null,
@@ -1347,8 +1108,7 @@ function flowPage(m, served) {
   ${(s.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('')}
   ${s.file ? `<a class="still" href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(s.name)} — the screen when it failed" loading="lazy"></a>` : ''}
   ${calls.length ? `<details${calls.some(r => r.failed || r.status >= 400) ? ' open' : ''}><summary>${calls.length} call${calls.length === 1 ? '' : 's'} of its own</summary><div class="reqs"><table>${reqRows}</table></div></details>` : ''}
-  <textarea aria-label="note on chapter ${s.n}" placeholder="${flagged ? 'why is this acceptable? a note is what clears the flag' : 'note on this chapter (optional)'}"></textarea>
-  ${flagged ? '<div class="needs" hidden>Approving does not clear this flag — one line saying why it is acceptable does.</div>' : ''}
+  <textarea aria-label="note on chapter ${s.n}" placeholder="${flagged ? 'the run flagged this — a note on why it is fine is optional' : 'note on this chapter (optional)'}"></textarea>
 </section>`;
   }).join('\n');
   const vtype = /\.webm$/.test(m.video) ? 'video/webm' : 'video/mp4';
@@ -1360,7 +1120,6 @@ function flowPage(m, served) {
   <span class="who">review</span>
   <div class="facts">${facts}</div>
   <span class="chip none" id="state">not reviewed</span>
-  ${served ? '<a class="up" href="/">all runs</a>' : ''}
 </div>
 <main>
   <div class="player">
@@ -1383,23 +1142,16 @@ function flowPage(m, served) {
     <input id="fnote" placeholder="a note on the whole flow (optional)" aria-label="note on the flow">
     <button class="danger" id="reject" data-v="reject">reject<kbd>r</kbd></button>
     <button class="go" id="approve" data-v="approve">approve<kbd>a</kbd></button>
-    ${served ? '<span class="saved" id="saved"></span>' : ''}
   </div>
   <div class="gate" id="gate"></div>
-  ${served ? '' : `<div class="paste">Paste it back so it counts: <code>pbpaste | fleet-shots verdict .</code> — then <code>fleet-shots --check .</code><textarea id="verdicttext" readonly></textarea></div>`}
+  <div class="paste">Paste it back so it counts: <code>pbpaste | fleet-shots verdict .</code> — then <code>fleet-shots --check .</code><textarea id="verdicttext" readonly></textarea></div>
 </div>
 <script>
 var CH = ${JSON.stringify(m.steps.map(x => ({ n: x.n, name: x.name, start: Number(x.start) || 0, end: Number(x.end) || 0, flagged: (x.notes || []).length > 0 })))};
 var DUR = ${JSON.stringify(Number(m.duration) || 0)};
-var SERVED = ${served ? 'true' : 'false'};
-var DIR = ${JSON.stringify(m.dir || '')};
 var KEY = 'gf.flow.' + location.pathname;
 var st = { flow: null, chapters: {} };
 try { st = JSON.parse(localStorage.getItem(KEY) || 'null') || st; } catch (e) {}
-// SERVED, THE FILE IS THE TRUTH: the page opens on what verdict.json holds, so a review
-// started on the phone and finished at the desk is one review, not two browsers' guesses.
-var INIT = ${JSON.stringify(m.verdict || null)};
-if (SERVED && INIT) st = { flow: INIT.flow || null, chapters: INIT.chapters || {} };
 st.chapters = st.chapters || {};
 var v = document.getElementById('v');
 var cards = document.querySelectorAll('.ch');
@@ -1408,13 +1160,7 @@ var cur = 0;
 function dur(){ return (isFinite(v.duration) && v.duration > 0) ? v.duration : DUR; }
 function save(){
   try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {}
-  if (!SERVED) return;
-  fetch('/api/verdict', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ dir: DIR, flow: st.flow, chapters: st.chapters }) })
-    .then(function(r){ mark(r.ok); }).catch(function(){ mark(false); });
 }
-function mark(ok){ var e=document.getElementById('saved'); if(!e) return;
-  e.textContent = ok ? 'saved' : 'NOT saved — the gate will not see this'; e.className = ok ? 'saved' : 'saved bad'; }
 function noteOf(n){ return String(st.chapters[String(n)] || '').trim(); }
 function chapterAt(t){ var k=0; for (var i=0;i<CH.length;i++) if (t + 0.05 >= CH[i].start) k=i; return k; }
 
@@ -1430,10 +1176,6 @@ function paint(){
   cards.forEach(function(el,i){
     el.classList.toggle('here', i===cur);
     el.classList.toggle('has', !!noteOf(CH[i].n));
-    var needs = el.querySelector('.needs'), ta = el.querySelector('textarea');
-    var wants = CH[i].flagged && st.flow && st.flow.v==='approve' && !noteOf(CH[i].n);
-    if (needs) needs.hidden = !wants;
-    if (ta) ta.classList.toggle('wants', wants);
   });
   document.querySelectorAll('#strip button').forEach(function(b,i){ b.classList.toggle('here', i===cur); });
   document.getElementById('now').textContent = CH.length ? (CH[cur].n + '. ' + CH[cur].name) : '';
@@ -1447,14 +1189,15 @@ function paint(){
 }
 function fmt(t){ t=Math.max(0,Math.floor(t||0)); return Math.floor(t/60)+':'+String(t%60).padStart(2,'0'); }
 function gate(){
+  // THE APPROVE IS THE DECISION: a chapter the run flagged is shown, and counted here, but
+  // it does not hold the flow back — fleet-shots --check passes an approve whatever the flags.
   var fv = st.flow && st.flow.v, missing = CH.filter(function(c){ return c.flagged && !noteOf(c.n); });
   var g = document.getElementById('gate'), s = document.getElementById('state');
   if (fv==='reject') { g.className='gate rej'; g.textContent='rejected — fleet-shots --check refuses this run'; s.className='chip bad'; s.textContent='rejected'; }
   else if (!fv) { g.className='gate'; g.textContent='not reviewed yet — watch it, then approve or reject the flow'
       + (missing.length ? ' · ' + missing.length + ' chapter' + (missing.length===1?'':'s') + ' flagged by the run' : ''); s.className='chip none'; s.textContent='not reviewed'; }
-  else if (missing.length) { g.className='gate fail'; g.textContent='approved, but --check still refuses: chapter '
-      + missing.map(function(c){ return c.n; }).join(', ') + ' was flagged by the run and has no reason'; s.className='chip warn'; s.textContent='needs a reason'; }
-  else { g.className='gate pass'; g.textContent='approved — fleet-shots --check passes this run'; s.className='chip ok'; s.textContent='approved'; }
+  else { g.className='gate pass'; g.textContent='approved — fleet-shots --check passes this run'
+      + (missing.length ? ' (' + missing.length + ' flagged chapter' + (missing.length===1?'':'s') + ' accepted by the approve)' : ''); s.className='chip ok'; s.textContent='approved'; }
   var t = document.getElementById('verdicttext');
   if (t) {
     var lines = [];
@@ -1467,11 +1210,6 @@ function choose(which){
   var note = document.getElementById('fnote').value;
   st.flow = { v: which, note: note };
   save(); paint();
-  // approving over a flag with no reason: take the reader to where the reason goes
-  if (which==='approve') {
-    var i = CH.findIndex(function(c){ return c.flagged && !noteOf(c.n); });
-    if (i >= 0) { go(i); var ta = cards[i].querySelector('textarea'); if (ta) ta.focus(); }
-  }
 }
 
 // the strip: one segment per chapter, as wide as it plays
@@ -1521,8 +1259,8 @@ paint();
 </script></body></html>`;
 }
 
-function page(m, served = false) {
-  if (isRecorded(m)) return flowPage(m, served);
+function page(m) {
+  if (isRecorded(m)) return flowPage(m);
   const p = m.provenance || {};
   const facts = [
     p.branch ? `<b>${esc(p.branch)}</b>` : null,
@@ -1598,7 +1336,6 @@ function page(m, served = false) {
   <span class="pos" id="pos"></span>
   <div class="rail" id="rail"></div>
   <span class="count ${flagged ? '' : 'clear'}">${flagged ? flagged + ' to look at' : 'nothing flagged'}</span>
-  ${served ? '<span class="state" id="saved">saved</span><a class="up" href="/">all runs</a>' : ''}
 </div>
 ${steps}
 <section class="done" id="done">
@@ -1623,8 +1360,6 @@ ${steps}
 // going back is instant and the images are already decoded. State is per-step and keyed on
 // the folder, exactly as before — the change is to the pacing, not to what gets recorded.
 var STEPS = ${JSON.stringify(m.steps.map(x => ({ n: x.n, name: x.name, notes: (x.notes || []).length })))};
-var SERVED = ${served ? 'true' : 'false'};
-var DIR = ${JSON.stringify(m.dir || '')};
 var KEY = 'gf.shots.' + location.pathname;
 var state = {};
 try { state = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { state = {}; }
@@ -1632,14 +1367,7 @@ var at = 0;                                  // 0..STEPS.length, the last index 
 
 function save(){
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
-  if (!SERVED) return;
-  fetch('/api/verdict', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ dir: DIR, state: state }) })
-    .then(function(r){ mark(r.ok ? 'saved' : 'failed'); }).catch(function(){ mark('failed'); });
 }
-function mark(w){ var e=document.getElementById('saved'); if(!e) return;
-  e.textContent = w==='saved' ? 'saved' : 'NOT saved — the gate will not see this';
-  e.className = w==='saved' ? 'state' : 'state bad'; }
 
 function vOf(n){ return (state[String(n)]||{}).v || ''; }
 

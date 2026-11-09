@@ -164,8 +164,11 @@ dismiss.
 | `preact.js` | **built.** The dependency chunk, split out so `screens.js` stays readable — npm ships preact pre-minified and inlining it would bury the screens in it |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
+| `grid-search.js` | the desk's `/` matcher — **a byte-for-byte copy** of `lib/grid-search.mjs`, which the suite holds identical. A copy and not an import, because a browser can only fetch `web/` and the desk must not need `web/` to start |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
+| `term.js` | the terminal screen's engine: xterm.js on one side, `fleet-serve`'s WebSocket on the other, the key row and the leave key. Loaded on demand |
+| `xterm.js` · `xterm-fit.js` · `xterm.css` | **vendored** from npm (`@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0) by `scripts/vendor-xterm.sh`, which refuses a tarball whose digest is not the pinned one. The suite reruns its `--check`, so a hand-edited copy goes red |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
@@ -228,12 +231,26 @@ one and pages back over the whole transcript, the pane is the only place a permi
 dialog exists at all. A **blocked** session says so in the chat, in red, with a button to
 the pane — that banner is what makes the chat safe as the default (§7a).
 
-The **back gesture** works: navigating pushes a history entry that reuses the current href,
-so a swipe walks session → grid → projects and **no URL ever appears**.
+The **back gesture** works: navigating pushes a history entry, so a swipe walks session →
+grid → projects. Each entry's **address names the place** — `?screen=session&p=acme-api&s=api-fix`,
+`?screen=reviews` — so a reload lands where that tab was, every tab on its own, and a link
+opens its screen once the lock is passed (`place.js`). Back still goes by depth, never by
+reading the address. The installed app opens `start_url` and restores the stored place.
 
 The session screen's ten footer buttons are one **`⋯` actions sheet**. The composer replaced
 `send a prompt`, and a **`🔊`** beside it reads the newest assistant turn aloud
 (`SpeechSynthesis` — no network, and fenced code is announced rather than read out).
+
+**Every sheet closes the same five ways, and they are one call** (`dismissSheet`): `Esc`, the
+back gesture, its `esc back` button, the **X** in its top-right corner, and a **tap or click
+on the dimmed room behind it**. Only a press that *starts* on the scrim counts — a drag that
+begins inside a sheet and lets go outside it is not a request to leave. None of them throws
+typed text away: a sheet's changed fields are kept for the page's life and are back when the
+same sheet opens again, until its own action (send, schedule, create) spends them. The
+**confirm bar** (`kill session 'api-fix'?`, `remove 'acme-api' from projects?`) has the same X, and a press
+anywhere outside it is its "any other key": it cancels, and the press goes no further — the
+card under it does not open. Outside only ever cancels; the yes is only ever the bar's own
+button or `y`.
 
 §7's key-to-touch mapping:
 
@@ -244,21 +261,219 @@ The session screen's ten footer buttons are one **`⋯` actions sheet**. The com
 | `⇧hjkl` reorder | drag a card **by its title line** (the grip — the rest of the card still scrolls) |
 | `p` / `P` | swipe ← pause · swipe → resume |
 | `x` | long-press |
+| `/` find a project or a session | the **find a project or session** field at the top of Projects: matching projects are lit and the rest dimmed in place as you type, and the sessions it finds — by name, label or branch, in every project and on every paired machine — are listed under the projects, each naming its project (and machine). A tap on one opens its conversation, and back comes to the search as you left it. The count sits in the field, `×` clears it. Always drawn, so nothing moves when you use it, and never focused for you, so the keyboard only comes up when you tap it. A project's grid has the same field, **find a session** |
 | `,` settings · `Ctrl-p`/`Q` projects · `q` back | buttons in the footer bar, key letter included |
 
-The keyboard bindings are wired too — the same letters — so a desktop browser or a
-Bluetooth keyboard behaves like the TUI.
+With a keyboard — a desktop browser, or a Bluetooth one on a phone — the keys are the
+desk's; see *On a desk* below for the whole map.
 
-**Two things are deliberately absent** (§7), and a substitute for either is the mistake:
+**Nothing §7 named is absent any more.** The **editor**, the **terminal** and the **stack**
+were held back until the owner decided each was worth its surface; all three are here now —
+see *The terminal* (the editor is its other tab) and *The stack*.
 
-- **the stack** — it exists to put four sessions side by side, and a phone has no side.
-  At `nc = 1` that is this card list.
-- **`Ctrl-t` terminal / `Ctrl-n` editor tabs** — they open a shell and neovim in the
-  session's folder. There is no local shell on a phone, and streaming a remote one is a
-  bigger surface than the whole rest of the design.
+## Reviews
 
-The settings sheet says both out loud, so the gap reads as a decision rather than as
-something half-built.
+What `fleet-shots` recorded for a branch is reviewed here. It used to be `fleet-shots serve`,
+a page on loopback that the phone could not reach, drawn for a desk, and listing every run
+of every branch flat. That command is retired: it prints where the screen lives (`#reviews`
+on this client's origin) and exits non-zero. `fleet-shots list`, `verdict` and `--check` are
+unchanged, and they read the same `verdict.json` this screen writes.
+
+- **A row on Projects**, `reviews · n`, with how many branches wait on a review. It is drawn
+  only while the `shots` switch is on: off, every `/api/shots*` answers 404 `disabled`, and
+  the client draws no row and no screen, and a `#reviews` link lands on Projects.
+- **One card per branch**, showing its newest run and that run's state; older runs fold away
+  under `N earlier runs`. Runs come from every profile's fleet dir, and a card names its
+  profile only when more than one profile has runs.
+- **A run**: the video with one chapter per step, each as wide as the step was long and the
+  steps the run flagged in the warning hue. A tap on one plays from there. Below it are the
+  steps, each with the URL it ended on and its requests (method, status, URL; assets folded),
+  then the provenance: commit, dirty, base, viewport, time and session. A run of stills has a
+  verdict per step (ok / problem / skip, each with a note) instead of a video.
+- **The verdict is pinned to the bottom**, as the composer is. Its line is `fleet-shots
+  --check`'s own answer for the run ("approved, but --check still refuses: chapter 3 needs a
+  reason"), so what the reviewer sees is what a worker's done-criterion will see.
+- **Saving.** A tap saves at once and typing saves 700ms after the last key. One write is in
+  flight at a time, and an edit made meanwhile goes after it. A failed save says so beside the
+  gate, with a retry. No passkey is asked: the write is audited and serialized, and a note
+  typed a word at a time could not stop for Face ID.
+- **At a desk** the list sits on the left and the run on the right, with only the open run
+  lit. The keys are under *On a desk*.
+
+The video comes through `/api/shots/media` with a ticket minted on the run read, because a
+`<video>` cannot send a bearer. It is served in ranges: a `<video>` cannot seek a file handed
+over whole, and iOS will not play one. The service worker leaves ranged requests and that
+route alone (`Cache.put` of a 206 throws). In fixture mode the run plays from
+`fixtures/shots/`, all of it placeholder.
+
+## On a desk
+
+The same client in a desktop browser is a different shape and the same screens. Opened
+from a PC it used to be a phone column in the middle of a wide window: opening a session
+lost the list, the composer needed a click to send, an image could only come in through
+the file picker, and the keys were not the desk's.
+
+**Two panes from 1024px up, with a mouse or trackpad.** The list on the left — Projects, or the project's grid — and
+the open conversation on the right, both on screen at once. Each pane is drawn by exactly
+the code that draws it on a phone (`#side` gets the Preact screen, `#app` the session
+screen), so there is no second design to keep in step. 1024 is wider than any phone held
+sideways (the largest is under 960), and it is the narrowest width at which the left pane
+at its 320px floor still leaves the conversation the 46em the phone layout already caps
+itself at — no conversation is drawn narrower on a desktop than on a phone. The pointer is
+asked too (`(hover: hover) and (pointer: fine)`), because a tablet held sideways is that
+wide and is a touch screen: it keeps the card grid it had. Below the width, on every phone
+and on every touch screen, nothing changes. `DUO_QUERY` in `app.js` is the one place this
+is decided.
+
+**The composer.** With a keyboard, `⏎` sends and `⇧⏎` is a new line: at a desk (a mouse or
+trackpad, `(hover: hover) and (pointer: fine)`) and on an iPhone or iPad with a keyboard
+attached (below). With only the on-screen keyboard, `⏎` stays the new line it has always
+been and `send` stays the button. `Esc` leaves the box, which is how the keys below come
+back.
+
+**A chat opens ready to type in — with a keyboard.** Opening a chat focuses its composer,
+the caret at the end of any draft it holds, when a keyboard is known by the same evidence
+as `⏎`-to-send: a desk's pointer, or a key from a real keyboard on an iPhone or iPad. A
+touch-only phone is never focused — that would raise the on-screen keyboard over the
+conversation on every open. Once per open: a poll never takes the focus back.
+
+**Images.** `Ctrl-V` / `⌘V` of an image in the composer, or an image file dragged onto the
+conversation, goes through the photo picker's own path — `addPhotos` → `api.attach` — so
+it has the same 6 MB limit, the same ten-per-message cap and lands in the same attach
+directory. It shows as a tile before sending, with `×` to remove it. A non-image dropped
+there attaches nothing and says so; anywhere else on the page a dropped file is refused
+rather than letting the browser navigate to it and throw the draft away.
+
+**Drafts, per session.** What is typed into a chat stays there — leave it, open another,
+reload, or swipe the installed app away and relaunch it, and the box comes back with it.
+One draft per session, keyed by profile, socket and session name, so two projects'
+`master` never share a box; kept in `localStorage` (`gf.drafts`), and in memory alone for
+the page's life where storage is blocked. A draft is cleared only when its send
+**succeeds**: a refused or failed send hands the words back and they stay. Photos attached
+to a draft go with it for as long as the page lives; a reload cannot keep a picked file,
+so a draft that had photos says how many were dropped, above the composer, until that has
+been read. This is not the outbox: the outbox holds what was sent and is not in the
+transcript yet, and a draft is what has not been sent at all.
+
+**Gestures are a finger's.** The phone's pointer gestures do not fire for a mouse, a pen or
+a desktop trackpad: there the keys and a plain click do the work, and a finger keeps every
+one of them. The gestures, and how each is gated:
+
+| gesture (touch) | does | with a mouse / pen / trackpad |
+|---|---|---|
+| tap a card | open it | a click opens it — the one thing that stays |
+| long-press a card (600ms) | `x`: the desk's kill / remove question | nothing; `x` asks it |
+| swipe ← / → across a card | `p` pause / `P` resume | nothing — a drag is a text selection; `p` / `P` |
+| drag a card by its title | `⇧hjkl` reorder | nothing; `H J K L` |
+| swipe across the chat | the next / previous session | nothing; `⇧←` / `⇧→` |
+
+The test is the event's own `pointerType` (`touchGesture` in `app.js`): `'touch'` gets the
+gesture, `'mouse'` and `'pen'` never do, decided per press — so a laptop with a touch screen
+gets gestures from the finger and none from its trackpad in the same session at the same
+width. Only an event that names no type at all (one built by a script) falls back to the
+screen's primary pointer, `(hover: hover) and (pointer: fine)`. There is no pull-to-refresh
+or edge-swipe in this client to gate: the browser's own pull-to-refresh is already off
+(`overscroll-behavior` on the shell), and an edge-swipe back is the system's, which only
+ever reaches the app as a history step.
+
+**On an iPhone or iPad**, everything here is the same with touch's own shapes:
+
+- **Paste.** An image pasted from iOS's own menu (long-press in the composer → Paste)
+  attaches through the same path. Safari hands it over in `clipboardData.items` with an
+  empty `files`, and both are read.
+- **A keyboard attached.** The keys above and Enter-to-send work exactly as at a desk.
+  A page cannot ask whether a keyboard is attached, so the client watches what arrives and
+  remembers it for the page's life (`noteKeyboard`). One trusted keydown of any of these
+  is enough:
+  - a key that arrives with no text field focused — the on-screen keyboard only exists
+    while one is;
+  - a key the on-screen keyboard does not have: Esc, Tab, an arrow, an F-key, a modifier
+    on its own, or a Ctrl / ⌘ / Alt chord;
+  - a key typed into a field while the on-screen keyboard is not up. The visual viewport
+    says which: the on-screen keyboard takes a third of the screen, while an attached one
+    leaves at most a shortcut bar.
+
+  With only the on-screen keyboard, none of that happens and ⏎ stays the new line.
+- **The phone keeps its layout and its gestures.** Two panes need a fine pointer as well
+  as the width, so neither a phone nor a tablet held sideways ever gets them.
+
+### The keys: the Mac grid's, the same key doing the same thing
+
+Derived from the desk, not from memory of it: `bin/fleet-grid.mjs`'s Projects and grid
+handlers (with `/` search from #75) and `tmux/cf.tmux.conf`'s bindings inside a session —
+[`docs/SHORTCUTS.md`](../docs/SHORTCUTS.md) is the desk's own reference. Three rules sit
+over all of it:
+
+- **A text box owns the keyboard.** No key here fires while an input, textarea or select
+  has focus — `q` in a message is a letter. The composer keeps `⏎`, `⇧⏎` and `Esc` — and,
+  in a session, lets through exactly the keys tmux answers before the agent at the desk:
+  `` ` ``, `⇧←`/`⇧→`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and `Ctrl-a`'s table. With the desk's
+  two costs: a literal `` ` `` cannot be typed into a message, and `⇧←`/`⇧→` move between
+  sessions rather than selecting text.
+- **A session is attached.** At the desk every key inside a session reaches the agent
+  except the few tmux binds; here the agent's input is the composer, so a letter pressed on
+  the session screen is typed into it. (The `p`/`P`/`x`/`r`/`l`/`s`/`q` this screen used
+  to take were this client's own, and did what the desk's same key never does.)
+- **`⌘` is the browser's.** The desk binds `Ctrl`, never `⌘`, so nothing here answers a
+  key with `⌘` held.
+
+Some keys a page can never have: `Ctrl-N`, `Ctrl-T` and `Ctrl-W` open a window, open a tab
+and close one before any page hears them, in an installed PWA too. Where the desk uses one,
+the table says so and offers no substitute.
+
+The stack's keys — `t`, `Ctrl-x`, `Ctrl-a x`, `Ctrl-a <` / `>` and the picker's — have a
+table of their own under *The stack*, held to the same rule by `stack-check.mjs`.
+
+`test/helpers/desktop-check.mjs` presses every key in this table in a real Chrome at
+1600×900, checks the gestures with a real mouse there and with touch at 390×844, drives the
+phone with an emulated on-screen keyboard and with an attached one, and fails if a key is
+added here without a row that presses it.
+
+<!-- desk-keys -->
+| desk key | where | what it does here |
+|---|---|---|
+| `j` · `k` · `h` · `l` · `↓` · `↑` · `→` · `←` | Projects, grid | move the cursor: a row down / up, a card right / left |
+| `H` · `J` · `K` · `L` | Projects, grid | reorder the selected project / card. Sent as `fleet_project_order` / `fleet_order`, which `fleet-serve` refuses by name today (`NOT_YET`: only the desk writes those files) — the refusal is shown |
+| `⏎` | Projects | open the project on its **master**, as the desk does, with its grid beside it. On the `queue · n ›` row (Tab to it, or click it), the queue instead |
+| `1-9` | Projects, grid | the project at that position (on its master) / the card at that position |
+| `Ctrl-s` | Projects | that project's grid, skipping master |
+| `s` | Projects, grid | schedule a message — to that project's master / to the selected session |
+| `,` | Projects, grid | settings |
+| `x` | Projects, grid | remove the project from the list / kill the session (or remove a free worktree), behind the desk's own question |
+| `y` · `any other key` | a question | yes / cancel — and so is a click anywhere outside the bar, which only ever cancels. A refused worktree removal takes `f`, as at the desk |
+| `Esc` | a sheet | close it — the same as its X and a click beside it, and what was typed in it is kept |
+| `⏎` | grid | open the selected card: a session on the right, a sub-lead's sub-grid, a name for a free worktree |
+| `/` | Projects, grid | find a project (by its name or its folder's) / an agent: every key types into the query, the cursor on the first match, the rest dimmed. On Projects a project the profile tab hides is not found, and the sessions of every project and paired machine whose name, label or branch matches are listed under the projects — `n` walks on into them, `⏎` on one opens its conversation, and `` ` `` or back from it returns to the search. A touch screen gets the field instead |
+| `/ ⏎` · `/ n` · `/ N` · `/ ⌫` · `/ /` · `/ Esc` · `/ q` · `/ ⏎ ⏎` | Projects, grid, searching | `⏎` keeps the search; then `n` / `N` next / previous, `⌫` or `/` edit again, `⏎` opens, `q` clears; `Esc` clears from either step. Card verbs are inert throughout |
+| `n` · `N` | grid | the new-session picker. One picker for both: this client starts sessions with `fleet_spawn`, which has no resume-or-blank switch |
+| `w` | grid | new worktree |
+| `p` · `P` | grid | pause / resume the selected session |
+| `Q` · `Ctrl-p` | grid, session, queue | Projects |
+| `q` · `` ` `` · `Ctrl-c` | grid | up: a sub-grid to the top grid, the top grid to the project's **master** (however the grid was reached). `Ctrl-c` only when nothing is selected — with a selection it stays copy |
+| `` ` `` | session | back: a worker to its grid, a master to Projects |
+| `j` · `k` · `↓` · `↑` · `⏎` | queue | move the cursor through what the masters hold for you / answer the item under it |
+| `q` · `` ` `` | queue | back to Projects, as the `‹` in its top bar does |
+| `j` · `k` · `⏎` · `l` · `space` | reviews | move through the branches / open the run under the cursor / fold its earlier runs open or shut |
+| `space` · `→` · `←` | a run | play or pause / the next or previous chapter |
+| `a` · `r` | a recorded run | approve / reject the flow (again to take it back) |
+| `q` · `` ` `` | reviews, a run | back: a run to the list, the list to Projects |
+| `⇧→` · `⇧←` | session | the next / previous session — master first, then the cards in grid order, wrapping at both ends (`fleet-cycle`) |
+| `Ctrl-s` | session | the grid |
+| `Ctrl-f` | everywhere | the jump chord, with tmux's own prompt at each step |
+| `Ctrl-f <p>` · `Ctrl-f <p> <s>` · `Ctrl-f <p> ⏎` · `Ctrl-f <p> m` · `Ctrl-f <p> s` · `Ctrl-f s <p>` · `Ctrl-f p` · `Ctrl-f Esc` | everywhere | project p, then: card s · its master · its master · its grid; `s` then a digit is that project's grid; `p` is Projects; `Esc` cancels |
+| `Ctrl-a` | session | tmux's prefix: the next key is read from its table |
+| `Ctrl-a g` · `Ctrl-a d` · `Ctrl-a s` · `Ctrl-a p` · `Ctrl-a f` · `Ctrl-a →` · `Ctrl-a ←` | session | back · back · the grid · Projects · the jump chord · next session · previous session |
+| `Ctrl-a t` | session | the project's **terminal**, in the right pane — the desk's `Ctrl-a t`, which is its `Ctrl-t`. It asks for the passkey; inside it every key is the shell's and `⇧Esc` leaves (see *The terminal*) |
+| `Ctrl-a n` | session | the project's **editor** (neovim, LazyVim if that is the config) — the desk's `Ctrl-a n`, which is its `Ctrl-n`. The same screen, passkey and gates as the terminal |
+| `p` | session | any key tmux does not bind goes to the agent: typed into the composer, which keeps the focus |
+| `⏎` · `⇧⏎` · `Esc` | composer | send (keyboard and mouse) / a new line / leave the box. On touch `⏎` is the new line |
+| `` ` `` · `⇧←` · `⇧→` · `Ctrl-s` · `Ctrl-p` · `Ctrl-f` · `Ctrl-a` | composer, focused | the same as in the session row above: tmux answers these before the agent at the desk, so they act from inside the box; every other key is text |
+| `Ctrl-t` · `Ctrl-n` | everywhere | terminal / editor tab — the browser keeps both (they open a tab and a window before the page hears them), so here they are `Ctrl-a t` and `Ctrl-a n`, the desk's other spelling of each, or `terminal` / `editor` behind a `⋯` |
+| `c` | Projects | clone a repo — not in this client: its add-project sheet takes a path |
+| `Ctrl-c Ctrl-c` | Projects | quit — no meaning in a browser: a page cannot close its own tab |
+| `Ctrl-a Ctrl-a` | session | a literal `Ctrl-a` for the agent — no meaning in a browser: there is no terminal to send it to |
+| drag with the mouse | session | copy — the browser keeps it: its own selection already does this |
+<!-- /desk-keys -->
 
 ## Destructive verbs
 
@@ -300,12 +515,25 @@ through, so the button being absent is a courtesy and not the control.
 GET  /api/projects                          -> { home, projects: [ … ], agents, jarvis_enabled, speak }
 GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 GET  /api/session?project=&session=&limit=20[&before=<ts>]
-                                            -> { session, total, messages: [{ts,role,text}], next_before, note? }
+                                            -> { session, total, messages: [{ts,role,text}], next_before, note?,
+                                                 stamp, queue? }   with an ETag; If-None-Match that
+                                            matches -> 304, no body. The open chat polls it this way.
+                                            Any read can be a 429 with Retry-After: the client then
+                                            holds EVERY read until it has passed (api.js heldFor)
 GET  /api/pane?project=&session=[&scrollback=0..2000]
                                             -> { ok, project, session, scrollback, at, pane: "<SGR text>" }
 GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 POST /api/verb   { tool, args }             -> { ok, text }         Bearer token required
+GET  /api/term                              -> { ok, enabled, since, idle }   for THIS device
+POST /api/term/enable { on }                -> { ok, enabled }      on: needs X-Fleet-Assertion; off: never
+POST /api/term/open { project, cols, rows } -> { ok, project, session, ticket, ttl, idle }
+                                            403 { needs: 'enable' } while off for this device;
+                                            401 { needs: 'passkey' } without a fresh X-Fleet-Assertion
+GET  /api/term/ws?ticket=…  (WebSocket)     the terminal. Origin must be a configured origin; the
+                                            ticket is single-use and dies in 30s. Binary frames
+                                            are the pane's bytes / keystrokes; text frames are
+                                            {t:'resize',cols,rows} up and {t:'hello'|'ready'|'closed'} down
 GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 POST /api/auth/register { code, id, … }     -> { token, expires_at }
 POST /api/auth/assert                       -> { token, expires_at }
@@ -317,13 +545,39 @@ GET  /api/push/key                          -> { key, detail, subscribed, endpoi
 POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201
 POST /api/push/unsubscribe { endpoint }     -> { ok, removed }
 GET  /api/digest                            -> { ok, at, since, liveness, projects, totals }   always peeked
+GET  /api/waiting                           -> { ok, at, items: [{ project, profile, session, key, id, text,
+                                                 state: waiting|replied|open, reason, at, since,
+                                                 from?, was?, note? }] }   (from: carried from a stopped worker)
+                                            each master's held ledger items; 503 without the mod's ledger.js
+GET  /api/usage                             -> { ok, at, enabled, off?, threshold, profiles: [{ profile, active,
+                                                 unsaved, exhausted?, pin?, accounts: [{ name, active, kind, state,
+                                                 stale, until, five_hour?, seven_day?, fix }] }] }
+                                            `fleet-accounts list` as data (lib/accounts.mjs describe()), for the
+                                            profiles this daemon lists; `off` and no profiles while the
+                                            experiment is off. Labels, figures and times only — read only
 GET  /api/jarvis                            -> { ok, present, project, profile, session, running,
                                                  status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
 POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
                                             'yes' needs X-Fleet-Assertion; 'no' does not
-POST /api/jarvis/hear   <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE
+POST /api/jarvis/hear   <audio/wav bytes>   -> the same as /api/voice/hear, for clients older than it
                                             every /api/jarvis* is 404 { ok:false, disabled:true }
                                             while Jarvis is switched off
+GET  /api/voice                             -> { ok, voice: { ready, why? }, speak }   Jarvis on or off
+POST /api/voice/hear    <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE;
+                                            503 { needs: 'voice' } without whisper.cpp
+GET  /api/shots                             -> { ok, profiles, multi, waiting, groups: [{ profile, project, branch,
+                                                 waiting, newest: <run>, earlier: [<run>] }] }   one per branch
+GET  /api/shots/run?profile=&run=           -> { ok, run: { id, profile, project, branch, at, kind: recorded|stills,
+                                                 video, duration, provenance, steps, verdict, state },
+                                                 media: { ticket, exp } }
+GET  /api/shots/media?profile=&run=&file=&k=<ticket>
+                                            the run's video or a still, Range/206. The ticket comes from
+                                            the run read (a <video> cannot send a bearer); the file must
+                                            resolve inside that run's own folder
+POST /api/shots/verdict { profile, run, flow, chapters } | { profile, run, state: { <n>: { v, note } } }
+                                            -> { ok, verdict, state }   Bearer token required; audited
+                                            every /api/shots* is 404 { ok:false, disabled:true } while
+                                            the `shots` switch is off
 ```
 
 ### Notifications
@@ -352,8 +606,10 @@ gesture. "not now" is honoured for three days. A payload from Jarvis carries
 
 Jarvis is experimental and switched off by default. The client learns the switch from
 `jarvis_enabled` on `/api/projects` (or a 404 from `/api/jarvis`), never from a build flag;
-off, it draws no band, no Jarvis screen and no `talk` button, and reads the Mac's voice from
-`speak` on `/api/projects`. On, its screen carries an `experimental` tag beside the name.
+off, it draws no band and no Jarvis screen, and reads the Mac's voice from `speak` on
+`/api/projects`. Every session's `talk` button stays either way: it reads the Mac's ears from
+`/api/voice` and hears through `/api/voice/hear`, falling back to `/api/jarvis` and
+`/api/jarvis/hear` on a daemon older than those routes. On, its screen carries an `experimental` tag beside the name.
 
 The master of masters (docs/jarvis.md) is the `jarvis` project's `master`, so its screen
 is the session screen pointed at it, plus three things: the proposals waiting on a yes
@@ -374,7 +630,9 @@ fleet-serve enroll phone      # prints e.g.  GP7CX-ZRDR5  — 15 minutes, one us
 ```
 
 The lock screen offers **enrol this phone** whenever the client is in server mode with no
-credential for that origin, and the sheet behind it takes the code. Case and the hyphen do
+credential for that origin, and the sheet behind it takes the code. On a desktop Mac, which
+opens the client at `http://localhost:<port>`, the same button reads **enrol this Mac**, and
+unlock says Touch ID (`passkey.js device()`). Case and the hyphen do
 not matter (the client normalises exactly as the server does), and the sheet asks
 `/api/auth/challenge` whether a window is even open *before* spending a Face ID prompt on
 a refusal. When the server does refuse, **its own sentence is what you see** — "no
@@ -416,6 +674,114 @@ Two notes for whoever wires the server up:
 - **`web/package.json` is `{"type":"module"}` for node's benefit, not the browser's** —
   it is what lets `node --check` and the test helpers read these `.js` files as ES
   modules. Don't remove it.
+
+## The terminal
+
+A real shell, in the project's folder, from the phone or a desktop browser — and **the same
+shell the desk sees**: `fleet-serve` opens the project's terminal tab with the desk's own
+`bin/fleet-tab` (`Ctrl-t` at the Mac, from the Projects-level origin), so it is a session
+called `_term-<project>` on the fleet's tmux server, on the grid like any other tab, and the
+browser attaches to it as a tmux **control-mode** client (`lib/web-term.mjs`). Closing the
+browser, or the socket dropping, detaches; the tab stays.
+
+**Open it from** the grid's `⋯` (`terminal`), a session's `⋯`, or `Ctrl-a t` in a session.
+
+**The editor is the same screen with the other tab in it** — the desk's `Ctrl-n`: `bin/fleet-tab
+edit` opens `$EDITOR` (default `nvim .`, with `lib/nvim-copy-on-select.lua`) on the project's
+folder as `_edit-<project>`, so a LazyVim config is the editor you get. Open it with `editor`
+beside `terminal` behind either `⋯`, or `Ctrl-a n` in a session (`Ctrl-n` itself is the
+browser's). It is behind **every gate below, unchanged** — the same device switch, a fresh
+passkey per open, the one-use ticket, the Origin check — because nvim's `:terminal` is a
+shell, so it is no lesser surface. Like the terminal it is absent for another machine's
+project.
+
+**Four gates, all on the server** (`bin/fleet-serve.mjs`, TERMINAL):
+
+1. **off per device.** Settings → *terminal* turns it on for this device — it asks for the
+   passkey, and the Mac records the switch on this device's enrolment (`terminal: { on, at,
+   ip }` in `serve.json`) with an audit row. Off never asks, and closes any terminal open.
+2. **a fresh passkey at every open**, like a destructive verb — the unlock does not count. The
+   challenge is fetched before the tap, so on iOS the sheet is asked for inside it.
+3. **the address fleet-serve already binds** (tailnet or loopback), nothing new; the
+   WebSocket also needs a configured `Origin` and a one-use ticket from the open.
+4. **inside the fleet's tmux**, so the Mac sees it.
+
+It closes after **15 minutes without a keystroke** (`terminal_idle` in `serve.json`) — the same
+idle window as the session token, so an unlocked phone on a table does not hold a shell open
+longer than it holds the app. Output does not count: a build printing to a terminal nobody is
+at is exactly the one to close. Nothing the terminal prints reaches `serve.log` — one line
+when it opens and one when it closes, with byte counts.
+
+**On a phone** a key row sits above the keyboard: `Esc` `Ctrl` `Tab` `←` `↑` `↓` `→` `|` `~`
+`/` `-`. `Ctrl` latches and changes the next key (`Ctrl` then `c` is Ctrl-C). A hardware
+keyboard needs none of it.
+
+**At a desk** it opens in the right pane with the grid beside it, and while it has the focus
+**every key is the shell's** — the desk's `Ctrl-a`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and `` ` ``
+included — except the ones the browser keeps for itself. **`⇧Esc` leaves it** (a terminal
+cannot tell ⇧Esc from Esc, so taking it costs the shell nothing); so does a click outside it.
+Then the desk's keys are back: `` ` `` or `q` returns to where it was opened from, `⏎` goes
+back in.
+
+## The stack
+
+**Several sessions, across projects, on screen at once** — the desk's stack screen
+(`bin/fleet-grid.mjs`, `t` / `Ctrl-x`) on this client.
+
+**The picker** lists every session of every project Projects is showing, grouped by project,
+and by machine first once another one is paired (`<host>` above its projects, as the profile
+tabs group them). Space, a click or a tap adds a session or takes it out; `⏎` (or `open`)
+opens them together. At a desk `/` finds one with the grid's own matcher (`grid-search.js`)
+and narrows the list to what matches, as the desk's picker does; a phone gets a field
+instead. **The selection is this device's** (`gf.stack` in localStorage — a private window
+starts empty and works), and it survives a reload, in its order, with each column's draft.
+
+Reach it with `Ctrl-x` (anywhere), `t` on a grid, `Ctrl-a x` in a session or the stack, or
+`stack` behind the `⋯` on Projects and on a grid — the phone's way in.
+
+**At a desk** the stack is the right pane, cut into **side-by-side columns, at most four**:
+the first four of the selection, and one chip in the bar for each of the rest — click a chip
+and that session takes the focused column's place. Each column is a whole conversation:
+its own list, its own composer, its own draft (#87), `⏎` to send, `⇧⏎` for a new line, paste
+and drop. One column has the focus at a time (a cyan rule along its top): a click anywhere
+in a column gives it the focus *before* the click lands, so every button in a column acts
+on that column, and the keys below act on the focused one. `×` takes a column out of the
+stack. A column on another machine works like any other, and — as #99 decided for every
+remote session — it has no terminal control.
+
+**On a phone** the stack is one conversation at a time: swipe ← / → for the next and
+previous (touch only, like the chat's swipe; it stops at the ends), or `◂` / `▸` in the bar,
+which also carries the agent's name and where it is in the stack (`2/4`).
+
+**The read rate.** One open chat reads its transcript every 2 s while something is owed and
+every 5 s otherwise. Four of those independently, plus a grid read per column, is the shape
+that once drew a burst of 429s from one phone — so the stack shares. The focused column keeps
+the chat's own poll; the others are read by **one** poller, one read at a time, never two
+starts less than a second apart; and the grids every column's status comes from are read
+once per 5 s tick for the focused column's project plus **one** other in turn. With four
+columns all working that is at most 30 + 60 + 24 = **114 reads a minute**, against the
+daemon's **240 per device** (`rate.read` in `fleet-serve`) — measured by `stack-check.mjs`
+against a fake daemon that counts. On a phone only the conversation on screen is read.
+
+<!-- stack-keys -->
+| key | where | what it does |
+|---|---|---|
+| `Ctrl-x` | Projects, grid, session, queue, stack | the stack picker (in a box, only while nothing in it is selected — with a selection it stays cut) |
+| `t` | grid | the stack picker, as at the desk |
+| `Ctrl-a x` | session, stack | the stack picker |
+| `j` · `k` · `↓` · `↑` | picker | move the cursor |
+| `space` | picker, finding too | add or remove the session under the cursor — never typed into a search |
+| `⏎` | picker | open the stack; while finding, keep the search (then `⏎` opens) |
+| `/` · `n` · `N` · `⌫` | picker | find: every key types into the query and the list narrows to the matches; then `n` / `N` step, `⌫` or `/` edit again |
+| `Esc` · `q` | picker | back — to the stack if it was opened from there. `Esc` clears a search first |
+| `c` | picker | clear the whole stack |
+| `⇧←` · `⇧→` | stack, also from a focused box | the focus to the previous / next column, wrapping at both ends — the desk stack's ring |
+| `Ctrl-a ←` · `Ctrl-a →` | stack | the same |
+| `Ctrl-a <` · `Ctrl-a >` | stack | move the focused column one place, wrapping — and so past the fourth, which swaps the next hidden one in |
+| `` ` `` | stack | back out of the stack, to where it was opened from |
+| `p` | stack | any key the stack does not bind is typed into the focused column's box |
+| `⇧⏎` | a column's box | a new line; `⏎` sends to that column's session |
+<!-- /stack-keys -->
 
 ## The pane
 

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# fleet-accounts — several Claude logins per profile [experimental].
+#
+#   fleet-accounts list | add | remove | use | threshold   (fleet-accounts --help)
+#
+# A launcher, exactly like bin/fleet-experimental is for fleet-experimental.mjs: the logic is
+# node (lib/accounts.mjs), and this is what puts `fleet-accounts` on PATH with a readable
+# error when node is missing.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-accounts: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/fleet-accounts.mjs" "$@"

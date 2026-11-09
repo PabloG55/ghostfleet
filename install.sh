@@ -513,13 +513,13 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     2) UNASKED+=("$what (the editor ^N opens)") ;;
   esac
 fi
-# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots) ARE OFF UNLESS SOMEBODY
+# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots, accounts, peek) ARE OFF UNLESS SOMEBODY
 # TURNS THEM ON. `fleet-experimental list` writes every switch down the first time: on for a
 # machine that already uses a feature, so an update changes nothing for somebody using it,
 # and off everywhere else. Jarvis is the one offered here, because it has a download behind it. Offering to turn it on is a step of its own, clearly labelled, with
 # Enter meaning NO — and never under --yes or with nobody watching, because "install missing
-# dependencies" is not a yes to an experimental feature. Its voice (whisper, below) is asked
-# about only once it is on: hearing is Jarvis's conversation mode and has no other use.
+# dependencies" is not a yes to an experimental feature. The Mac's voice (whisper, below) is
+# asked about whether it is on or not: it is every session's talk button, Jarvis's included.
 _jdir="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}"
 "$REPO/bin/fleet-experimental" list >/dev/null 2>&1 || true
 _jon=0; grep -qsx on "$_jdir/jarvis.enabled" && _jon=1
@@ -535,25 +535,25 @@ elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
 else
   vsay "· Jarvis (experimental) is off — turn it on with: fleet-experimental enable jarvis"
 fi
-if [ "$_jon" = 1 ]; then
-  # JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
-  # transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
-  # stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
-  # that nobody accepted by agreeing to "install missing dependencies" — only a person at a
-  # terminal saying yes to this question gets it. Already working is silent. And it can never
-  # fail the install: text to Jarvis works without it, and the command says how to add it later.
-  if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
-  elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
-    _save_yes="$ASSUME_YES"; ASSUME_YES=0
-    rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
-    ASSUME_YES="$_save_yes"
-    case $rc in
-      0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
-      *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
-    esac
-  else
-    vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
-  fi
+# THE MAC'S EARS: whisper.cpp and one model, so the phone's conversation mode — the talk
+# button in every session's composer, and Jarvis's when it is on — is transcribed on this
+# machine (docs/mobile.md). It used to be asked only with Jarvis on, which left an owner who
+# had switched Jarvis off with no way to be offered talk at all. The most optional thing
+# here, and held to a stricter rule than the two above: NOT implied by --yes, because it is a
+# ~550 MB download that nobody accepted by agreeing to "install missing dependencies" — only
+# a person at a terminal saying yes to this question gets it. Already working is silent. And
+# it can never fail the install: typing works without it, and the command says how to add it.
+if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "· The phone can talk to your sessions: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — typing still works; retry with: fleet-jarvis voice --install" ;;
+    *) echo "  Skipped. Voice later: fleet-jarvis voice --install" ;;
+  esac
+else
+  vsay "· voice for talking to sessions from the phone (optional, ~550 MB): fleet-jarvis voice --install"
 fi
 # THE MAC'S SPEAKING VOICE: Kokoro, which fleet-serve reads the phone's replies with when it
 # is here (lib/speech.mjs) — better English, real Spanish, and nothing leaves the machine.
@@ -635,6 +635,8 @@ if ! is_repo "$REPO"; then
   prev="$(cat "$FLEET_HOME/.source" 2>/dev/null || true)"
   if [ -n "$prev" ] && [ "$prev" != "$REPO" ] && is_repo "$prev"; then KEEP_SOURCE="$prev"; fi
 fi
+# The memory records this install as a deploy from inside cf-sync (it alone knows the commit it
+# copied), under the name set on the two calls below — see the end of bin/cf-sync.
 # cf-sync narrates its own success in two lines. Keep them for --verbose, and on a
 # FAILURE keep them unconditionally: it prints "the runtime is now a MIX of old and new
 # code, do not trust it" to stderr, and that must never be something a quiet mode ate.
@@ -647,9 +649,9 @@ _sync_rc=0
 if [ "$VERBOSE" = 1 ]; then
   # `|| _sync_rc=$?` and not a bare call: under `set -e` a failing cf-sync would take the
   # whole script out here with its own status and none of the explanation below.
-  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" || _sync_rc=$?
+  CLAUDE_FLEET_DEPLOY_TARGET="ghostfleet install" CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" || _sync_rc=$?
 else
-  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" 2>&1)" \
+  _sync_out="$(CLAUDE_FLEET_DEPLOY_TARGET="ghostfleet install" CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" 2>&1)" \
     || { _sync_rc=$?; printf '%s\n' "$_sync_out"; }
 fi
 # A FAILED STAGE IS THE END OF THE INSTALL, NOT A LINE IN IT. cf-sync copies nothing when it
@@ -684,6 +686,7 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 # Everything below points at the STAGED runtime, never the repo.
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
+TGGUARD="$FLEET_HOME/hooks/fleet-telegram-guard.sh"
 OBSERVE="$FLEET_HOME/hooks/fleet-observe.sh"
 
 mkdir -p "$BIN_DIR"
@@ -692,7 +695,8 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-shipped fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
-         fleet-digest fleet-jarvis fleet-experimental fleet-update fleet-mod fleet-ledger
+         fleet-digest fleet-jarvis fleet-experimental fleet-accounts fleet-update fleet-mod fleet-ledger fleet-web fleet-know fleet-know-event
+         fleet-telegram fleet-model
          agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
@@ -776,7 +780,7 @@ wire_hooks() {
   tmp="$(mktemp)"
   # Hooks belong in settings.json; MCP does NOT (see register_mcp). Wire the hooks
   # and strip any stale ghostfleet MCP entry an older installer wrote here.
-  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg observe "$OBSERVE" '
+  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg tgguard "$TGGUARD" --arg observe "$OBSERVE" '
     def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
     # STOP CARRIES TWO OF OURS: the status/notify hook, and the observation enforcer that
     # refuses a lead done-claim on a turn that changed a surface and never looked at it.
@@ -790,8 +794,8 @@ wire_hooks() {
                                              { type: "command", command: $observe } ] } ];
     .hooks = ((.hooks // {}) + {
       Notification: entry, Stop: stopentry, UserPromptSubmit: entry,
-      SessionStart: entry, SessionEnd: entry })
-    # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
+      SessionStart: entry, SessionEnd: entry, PreCompact: entry })
+    # PreToolUse is SHARED GROUND — unlike the six above, other tools legitimately
     # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
     # our guard are dropped first so re-installing (or changing the matcher) replaces
     # rather than stacks up copies — which is what makes ADDING a tool to the matcher a
@@ -801,11 +805,18 @@ wire_hooks() {
     # Bash and the GitHub MCP merge tool are there for ONE question — is a worker in a
     # linked worktree merging its own PR — and the guard leaves a non-merge Bash call
     # before it has so much as started jq.
+    #   The Telegram guard is a SECOND stanza with an empty matcher, because the question it
+    # asks — did the owner start this turn from Telegram — is about every tool, and a regex
+    # of the ones to refuse would let through whatever tool shipped after it was written.
+    # It leaves before it has started a process unless a Telegram mark exists on the
+    # socket of the session (hooks/fleet-telegram-guard.sh).
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
-          | select([.hooks[]?.command] | index($guard) | not) ]
+          | select([.hooks[]?.command] | (index($guard) or index($tgguard)) | not) ]
         + [ { matcher: "EnterWorktree|Agent|Task|Bash|mcp__.*__merge_pull_request",
-              hooks: [ { type: "command", command: $guard } ] } ] )
+              hooks: [ { type: "command", command: $guard } ] },
+            { matcher: "",
+              hooks: [ { type: "command", command: $tgguard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
   ' "$settings" > "$tmp" && mv "$tmp" "$settings"

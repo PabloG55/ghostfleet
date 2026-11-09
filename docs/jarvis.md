@@ -12,14 +12,17 @@ Jarvis is one of the fleet's experimental features (`lib/experimental.mjs`, whic
 already set up (its marker exists) resolves to **on**, so nothing changes for somebody using
 it; the first `fleet-jarvis` command — or `install.sh` — writes that answer down, and from
 then on the file is the answer. Three places show it, each with an `experimental` tag: the
-settings page, `fleet-jarvis status`, and Jarvis's own screen on the phone.
+settings page, `fleet-jarvis status`, and Jarvis's own screen on the phone. How a new
+feature joins them: [CONTRIBUTING.md, "Adding an experimental feature"](../CONTRIBUTING.md#adding-an-experimental-feature).
 
 Off means **gone, not hidden**:
 
-- the phone has no Jarvis band, no Jarvis screen and no `talk` button (conversation mode
-  is Jarvis's: its hearing is the Mac's whisper.cpp), and `fleet-serve` answers every
-  `/api/jarvis*` route with a 404 that says Jarvis is disabled. The per-message play button,
-  `/api/speak` and Kokoro are the phone's own and keep working;
+- the phone has no Jarvis band and no Jarvis screen, and `fleet-serve` answers every
+  `/api/jarvis*` route with a 404 that says Jarvis is disabled. What is the phone's own keeps
+  working: the per-message play button (`/api/speak`, Kokoro) and **the `talk` button in
+  every session's composer** — conversation mode with a session needs only whisper.cpp on
+  the Mac and the session, so its hearing is `/api/voice` and `/api/voice/hear`, answered
+  with Jarvis on or off;
 - the Projects screen (terminal and phone) has no card for Jarvis's project;
 - `fleet-jarvis disable` stops Jarvis's session by its exact tmux target and keeps the
   conversation it was in (written into the marker as `resume=`); enabling it
@@ -164,14 +167,15 @@ On the phone, open **Jarvis** from the top of Projects and tap **talk** once:
 It only works **with the screen on and the app open**: an installed web app gets no
 microphone in the background, and the screen says so. Text always works.
 
-Voice needs whisper.cpp and a model on the Mac. The installer offers them (never by
+Voice needs whisper.cpp and a model on the Mac — the same transcriber every session's talk
+uses, so it is offered whether or not Jarvis is on. The installer offers them (never by
 `--yes`: it is a ~550 MB download); later, `fleet-jarvis voice --install` does the same —
 Homebrew's `whisper-cpp` and `ggml-large-v3-turbo-q5_0.bin` into `~/.local/share/whisper`.
 Without them the talk button says how to enable voice.
 
 The same **talk** button is in every session's composer, not only Jarvis's — the same
 loop, aimed at that session instead (see `docs/mobile.md`, *Conversation mode, in every
-session*).
+session*). That one is not Jarvis's: it stays with Jarvis switched off.
 
 ## Reaching you: notifications
 

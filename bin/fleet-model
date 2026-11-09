@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# fleet-model [-s SOCKET] <session>                   what it runs on now, and what it starts on
+# fleet-model [-s SOCKET] <session> <model> [--wait|--no-wait]
+#                                                     move a RUNNING Claude session to <model>
+#                                                     (opus | sonnet | haiku | a full id) without
+#                                                     losing its conversation, and pin it there
+# fleet-model [-s SOCKET] <session> --unpin           drop the pin: the next start goes back to
+#                                                     the project default or the profile default
+#
+# WHY. A fleet that runs every session on the profile default runs all of them on the most
+# expensive model, and only a NEW worker could be given another one (fleet-spawn --model,
+# lib/model-kind.sh). Moving a running session by hand — `fleet-send <s> "/model sonnet"` —
+# works and keeps the conversation, and does two more things nobody asked for:
+#   * Claude Code saves it as the PROFILE's default ("saved as your default for new
+#     sessions"), so every later session of that profile silently starts on it;
+#   * it does not last: a hibernated, restarted or reopened session comes back on the profile
+#     default, because those relaunches build a new tmux session without the choice.
+# This sends the same `/model`, through fleet-send's delivery (the mod's command channel when
+# the mod is current, the pane paste when it is not — fleet-send chooses), then reads the
+# outcome back out of the transcript, puts the profile's settings.json `model` key back the way
+# it was IF and only if that switch is what moved it, and pins the session
+# (<sock>.<session>.model), which bin/agent-here applies at every start.
+#
+# WHEN. Never mid-turn: a /model typed under a running turn queues behind it, or lands in the
+# middle of a tool call's output. The request is recorded and a watcher waits — the same "free"
+# lib/agent-switch.sh waits for (lib/session-idle.sh: not busy, not on a dialog, three idle
+# samples in a row) AND nothing in fleet-send's queue ahead of it, since an idle session with a
+# backlog takes the backlog first. An idle session is moved while you wait (up to a minute);
+# a busy one is moved when its turn ends, and `fleet-model <session>` reports how that went.
+# --wait blocks until then; --no-wait returns as soon as the request is down.
+#
+# THE CONFIRM DIALOG. Mid-conversation, with the prompt cache warm, Claude Code asks first —
+# "Switch model? … This conversation is cached for the current model. Switching to Sonnet 5.5
+# means the full history gets re-read. ❯ 1. Yes, switch to Sonnet 5.5 / 2. No, go back". Asking
+# for the switch is the answer, so the watcher presses 1 on that exact dialog and nothing else.
+#
+# CLAUDE ONLY. A model name is vendor-specific (`haiku` means nothing to codex), and moving a
+# session to another CLI is lib/agent-switch.sh's job, which keeps a model per agent.
+#
+# Exit: 0 moved, pinned or queued · 1 refused (usage, unknown session, not claude, bad name)
+#       2 the switch was tried and did not take (what Claude Code said is printed).
+set -uo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _l="$(readlink "$_self")"; case "$_l" in /*) _self="$_l" ;; *) _self="$(dirname "$_self")/$_l" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
+SELF="$BIN_DIR/fleet-model"
+LIB_DIR="$(cd "$BIN_DIR/../lib" && pwd)"
+# shellcheck source=lib/session-model.sh
+. "$LIB_DIR/session-model.sh"
+# shellcheck source=lib/session-idle.sh
+. "$LIB_DIR/session-idle.sh"
+SM_JS="$LIB_DIR/session-model.mjs"
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+# Every command run from here reads the same fleet dir, whichever way this one was told it.
+export CLAUDE_FLEET_DIR="$FLEET_DIR"
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# $TMUX before the env var, as every fleet command does: a --resume'd session can hold a stale
+# CLAUDE_FLEET_SOCK. -s overrides both.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+
+IDLE_N="${CLAUDE_FLEET_MODEL_IDLE_N:-3}"          # consecutive idle samples before it acts
+POLL="${CLAUDE_FLEET_MODEL_POLL:-1}"              # seconds between samples
+MAXWAIT="${CLAUDE_FLEET_MODEL_MAXWAIT:-43200}"    # a watcher gives up after this (12h)
+VERIFY="${CLAUDE_FLEET_MODEL_VERIFY:-30}"         # seconds for the /model to answer
+FG_WAIT="${CLAUDE_FLEET_MODEL_FG_WAIT:-60}"       # how long the caller waits on an idle session
+
+usage() { sed -n '2,10p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+MODE=get; WAITMODE=auto; SESSION=""; MODEL=""; POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)        SOCK="${2:-}"; shift 2 ;;
+    --wait)    WAITMODE=wait; shift ;;
+    --no-wait) WAITMODE=none; shift ;;
+    --unpin)   MODE=unpin; shift ;;
+    # internal: the detached watcher (one per session)
+    --watch)   MODE=watch; SOCK="${2:-}"; SESSION="${3:-}"; shift 3 2>/dev/null || shift $# ;;
+    -h|--help) usage; exit 0 ;;
+    --)        shift; POS+=("$@"); break ;;
+    -*)        echo "fleet-model: unknown flag '$1'" >&2; usage >&2; exit 1 ;;
+    # A flag may follow the session — `fleet-model api-fix --unpin` is how it gets typed, and
+    # stopping at the first word made that a "model" named --unpin.
+    *)         POS+=("$1"); shift ;;
+  esac
+done
+set -- ${POS[@]+"${POS[@]}"}
+if [ "$MODE" != watch ]; then
+  SESSION="${1:-}"; MODEL="${2:-}"
+  [ $# -gt 2 ] && { echo "fleet-model: too many arguments" >&2; usage >&2; exit 1; }
+  [ -n "$MODEL" ] && [ "$MODE" = get ] && MODE=set
+  [ -n "$MODEL" ] && [ "$MODE" = unpin ] && { echo "fleet-model: --unpin takes no model" >&2; exit 1; }
+fi
+[ -n "$SOCK" ]    || { echo "fleet-model: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$SESSION" ] || { usage >&2; exit 1; }
+case "$SESSION" in
+  _*) echo "fleet-model: '$SESSION' is a tab (a shell), not an agent session" >&2; exit 1 ;;
+  *[!A-Za-z0-9._~-]*) echo "fleet-model: bad session name '$SESSION'" >&2; exit 1 ;;
+esac
+
+PIN="$FLEET_DIR/$SOCK.$SESSION.model"
+REQF="$FLEET_DIR/$SOCK.$SESSION.model-switch"
+PIDF="$REQF.pid"
+RESF="$REQF.result"
+LOGF="$REQF.log"
+SNAPF="$FLEET_DIR/$SOCK.$SESSION.settings-before.json"
+BAKF="$FLEET_DIR/$SOCK.$SESSION.settings-backup.json"
+# One per PROFILE, not per session: two switches on one profile both write its settings.json,
+# and a snapshot taken between the other's write and its restore would put the other's model
+# back as if it were the person's.
+LOCKD="$FLEET_DIR/model-switch.lock"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$LOGF" 2>/dev/null; }
+now() { date +%s; }
+ago() {
+  local s="$1"; case "$s" in ''|*[!0-9]*) printf '?'; return ;; esac
+  s=$(( $(now) - s )); [ "$s" -lt 0 ] && s=0
+  if   [ "$s" -ge 86400 ]; then printf '%dd' $(( s / 86400 ))
+  elif [ "$s" -ge 3600 ];  then printf '%dh' $(( s / 3600 ))
+  elif [ "$s" -ge 60 ];    then printf '%dm' $(( s / 60 ))
+  else printf '%ds' "$s"; fi
+}
+
+live()   { tmux -L "$SOCK" has-session -t "=$SESSION" 2>/dev/null; }
+asleep() { [ -f "$FLEET_DIR/$SOCK.$SESSION.asleep" ]; }
+# The newest status record's value for <field>, scoped by socket (every fleet has a master).
+record() {
+  command -v jq >/dev/null 2>&1 || return 0
+  local f
+  for f in "$FLEET_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    jq -r --arg s "$SESSION" --arg k "$SOCK" --arg f "$1" \
+      'select(.slot==$s and ((.sock // "") == $k)) | [(.ts // 0), (.[$f] // "" | tostring)] | @tsv' "$f" 2>/dev/null
+  done | sort -rn | head -1 | cut -f2
+}
+agent()  { "$BIN_DIR/fleet-agent" of "$SESSION" -s "$SOCK" 2>/dev/null || echo claude; }
+envof()  {
+  local v; v="$(tmux -u -L "$SOCK" show-environment -t "$SESSION" "$1" 2>/dev/null)" || return 0
+  case "$v" in "$1="*) printf '%s' "${v#"$1="}" ;; esac
+}
+# The conversation the process is in NOW — fleet-hibernate's resolver, the one fleet-restart
+# trusts — and the status record's as the fallback.
+transcript() {
+  local r id tr=""
+  if r="$("$BIN_DIR/fleet-hibernate" --resolve "$SOCK" "$SESSION" 2>/dev/null)"; then
+    IFS=$'\x1f' read -r id tr _ <<< "$r"
+  fi
+  [ -f "$tr" ] || tr="$(record transcript)"
+  [ -f "$tr" ] && printf '%s' "$tr"
+  return 0
+}
+# The profile the process writes settings into: the transcript is <cfg>/projects/<dir>/<id>.jsonl,
+# which is exact for the running process; then the session's env; then ours.
+cfg_of() {
+  local tr="$1" d
+  if [ -n "$tr" ]; then d="$(cd "$(dirname "$tr")/../.." 2>/dev/null && pwd)"; [ -d "$d" ] && { printf '%s' "$d"; return; }; fi
+  d="$(envof CLAUDE_CONFIG_DIR)"; case "$d" in /*) printf '%s' "$d"; return ;; esac
+  printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+# `<model>\t<epoch>\t<how>` for the running process (lib/session-model.mjs current).
+running_model() {
+  local tr="$1" launch
+  launch="$(envof CLAUDE_FLEET_MODEL_LAUNCH)"
+  printf '%s\t%s\t%s\n' "$SESSION" "${tr:--}" "${launch:--}" | node "$SM_JS" current 2>/dev/null | cut -f2-
+}
+short_said() { printf '%s' "$1" | sed 's/ and saved as your default for new sessions//'; }
+
+refuse_not_claude() {
+  local a="$1"
+  echo "fleet-model: $SESSION runs $a, not claude — a model name is per CLI (\"haiku\" means nothing to $a)." >&2
+  echo "fleet-model: moving a session between agents is lib/agent-switch.sh (fleet-project agent <project> <agent> for a master), which keeps a model per agent." >&2
+  exit 1
+}
+
+# ── get ───────────────────────────────────────────────────────────────────────
+do_get() {
+  local a res nm nsrc tr m at how settings dflt rid rmodel rpid rst rat line
+  a="$(agent)"
+  if [ "$a" != claude ]; then
+    echo "$SESSION runs $a — fleet-model covers claude sessions only (lib/agent-switch.sh keeps a model per agent)"
+    return 0
+  fi
+  live || asleep || [ -n "$(record slot)" ] || { echo "fleet-model: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+  res="$(session_model_resolve "$FLEET_DIR" "$SOCK" "$SESSION" "$(live && envof CLAUDE_FLEET_MODEL)")"
+  nm="${res%%$'\t'*}"; nsrc="${res#*$'\t'}"   # not `read`: see agent-here's claude_model
+  tr=""; live && tr="$(transcript)"
+  settings="$(cfg_of "$tr")/settings.json"
+  dflt="$(jq -r '.model // empty' "$settings" 2>/dev/null)"
+  if [ -n "$dflt" ]; then dflt="the profile default ($dflt, from settings.json)"
+  else dflt="the profile default (Claude Code's own; settings.json names none)"; fi
+  echo "$SESSION"
+  if live; then
+    IFS=$'\t' read -r m at how <<< "$(running_model "$tr")"
+    case "$how" in
+      reply)    echo "  now:     $m — the model its last reply came from, $(ago "$at") ago" ;;
+      switch)   echo "  now:     $m — switched with /model $(ago "$at") ago, no reply since" ;;
+      launch*)  if [ "$m" = - ] || [ -z "$m" ]; then echo "  now:     $dflt — what it started on $(ago "$at") ago, no reply since"
+                else echo "  now:     $m — what it started on $(ago "$at") ago (${how#launch:}), no reply since"; fi ;;
+      *)        echo "  now:     not known — no reply in its transcript and no launch record (it started before fleet-model)" ;;
+    esac
+  elif asleep; then echo "  now:     asleep — nothing is running"
+  else echo "  now:     not running"
+  fi
+  if [ -n "$nm" ]; then echo "  starts:  $nm — $(session_model_source_label "$nsrc")"
+  else echo "  starts:  $dflt"; fi
+  if [ -s "$REQF" ]; then
+    IFS=$'\t' read -r rid rmodel < "$REQF"
+    rpid="$(cat "$PIDF" 2>/dev/null)"
+    if case "$rpid" in ''|*[!0-9]*) false ;; *) kill -0 "$rpid" 2>/dev/null ;; esac; then
+      echo "  pending: $rmodel — asked $(ago "${rid%%.*}") ago, waiting for it to be free (its turn to end, its queue to drain)"
+    else
+      echo "  pending: $rmodel — asked $(ago "${rid%%.*}") ago, but no watcher is running; run fleet-model $SESSION $rmodel again"
+    fi
+  fi
+  if [ -s "$RESF" ]; then
+    IFS=$'\t' read -r _ rst rat < "$RESF"
+    line="$(sed -n 2p "$RESF")"
+    echo "  last:    $rst $(ago "$rat") ago — $line"
+  fi
+}
+
+# ── the switch itself (run by the watcher, once the session is free) ──────────
+lock() {
+  local i=0 p
+  while ! mkdir "$LOCKD" 2>/dev/null; do
+    p="$(cat "$LOCKD/pid" 2>/dev/null)"
+    case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null || { rm -f "${LOCKD:?}/pid"; rmdir "${LOCKD:?}" 2>/dev/null; continue; } ;; esac
+    # a lock with no pid yet is a holder between its mkdir and its write; after a while, stale
+    i=$((i+1)); [ "$i" -ge 240 ] && return 1
+    sleep 0.5
+  done
+  echo $$ > "$LOCKD/pid"
+}
+unlock() { [ "$(cat "$LOCKD/pid" 2>/dev/null)" = $$ ] && { rm -f "${LOCKD:?}/pid"; rmdir "${LOCKD:?}" 2>/dev/null; }; return 0; }
+
+pane()       { tmux -L "$SOCK" capture-pane -p -J -t "$SESSION" -S -200 2>/dev/null; }
+pane_count() { local p; p="$(pane)"; grep -c 'Set model to' <<< "$p" || true; }
+dialog_up()  { local p; p="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"; grep -q 'Switch model?' <<< "$p" && grep -q 'Yes, switch to' <<< "$p"; }
+
+# result <id> <ok|failed> <line>... — the outcome a waiting caller and `fleet-model <s>` read.
+result() {
+  local id="$1" st="$2"; shift 2
+  { printf '%s\t%s\t%s\n' "$id" "$st" "$(now)"; printf '%s\n' "$@"; } > "$RESF.$$" && mv -f "$RESF.$$" "$RESF"
+  log "result $id $st: $*"
+}
+
+do_switch() {
+  local id="$1" model="$2" tr cfg settings snap off pb out rc queued o deadline pressed=0 r rrc was lines=()
+  lock || { result "$id" failed "another switch on this profile held its lock for two minutes; nothing was sent"; return; }
+  tr="$(transcript)"
+  cfg="$(cfg_of "$tr")"; settings="$cfg/settings.json"
+  if [ -f "$settings" ]; then cat "$settings" > "$SNAPF"; snap="$SNAPF"; else snap=-; fi
+  off=0; [ -n "$tr" ] && off="$(wc -c < "$tr" | tr -d ' ')"
+  pb="$(pane_count)"
+  was="$(running_model "$tr" | cut -f1)"; [ "$was" = - ] && was=""
+  log "sending /model $model (transcript ${tr:-none} @ $off, settings $settings)"
+  out="$("$BIN_DIR/fleet-send" -s "$SOCK" --anyway -- "$SESSION" "/model $model" 2>&1)"; rc=$?
+  log "fleet-send rc=$rc: $out"
+  if [ "$rc" != 0 ]; then
+    unlock; rm -f "${SNAPF:?}"
+    result "$id" failed "fleet-send did not deliver it: $(printf '%s' "$out" | tail -1)"; return
+  fi
+  # It went in behind a turn that started in the gap between the last idle sample and the send:
+  # the queue delivers it when that turn ends, and this waits for that rather than leaving the
+  # settings file to whoever happens to look.
+  queued=0; case "$out" in *"(queued #"*) queued=1 ;; esac
+  if [ "$queued" = 1 ]; then deadline=$(( SECONDS + MAXWAIT )); else deadline=$(( SECONDS + VERIFY )); fi
+  o=none
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if dialog_up && [ "$pressed" -lt 3 ]; then
+      tmux -L "$SOCK" send-keys -t "$SESSION" 1 2>/dev/null; pressed=$((pressed+1)); log "confirmed the switch dialog"
+      sleep 1
+    fi
+    if [ -z "$tr" ]; then tr="$(transcript)"; off=0; fi     # a fresh conversation's first record
+    if [ -n "$tr" ]; then o="$(node "$SM_JS" outcome "$tr" "$off" "$model" 2>/dev/null)"; fi
+    case "$o" in ok\ *|failed\ *) break ;; esac
+    # No transcript to read (a conversation that has had no turn may have none): the pane's
+    # own line, counted against what was there before the send.
+    if [ -z "$tr" ] && [ "$(pane_count)" -gt "$pb" ]; then o="ok $(pane | grep 'Set model to' | tail -1 | sed 's/^[^S]*//')"; break; fi
+    live || { o="failed the session ended before the switch answered"; break; }
+    sleep 0.5
+  done
+  case "$o" in
+    ok\ *)
+      # The settings write lands with the confirmation; give it a moment to arrive before
+      # deciding there was none.
+      local i=0
+      if [ "$snap" = - ]; then while [ ! -f "$settings" ] && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done
+      else while cmp -s "$snap" "$settings" && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; fi
+      r="$(node "$SM_JS" restore "$settings" "$snap" "$model" "$BAKF" 2>&1)"; rrc=$?
+      printf '%s\n' "$model" > "$PIN"
+      lines+=("$SESSION → $model${was:+ (was $was)}: $(short_said "${o#ok }")")
+      lines+=("pinned: it starts on $model after a restart, a wake or a reopen")
+      if [ "$rrc" = 0 ]; then lines+=("profile settings.json: $r")
+      else lines+=("WARNING profile settings.json $r — $settings"); fi
+      unlock; rm -f "${SNAPF:?}"
+      result "$id" ok "${lines[@]}" ;;
+    failed\ *)
+      r="$(node "$SM_JS" restore "$settings" "$snap" "$model" "$BAKF" 2>&1)"
+      unlock; rm -f "${SNAPF:?}"
+      result "$id" failed "$SESSION did not move to $model: ${o#failed }" "nothing was pinned; profile settings.json: $r" ;;
+    *)
+      unlock; rm -f "${SNAPF:?}"
+      result "$id" failed "$SESSION did not answer the /model $model within ${VERIFY}s — nothing was pinned; look at its pane (fleet-read $SESSION, or open it)" ;;
+  esac
+}
+
+# ── the watcher ───────────────────────────────────────────────────────────────
+claim() { ( set -o noclobber; echo $$ > "$PIDF" ) 2>/dev/null; }
+req_id()    { [ -s "$REQF" ] && cut -f1 "$REQF" | head -1; }
+clear_req() { [ "$(req_id)" = "$1" ] && rm -f "${REQF:?}"; return 0; }
+queue_empty() { [ -z "$("$BIN_DIR/fleet-send" -s "$SOCK" --list-queue "$SESSION" 2>/dev/null)" ]; }
+
+# 0 free · 1 gave up · 2 not running any more · 3 the request changed under it
+wait_free() {
+  local id="$1" idle=0 t0=$SECONDS
+  while :; do
+    [ "$(req_id)" = "$id" ] || return 3
+    live || return 2
+    if session_idle_sample "$SOCK" "$SESSION" && queue_empty; then idle=$((idle+1)); else idle=0; fi
+    [ "$idle" -ge "$IDLE_N" ] && return 0
+    [ $(( SECONDS - t0 )) -ge "$MAXWAIT" ] && return 1
+    sleep "$POLL"
+  done
+}
+
+do_watch() {
+  claim || exit 0
+  local id model rc
+  log "watcher $$ up"
+  while :; do
+    if [ -s "$REQF" ]; then
+      IFS=$'\t' read -r id model < "$REQF"
+      wait_free "$id"; rc=$?
+      case "$rc" in
+        0) do_switch "$id" "$model"; clear_req "$id" ;;
+        1) result "$id" failed "$SESSION was still busy after $(( MAXWAIT / 3600 ))h — nothing was sent or pinned"; clear_req "$id" ;;
+        2) if asleep; then
+             printf '%s\n' "$model" > "$PIN"
+             result "$id" ok "$SESSION went to sleep before it was free — pinned: it wakes on $model"
+           else
+             result "$id" failed "$SESSION stopped running before it was free — nothing was sent or pinned"
+           fi
+           clear_req "$id" ;;
+        3) continue ;;     # a newer request replaced it: take that one
+      esac
+      continue
+    fi
+    # Nothing left. Let go of the claim, THEN look once more: a request written after the last
+    # look and before the release found this watcher alive and started none of its own.
+    rm -f "${PIDF:?}"
+    [ -s "$REQF" ] && claim && continue
+    log "watcher $$ done"
+    exit 0
+  done
+}
+
+start_watcher() {
+  local p; p="$(cat "$PIDF" 2>/dev/null)"
+  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
+  rm -f "${PIDF:?}"
+  nohup bash "$SELF" --watch "$SOCK" "$SESSION" </dev/null >>"$LOGF" 2>&1 &
+}
+
+# Print a result's lines; exit with its status.
+show_result() {
+  local st; IFS=$'\t' read -r _ st _ < "$RESF"
+  sed -n '2,$p' "$RESF" | sed 's/^/fleet-model: /'
+  [ "$st" = ok ] && exit 0 || exit 2
+}
+
+do_set() {
+  local a id t0 waiting
+  model_name_valid "$MODEL" || { echo "fleet-model: '$MODEL' is not a model name (opus, sonnet, haiku, or a full id like claude-sonnet-5-5)" >&2; exit 1; }
+  a="$(agent)"; [ "$a" = claude ] || refuse_not_claude "$a"
+  if ! live; then
+    asleep || [ -n "$(record slot)" ] || { echo "fleet-model: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+    printf '%s\n' "$MODEL" > "$PIN"
+    if asleep; then echo "fleet-model: $SESSION is asleep, so nothing is running to move — pinned: it wakes on $MODEL"
+    else echo "fleet-model: $SESSION is not running — pinned: it starts on $MODEL when it is reopened"; fi
+    exit 0
+  fi
+  id="$(now).$$"
+  printf '%s\t%s\n' "$id" "$MODEL" > "$REQF"
+  start_watcher
+  # Busy right now: say so and go, unless asked to wait. Idle: the switch is seconds away, so
+  # the answer is worth waiting for.
+  waiting="$WAITMODE"
+  if [ "$waiting" = auto ]; then
+    if session_idle_sample "$SOCK" "$SESSION" && queue_empty; then waiting=fg; else waiting=none; fi
+  fi
+  if [ "$waiting" = none ]; then
+    echo "fleet-model: $SESSION is mid-turn (or has prompts queued ahead) — it moves to $MODEL once it is free, and is pinned then. Check with: fleet-model $SESSION"
+    exit 0
+  fi
+  t0=$SECONDS
+  while :; do
+    [ -s "$RESF" ] && [ "$(cut -f1 "$RESF" | head -1)" = "$id" ] && show_result
+    if [ "$waiting" = fg ] && [ $(( SECONDS - t0 )) -ge "$FG_WAIT" ]; then
+      echo "fleet-model: $SESSION did not come free within ${FG_WAIT}s — it moves to $MODEL once it is, and is pinned then. Check with: fleet-model $SESSION"
+      exit 0
+    fi
+    # the request was replaced by a newer one, or its watcher died without answering
+    if [ "$(req_id)" != "$id" ] && ! { [ -s "$RESF" ] && [ "$(cut -f1 "$RESF" | head -1)" = "$id" ]; }; then
+      echo "fleet-model: a newer fleet-model request for $SESSION replaced this one" >&2; exit 2
+    fi
+    sleep 0.5
+  done
+}
+
+do_unpin() {
+  local res nm nsrc
+  rm -f "${PIN:?}"
+  res="$(session_model_resolve "$FLEET_DIR" "$SOCK" "$SESSION" "$(live && envof CLAUDE_FLEET_MODEL)")"
+  nm="${res%%$'\t'*}"; nsrc="${res#*$'\t'}"   # not `read`: see agent-here's claude_model
+  echo "fleet-model: unpinned $SESSION — its next start is on ${nm:-the profile default}${nm:+ ($(session_model_source_label "$nsrc"))}; what it runs on now is unchanged"
+}
+
+case "$MODE" in
+  get)   do_get ;;
+  set)   do_set ;;
+  unpin) do_unpin ;;
+  watch) do_watch ;;
+esac

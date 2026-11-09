@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readMarker, isJarvisSelf, mcpConfirmSpec, gate } from '../lib/jarvis.mjs';
 import { permissionDialog, approves } from '../lib/permission-dialog.mjs';
+import { projects } from '../lib/projects.mjs';
 
 export const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
 export const HOME = os.homedir();
@@ -34,31 +35,8 @@ export const HOME = os.homedir();
 // (e.g. replying to a session fleet-open put on another project's fleet) was
 // impossible from a tool call. Resolve a project name -> its socket + config dir,
 // from the same ~/.config/ghostfleet/projects[.<profile>] files ghostfleet reads.
-export function projects() {
-  const dir = path.join(HOME, '.config', 'ghostfleet');
-  const files = [path.join(dir, 'projects')];
-  // only real profile lists: 'projects.bak.1785…' is a backup, not a profile
-  try { for (const f of fs.readdirSync(dir)) if (/^projects\.[A-Za-z0-9_-]+$/.test(f)) files.push(path.join(dir, f)); } catch {}
-  const out = [];
-  for (const f of files) {
-    let txt; try { txt = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    for (const line of txt.split('\n')) {
-      const t = line.replace(/\r$/, '');
-      if (!t.trim() || t.startsWith('#')) continue;
-      const [name, p, prof0, agent0] = t.split('\t');
-      if (!name || !p) continue;
-      const prof = prof0 || 'work';
-      const isWork = prof === 'work' || prof === 'default';
-      // 4th column = that project's default agent. Carried so a cross-fleet spawn uses
-      // the TARGET's default rather than inheriting whatever the caller happens to run.
-      const agent = /^[a-z0-9_-]+$/.test((agent0 || '').trim()) ? agent0.trim() : '';
-      out.push({ name, path: p.replace(/^~/, HOME), profile: prof, agent,
-                 sock: isWork ? `cf-${name}` : `cf-${prof}-${name}`,
-                 cfg: isWork ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + prof) });
-    }
-  }
-  return out;
-}
+// (lib/projects.mjs holds the reader; re-exported because fleet-serve imports it from here.)
+export { projects };
 export function target(proj) {
   if (!proj) return null;                       // omitted -> the caller's own fleet
   const s = String(proj), all = projects();
@@ -81,7 +59,7 @@ export function self() {
   let sess = '';
   if (/^\d+$/.test(sid || '')) {                        // that field is the ID, not the name
     try {
-      const rows = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_id} #{session_name}'],
+      const rows = execFileSync('tmux', ['-u', '-L', sock, 'list-sessions', '-F', '#{session_id} #{session_name}'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       for (const line of rows.split('\n')) {
         const [id, name] = line.split(' ');
@@ -210,9 +188,9 @@ export const TOOLS = [
   { name: 'fleet_send', description: 'Send a prompt to a sibling fleet session and submit it (it runs there). The prompt must be self-contained — the sibling does not share your context. A NEW task goes to a NEW session (fleet_spawn), never to a worker that already finished one: a send to a worker whose task shipped is refused unless anyway:true. Set reply_to:true when you are ASKING something rather than dispatching work: without it a send is one-way and the answer never comes back to you.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' }, reply_to: { type: 'boolean', description: "ask for an answer back: that session is told to answer YOU directly, so its reply usually arrives in this conversation as a message from it (even while you are mid-turn) — no polling, and nothing to drain. If it can't reach you (not a Claude session, or its turn dies first) the answer falls back to an ANSWERED row in your fleet_inbox, so check there if nothing arrives" }, anyway: { type: 'boolean', description: "send even though the target already FINISHED a task that shipped (its PR merged, or it is clean and even with the integration branch after a done). Without it such a send is REFUSED: a new task is a new session — fleet_stop reclaim:true, then fleet_spawn. Only for a follow-up on that same work; an open PR's follow-ups (a red CI row, a review note) are never refused and need no flag" } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' }, json: { type: 'boolean', description: "return the messages as DATA — {ts, role, text} per message plus a next_before cursor — instead of as text. For a machine consumer (bin/fleet-serve's /api/session); a reader wanting the output should leave it off and use n" }, limit: { type: 'number', description: 'with json: how many messages in this page (default 20)' }, before: { type: 'string', description: "with json: page backwards from this message's ts (the previous page's next_before)" } }, required: ['session'], additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' }, json: { type: 'boolean', description: "return the messages as DATA — {ts, role, text} per message plus a next_before cursor — instead of as text. For a machine consumer (bin/fleet-serve's /api/session); a reader wanting the output should leave it off and use n" }, limit: { type: 'number', description: 'with json: how many messages in this page (default 20)' }, before: { type: 'string', description: "with json: page backwards from this message's ts (the previous page's next_before)" }, unless: { type: 'string', description: "with json: the `stamp` of a previous answer for the same page; if nothing it is made of has changed since, the answer is {unchanged:true} instead of the page. For a poller, so an unchanged transcript costs a stat rather than a parse" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_spawn', description: "Create a new git worktree and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Called from a WORKER (a session in a linked worktree), the new session is that worker's CHILD: branched from its branch, its PR into that branch, its done/need-you in the worker's own fleet_inbox — a sub-worker cannot spawn in turn. Defaults to YOUR OWN repo; pass `project` to spawn a worker into ANOTHER project's fleet (name from fleet_projects) — it runs in that project's checkout and the worker lands on that fleet, with that project's default agent. Call fleet_worktrees FIRST (same `project`): if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).",
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default. Wins over kind' }, kind: { type: 'string', enum: ['verify', 'ci', 'docs', 'video', 'build'], description: "what kind of task this is; picks the model from the project's map (model-<kind>), and with no entry the account default, as without it. verify / ci / docs / video are the cheap kinds" }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
   // A SECOND SESSION IN THE SAME WORKTREE, which had a CLI and no tool. fleet-companion
   // is the answer to "give me another session here" and an agent restricted to MCP could
   // not reach it — an asymmetry that got worse when #89 gave codex and opencode the
@@ -233,11 +211,13 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_interrupt', description: "End a session's CURRENT TURN — the Escape the desk presses, retried until the spinner stops (one Escape is often swallowed mid tool-call). Nothing else: the session is not parked, not stopped and keeps taking work, so unlike fleet_pause this works on 'master' too. A prompt queued behind the turn stays queued (an interrupt fires no Stop) and the next send delivers it first.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_telegram_send', description: "Send the OWNER a message on Telegram, in the chat bin/fleet-telegram connects to this machine's fleet — for something the owner should see on their phone now (a result, a question, a finished PR), not for a reply to a message they sent from there: a Telegram turn's final message already goes back on its own. Markdown is converted to what Telegram shows (bold, italics, code, links) and long text is split. `file` sends a file as well (a JPEG or PNG as a photo, anything else as a document), with `text` as its caption. Fails, saying why, when the channel is not set up (fleet-telegram status).",
+    inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'the message (markdown)' }, file: { type: 'string', description: 'absolute path of a file to send with it' } }, required: ['text'], additionalProperties: false } },
   { name: 'fleet_queue', description: "List the prompts still WAITING in a session's queue — sent with fleet_send while it was mid-turn and not delivered yet. One line per prompt: queued-at (epoch seconds), the prompt base64-encoded, and kind ('nudge' for the fleet's own wakes, else empty), tab-separated. Empty output is an empty queue.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_unqueue', description: "Take a prompt back OUT of a session's queue before it is delivered — the first waiting one whose text is exactly `prompt`. Refused, saying so, when it is no longer there: it has already been typed into the session and can no longer be edited.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session', 'prompt'], additionalProperties: false } },
-  { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
+  { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Succeeds only once the session is still up a few seconds after its first prompt; fails loudly, with the pane's last lines, if it exits before that, if the folder was never trusted, or if the transcript does not replay inside the timeout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_reopen', description: "Reopen a LOST session: one the machine killed (a crash or reboot took its tmux server) that left its status record and conversation behind, shown as `lost` by fleet_list, fleet_digest and the grid. Starts it again under the same name, resuming ITS OWN conversation by id, in its recorded folder, as its recorded agent (fleet-restart --reopen) — never the newest conversation in the folder. To forget a lost session instead, fleet_stop it; its transcript is kept either way.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
@@ -251,6 +231,15 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, agent: { type: 'string', description: "default coding CLI for this project's master and its workers (fleet-agent list; omit for claude)" }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master switches too: at once when idle, after its current turn when not; switching back to an agent it ran before resumes that agent's own conversation (codex, which cannot resume, starts fresh). Running workers keep their agent.",
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, agent: { type: 'string', description: 'an agent from fleet-agent list; empty or omitted clears it back to claude' } }, required: ['name'], additionalProperties: false } },
+  { name: 'fleet_project_model', description: "Set or clear an EXISTING project's default model — what its sessions START on from their next start (a new worker, a restart, a wake), below a session's own pin (fleet_model) and above the profile default. Never master's: a master moves only by its own pin (fleet_model session:master). Running sessions keep the model they have. Omit `model` (or pass an empty string) to clear it back to the profile default.",
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, model: { type: 'string', description: 'opus, sonnet, haiku or a full model id; empty or omitted clears it' } }, required: ['name'], additionalProperties: false } },
+  // A RUNNING SESSION'S MODEL, which before this only a NEW worker could be given (fleet_spawn's
+  // model/kind). The CLI's whole contract rides along: Claude sessions only, never mid-turn,
+  // the outcome read back from the transcript, the profile's settings.json left as it was, and
+  // a pin so a wake or a restart keeps it. The description carries WHEN to move one, because
+  // the tool is no use to a lead that does not know a cheaper model is the right answer.
+  { name: 'fleet_model', description: "Show or change the MODEL a Claude session runs on, without losing its conversation. With no `model`: what it runs on now (its last reply's model, or what it started on) and what it will start on next (its pin, the project default, or the profile default). With `model` (opus | sonnet | haiku | a full id): moves it as soon as it is free — at once when idle (the answer says whether it took), after its current turn when not (the answer says it is queued; call again without `model` for the outcome) — and PINS it, so a wake, a restart or a reopen keeps it. The profile's own default is left exactly as it was. `unpin:true` drops the pin (its next start goes back to the project/profile default). Claude sessions only — another agent is refused. WHEN: move a session DOWN (sonnet, haiku) when its work is lists, lookups, formatting, summaries or routine edits; move it UP (opus) for graded, sworn or high-stakes reasoning — legal and immigration forms, money, a review that decides a merge. Say which model and why in the same reply, so the owner can disagree.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'the session (see fleet_list — its MODEL column)' }, model: { type: 'string', description: 'opus, sonnet, haiku, or a full model id; omit to only read' }, unpin: { type: 'boolean', description: 'drop the pin instead (no model)' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_worktree_remove', description: "Remove ONE git worktree that no session is using — the `x` on a grey FREE card in the grid. Whether removal is safe is decided by fleet-clean's own gates (clean tree, fully pushed or merged, no live session); if they decline, the worktree is kept and the reason is printed. force:true is the escalation for exactly that case — the grid's `f = remove anyway` — and it DELETES UNCOMMITTED WORK. It still refuses a main checkout, a worktree a live session is standing in, and Claude's own .claude/worktrees trees. Use fleet_stop reclaim for a worktree that still has a session on it.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "the project whose worktree this is (name from fleet_projects); omit for your own fleet" }, path: { type: 'string', description: 'absolute path of the worktree to remove' }, force: { type: 'boolean', description: 'remove it past those gates — destroys uncommitted work; the deliberate second step after a plain removal was declined' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_remove', description: "Unregister a project — drop its entry from the projects list. Its sessions, worktrees and history are untouched; this is the `x` on the Projects screen, not a delete.",
@@ -264,6 +253,25 @@ export const TOOLS = [
   // inboxes, the asleep/parked/exited markers — and costs no agent anything.
   { name: 'fleet_digest', description: "One rollup across EVERY fleet on EVERY profile, read from files: who needs you (with the note), what is working, what is ready, asleep, parked or exited, what finished or was answered since your last look, and the open PRs already known. Cheap — no session is asked anything. Call this FIRST when asked how everything is doing, or when woken; then act on ONE project with the per-fleet tools. A plain call advances the 'since last look' stamp; peek:true does not.",
     inputSchema: { type: 'object', properties: { json: { type: 'boolean', description: 'return the digest as data rather than as text' }, peek: { type: 'boolean', description: "look without advancing the 'since last look' stamp (for a poll, not for a read)" } }, additionalProperties: false } },
+  // THE FLEET'S MEMORY (docs/MEMORY.md), read: bin/fleet-know, the same queries. The project
+  // it briefs on is `about`, NOT `project` — every other tool's `project` names the FLEET to
+  // act in and is resolved against this machine's project list, while the memory answers
+  // about every profile and every paired machine at once (acme-api@vm is a project here).
+  { name: 'fleet_know', description: "The fleet's memory: what each project is, where it stands and why, recorded from what every session, spawn, merge and ledger item did — across EVERY profile and every paired machine. Answer \"where does X stand\" from here BEFORE reading files. about:<project> is a one-page brief (what it is; live sessions, open branches and PRs, the last deploy; what is open; recent decisions with their source); waiting:true lists everything waiting on the owner; touched:<path> lists the sessions and PRs that touched a file; find:<text> searches the raw events; rules:<project> lists the owner's standing rules that apply to a project, most specific first (\"\" for this profile's); about:<project> with fact:<key> reads one keyed fact, and says \"not recorded\" when nothing holds now; history:<project> is what happened to it, newest last and grouped by day, narrowed by since and until. With none of them: every project it knows. at:<time> answers as it stood then. Every decision and description says who said it: [owner], [lead], [worker] or [model]; about:<project> lists the owner's and the lead's decisions and counts the workers' (every worker's fleet-ack is one); all:true lists those too; trusted:true narrows about:<project> to the owner's and the lead's word. An item marked [private] is readable here but must not be pasted into a prompt for another model vendor.",
+    inputSchema: { type: 'object', properties: {
+      about: { type: 'string', description: 'a project to brief on: name, name@machine (a paired one) or name/profile' },
+      all: { type: 'boolean', description: 'with about: list the decisions workers recorded too, which the page otherwise counts and leaves out (json always has them, each with its authority)' },
+      trusted: { type: 'boolean', description: 'with about: only what the owner or a lead said, in decisions, what the project is, and what it depends on' },
+      waiting: { type: 'boolean', description: 'everything waiting on the owner, every project' },
+      touched: { type: 'string', description: 'a file path (repo-relative, or its tail): which sessions touched it and the PRs it went into' },
+      find: { type: 'string', description: 'words to search the raw recorded events for (every word must appear)' },
+      rules: { type: 'string', description: 'the standing rules that apply to this project: name or name/profile, or "" for what applies to every project in this profile. project: beats profile beats all, and the answer says so' },
+      fact: { type: 'string', description: 'with about: one keyed fact of that project, by its key' },
+      history: { type: 'string', description: 'what happened to this project, one line each, newest last, grouped by day: merged PRs, decisions and rules with who said them, deploys, keyed facts changing, workers started and finished, commits' },
+      since: { type: 'string', description: 'with history: from this date or time. A range too long to print says "+N earlier" and how to read those' },
+      until: { type: 'string', description: 'with history: up to this date (the whole of that day) or time' },
+      at: { type: 'string', description: 'answer as it stood at this time: ISO, epoch, or "3d ago" (default now)' },
+      json: { type: 'boolean', description: 'return data rather than text' } }, additionalProperties: false } },
 ];
 
 // REFUSING A CALL, so the caller can see it was refused. MCP's error channel for a tool
@@ -337,7 +345,7 @@ export function argError(name, a) {
 function projectTable() {
   const rows = projects().map(p => {
     let n = '0';
-    try { n = String(execFileSync('tmux', ['-L', p.sock, 'list-sessions', '-F', '#{session_name}'],
+    try { n = String(execFileSync('tmux', ['-u', '-L', p.sock, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean).length); } catch {}
     return `${p.name.padEnd(18)} ${p.profile.padEnd(9)} ${p.sock.padEnd(26)} ${n.padEnd(8)} ${p.path}`;
   });
@@ -367,6 +375,9 @@ export function plan(name, a = {}) {
     // indistinguishable from an argument that got lost on the way.
     case 'fleet_project_agent':
       return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
+    // `default` rather than an empty argument, for the reason `--none` is above.
+    case 'fleet_project_model':
+      return run('fleet-project', ['set', String(a.name), 'model', String(a.model || '').trim() || 'default']);
     case 'fleet_projects': return { kind: 'text', text: projectTable() };
     // No target and no -s: the digest is every fleet at once, and it resolves the
     // profiles itself from the same projects files target() reads.
@@ -375,6 +386,32 @@ export function plan(name, a = {}) {
       if (a.json) args.push('--json');
       if (a.peek) args.push('--peek');
       return run('fleet-digest', args);
+    }
+    // Across every fleet, like the digest: no target. One query per call, in the order the
+    // CLI reads them, so a caller who sets two gets the first rather than a silent mix.
+    case 'fleet_know': {
+      // A leading '-' must not read as a flag.
+      for (const [k, x] of [['about', a.about], ['rules', a.rules], ['fact', a.fact], ['history', a.history]]) {
+        if (x && String(x).startsWith('-')) return { kind: 'fail', ...fail(`fleet_know: '${x}' is not a ${k === 'fact' ? "fact's key" : 'project name'}`) };
+      }
+      // The options first: `find` ends in a `--`, and anything after that is a word to search
+      // for, so `at` and `json` beside a find used to be searched for instead of obeyed.
+      // --via is how a read is told from one at a terminal (fleet-know reads).
+      const args = ['--via', 'mcp'];
+      if (a.at) args.push('--at', String(a.at));
+      if (a.since) args.push('--since', String(a.since));
+      if (a.until) args.push('--until', String(a.until));
+      if (a.trusted) args.push('--trusted');
+      if (a.all) args.push('--all');
+      if (a.json) args.push('--json');
+      if (a.rules !== undefined) { args.push('rule', 'list'); if (a.rules) args.push(String(a.rules)); }
+      else if (a.history) args.push('history', String(a.history));
+      else if (a.about && a.fact) args.push('fact', String(a.about), String(a.fact));
+      else if (a.about) args.push(String(a.about));
+      else if (a.waiting) args.push('waiting');
+      else if (a.touched) args.push('touched', String(a.touched));
+      else if (a.find) args.push('find', '--', ...String(a.find).split(/\s+/).filter(Boolean));
+      return run('fleet-know', args);
     }
     case 'fleet_list': return run('fleet-list', [], t);
     case 'fleet_send': {
@@ -387,7 +424,9 @@ export function plan(name, a = {}) {
         args.push('--reply-to', `${me.sock}/${me.sess}`, '--reply-dir', me.dir);
       }
       if (a.anyway === true) args.push('--anyway');
-      args.push(String(a.session), String(a.prompt));
+      // `--` BEFORE THE POSITIONALS, as fleet_answer's: a session named "--owner" handed over
+      // bare would parse as the flag that marks the owner's words (asOwner).
+      args.push('--', String(a.session), String(a.prompt));
       return run('fleet-send', args, t);
     }
     case 'fleet_read': {
@@ -398,6 +437,7 @@ export function plan(name, a = {}) {
         const args = ['--json', String(a.session)];
         if (a.limit) args.push('--limit', String(Number(a.limit) || 20));
         if (a.before) args.push('--before', String(a.before));
+        if (a.unless) args.push('--unless', String(a.unless));
         return run('fleet-read', args, t);
       }
       return run('fleet-read', [String(a.session), String(a.n || 1)], t);
@@ -407,6 +447,7 @@ export function plan(name, a = {}) {
       if (a.branch) args.push('--branch', String(a.branch));
       if (a.from) args.push('--from', String(a.from));
       if (a.model) args.push('--model', String(a.model));
+      if (a.kind) args.push('--kind', String(a.kind));
       if (a.reuse) args.push('--reuse', String(a.reuse));
       if (a.force_new) args.push('--new');
       if (a.prompt) args.push('--prompt', String(a.prompt));
@@ -422,6 +463,16 @@ export function plan(name, a = {}) {
     case 'fleet_companion':
       return run('fleet-companion', a.session ? [String(a.session)] : [], t,
                  { cwd: t ? checkoutOf(t) : undefined });
+    // `--` before the positionals, as fleet_send's: a session or model spelled "--unpin" must
+    // not become the flag. unpin and a model together are two answers to one question; refused
+    // here, before anything runs, rather than letting the CLI pick one.
+    case 'fleet_model': {
+      if (a.unpin === true && a.model) return { kind: 'fail', ...fail('fleet_model: pass a model OR unpin:true, not both') };
+      const args = a.unpin === true ? ['--unpin'] : [];
+      args.push('--', String(a.session));
+      if (a.model && a.unpin !== true) args.push(String(a.model));
+      return run('fleet-model', args, t);
+    }
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
     // `--` BEFORE THE POSITIONALS, always. fleet-answer takes --human-approved, and a text
@@ -477,6 +528,13 @@ export function plan(name, a = {}) {
     case 'fleet_interrupt':
       return run('fleet-pause', ['--interrupt', String(a.session)], t);
     // The queue's format belongs to fleet-send, so both are fleet-send's own modes.
+    case 'fleet_telegram_send': {
+      // No project: the channel belongs to the machine, not to a fleet, and its own state
+      // (which bot, which chat) is resolved by fleet-telegram itself, never passed in here.
+      const args = ['send', String(a.text ?? '')];
+      if (a.file) args.push('--file', String(a.file));
+      return run('fleet-telegram', args, null);
+    }
     case 'fleet_queue':
       return run('fleet-send', ['--list-queue', String(a.session)], t);
     case 'fleet_unqueue':
@@ -602,6 +660,16 @@ function firstCommand(d) {
 function withHuman(p) {
   return p.cmd === 'fleet-answer' ? { ...p, args: ['--human-approved', ...p.args] } : p;
 }
+// THE ONLY WAY --owner reaches fleet-send from here: opts.human, the phone's daemon, and
+// nothing else. What the owner types on the phone is the owner speaking (bin/fleet-serve.mjs
+// already records it as such for Jarvis), so the receiving session's ledger records it as the
+// person's message, not as a lead's brief that needs proof (mods/ghostfleet/hooks/ledger.js
+// deliverySource). NOT on the Jarvis grant that withHuman also honours: that is the owner's yes
+// to a call whose WORDS are Jarvis's own. And not from any argument: the MCP server's callTool
+// has no opts, so a worker's fleet_send cannot ask for it.
+function asOwner(p) {
+  return p.cmd === 'fleet-send' ? { ...p, args: ['--owner', ...p.args] } : p;
+}
 
 // The MCP server's entry point. Same signature and same return shape it always had: a
 // string for a call that RAN, fail()'s {isError,text} for one we refused to run.
@@ -622,5 +690,6 @@ export async function callToolAsync(name, a = {}, opts = {}) {
   if (p.kind === 'text') return p.text;
   const j = jarvisCheck(name, a, p);
   if (j.fail) return j.fail;
-  return execPlanAsync(j.granted || opts.human === true ? withHuman(p) : p, opts);
+  const q = j.granted || opts.human === true ? withHuman(p) : p;
+  return execPlanAsync(opts.human === true ? asOwner(q) : q, opts);
 }

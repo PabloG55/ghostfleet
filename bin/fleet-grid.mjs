@@ -30,6 +30,8 @@ import { modState, modLimitAt } from '../lib/mod-status.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as X from '../lib/experimental.mjs';
 import { keyReader } from '../lib/keys.mjs';
+import { budgetFile, budgetIgnored } from '../lib/projects.mjs';
+import { matchIndices, stepMatch, matchSpan } from '../lib/grid-search.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -40,13 +42,26 @@ try { ({ lostSessions, serverStart } = await import(new URL('../lib/fleet-scan.m
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
-const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
-const FLEET_DIR = process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet');
+// THE SOCKET SAYS WHOSE FLEET THIS IS, AND THE ENV ONLY SAYS WHOSE PANE RAN US. A fleet
+// session exports CLAUDE_FLEET_DIR for its OWN profile, so a grid started with another
+// profile's env read that profile's fleet dir: a fleet on another profile whose server had
+// died, with six sessions recorded and every conversation intact, drew "nothing running yet"
+// and its lost cards were never reached. So the fleet's own project (lib/projects.mjs, the
+// reader the phone's /api/grid already resolves through) decides the account, and the env
+// is the answer only for a socket no project owns. Loaded, not imported, for the reason the
+// fleet-scan import above is: a copy of this file run from a temp directory has no ../lib,
+// and then the env is all there is — which is exactly what this did before.
+let OWN = null;
+try { OWN = (await import(new URL('../lib/projects.mjs', import.meta.url))).projectForSock(process.argv[2]); } catch {}
+const CFG = OWN?.cfg || process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+const FLEET_DIR = OWN ? path.join(OWN.cfg, 'fleet') : (process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet'));
+// ...and everything this starts (a reopen, a stop, a spawn) is told the same account.
+if (OWN) Object.assign(process.env, { CLAUDE_CONFIG_DIR: CFG, CLAUDE_FLEET_DIR: FLEET_DIR, CLAUDE_FLEET_PROFILE: OWN.profile });
 const PROJECTS = path.join(CFG, 'projects');
 // codex keeps its own history, in its own place, under its own env var (same name and
 // default the binary uses). Nothing about it is reachable from PROJECTS above.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
-const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
+const PROFILE = OWN?.profile || process.env.CLAUDE_FLEET_PROFILE || 'work';
 // TWO WIRES, TWO SEPARATORS, and conflating them cost 122 red assertions.
 //
 // US is OUR OWN protocol: the chosen action this file prints on stdout for the bash
@@ -71,6 +86,12 @@ const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
 // leaves it alone because VIS_TAB is not in that flag set). And a tab cannot appear
 // INSIDE these fields — tmux sanitizes a tab in a session name to the literal `\t` on
 // 3.4 and rejects the name outright on 3.7b. test/run.sh pins both halves.
+//
+// AND EVERY READ PASSES -u, or none of that holds. All of the above is what tmux prints to a
+// UTF-8 client. A client that is not inside tmux and finds no UTF-8 in LC_ALL, LC_CTYPE or
+// LANG gets utf8_sanitize() on top, on every version measured: the tab comes back as `_`, and
+// so does every byte of a non-ASCII path. A daemon started by launchd or a systemd unit is
+// that client, and so is a stock container. -u is the switch that wins over all three.
 const US = '\x1f'; // our own wire, to bin/ghostfleet — never crosses tmux
 const TF = '\t';   // the separator inside a tmux -F format — see above
 
@@ -145,7 +166,7 @@ function tmuxVersion() {
 }
 function tmuxList() {
   try {
-    const args = ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F',
+    const args = ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F',
       `#{session_name}${TF}#{session_path}${TF}#{session_attached}`];
     const out = execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return out.split('\n').filter(Boolean).map(l => {
@@ -760,7 +781,7 @@ function recordOfPane(name) {
   if (hit && Date.now() - hit.at < 10000) return hit.rec;
   let rec = null;
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const f = tmuxRecord(out.split('\n')[0] || '', 2);
     if (f) rec = recordFor(f[0], f[1]);
@@ -1041,14 +1062,14 @@ function nestRows(rows, sub) {
 // renamed by hand still owns the pane its old record names.
 function livePanes() {
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return new Set(out.split('\n').filter(Boolean));
   } catch { return new Set(); }
 }
 function allLiveNames() {
   try {
-    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
+    const out = execFileSync('tmux', ['-u', '-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return new Set(out.split('\n').filter(Boolean));
   } catch { return new Set(); }     // no server on this socket: that IS the crash case
@@ -1374,6 +1395,48 @@ function schedule(session, whenStr, msg, sock = SOCK, dir = FLEET_DIR, env = nul
 function vis(s) { return [...s].length; }
 function clip(s, w) { s = String(s ?? ''); return vis(s) <= w ? s : [...s].slice(0, Math.max(0, w - 1)).join('') + '…'; }
 function padEndV(s, w) { s = clip(s, w); return s + ' '.repeat(Math.max(0, w - vis(s))); }
+// The same two questions for a line that carries colour, whose codes take no cell. clip() would
+// count them, and would cut one in half.
+const SGR = /(\x1b\[[0-9;]*m)/;
+const isSgr = (t) => t.startsWith('\x1b[');
+function clipSgr(s, w) {
+  let left = Math.max(0, w - 1), out = '';
+  const parts = s.split(SGR);
+  if (parts.reduce((n, t) => n + (isSgr(t) ? 0 : vis(t)), 0) <= w) return s;
+  for (const t of parts) {
+    if (isSgr(t)) { out += t; continue; }
+    if (vis(t) > left) return out + [...t].slice(0, left).join('') + '…' + C.reset;
+    out += t; left -= vis(t);
+  }
+  return out;
+}
+// At spaces, with the colour in force carried across each break. A word wider than the line is
+// left for clipSgr to cut.
+function wrapSgr(s, w) {
+  const lines = [];
+  let cur = '', used = 0, pending = '', active = '';
+  for (const t of s.split(/(\x1b\[[0-9;]*m|\s+)/)) {
+    if (!t) continue;
+    if (isSgr(t)) { cur += t; active = t === C.reset ? '' : active + t; continue; }
+    if (/^\s/.test(t)) { if (used) pending = ' '; continue; }
+    if (used && used + pending.length + vis(t) > w) { lines.push(cur + C.reset); cur = active; used = 0; pending = ''; }
+    cur += pending + t; used += pending.length + vis(t); pending = '';
+  }
+  if (used) lines.push(cur + C.reset);
+  return lines.length ? lines : [''];
+}
+// The rows of a list that fit in `room`, cut around the cursor, in the shape the stack screen
+// draws: a `↑ N more` / `↓ N more` takes a row of its own and counts the row it took.
+function windowLines(lines, sel, room) {
+  if (lines.length <= room) return lines;
+  const top = Math.max(0, Math.min(sel - Math.floor(room / 2), lines.length - room));
+  const shown = lines.slice(top, top + room);
+  if (room < 3) return shown;
+  const below = lines.length - (top + room);
+  if (top > 0) shown[0] = `   ${C.dim}↑ ${top + 1} more${C.reset}`;
+  if (below > 0) shown[room - 1] = `   ${C.dim}↓ ${below + 1} more${C.reset}`;
+  return shown;
+}
 function twoCol(l, r, w) {
   l = clip(l, w - vis(r) - 1);
   const gap = Math.max(1, w - vis(l) - vis(r));
@@ -1388,7 +1451,29 @@ function humanAge(a) {
 
 // ── card rendering ────────────────────────────────────────────────────────
 const CW = 30; // inner content width
-function cardLines(card, selected, idx) {
+// A SEARCH'S LOOK, from the palette the cards already wear (see srchQ). `hl` is null with
+// no search up; otherwise { q, hit }. A hit is drawn bold — the weight the selected card
+// already has, without its reversed top rule, so the cursor still reads as the cursor —
+// and the letters that matched are reversed in the card's own colour, which reads the
+// same on a red NEEDS YOU card as on a cyan working one because it IS that colour. A miss
+// is dimmed, the way the `+ new session` card always is when it is not selected: still in
+// its place, still its status colour, just quieter. The selected card is never dimmed —
+// the cursor parked on a miss (nothing matched) has to stay findable.
+function srchWrap(color, hl) {     // an unselected card's lead-in; selected ones never ask
+  return !hl ? color : hl.hit ? `${C.bold}${color}` : `${C.dim}${color}`;
+}
+// Reverse the matched letters of `line` inside [from, to). On the selected card's top
+// rule — already reversed whole — the match is the part that is NOT, so it inverts the
+// other way. Offsets are taken on the plain line before any colour goes in, and the
+// codes added are zero-width, so every card stays exactly CW+2 columns.
+function srchMark(line, from, to, q, inverted) {
+  const sp = matchSpan(line.slice(from, to), q);
+  if (!sp) return line;
+  const [a, b] = [from + sp[0], from + sp[1]];
+  const [on, off] = inverted ? [C.unrev, C.rev] : [C.rev, C.unrev];
+  return line.slice(0, a) + on + line.slice(a, b) + off + line.slice(b);
+}
+function cardLines(card, selected, idx, hl = null) {
   // A sub-lead's card wears its TEAM's status (see teamStatusOf); every other card's
   // teamStatus is null and this is its own status, as it always was.
   const meta = STATUS[card.teamStatus || card.status] || STATUS.starting;
@@ -1503,8 +1588,16 @@ function cardLines(card, selected, idx) {
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
-    : `${color}${s}${C.reset}`;
-  return [wrap(top, true), wrap(l1), wrap(l2), wrap(l3), wrap(bot)];
+    : `${srchWrap(color, hl)}${s}${C.reset}`;
+  // The title is the label when there is one, so the session name is only on l2 then, as
+  // its first word — and a card found BY its name must show where the name is.
+  let t = top, s2 = l2;
+  if (hl?.hit) {
+    const from = 1 + 2 + num.length;                 // ╭, '─ ', the jump digit
+    t = srchMark(top, from, 1 + title.length, hl.q, selected);
+    if (card.label) s2 = srchMark(l2, 2, 2 + card.name.length, hl.q, false);
+  }
+  return [wrap(t, true), wrap(l1), wrap(s2), wrap(l3), wrap(bot)];
 }
 function newCardLines(selected) {
   const color = C.yellow;
@@ -1517,7 +1610,7 @@ function newCardLines(selected) {
 }
 // a worktree that exists but has no live session — ⏎ jumps straight to naming one,
 // skipping the checkout picker entirely (the worktree is already identified)
-function freeCardLines(w, selected, idx) {
+function freeCardLines(w, selected, idx, hl = null) {
   const color = w.removing ? C.yellow : C.grey;
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   const title = clip(`─ ${num}${path.basename(w.path)} `, CW);
@@ -1533,7 +1626,7 @@ function freeCardLines(w, selected, idx) {
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
-    : `${color}${s}${C.reset}`;
+    : `${srchWrap(color, hl)}${s}${C.reset}`;
   return [wrap(top, true), wrap(l1), wrap(l2), wrap(l3), wrap(bot)];
 }
 
@@ -2013,9 +2106,10 @@ let SUB = SUB_ARG;
 // with --select <session>. This one-line file is how the next grid knows the session was
 // entered from a sub-grid, so detaching lands you back in it rather than at the top.
 function subMemFile() { return path.join(FLEET_DIR, `${SOCK}.grid-sub`); }
-function enterSub(name) { SUB = name; sel = 0; buildItems(); }
+// A search is about the cards it was typed against; a different grid ends it.
+function enterSub(name) { SUB = name; sel = 0; srchQ = null; buildItems(); }
 function leaveSub() {
-  const was = SUB; SUB = ''; buildItems();
+  const was = SUB; SUB = ''; srchQ = null; buildItems();
   const i = items.findIndex(it => it.card && it.card.name === was);
   sel = i >= 0 ? i : 0;
 }
@@ -2064,6 +2158,21 @@ let confirmWt = null;        // { path, branch, msg, force } — free worktree a
 let wtRmMsg = '';
 let labelFor = null;         // session being labelled (from the settings page's 'l')
 let labelInput = '';         // editable, pre-filled with the current label
+// ── `/` FINDS AN AGENT, the way less and vim do ──────────────────────────────
+// Two steps, because the typing step has to own every letter: `n` is in `billing-svc`,
+// and a search where n jumps instead of typing cannot find half the fleet. So: `/` opens
+// the prompt and every printable key goes into the query (the cursor follows the first
+// match as you type); ⏎ locks it, and only THEN are n / N next / previous and ⏎ opens.
+// Esc clears it from either step. Matching lives in lib/grid-search.mjs.
+//   The card verbs (p, x, s, t …) stay inert for as long as a search is up, in both
+// steps — a query typed into what turns out to be the locked step must not pause or kill
+// whatever the cursor happens to sit on.
+let srchQ = null;            // null = no search; otherwise the query ('' just after `/`)
+let srchTyping = false;      // true = keys type into the query; false = locked, n/N/⏎ act
+function srchMatches() { return srchQ ? matchIndices(items, srchQ, it => it.card) : []; }
+// The cursor goes to the first match on every keystroke, and nowhere when nothing
+// matches — the card you were on is a better place to be left than the top of the grid.
+function srchFirst() { const m = srchMatches(); if (m.length) sel = m[0]; }
 
 // Rename BOTH the tmux session and its worktree folder (git worktree move), so the
 // two never drift apart — a session named "x" always sitting in a folder named "x"
@@ -2154,6 +2263,8 @@ function renderGrid() {
         `${C.red} — f = remove anyway · any key = cancel${C.reset}\x1b[K\n`
       : `${C.red}${C.bold} remove worktree '${path.basename(confirmWt.path)}' (${confirmWt.branch})?${C.reset}` +
         `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (srchQ != null)
+    buf += searchLine() + '\x1b[K\n';
   else if (wtRmMsg)
     buf += `${C.yellow}${C.bold} ${clip(wtRmMsg, Math.max(20, W() - 2))}${C.reset}\x1b[K\n`;
   else if (!cards.length && !jumpStage)
@@ -2167,13 +2278,15 @@ function renderGrid() {
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
+  const hits = new Set(srchMatches());
+  const hlOf = (idx) => srchQ ? { q: srchQ, hit: hits.has(idx) } : null;
   for (let i = 0; i < items.length; i += nc) {
     const rowItems = items.slice(i, i + nc);
     const linesPerCard = rowItems.map((it, j) => {
       const idx = i + j;
       return it.newCard ? newCardLines(idx === sel)
-           : it.freeWt  ? freeCardLines(it.freeWt, idx === sel, idx)
-           : cardLines(it.card, idx === sel, idx);
+           : it.freeWt  ? freeCardLines(it.freeWt, idx === sel, idx, hlOf(idx))
+           : cardLines(it.card, idx === sel, idx, hlOf(idx));
     });
     for (let li = 0; li < 5; li++) {
       buf += ' ' + linesPerCard.map(lc => lc[li]).join(' ') + '\x1b[K\n';
@@ -2194,9 +2307,9 @@ function renderGrid() {
   // line between 93 and 106 columns and none above; at 80 the banner was already being
   // pushed off by the footer as it stood, which is its own problem and not this one.
   buf += SUB
-    ? `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
+    ? `${C.dim} ↑↓←→/hjkl move · / find · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
       `Ctrl-t term · Ctrl-n edit · Ctrl-f jump · Ctrl-p/Q projects · q/\` up to the top grid${C.reset}\x1b[K\n`
-    : `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
+    : `${C.dim} ↑↓←→/hjkl move · / find · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
          `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
@@ -2361,11 +2474,11 @@ function renderSettings() {
   const names = cards.map(c => c.name);
   gSetSel = Math.max(0, Math.min(gSetSel, Math.max(0, names.length - 1)));
   const pOn = projPushOn();
-  let buf = '\x1b[H';
-  buf += ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per session${C.reset}\x1b[K\n`;
-  buf += ` ${C.dim}a session's own setting wins over the project's.  project ${C.reset}${C.bold}${Z}${C.reset}${C.dim}: ${C.reset}` +
-         `${pOn ? `${C.green}on` : `${C.grey}off`}${C.reset} ${C.dim}(change on the projects screen → ,)${C.reset}\x1b[K\n\x1b[K\n`;
-  if (!names.length) buf += ` ${C.dim}(no sessions yet)${C.reset}\x1b[K\n`;
+  // One cell short of the edge, as the Projects settings page draws: a line that fills the last
+  // column leaves the cursor waiting to wrap, and the second header line is wider than 80.
+  const width = W() - 1, rows = H();
+  const body = [];
+  if (!names.length) body.push(` ${C.dim}(no sessions yet)${C.reset}`);
   names.forEach((n, i) => {
     const st = sessPush(n), selRow = i === gSetSel;
     const badge = st === 'on'  ? `${C.green}● on     ${C.reset}`
@@ -2379,11 +2492,25 @@ function renderSettings() {
       : par && parSt !== 'inherit' ? `follows ${par} · ${parSt}`
       : par ? `follows project · ${fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off')) ? 'off' : 'on'}`
       : `follows project · ${pOn ? 'on' : 'off'}`;
-    buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
-           `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
+    body.push(`${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
+           `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}`);
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · l label · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
-  out(buf);
+  // What stays is the title, the line about precedence and the keys; the rows are cut around the
+  // cursor by the same helper the Projects page uses, and the spacers go first when short.
+  const title = ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per session${C.reset}`;
+  const info = ` ${C.dim}a session's own setting wins over the project's.  project ${C.reset}${C.bold}${Z}${C.reset}${C.dim}: ${C.reset}` +
+         `${pOn ? `${C.green}on` : `${C.grey}off`}${C.reset} ${C.dim}(change on the projects screen → ,)${C.reset}`;
+  const keys = [
+    ' ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · l label · esc/` back',
+    ' ↑↓ move · space cycle · r rename · l label · esc back',
+    ' ↑↓ · space · esc back',
+  ].find(f => vis(f) <= width) || ' esc back';
+  const roomy = rows >= 8;
+  const head = rows >= 4 ? [title, info, ...(roomy ? [''] : [])] : [title];
+  const foot = [...(roomy ? [''] : []), `${C.dim}${keys}${C.reset}`];
+  const frame = [...head, ...windowLines(body, gSetSel, Math.max(1, rows - head.length - foot.length)), ...foot];
+  // The last line ends without a newline: on the bottom row, one scrolls the whole frame up.
+  out(`\x1b[H${frame.slice(0, rows).map(l => clipSgr(l, width) + '\x1b[K').join('\n')}\x1b[J`);
 }
 function renderRename() {
   let buf = '\x1b[H';
@@ -2477,7 +2604,7 @@ function render() {
 // ── input ───────────────────────────────────────────────────────────────
 function cleanup() {
   try { process.stdin.setRawMode(false); } catch {}
-  out('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');   // disable mouse, show cursor, leave alt-screen
+  out('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?7h\x1b[?1049l');   // disable mouse, show cursor, wrap on, leave alt-screen
 }
 function finish(result) {
   cleanup();
@@ -2628,6 +2755,79 @@ function jumpHint() {
       : `project ${k(jumpProj)}, session? ${k('1-9')} · ${k('⏎/m')} = master · ${k('s')} = grid · ${k('esc')}`;
   return ` ${C.yellow}${C.bold}jump →${C.reset} ${C.dim}${body}${C.reset}`;
 }
+// The search's prompt, in the confirm/jump row under the header — the row every other
+// one-line mode on this screen already speaks in, styled like jumpHint: a yellow lead,
+// dim prose, the keys themselves bright. ONE ROW, ALWAYS: a line that wraps pushes the
+// whole grid down and reflows it under the cursor you are steering, so the hint drops to
+// its short form before it would wrap, and the query is clipped before the hint goes.
+// The Projects screen asks the same question about projects (see pSrch), so the line is
+// drawn from what it is handed: one wording for both screens, with the noun swapped.
+function searchLine() { return searchLineOf(srchQ, srchTyping, srchMatches(), sel, 'agent'); }
+function searchLineOf(srchQ, srchTyping, m, sel, noun) {
+  const k = s => `${C.reset}${C.bold}${s}${C.dim}`;
+  const q = clip(srchQ, Math.max(8, W() - 52));
+  const lead = ` ${C.yellow}${C.bold}/${C.reset}${C.bold}${q}${C.reset}${srchTyping ? `${C.rev} ${C.unrev}` : ' '} `;
+  const leadW = 2 + vis(q) + 2;
+  const fits = (plain) => leadW + vis(plain) <= W() - 1;
+  if (!srchQ)
+    return lead + `${C.dim}type part of ${noun === 'agent' ? 'an agent' : `a ${noun}`}'s name · ${k('esc')} cancel${C.reset}`;
+  if (!m.length)
+    return lead + `${C.yellow}no ${noun} matches '${q}'${C.reset}`;
+  const n = `${m.length} match${m.length === 1 ? '' : 'es'}`;
+  if (srchTyping)
+    return lead + `${C.dim}${n} · ${k('⏎')} keep · ${k('esc')} clear${C.reset}`;
+  const at = m.indexOf(sel);
+  const pos = at >= 0 ? `${at + 1} of ${m.length}` : n;
+  return lead + (fits(`${pos} · n next · N prev · ⏎ open · / edit · esc clear`)
+    ? `${C.dim}${pos} · ${k('n')} next · ${k('N')} prev · ${k('⏎')} open · ${k('/')} edit · ${k('esc')} clear${C.reset}`
+    : `${C.dim}${pos} · ${k('n')}/${k('N')} · ${k('⏎')} open · ${k('esc')}${C.reset}`);
+}
+// One key while a search is up. Returns a choice to finish with, or null.
+function searchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const shorter = () => [...srchQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { srchQ = null; return null; }
+  if (key === '\x1b[A') { moveGrid('up'); return null; }
+  if (key === '\x1b[B') { moveGrid('down'); return null; }
+  if (key === '\x1b[C') { moveGrid('right'); return null; }
+  if (key === '\x1b[D') { moveGrid('left'); return null; }
+  if (srchTyping) {
+    // Locks only onto something: with nothing matching there is nothing for n or ⏎ to do,
+    // and a locked prompt you have to unlock to fix a typo is one key worse than this.
+    if (key === '\r' || key === '\n') { if (srchMatches().length) srchTyping = false; return null; }
+    if (bs) { if (!srchQ) srchQ = null; else { srchQ = shorter(); srchFirst(); } return null; }
+    // Every printable key, digits and the card verbs included — that is the point of the
+    // typing step. A pasted run arrives as one token and goes in whole. Any other control
+    // or escape sequence (a function key, ^T) is dropped rather than typed or obeyed.
+    if (key.startsWith('\x1b')) return null;
+    const t = [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { srchQ += t; srchFirst(); }
+    return null;
+  }
+  // LOCKED. n / N step, ⏎ opens, / or ⌫ go back to editing; q and ` clear the search
+  // before they would leave the grid — one back-out at a time. Everything else is inert.
+  if (key === 'q' || key === '\x60') { srchQ = null; return null; }
+  if (key === '/') { srchTyping = true; return null; }
+  if (bs) { srchTyping = true; srchQ = shorter(); srchFirst(); return null; }
+  if (key === '\r' || key === '\n') { srchQ = null; return openSelected(); }
+  // A run of keys in one read (`nn` typed fast) is each of them, in order.
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(srchMatches(), sel, ch === 'n' ? 1 : -1); if (i >= 0) sel = i; }
+    else if (ch === 'k') moveGrid('up');
+    else if (ch === 'j') moveGrid('down');
+    else if (ch === 'l') moveGrid('right');
+    else if (ch === 'h') moveGrid('left');
+  }
+  return null;
+}
+// What ⏎ does to the selected item — the same from a search as without one.
+function openSelected() {
+  const it = items[sel];
+  if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; return null; }
+  if (it?.card) return cardChoice(it.card);
+  if (it?.freeWt) return freeWtChoice(it.freeWt);
+  return null;
+}
 function jumpKey(key) {
   const digit = key.length === 1 && key >= '1' && key <= '9';
   if (!jumpStage) {                                   // only ^F opens a chord
@@ -2774,6 +2974,7 @@ function onKey(key) {
       } else confirmWt = null;
       render(); return;
     }
+    if (srchQ != null) { const c = searchKey(key); if (c) return finish(c); render(); return; }
     {                                                // ^F jump chord (see jumpKey)
       const j = jumpKey(key);
       if (j) { if (j !== 'handled') return finish(j); render(); return; }
@@ -2862,12 +3063,8 @@ function onKey(key) {
       const it = items[sel]; const i = it?.card ? cards.findIndex(c => c.name === it.card.name) : 0;
       gSetSel = i >= 0 ? i : 0;                      // land on the session you had selected
     }
-    else if (key === '\r' || key === '\n') {
-      const it = items[sel];
-      if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
-      else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); }
-      else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
-    }
+    else if (key === '/') { srchQ = ''; srchTyping = true; }
+    else if (key === '\r' || key === '\n') { const c = openSelected(); if (c) return finish(c); }
     render();
   } else if (mode === 'picker') {
     if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') { mode = 'grid'; render(); return; }
@@ -3258,12 +3455,21 @@ const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 
 const SELECT = (() => { const i = process.argv.indexOf('--select'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
 const PROJECTS_CFG = process.env.CLAUDE_FLEET_PROJECTS || path.join(HOME, '.config', 'ghostfleet', 'projects');
 
-function boxCard(title, rows, color, sel) {
+// `hl` is the Projects search's look, the grid's cardLines' in every respect: null with no
+// search up, otherwise { q, hit, title: [from, to), row1: [from, to) } — the spans of
+// `title` and of rows[1] that the query may be marked in (either can be absent). Offsets
+// are into those strings as passed; a clipped title just loses the part past the clip.
+function boxCard(title, rows, color, sel, hl = null) {
   const t = clip(`─ ${title} `, CW);
-  const top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
+  let top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
   const body = [0, 1, 2].map(i => `│ ${padEndV(rows[i] || '', CW - 2)} │`);
   const bot = `╰${'─'.repeat(CW)}╯`;
-  const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${color}${s}${C.reset}`;
+  const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${srchWrap(color, hl)}${s}${C.reset}`;
+  if (hl?.hit) {
+    // ╭ and '─ ' come before the title; '│ ' before a row
+    if (hl.title) top = srchMark(top, 3 + hl.title[0], Math.min(1 + t.length, 3 + hl.title[1]), hl.q, sel);
+    if (hl.row1 && hl.row1[1] <= CW - 2) body[1] = srchMark(body[1], 2 + hl.row1[0], 2 + hl.row1[1], hl.q, false);
+  }
   return [wrap(top, true), wrap(body[0]), wrap(body[1]), wrap(body[2]), wrap(bot)];
 }
 // ── the Projects banner ──────────────────────────────────────────────────────
@@ -3344,7 +3550,7 @@ function sessionStatuses(proj, includeTabs = false) {
   const sock = sockOf(proj);
   let names = [];
   try {
-    const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const o = execFileSync('tmux', ['-u', '-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     // TABS ARE FILTERED HERE BY DEFAULT, and the default is the part worth keeping: this
     // is the ONE status reader the Projects cards and the stack screen share, so counting
     // tabs would make a project with a terminal open report a session it does not have.
@@ -3411,6 +3617,55 @@ let pSettings = false;       // settings page open (per-project toggles)
 let pSetSel = 0;             // selected row (project) on the settings page
 let pSetCol = 0;             // selected column (which setting) on the settings page
 let pSetMsg = '';            // what the last experimental toggle answered, shown on its row
+// ── `/` FINDS A PROJECT — the grid's search (srchQ above), one screen up ─────────────
+// Same two steps and the same keys: `/` opens the prompt and every printable key is query
+// (x, s and the digits included — a digit typed into a name must not open project 3); ⏎
+// locks it onto a match, and only then are n / N next / previous and ⏎ opens. Esc clears.
+// A project answers to the name its card shows AND to its folder's name, which is what you
+// type at a shell — both through lib/grid-search.mjs, as the grid's label and session name.
+let pSrchQ = null;           // null = no search; otherwise the query ('' just after `/`)
+let pSrchTyping = false;     // true = keys type into the query; false = locked, n/N/⏎ act
+const pCardOf = (it) => it?.project ? { label: it.project.name, name: path.basename(it.project.path) } : null;
+function pSrchMatches() { return pSrchQ ? matchIndices(pItems, pSrchQ, pCardOf) : []; }
+function pSrchFirst() { const m = pSrchMatches(); if (m.length) pSel = m[0]; }
+// One key while a search is up — the grid's searchKey, on this screen's cursor and open.
+// Returns a choice to finish with, or null.
+function pSearchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const shorter = () => [...pSrchQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { pSrchQ = null; return null; }
+  if (key === '\x1b[A') { pMove('up'); return null; }
+  if (key === '\x1b[B') { pMove('down'); return null; }
+  if (key === '\x1b[C') { pMove('right'); return null; }
+  if (key === '\x1b[D') { pMove('left'); return null; }
+  if (pSrchTyping) {
+    if (key === '\r' || key === '\n') { if (pSrchMatches().length) pSrchTyping = false; return null; }
+    if (bs) { if (!pSrchQ) pSrchQ = null; else { pSrchQ = shorter(); pSrchFirst(); } return null; }
+    if (key.startsWith('\x1b')) return null;
+    const t = [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { pSrchQ += t; pSrchFirst(); }
+    return null;
+  }
+  // LOCKED. q and ` clear it, as on the grid — this screen has no q of its own, but a key
+  // that clears a search on one screen and does nothing one screen up is two rules to learn.
+  // Everything that is not a search key is inert.
+  if (key === 'q' || key === '\x60') { pSrchQ = null; return null; }
+  if (key === '/') { pSrchTyping = true; return null; }
+  if (bs) { pSrchTyping = true; pSrchQ = shorter(); pSrchFirst(); return null; }
+  if (key === '\r' || key === '\n') {
+    pSrchQ = null;
+    const it = pItems[pSel];
+    return it?.add ? 'addproject' : it?.project ? `project${US}${it.project.name}` : null;
+  }
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(pSrchMatches(), pSel, ch === 'n' ? 1 : -1); if (i >= 0) pSel = i; }
+    else if (ch === 'k') pMove('up');
+    else if (ch === 'j') pMove('down');
+    else if (ch === 'l') pMove('right');
+    else if (ch === 'h') pMove('left');
+  }
+  return null;
+}
 
 // ── worker → master auto-nudge (notify-lead) per-project settings ───────────
 // The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
@@ -3466,8 +3721,10 @@ function toggleExperimental(name) {
 // enforcing it — read live each tick (no restart), and flipping it on RELEASES the
 // workers the governor parked. Use it when you have extra usage and want the fleet
 // to keep going; hand-paused workers stay paused either way.
-function limitFile(proj) { return path.join(profileDir(proj.profile), 'fleet', sockOf(proj) + '.governor-off'); }
-function ignoreLimit(proj) { try { return fs.existsSync(limitFile(proj)); } catch { return false; } }
+// The accounts engine reads the same marker (lib/projects.mjs budgetIgnored) and does not
+// park this project's workers when every account is spent, either.
+function limitFile(proj) { return budgetFile(path.join(profileDir(proj.profile), 'fleet'), sockOf(proj)); }
+function ignoreLimit(proj) { return budgetIgnored(path.join(profileDir(proj.profile), 'fleet'), sockOf(proj)); }
 function toggleIgnoreLimit(proj) {
   const f = limitFile(proj);
   if (ignoreLimit(proj)) { try { fs.unlinkSync(f); } catch {} }
@@ -3518,7 +3775,7 @@ const SETCOLS = [
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
   // "The NEXT one" was true until lib/agent-switch.sh: the running master now moves too,
-  // so what the row has to say is WHEN — see switchNote(), drawn at the row's end.
+  // so what the row has to say is WHEN — see switchNote(), drawn on the line under the row.
   // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
   // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
   // cycles through however many agents are installed, and three presses land back on
@@ -3546,7 +3803,18 @@ const SETCOLS = [
       const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
       return { on: !!a, label: (a || 'claude') + pos };
     } },
-  // THE TWO BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
+  // THE PROJECT'S MODEL (lib/session-model.sh): what its sessions START on, below a session's
+  // own pin (fleet-model) and above the profile default. A ring for the same reason AGENT is
+  // one — four states, and a lap lands on "default", which is the row of a project never set —
+  // so it carries a position. A model named by hand that is not in the ring shows its name and
+  // no position, as AGENT does for an agent that is not installed.
+  { title: 'MODEL', onColor: C.cyan, toggle: cycleModel, verb: 'cycle',
+    blurb: `${C.dim}model: what sessions start on, ${C.reset}${C.bold}from their next start${C.reset}${C.dim} (new worker, restart, wake) · ${C.reset}${C.bold}fleet-model${C.reset}${C.dim} moves a running one · not master: fleet-model master <m>${C.reset}`,
+    state: p => {
+      const m = projModel(p), i = MODEL_RING.indexOf(m);
+      return { on: !!m, label: (m || 'default') + (i >= 0 ? ` ${i + 1}/${MODEL_RING.length}` : '') };
+    } },
+  // TWO OF THE BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
   // agent approving another session's permission dialog. Project-wide here; the one-session
   // form (the sub-master of its task) is `fleet-project set … --session <s>`. Written
   // through fleet-project, like AGENT, so the markers have one writer.
@@ -3556,9 +3824,37 @@ const SETCOLS = [
   { title: 'AGENTS APPROVE', onColor: C.red, toggle: p => toggleBoundary(p, 'agents-approve'),
     blurb: `${C.dim}agents can approve tool calls: ${C.reset}${C.bold}on${C.reset}${C.dim} = fleet-answer may send a yes to a worker's permission dialog · ${C.reset}${C.bold}off${C.reset}${C.dim} = a human approves (default). Jarvis always asks you.${C.reset}`,
     state: p => { const on = boundaryOn(p, 'agents-approve'); return { on, label: on ? 'on' : 'off' }; } },
+  // THE REVIEW GATE (lib/review-gate.sh): the boundary that DRAWS a line when on, so it is
+  // green rather than red — on is the careful state here. The cell names the reviewer model,
+  // because "on" alone hides which second opinion the project is paying for. Turning it off
+  // is a human's act, which is exactly what this page is: no session can (fleet-guard.sh).
+  { title: 'REVIEW GATE', onColor: C.green, toggle: p => toggleBoundary(p, 'review-gate'),
+    blurb: `${C.dim}review gate: ${C.reset}${C.bold}on${C.reset}${C.dim} = no PR merges until a reviewer subagent's code review passed at its head (fleet-review status <pr>) · ${C.reset}${C.bold}off${C.reset}${C.dim} = merge as before (default). Reviewer, level and caps: fleet-project set <p> review-model|review-level|review-stalled|review-rounds${C.reset}`,
+    state: p => {
+      const on = boundaryOn(p, 'review-gate');
+      let m = 'sonnet';
+      try { const v = fs.readFileSync(path.join(profileDir(p.profile), 'fleet', `${sockOf(p)}.review-model`), 'utf8').trim(); if (/^(sonnet|opus|haiku|fable)$/.test(v)) m = v; } catch {}
+      return { on, label: on ? `on · ${m}` : 'off' };
+    } },
 ];
 function boundaryOn(proj, b) {
   try { return fs.existsSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.${b}`)); } catch { return false; }
+}
+const MODEL_RING = ['', 'opus', 'sonnet', 'haiku'];
+function projModel(proj) {
+  try {
+    const v = fs.readFileSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.model`), 'utf8').trim();
+    // lib/model-kind.sh's model_name_valid, so the cell and a launch agree on what counts
+    return (v !== 'default' && /^[A-Za-z0-9._:/@\[\]-]{1,100}$/.test(v)) ? v : '';
+  } catch { return ''; }
+}
+// Written through fleet-project, like AGENT and the boundaries, so the file has one writer.
+function cycleModel(proj) {
+  const next = MODEL_RING[(Math.max(0, MODEL_RING.indexOf(projModel(proj))) + 1) % MODEL_RING.length];
+  for (const bin of [path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-project'), 'fleet-project']) {
+    try { execFileSync(bin, ['set', proj.name, 'model', next || 'default'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return; }
+    catch {}
+  }
 }
 function toggleBoundary(proj, b) {
   const want = boundaryOn(proj, b) ? 'off' : 'on';
@@ -3740,8 +4036,10 @@ function pRender() {
       ?? ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
+    : pSrchQ != null ? searchLineOf(pSrchQ, pSrchTyping, pSrchMatches(), pSel, 'project') + '\x1b[K\n'
     : (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
+  const hits = new Set(pSrchMatches());
   for (let i = 0; i < pItems.length; i += nc) {
     const row = pItems.slice(i, i + nc);
     const lines = row.map((it, j) => {
@@ -3785,7 +4083,15 @@ function pRender() {
         : (live && live !== want)
         ? `${it.project.profile} · ${live}→${want}`
         : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
-      return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
+      const num = i + j < 9 ? `${i + j + 1} ` : '';
+      const shown = it.project.path.replace(HOME, '~'), folder = path.basename(it.project.path);
+      // The folder is marked only where it says something the title does not.
+      const hl = pSrchQ == null ? null : {
+        q: pSrchQ, hit: hits.has(i + j),
+        title: [num.length, num.length + it.project.name.length],
+        row1: folder !== it.project.name && shown.endsWith(folder) ? [shown.length - folder.length, shown.length] : null,
+      };
+      return boxCard(`${num}${it.project.name}`, [who, shown, line], color, sel, hl);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
@@ -3794,51 +4100,102 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · Ctrl-f jump · Ctrl-s sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · / find · ⇧hjkl reorder · ⏎/1-9 open · Ctrl-f jump · Ctrl-s sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
+//
+// THE FRAME IS NEVER TALLER THAN THE TERMINAL, whatever the page lists. It was written top to
+// bottom and let the terminal deal with the rest, so every line wider than the pane wrapped and
+// cost a row nobody counted. With six experimental rows at 120x24 it came out taller than the
+// pane: the title and the column names scrolled off, and the page started mid-blurb. Cutting the
+// descriptions alone would pass until the list outgrew the rows, and a window alone would still
+// miscount any line that wrapped, so it takes both:
+//   - every line is cut to the width, so a line costs exactly one row;
+//   - the list is windowed in lines around the cursor, between a head and a footer that stay;
+//   - the setting columns are windowed as well, or a cut would hide the very cell the cursor is on
+//     (seven columns need 163 cells, so this is 120 columns as much as 80);
+//   - the slot under the title carries the whole text of whatever the cursor is on, so what a row
+//     loses to the cut is one key away, in the place this page already explains its selection.
 function pRenderSettings() {
   const projs = visibleProjects();
   const nRows = projs.length + X.FEATURES.length;
   pSetSel = Math.max(0, Math.min(pSetSel, nRows - 1));
   const onExp = pSetSel >= projs.length;
-  let buf = '\x1b[H';
-  buf += ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}\x1b[K\n`;
-  const glob = fs.existsSync(GLOBAL_NOTIFY());
-  buf += ` ${C.dim}${C.reset}${onExp ? `${C.dim}experimental: off on a new install, and off means gone — not hidden${C.reset}` : SETCOLS[pSetCol].blurb}\x1b[K\n`;
-  buf += ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
-  const head = `   ${padEndV('', 6)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}`;
-  buf += `${C.dim}${head}${SETCOLS.map((c, ci) => (ci === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}\x1b[K\n`;
-  if (!projs.length) buf += ` ${C.dim}(no projects yet)${C.reset}\x1b[K\n`;
+  const feat = onExp ? X.FEATURES[pSetSel - projs.length] : null;
+  // One cell short of the edge: a line that fills the last column leaves the cursor waiting to
+  // wrap, and what the erase after it does from there depends on the terminal.
+  const width = W() - 1, rows = H();
+  // The column that held nothing but space goes first when the width is short.
+  const gutter = ' '.repeat(width >= 112 ? 6 : 0);
+  const left = 3 + gutter.length + 2 + 22 + 1 + 10;
+  const nCols = Math.min(SETCOLS.length, Math.max(1, Math.floor((width - left - 4) / 17)));
+  const firstCol = Math.max(0, Math.min(pSetCol - nCols + 1, SETCOLS.length - nCols));
+  const shownCols = SETCOLS.slice(firstCol, firstCol + nCols);
+  const colsLeft = SETCOLS.length - firstCol - nCols;
+
+  // ── the list ──
+  const body = [];
+  let selLine = 0;
+  if (!projs.length) body.push(` ${C.dim}(no projects yet)${C.reset}`);
   projs.forEach((p, i) => {
     const sel = i === pSetSel;
     const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
     const name = (sel ? C.bold + C.white : C.reset) + padEndV(p.name, 22) + C.reset;
-    const cells = SETCOLS.map((c, ci) => {
+    const cells = shownCols.map((c, k) => {
       const st = c.state(p);
-      const lit = sel && ci === pSetCol;                       // the cell space/⏎ acts on
+      const lit = sel && firstCol + k === pSetCol;             // the cell space/⏎ acts on
       const txt = padEndV((st.on ? '● ' : '○ ') + st.label, 16);
       return (lit ? C.rev : '') + (st.on ? c.onColor : C.grey) + txt + C.reset;
     });
+    if (sel) selLine = body.length;
+    body.push(`${cur}${gutter}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}`);
+    // On a line of its own: at the row's end it says WHEN a switch lands, and the cut would take it.
     const note = switchNote(p);
-    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}${note ? '  ' + note : ''}\x1b[K\n`;
+    if (note) body.push(`${' '.repeat(3 + gutter.length + 2)}${note}`);
   });
   // THE EXPERIMENTAL SECTION: global, one row per feature, each tagged every time it is
   // drawn. Its rows continue the project rows, so ↓ walks into them and space/⏎ flips one.
-  buf += `\x1b[K\n ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install${C.reset}\x1b[K\n`;
+  body.push('', ` ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install, and off means gone, not hidden${C.reset}`);
   X.FEATURES.forEach((f, k) => {
     const sel = projs.length + k === pSetSel;
     let on = false; try { on = X.enabled(f.name); } catch {}
     const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
     const st = (sel ? C.rev : '') + (on ? C.green : C.grey) + padEndV((on ? '● on' : '○ off'), 8) + C.reset;
-    buf += `${cur}${padEndV('', 6)}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
-         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}\x1b[K\n`;
+    if (sel) selLine = body.length;
+    body.push(`${cur}${gutter}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
+         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}`);
   });
+
+  // ── what stays ──
+  const title = ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}`;
+  const wrapped = (t) => wrapSgr(t, width - 1);
+  const desc = wrapped(feat ? `${C.dim}${pSetMsg || feat.what}${C.reset}` : SETCOLS[pSetCol].blurb);
+  // As tall as the tallest text it can hold, so walking the list does not move the rows under the
+  // cursor every time a longer description comes up.
+  const slot = Math.max(desc.length, ...[...SETCOLS.map(c => c.blurb), ...X.FEATURES.map(f => f.what)].map(t => wrapped(t).length));
+  const glob = fs.existsSync(GLOBAL_NOTIFY());
+  const nudge = ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}`;
+  const colHead = `${C.dim}${padEndV(firstCol ? `← ${firstCol}` : '', 3 + gutter.length)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}${shownCols.map((c, k) => (firstCol + k === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}${colsLeft ? ` ${C.dim}→ ${colsLeft}${C.reset}` : ''}`;
   // Named per row and column, so the key's own description changes with what it will do.
-  const verb = onExp ? `turn ${X.FEATURES[pSetSel - projs.length].name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
-  out(buf);
+  const verb = feat ? `turn ${feat.name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
+  const keys = [
+    ` ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back`,
+    ` ↑↓ row · ←→ column · space ${verb} · esc back`,
+    ' ↑↓ · ←→ · space · esc back',
+  ].find(f => vis(f) <= width) || ' esc back';
+  // What gives way when the height is short: the spacers and the global default, then the
+  // description's later lines. Never the title, the row under the cursor or the keys.
+  const roomy = rows >= 1 + slot + 3 + 3 + 2;
+  const descRows = roomy ? slot : Math.max(rows >= 5 ? 1 : 0, Math.min(desc.length, rows - 6));
+  const descLines = Array.from({ length: descRows }, (_, i) => (desc[i] === undefined ? '' : ` ${desc[i]}`));
+  // A text this pane cannot hold says so; `fleet-experimental list` still has all of a feature's.
+  if (desc.length > descRows && descRows) descLines[descRows - 1] += '…';
+  const head = [title, ...descLines, ...(roomy ? [nudge, ''] : []), ...(rows >= 4 ? [colHead] : [])];
+  const foot = [...(roomy ? [''] : []), `${C.dim}${keys}${C.reset}`];
+  const frame = [...head, ...windowLines(body, selLine, Math.max(1, rows - head.length - foot.length)), ...foot];
+  // The last line ends without a newline: on the bottom row, one scrolls the whole frame up.
+  out(`\x1b[H${frame.slice(0, rows).map(l => clipSgr(l, width) + '\x1b[K').join('\n')}\x1b[J`);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
 function pRenderSchedule() {
@@ -3916,6 +4273,9 @@ function onKeyProjects(key) {
     else pConfirmRemove = null;
     pRender(); return;
   }
+  // The search comes BEFORE the chord and the quit, as on the grid: while `/` is up every
+  // key is the search's, and ⌃C clears it rather than arming a quit.
+  if (pSrchQ != null) { pQuitArmed = 0; const c = pSearchKey(key); if (c) return finish(c); pRender(); return; }
   // Fully exiting to the shell (this is the ONLY screen whose quit does that)
   // now takes ⌃C twice, so a single stray key can't drop the whole fleet UI.
   // First ⌃C arms + shows a hint; a second within QUIT_WINDOW quits.
@@ -3984,6 +4344,7 @@ function onKeyProjects(key) {
     const it = pItems[pSel] || pItems.find(x => x.project);
     if (it?.project) return finish(`tabfor${US}${it.project.name}${US}${key === '\x14' ? 'term' : 'edit'}`);
   }
+  else if (key === '/') { pSrchQ = ''; pSrchTyping = true; }
   else if (key === ',') { pSettings = true; pSetSel = 0; pSetMsg = ''; }   // open the settings page
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
@@ -4311,7 +4672,46 @@ let sItems = [], sSel = 0, sMembers = new Set(), sMsg = '';
 // low. This screen cannot drift that way, because the only thing that fills this map is
 // the loop that draws the lines. A row nobody drew is a row nobody can click.
 let sHitRow = new Map();
+// `/` FINDS, as it does on the grid (see srchQ there for why it takes two steps): every
+// printable key types into the query and the cursor follows the first match; ⏎ locks it,
+// and only then do n / N step. Matching is lib/grid-search.mjs, so `bil` means here what
+// it means on the desk. Two things differ, and both are this screen's job:
+//   - it NARROWS rather than dims. The grid is a few cards you can see at once; this list
+//     is every session in every project and is longer than the window, so a dimmed miss
+//     still costs the row a match needed.
+//   - SPACE IS NEVER TYPED. It toggles the session under the cursor in both steps, because
+//     picking what you just found is the reason to search here, and no session or project
+//     name has a space in it to lose.
+let sQ = null;               // null = no search; otherwise the query ('' just after `/`)
+let sTyping = false;         // true = keys type into the query; false = locked, n/N act
+// A session row answers to its own name AND its project's, so `bil` finds every session
+// of billing-svc as well as any session named like it. Headers are never matches: there
+// is nothing to stack on a header.
+function sMatches() {
+  return sQ ? matchIndices(sItems, sQ, it => it.header ? null : { label: it.proj, name: it.name }) : [];
+}
+function sFirst() { const m = sMatches(); if (m.length) sSel = m[0]; }
+// The rows the list is made of, as indices into sItems: everything, or — while a search
+// matches something — the matches and the headers they sit under. A query that matches
+// NOTHING leaves the whole list up, with the cursor where it was: an empty list would hide
+// the cursor, and the prompt already says nothing matched.
+function sView() {
+  const m = sMatches();
+  if (!m.length) return sItems.map((_, i) => i);
+  const keep = new Set(m), view = [];
+  let hdr = -1;
+  sItems.forEach((it, i) => {
+    if (it.header) { hdr = i; return; }
+    if (keep.has(i)) { if (hdr >= 0) view.push(hdr); hdr = -1; view.push(i); }
+  });
+  return view;
+}
+const sKey = it => it && !it.header ? `${it.sock}\t${it.name}` : '';
 function sBuild() {
+  // The cursor is a SESSION, not a position: a session that starts or stops above it
+  // shifts every index by one, and a 2.5s poll would walk the cursor off what you were
+  // about to press space on.
+  const was = sKey(sItems[sSel]);
   sMembers = stackMembers();
   sItems = [];
   for (const p of visibleProjects()) {
@@ -4336,16 +4736,48 @@ function sBuild() {
     });
     for (const r of rows) sItems.push(r);
   }
+  if (was) { const i = sItems.findIndex(it => sKey(it) === was); if (i >= 0) sSel = i; }
   // Land on a session, never on a project header — space/⏎ would have nothing to act on.
   if (sSel >= sItems.length) sSel = sItems.length - 1;
   if (sSel < 0) sSel = 0;
-  if (sItems[sSel]?.header) sMoveStack(1) || sMoveStack(-1);
+  // ...and on one the list is showing: the session under the cursor can stop matching (or
+  // stop) while a search is up.
+  if (sItems[sSel]?.header || !sView().includes(sSel)) {
+    if (sMatches().length) sFirst(); else sMoveStack(1) || sMoveStack(-1);
+  }
 }
 function sMoveStack(d) {               // step to the next selectable row; false if none
+  const view = new Set(sView());
   for (let i = sSel + d; i >= 0 && i < sItems.length; i += d) {
-    if (!sItems[i].header) { sSel = i; return true; }
+    if (!sItems[i].header && view.has(i)) { sSel = i; return true; }
   }
   return false;
+}
+function sToggle() {
+  const it = sItems[sSel];
+  if (it && !it.header) { stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers(); }
+}
+// Reverse the letters of `plain` that the search matched. Offsets are taken on the plain
+// text before any colour goes in, so the padding around it is untouched.
+function sMark(plain, base) {
+  const sp = sQ ? matchSpan(plain, sQ) : null;
+  if (!sp) return base + plain;
+  return base + plain.slice(0, sp[0]) + C.rev + plain.slice(sp[0], sp[1]) + C.unrev + plain.slice(sp[1]);
+}
+// The search prompt, in the message slot under the count — one row, styled like the
+// grid's: a yellow lead, dim prose, the keys themselves bright.
+function sSearchLine() {
+  const k = t => `${C.reset}${C.bold}${t}${C.dim}`;
+  const m = sMatches();
+  const q = clip(sQ, Math.max(8, W() - 56));
+  const lead = ` ${C.yellow}${C.bold}/${C.reset}${C.bold}${q}${C.reset}${sTyping ? `${C.rev} ${C.unrev}` : ' '} `;
+  if (!sQ) return lead + `${C.dim}type part of a session or project name · ${k('esc')} cancel${C.reset}`;
+  if (!m.length) return lead + `${C.yellow}nothing matches '${q}'${C.reset}`;
+  const n = `${m.length} match${m.length === 1 ? '' : 'es'}`;
+  if (sTyping) return lead + `${C.dim}${n} · ${k('space')} add · ${k('⏎')} keep · ${k('esc')} clear${C.reset}`;
+  const at = m.indexOf(sSel);
+  return lead + `${C.dim}${at >= 0 ? `${at + 1} of ${m.length}` : n} · ${k('n')}/${k('N')} next/prev · ` +
+    `${k('space')} add · ${k('⏎')} open the stack · ${k('/')} edit · ${k('esc')} clear${C.reset}`;
 }
 function sRender() {
   const memberRows = sItems.filter(it => !it.header && sMembers.has(`${it.sock}\t${it.name}`));
@@ -4353,18 +4785,50 @@ function sRender() {
   // The same arithmetic bin/fleet-stack applies before it builds anything, shown here
   // so the limit is visible BEFORE you press ⏎ rather than as a message after.
   const fits = Math.max(1, Math.floor((W() + 1) / (STACK_MIN_COLS + 1)));
-  let buf = '\x1b[H';
+  // AUTOWRAP OFF for the frame: a line wider than the window would otherwise take two rows
+  // and push the footer off the bottom — the same overflow as the list's, from the side.
+  // The terminal clips it at the margin instead; cleanup() turns wrapping back on.
+  let buf = '\x1b[?7l\x1b[H';
   buf += ` ${C.bold}stack${C.reset} ${C.dim}— several sessions on screen at once, across projects${C.reset}\x1b[K\n`;
   buf += n === 0
     ? ` ${C.dim}nothing stacked yet — ${C.reset}space${C.dim} adds the selected session${C.reset}\x1b[K\n`
     : ` ${C.green}${n} stacked${C.reset}${C.dim} · ~${Math.floor((W() - n + 1) / n)} columns each${C.reset}` +
       (n > fits ? `  ${C.red}${C.bold}this window fits ${fits} — the rest will be left out${C.reset}` : '') + '\x1b[K\n';
-  buf += sMsg ? ` ${C.yellow}${sMsg}${C.reset}\x1b[K\n` : '\x1b[K\n';
+  buf += sMsg ? ` ${C.yellow}${sMsg}${C.reset}\x1b[K\n` : sQ != null ? sSearchLine() + '\x1b[K\n' : '\x1b[K\n';
   const STC = { working: C.cyan, 'need-you': C.red, parked: C.grey, ready: C.green, idle: C.grey, unknown: C.grey };
-  const maxShow = Math.max(6, H() - 7);
-  let start = Math.max(0, sSel - Math.floor(maxShow / 2));
-  const end = Math.min(sItems.length, start + maxShow);
-  start = Math.max(0, end - maxShow);
+  // ── the window, IN LINES ──
+  // Three rows above the list (title, count, message slot) and two below (a blank, the
+  // footer) are always drawn, and the list gets exactly what is left. It was windowed in
+  // ITEMS, and a header draws TWO lines (a blank, then its name) to a session's one, so a
+  // fleet with many projects drew a frame taller than the terminal: it scrolled, and the
+  // title, the count and the message slot went off the top. Measured at 58 rows with 11
+  // projects and ~40 sessions, the frame started mid-list with no title at all.
+  //   The window grows from the cursor outward, a row below then a row above, until the
+  // next one would not fit — counting a `↑ N more` / `↓ N more` line for whichever side
+  // still has rows past the edge, since that line costs a row too. The cursor is in it by
+  // construction, and it sits mid-window wherever there is list on both sides of it.
+  const view = sView();
+  const budget = Math.max(1, H() - 5);
+  const cost = i => sItems[i].header ? 2 : 1;
+  const span = (a, b) => {
+    let l = (a > 0 ? 1 : 0) + (b < view.length ? 1 : 0);
+    for (let p = a; p < b; p++) l += cost(view[p]);
+    return l;
+  };
+  const c = Math.max(0, view.indexOf(sSel));
+  let a = c, b = Math.min(view.length, c + 1);
+  // Downward, a header comes in only WITH its first session: a project name on the last
+  // row with nothing under it is a heading for a list that is not there.
+  for (let grew = true; grew;) {
+    grew = false;
+    const step = b + 1 < view.length && sItems[view[b]].header ? 2 : 1;
+    if (b < view.length && span(a, b + step) <= budget) { b += step; grew = true; }
+    if (a > 0 && span(a - 1, b) <= budget) { a--; grew = true; }
+  }
+  // A window too short for even the cursor and its markers drops the markers, never the
+  // cursor: the row you are acting on is the one thing that has to be on screen.
+  const marks = span(a, b) <= budget;
+  const hidden = (from, to) => view.slice(from, to).filter(i => !sItems[i].header).length;
   // Three lines are always emitted above the list: the title, the count, and the message
   // slot. `row` walks with the buffer from there so a session's row is whatever line it
   // actually landed on — a header costs TWO (a blank, then its name) and a session one,
@@ -4372,10 +4836,17 @@ function sRender() {
   let row = 3;
   sHitRow = new Map();
   if (!sItems.length) { buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`; row++; }
-  for (let i = start; i < end; i++) {
-    const it = sItems[i];
+  if (marks && a > 0) {
+    // ...and the project the top rows belong to, when its own header is above the window:
+    // every project has a `master`, so a list that opens on one does not say whose it is.
+    const top = sItems[view[a]];
+    const owner = top && !top.header ? ` · ${C.reset}${C.bold}${top.proj}${C.reset}` : C.reset;
+    buf += `   ${C.dim}↑ ${hidden(0, a)} more${owner}\x1b[K\n`; row++;
+  }
+  for (let p = a; p < b; p++) {
+    const i = view[p], it = sItems[i];
     if (it.header) {
-      buf += `\x1b[K\n ${C.bold}${C.white}${it.header}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
+      buf += `\x1b[K\n ${sMark(it.header, C.bold + C.white)}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
       row += 2;
       continue;
     }
@@ -4398,11 +4869,63 @@ function sRender() {
     // repeated itself. `↳` says this row HANGS OFF the one named beside it, so the origin
     // stays readable and the kind column is the difference rather than the only clue.
     const label = it.tab ? `↳ ${it.name.replace(/^_(?:term|edit)-/, '')}` : it.name;
-    const nm = (sel ? C.bold + C.white : C.reset) + padEndV(label, 24) + C.reset;
+    const nm = sMark(padEndV(label, 24), sel ? C.bold + C.white : C.reset) + C.reset;
     buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(kind, 10)}${C.reset}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓/jk/wheel move · space or click add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
+  if (marks && b < view.length) { buf += `   ${C.dim}↓ ${hidden(b, view.length)} more${C.reset}\x1b[K\n`; row++; }
+  // The footer is PLACED on the last row rather than written after the list, so nothing
+  // the list does can move it — and it is the one line that ends without a newline, since
+  // a newline on the bottom row scrolls the whole frame up by one. Shortest form that fits.
+  const foot = [
+    '↑↓/jk/wheel move · / find · space or click add/remove · ⏎ open the stack · c clear · esc/q/` back',
+    '↑↓ move · / find · space add/remove · ⏎ open · c clear · esc back',
+    '/ find · space add · ⏎ open · esc back',
+  ].find(f => vis(f) + 1 <= W()) || 'esc back';
+  buf += `\x1b[J\x1b[${H()};1H${C.dim} ${foot}${C.reset}\x1b[K`;
   out(buf);
+}
+// One key while a search is up. Returns a choice to finish with, or null.
+function sSearchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const enter = key === '\r' || key === '\n';
+  const shorter = () => [...sQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { sQ = null; return null; }
+  if (key === '\x1b[A') { sMoveStack(-1); return null; }
+  if (key === '\x1b[B') { sMoveStack(1); return null; }
+  if (key === ' ') { sToggle(); return null; }
+  if (sTyping) {
+    // Locks only onto something, as on the grid: with nothing matching there is nothing
+    // for n to step through.
+    if (enter) { if (sMatches().length) sTyping = false; return null; }
+    if (bs) { if (!sQ) sQ = null; else { sQ = shorter(); sFirst(); } return null; }
+    if (key.startsWith('\x1b')) return null;
+    // Every printable key but space, in order. A space that arrives in the same read as
+    // the letters before it (`bill ` while the poll held the loop) is still the toggle it
+    // was typed as, on whatever those letters found.
+    for (const ch of key) {
+      if (ch === ' ') sToggle();
+      else if (ch > ' ' && ch !== '\x7f') { sQ += ch; sFirst(); }
+    }
+    return null;
+  }
+  // LOCKED. n / N step, j / k move, ⏎ opens the stack as it does without a search, / or ⌫
+  // go back to editing; q and ` clear the search before they would leave the screen.
+  // Everything else is inert — `c` clearing the whole stack is not what a stray letter
+  // typed into the wrong step should do.
+  if (key === 'q' || key === '\x60') { sQ = null; return null; }
+  if (key === '/') { sTyping = true; return null; }
+  if (bs) { sTyping = true; sQ = shorter(); sFirst(); return null; }
+  if (enter) {
+    if (sMembers.size === 0) { sMsg = 'the stack is empty — press space on a session first'; return null; }
+    return 'stackopen';
+  }
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(sMatches(), sSel, ch === 'n' ? 1 : -1); if (i >= 0) sSel = i; }
+    else if (ch === 'k') sMoveStack(-1);
+    else if (ch === 'j') sMoveStack(1);
+    else if (ch === ' ') sToggle();
+  }
+  return null;
 }
 function onKeyStack(key) {
   // THE MOUSE, and it has to come first: an SGR event arrives as one multi-character
@@ -4423,21 +4946,39 @@ function onKeyStack(key) {
       const i = sHitRow.get(mev.y), it = sItems[i];
       if (it && !it.header) {
         sSel = i; sMsg = '';
-        stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers();
+        sToggle();
         sRender();
       }
       return;
     }
     return;   // releases, drags, right-clicks, and clicks on chrome
   }
-  if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
   sMsg = '';
-  if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
+  if (sQ != null) { const c = sSearchKey(key); if (c) return finish(c); sRender(); return; }
+  if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
+  // A RUN OF KEYS IN ONE READ is each of them. The poll walks every project's sessions
+  // synchronously, and with forty of them that blocks the loop long enough that a held j,
+  // or `/` and the first letters after it, arrive as one chunk — which lib/keys.mjs keeps
+  // as one text event and the comparisons below never match, so a held j dropped moves.
+  // Only the keys that are safe to replay: j, k and space step and toggle, and `/` hands
+  // the rest of the run to the query it opens. Anything else ends the run unread, so a
+  // stray paste cannot reach `c` (clear the stack) or `q`.
+  if (key.length > 1 && /^[jk /]/.test(key)) {
+    const run = [...key];
+    for (let x = 0; x < run.length; x++) {
+      const ch = run[x];
+      if (ch === 'j') sMoveStack(1);
+      else if (ch === 'k') sMoveStack(-1);
+      else if (ch === ' ') sToggle();
+      else if (ch === '/') { sQ = ''; sTyping = true; const rest = run.slice(x + 1).join(''); if (rest) sSearchKey(rest); break; }
+      else break;
+    }
+  }
+  else if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
   else if (key === '\x1b[B' || key === 'j') sMoveStack(1);
-  else if (key === ' ') {
-    const it = sItems[sSel];
-    if (it && !it.header) { stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers(); }
-  } else if (key === 'c' || key === 'C') { stackRun(['clear']); sMembers = stackMembers(); }
+  else if (key === '/') { sQ = ''; sTyping = true; }
+  else if (key === ' ') sToggle();
+  else if (key === 'c' || key === 'C') { stackRun(['clear']); sMembers = stackMembers(); }
   else if (key === '\r' || key === '\n') {
     if (sMembers.size === 0) sMsg = 'the stack is empty — press space on a session first';
     else return finish('stackopen');
@@ -4458,6 +4999,9 @@ watchLauncher();
 if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', keyReader(onKeyProjects));
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
+  // At once, not at the next tick: the page lays itself out from the size, and until it is redrawn
+  // a shrink leaves the old frame with its top cut off.
+  process.stderr.on('resize', () => pRender());
 } else if (SCREEN === 'addproject') {
   // --clone opens straight on the clone box (the `c` key on the add card). It starts in
   // ~/projects when there is one, since that is where a clone usually goes and HOME
@@ -4476,6 +5020,9 @@ if (SCREEN === 'projects') {
 } else if (SCREEN === 'stack') {
   sBuild(); sRender(); process.stdin.on('data', keyReader(onKeyStack));
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);
+  // A RESIZE REDRAWS NOW, not at the next poll: the window is cut to the terminal's height,
+  // and for up to 2.5s after a shrink the frame drawn for the old one scrolls the title off.
+  process.stderr.on('resize', () => sRender());
 } else {
   process.stdin.on('data', keyReader(onKey));
   sweepRemovingMarkers();          // a previous grid may have left one behind (see above)

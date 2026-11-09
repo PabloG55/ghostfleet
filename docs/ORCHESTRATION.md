@@ -31,8 +31,12 @@ which is what keeps a long-running or restarted lead from getting lost:
 |------|---------|
 | every worktree + which are **FREE** | `fleet-worktrees` — ASKED beside UNDERSTOOD |
 | record what you heard (as a worker) | `fleet-ack "<one line>" --from "<decisions>"` |
+| **where a project stands**, what it is, what was decided — any profile, any paired machine | `fleet-know <project>` (MCP `fleet_know`) — read it before reading files; `fleet-know waiting` for everything on the owner |
+| **standing rules**, and closing what stopped being true | `fleet-know rule add\|list\|close\|accept`, `fleet-know decide … --supersedes <id>`, `fleet-know fact <project> <key> <value>` (MCP `fleet_know`: `rules`, `fact`) — a worker's rule is a proposal until a lead accepts it |
+| **what happened to a project**, in order, with who said what | `fleet-know history <project> [--since <date>] [--until <date>]` (MCP `fleet_know`: `history`, `since`, `until`) |
 | live sessions + status | `fleet-list` |
 | who needs you / what **finished** (drains since last look) | `fleet-inbox` — also names finished workers to `fleet-stop --reclaim` |
+| a queued prompt a dead drain left **stranded** (listed by `fleet-inbox`) | `fleet-send --requeue <session> <id>` or `--discard <session> <id>` — the owner's call |
 | a **new task** — always a new session | `fleet-spawn <name> [--reuse <wt>] --prompt "…"` |
 | a follow-up on the **same PR** (red CI, a review note) | `fleet-send <session> "…"` — refused for a worker whose task shipped; `--anyway` for same-work follow-ups only |
 | **ask** one and get the answer back | `fleet-send --reply-to me <session> "…"` |
@@ -42,9 +46,12 @@ which is what keeps a long-running or restarted lead from getting lost:
 | new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
 | unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
+| what a session **runs on**, and where that came from | `fleet-model <session>` |
+| move a **running** session to another model, keeping its conversation | `fleet-model <session> sonnet` (MCP `fleet_model`) — say which model and why; [details](#moving-a-running-session-to-another-model) |
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
 | **retire** a finished worker and its worktree | `fleet-stop --reclaim <session>` — removes the tree when safe (a squash-merged PR on a clean tree is), else keeps it and says why |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
+| what a stopped worker still **owed** | `fleet-ledger` — both stops hand its open, waiting and not-done ledger items to you, labelled `[<worker>]`; finish, re-dispatch or drop each |
 | the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
 
 ### Nested leads — a worker can run its own workers
@@ -98,6 +105,137 @@ master (main checkout)
   `fleet-stop --children [--reclaim] <sub-lead>` stops and reclaims each child through
   fleet-clean's squash-aware gates, then the sub-lead. The grid's `x` and the phone's
   long-press ask the same question with the worker count in it.
+
+### Moving a running session to another model
+
+Every session starts on the profile default, and that is the most expensive model. A new worker
+can be started on another one (`fleet-spawn --model`, or `--kind` with the project's map), but a
+session that is already running could only be moved by hand, with `fleet-send <s> "/model
+sonnet"`. That keeps the conversation. It also does two things nobody asked for: Claude Code saves
+the model as the **profile's** default, so every later session of that profile starts on it, and
+the choice is lost the next time the session sleeps or restarts.
+
+`fleet-model` does the same switch and undoes both side effects:
+
+```bash
+fleet-model docs-pass                # what it runs on now, and what it starts on next
+fleet-model docs-pass haiku          # move it, keep the conversation, pin it there
+fleet-model docs-pass --unpin        # the next start goes back to the project / profile default
+fleet-project set acme-api model sonnet   # the project's default (never master's)
+fleet-project set acme-api model default  # drop it
+```
+
+What a switch does, in order:
+
+1. **Claude sessions only.** A model name means nothing to another CLI, so any other agent is
+   refused. Moving a session to another agent is `lib/agent-switch.sh`, which keeps a model per
+   agent.
+2. **It waits until the session is free.** That means not busy, not on a dialog, idle three
+   samples in a row (the same check `lib/agent-switch.sh` uses), *and* nothing in its
+   `fleet-send` queue. An idle session with a backlog takes the backlog first, so a `/model`
+   sent then would land behind work nobody connected it to. An idle session is moved while you
+   wait, for up to a minute. A busy one is moved when its turn ends: `fleet-model` returns at
+   once and `fleet-model <session>` shows the result later. `--wait` blocks until it is done.
+3. **It sends `/model <m>` through `fleet-send`.** That is the mod's command channel when the mod
+   is current, and a pane paste when it is not. With a warm prompt cache, Claude Code asks
+   *"Switch model? … 1. Yes, switch to …"*. The request was the answer, so `fleet-model` presses
+   `1` on that exact dialog and nothing else.
+4. **It reads the result back from the transcript.** Success is `Set model to …`. A decline
+   (`Kept model as …`) or a bad name (`Unable to validate model …`) is a failure, and nothing is
+   pinned.
+5. **It puts the profile's `settings.json` back, but only when its own switch is the whole
+   change.** It takes a snapshot before the switch. If only the `model` key moved, and it moved to
+   the model this switch asked for, the snapshot's exact bytes are written back in place, so a
+   symlink stays a symlink. Anything else is left as it is, with a warning that names what
+   changed: another key edited in the same window, or the key now holding a model this switch did
+   not set. The version it replaced is kept as `<fleet dir>/<sock>.<session>.settings-backup.json`.
+   A running session does not follow that key, so the restore never moves the session back.
+6. **It pins the session** at `<fleet dir>/<sock>.<session>.model`. `agent-here` reads the pin at
+   every start: a new session, `fleet-restart`, a hibernate wake and a reopen. A session that is
+   not running (asleep, or exited) is only pinned, and wakes on that model.
+
+**What a session starts on**, highest first:
+
+| source | set by |
+|--------|--------|
+| the session's pin | `fleet-model <session> <m>` — the only way master moves — and `fleet-spawn --model` / `--kind`, which writes one so a worker wakes on the model it was given |
+| `CLAUDE_FLEET_MODEL` in its environment | a session started before pins existed |
+| the project's default — **never master's** | `fleet-project set <project> model <m>`, or the MODEL column on the grid's `,` page and the phone's project settings |
+| the profile default | Claude Code's own `settings.json` |
+
+There is no all-projects default, for the same reason the kind map has none. `fleet-list`
+shows a MODEL column: what the session's last reply came from, or what it was started on when it
+has not replied since, or what an asleep session will start on. It shows `?` when the two
+sources disagree or neither is there.
+
+**When to move one.** Move a session **down** when what is left is lists, lookups and
+formatting: a summary, a table, a changelog, a status read-out. Move it **up** for anything
+graded, sworn or high-stakes: an exam answer, a legal form, an irreversible migration, a review
+whose verdict others will act on. A switch re-reads the whole conversation on the new model, so
+it is worth doing at a change of phase, not every turn. A lead says which model and why, in the
+same message that moves it.
+
+### The review gate — no merge without an independent review
+
+`fleet-project set <project> review-gate on` (or the grid's `,` page) makes every PR in that
+project pass a code review by another model before **anyone** may merge it, the lead
+included. OFF by default, and off means nothing changes: no clause, no `gh` call from the
+guard, no new wording anywhere. It is the third boundary of the `workers-merge` /
+`agents-approve` family — the same markers, the same `--session` override, most specific
+wins — with the polarity reversed: it draws a line rather than lifting one, so a lead may
+switch it **on**, and no session may switch it off or to `inherit`. Only a human does that,
+at the terminal or on the grid.
+
+```
+worker                                   lead
+──────                                   ────
+push; open the PR
+Agent(Explore, model sonnet):
+  Skill code-review "medium <PR>"
+  → FINDING <file>:<line> <summary>
+    or NO FINDINGS
+Write the answer to a file
+fleet-review round <PR> --findings <f>
+  CONTINUE → fix, push, review again
+  PASS     → report READY ──────────────▶ inbox: "READY to merge — review passed at <sha>"
+  STUCK    → stop; a need-you is filed ─▶ inbox: "review gate STUCK on PR #N …"
+                                         fleet-review status <PR>    (exit 0 = passed at head)
+                                         gh pr merge <PR> --match-head-commit <sha>
+```
+
+- **The reviewer** is an Explore subagent — read-only, and already allowed past the
+  subagent guard — on the project's `review-model` (default `sonnet`), running the
+  `code-review` skill at `review-level` (default `medium`; `ultra` is a billed cloud review
+  and is refused as a value). It is given the PR number and nothing else: no summary of the
+  change, no hint of what to look for, so its read is not anchored on the author's.
+- **The record** is `<fleet dir>/<sock>.reviews/<owner>~<repo>~<n>.tsv`, one row per round:
+  head sha, findings count and fingerprints, whether the round stalled, the verdict, the
+  reviewer model and level. Only `fleet-review` writes it; a hand-written row is refused by
+  the guard like any marker. An answer with neither a `FINDING` nor a `NO FINDINGS` line is
+  refused rather than read as clean — a reviewer that could not run is no review.
+- **The caps.** A round is **stalled** when the head did not move since the last round, or
+  when every finding repeats the last round's (compared without line numbers, case,
+  digits or punctuation, so a reworded repeat at a moved line still counts). After
+  `review-stalled` stalled rounds (default 3) or `review-rounds` rounds in all (default 8)
+  the series is **STUCK**: the worker stops and a `need-you` naming the open findings goes
+  to its lead. A pass or a STUCK ends a series; the next round starts at 1.
+- **The guard** (`hooks/fleet-guard.sh`) refuses a merge unless the LAST verdict recorded
+  at the PR's **current** head is a pass — so a push after the review voids it. It catches
+  `gh pr merge` in every spelling (`-R`, a quoted `--subject`, `--match-head-commit`, which
+  must name that same head), the REST `pulls/N/merge`, and the GitHub MCP merge tool; it
+  refuses `--auto` (it would land whatever head is there later) and a GraphQL merge (it
+  cannot tell which PR). If GitHub cannot be asked for the head, it refuses rather than
+  guess. **Whose setting:** the PR author's — the session whose branch is the PR's head in
+  the manifest — so `--session docs-pass review-gate off` exempts that worker's PRs whoever
+  merges them; a PR no session owns falls back to the merging session.
+- **READY is not DONE.** With the gate on, a worker's `done` row in the inbox says which it
+  is: `READY to merge — review passed at <sha7> (PR #N)` when this session's newest record
+  passed at its local head, `review STUCK on PR #N — needs you`, or `unreviewed — not ready
+  to merge`. The gathered wake lists them the same way. The Stop hook reads only the local
+  record — it never goes to the network — so the lead's `fleet-review status` is the check
+  before a merge, and the guard is what holds it.
+- **What it is not:** a sandbox. A merge from the GitHub web UI, a script outside a fleet
+  session, or a token used by hand is not seen. Branch protection is the server's half.
 
 ### Dev-stack slots — one integer per checkout
 
@@ -182,8 +320,34 @@ fleet-read fix-auth 3           # check progress
 
 The **inbox carries completion too**: a worker's turn ending shows as `DONE`, so
 you learn when a brief is ready to review/merge without polling — and with
-`CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken** on `done`/`need-you` (debounced)
-so it acts hands-off instead of polling at all (see [Config](../README.md#config)). A fresh worktree
+`CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken**, so it acts hands-off instead of polling at
+all (see [Config](../README.md#config)): a `need-you` at once, and finished workers in one wake
+once the fleet has been quiet for ten minutes ([When the lead is woken](OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits)).
+
+**`DONE` means nothing of its own is still running.** A worker never holds a turn open, so it
+starts the suite in a background shell and ends its turn, then is re-invoked when the shell
+exits, pushes, and ends a second one. Each turn end used to be a `DONE` and a wake: one worker
+filed four in six minutes, and the lead was woken for each while no PR existed yet. Now a turn
+that ends while a background job the worker started for this task is still running is filed
+**`WAITING`** — `toolbox  WAITING  on its background job (Run the full suite) · …` — and wakes
+nobody. The turn that ends with nothing left running is the `DONE`, and it wakes as before.
+The hook reads it from two places, because neither is enough alone: the transcript says which
+jobs the session started since the last prompt somebody sent it, and has not yet recorded the
+end of, and `lsof` says whether anything still holds a job's output file open for writing
+(a job killed with its session never gets its end written). If either cannot be read, the turn
+is a `DONE`, exactly as before. A job that never exits (a dev server) or dies with its session
+still ends in a `DONE`: a watcher files it after 30 minutes (`CLAUDE_FLEET_WAIT_MAX`), or 90
+seconds after the job is gone with no turn following it (`CLAUDE_FLEET_WAIT_GRACE`), and the
+row says which. `fleet-inbox` hides a `WAITING` once its worker has a later row.
+
+**A repeat `DONE` is not a second one.** A worker can still end two turns in a row with
+nothing between them. A `DONE` is folded into the previous one (no row, no wake) when nobody
+has sent the worker a prompt since, its words are the same, nothing was produced since (no
+commit, no moved pushed branch, no PR command, no ledger item closed), and it falls inside the
+fleet's wake window (`notify-quiet`, or the debounce when that is `0`). A review-gate change,
+`unreviewed` to `READY to merge`, is different words, so it is always a row of its own.
+
+A fresh worktree
 gets the main checkout's `node_modules` symlinked in (workers can run
 lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases a
 branch on your **local** ref — falling back to the remote tip only when local is

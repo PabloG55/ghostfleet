@@ -9,6 +9,10 @@ Everything below is real, but you'll reach for it far less often than what's abo
 setups, migrating an existing scattered workflow, notification tuning, and the mechanics behind a
 couple of conveniences.
 
+Several sections here (the request ledger, the context ceiling, lead wakes and the send
+queue) were changed by the November 2026 flow audit. For what it found, what each PR fixed
+and what is still owed, see [FLOW-AUDIT-2026-11.md](FLOW-AUDIT-2026-11.md).
+
 ## Already running Claude by hand? Adopt it
 
 If you already work the scattered way — a Claude session per terminal tab or zellij
@@ -304,6 +308,117 @@ worked out (an unregistered project, or a position past 9, which the chord can't
 express) it's simply absent — a chord that sends you to the wrong session is worse than
 none.
 
+## When the lead is woken, and when it waits
+
+With the push on (`notify-lead`, see [SHORTCUTS](SHORTCUTS.md)), the lead is woken by a paste
+into its input box. Not every event is worth a turn, so the kinds are not treated alike:
+
+| event | when the lead hears |
+|---|---|
+| a worker **needs you** (permission, question, limit) | at once, mid-turn too, naming the worker and the ask |
+| an answer relayed to an asker, a failed delivery, a held wake (below) | at once, as before |
+| a worker **finished** (`DONE`) | once the fleet has been **quiet for 10 minutes**, in one wake for everything gathered |
+| a worker's turn ended with its own background job running (`WAITING`) | never: its next turn's `DONE` is the news ([ORCHESTRATION](ORCHESTRATION.md)) |
+| the same worker's `DONE` again, with nothing new since | never: it is folded into the first one |
+
+**Why finishes wait.** Measured on one busy fleet's master over 13 days: 64% of its turns were
+started by the "a worker finished" nudge, each re-reading its whole context, and more than half
+of those turns only looked and ended. The nudges came a median 2.7 minutes apart, so the old
+30-second debounce coalesced almost none of them. Now a `DONE` is gathered, and when no new
+one has arrived for the window, ONE nudge goes: *"[fleet] 3 workers finished (acme-api,
+toolbox, scratch) — run fleet-inbox…"*. The window trails, but is capped at three times its
+length from the first `DONE` gathered, so a fleet that never falls quiet still wakes its lead.
+A sub-lead's children are gathered the same way, for the sub-lead.
+
+**Re-checked when the window ends.** A `DONE` is dropped if its worker is busy again by then (a
+background task woke it, or it was given its next prompt; it will `DONE` again), or if the lead
+already read that row with `fleet-inbox`. If nothing is left, nobody is woken. The rows are in
+the inbox either way.
+
+**Setting the window, per fleet.** One number of seconds in `<fleet dir>/<sock>.notify-quiet`
+(read live, no restart), else `CLAUDE_FLEET_NOTIFY_QUIET`, else `600`. `0` restores the old
+behaviour: a finish wakes the lead at once, debounced by `CLAUDE_FLEET_NOTIFY_DEBOUNCE`.
+`CLAUDE_FLEET_NOTIFY_QUIET_MAX` overrides the cap.
+
+```bash
+echo 120 > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: two quiet minutes
+echo 0   > ~/.claude/fleet/cf-acme-api.notify-quiet    # this fleet: every finish at once
+```
+
+### Only the session itself reports
+
+A Claude that a session starts from its own tool shell (a probe, a `claude -p` one-off, an
+agent a script runs) inherits that session's whole environment: its pane, its fleet's server,
+its name. Until now every hook it fired read as the session's, so each probe's Stop filed a
+`DONE` under the worker's name and woke the lead. Measured on one fleet: nine `DONE`s in a few
+minutes from a worker that had finished nothing.
+
+The hook now checks its own process tree. An agent whose parent chain reaches **another agent
+through a shell** is somebody's probe, whatever its environment says, and it gets no fleet
+identity: no inbox row, no wake, no phone push, no popup. Its record is still written, with no
+socket or slot and `nested_under` naming the agent it runs under, and `hook-debug.log` in the
+fleet dir has a line for each event it dropped (`an agent started under <pid>:claude`). An agent
+directly under an agent-named launcher, with no shell between, is still the session.
+
+A probe that **should** report is a session: start it with `fleet-spawn`, which gives it its own
+pane and name.
+
+### A wake the input box keeps out
+
+A wake is pasted only into an **empty** input box. Anything else might be your half-typed
+message, and the fleet never clears it or sends it. So when the box holds text (or no box is on
+screen: a dialog, a scrolled-back pane), the wake waits and retries every 20 s. It used to give
+up after ten minutes and leave only a log line, and one fleet's master went 13 days with a
+stray character in its box and 14 wakes lost behind it. Now, at ten minutes the hold becomes
+visible, and the wake keeps waiting for as long as the lead's session exists:
+
+- **On the lead's band**, above the box that is the cause:
+  `wake held 12m · this input box has unsent text · the fleet will not touch it`.
+- **On the phone's queue** (`fleet-serve`), as a red `▲ wake held` card for that lead. Tapping
+  it opens the lead, so you can see what is typed. It is not a message: a message would queue
+  behind the same box.
+- **In the lead's inbox**, as an `UNDELIVERED` row, and as one push to the phone.
+
+Send or clear the box yourself, and the wake goes in on the next poll (every 30 s once held,
+`CLAUDE_FLEET_NOTIFY_BLOCKED_EVERY`). The hold lives in `<sock>.<kind>.blocked`, rewritten on
+every poll; a file that has not been rewritten for two minutes is read as no hold.
+
+### A wake that does not land
+
+A wake used to count as sent once `fleet-send` had been run. Its exit status was thrown away,
+and the stamp that holds back the next wake was written before the send. So a delivery that
+failed looked exactly like one that worked. Seen on one lead: three wakes logged within an
+hour, none of them reached it, and nothing anywhere said so until someone typed into it eight
+hours later. Every earlier wake that night had landed. The lead had compacted while idle in
+between.
+
+Now every wake (a gathered finish, a need-you, a held wake when it goes, Jarvis's) is sent
+the same way:
+
+- **Counted only when it lands.** The stamp is written after a zero exit, never before.
+- **Retried by paste.** A failed wake is tried again after 60 s, then after 180 s more, with
+  the mod bypassed, since the failures that went unseen were on the mod's path. A retry
+  never pastes over text in the box, and it stops if another wake reached the lead meanwhile.
+  Set the gaps with `CLAUDE_FLEET_WAKE_RETRY` (seconds, space-separated; default `60 180`).
+- **Said when it still fails.** You get a `FAILED` row in the inbox the lead reads (the
+  sub-lead's own, for a sub-lead), with the last error. A line also goes to
+  `<sock>.<kind>.undelivered`, the same file a held wake writes, which is what buzzes the
+  phone.
+- **A queued wake is followed until it lands.** A session that reads as mid-turn gets the
+  wake in its queue, and only a Stop drains a queue. A compaction ends with no Stop. In a
+  scratch fleet, a wake sent by paste during a `/compact` sat in the queue of an idle
+  session until the next send happened to drain it. Now the wake is looked for in the queue
+  on the same gaps as the retries, and while it is still there the queue is drained the way
+  a Stop drains it. A wake behind a turn that is really running is left to that turn's
+  Stop. One still queued at an idle session is filed as `wake queued and never drained`.
+- **A wake the mod claims and never starts is taken back.** `fleet-send --nudge` waits
+  `CLAUDE_FLEET_MOD_START` (20 s) for the turn, then renames the claim away and pastes the
+  wake instead (or queues it, if a turn is running). A second copy of a wake costs a
+  glance; a lost one can leave a lead idle for hours. Any other prompt is still left with
+  the mod, because taking it back could deliver it twice. The mod also writes off a claim
+  whose turn has not started after two minutes, on its own poll, instead of waiting for a
+  turn that an idle session will never start.
+
 ## Profiles (work vs personal accounts)
 
 Claude Code keeps each account in its own config dir (`CLAUDE_CONFIG_DIR`) — that dir holds
@@ -419,6 +534,158 @@ ghostfleet client --new   # writes ~/.config/ghostfleet/projects.client, then op
 
 </details>
 
+## Several Claude accounts on one profile (experimental)
+
+> **Experimental — off by default; enable with `fleet-experimental enable accounts`.** With it
+> off nothing below runs, and nothing it reads or writes exists.
+
+Rotating between Claude accounts to get past usage limits may conflict with Anthropic's terms
+of service; whether to use this, and how, is your responsibility.
+
+A profile keeps **one** config dir — its conversations, settings, plugins, folder trust and
+`fleet/` dir never move. What changes is the **login** that dir holds, which is exactly what
+`/login` to another account does by hand. An *account* here is a saved login for a profile, and
+a profile can have any number of them. The order you add them in only breaks ties.
+
+```bash
+fleet-experimental enable accounts
+# in a session of the profile (or: CLAUDE_CONFIG_DIR=~/.claude claude), /login as the first account, then
+fleet-accounts add work main
+# /login as the next account, then
+fleet-accounts add work backup
+fleet-accounts use work main          # put the first one back; `add` leaves the profile on the login it just saved
+fleet-accounts list
+```
+
+```
+accounts; switch at 97% of the 5h or 7d limit, spending the week that ends first
+
+work  (~/.claude)
+    main    5h  97% (resets 14:00, read 10m ago)         7d  30% (resets Tue 09:00, read 10m ago)     exhausted until 14:00
+  * backup  5h —                                         7d  90% (resets Fri 15:00, read 2d ago)      active
+```
+
+**Which account it runs on: the allowance that expires first.** What is left of a weekly window
+when it resets is lost, so of the accounts under the threshold on **both** the 5-hour and the
+weekly window, the profile runs on the one whose weekly window resets soonest. Two weeks that end
+within 5 hours of each other count as a tie, and the one with more weekly room wins it. An account
+with no weekly reading counts as resetting last. In the listing above, main's week ends three
+days before backup's. So main is used until its 5-hour window runs out, the profile goes to backup,
+and it **comes back to main once main's 5-hour window resets** (14:00). That way main's week is
+spent before it expires, and backup's last 10% is kept for when it is needed.
+
+**Anti-thrash.** A switch away from an account that still has room happens only when the other
+account's week ends **more than 5 hours sooner**. Five hours is one 5-hour window: two weeks that
+end closer than that expire practically together, so switching between them buys nothing. The
+profile is also **held for 15 minutes after any switch**, long enough for the new login to be
+read, so the next choice is made on a real figure. Neither rule applies when the account in use is
+over the threshold or unusable; then it moves at once.
+
+**By hand.** `fleet-accounts use <profile> <name>` switches now and **pins** that account for
+**2 hours**: the planner leaves it there, unless it reaches the threshold or stops working. A
+`/login` by hand to a saved account is adopted and pinned the same way. `fleet-accounts list`
+shows the pin and when it ends.
+
+**Readings are only as fresh as the last turn on that login.** Figures come from the mod's session
+records (`usage.limits.five_hour` / `seven_day`), so only the account in use is ever read. Nothing
+sends a request on an inactive account to refresh its figures, and `list` shows how old each figure
+is (`read 2d ago`). So a **planned** move (`backup's week resets first`) is made only to an account
+whose **7d** figure was read in the **last 6 hours**: the weekly figure is what that move is decided
+on, and a turn can report a 5h figure without a 7d one, so a fresh 5h reading does not count. An
+older one is shown as `ready, stale (no planned move onto it)` and
+is used only as a **failover**, when the account in use cannot run, because a stale account beats
+stopping. The cost of trusting an old figure is not bounded the way it looks: a turn refused at the
+limit carries no usage figures, so it never becomes a reading. An account read three days ago at
+0% can have hit its weekly limit since, and nothing in its figures says so.
+
+**A turn refused at the limit is a reading.** When a turn fails with Claude's own usage-limit
+message, `You've hit your weekly limit · resets Oct 29 at 1am (America/New_York)` (or `session
+limit`, or a per-model limit), the StopFailure hook keeps that sentence beside `rate_limit` in the
+session's record. The account it was on is marked **OUT** until the reset the sentence names, in
+the zone it names. If there is no time it can read, the mark lasts until the stored weekly reset or
+24 hours after the failure, whichever is later. An OUT account is never chosen before then, not even
+as a failover. If it is the account in use, the profile leaves it **at once**, the same way it
+leaves one at the threshold: no 15-minute hold, and a by-hand pin does not keep it there. With
+nowhere to go, the profile is exhausted until the earliest reset. `list` shows `OUT until Thu 01:00
+(hit its weekly limit)`. A `rate_limit` without that sentence is a plain 429 that ran out of retries,
+and marks nothing. The failure that lands in the 90-second grace window right after a switch still
+counts when the account switched away from had room, because a limit there can only be the new
+account's. `fleet-accounts use` on an OUT account switches anyway (you may know the limit was
+lifted) and says so; the next turn refused at the limit marks it again.
+
+**What happens at the limit.** When either figure reaches the threshold (`fleet-accounts
+threshold`, default 97), the profile moves to the best account that still has room, chosen by the
+rule above. The current login is copied back into its slot, the next one is put where Claude Code
+reads its login, and an inbox row plus a phone push say
+`work: switched from main to backup (5h at 97%)`. A planned move back (`switched from backup to main
+(main's week resets first, …)`) gets an inbox row but no push. That is the whole switch, the same thing a
+`/login` by hand does: **no session is restarted**. Each running Claude re-reads its login by
+itself (from the Keychain every 30 seconds on macOS, from `.credentials.json` on Linux), so a
+session mid-turn finishes that turn and its next request goes out on the new account, with its
+screen, its scrollback and anything it has running in the background left as they were. For a
+short grace window after a switch (`CLAUDE_FLEET_ACCOUNTS_GRACE`, default 90 seconds) a session
+may still be on the old login, so usage read in that window is credited to neither account.
+
+**When every account is spent**, every worker in the profile's fleets is parked (the lead is
+not), an inbox row and a push say `all work accounts exhausted until 14:00`, and at the
+earliest reset the profile moves to that account and the parked workers are resumed where they
+are, as `fleet-resume` does it: the park is cleared and a prompt telling them to continue is typed
+into the session that is already running.
+
+**A project whose budget limit is `ignored`** (the grid's settings screen, or the web client's
+project sheet; on disk `<sock>.governor-off` in the fleet dir) is the exception: the accounts
+engine reads the same marker the governor does, and parks nothing there. Its workers keep running
+on what the active account has left until Claude itself refuses a turn — at which point that
+account is marked `OUT` until the reset Claude names, the profile fails over if anything has room,
+and a session left on Claude's limit message shows as at its limit like any other. The notice
+still comes, worded for what is true: that project's inbox row ends `budget ignored here, so
+workers keep running until Claude refuses them`, and the push and `list` say `workers keep
+running (budget ignored)` (or `workers paused, except where the budget is ignored` when the
+profile's fleets differ). The setting is read every tick, so switching a project to `ignored`
+mid-episode resumes the workers the engine parked there on the next one, and switching it back
+parks them again.
+
+**A login that stops working** — expired, revoked, or never refreshed — is seen three ways: Claude
+Code blanking the tokens in the stored login (what it does when a refresh is refused), a turn
+ending in `StopFailure` with `authentication_failed` (`fleet-accounts add` wires that hook into
+the profile's `settings.json`), or a session launched on it showing Claude's own `Please run
+/login` line. The account is marked **NEEDS-LOGIN**, said once (`work/backup needs /login — run:
+…` with the exact command), and skipped until you `/login` to it again and re-run `fleet-accounts
+add work backup`, which clears the mark. It is never retried in a loop, and the profile's own
+first account expiring is the same case.
+
+**An account its organization has turned off** is a different case. A turn fails with
+`oauth_org_not_allowed` ("Your organization has disabled Claude subscription access for Claude
+Code"), and a `/login` gets the same refusal. That account is marked **BLOCKED**, said once with
+a push, and skipped. `list` shows it with the fix: only an admin of that organization can turn
+access back on. `use` refuses it. The mark clears by itself when a later reading on that login
+succeeds (a turn went through), or when you `/login` to it and `fleet-accounts add` it again.
+
+**On the phone and in the web client.** The top of Projects carries one line per profile: its
+active account and that account's 5h and 7d figures with time to reset (`main · 5h 37% (2h10m) ·
+7d 42% (Sat)`), green while the figures are fresh, yellow when they are over 6 hours old (with
+how old) or the login in use is not saved, red when the account cannot run (`OUT until …`,
+`NEEDS-LOGIN`, `BLOCKED`, over the threshold) or every account is out (`all accounts exhausted
+until … — workers paused`, or `workers keep running (budget ignored)`). A tap opens every account of every profile the way `list` prints
+them, with the threshold and any pin. It is `list`'s own data — `fleet-serve` serves
+`lib/accounts.mjs`'s `describe()`, which `list` prints from — for the profiles the daemon lists,
+read every 45 seconds and on reopening the app, and it carries account labels, figures, times and
+states only. With the experiment off the line says so and nothing else. Switching stays at the
+desk.
+
+**Where the logins are.** Claude Code keeps a config dir's login in the macOS Keychain (item
+`Claude Code-credentials-<hash of the config dir>`) or, on Linux, `<config dir>/.credentials.json`,
+and who it belongs to in `.claude.json`'s `oauthAccount`. ghostfleet keeps each *saved* account
+only in the same place: a Keychain item of its own (`ghostfleet-claude-login`, account
+`<profile>.<name>`) or a 0600 file beside `.credentials.json`. `accounts.json` in the profile's
+`fleet/` dir holds the order, the readings and a one-way id per login — never a token — and
+nothing here prints or logs one. Tokens that Claude Code refreshes while an account is in use are
+copied back into its slot on every governor tick and at the moment of switching away, and an
+older saved copy is never written over a newer live one.
+
+`fleet-accounts remove <profile> <name>` forgets one (not the one in use — switch first).
+Codex, opencode, agy and cursor keep their single login and are not touched.
+
 ## Where a worktree goes, and which ones you can reuse
 
 `w` puts a worktree beside the repo — unless the repo says otherwise. A repo that runs
@@ -476,6 +743,131 @@ the session had been: "could not tell which worktree it was in — nothing remov
 worktree still on disk. A kept reclaim now leaves the path in
 `<fleet dir>/<socket>.<session>.reclaim-kept`, and the manifest row is read before it is
 deleted.
+
+## The context ceiling
+
+**Every session ghostfleet starts gets a 300k-token context ceiling.** Masters and workers alike
+get it, through every route: spawn, the grid, wake, resume and restart. All of them start the
+session through `bin/claude-here`, which exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000`. Claude
+Code then compacts the conversation once it nears that size, instead of near the model's 1M window.
+
+**Why.** Each call re-reads the whole context from the prompt cache, so a long session costs more
+on every call it makes. One busy fleet was measured over 13 days (146 sessions, 68k model calls):
+
+- 83% of the token cost was cache reads.
+- The average call carried 420k tokens.
+- 54% of the spend was on calls at 500k+, and 30% on calls at 700k+.
+- Sessions only compacted near 965k.
+
+**How it behaves, measured on scratch sessions:**
+
+- A 300k window is 280k after Claude Code reserves 20k for output.
+- The compaction threshold works out to about 238k. A 172k session did not compact under it.
+- A 334k session compacted before its next call. That compaction cost one summary pass (334k
+  read, under 1k written), and the call after it read 14k tokens instead of 334k.
+
+Two other variables look like they do the same job and don't:
+
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` leaves the window at 1M, so the UI's "% left" stays wrong. It
+  is also a test override that forked agents ignore.
+- `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` is only the size floor for idle compaction, and a
+  server-side flag decides per account whether idle compaction runs at all. In a test on an
+  account with the flag on, two idle 172k sessions were left 58 minutes; neither compacted, even
+  with the floor at 100k. So masters get the same ceiling as workers.
+
+**Changing it.** Set it per project:
+
+```bash
+fleet-project set acme-api context-window 400k     # or 0.5m, 450000
+fleet-project set acme-api context-window off      # no ceiling: the model's whole window, as before
+fleet-project set acme-api context-window default  # drop the override
+fleet-project get acme-api                         # what it resolves to, and from where
+```
+
+That writes `<fleet dir>/<socket>.context-window`. To change the default for every project, put
+one value in `~/.config/ghostfleet/context-window`. A project's own file beats it, and the
+built-in 300k comes last.
+
+A few rules apply to the values:
+
+- Below 200k the value is raised to 200k. Claude Code does not compact ahead of time under that
+  size.
+- Above 1M the value is held at 1M.
+- A bare number under 1000 (`300`) is refused rather than read as 300 tokens.
+- A file that doesn't parse is skipped with a warning, not treated as `off`.
+
+Workers can't change it: the guard that stops a worker from loosening its own limits blocks every
+`fleet-project set`.
+
+**It applies when a session starts.** A running session keeps the window it started with until
+its next start: wake, restart, or the grid's reopen. To move a whole fleet now, restart its
+sessions.
+
+**If you exported `CLAUDE_CODE_AUTO_COMPACT_WINDOW` yourself, your value wins.** ghostfleet marks
+the values it sets itself (`CLAUDE_FLEET_CONTEXT_WINDOW`). An inherited value with that mark is
+recomputed for the project at hand. That matters because a lead that starts another project's
+fleet would otherwise pass its own ceiling to that fleet.
+
+**Did it work?** Ask the meter, over the weeks before and after the change:
+
+```bash
+fleet-meter --context --until 2026-11-02     # before
+fleet-meter --context --since 2026-11-02     # after
+```
+
+It prints:
+
+- the share of spend and calls in each context-size bucket (`<200k`, `200-300k`, `300-500k`,
+  `500-700k`, `>=700k`);
+- the compactions, with the median size each one cut from (about 250k once the ceiling is in
+  force, about 965k before);
+- turns, calls and spend by what started each turn: a person, a `[fleet]` nudge, a task
+  notification, or a ledger gate.
+
+Like the rest of `fleet-meter` it prints counts and digests, never content. Spend is priced at
+list price per model; `--json` also carries the raw token counts per bucket, so you can re-weight
+them with your own prices. It reads the corpus of the profile it runs under
+(`$CLAUDE_CONFIG_DIR/projects`), or `--corpus DIR`.
+
+## A model for each kind of task
+
+A worker spawned without `--model` runs on the account default. In one busy fleet over 13 days
+(146 sessions), that meant every worker ran on the most expensive model. That included workers
+that only read a diff, watched CI, wrote docs or put a video together. One verifier was 4.6% of
+the fleet's spend on its own, and two video workers came to about 5%.
+
+So a lead can say what kind of task a worker has, and the project can map each kind to a model:
+
+```bash
+fleet-project set acme-api model-verify sonnet     # read a PR or a diff and report
+fleet-project set acme-api model-ci haiku          # watch or fix a pipeline
+fleet-project set acme-api model-docs sonnet
+fleet-project set acme-api model-video sonnet
+fleet-project set acme-api model-verify default    # drop the entry: the account default again
+fleet-project get acme-api                         # every kind, and what it maps to
+
+fleet-spawn verify-142 --kind verify --prompt "…"  # starts on sonnet
+fleet-spawn fix-auth --kind build --prompt "…"     # no entry for build: the account default
+```
+
+The kinds are `verify`, `ci`, `docs`, `video` and `build`. A model is an alias (`sonnet`,
+`haiku`) or a full id (`claude-opus-5-5`). Any other kind is refused, and so is a value that
+can't be a model name.
+
+**Nothing changes until you set an entry.** A kind with no entry starts on the account default,
+exactly like a spawn without `--kind`. A spawn without `--kind` never reads the map. Setting
+one kind changes that kind only, in that project only.
+
+**An explicit `--model` always wins** over the map.
+
+**Claude workers only.** Model names are vendor-specific. A worker on another agent
+(`--agent opencode`) keeps its kind in the record and starts on that agent's own default.
+
+**Where it shows.** `fleet-spawn` prints which model the kind got and why. The kind is saved as
+the manifest's seventh column, and `fleet-worktrees` puts it in front of ASKED, as
+`[verify] <the task>`. The map is stored as `<fleet dir>/<socket>.model-<kind>`, one model name
+per file, and a worker reads it when it is spawned. Workers can't change it, because the guard
+blocks every `fleet-project set` from a worker.
 
 ## Two ways to register a project, and what each one costs
 
@@ -557,6 +949,7 @@ every Claude session and reports from there. It does three things:
 | **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
 | **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
 | **ledger** | `prompt.submit` (every message, mid-turn ones too, and the note it carries), `tool.call` (`ledger_close`, `ledger_drop`, `ledger_add`) and `turn.complete` (the turn's text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
+| **peek** *(experimental)* | the prompt box's `[Image #N]` (`prompt.edit`, and a look every 500 ms), the sent prompt's, and the pointer on them | a chip row above the prompt and a preview on hover; a paste the engine kept no copy of is written once into `ghostfleet-peek/` in the session's temp folder. See "Pasted pictures on hover" |
 
 **Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
 take the mod's `state` over the pane while it is still being written: the pid that wrote
@@ -612,7 +1005,8 @@ cf-acme-api/api-fix  ~/.claude       2.1.292  idle     reload
 cf-acme-web/master   ~/.claude-work  2.1.292  working  skip: busy
 cf-acme-web/scratch  ~/.claude-work  ?        -        skip: not claude (codex)
 cf-toolbox/master    ~/.claude       2.1.292  ready    already on mod
-$ fleet-mod reload --apply         # do it, then read every record back: ✓ on mod / ✗ why
+cf-toolbox/docs-pass ~/.claude       2.1.292  ready    reload: stale mod
+$ fleet-mod reload --apply         # one at a time, each read back before the next: ✓ / ✗ why
 ```
 
 - **reload**: `/reload-plugins` typed into the session. No turn starts, and on a new
@@ -628,8 +1022,18 @@ $ fleet-mod reload --apply         # do it, then read every record back: ✓ on 
   background command that will start one), a permission dialog, a question waiting on you,
   something half-typed, a pane with no input box drawn: each is listed with why, and left
   as it was. Neither is the session running the command.
+- **stale mod**: on the mod, but not on the code the runtime holds now. A deploy is a
+  `cf-sync` with no version bump, so every session reports the same `v`; each one's record
+  says instead which code its process loaded (`mod.code`, a digest of the mod's hooks
+  folder taken at its first session start), and `fleet-mod reload` compares that with the
+  runtime's copy. One that names its code is sent `/reload-plugins` through its own
+  delivery (`fleet-send`), which runs it once; one that names none is from before either
+  existed, and has it typed. `fleet-mod status` says how many sessions are behind.
+- **One at a time.** Each session is acted on and read back before the next is touched, so
+  a reload that goes wrong does so once, in front of you.
 - **Done means the record says so.** Each session gets 15 seconds to write `source: "mod"`
-  from a live process after the action; otherwise it is ✗ with what its pane said.
+  from a live process after the action (for a stale one, with the runtime's code); otherwise
+  it is ✗ with what its pane, or fleet-send, said.
 
 `--only <sock>[/<session>]` narrows it to one fleet or one session; `--reload-only` never
 restarts. The running version comes from Claude's own note about the process
@@ -707,6 +1111,9 @@ A master, and a sub-lead (a worker with children), draws its team above the prom
   into its own branch. `PRs ?` means gh did not answer, never zero.
 - **Narrow panes.** Words shorten first, then `need you` moves to the front, then only the
   essentials stay: `1 need · 1 busy · 4w` at 28 columns, `1!` at the very end.
+- **A held wake** is a row of its own above the team's, while the fleet holds a wake for this
+  session because its input box never read empty
+  (see [A wake the input box keeps out](#a-wake-the-input-box-keeps-out)).
 - **Cost.** No turn, no model call. A redraw happens only when what the line says changes.
 
 ### The guards
@@ -720,7 +1127,7 @@ call is **refused**, with the reason:
 | guard | refuses | how it decides |
 |---|---|---|
 | Jarvis's confirm-list | the listed Bash commands and `fleet_*` MCP calls, from Jarvis's master | `lib/mod-gate.mjs` asks the same gate the MCP door and `hooks/jarvis-guard.sh` ask (`lib/jarvis.mjs`), under the same lock |
-| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
+| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree. Judged on what the command runs: the arguments of `fleet-ack`, `fleet-send`, `fleet-ledger` and `git commit` are data, so a message may name a merge; one chained after it, or inside its `$(…)` or backticks, is still refused | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
 | an agent does not approve another agent's tool call | an approving key from `fleet-answer` (Bash) or `fleet_answer` (MCP) into a permission dialog | `fleet-answer --check`: fleet-answer's own decision, sending nothing |
 
 Same switches, same defaults: "workers can merge" and "agents can approve tool calls" (off),
@@ -757,6 +1164,56 @@ guards only refuse, so nothing changes there. An organization that sets
 `allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
 guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
 
+### Pasted pictures on hover (experimental)
+
+*Off by default; `fleet-experimental enable peek` turns it on, `disable` turns it off. A running
+session picks the switch up at its next turn end. Off means nothing: no row, no preview, the
+prompt box is not looked at, and no picture is read.*
+
+A picture pasted into Claude Code becomes `[Image #N]` in the prompt box and in the transcript,
+and nothing there lets you look at it again. With `peek` on:
+
+- **While writing**, a row above the prompt lists the draft's pastes as chips, followed by
+  *hover to preview · click to open*. Pointing at a chip opens the preview; moving off closes it;
+  a click opens the picture in the system's viewer (`open -a Preview` on macOS, `xdg-open`
+  elsewhere). The row follows the box as you type, and a paste, which puts the placeholder in
+  the box without an edit, is picked up within half a second. Typing closes a preview the row
+  opened, and sending takes the row away.
+- **After sending**, the `[Image #N]` on a sent prompt's first line and each `⎿ [Image #N]` row
+  Claude Code lists under it take the pointer too, with the text left exactly as Claude Code drew
+  it. A click on the first line's `[Image #N]` opens the viewer.
+
+Both need the fullscreen layout (`"tui": "fullscreen"` in Claude Code's settings), because only
+there does the terminal report the pointer. On the main screen the mod draws nothing.
+
+**What the preview is**, decided once per session:
+
+| where | preview |
+|---|---|
+| macOS, local (a fleet session in tmux included) | a borderless window by the pointer, with the picture's own pixels at the screen's scale: shrunk to 800 points and 70% of the screen at most, never enlarged. It never takes the focus or the pointer, stands over every window (full-screen spaces too), closes when the pointer leaves, and lives two minutes at most. It is a JavaScript for Automation program run by `osascript`, so nothing needs installing. |
+| Ghostty or kitty, **outside** tmux | the terminal draws the picture itself (the kitty graphics protocol, the engine's `Image`), in a card above the prompt. Inside tmux that would need `allow-passthrough`, so a fleet session gets the window instead. |
+| Linux, WSL, any other terminal, and anything over SSH | a card of half-block cells (`▀`, two pixels to a cell) above the prompt. It works through tmux in any true-colour terminal, and shows a picture's layout rather than text you can read. There is no native window on Linux or WSL. Over SSH a window would open on the other machine, which is why SSH always gets cells. |
+
+A card in the terminal is drawn above the prompt, over the chips, whichever `[Image #N]` opened
+it, and the transcript moves up while it shows: the prompt's slot clips anything drawn outside
+it, and a card floated over the transcript is painted over by the rows after it.
+`CLAUDE_FLEET_PEEK=cells` asks for the cells on a Mac; `=window` and `=kitty` are honoured only
+where that preview can open. If the window program ends without showing a window, the rest of the
+session uses cells.
+
+**What it reads.** Only the session's own pastes. First Claude Code's copy, under
+`$CLAUDE_CODE_TMPDIR` (or `/tmp`)`/claude-<uid>/<project>/<session>/images/<N>.<ext>`, which must
+be a regular file and not a symbolic link. Claude Code does not keep a copy of every paste, so
+for one it did not, the mod writes the bytes once into `ghostfleet-peek/` beside that folder:
+they come from the prompt as it is sent, or else from the transcript. Bytes that do not sniff as
+PNG, JPEG, GIF or WebP are named as such and never shown or converted. Every read, write and
+conversion has a time limit.
+
+**What it needs.** Nothing on macOS: the window reads every format itself, and `sips` shrinks a
+picture for the cells. PNG is decoded in the mod (`hooks/peek-shape.js` has its own inflate). On
+Linux, JPEG, GIF and WebP go through ImageMagick (`magick` or `convert`), else `ffmpeg`. With
+neither, the preview names the paste and says nothing here can shrink it.
+
 ### Delivering prompts through the mod
 
 `fleet-send` used to deliver every prompt the way a person would: paste it into the pane's
@@ -791,7 +1248,9 @@ problems.
 ```
 <id>.json      fleet-send left it: { id, text, reply? }
 <id>.taken     the mod claimed it (a rename) while no turn was running
-<id>.done      the receipt: { turnId } once its turn started, or { dropped | error }
+<id>.done      the receipt: { turnId } once its turn started, { ran } for a slash command
+               that ran without starting one, or { dropped | error }
+<id>.failed    a failed receipt nobody read within the hour, kept for fleet-inbox
 <id>.revoked   fleet-send took it back unclaimed and pasted it instead
 .ready         the pid of the mod process that delivers from here
 ```
@@ -802,6 +1261,27 @@ renames it to `.revoked`. If the session went busy in that gap, the prompt is qu
 Otherwise it is pasted, with a note on stderr. If the mod claimed it first, the revoke's
 rename fails, so a prompt is never both submitted and pasted. Receipts are kept for an
 hour.
+
+**A prompt may start with a slash command.** `fleet-spawn w1 --prompt "/some-skill redo the
+settings page …"` runs `/some-skill` with everything after it as its arguments, exactly as if
+it had been typed, and its turn is the one the receipt names. The host refuses a text
+beginning with `/` as a plain prompt, so the mod runs it through `$.command.run` instead.
+There is no escape for a literal leading slash. The host refuses `//x`, ` /x` and `/x` alike
+as prompt text, so a `//` brief, a bare `/` or a path (`/tmp/log …`) is refused with a
+message that says to reword it. A command that answers without a turn (a panel, a local
+command) is receipted `ran`, and `fleet-send` prints `→ w1 (ran /cost; it started no turn)`.
+The mod's own `/fleet`, `/inbox` and `/ledger` cannot be run this way: the host skips a
+plugin's own hooks when it runs a command itself. Use `fleet-list`, `fleet-inbox` and
+`fleet-ledger` instead.
+
+**A delivery that fails is never silent.** `fleet-send` waits for the receipt, prints the
+mod's error and exits 1, and removes a failed receipt once it has reported it. Two senders
+have no reader for that output, so they file the failure as a `failed` row in the inbox of
+the worker's lead: `fleet-spawn`'s deferred brief (also printed on the terminal
+`fleet-spawn` ran in, when there is one) and the queue's drain. Any failed receipt still on
+disk 30 seconds after it was written was read by nobody. `fleet-inbox` files it as a
+`failed` row naming the worker, the opening words of the prompt and the error, then clears
+it (`lib/handoff-sweep.mjs`).
 
 **What stays the same.** Outputs and exit codes, the queue and its card count, the
 `[fleet]` preambles, the nudges and their deferral (they still wait for an empty box,
@@ -820,11 +1300,65 @@ session of that name.
 
 **Who sent it.** Each `.sent` row carries a fifth field:
 `from=<sock>/<session> cwd=<dir> by=<parent command>`. The session comes from `$TMUX`, and
-is marked `env:` when it was only read from the environment. `-` means no fleet session. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
-exits 1 with `not delivered`.
+is marked `env:` when it was only read from the environment. `-` means no fleet session.
+
+**What became of it.** A sixth field gives the outcome. The row is written when `fleet-send`
+exits, stamped with the time of the attempt, and the first five fields are where they were.
+The values: `delivered` (a turn started, or the paste was seen to submit), `ran` (a slash
+command that started no turn), `queued` (handed back to the queue, to run after the turn in
+progress), `claimed` (the mod holds it and had not started it when `fleet-send` stopped
+waiting), `unconfirmed` (pasted, and no turn was seen to start), `failed`. `attempted` means
+the process exited 0 somewhere no outcome was named. A HUP, INT or TERM still writes the row;
+only a SIGKILL loses it. Rows written before this change have five fields and mean
+"attempted". One new failure gets a code: a prompt the mod could not submit (a hook dropped it, the
+host refused it, a command that does not exist) exits 1 with `not delivered` and the
+mod's own words.
 
 **Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet
 plugin`. The record's `turnId` and the handoff's `<id>.done` name the same turn.
+
+### A queued prompt the drain could not finish
+
+A prompt sent to a busy session waits in `<sock>.<session>.queue` until that session's Stop,
+and the drain (`fleet-send --dequeue`) delivers it. The drain used to cut the prompt off the
+queue *before* delivering it, and write it back through a `<queue>.<pid>.tmp` file when the
+session answered busy. A drain killed anywhere in between dropped the prompt. One fleet's
+directory held three such tmps, each one complete prompt, and nothing anywhere said so.
+
+Now the prompt stays at the head of the queue until its delivery is confirmed, and only
+then leaves. While it is out for delivery, `<queue>.sending` records how far the drain got.
+A drain that finds that file left by a dead one decides from it:
+
+| how far it got | what happens |
+|---|---|
+| nothing reached the session yet | the prompt is still the head, and is delivered next |
+| it may have been typed in | it is **not** sent again, so a prompt never runs twice. It moves to `<queue>.<id>.indoubt` |
+| the delivery is still running | the drain answers busy and tries again |
+
+A prompt that the session refused after receiving it (the mod could not submit it) also
+moves aside, to `<queue>.<id>.refused`, next to the `failed` row in the lead's inbox. The
+old drain's `.tmp` leftovers are the third kind.
+
+None of these is delivered on its own, because whether it is still wanted is the owner's
+call. `fleet-inbox` lists every one at the foot of each call until someone settles it. Each
+line gives the target session, how long ago the prompt was queued, its length in bytes, and
+its id. It never shows the prompt's words:
+
+```
+stranded queued prompts (2) — out of the queue, so nothing will deliver them:
+  master                     88 bytes  queued 9d ago — left by a drain that died — never delivered  [4242.tmp]
+  acme-api                  412 bytes  queued 2h ago — its drain died mid-delivery — it MAY have been typed in already  [1793573730-76105-2291.indoubt]
+  resolve: fleet-send -s cf-acme --requeue <session> <id>  (back to the head of its queue)
+       or: fleet-send -s cf-acme --discard <session> <id>
+```
+
+`--requeue` puts the prompt back at the head of its queue, where it was, and delivers it
+now if the session is idle. It skips any record that is already waiting, so a `.tmp` that
+was only a copy adds nothing. For an `.indoubt` prompt it warns that the prompt may run a
+second time. `--discard` deletes it, and works for a session that no longer exists.
+`fleet-send -s <sock> --stranded` prints the same list for scripts, one record per line,
+`\x1f` between fields. `fleet-stop` keeps a stopped session's stranded prompts, and
+`fleet-rename` moves them with the session.
 
 ### The request ledger
 
@@ -844,10 +1378,18 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
 
 - **What becomes an item.** Every message the person submits: typed at an idle prompt,
   typed over a running turn (`prompt.submit` fires at Enter, with that turn's id), or sent
-  from the phone. A message of two or more plain asks (list lines, questions, sentences that
+  from the phone. The phone's messages reach the session through `fleet-send`, and the one
+  sender that authenticated the owner says so: `fleet-serve` runs every phone verb as the
+  human (its request carried a passkey-minted token), and only that door adds
+  `fleet-send --owner`, which marks the handoff `kind: "owner"` (and the queue record, for a
+  busy session). A marked delivery is the person's message, split and judged exactly as if
+  typed; nothing else can mark one: the MCP `fleet_send` has no field for it and passes its
+  session and prompt after `--`. Measured before the mark: 82 proof prompts in 14 days, each
+  asking an agent to prove it had answered the owner's own question. A message of two or more plain asks (list lines, questions, sentences that
   open with a verb of work or "can you") is one item per ask, so each closes on its own
   proof; anything less plain, a paste, or a message over 4,000 characters stays one item. A
-  prompt `fleet-send` hands the mod (see above) is one item, never split. Not items: slash
+  prompt `fleet-send` hands the mod (see above) without that mark is a lead's brief: one
+  item, never split. Not items: slash
   commands, background-task notifications, `/loop` firings, the ledger's own re-prompt, and
   **the fleet's own wake-ups** ("a worker finished, run fleet-inbox", Jarvis's and the batch
   wake): `hooks/fleet-event.sh` sends those with `fleet-send --nudge`, which marks the
@@ -855,19 +1397,54 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   nothing for a marked entry. The marker is the test, never the wording. A nudge that falls
   back to the paste (a lead whose mod is not delivering) arrives as typed text and is
   recorded like one. Only messages after the mod loaded: nothing is backfilled.
+- **A person's message is owed only once it outlives its turn.** A plain instruction the
+  session just carries out is not an open loop: measured over fourteen days of real ledgers,
+  75% of the items made from the person's own messages (1,204 of 1,607) were closed before
+  their next message, yet each was counted on the band, listed in the note, and closed by the
+  agent with `fleet-ledger close` from Bash (3,305 such calls, each a main-model round trip).
+  So an item from the person's own message (`source: user`: typed, idle or mid-turn, or from
+  the phone's bridge) is made `inTurn`. While the mark holds it is **not** on the band, in
+  the record's count, in the note, or in the list held for the person, and the agent spends
+  no tool call on it; it **is** judged at the turn's end like any open item, and
+  `/ledger all` lists it as `[this turn]` (`/ledger` counts it in a line of its own). The end
+  of the turn that answers it settles it: `done` or `not-done` closes it as before; any other
+  verdict, a judge that failed or never ran (`-p`, a crash), and an Esc drop the mark, and from
+  then on it is owed exactly as before, the gate included. A message typed over a running
+  turn is settled at the end of the turn that ran it: the next one when it started one, the
+  turn it was typed over when that turn folded it in. A mark nothing settled counts as owed
+  after 30 minutes. Briefs from the lead (`fleet`), promises and `ledger_add` are never
+  turn-scoped.
 - **The note.** Each prompt carries a note to the model, never shown the person: the open
-  items with their ids, requests first and newest first, then promises, **eight at most**
-  (each cut to 100 characters, so the note stays under ~1.5k), `+N more open (/ledger lists
-  them)` past that, and the rule: close with `ledger_close` and proof. No note when nothing
-  is open. A plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
+  items it owes (never the message it rides on, see above) with their ids, requests first and
+  newest first, then promises, **eight at most** (each cut to 100 characters, so the note
+  stays under 1,250 characters), `+N more open (/ledger lists them)` past that, and the rule
+  in one line, in the form every session can run: `fleet-ledger close <id> "<proof>"` (proof
+  required), `fleet-ledger drop <id> "<reason>"`, `fleet-ledger add "<ask>"`. Measured over
+  14 days: 3,305 closes through `fleet-ledger` and none through the tools below, while every
+  note (~15,800, ~740 characters each) spelled out both. No note when nothing is open. A
+  plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
   gets its note on the first tool result of the turn it started instead.
-- **The agent's tools.** `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
+- **The agent's tools.** The reminders name only the `fleet-ledger` forms above; the mod
+  still registers its three tools and answers them, for a session that has them.
+  `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
   and non-empty (a path, link, commit, PR number, command result) and kept on the item.
   `ledger_drop(id, reason)`: not a real ask, or the person cancelled it; state `dropped`.
   `ledger_add(text)`: an ask the split missed, added to the latest prompt so the gate covers
   it. Every close records who made it: `closedBy` is `agent`, `judge`, or `person` (`hand`
   in a file written before this). Old ledgers need no migration: their items are closable
   by the tools as they are.
+- **A brief from the lead is done only with proof.** An item whose source is `fleet` (a
+  prompt `fleet-send` delivered, not marked as the owner's) is closed as `done` by
+  `fleet-ledger close <id> "<proof>"` (or `ledger_close`) with its proof, or by
+  the person by hand, and never by the judge. The judge reads a turn's prose, not its work:
+  measured on one fleet, 40% of all closed items were judge-closed with no proof, and in one
+  weekend every "done" across 23 workers was, with nothing merged. A brief the judge reads
+  as done stays **open**, carries `answered: { at, turnId, reason }`, and shows as
+  `[answered, no proof]` in `/ledger` and `fleet-ledger list`; the judge may still keep it
+  open, report it in progress, or hold it waiting. The person's own messages and the
+  agent's promises are judged exactly as before. Not retroactive: items closed before this
+  keep their state. An item a stopped worker's ledger carried to its lead is `fleet` too (see
+  below), and needs proof the same way.
 - **The judge, as backup.** At the end of each answered main-loop turn, after the agent's
   own closes, a small-model call (`haiku` by default) for every ten items **still open**,
   newest first, reads them and the turn's text (all of its blocks, cut from the middle past
@@ -879,7 +1456,10 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   in `/ledger`, and is judged again on later turns. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. **A turn in which the agent closed items and left nothing
-  open makes no call at all**, promise wording or not; otherwise the call is made only when
+  open makes no call at all** (a close from Bash, `fleet-ledger close`, counts by its time:
+  at or after the turn began), promise wording or not (a brief the judge read as answered is
+  still open, so it is judged again each turn until it is closed with proof); otherwise the
+  call is made only when
   something is open or the answer reads like a promise, so a quiet session costs nothing.
   Measured on haiku, one call for 46 items needed 1,737 tokens of reply and was cut off at
   700 before its closing brace; a call of ten takes at most ~600, and each may now use
@@ -925,16 +1505,132 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   `judge.held` (`gate-turn`, `waiting`, `workers`, `cooldown`)
   with the ids it held back. An item the turn simply never mentioned is still re-prompted
   once.
+  **The proof nudge.** A brief the judge reads as answered is never named by the re-prompt
+  above; the same re-prompt instead asks for its proof ("a brief from the lead reads as
+  answered, but a brief counts as done only with proof: close it with `fleet-ledger close` and a PR
+  number, commit or file path, or say what is still missing"). It is bounded the same way and
+  in the data: a brief carries `proofAskedAt` once asked and is **never asked again**, however
+  many later turns the judge reads it as answered, across reloads too. The holds above apply
+  to it (the nudge's own turn is a gate turn, so its end is never re-prompted; nor is one
+  inside the five-minute cooldown, which the nudge shares with the re-prompt), so a worker
+  that already ended its turn is woken at most once per brief. One that answers the nudge
+  in prose keeps the brief open as `[answered, no proof]`, for the lead to see. A nudge held
+  back is not spent: the next turn the judge reads the brief as answered may ask. Not sent
+  when `CLAUDE_FLEET_LEDGER_GATE=off`.
 - **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
   asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`,
   the band leads with `judge failing: <why>` while anything is open, the record carries
   `ledger.judge_failing`, and `fleet-ledger list` ends with the last judge's status, failing
   or ok. The ledger is a nag, not a guard.
+- **What the judge costs.** `judge` is the last judged turn only; `judged` keeps running
+  totals in the same file: `turns`, `calls`, `failedCalls`, `items` judged, and the
+  `inputTokens`/`outputTokens` the host reported, with `reported` saying how many calls
+  carried usage at all (a host that reports none reads as unreported, not as free).
+  `fleet-meter --ledger` sums them over every profile's fleet dir (`~/.claude/fleet`,
+  `~/.claude-*/fleet`, `$CLAUDE_FLEET_DIR`, each once by real path), beside the state of every
+  item and the age and sender of everything still owed. Counts only: no text, session,
+  branch or path. A ledger written before the counter is reported `untallied`.
+- **Waiting on the person.** An item the judge reports `in-progress` because it waits on
+  the person ("waits on the person: their pick between A and B") leaves the open list and the
+  gate as `waiting`, and comes back when the person's message speaks to it. A reply like
+  "1 a" or "yes" shares too few words with the item to wake it, so **a turn the person's own
+  message started** (typed, or marked as the owner's; never a nudge, the gate's re-prompt
+  or a lead's brief) shows the judge that session's waiting items, newest first, ten at
+  most, mentioned or not: done closes one, in progress reopens it, and one the turn did not
+  address stays waiting. **A waiting item untouched for 24 hours expires**: off the phone's
+  queue and the status note at once, written `expired` at the next judged turn, still in
+  `/ledger all` and still closable. Measured before it: of 35 waiting items within a week,
+  34 were over a day old and 27 had three or more messages from the person since. A master's
+  waiting items are what an unattended run ends up holding, so they leave the session two
+  ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
+  and profile it lists; workers' items reach the owner through their master), Projects
+  carries one `queue · n ›` row (red while any item waits on the owner, grey when every item
+  is answered or untouched, absent when nothing is held), and the row opens the queue: the
+  project, the ask, how long it has waited, and what the master said it needs. At a desk the
+  queue opens in the right pane beside Projects; its `‹`, the same back control a conversation has, returns to Projects; a tapped "waiting on you" notification opens it. Beside them, an item the owner replied to that
+  the master has not closed yet, and a request nobody has touched in four hours, but never one
+  that is only `[answered, no proof]`: what such a brief still owes is the agent's proof,
+  not anything the owner can give. An item carried from a stopped worker is the master's own request
+  by then and is listed by the same rules; its row names the worker and what it last said. A tap replies
+  with an ordinary message to that master quoting the item, which wakes it; the owner never
+  closes one, and it leaves the list when the master closes or drops it. An item newly
+  waiting rings the phone once per project. **In the session:** a short status question
+  ("whats the status", "status?", "any update?", "qué falta", "cómo vamos") carries a second
+  note, `[ghostfleet ledger: waiting on the person]`, listing those same items with what the
+  agent last said about each and the instruction to ask the person each one. Before it, the
+  only trace a waiting item left in any prompt was nothing: the open-items note lists open
+  items, `/ledger` gave a count, and a status answer had whatever the model still remembered
+  of the turn that asked.
+- **The same words again are the same item.** A message whose text (case, spacing and end
+  punctuation aside) equals an item from the same sender that is still `open`, sent within
+  ten minutes of that item's last send, is that item: `repeated` counts the sends, the item
+  is handed to the new turn, and its age is still its first send's. Two sends of the same
+  words more than ten minutes apart are two items, and so are the same words after the first
+  closed. Measured over 14 days: 101 exact repeats, 52 of them a lead's brief, 31 inside ten
+  minutes, each a second row for one ask. A delivery the session refuses undoes only the
+  items it created, never the one it folded into.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
-  session, without a turn. `clear` closes every open item and keeps the history; `all` shows
+  session, without a turn. `fleet-ledger [session] drop-carried <worker> "<reason>"` drops
+  every item still owed that was carried from one stopped worker, with one reason: the
+  person's or the lead's call after reading them, never run on anyone's behalf. `clear` closes every open item and keeps the history; `all` shows
   who closed each and the proof or reason. Items older than 7 days drop off the band and
   the gate; the file keeps the newest 200.
+- **A stopped worker's unfinished items go to its lead.** `fleet-stop` (with or without
+  `--reclaim`, and the MCP `fleet_stop`, which runs it) hands each item still `open`,
+  `waiting` or `not-done` to the lead's ledger: its sub-lead's when it has one, else
+  `master`'s, on the same socket and in that fleet's own directory (another profile is
+  another directory, so the dir is resolved from the socket, not from whoever ran the stop).
+  Each arrives as an open item `[<worker>] <ask>`, dated at the stop so a two-week-old ask
+  lands inside the band, with `carried: { from, state, note }` holding where it came from,
+  what it was there, and its last progress or reason; `fleet-ledger master` shows that
+  beside it. It is listed and in the lead's prompt note like any other open item, but never
+  re-prompted at a turn's end: the lead's turn was not asked it. The lead finishes it,
+  re-dispatches it, or drops it with a reason, with the ordinary tools. A carried item is
+  `fleet`, so it is **done only with proof** like any brief, whatever it was in the worker:
+  the lead's judge reading it as done leaves it open as `[answered, no proof]`, and the proof
+  nudge never names it (it is never re-prompted). Done, dropped and
+  stale items stay behind. In the worker's file each carried item becomes `carried`, with
+  the lead's id, so a second stop never carries it twice. Not retroactive: ledgers of
+  workers stopped before this are left as they are.
+  **A worker whose PR merged carries nothing.** Before the kill, `fleet-stop` reads the
+  worker's branch (a linked worktree only: a main checkout's branch is the integration
+  branch) and its PR's state, from `fleet-merged`'s cache and then from GitHub directly when
+  the cache says anything but merged (the usual stop comes right after the merge, inside the
+  cache's ten minutes). A merged PR closes the worker's open and waiting items in its own
+  ledger as `done`, `closedBy: fleet-stop`, with proof `PR #N merged`, and hands the lead
+  none of them; a `not-done` item stays as it is. Measured before it: 23 carried items open
+  in one lead's ledger, many for work already merged. A worker whose PR is still open (or
+  whose state could not be learned: each of the two lookups gives up after
+  `CLAUDE_FLEET_GH_TIMEOUT` seconds, 10 by default, so a gh hung on the network or a login
+  never hangs the stop) carries as above, and each carried item keeps
+  `carried.branch` and `carried.pr`. **When that PR merges, the item closes**: `fleet-inbox`,
+  which already reads merges for its "finished & reclaimable" footer, closes the lead's
+  carried item as `done`, `closedBy: fleet`, proof `PR #N merged`, and says so in a footer
+  line. No model call, and the PR state comes from the same cached `fleet-merged` answer;
+  an item that carried only a branch closes when the branch has a merged PR and no open one.
+  Not retroactive: an item carried before the branch was kept has none, and is the
+  person's or the lead's to finish or `drop-carried`.
+  When the lead cannot take them, the stop still completes and says so, naming the
+  `fleet-ledger --session <id> all` that reads them where they stayed (the worker's own
+  ledger, which a stop never deletes): the lead has no status record on that socket; it
+  keeps no ledger (codex, an older Claude, `CLAUDE_FLEET_LEDGER=off`; none is created for
+  it, since nobody would read it); its file is not readable JSON (never written over); or
+  it changed under all five tries of the write.
+  **A worker that died without a stop carries the same way.** A pane killed by hand, a
+  crashed tmux server or a reboot runs no `fleet-stop`, so `fleet-inbox` does it, on every
+  look the lead takes, with no model call: `lib/ledger-orphans.mjs` finds a worker with no
+  session (and no pane) on the socket, no `asleep`, `exited` or `parked` marker, and no
+  status record newer than a day, and runs the same carry for it. The lead is its sub-lead
+  while that sub-lead is still on the fleet (live or asleep), else `master`, and the branch
+  rides along when the worker sat in a linked worktree, so the item closes when that branch
+  merges, on the same look if it already has. The inbox says
+  `ledger: '<worker>' is gone (no session on <socket>, last seen 2d ago): carried …`. Never
+  `master` and never a tab. If tmux cannot be asked, nobody is dead. A worker the grid still
+  offers to reopen (a "lost" card) counts once its record is a day old: reopened, it finds
+  those items `carried`, and the lead's copy closes on the merge.
+  `node lib/ledger-orphans.mjs <fleet dir> <socket> --dry-run` names who would be carried
+  for, and changes nothing.
 
 **The file is not a `*.json`.** `<session_id>.ledger` holds JSON, but eight readers glob
 `<fleet dir>/*.json` as status records (fleet-list, the governor, the grid, fleet-read,
@@ -942,6 +1638,15 @@ fleet-stop, …), and a ledger named `.json` would be read as a session. It is w
 atomically, beside itself and renamed over, by the mod and by `fleet-ledger` alike; both
 re-read it before each change, so a close from outside is never undone by the mod's next
 write. It outlives the session, so `--resume` comes back to the same ledger.
+**Resumed under another profile** (the conversation copied into another account's config
+dir and reopened there, or resumed under another fleet dir), a session starts a ledger in
+that profile's fleet dir, and the old one held what it still owed: 16 session ids had a
+ledger in two profiles on one machine, 9 of the old copies with items still owed. So at
+session start the mod looks in every other `~/.claude*/fleet` for a `<session_id>.ledger`.
+Each item still owed there that this ledger lacks is added here with `movedFrom`, and
+becomes `moved` there with `movedTo`. Each dir is compared by real path, so a link to this
+fleet dir is not another profile. The old file is replaced only if nothing changed it since
+it was read, and no file is created or deleted in another profile.
 
 **For readers.** The status record's `ledger` field (`open`, `promises`, `oldest_at` in
 epoch seconds) is carried by the shell hook like the mod's other fields, so `fleet-list`,
@@ -950,7 +1655,7 @@ the grid card and the phone can show it. None of them draws it yet.
 | switch | default | effect |
 |---|---|---|
 | `CLAUDE_FLEET_LEDGER=off` | on | the whole feature: no file, no record field, no `/ledger`, no model call, no re-prompt |
-| `CLAUDE_FLEET_LEDGER_GATE=off` | on | record, judge and show; never re-prompt |
+| `CLAUDE_FLEET_LEDGER_GATE=off` | on | record, judge and show; never re-prompt, nor ask a brief for its proof |
 | `CLAUDE_FLEET_LEDGER_PROMISES=show\|gate\|off` | `show` | `gate` lets an open promise be re-prompted once too; `off` stops extracting them |
 | `CLAUDE_FLEET_LEDGER_MODEL` | `haiku` | the judge's model (an alias or a full id) |
 

@@ -128,3 +128,54 @@ function prGroups(prs, form) {
 // Cells, counting each code point as one: every glyph the band draws is narrow.
 export function width(runs) { return (runs || []).reduce((k, r) => k + [...r.text].length, 0) }
 export const plain = runs => (runs || []).map(r => r.text).join('')
+
+// ── A WAKE THE FLEET IS HOLDING FOR THIS LEAD ───────────────────────────────
+// hooks/fleet-event.sh pastes a wake only into an EMPTY input box, and when the box never
+// reads empty it holds the wake rather than clear or send what is there: it may be the
+// person's half-typed message. Held quietly, that was a lead never told its workers had
+// finished, for as long as one stray character sat in the box. So the hold is drawn here,
+// in the one place the person is certainly looking when the box is the cause: just above it.
+//   The file is <sock>.<kind>.blocked, rewritten by the retry on every poll ("since␟why␟to");
+// a stale one is a retry that died without its trap, and says nothing.
+export const HELD_STALE_MS = 120_000
+// The kinds whose wakes land in `me`: master is woken by the fleet's own kinds, a sub-lead
+// by the ones carrying its name (the same naming fleet-serve's undeliveredTarget reads).
+export function heldKinds(me) {
+  return me === 'master' ? ['notify', 'needyou', 'jarvis'] : [`${me}.notify`, `${me}.needyou`]
+}
+// `files` is [{ name, mtimeMs, text }] for this socket's .blocked files; the earliest live
+// hold wins, since that is how long the lead has gone untold.
+export function heldWake(files, sock, me, nowMs) {
+  const want = new Set(heldKinds(me).map(k => `${sock}.${k}.blocked`))
+  let out = null
+  for (const f of files || []) {
+    if (!f || !want.has(f.name) || nowMs - (Number(f.mtimeMs) || 0) > HELD_STALE_MS) continue
+    const [since, why] = String(f.text || '').split('\n')[0].split('\x1f')
+    const s = Number(since) || 0
+    if (!s) continue
+    if (!out || s < out.since) out = { since: s, why: why === '1' ? 'typed' : 'nobox' }
+  }
+  return out
+}
+// The row, the longest form that fits. Its words say what the person can do (send or clear
+// the box) and what the fleet will not, because "held" alone reads as the fleet's fault.
+export function heldRuns(held, nowMs, columns) {
+  if (!held) return null
+  const cols = Math.max(1, Number(columns) || 80)
+  const mins = Math.max(0, Math.floor((nowMs / 1000 - held.since) / 60))
+  const age = mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`
+  const what = held.why === 'typed'
+    ? ['this input box has unsent text', 'box has unsent text', 'box has text']
+    : ['no input box is showing', 'no input box', 'no box']
+  const lead = t => ({ text: t, color: COLOR.need, bold: true })
+  const forms = [
+    [lead(`wake held ${age}`), { text: ` · ${what[0]} · send or clear it to let workers' news in; the fleet will not touch it`, dim: true }],
+    [lead(`wake held ${age}`), { text: ` · ${what[0]} · the fleet will not touch it`, dim: true }],
+    [lead(`wake held ${age}`), { text: ` · ${what[0]}`, dim: true }],
+    [lead(`wake held ${age}`), { text: ` · ${what[1]}`, dim: true }],
+    [lead(`held ${age}`), { text: ` ${what[2]}`, dim: true }],
+    [lead(`held ${age}`)],
+  ]
+  for (const runs of forms) if (width(runs) <= cols) return runs
+  return forms[forms.length - 1]
+}

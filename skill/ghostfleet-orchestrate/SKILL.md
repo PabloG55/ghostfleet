@@ -28,6 +28,25 @@ lead starts blank, so **do not act from memory — read the real state first:**
 - **`fleet-digest`** (MCP `fleet_digest`) — every fleet on every profile at once, read
   from files: who needs the owner, what is working, what finished since the last look.
   For a question about *everything*; `--peek` looks without moving the "since" stamp.
+- **`fleet-know`** (MCP `fleet_know`) — the fleet's memory: what a project is, where it
+  stands and why, across every profile and paired machine (docs/MEMORY.md).
+
+## "Where does X stand?" — ask the memory before reading files
+
+When the owner (or a bot relaying the owner's messages) asks where a project stands, what
+was decided, what is waiting on them, or who touched a file, answer from **`fleet_know`
+first** (`about: "<project>"`, `waiting: true`, `touched: "<path>"`, `find: "<words>"`,
+`rules: "<project>"` for the owner's standing rules there, `about` with `fact: "<key>"` for one keyed fact)
+and read worktrees, ledgers or transcripts only for what it does not hold. It is recorded
+as things happen — every session, spawn, merge and ledger item — so it knows about other
+profiles and paired machines that no file in this checkout does, and it costs no agent a
+turn. Its answer names its sources; quote them rather than re-deriving them.
+
+- `about` takes `acme-api`, `acme-api@vm` (a paired machine) or `acme-api/personal`.
+- `at: "3d ago"` answers as things stood then.
+- An item marked **`[private]`** is readable by you on this machine and must **not** be
+  pasted into a prompt for another model vendor.
+- A paired machine marked **stale** is its last fetched state — say so when you use it.
 
 ## "Start a worktree" means fleet-spawn — never EnterWorktree
 
@@ -93,12 +112,16 @@ makes them the top lead's, and nothing ties them to you.
 
 **A worker is disposable.** When it finishes a task its context is full of that task —
 the files it read, the approach it settled on, the dead ends it half-remembers — and a
-second, unrelated brief gets worked *through* all of it. So a finished worker is retired,
-and the next task goes to a fresh session. What you may reuse is the **folder**:
+second, unrelated brief gets worked *through* all of it. It is also the expensive way: on
+one busy fleet, re-briefed sessions carried 300–900k tokens of an old task into new work,
+and every call re-reads all of it. So a finished worker is retired, and the next task goes
+to a fresh session. What you may reuse is the **folder**:
 
 1. A worker finished and its PR merged → **`fleet-stop --reclaim <session>`**. It stops
    the session and removes the worktree when that is safe (a squash-merged PR on a clean
    tree is), or keeps it and says why. `fleet-inbox` lists these for you, with the command.
+   Whatever its ledger still held open lands in YOURS as `[<worker>] <ask>`: finish it,
+   re-dispatch it to a new session, or drop it with a reason.
 2. New task → run **`fleet-worktrees`**. If a **FREE** worktree fits, start a NEW session
    in it: **`fleet-spawn <name> --reuse <worktree>`** — `--reuse` always opens a new
    conversation there (it never resumes the old one), and it refuses a worktree somebody
@@ -124,12 +147,27 @@ A worker can't interrupt you, and polling each one with `fleet-read` burns the
 **shared account budget** (see below). Instead the events you act on are collected
 passively into an inbox you drain in one call:
 
-- a worker **`done`** — its turn finished (idle). This is your **completion
-  signal**: a dispatched brief is ready to review/merge. It is NOT "free for the
-  next task" — once its PR merges, that worker is retired with `fleet-stop --reclaim`
-  and the next task gets a new session. (A worker's autonomous turn ends once, so one
-  `done` per brief.)
-- a worker **`need-you`** — permission / usage-limit / a real question.
+- a worker **`done`** — its turn finished with **nothing of its own still running**
+  (idle). This is your **completion signal**: a dispatched brief is ready to
+  review/merge. It is NOT "free for the next task" — once its PR merges, that worker is
+  retired with `fleet-stop --reclaim` and the next task gets a new session. A second
+  `done` from the same worker with nothing new since (no prompt sent to it, no commit,
+  no push, no PR command, same words) is the same one: no row, no wake. Under the review
+  gate a `done` says whether it is **READY to merge** (review passed at its head),
+  **unreviewed**, or **STUCK** — DONE alone is not ready.
+- a worker **`waiting`** — its turn ended while a background job it started this task
+  (the suite, a build) is still running: *"toolbox WAITING on its background job (Run the
+  full suite)"*. It is **not finished and does not wake you**; when the job exits the
+  worker is re-invoked, and the turn that ends with nothing left running is its `done`.
+  Don't act on a WAITING row — no PR exists yet, as often as not. If the job never exits
+  or dies with its session, the `done` comes anyway, saying why (`still running after
+  30m`, `ended and no turn followed`). `fleet-inbox` hides a WAITING once that worker has
+  a later row.
+- a worker **`need-you`** — permission / usage-limit / a real question. The row says
+  WHAT it asks (the tool and command, the question and its options, the limit line), and
+  whether it is still **`(pending)`** — the worker's pane still shows it — or
+  **`(cleared HH:MM)`**. A pending one is pinned under **`NEEDS YOU NOW`** at the top of
+  every `fleet-inbox`, seen or not, until it clears: being read is not being answered.
 - governor **`parked`/`resumed`** — budget shedding.
 
 - **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
@@ -137,10 +175,15 @@ passively into an inbox you drain in one call:
   ones it flags. A `done` → review and merge, or a same-PR follow-up; merged →
   `fleet-stop --reclaim`, and the next task to a new session; a `need-you` →
   `fleet-answer`. If the **push** is enabled for this fleet, you'll instead be
-  *woken* by a nudge — *"[fleet] a worker finished or needs you…"*. When you get it,
-  just drain `fleet-inbox` and act; it's an automated note, don't reply to it. (The
-  push is debounced — a burst of finishes wakes you once. If it's off, you're not
-  woken while idle, so drain the inbox whenever you next act.)
+  *woken* by a nudge — *"[fleet] 2 workers finished (api-fix, docs-pass) — run
+  fleet-inbox…"*. When you get it, just drain `fleet-inbox` and act; it's an automated
+  note, don't reply to it. (Finishes are gathered: you are woken once the fleet has been
+  quiet for ten minutes, for all of them, and a worker that went busy again in the
+  meantime is left out. If the push is off, you're not woken while idle, so drain the
+  inbox whenever you next act.) A need-you comes as an
+  alert of its own, even mid-turn — *"[fleet] <worker> NEEDS YOU: permission · Bash
+  command: …"*. Act on it: `fleet-answer <worker>` for what you may answer, and tell the
+  owner what it wants in one line when it is an approval, which is theirs to give.
 
 ## Asking a session a question (not dispatching work)
 
@@ -164,6 +207,29 @@ project's session looks ignored no matter how long you wait. When you want an an
   `ASKS` row instead, and can unblock it with `fleet-answer`; the address survives until
   it answers.
 - One request, one answer — you won't get both copies.
+
+## A Telegram turn is the owner talking
+
+A prompt that starts with `[telegram] ` was sent by the owner from the Telegram chat that
+`fleet-telegram` connects to your session. The fleet adds a `[fleet]` context line to that
+turn. It is not another agent's brief.
+
+- **Answer the owner.** Your final message is sent back to that chat as the reply. Keep it
+  short: a sentence or a few lines, plain markdown, no tables. Telegram shows bold,
+  italics, code and links, and long text arrives as several messages.
+- **Delegate whatever needs more than reading.** The turn runs under a tool allowlist:
+  reads, web lookups and the `fleet_*` tools. By default no shell, and writes only into this
+  session's scratch folder. The owner may have added commands (`Bash(<prefix> *)`) or the
+  checkout (`Write:checkout`), and the `[fleet]` line says what this turn has. Pass text to an
+  allowed command in single quotes. For the rest, `fleet_send` the task to the session that should do it, or
+  `fleet_spawn` a worker for new work (and set its model when that tool exists). Then tell
+  the owner in one line who has it. A refused tool's message says the same. Don't try to
+  route around it: a fleet tool aimed at your own session is refused too.
+- A photo or voice note arrives as a file path in the prompt. Read the picture. If an audio
+  file is all you got, say that you cannot listen to it and ask for it in text.
+- To tell the owner something unprompted (a finished PR, a blocker), use
+  `fleet_telegram_send`. Don't use it to answer a Telegram turn: the final message already
+  goes back.
 
 ## Unblock a worker stuck on a prompt
 
@@ -194,6 +260,15 @@ retry?", or a trust prompt, use:
   sub-master of its task while its siblings stay blocked. `fleet-project get <project>`
   shows them. Only you or the human set these — a worker's own attempt is refused. Jarvis
   ignores both: its confirm-list always asks the owner.
+- **The review gate is the third, and it runs the other way** (`review-gate on`): every PR
+  needs a pass from an independent reviewer at its CURRENT head before anyone merges it —
+  you too. You may switch it on; nobody in a session may switch it off. When it is on, a
+  worker's contract tells it to run the review itself and report READY; you run
+  `fleet-review status <PR>` (exit 0 means passed at the head) and merge with
+  `gh pr merge <PR> --match-head-commit <that sha>`. A push after the pass voids it. A
+  `need-you` reading *review gate STUCK on PR #N* means the rounds stopped converging: read
+  the open findings it lists and decide with the human — do not just send it back to loop.
+  Full flow: docs/ORCHESTRATION.md, "The review gate".
 
 ## Budget: one shared account
 
@@ -201,6 +276,13 @@ Every worker AND you drink from **one usage pool**, so wide fan-out drains it N�
 faster and everyone stalls at the ceiling together. A **governor** runs alongside
 the fleet (a dumb non-Claude loop) and auto-parks the newest workers as usage
 climbs, resuming them when the window resets — you'll see those in `fleet-inbox`.
+A turn a resume prompt started is filed **RESUMED**, not DONE, unless it made a commit,
+moved a pushed branch, ran a PR command or closed a ledger item. It doesn't wake you,
+and every RESUMED row folds into one line (`3 workers RESUMED nothing new — …`). A DONE
+after a resume means that worker produced something.
+A Claude a worker starts from its own Bash tool (a probe, `claude -p`) files nothing under
+the worker's name: the hook sees it nested under another agent and drops its rows. A probe
+whose result you need in the inbox is a session — `fleet-spawn` it.
 Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 
 - **`fleet-pause <session>`** — reliably interrupt a worker and mark it OFF (zero
@@ -222,23 +304,48 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | see live sessions + status | `fleet-list` |
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
 | a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
-| a NEW task | `fleet-spawn <name> [--reuse <free worktree>] --prompt "<self-contained brief>"` — always a new session |
+| a NEW task | `fleet-spawn <name> [--reuse <free worktree>] --kind <verify\|ci\|docs\|video\|build> --prompt "<self-contained brief>"` — always a new session |
 | a follow-up on the SAME PR (red CI, a review note) | `fleet-send <session> "<follow-up>"` — refused for a worker whose task already shipped; `--anyway` only for same-work follow-ups |
 | **record what you heard** (you are the worker) | `fleet-ack "<one line of what you understood>" --from "<the decisions you are working from>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
 | **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
+| **see a PR's review-gate record** | `fleet-review status <PR>` — every round, and whether a pass stands at the current head (exit 0) or not (exit 1). `fleet-review round <PR> --findings <file>` / `pass <PR>` / `stuck <PR> "<why>"` are the worker's half |
 | **photograph a flow for a human to approve** *(experimental — off unless `fleet-experimental enable shots`)* | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
 | unblock a stuck worker | `fleet-answer <session> "<keys>"` |
 | park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
+| what a session runs on, and where that came from | `fleet-model <session>` (MCP `fleet_model`, no model) |
+| move a RUNNING session to another model, keeping its conversation | `fleet-model <session> <opus\|sonnet\|haiku>` (MCP `fleet_model`) — waits until it is free, and pins it |
 | stop a worker for good (or a dead orphan) | `fleet-stop <session>` |
 
-`fleet-spawn` accepts `--model opus` for heavier tracks (workers otherwise use the
-account default). It records each worker's task in a manifest, so `fleet-worktrees`
+**Pick the model by the KIND of task.** `fleet-spawn --kind <verify|ci|docs|video|build>`
+(MCP: `kind`) starts the worker on the model the project maps that kind to. Verify, CI,
+docs and video are the cheap kinds: reading a diff, watching a pipeline, writing docs or
+assembling a video does not need the model a build does. On one busy fleet every worker
+ran on the account default, and one verifier alone was 4.6% of the spend. The map is
+opt-in per project and a model choice is the owner's, so set it when they ask
+(`fleet-project set <project> model-verify sonnet`; `fleet-project get <project>` shows
+it). A kind with no entry starts on the
+account default, the same as no `--kind`, so pass `--kind` anyway: it is recorded, and
+`fleet-worktrees` shows it as `[verify]` in ASKED. An explicit `--model opus` always wins.
+
+**Move a running session when its work changes phase.** `fleet-model <session> <model>` (MCP
+`fleet_model`) switches a Claude session that is already running, keeps its conversation, and
+pins the model so a wake or a restart starts on it too. Move it **down** (`sonnet`, `haiku`)
+when what is left is lists, lookups and formatting: a summary, a table, a changelog, a status
+read-out. Move it **up** (`opus`) for anything graded, sworn or high-stakes: an exam answer, a
+legal form, an irreversible migration, a review whose verdict others will act on. **Say which
+model and why** in the message that moves it, so the owner can disagree cheaply. A switch
+re-reads the whole conversation on the new model, so do it at a change of phase, not every turn.
+It waits until the session is free, so it never cuts a turn. It refuses a session on another
+agent. `fleet-model <session>` reports what it runs on and where that came from: the session's
+pin, the project's default (`fleet-project set <project> model <m>`, never master's), or the
+profile default.
+`fleet-spawn` records each worker's task in a manifest, so `fleet-worktrees`
 shows *what each worktree is for* — that's how you rebuild your map after a restart
 instead of guessing. `--from` bases the branch on your **local** ref (use
 `--from HEAD` for the current one) and only falls back to the remote tip if local
@@ -275,12 +382,15 @@ When you're done, produce a visual verification:
    flagged, say so explicitly.
 ```
 
-Then `fleet-shots serve` and review it — one step at a time, approve / changes / skip.
+Then review it in the phone app's **Reviews** screen (on Projects, or `<origin>/#reviews`):
+one card per branch, the run's video with a chapter per step, and approve / reject — or, for
+a run of stills, ok / problem / skip per step. `fleet-shots serve` is retired; it prints where
+the screen lives. `fleet-shots verdict <run>` still reads the verdict in a terminal.
 
 **Why each line is there:**
 
-- **Let `--out` default (4).** Both the run and `fleet-shots serve` default to
-  `$CLAUDE_FLEET_DIR/shots`, so they meet with no paths passed. The first real run went to
+- **Let `--out` default (4).** The run defaults to `$CLAUDE_FLEET_DIR/shots`, which is
+  where the Reviews screen reads, so they meet with no paths passed. The first real run went to
   the worker's own scratchpad and simply did not appear in the reviewer's list.
 - **Its OWN stack (3).** A worker found a sibling worktree's stack live on another port and
   refused it, unprompted — screenshots of somebody else's branch look exactly like yours,
@@ -290,8 +400,10 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   (a `data-testid` built from a template literal, a placeholder with a real `…`). An invented
   selector produces a step that photographs an unchanged screen.
 - **`--check` before done (5).** Unreviewed fails exactly as rejected does, so the task
-  cannot close until a human has looked. A flag the RUN raised needs a one-line reason to
-  clear, and the reason is printed — a click alone cannot launder a measured failure.
+  cannot close until a human has looked. On a recorded flow the owner's approve is the
+  reviewer's decision and passes whatever the run flagged; each flag is still printed, as
+  accepted by the approve (or with his note), so the record keeps it. On a per-step run a
+  flag the RUN raised still needs a one-line reason to clear.
 - **PROFILES DO NOT SHARE A SHOTS FOLDER.** `CLAUDE_FLEET_DIR` is `<config>/fleet`, so a
   `personal` worker's runs land under `~/.claude-personal` and a server started from a
   `work` session will not see them. Run `serve` from the same profile, or pass `--dir`.
@@ -299,7 +411,18 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 ## Rules
 
 - **A new task is a new session.** Never hand a finished worker a second task; retire it
-  with `fleet-stop --reclaim` and `fleet-spawn` the next one.
+  with `fleet-stop --reclaim` and `fleet-spawn` the next one (`--reuse <worktree>` keeps
+  the folder, never the conversation).
+- **Pick the model by kind.** `--kind verify|ci|docs|video` for the cheap work, `--kind
+  build` for the code. Say which in every spawn. A running session moves with `fleet-model`:
+  down for lists, lookups and formatting, up for graded, sworn or high-stakes reasoning, and
+  you say which model and why.
+- **Waiting on CI is one background watch, then end the turn.** Never a sleep or `until`
+  loop, and never a new watch armed on each wake: every wake re-reads the whole context. On
+  one fleet, workers ran 2,785 polling commands, and 25% of the spend was in turns woken by
+  background-task notifications, mostly CI. If the brief's done-criterion is "PR open and
+  CI triggered", the worker should not watch CI at all, so write it that way unless you
+  need the result.
 - **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree's folder; only
   `--new` when none fit.
 - **Stuck ≠ busy — reach for `fleet-answer`, not another `fleet-send`.** A worker
@@ -318,6 +441,12 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   folded into a turn is read as a change of direction.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **A brief may start with a slash command.** `--prompt "/some-skill <the brief>"` runs that
+  skill in the worker as if typed, with the rest as its arguments, so there is no need to
+  reword it as "use the skill …". A brief that cannot be delivered is never silent:
+  `fleet-send` exits 1 with the reason, and a deferred `fleet-spawn` brief that fails lands
+  in your `fleet-inbox` as a `FAILED` row naming the worker and the error. Re-send it
+  reworded. A literal leading `/` cannot be sent, `//` included.
 - **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight
   axes — the UNIT (per line, per document, per policy) · PARITY with an existing surface ·
   REUSE rather than recreate · the GATE before advancing · COMPLETENESS of a list ·

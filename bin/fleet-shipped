@@ -39,12 +39,12 @@ SESSION="${1:-}"
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 US=$'\x1f'
 
-cwd="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+cwd="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
 [ -n "$cwd" ] || exit 1
 wt="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || exit 1
 [ "$(git -C "$wt" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null)" ] || exit 1
 
-created="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{session_created}' 2>/dev/null)"
+created="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{session_created}' 2>/dev/null)"
 case "$created" in ''|*[!0-9]*) exit 1 ;; esac
 awk -F'\t' -v s="$SESSION" -v c="$created" '$2==s && $3=="done" && $1+0>=c+0 {f=1} END{exit !f}' \
   "$FLEET_DIR/$SOCK.inbox" 2>/dev/null || exit 1

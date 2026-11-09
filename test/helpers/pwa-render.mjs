@@ -232,6 +232,13 @@ class Node_ {
     };
     return hit(this);
   }
+  // ...and every match, for the sheets' text fields (sheetFields): a tag, or a tag with one
+  // `[attr=value]`, in a comma-separated list. A field built by input() carries type=text as
+  // an attribute here, exactly as el() sets it on a real one.
+  querySelectorAll(sel) {
+    const want = sel.split(',').map(s => /^(\w+)(?:\[(\w+)=([\w-]+)\])?$/.exec(s.trim())).filter(Boolean);
+    return this.all(n => want.some(([, tag, k, v]) => n.tag === tag && (!k || n.attrs[k] === v)));
+  }
   // for the assertions, not for app.js
   find(pred) {
     for (const k of this.kids) { if (pred(k)) return k; const d = k.find(pred); if (d) return d; }
@@ -671,7 +678,11 @@ const tabBtn = (label) => { const t = tabStrip(); return t && t.all(n => n.tag =
 // regex relaxed enough to match both spellings would have proved neither, and the digit
 // is the whole point of numberOf(): it is what `Ctrl-f <n>` counts at the desk, so a card
 // renamed by its own index is the bug these rows exist to catch.
-const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card'));
+// NOT A WAITING ITEM'S CARD. Projects also lists what each master holds for the owner
+// (app.js waitingModel), titled with the PROJECT's name and carrying no number, so a card
+// "named acme-api" would otherwise be that one: measured, numberOf() read ',,,4,5'.
+const isWaiting = (n) => n.className.split(/\s+/).includes('k-waiting');
+const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card') && !isWaiting(n));
 const partOf = (card, cls) => {
   const n = card.find(x => x.className.split(/\s+/).includes(cls));
   return n ? n.textContent.trim() : '';
@@ -778,7 +789,8 @@ const fleetOf = (...rows) => ({ home: '/Users/you', projects: rows.map(([name, p
 // and one that never renders the new fleet still fails its own assertion.
 const reopenProjects = async (ready) => {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const first = app.all(n => n.className.split(/\s+/).includes('card'))
+    // ...a PROJECT's card: a waiting item's opens the answer sheet, not a project.
+    const first = app.all(n => n.className.split(/\s+/).includes('card') && !isWaiting(n))
       .find(n => !/add project/.test(n.textContent));
     if (first) {
       (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
@@ -932,6 +944,65 @@ fixtureOverride = null;
 await reopenProjects();
 is('the shipped fleet is back', true, await until(() => shows('acme-api') && shows('scratch'), 4000));
 
+// ── WAITING ON YOU: one row on Projects, the list on its own screen ────────
+// The shipped waiting.json is empty, so the rows above run on the Projects screen they
+// were written for. These put two held items on it and ask #81's questions again — the
+// projects keep their numbers, the cursor never lands on what is held, a tap on a project
+// still opens it, and a tap on an item opens its answer sheet rather than a project.
+//   UPDATED when the list moved to the queue screen. #81's rows read the items and their
+// heading off Projects ('waiting on you · 1|projects', 'acme-api,toolbox' as cards there);
+// Projects now carries one `queue · 2 ›` row and no item cards, so those rows read the
+// row on Projects and the cards on the queue it opens. The numbering, cursor and
+// tap-a-project rows are unchanged, and still read Projects.
+fixtureOverride = { 'waiting.json': { ok: true, items: [
+  { project: 'acme-api', profile: 'work', session: 'master', key: 'k:7', id: '7', text: 'merge #12 now, or wait for the review?',
+    state: 'waiting', reason: 'waits on the person: pick one', since_ago: 7200, at_ago: 9000 },
+  { project: 'toolbox', profile: 'work', session: 'master', key: 'k:2', id: '2', text: 'rename the scratch keys',
+    state: 'replied', reason: '', since_ago: 60, at_ago: 20000 },
+] } };
+const held = () => app.all(n => n.className.split(/\s+/).includes('card') && isWaiting(n));
+const qRow = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('queue-row'));
+// tapCard() is declared further down; a `const` read before its line is a ReferenceError.
+const press = (n) => { if (!n) return false;
+  (n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  return true; };
+await reopenProjects(() => !!qRow());
+// Looked up on every call: leaving Projects and coming back builds a NEW `.cards` (the
+// screen's key changes), and a node kept from before is a detached list still holding the
+// old children. Measured: it went on reading 'waiting on you · 1|projects' after the
+// items were gone, while held() — which reads #app — read none.
+const heads = () => {
+  const list = app.find(n => n.className.split(/\s+/).includes('cards'));
+  return list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : [];
+};
+const scopeNow = () => { const n = app.find(x => x.className === 'scope'); return n ? n.textContent.trim() : ''; };
+is('held items are ONE row on Projects, and no cards or heading there', 'queue · 2 ›/0/',
+   `${qRow() ? qRow().textContent.replace(/\s+/g, ' ').trim() : ''}/${held().length}/${heads().join('|')}`);
+is('...red, because one of them waits on the owner', true, !!qRow() && qRow().className.split(/\s+/).includes('hot'));
+is('the projects keep the numbers they had', '1,2,3,4,5',
+   [numberOf('acme-api'), numberOf('acme-web'), numberOf('toolbox'), numberOf('billing-svc'), numberOf('scratch')].join(','));
+is('...and the cursor is on a project', true, cardEls().some(c => c.className.split(/\s+/).includes('sel')));
+is('a tap on a project still opens the project', true, press(cardNamed('acme-api')) && await until(() => !btnWith(/add project/) && !cardNamed('scratch'), 4000));
+swipeBack();
+await until(() => !!cardNamed('scratch'), 4000);
+click(qRow());
+is('a tap on the row opens the queue', true, await until(() => held().length === 2, 4000));
+is('...titled with its count, and nothing but the items on it', '— queue · 2/false', `${scopeNow()}/${!!cardNamed('scratch')}`);
+is('...the waiting one first, then the one the owner replied to', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
+is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
+press(held()[0]);
+is('a tap on an item opens its answer sheet', true,
+   await until(() => /answer/.test(sheetHost.textContent) && /acme-api · master · #7/.test(sheetHost.textContent), 2000));
+is('...on the queue, not a project', '— queue · 2', scopeNow());
+click(sheetHost.find(n => n.tag === 'button' && /esc back/.test(n.textContent)));
+await tick(5);
+swipeBack();
+is('back from the queue is Projects', true, await until(() => !!cardNamed('scratch') && !!qRow(), 4000));
+fixtureOverride = null;
+await reopenProjects(() => !qRow());
+is('...and with none held, no row is drawn', 'false/', `${!!qRow()}/${heads().join('|')}`);
+
 // ── which CLI a project's master runs ────────────────────────────────────
 // "the master cant be selected as open code or codex add that pls". The column has been
 // readable for a while and nothing on a SCREEN could write it.
@@ -1055,6 +1126,47 @@ is('clearing reports the default', true, await until(() => /back to the default 
 await until(() => !/· opencode/.test(projText('acme-api')), 4000);
 is('...and the card stops naming one', false, /· opencode/.test(projText('acme-api')));
 is('...without falling back to the word claude', false, /· claude/.test(projText('acme-api')));
+
+// 3. THE PROJECT'S MODEL, the same table's next setting (lib/session-model.sh). What it does
+// NOT do is the sentence that matters — a running session keeps its model, and master never
+// takes it — so that is asserted, not only the buttons. acme-web is `sonnet` in the fixture
+// and acme-api has none: both directions on one screen.
+while (sheetNow()) closeSheetFromTest();
+openProjSettings();
+await tick(20);
+is('project settings lists the model', true, sheetHas(/model: what this project's claude sessions start on/));
+is("...saying running sessions keep theirs and master never takes it", true, sheetHas(/Running sessions keep theirs, and master never takes it/));
+is('...showing a project that has one', true, !!sBtn(/^sonnet$/));
+is('...and default for one that has not', true, !!sBtn(/^default$/));
+sClick(/^default$/);           // acme-api's row: opens its own sheet
+await tick(20);
+is('a project opens its own model sheet', true, sheetHas(/model · acme-api/));
+sClick(/^haiku$/);
+await tick(5);
+is('...and says what the choice is for', true, sheetHas(/lists, lookups and formatting/));
+const saveModel = () => sheetHas(/model · /) && sClick(/^save$/);
+is('the save belongs to the model sheet', true, saveModel());
+is('saving reports the change', true, await until(() => /'acme-api' sessions start on haiku from their next start/.test(app.textContent), 4000));
+// ROUND TRIP: the next sheet reads the value off the refreshed payload, not off the click.
+while (sheetNow()) closeSheetFromTest();
+openProjSettings();
+await tick(20);
+// acme-api's OWN row: every other project without a model shows `default` too, so a
+// sheet-wide "no default button" could never hold.
+// Every button UNDER the row, not only its direct children: the settings sit in a group of
+// their own (`.pset`) so a narrow screen can wrap them under the name as one unit.
+const modelRow = (name) => { const s = sheetNow(); return s && s.find(n => n.className.split(/\s+/).includes('srow')
+  && n.kids.some(k => k.className.split(/\s+/).includes('nm') && k.textContent === name)); };
+const btnsUnder = (n, acc = []) => { for (const k of n.kids) { if (k.tag === 'button') acc.push(k.textContent); btnsUnder(k, acc); } return acc; };
+const rowBtns = (name) => { const r = modelRow(name); return r ? btnsUnder(r) : []; };
+is('...and the row reads it back', true, rowBtns('acme-api').includes('haiku') && !rowBtns('acme-api').includes('default'));
+is("...and only that project's row", true, rowBtns('acme-web').includes('sonnet'));
+sClick(/^haiku$/);
+await tick(20);
+sClick(/^default$/);
+await tick(5);
+is('the clear is saved from the model sheet', true, saveModel());
+is('clearing reports the profile default', true, await until(() => /back to the profile default model/.test(app.textContent), 4000));
 // LEAVE THE SCREEN AS THIS SECTION FOUND IT, whatever it found. If a control here goes
 // missing, sClick() is a no-op and every step after it operates on a sheet that never
 // opened — which ended, three sections later, as `box.scrollTop` on an undefined grid
@@ -1642,10 +1754,12 @@ closeSheetFromTest();
 
 // ── the back gesture, which had nothing to pop before ───────────────────
 // Two forward moves were made to get here (project, then session), so there are two of our
-// entries on the stack and the system gesture has somewhere to go. No URL was ever set:
-// every push reuses the current href.
+// entries on the stack and the system gesture has somewhere to go. Each one is addressed
+// with the place it opened (web/place.js) — so a reload of it lands there — and with nothing
+// but a query on the same path: a push never leaves the page, it only names where it is.
 is('navigating pushed history entries', 2, histDepth);
-is('...and none of them set a url', true, histPushedUrls.every(u => u === location.href));
+is('...each addressed with the place it opened, on the same page', ['grid', 'session'],
+   histPushedUrls.slice(-2).map(u => /^\?/.test(u) ? new URLSearchParams(u).get('screen') : 'not a query: ' + u));
 // The gesture itself. popstate is the ONLY path backwards, so this is exactly what a swipe
 // does — not a second code path that happens to agree.
 swipeBack();
@@ -1657,11 +1771,28 @@ is('...then to projects', true, await until(() => /— projects/.test(app.textCo
 // closing the app should do, and what the old code did on the FIRST back from anywhere.
 is('...and the stack is unwound', 0, histDepth);
 
+// ── JARVIS SWITCHED OFF TAKES JARVIS, NOT TALK ──────────────────────────
+// Talk used to be drawn only while Jarvis was on, so an owner who switched Jarvis off to be
+// rid of its session lost the talk button on every session too. The switch is the daemon's
+// (`jarvis_enabled` on the project list), so the fleet below is the shipped one with only
+// that field changed; the band going is the proof the client took it, and then the very
+// session the rows above read with Jarvis on must still carry the same button.
+const pjShipped = JSON.parse(fs.readFileSync(new URL('../../web/fixtures/projects.json', import.meta.url), 'utf8'));
+const jarvisBand = () => /talk or type|type to it|not set up — at the Mac/.test(app.textContent);
+is('Jarvis on: the band is there to go', true, await until(jarvisBand, 4000));
+fixtureOverride = { 'projects.json': { ...pjShipped, jarvis_enabled: false } };
+pollTick();
+is('Jarvis off: the band goes', true, await until(() => !jarvisBand(), 4000));
+
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
 clickVerb('open');
 is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
 tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
+is('Jarvis off: a session composer still has the talk button', 'talk',
+   ((await until(() => !!talkB(), 4000)) && talkB() || { textContent: '' }).textContent);
+is('...named for the session, not for Jarvis', true, /^talk to (?!Jarvis)\S/.test((talkB() || { attrs: {} }).attrs['aria-label'] || ''));
+fixtureOverride = null;
 is('a worker says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
 click(btnWith(/⋯/));
 const wacts = sheetHost.firstChild;
@@ -1834,14 +1965,15 @@ await until(() => { const b = chatBox(); return !!b && !!b.find(n => n.className
   const box = chatBox();
   is('the chat is a scroller', true, !!box && box.scrollHeight > box.clientHeight);
   is('...and a chat opens at the newest message', true, !!box && box.scrollTop === box.scrollHeight - box.clientHeight);
-  // The reader goes up to the middle and presses the button at the ceiling.
+  // The reader scrolls up to the ceiling — which is what asks for the page above now; there
+  // is no button to press unless a fetch failed (chat-lands-check drives that one).
   box.scrollTop = Math.round((box.scrollHeight - box.clientHeight) / 3);
   await tick(5);
-  const fromEndBefore = box.scrollHeight - box.scrollTop;
   is('the reader scrolls up', true, box.scrollTop > 0);
-  const older = btnWith(/load \d+ older/);
-  is('...and there is a page above them to load', true, !!older);
-  click(older);
+  is('...and there is no button to press for older messages', null, btnWith(/load \d+ older/) || null);
+  box.scrollTop = 0;
+  const fromEndBefore = box.scrollHeight - box.scrollTop;
+  dispatch(box, 'scroll', { type: 'scroll', target: box, currentTarget: box });
   is('...the page arrives', true, await until(() => { const b = chatBox(); return !!b && b.scrollHeight > box.scrollHeight; }, 4000));
   await tick(5);
   const now = chatBox();

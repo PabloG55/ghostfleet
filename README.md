@@ -113,7 +113,10 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)** | **A lead session driving workers.** Dispatching briefs to siblings, watching them, unblocking them, reusing worktrees before making more, and metering cost with the governor |
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
+| **[docs/MEMORY.md](docs/MEMORY.md)** | **The fleet's memory, `fleet-know`.** What every project is, where it stands and why, recorded as sessions, spawns, merges and ledger items happen — one page per project, across every profile and paired machine, so a lead answers from it instead of reading files. The three layers, the include/private/exclude switch, and the queries |
+| **[docs/TELEGRAM.md](docs/TELEGRAM.md)** | **A Telegram chat connected to a lead.** `fleet-telegram`: setting up the bot, keeping the token in your keychain, what a photo or a voice note arrives as, and the tool allowlist a Telegram turn runs under, and why |
 | **[docs/jarvis.md](docs/jarvis.md)** | **Jarvis, one session above every fleet** — *experimental, off by default; `fleet-experimental enable jarvis` turns it on.* `ghostfleet jarvis`, the digest it reads instead of polling, the confirm-list the tools enforce, conversation mode on the phone (transcribed on the Mac), and its fresh start once the conversation grows long |
+| **[docs/automations.md](docs/automations.md)** | **Automations** — *experimental, off by default; `fleet-experimental enable automations` turns it on.* A trigger (a schedule, or a session changing state) and steps the fleet runs on its own, built on the phone by taps or in a sentence; start and stop are approved with the passkey when saved and again on "run now", and a missed schedule is never run late |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex`, `opencode`, `agy` and `cursor` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
 | **[docs/attachments.md](docs/attachments.md)** | Sending a photo from the phone: what was measured per agent, why the bytes are converted on the Mac rather than the phone, and the two recommendations the build overturned |
@@ -199,6 +202,12 @@ over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a publ
 the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
 for the design and the threat model.
 
+The same client also opens on the Mac itself, with no Tailscale: `ghostfleet web` opens
+`http://localhost:8787` (the daemon listens on `127.0.0.1` too). The Mac enrols its own
+passkey with Touch ID the first time, through `fleet-serve enroll`, because any process on
+the machine can reach localhost
+([docs/mobile.md](docs/mobile.md#on-the-mac-itself-httplocalhost8787)).
+
 **Optional, and local only: the Mac's voice.** The phone can read replies aloud with
 [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) running on your machine — better English,
 real Spanish, chosen sentence by sentence — instead of the phone's own voice. It is ~350 MB, so
@@ -211,6 +220,22 @@ fleet-jarvis voice --kokoro --install   # verified download + a pinned Python 3.
 Without it nothing is missing: the phone reads with its own voice. `fleet-phone` and
 `fleet-jarvis status` say whether it is installed, not installed or broken.
 [docs/mobile.md](docs/mobile.md#the-macs-voice-kokoro-optional) has the details.
+
+**Or talk to a lead from Telegram:**
+
+```bash
+fleet-telegram link acme-api/master   # then config secret-cmd, start — docs/TELEGRAM.md
+```
+
+One chat, one session. Your message lands as your words. The answer is the final message
+of the turn your message started, sent back to the chat with its markdown rendered and
+split to Telegram's limit. Photos and any other file up to 20 MB arrive as files the session
+can open, and a reply keeps what it replies to. Voice notes arrive as words if you set a
+transcriber, otherwise as an audio file, and can be answered with a voice note if you set a
+command for that. The token never touches a file: it comes from a command you name, such as a keychain lookup. A Telegram turn may only
+read, look things up and delegate through the fleet tools, plus any command or checkout you
+name, because a chat id on a phone is weaker proof than you at the keyboard.
+[docs/TELEGRAM.md](docs/TELEGRAM.md) covers the setup and the allowlist.
 
 Two things that cost people time, so they are in that command's output too: the passkey is
 enforced server-side, so until a phone is enrolled the app sits on its lock screen and the
@@ -367,6 +392,16 @@ window — and if you use zellij, it stays a single pane instead of commandeerin
   own fourth source (`<sock>.order`, rewritten by `⇧hjkl`) — and the single one, since
   `ghostfleet` counts `Ctrl-f <p> <s>` through `fleet-grid.mjs --order` rather than re-deriving
   it, and `fleet-cycle` reads the copy mirrored onto the tmux server as `@cf_order`.
+- **`fleet-know`** is the fleet's memory ([docs/MEMORY.md](docs/MEMORY.md)): the hooks, `fleet-spawn`,
+  `fleet-merged` and the ledger writers append what happened to a log per profile, and
+  `fleet-know <project>` (MCP `fleet_know`) answers "where does it stand" from the graph derived
+  from it — `waiting`, `touched <path>` and `find <text>` across every project, `--at` for any past
+  moment. `fleet-know rule` keeps the owner's standing rules, `decide --supersedes` and `fact` close what
+  stopped being true, and the experimental `know-brief` tells a lead all of it at SessionStart.
+  `fleet-know history <project>` is what happened, in order, and `fleet-know backfill` fills that in
+  from the PRs, ledgers, manifests and commits the machine already has, at the times they happened.
+  `fleet-know privacy <project> private|exclude` (also a project setting, `know`) keeps a
+  project from a model vendor or out of the record.
 - **`claude-here`** is what each session runs, so sessions resume by checkout. If a
   conversation was registered as a Claude Code **background agent** (e.g. it was
   backgrounded, or created by a bg workflow), a plain `--resume` is refused with
@@ -394,8 +429,57 @@ and `fleet-*` tools):
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
 | `CLAUDE_FLEET_AWAKE`  | `display` to keep the screen on as well as the machine; `off` to inhibit nothing. Default `on`. See [Staying awake](docs/OPERATIONS.md#staying-awake). |
 | `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead instead of it polling. See [docs/SHORTCUTS.md](docs/SHORTCUTS.md) for the per-project/per-session settings-page toggle and the full precedence rules. |
+| `CLAUDE_FLEET_NOTIFY_QUIET` | Seconds of quiet a worker's `done` waits for before it wakes the lead, in one wake for every `done` gathered. Default `600`; `0` wakes at once. Per fleet: `<fleet dir>/<sock>.notify-quiet`. A `need-you` never waits. See [When the lead is woken](docs/OPERATIONS.md#when-the-lead-is-woken-and-when-it-waits). |
 
 `ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
+
+**Every session starts with a 300k-token context ceiling.** A session left to grow to the model's
+1M window re-reads that much on every call. With the ceiling, Claude Code compacts at about 240k
+instead of about 965k. Change it per project with `fleet-project set <project> context-window <300k|off|default>`
+(`off` keeps the model's whole window), and see where the spend goes with `fleet-meter --context`.
+Details: [The context ceiling](docs/OPERATIONS.md#the-context-ceiling).
+
+**Workers can run on a cheaper model by kind of task.** `fleet-spawn --kind verify` (or `ci`,
+`docs`, `video`, `build`) starts the worker on the model its project maps that kind to:
+`fleet-project set <project> model-verify sonnet`. The map is opt-in. A kind with no entry runs
+on the account default, as before, and an explicit `--model` always wins. Details:
+[A model for each kind of task](docs/OPERATIONS.md#a-model-for-each-kind-of-task).
+
+**A running session can move to another model without losing its conversation.**
+`fleet-model <session> sonnet` waits until the session is free, sends `/model sonnet` and reads
+the switch back from the transcript. Then it undoes the two side effects of a `/model` typed by
+hand. It puts the profile's `settings.json` back, because Claude Code saves a `/model` as the
+default for every later session, but only when that switch is the whole change. And it pins the
+session, so a restart, a wake or a reopen starts it on the new model. `fleet-model <session>`
+says what it runs on now and what it starts on next. `fleet-project set <project> model sonnet`
+is a project's default, for every session except master. Claude sessions only. Details:
+[Moving a running session to another model](docs/ORCHESTRATION.md#moving-a-running-session-to-another-model).
+
+### Several Claude accounts on one profile (experimental)
+
+Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and
+save it with `fleet-accounts add <profile> <name>`. The profile runs on the account whose weekly
+allowance expires first, moves off it at 97% of its 5-hour or weekly limit, and comes back once
+that 5-hour window resets. A turn refused with Claude's "You've hit your … limit" marks that account
+out until the reset it names, and the profile leaves it at once. A planned move is never made on a
+reading older than 6 hours. Like a `/login` by hand,
+that restarts nothing: each running session picks the new login up by itself. When all are
+spent the workers are parked until the earliest reset, then told to continue. Rotating accounts to get past usage limits may conflict
+with Anthropic's terms of service; that is your responsibility. Details, and what happens when a
+saved login expires: [docs/OPERATIONS.md](docs/OPERATIONS.md#several-claude-accounts-on-one-profile-experimental).
+
+### Pasted pictures on hover (experimental)
+
+Off by default. `fleet-experimental enable peek` lets you look at a pasted `[Image #N]` again
+without leaving Claude Code. While you write, a row above the prompt lists the draft's pictures:
+point at one to preview it, click it to open it in the system's viewer. After sending, pointing
+at the `[Image #N]` in the sent prompt does the same. On macOS the preview is a borderless window
+by the pointer with the picture's own pixels, needing nothing installed; Ghostty and kitty outside
+tmux draw it themselves; anywhere else (Linux, WSL, over SSH) it is a card of coloured cells. It
+needs the fullscreen layout, the one that reports the pointer. Details:
+[docs/OPERATIONS.md](docs/OPERATIONS.md#pasted-pictures-on-hover-experimental). The hover
+behaviour and the macOS window follow the Image Preview mod in
+[midudev/better-claude](https://github.com/midudev/better-claude) (MIT, © Miguel Ángel Durán).
 
 ---
 
@@ -478,4 +562,5 @@ rule worth knowing before sending a patch: a test that cannot fail proves nothin
 
 ## License
 
-MIT © 2026 Pablo Garces
+The core is MIT © 2026 Pablo Garces. The `ee/` folder is the Team edition, under the ghostfleet Team
+License. See [docs/LICENSING.md](docs/LICENSING.md).

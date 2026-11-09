@@ -7,7 +7,7 @@
 // fleet-inbox through Bash. From in here there is nothing to guess: a turn starts, a turn
 // completes, a dialog is about to be drawn, the engine measures the account.
 //
-// Seven things, each a section below, all sharing the record I/O at the top:
+// Eight things, each a section below, all sharing the record I/O at the top:
 //   STATE     written into the session's status record as it changes
 //   BUDGET    the account's rate-limit windows, from the engine's own measurement
 //   COMMANDS  /fleet and /inbox, answered without a turn
@@ -15,12 +15,14 @@
 //   GUARDS    the fleet's refusals in front of Bash and the MCP tools, failing CLOSED
 //   BAND      a lead's team above its prompt
 //   LEDGER    every request made of the session, held open until a final message answers it
-// What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js, ./band-shape.js and ./ledger.js,
-// plain functions the suite can run with node. The engine follows `$` only into functions
-// declared in this file, never across an import, which is why the hooks are one file and not six.
+//   PEEK      a pasted [Image #N] previewed on hover, while writing and after (experimental: `peek`)
+// What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js, ./band-shape.js,
+// ./ledger.js and ./peek-shape.js, plain functions the suite can run with node (./peek-window.js
+// is a string, the program PEEK runs; ./peek-chip.js is a surface module, which the engine loads
+// apart and which has no `$`). The engine follows `$` only into functions declared in this file, never across an import, which is why the hooks are one file and not six.
 //
-// THE OBSERVERS DECIDE NOTHING, THE GUARDS DECIDE AND FAIL CLOSED. STATE, BUDGET, COMMANDS
-// and BAND only observe: a hook of theirs that throws or runs out of time is skipped and the
+// THE OBSERVERS DECIDE NOTHING, THE GUARDS DECIDE AND FAIL CLOSED. STATE, BUDGET, COMMANDS,
+// BAND and PEEK only observe: a hook of theirs that throws or runs out of time is skipped and the
 // session goes on as if this were not loaded, which is exactly right for an observer, so none
 // carries a `.catch` that could refuse in its place. GUARDS is the one section whose hooks
 // refuse, and each is registered with a `.catch` that refuses too (that section says why).
@@ -33,24 +35,33 @@
 // unbounded one would hold a turn open for as long as the filesystem stalled.
 
 import {
-  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson,
+  withState, stateAfterTurn, usageRecord, sockOfTmux, asksAPerson, codeId, isCodeFile,
 } from './shape.js'
 import {
   mergesAPr, changesABoundary, isMergeTool, prSelector, boundaryOn, mergeRefusal,
   SETTING_REFUSAL, failedClosed, answerCalls, JARVIS_TOOLS, fleetTool, callArgs, markerSock,
   jarvisMightAct,
 } from './guard-shape.js'
-import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
+import { teamOf, latestBySlot, summarize, prSummary, bandRuns, heldKinds, heldWake, heldRuns } from './band-shape.js'
 import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
-  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
-  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
-  revisit, expireDormant, endsOnChoice,
+  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn, countJudge, adoptLedger,
+  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
+  revisitTurn, expireDormant, endsOnChoice, askedIn, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
+  deliverySource, ledgerChanges,
 } from './ledger.js'
+import { inferFacts, INFER_MODEL, INFER_TOKENS, INFER_MS } from './know-shape.js'
+import {
+  pastesIn, sameIds, sessionDirs, storedImage, EXT, pairPastes, pastesFromApi, fromBase64, sniff, decodePng, thumb,
+  ffmpegFileArgv, NO_FFMPEG, parsePam, fitCells, rasterOf, caption, WHY, platformOf, previewMode, WINDOW, openArgv,
+  SHRINKERS, shrinkArgv, tokenTargets, listedTargets, chipOf,
+} from './peek-shape.js'
+import { PEEK_WINDOW } from './peek-window.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
+  commandOf, failureOf, headOf,
 } from './handoff.js'
 
 // ── the record ──────────────────────────────────────────────────────────────
@@ -145,7 +156,14 @@ async function applyPatch($, change) {
 // $TMUX, and carries the CLAUDE_FLEET_* of whichever session first started that daemon.
 // With $CLAUDE_JOB_DIR set and no $TMUX the environment names nobody, and only the
 // record, which the shell hook pointed at the conversation's predecessor, may answer.
+//
+// AN AGENT STARTED BY AN AGENT inherits that agent's environment whole — a probe a worker
+// runs from its Bash tool carries the worker's $TMUX, pane and slot. The shell hook sees it
+// in the process tree and writes the record with no slot and `nested_under` set, and that
+// mark is the answer here too: the environment would hand this session the worker's queue,
+// its inbox and its team.
 async function identity($, rec) {
+  if (rec && rec.nested_under) return { sock: '', slot: '' }
   if (rec && rec.sock && rec.slot) return { sock: String(rec.sock), slot: String(rec.slot) }
   const tmux = await $.env.get('TMUX')
   const job = await $.env.get('CLAUDE_JOB_DIR')
@@ -168,7 +186,29 @@ let heartbeat = null
 async function setState($, next, turnId) {
   state = next
   const nowMs = await $.clock.now()
-  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId }))
+  return patchRecord($, rec => withState(rec, next, { nowMs, pid, turnId, code: codeLoaded || '' }))
+}
+
+// The code this process loaded (shape.js codeId says why `v` cannot tell): read once, at the
+// first session.start of this module, and never again. A reload starts the module over and so
+// reads it afresh; a /clear is the same module, and reading again then would describe whatever
+// is on disk now rather than what is running. '' is "could not be read", reported as nothing,
+// which a reader takes as not known to be current.
+let codeLoaded = null
+const CODE_READ_MS = 30_000
+async function readCode($) {
+  if (codeLoaded !== null) return codeLoaded
+  codeLoaded = ''
+  const dir = `${$.plugin.root}/hooks`
+  // Slow is waited for, because nothing waits on this past the start's own bound (startState);
+  // only a filesystem that never answers is given up on.
+  const list = await bounded($, $.fs.list(dir), CODE_READ_MS, null)
+  if (!list) return codeLoaded
+  const names = list.filter(e => e && e.kind === 'file' && isCodeFile(e.name)).map(e => e.name)
+  const texts = await Promise.all(names.map(name => bounded($, $.fs.read(`${dir}/${name}`), CODE_READ_MS, null)))
+  if (texts.some(t => typeof t !== 'string')) return codeLoaded
+  codeLoaded = names.length ? codeId(names.map((name, i) => ({ name, text: texts[i] }))) : ''
+  return codeLoaded
 }
 
 // The process this module runs in. `$.process.run` starts its child from Claude Code's
@@ -182,6 +222,13 @@ async function learnPid($) {
 
 async function startState($) {
   pid = await learnPid($)
+  // The start waits for the code as long as it can spare, and no longer. Measured on a scratch
+  // session started while the machine was busy: the read outlasted that, the record was written
+  // without it, and an idle session writes nothing again but its heartbeat, so it named no code
+  // for as long as it sat there, which `fleet-mod reload` reads as stale. So a read that lands
+  // late patches its answer in, into a record of this process that has none yet.
+  const reading = readCode($)
+  await bounded($, reading, IO_MS * 3, '')
   // A resumed conversation's record can still say `working` from the process that died
   // mid-turn; this process has started no turn, so say what it IS doing.
   const turns = await bounded($, $.session.turns(), IO_MS, 0)
@@ -191,6 +238,8 @@ async function startState($) {
   if (!(await setState($, first))) {
     $.clock.after(2000, () => { if (state === first) setState($, first) })
   }
+  void reading.then(code => code && patchRecord($, rec => (rec.mod && pid && rec.mod.pid === pid && !rec.mod.code)
+    ? { ...rec, mod: { ...rec.mod, code } } : null)).catch(() => {})
   // A state can be right for hours (a ready session nobody talks to), so its age says
   // nothing about whether anybody is still writing it. The heartbeat is what lets a
   // reader tell "ready for an hour" from "the plugin was disabled an hour ago".
@@ -218,7 +267,12 @@ async function onTurnComplete($, e, next) {
   if (e.agentId === undefined) await setState($, stateAfterTurn(e.reason))
   deliveryTurnComplete(e)
   // Not awaited: the judge is a model call, and the turn's end must not wait on it.
-  if (e.agentId === undefined) void ledgerTurnComplete($, e, takeSteps(e)).catch(() => {})
+  if (e.agentId === undefined) {
+    const blocks = takeSteps(e)
+    void ledgerTurnComplete($, e, blocks).catch(() => {})
+    void knowTurnComplete($, e, blocks).catch(() => {})       // KNOW: also never awaited
+  }
+  if (e.agentId === undefined) await peekTurnComplete($)
   return done
 }
 
@@ -266,6 +320,7 @@ async function onToolCall($, e, next) {
 // and, by the rule above, writes nothing.
 async function onSessionEnd($, e, next) {
   if (e.reason !== 'clear' && heartbeat) { heartbeat.cancel(); heartbeat = null }
+  peekEnd()
   state = ''
   await deliveryEnd($)
   const done = await next(e)
@@ -340,7 +395,10 @@ async function onInbox($) { return runFleet($, 'fleet-inbox') }
 // folded into the running turn so the next Stop belonged to work nobody asked for (hence
 // arming reply-to on UserPromptSubmit). From in here it is one call, `$.prompt.submit`,
 // which leaves the person's draft alone, runs as a turn of its own, and whose turn this
-// section can name exactly.
+// section can name exactly. A prompt that opens with a slash command (`/skill args`) is the
+// one exception: the host refuses it to `$.prompt.submit`, so it goes through
+// `$.command.run`, which runs it as if typed and starts its turn the same way
+// (./handoff.js commandOf has the measurements).
 //
 // THE CHANNEL IS A SPOOL DIRECTORY PER SESSION, polled (./handoff.js has the layout).
 // Claude Code's cross-session messaging was the other candidate and loses on each count
@@ -353,12 +411,27 @@ async function onInbox($) { return runFleet($, 'fleet-inbox') }
 //
 // EACH STEP IS A RENAME, so exactly one side owns an entry at any moment:
 //   fleet-send writes <id>.json and waits for <id>.done;
-//   this claims it (.json -> .taken) only while no turn runs, and submits it; at the
-//     turn.start whose text is that prompt it writes <id>.done with the turnId and arms
-//     the prompt's reply address, if it has one, for THAT turn;
+//   this claims it (.json -> .taken) only while no turn runs, and marks it submitted
+//     (.taken -> .sent) in the instant before it submits; at the turn.start whose text is
+//     that prompt it writes <id>.done with the turnId and arms the prompt's reply address,
+//     if it has one, for THAT turn;
 //   fleet-send, finding the entry unclaimed when its window closes, takes it back
 //     (.json -> .revoked) and pastes. The loser of a rename knows it lost, so a prompt is
 //     never both submitted and pasted.
+//
+// `.taken` AND `.sent` ARE TWO STATES BECAUSE A RESTART CANNOT TELL THEM APART OTHERWISE.
+// A process that starts on this conversation finds what the last one left: a claim it never
+// submitted is put back and delivered again, which is what makes a crash cost nothing. A
+// claim it DID submit must never be, and with one state for both it was: `/reload-plugins`
+// delivered through here reloads this mod inside its own `$.command.run`, the reload drops the
+// old environment's timers before its receipt is written, and the new one found `.taken`, put
+// it back, and ran the reload again. Measured: one send, 65 reloads before it was cut off by
+// hand, and the sender's "could not confirm submit" was the only sign. So the submit is
+// written down before it is made, and a process that finds `.sent` resumes waiting for that
+// prompt's turn (DELIVERY_SENT keeps its ledger items across a reload) and never submits it.
+// The one window left is the rename itself: a crash between `.sent` and the call loses that
+// one prompt, which is the side to err on: a prompt run twice is work done twice, and a
+// command run twice can be a loop.
 //
 // NOT HERE: the queue, and --now. A prompt for a busy session still goes to fleet-send's
 // <sock>.<slot>.queue, counted on the card and drained by the shell hook's Stop through
@@ -374,9 +447,19 @@ const POLL_MS = 500
 // How long a claimed prompt may take to reach its turn.start before it is written off: the
 // engine runs it "once idle", and a person's own turn can put that off.
 const START_MS = 120_000
+// How long a command run that resolved may take to start its turn before it is taken to have
+// started none. Measured: a skill's run resolves and its turn.start lands in the same
+// millisecond; a panel command (/cost) resolves once its panel closes, with no turn at all.
+const RAN_MS = 10_000
+// The slash commands this mod registers and answers itself (COMMANDS, LEDGER).
+const OWN_COMMANDS = ['fleet', 'inbox', 'ledger']
+
+// The prompt submitted and not yet started, by id, with the ledger items its claim made: in
+// $.state, so the process a reload starts can still stamp or undo them.
+const DELIVERY_SENT = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'deliverySent' })
 
 let turnRunning = false
-let pending = null                         // { id, text, reply, at }: submitted, not started
+let pending = null                         // { id, text, command, reply, at, resumed? }: claimed, not started
 let claiming = false
 let poll = null
 let spool = ''
@@ -392,15 +475,38 @@ async function writeSpool($, dir, name, text) {
   return moved?.exitCode === 0
 }
 
+// A failure also names the session it failed in, so fleet-inbox can put it in front of that
+// session's lead when no sender read it (lib/handoff-sweep.mjs): by then the session that
+// wrote it may have ended and taken its status record with it.
 async function receipt($, id, fields) {
   const nowMs = await $.clock.now()
-  await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, at: nowMs }))
-  await runBounded($, ['rm', '-f', `${spool}/${id}.taken`])
+  let who = {}
+  if (failureOf(fields)) {
+    const rec = await readRecord($, `${await fleetDir($)}/${deliverSid}.json`)
+    if (rec && rec.sock && rec.slot) who = { sock: rec.sock, slot: rec.slot }
+  }
+  await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, ...who, at: nowMs }))
+  await runBounded($, ['rm', '-f', `${spool}/${id}.taken`, `${spool}/${id}.sent`])
+  const sent = await soon($, $.state.get(DELIVERY_SENT), null)
+  if (sent && sent.value && sent.value.id === id) await soon($, $.state.set(DELIVERY_SENT, null), null)
+}
+
+// Receipts past the hour go, except a failure: nobody read it (fleet-send removes the ones it
+// reported), so it is kept as <id>.failed for fleet-inbox to report and clear.
+async function clearReceipts($, dir, names) {
+  const gone = []
+  for (const n of names) {
+    const r = await readRecord($, `${dir}/${n}`)
+    if (failureOf(r)) await runBounded($, ['mv', '-f', `${dir}/${n}`, `${dir}/${entryId(n, '.done')}.failed`])
+    else gone.push(`${dir}/${n}`)
+  }
+  if (gone.length) await runBounded($, ['rm', '-f', ...gone])
 }
 
 // One at a time, and only while idle: a prompt claimed mid-turn would sit inside the
 // engine, where fleet-send can no longer take it back and nothing shows it waiting.
 async function deliverTick($) {
+  if (!claiming && pending && !turnRunning) await expirePending($)
   if (claiming || pending || turnRunning || !spool) return
   claiming = true
   try {
@@ -408,7 +514,7 @@ async function deliverTick($) {
     if (!entries) return
     const nowMs = await $.clock.now()
     const old = staleReceipts(entries, nowMs)
-    if (old.length) void runBounded($, ['rm', '-f', ...old.map(n => `${spool}/${n}`)])
+    if (old.length) await bounded($, clearReceipts($, spool, old), IO_MS * 2, null)
     const id = waiting(entries)[0]
     if (!id) return
     const took = await runBounded($, ['mv', `${spool}/${id}.json`, `${spool}/${id}.taken`])
@@ -418,8 +524,20 @@ async function deliverTick($) {
       await receipt($, id, { error: 'unreadable entry' })
       return
     }
+    const cmd = commandOf(entry.text)
+    // This mod's own commands cannot be run from here: the host runs a plugin's
+    // `$.command.run` through every hook but that plugin's own, so measured, `/fleet` ran
+    // and printed "no command.run hook answered it", and its receipt said it had run.
+    const own = cmd && OWN_COMMANDS.includes(cmd.command)
+      ? `/${cmd.command} is this session's own ghostfleet command, which its delivery cannot run (the host skips a plugin's own hooks on its own run); run fleet-${cmd.command === 'fleet' ? 'list' : cmd.command} instead` : ''
+    if (cmd && (cmd.refused || own)) {
+      await receipt($, id, { error: cmd.refused || own, head: headOf(entry.text) })
+      return
+    }
     // `kind: "nudge"`: a wake-up fleet-send was told is one (--nudge), never a request.
-    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
+    // `kind: "owner"`: the owner's own words, from a sender that authenticated them
+    // (fleet-send --owner; ledger.js deliverySource), recorded as the person's.
+    pending = { id, text: entry.text, command: cmd, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge', owner: entry.kind === 'owner' }
     // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
     // hook but its own, so LEDGER's never sees it.
     await ledgerDelivery($, pending)
@@ -430,12 +548,34 @@ async function deliverTick($) {
     if (await maybeJarvis($).catch(() => false))
       await bounded($, guardRun($, [bin($, 'fleet-jarvis'), 'delivered'], { stdin: entry.text }), GUARD_MS + 500, null)
     // Settles once the turn started or the engine queued it; turn.start is what names the
-    // turn, so this is not awaited for that. A refusal is answered here.
+    // turn, so this is not awaited for that. A refusal is answered here. A command run that
+    // settles and starts no turn within RAN_MS ran without one (a panel, a local command):
+    // its receipt says it ran, which is a delivery, and its ledger item goes, as nothing
+    // will ever answer it.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
-    const lost = async () => { if (pending?.ledgered?.length) await ledgerUndo($, pending.ledgered) }
-    Promise.resolve($.prompt.submit({ text: entry.text, asUser: true })).then(
-      async r => { const d = settled(r); if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, d) } },
-      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
+    const lost = () => ledgerLost($, pending)
+    const ranAlone = async () => {
+      await $.clock.sleep(RAN_MS)
+      if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { ran: `/${cmd.command}` }) }
+    }
+    // Written down before it is made (`.sent`, above). A rename that fails means the sender
+    // took the claim back (fleet-send does that to a wake it gave up on) and delivers it
+    // itself; one whose answer was lost to the bound is asked of the file.
+    await soon($, $.state.set(DELIVERY_SENT, { id, ledgered: pending.ledgered || [], made: pending.ledgerMade || [] }), null)
+    const marked = await runBounded($, ['mv', `${spool}/${id}.taken`, `${spool}/${id}.sent`])
+    if (marked?.exitCode !== 0 && (await bounded($, $.fs.exists(`${spool}/${id}.sent`), IO_MS, false)) !== true) {
+      await lost(); pending = null
+      await soon($, $.state.set(DELIVERY_SENT, null), null)
+      return
+    }
+    const run = cmd ? $.command.run({ command: cmd.command, args: cmd.args }) : $.prompt.submit({ text: entry.text, asUser: true })
+    Promise.resolve(run).then(
+      async r => {
+        const d = settled(r)
+        if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, { ...d, head: headOf(entry.text) }) }
+        else if (cmd && pending?.id === id) await ranAlone()
+      },
+      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err), head: headOf(entry.text) }) } })
   } finally {
     claiming = false
   }
@@ -476,11 +616,60 @@ async function deliveryTurnStart($, e) {
       // stamped with its turn here. A nudge is never an item.
       if (p.ledgered) await stampItems($, p.ledgered, e.turnId)
       if (p.ledgered && p.ledgered.length) noteDue = e.turnId
-      else if (!p.nudge) await ledgerFleetItem($, p.text, e.turnId)
+      else if (!p.nudge) await ledgerFleetItem($, p, e.turnId)
     })(), IO_MS * 4, null)
-  } else if (p && (await $.clock.now()) - p.at > START_MS) {
-    pending = null
-    await bounded($, receipt($, p.id, { error: 'its turn never started' }), IO_MS * 2, null)
+  } else if (p) await expirePending($)
+}
+
+// A CLAIM WHOSE TURN NEVER STARTED IS WRITTEN OFF ON THE POLL, NOT ONLY AT THE NEXT TURN.
+// This used to be checked at turn.start alone, and on a lead that sits idle no turn starts:
+// `pending` stayed set, deliverTick returned at its first line for as long as the session
+// lived, and every later handoff waited out its claim window and was taken back. The receipt
+// that would have said why was never written either. So the poll asks too, while no turn
+// runs. A claim the sender already took back (its `.taken` renamed away: fleet-send does
+// that to a wake it gave up on) is let go without a receipt, because that sender delivered
+// it another way and a failure written now would be reported as one nobody read.
+//   A command a restart RESUMED has no run of its own left to settle, so it is held to RAN_MS,
+// the wait its own run would have had: the commonest is the `/reload-plugins` that started
+// this very process, which ran and started no turn, and its receipt says exactly that.
+async function expirePending($) {
+  const p = pending
+  const ran = Boolean(p && p.resumed && p.command && !p.command.refused)
+  if (!p || (await $.clock.now()) - p.at <= (ran ? RAN_MS : START_MS)) return
+  pending = null
+  const held = await bounded($, $.fs.exists(`${spool}/${p.id}.sent`), IO_MS, null)
+  if (held === false) return
+  if (ran) await ledgerLost($, p)
+  await bounded($, receipt($, p.id, ran ? { ran: `/${p.command.command}` } : { error: 'its turn never started', head: headOf(p.text) }), IO_MS * 2, null)
+}
+
+// The ledger items a claim made and nothing will answer now (a refusal, a command that started
+// no turn): undone, those alone (ledgerDelivery says why `made` and not `ledgered`).
+async function ledgerLost($, p) {
+  const m = p?.ledgerMade || p?.ledgered
+  if (m?.length) await ledgerUndo($, m)
+}
+
+// What a process finds that the one before it on this conversation submitted: waited for, as
+// that one would have, and never submitted again. The newest is resumed; one older than it is
+// from a process before that, whose turn has had its chance, and is written off as expirePending
+// would have written it off.
+async function resumeSent($, dir, ids) {
+  const nowMs = await $.clock.now()
+  const st = await soon($, $.state.get(DELIVERY_SENT), null)
+  const kept = st && st.value ? st.value : null
+  const all = [...ids].sort()
+  for (const [i, id] of all.entries()) {
+    const entry = await readRecord($, `${dir}/${id}.sent`)
+    const text = entry && typeof entry.text === 'string' ? entry.text : ''
+    const p = {
+      id, text, command: commandOf(text), reply: replyOf(entry), at: nowMs, resumed: true,
+      nudge: entry?.kind === 'nudge', owner: entry?.kind === 'owner',
+      ...(kept && kept.id === id ? { ledgered: kept.ledgered, ledgerMade: kept.made } : {}),
+    }
+    if (i === all.length - 1) { pending = p; continue }
+    pending = { ...p, at: -Infinity }
+    await expirePending($)
   }
 }
 
@@ -494,16 +683,22 @@ async function deliveryStart($) {
     if (!sid || !pid) return
     const dir = spoolOf(await fleetDir($), sid)
     await runBounded($, ['mkdir', '-p', dir])
-    // A claim an earlier process of this conversation made and never finished goes back,
-    // so the next tick delivers it instead of leaving it stranded as `.taken`.
+    // A claim an earlier process of this conversation made and never submitted goes back,
+    // so the next tick delivers it instead of leaving it stranded as `.taken`. One it DID
+    // submit (`.sent`) is waited for and never submitted again (the section's head says why).
+    const sent = []
     for (const t of (await bounded($, $.fs.list(dir), IO_MS, null)) || []) {
-      const id = t && t.kind === 'file' ? entryId(t.name, '.taken') : null
+      if (!t || t.kind !== 'file') continue
+      const id = entryId(t.name, '.taken')
       if (id) await runBounded($, ['mv', '-n', `${dir}/${id}.taken`, `${dir}/${id}.json`])
+      const was = entryId(t.name, '.sent')
+      if (was) sent.push(was)
     }
     spool = dir
     deliverSid = sid
     pending = null
     turnRunning = false
+    if (sent.length) await resumeSent($, dir, sent)
     await writeSpool($, dir, '.ready', `${pid}\n`)
     if (poll) poll.cancel()
     poll = $.clock.every(POLL_MS, () => { void deliverTick($) })
@@ -528,6 +723,7 @@ async function onSessionStart($, e, next) {
   await ledgerStart($)
   startBand($)
   await deliveryStart($)
+  await peekStart($, e)
   return started
 }
 
@@ -546,13 +742,21 @@ export const register = on => {
   // GUARDS and BAND, below the wiring so each is one section of its own.
   on('tool.call', { tool: 'Bash' }, onBash).catch(bashFailedClosed)
   on('tool.call', { tool: /^mcp__/ }, onMcp).catch(mcpFailedClosed)
-  on('ui.render', { component: 'AbovePrompt' }, onBandRender)
+  // One AbovePrompt hook for the band and PEEK's row: the band's rows, then PEEK's, then the slot
+  // as the hooks beneath left it (onBandRender says why it is always passed on).
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => onBandRender($, e, ee => onPeekBand($, ee, next)))
   on('prompt.submit', onPromptSubmit)
   on('command.run', { command: 'ledger' }, onLedgerCommand)
   // Spelled out, not TOOL.*: `claude plugin validate` reads a matcher only from its literal.
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_close' }, onLedgerTool)
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_drop' }, onLedgerTool)
   on('tool.call', { tool: 'mcp__ghostfleet__ledger_add' }, onLedgerTool)
+  // PEEK: every hook answers `next(e)` untouched while the switch is off. Its session.start,
+  // session.end, turn.complete and prompt.submit parts ride in the hooks above, and its
+  // AbovePrompt row in the band's hook.
+  on('prompt.edit', onPeekEdit)
+  on('ui.message', onPeekMessage)
+  on('ui.render', { component: 'UserMessage' }, onPeekSent)
 }
 
 // ── GUARDS ──────────────────────────────────────────────────────────────────
@@ -917,8 +1121,23 @@ async function refresh($) {
   lead = { sock: who.sock, me: who.slot, team, dir }
   if (!wasLead) refreshPrs($).catch(() => {})
   const bySlot = latestBySlot(await readTeamRecords($, dir, entries), who.sock)
-  const s = summarize(team, bySlot, await $.clock.now())
-  await publish($, { ...s, prs })
+  const nowMs = await $.clock.now()
+  const s = summarize(team, bySlot, nowMs)
+  await publish($, { ...s, prs, held: await heldOf($, dir, entries, who.sock, who.slot, nowMs) })
+}
+
+// A wake the fleet is holding because THIS session's input box never read empty
+// (band-shape.js heldWake). Its age is drawn against a minute bucket, like the ledger's, so
+// the band redraws once a minute while it lasts and not on every tick.
+async function heldOf($, dir, entries, sock, me, nowMs) {
+  const names = new Set(heldKinds(me).map(k => `${sock}.${k}.blocked`))
+  const files = []
+  for (const f of entries) {
+    if (f.kind !== 'file' || !names.has(f.name)) continue
+    files.push({ name: f.name, mtimeMs: f.mtimeMs, text: String(await soon($, $.fs.read(`${dir}/${f.name}`), '')) })
+  }
+  const held = heldWake(files, sock, me, nowMs)
+  return held ? { ...held, asOf: Math.floor(nowMs / 60_000) * 60_000 } : null
 }
 
 async function refreshPrs($) {
@@ -941,21 +1160,28 @@ async function refreshPrs($) {
   return refresh($)
 }
 
-// The team's row, then the ledger's (LEDGER, below), each only when it has something to say.
+// A held wake first (it is about the box right below), then the team's row, then the
+// ledger's (LEDGER, below), each only when it has something to say, and then whatever the
+// hooks beneath put in the slot. AbovePrompt is ONE slot shared by every mod and by this
+// mod's own PEEK row: a tree answered without `next(e)` is the whole slot, so the band
+// showing its team used to make every other row above the prompt disappear.
 async function onBandRender($, e, next) {
   if (e.props.hasSurvey) return next(e)
   const { value } = await $.state.get(BAND)
   const team = value ? bandRuns(value, value.prs, e.props.bodyColumns) : null
+  const hold = value && value.held ? heldRuns(value.held, value.held.asOf, e.props.bodyColumns) : null
   const led = (await $.state.get(LEDGER)).value
   const book = led ? ledgerRuns(led, led.asOf, e.props.bodyColumns) : null
-  if (!team && !book) return next(e)
+  const below = await next(e)
+  if (!team && !hold && !book) return below
   const { Box, Text } = $.ui.resolve(e)
   const row = (runs, k) => h(Box, { key: k, flexDirection: 'row' },
     ...runs.map((r, i) => h(Text, {
       key: String(i), wrap: 'truncate-end',
       ...(r.color ? { color: r.color } : {}), ...(r.dim ? { dimColor: true } : {}), ...(r.bold ? { bold: true } : {}),
     }, r.text)))
-  return h(Box, { flexDirection: 'column' }, ...(team ? [row(team, 'team')] : []), ...(book ? [row(book, 'ledger')] : []))
+  return h(Box, { flexDirection: 'column' }, ...(hold ? [row(hold, 'held')] : []), ...(team ? [row(team, 'team')] : []),
+    ...(book ? [row(book, 'ledger')] : []), ...(below ? [below] : []))
 }
 
 // Started from onSessionStart (one session.start hook per module), after the record exists.
@@ -982,6 +1208,10 @@ function startBand($) {
 //
 //   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
 //            shape), its open count in the status record (`ledger`), the oldest on the band
+//   TURN     the person's own message is turn-scoped: judged at the end of the turn that
+//            answers it, but on the band, the record and the prompt's note only once it
+//            outlives that turn (ledger.js owed). Every turn end settles it, a failed or
+//            skipped judge and an Esc included, so it fails open (settleOf)
 //   JUDGE    at a main-loop turn.complete that ended with an answer, a small-model call per
 //            ten open items (when something is open, or the answer sounds like a promise):
 //            which open items the turn's text, all of it, addressed, and what its final text
@@ -990,6 +1220,9 @@ function startBand($) {
 //            item the turn reported in progress, and never at all at the end of a turn the
 //            gate itself started, one that ends on a question to the person, one inside the
 //            cooldown, or a lead's while its workers are still at it (gateHold)
+//   PROOF    a brief from the lead (`fleet`) the judge reads as done stays open: only
+//            ledger_close with proof closes it. The same re-prompt, under the same holds, asks
+//            for that proof ONCE per brief, ever (ledger.js proofTargets)
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
 // a wrong shape closes nothing and re-prompts nothing (the item stays open, the failure is
@@ -1011,12 +1244,16 @@ let currentTurn = ''
 let judging = false
 let judgeNext = null     // a turn.complete that arrived while the judge was busy
 let turnsStarted = 0     // main-loop turn.starts, so a verdict can tell it went stale
+let turnStarts = new Map() // turnId -> when it started, for the last few turns (settleTurn, closedInTurn)
 let answers = []         // the last few judged turns: { at, turnId, blocks }
 let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrote, in order
 let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
 let gateTurns = []       // the last few turns the gate's own re-prompt started
 let choiceTurn = ''      // the last turn, when it ended on a numbered question (ledger.js foldReply)
+let choiceAsked = ''     // ...and what it asked, for quoting beside the answer (ledger.js askedIn)
+let personTexts = []     // the person's own messages, submitted and not yet started as a turn
+let personTurns = []     // the last few turns one of those started (ledger.js revisitTurn)
 
 async function ledgerConfigOf($) {
   if (ledgerCfg) return ledgerCfg
@@ -1064,8 +1301,48 @@ async function applyLedger($, change) {
   await $.fs.write(tmp, JSON.stringify(next))
   const moved = await $.process.run(['mv', '-f', tmp, file], { timeoutMs: IO_MS })
   if (moved.exitCode !== 0) return null
+  knowLedger($, dir, file, ledgerChanges(cur, next))
   await showLedger($, next)
   return next
+}
+
+// ── KNOW: the fleet's memory (docs/MEMORY.md) ──────────────────────────────
+// Two things only, and neither may slow a turn: what a ledger write changed goes to
+// bin/fleet-know-event (the one writer), and — behind fleet-experimental's know-infer, OFF by
+// default — a finished turn is read by a small model for the decisions in it. Both are fired
+// and not awaited; a failure costs a fact, never the write or the turn.
+function knowLedger($, dir, file, changes) {
+  if (!changes.length) return
+  const sid = file.slice(dir.length + 1).replace(/\.ledger$/, '')
+  void $.process.run([bin($, 'fleet-know-event'), 'ledger', `session=${sid}`, `fleet=${dir}`, 'via=mod'],
+    { stdin: JSON.stringify(changes), timeoutMs: KNOW_MS }).catch(() => {})
+}
+const KNOW_MS = 5000
+async function knowInferOn($) {
+  const dir = (await $.env.get('CLAUDE_FLEET_EXPERIMENTAL_DIR')) || `${await $.env.get('HOME')}/.config/ghostfleet`
+  const text = await soon($, $.fs.read(`${dir}/know-infer.enabled`), '')
+  return /^\s*on\s*$/.test(String(text))
+}
+// The privacy answer comes from the writer itself (`fleet-know-event privacy`), the same code
+// that decides what the log records, so the gate here and the log can never disagree. Its
+// absence, a timeout or a non-zero exit is the empty answer, and know-shape.js refuses it.
+async function knowTurnComplete($, e, blocks) {
+  if (e.reason !== 'answer') return
+  const enabled = await knowInferOn($)
+  if (!enabled) return
+  const sid = await $.session.id()
+  if (!sid) return
+  const dir = await fleetDir($)
+  const asked = await bounded($, $.process.run([bin($, 'fleet-know-event'), 'privacy', `session=${sid}`, `fleet=${dir}`], { timeoutMs: KNOW_MS }), KNOW_MS + 500, null)
+  const mode = asked && asked.exitCode === 0 ? String(asked.stdout || '').trim() : ''
+  const r = await inferFacts({
+    enabled, mode, turn: blocks.join('\n\n'),
+    call: prompt => $.model.complete({ model: INFER_MODEL, prompt, maxTokens: INFER_TOKENS, effort: 'low', timeoutMs: INFER_MS }),
+  })
+  if (r.failed) void $.ui.log(`ghostfleet know: inferred pass failed (${r.failed}); nothing recorded`, { to: 'debug' })
+  if (!r.facts.length) return
+  await bounded($, $.process.run([bin($, 'fleet-know-event'), 'infer', `session=${sid}`, `turn=${e.turnId}`, `fleet=${dir}`],
+    { stdin: JSON.stringify(r.facts), timeoutMs: KNOW_MS }), KNOW_MS + 500, null)
 }
 
 // The band's row and the record's count, rewritten only when what they say changed. The
@@ -1125,14 +1402,67 @@ async function ledgerRefresh($) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const file = await ledgerPath($)
+  if (file && adoptedFor !== file) { adoptedFor = file; await bounded($, adoptMoved($, file), IO_MS * 6, null) }
   const l = file ? await readLedger($, file) : null
   if (l) await showLedger($, l)
+}
+
+// WHAT THIS SESSION LEFT UNDER ANOTHER PROFILE, BROUGHT HERE (ledger.js adoptLedger). Asked
+// once per session id per process, on the first band tick that knows the id: a resume under
+// another profile is a new process, so that is when the old file appears. Every other
+// profile's fleet dir is <HOME>/.claude or <HOME>/.claude-<name>, as fleet-open finds a
+// transcript. A dir is "this one" by its REAL path, never by its spelling: a fleet dir reached
+// through a link is the same dir, and taking this session's own file for the old copy would
+// mark every item it owes as moved. When either path cannot be resolved, that dir is skipped.
+// Nothing here makes a new ledger in another profile or deletes one; the old file is rewritten
+// only when nobody changed it while this read it, and a lost race is retried at the next start.
+let adoptedFor = ''
+async function adoptMoved($, file) {
+  const here = file.slice(0, file.lastIndexOf('/'))
+  const name = file.slice(here.length + 1)
+  const real = async p => { try { return (await $.fs.stat(p, { resolve: true })).realPath || '' } catch { return '' } }
+  const hereReal = await real(here)
+  const home = await $.env.get('HOME')
+  if (!hereReal || !home) return
+  const entries = await $.fs.list(home).catch(() => [])
+  const dirs = entries.filter(e => (e.kind === 'dir' || e.isLink) && /^\.claude(-[A-Za-z0-9._-]+)?$/.test(e.name))
+    .map(e => `${home}/${e.name}/fleet`)
+  for (const dir of dirs) {
+    const dirReal = await real(dir)
+    if (!dirReal || dirReal === hereReal) continue
+    const other = `${dir}/${name}`
+    if (!(await $.fs.exists(other).catch(() => false))) continue
+    const before = await $.fs.read(other).catch(() => null)
+    if (before === null) continue
+    let old
+    try { old = JSON.parse(before) } catch { continue }
+    if (!old || !Array.isArray(old.items)) continue
+    const nowMs = await $.clock.now()
+    let r = null
+    const wrote = await changeLedger($, l => { r = adoptLedger(l, parseLedger(before), { from: dir, to: here, nowMs }); return r && r.here })
+    // This ledger first: unread here (null, and the change never ran) leaves the old file as it is.
+    if (!r || (r.here && !wrote)) continue
+    const tmp = `${dir}/.${name}.moved.tmp`
+    await $.fs.write(tmp, JSON.stringify(r.old))
+    const now = await $.fs.read(other).catch(() => null)
+    const ok = now === before && (await $.process.run(['mv', '-f', tmp, other], { timeoutMs: IO_MS })).exitCode === 0
+    if (!ok) await $.process.run(['rm', '-f', tmp], { timeoutMs: IO_MS }).catch(() => {})
+    void $.ui.log(`ghostfleet ledger: ${r.moved} item(s) this session owed under ${dir} ${ok ? 'moved here' : 'copied here; the old file changed, marked next start'}`
+      + ` (${r.added} added, ${r.back} back)`, { to: 'debug' })
+  }
 }
 
 // Recorded BEFORE `next`, so the note the prompt carries can name its own items by id; the
 // turn they belong to is stamped after, once `next` has started it. A slash command is the
 // harness's, and carries nothing.
 async function onPromptSubmit($, e, next) {
+  await peekPrompt($, e)
+  const r = await ledgerPromptSubmit($, e, next)
+  await peekSubmitted($, e)
+  return r
+}
+
+async function ledgerPromptSubmit($, e, next) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on || String(e.text || '').trimStart().startsWith('/')) return next(e)
   const before = currentTurn
@@ -1143,14 +1473,18 @@ async function onPromptSubmit($, e, next) {
   let window = 0
   let cur = source ? await changeLedger($, l => {
     window = Number(l.window) || 0
-    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn }, ids, made)
+    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn, asked: choiceAsked }, ids, made)
   }) : null
   if (!cur) {
     const file = await ledgerPath($)
     cur = file ? await readLedger($, file) : null
   }
-  const note = cur ? contextNote(cur, at) : ''
-  const r = await next(note ? { ...e, context: [...(e.context || []), note] } : e)
+  // A status question also carries what is held for the person (ledger.js statusNote):
+  // waiting items are on neither the open list nor contextNote, so without it the answer
+  // to "whats the status" was whatever the model remembered of the turn that asked.
+  const notes = cur ? promptNotes(cur, e.text, at) : []
+  if (source) notePerson(e.text)
+  const r = await next(notes.length ? { ...e, context: [...(e.context || []), ...notes] } : e)
   if (!ids.length) return r
   if (!r || r.drop !== undefined) {
     // It never entered: its items go, and the window goes back to the one before. An item it
@@ -1186,23 +1520,51 @@ async function onLedgerTool($, e) {
   return { result: said }
 }
 
+// WHICH TURNS THE PERSON STARTED: their own message, typed (sourceOf) or delivered as the
+// owner's (deliverySource), never a nudge, the gate's re-prompt or a lead's brief. Known by the
+// text, as stampTurn knows a turn: the message is noted when it is submitted (one typed over a
+// running turn starts its own turn later) and the turn.start that carries it is theirs. Its
+// judge is shown their waiting items (ledger.js revisitTurn).
+function notePerson(text) {
+  const t = String(text || '').trim()
+  if (t) personTexts = [...personTexts.filter(x => x !== t), t].slice(-6)
+}
+
 async function ledgerTurnStart($, e) {
   const cfg = await ledgerConfigOf($)
-  if (!cfg.on || !e.text) return
+  if (!cfg.on) return
+  turnStarts.set(e.turnId, await $.clock.now())
+  while (turnStarts.size > 8) turnStarts.delete(turnStarts.keys().next().value)
+  if (!e.text) return
   if (isGateTurn(e.text)) gateTurns = [...gateTurns, e.turnId].slice(-4)
+  const said = String(e.text).trim()
+  if (personTexts.includes(said)) {
+    personTexts = personTexts.filter(x => x !== said)
+    personTurns = [...personTurns, e.turnId].slice(-4)
+  }
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
 
-// A prompt fleet-send handed over, as DELIVERY claims it: one item (a brief is not split into
-// its sentences) in a window of its own, unless it is a nudge. Its turn.start stamps the item
-// with the turn and arms the note (ledgerNoteOnTool).
+// A prompt fleet-send handed over, as DELIVERY claims it: a lead's brief is one item (not
+// split into its sentences) in a window of its own; the owner's own words (`owner`) are the
+// person's, split into asks like a typed message; a nudge is nothing (ledger.js
+// deliverySource). Its turn.start stamps the items with the turn and arms the note
+// (ledgerNoteOnTool).
+const deliveryKind = p => (p.nudge ? 'nudge' : p.owner ? 'owner' : '')
 async function ledgerDelivery($, p) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const at = await $.clock.now()
   const ids = []
-  if (!p.nudge) await changeLedger($, l => addPrompt(l, { text: p.text, at, source: 'fleet', whole: true }, ids))
+  const made = []
+  const source = deliverySource(deliveryKind(p))
+  if (source) await changeLedger($, l => addPrompt(l, { text: p.text, at, source, whole: source === 'fleet' }, ids, made))
+  if (source === 'user') notePerson(p.text)
+  // `ledgered` is every item it names (its turn stamps them); `ledgerMade` only the ones it
+  // created. A delivery that never lands undoes those alone: a brief sent twice folds into the
+  // first copy (ledger.js repeatOf), and undoing the second send must not delete the first.
   p.ledgered = ids
+  p.ledgerMade = made
 }
 
 async function ledgerUndo($, ids) {
@@ -1224,11 +1586,14 @@ async function ledgerNoteOnTool($, done) {
 }
 
 // Recorded at the turn it started, for a prompt DELIVERY claimed before this process did.
-async function ledgerFleetItem($, text, turnId) {
+async function ledgerFleetItem($, p, turnId) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
+  const source = deliverySource(deliveryKind(p))
+  if (!source) return
+  if (source === 'user') personTurns = [...personTurns, turnId].slice(-4)
   const at = await $.clock.now()
-  await changeLedger($, l => addPrompt(l, { text, at, turnId, source: 'fleet', whole: true }))
+  await changeLedger($, l => addPrompt(l, { text: p.text, at, turnId, source, whole: source === 'fleet' }))
 }
 
 // Kept for the last few turns only: a turn that never completes (a crash, a reload) must
@@ -1254,8 +1619,9 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
   if (!cfg.on) return
   const at = await $.clock.now()
   choiceTurn = e.reason === 'answer' && endsOnChoice(blocks[blocks.length - 1]) ? e.turnId : ''
+  choiceAsked = choiceTurn ? askedIn(blocks[blocks.length - 1]) : ''
   if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
-  if (e.reason !== 'answer') return
+  if (e.reason !== 'answer') { await settleOf($, e.turnId, generation); return }
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
@@ -1266,12 +1632,21 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
   } finally {
     judging = false
   }
+  // Whatever the judge did (closed, kept open, failed, skipped, threw), the turn is over: what
+  // it left open is owed from here (ledger.js settleTurn). After the gate, which is unchanged.
+  await settleOf($, e.turnId, generation)
   const queued = judgeNext
   judgeNext = null
   if (queued) {
     answers = answers.filter(a => a.turnId !== queued.e.turnId)
     await ledgerTurnComplete($, queued.e, queued.blocks, queued.generation)
   }
+}
+
+// The end of turn `turnId` settles the turn-scoped marks it answers (ledger.js settleTurn).
+async function settleOf($, turnId, generation) {
+  const startedAt = turnStarts.get(turnId) || 0
+  await changeLedger($, l => settleTurn(l, { turnId, startedAt, movedOn: turnsStarted !== generation }))
 }
 
 // `blocks`: every text block the turn wrote. `generation`: how many turns had started when
@@ -1287,12 +1662,15 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // The judge is the backup: it reads only what is still open after the agent's own closes
   // (ledger_close, ledger_drop), and a turn whose agent closed everything costs no call at
   // all, not even the promise read: an agent that closes its items with proof is the one
-  // the hybrid is for, and a call per turn to second-guess it is the cost it removes.
+  // the hybrid is for, and a call per turn to second-guess it is the cost it removes. A close
+  // from Bash (fleet-ledger) carries no turn, and counts by its time (ledger.js closedInTurn).
+  // `open` is every open item, the turn's own turn-scoped ones too: the judge reads them.
   const open = openItems(cur, nowMs)
-  const closedOwn = cur.items.some(i => i.closedBy === 'agent' && i.closedTurn === e.turnId)
+  const closedOwn = closedInTurn(cur, { turnId: e.turnId, startedAt: turnStarts.get(e.turnId) || 0 })
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
-  // A stale or waiting item this turn mentions is judged with them (ledger.js revisit).
-  const back = revisit(cur, nowMs, blocks.join('\n'))
+  // A stale or waiting item this turn mentions is judged with them, and on a turn the person's
+  // own message started, every waiting item still inside its day (ledger.js revisitTurn).
+  const back = revisitTurn(cur, nowMs, blocks.join('\n'), { person: personTurns.includes(e.turnId) })
   if (!open.length && !back.length && (closedOwn || !promises)) return  // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
@@ -1311,11 +1689,13 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const failed = []
   let answered = 0
   let waitingOnPerson = false
+  const usage = []         // each call's `usage`, as the host reports it (ledger.js countJudge)
   for (const [k, batch] of batches.entries()) {
     const r = await $.model.complete({
       model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
       maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
     })
+    if (r && r.usage) usage.push(r.usage)
     const verdict = r && r.isAnswered ? parseVerdict(r.text, batch.map(i => i.id)) : null
     if (!verdict) {
       failed.push(!r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for')
@@ -1330,7 +1710,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const judge = failed.length
     ? { at: nowMs, ok: false, why: failed[0], items: answered, calls: batches.length, failedCalls: failed.length }
     : { at: nowMs, ok: true, items: answered, calls: batches.length }
-  const kept = await changeLedger($, l => ({ ...l, judge }))
+  const kept = await changeLedger($, l => ({
+    ...l, judge, judged: countJudge(l.judged, { at: nowMs, calls: batches.length, failedCalls: failed.length, items: answered, usage }),
+  }))
   if (failed.length) {
     void $.ui.log(`ghostfleet ledger: judge failed open on ${failed.length} of ${batches.length} call(s) (${failed[0]}); ${open.length - answered} item(s) unjudged`, { to: 'debug' })
     // A batch that failed closes nothing and re-prompts nothing: no gate on this turn.
@@ -1345,7 +1727,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   if (turnsStarted !== generation || turnRunning || pending || judgeNext) return
   const judged = new Set(open.map(i => i.id))
   let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
-  if (!targets.length) return
+  // Briefs this turn's verdict read as answered, owed their proof (ledger.js needsProof).
+  let proof = proofTargets(after, nowMs, e.turnId)
+  if (!targets.length && !proof.length) return
   // Asked of every open queued or interrupted item, not only the targets: the rewound copy of
   // a message stopped and sent again is from the window before, so the gate would never name
   // it, and unasked it stayed open beside its resend as a second item for one message.
@@ -1359,8 +1743,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
       : unsure.map(i => i.id)
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
-    if (!targets.length) return
+    proof = proof.filter(i => !gone.includes(i.id))
   }
+  if (!targets.length && !proof.length) return
   // Each of these is a turn whose re-prompt could only be answered with the report it just
   // gave (ledger.js gateHold). The items stay open and un-gated: a later turn may still name them.
   const band = await bounded($, $.state.get(BAND), IO_MS, null)
@@ -1370,16 +1755,20 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
     workers: team ? (Number(team.working) || 0) + (Number(team.need) || 0) : 0,
   })
   if (held) {
-    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems: targets.map(i => i.id) } }))
-    void $.ui.log(`ghostfleet ledger: no re-prompt for ${targets.map(i => i.id).join(', ')} (${held})`, { to: 'debug' })
+    const heldItems = [...targets, ...proof].map(i => i.id)
+    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems } }))
+    void $.ui.log(`ghostfleet ledger: no re-prompt for ${heldItems.join(', ')} (${held})`, { to: 'debug' })
     return
   }
   const ids = targets.map(i => i.id)
+  const asked = proof.map(i => i.id)
   // Marked BEFORE the submit: a crash between the two loses one nag, never adds a second.
-  const marked = await changeLedger($, l => markGated(l, ids, nowMs))
+  const marked = await changeLedger($, l => markProofAsked(markGated(l, ids, nowMs), asked, nowMs))
   if (!marked) return
-  // Framed ("the ghostfleet plugin sent a message"), not asUser: it is the mod talking.
-  void Promise.resolve($.prompt.submit({ text: gatePrompt(targets) })).catch(() => {})
+  // Framed ("the ghostfleet plugin sent a message"), not asUser: it is the mod talking. One
+  // submit, so the briefs owed proof and the ignored asks are one turn, not two.
+  const text = [targets.length ? gatePrompt(targets) : '', proof.length ? proofPrompt(proof) : ''].filter(Boolean).join('\n\n')
+  void Promise.resolve($.prompt.submit({ text })).catch(() => {})
 }
 
 async function onLedgerCommand($, e) {
@@ -1403,4 +1792,536 @@ async function onLedgerCommand($, e) {
     return { text: 'ledger: every open item closed (the history stays in the file)' }
   }
   return { text: 'usage: /ledger [list|all|close <id>|clear]' }
+}
+
+// ── PEEK ────────────────────────────────────────────────────────────────────
+//
+// A pasted picture is `[Image #N]` in the prompt box and in the transcript, and nothing in the
+// session lets it be looked at again. PEEK opens it on hover. EXPERIMENTAL (lib/experimental.mjs
+// `peek`): switched off, no hook here changes anything, no image is read, nothing is started.
+//
+// WHERE THE POINTER GOES. Only the fullscreen layout (`"tui": "fullscreen"`) reports the
+// pointer, so off it nothing here draws a target.
+//   WHILE WRITING  the prompt box's text can be coloured by a mod but not hovered, so a row
+//                  above the prompt lists the draft's `[Image #N]` as chips (./peek-chip.js).
+//                  The draft is followed by `prompt.edit` and by a look at the box every
+//                  PEEK_POLL_MS: a paste puts the placeholder in the box with no edit event.
+//   AFTER SENDING  an unpainted chip over each `[Image #N]` on the sent prompt's first line
+//                  (also a click target), and over each `  ⎿  [Image #N]` row Claude Code lists
+//                  under it (hover only: a click there stays Claude Code's).
+// A chip posts when the pointer comes onto it, moves on it and leaves it, and when it is
+// clicked; `ui.message` opens the preview, closes it, or opens the picture in the viewer.
+//
+// WHAT THE PREVIEW IS, decided once a session (peek-shape.js previewMode): on macOS a panel by
+// the pointer (./peek-window.js), in Ghostty or kitty outside tmux the terminal's own picture,
+// anywhere else a card of cells. Both of those are a card drawn above the prompt, over the
+// chips, whatever target opened it: the one place in the terminal a card lays out whole. A
+// window program that ends without showing hands the rest of the session to cells.
+//
+// WHAT IT MAY OPEN. Only a paste of this session: Claude Code's own copy in the session's temp
+// folder, or the bytes the prompt carried (at submit, or from the transcript) written into
+// PEEK's folder beside it. A stored file must be a regular file and not a symbolic link, and
+// its bytes must sniff as PNG, JPEG, GIF or WebP before anything is shown or converted.
+//
+// AN OBSERVER, like STATE and BAND: every call bounded, the work done off the hook that asked
+// for it, and a picture that cannot be had is a line saying why.
+
+const PEEK_ON = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekOn' })
+const PEEK_DRAFT = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekDraft' })
+const PEEK_PICS = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekPics' })
+const PEEK_SHOWN = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'peekShown' })
+const PEEK_POLL_MS = 500
+const PEEK_WAIT_MS = 200          // the engine writes a paste's file just after the placeholder lands
+const PEEK_WAIT_TRIES = 10
+const PEEK_SHRINK_MS = 8_000
+const PEEK_API_MS = 8_000         // the transcript's image blocks: the one large read
+const PEEK_READ_MAX = 4 * 1024 * 1024
+const PEEK_CELL_SIDE = 800        // the side a picture is shrunk to before it is sampled into cells
+const PEEK_DIR = 'ghostfleet-peek'
+
+let peekOn = false
+let peekInteractive = false
+let peekMode = 'cells'       // 'window' | 'kitty' | 'cells' (peek-shape.js previewMode)
+let peekPlatform = ''
+let peekTool = ''            // the shrinker that worked here
+let peekSid = ''             // whose pictures these are: /clear starts the numbers again
+let peekFolder = ''          // the session's temp folder, once found
+let peekPoll = null
+let peekFresh = true         // this copy of the module has not begun yet (peekBegin)
+let peekDraftIds = []
+let peekWin = null           // { target, isOpen }: the window program running now
+let peekChanging = Promise.resolve()
+const peekPixels = new Map() // N -> picture, kept small (thumb), for cells
+const peekLoading = new Set()
+const peekPastes = new Map() // N -> { mediaType, base64 }: bytes a prompt handed over
+
+async function peekSwitch($) {
+  const dir = (await $.env.get('CLAUDE_FLEET_EXPERIMENTAL_DIR')) || `${await $.env.get('HOME')}/.config/ghostfleet`
+  const text = await soon($, $.fs.read(`${dir}/peek.enabled`), '')
+  return /^\s*on\s*$/.test(String(text))
+}
+
+// A state read's value, or `fallback` where there is none. (The read itself is written out at
+// each call: `claude plugin validate` holds every $.state key to the contract only from a
+// reference it can read there.)
+const peekVal = (got, fallback) => (got && got.value !== undefined && got.value !== null ? got.value : fallback)
+
+// Read the switch and make the session match it: on decides how pictures show here and starts
+// looking at the box; off stops that, closes a window and forgets the pictures. Asked at the
+// start and again at every turn's end, so `fleet-experimental disable peek` needs no restart.
+async function peekSync($) {
+  // A copy of the module that is asked before any session.start reached it: the engine replaced
+  // the one that had (its hooks worker was lost), and this one learns where it runs on its own.
+  if (peekFresh) await peekBegin($, ((await soon($, $.session.surfaces(), [])) || []).includes('terminal'))
+  const on = await peekSwitch($)
+  const was = peekOn
+  peekOn = on
+  if ((await peekVal(await soon($, $.state.get(PEEK_ON), null), null)) !== on) await soon($, $.state.set(PEEK_ON, on), null)
+  if (on && !was) {
+    const uname = await soon($, $.process.run(['uname', '-s'], { timeoutMs: IO_MS }), null)
+    peekPlatform = platformOf(uname && uname.exitCode === 0 ? uname.stdout : '')
+    // Each name written out: `claude plugin validate` lists what a module reads from literals.
+    const env = {
+      TERM_PROGRAM: await $.env.get('TERM_PROGRAM'), TERM: await $.env.get('TERM'),
+      KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'), TMUX: await $.env.get('TMUX'),
+      SSH_CONNECTION: await $.env.get('SSH_CONNECTION'), SSH_TTY: await $.env.get('SSH_TTY'),
+      CLAUDE_FLEET_PEEK: await $.env.get('CLAUDE_FLEET_PEEK'),
+    }
+    peekMode = previewMode({ platform: peekPlatform, env, isInteractive: peekInteractive })
+    if (peekInteractive) {
+      if (peekPoll) peekPoll.cancel()
+      // A look that fails (the module unloading under it) waits for the next one.
+      peekPoll = $.clock.every(PEEK_POLL_MS, () => {
+        void $.prompt.read().then(box => peekTrack($, box.text)).catch(() => {})
+      })
+      const box = await soon($, $.prompt.read(), null)
+      if (box) await peekTrack($, box.text)
+    }
+  }
+  if (!on && was) await peekForget($)
+  return on
+}
+
+// A RELOAD KEEPS $.state AND STARTS THE MODULE OVER, and the pictures were in both. PEEK_PICS
+// says which pastes were read; the pixels a card is drawn from, the bytes a prompt handed over
+// and the window a hover opened lived in the module, and went with it. So a paste read before
+// /reload-plugins was still "read" after it, never read again, and its card said loading for as
+// long as the session ran; the new code never saw the file, and wrote nothing beside it. The
+// same for a paste an older mod read and recorded in its own shape, which is what a reload
+// after a deploy meets. A new copy of the module starts its pictures again: each paste in the
+// box, or in a sent prompt, is read on the next look, by this code.
+//   The look itself was never the fault, though it was the first suspect: measured on 2.1.319,
+// a reload's session.start says isInteractive like the first one, the new copy arms its poll on
+// the switch's edge, and only that poll ticks (the engine drops the old copy's timers). One
+// copy would miss it: one the engine starts in place of a lost hooks worker, whose first event
+// can be a turn's end with no session.start before it, so it never learns it is in a terminal
+// and never looks. It asks the session instead.
+async function peekBegin($, interactive) {
+  peekFresh = false
+  peekInteractive = interactive
+  await soon($, $.state.set(PEEK_PICS, {}), null)
+  await soon($, $.state.set(PEEK_SHOWN, null), null)
+}
+
+async function peekForget($) {
+  if (peekPoll) { peekPoll.cancel(); peekPoll = null }
+  peekCloseWindow()
+  peekPixels.clear(); peekPastes.clear(); peekDraftIds = []; peekFolder = ''
+  await soon($, $.state.set(PEEK_DRAFT, []), null)
+  await soon($, $.state.set(PEEK_PICS, {}), null)
+  await soon($, $.state.set(PEEK_SHOWN, null), null)
+}
+
+// After /clear the numbers start again from 1: what was read belongs to the session before.
+async function peekFollow($) {
+  const sid = await soon($, $.session.id(), '')
+  if (sid === peekSid) return
+  const had = peekSid !== ''
+  peekSid = sid
+  peekFolder = ''
+  peekPixels.clear(); peekPastes.clear()
+  if (had) {
+    await soon($, $.state.set(PEEK_PICS, {}), null)
+    await peekChange($, () => null)
+  }
+}
+
+// ── finding a paste ──
+
+// The session's temp folder (peek-shape.js sessionDirs): the one holding `images`, else the
+// first candidate, which is where PEEK's own folder goes even before Claude Code made one.
+async function peekSessionFolder($) {
+  if (peekFolder) return peekFolder
+  const out = await soon($, $.process.run(['id', '-u'], { timeoutMs: IO_MS }), null)
+  const uid = out && out.exitCode === 0 ? String(out.stdout).trim() : ''
+  const tmp = (await $.env.get('CLAUDE_CODE_TMPDIR')) || '/tmp'
+  const dirs = sessionDirs({ tmp, uid, root: await soon($, $.session.root(), ''), cwd: await soon($, $.session.cwd(), ''), sessionId: peekSid })
+  for (const d of dirs) {
+    if (await soon($, $.fs.list(`${d}/images`), null)) return (peekFolder = d)
+  }
+  // A project path too long for one folder name has a hash after it: look for the session.
+  if (dirs.length) {
+    const base = dirs[0].slice(0, dirs[0].lastIndexOf('/', dirs[0].lastIndexOf('/') - 1))
+    for (const entry of (await soon($, $.fs.list(base), null)) || []) {
+      if (entry.kind !== 'dir') continue
+      const d = `${base}/${entry.name}/${peekSid}`
+      if (await soon($, $.fs.list(`${d}/images`), null)) return (peekFolder = d)
+    }
+  }
+  return dirs[0] || ''
+}
+
+// Paste N as a file: { file, size } or { why }. Claude Code's copy first; else the prompt's or
+// the transcript's bytes, written once into PEEK's folder.
+async function peekFile($, n) {
+  const folder = await peekSessionFolder($)
+  if (!folder) return { why: WHY.noBytes }
+  const names = ((await soon($, $.fs.list(`${folder}/images`), null)) || []).map(x => x.name)
+  const name = storedImage(names, n)
+  if (name) {
+    const file = `${folder}/images/${name}`
+    const st = await soon($, $.fs.stat(file), null)
+    if (st && st.isLink) return { why: WHY.link }
+    if (st && st.kind === 'file') return { file, size: st.size }
+  }
+  const mine = `${folder}/${PEEK_DIR}`
+  for (const ext of ['png', 'jpg', 'gif', 'webp']) {
+    const st = await soon($, $.fs.stat(`${mine}/${n}.${ext}`), null)
+    if (st && st.kind === 'file' && !st.isLink) return { file: `${mine}/${n}.${ext}`, size: st.size }
+  }
+  if (!peekPastes.has(n)) {
+    const full = await soon($, $.session.messages({ as: 'api' }), [], PEEK_API_MS)
+    for (const [k, img] of pastesFromApi(Array.isArray(full) ? full : [])) if (!peekPastes.has(k)) peekPastes.set(k, img)
+  }
+  const img = peekPastes.get(n)
+  if (!img) return { why: WHY.noBytes }
+  const kind = sniff(fromBase64(img.base64.slice(0, 64 * 1024)))
+  if (!kind) return { why: WHY.notImage }
+  const file = `${mine}/${n}.${EXT[kind.format]}`
+  // The bytes ride on stdin and the path as $1: neither is ever inside the script's text.
+  const wrote = await soon($, $.process.run(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && base64 -d > "$1"', 'peek', file],
+    { stdin: img.base64, timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+  if (!wrote || wrote.exitCode !== 0) return { why: WHY.failed }
+  return { file, size: Math.floor(img.base64.length * 3 / 4) }
+}
+
+// The first shrinker that works here, remembered: `file` as a PNG at `out`, at most `side`.
+async function peekShrink($, file, out, side) {
+  const tools = peekTool ? [peekTool] : SHRINKERS[peekPlatform] || SHRINKERS.other
+  await soon($, $.process.run(['mkdir', '-p', out.slice(0, out.lastIndexOf('/'))], { timeoutMs: IO_MS }), null)
+  for (const tool of tools) {
+    const r = await soon($, $.process.run(shrinkArgv(tool, file, out, side), { timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+    if (r && r.exitCode === 0) { peekTool = tool; return true }
+  }
+  return false
+}
+
+// Reads paste N once into PEEK_PICS: its file, kind and size, and for the terminal what it
+// draws (a PNG for kitty, pixels for cells). A window needs only the file.
+async function peekLoad($, n) {
+  if (!peekOn || peekLoading.has(n)) return
+  const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  const had = pics[n]
+  if (had && (had.ready || !had.retry)) return
+  peekLoading.add(n)
+  const sid = peekSid
+  let pic
+  try {
+    let got = await peekFile($, n)
+    for (let i = 0; got.why === WHY.noBytes && i < PEEK_WAIT_TRIES; i++) {
+      await $.clock.sleep(PEEK_WAIT_MS)
+      got = await peekFile($, n)
+    }
+    pic = got.why ? { label: `[Image #${n}]`, why: got.why, retry: got.why === WHY.noBytes } : await peekRead($, n, got.file, got.size)
+  } catch {
+    pic = { label: `[Image #${n}]`, why: WHY.failed, retry: true }
+  } finally {
+    peekLoading.delete(n)
+  }
+  if (!peekOn || sid !== peekSid) return
+  const now = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  await soon($, $.state.set(PEEK_PICS, { ...now, [n]: pic }), null)
+}
+
+async function peekRead($, n, file, size) {
+  const label = `[Image #${n}]`
+  let bytes = null
+  if (size <= PEEK_READ_MAX) {
+    const got = await soon($, $.fs.read(file, { as: 'bytes' }), null)
+    bytes = got && got.base64 ? fromBase64(got.base64) : null
+  } else {
+    const head = await soon($, $.process.run(['/bin/sh', '-c', 'head -c 65536 "$1" | base64', 'peek', file], { timeoutMs: IO_MS }), null)
+    bytes = head && head.exitCode === 0 ? fromBase64(head.stdout) : null
+  }
+  const kind = bytes && sniff(bytes)
+  if (!kind) return { label, why: bytes ? WHY.notImage : WHY.missing, retry: !bytes }
+  const base = { label, file, format: kind.format, bytes: size, width: kind.width, height: kind.height }
+  if (peekMode === 'window') return { ...base, ready: true }
+  const larger = !kind.width || Math.max(kind.width, kind.height) > PEEK_CELL_SIDE
+  const cache = `${file.slice(0, file.lastIndexOf('/images/') >= 0 ? file.lastIndexOf('/images/') : file.lastIndexOf('/'))}/${PEEK_DIR}`
+  if (peekMode === 'kitty') {
+    if (kind.format === 'png') return { ...base, png: file, ready: true }
+    const out = `${cache}/${n}.view.png`
+    return (await peekShrink($, file, out)) ? { ...base, png: out, ready: true } : { ...base, why: WHY.noDecoder }
+  }
+  // Cells: a PNG small enough decodes here; anything else is shrunk to one first.
+  let pixels = kind.format === 'png' && bytes.length === size && !larger ? decodePng(bytes) : null
+  if (!pixels) {
+    const out = `${cache}/${n}.cells.png`
+    if (await peekShrink($, file, out, larger ? PEEK_CELL_SIDE : undefined)) {
+      const got = await soon($, $.fs.read(out, { as: 'bytes' }), null)
+      pixels = got && got.base64 ? decodePng(fromBase64(got.base64)) : null
+    }
+  }
+  if (!pixels) {
+    const ff = await soon($, $.process.run(ffmpegFileArgv(file), { timeoutMs: PEEK_SHRINK_MS }), null, PEEK_SHRINK_MS + 1000)
+    if (ff && ff.exitCode === NO_FFMPEG) return { ...base, why: WHY.noDecoder }
+    pixels = ff && ff.exitCode === 0 && !ff.isStdoutTruncated ? parsePam(fromBase64(ff.stdout)) : null
+  }
+  if (!pixels) return { ...base, why: WHY.failed }
+  peekPixels.set(n, thumb(pixels))
+  return { ...base, width: kind.width || pixels.width, height: kind.height || pixels.height, ready: true }
+}
+
+// ── the draft, the preview ──
+
+// Keeps the row above the prompt in step with the box.
+async function peekTrack($, text) {
+  if (!peekOn) return
+  await peekFollow($)
+  const ids = pastesIn(text)
+  if (!sameIds(ids, peekDraftIds)) {
+    peekDraftIds = ids
+    await soon($, $.state.set(PEEK_DRAFT, ids), null)
+    await peekChange($, peekCloseChip)
+  }
+  for (const n of ids) void peekLoad($, n)
+}
+
+// A preview the row above the prompt opened (`.../chip:N`) closes when the box changes: the
+// box may grow and move the chip from under the pointer, which would then say nothing.
+const peekCloseChip = now => (now && /\/chip:\d+$/.test(now.target) ? null : now)
+
+// Opens, moves or closes (null) the preview, one change at a time, each handed the one before:
+// leaving one chip and entering the next are two changes that can arrive in either order.
+function peekChange($, next) {
+  const run = peekChanging.then(async () => {
+    const last = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
+    const to = next(last)
+    if (last === to || (last && to && last.n === to.n && last.target === to.target && last.edge === to.edge)) return
+    await soon($, $.state.set(PEEK_SHOWN, to), null)
+    if (to && to.edge === 'window') void peekOpenWindow($, to.n, to.target)
+    else peekCloseWindow()
+  })
+  peekChanging = run.catch(() => {})
+  return run
+}
+
+const peekPlace = (n, target) => ({ n, target, edge: peekMode === 'window' ? 'window' : 'card' })
+
+// The window by the pointer, till peekCloseWindow. The program ticks ten times a second, so
+// the loop wakes to find it closed, and leaving the loop ends the program (./peek-window.js).
+// One that ends without having said `shown` cannot show a window here: cells from now on.
+async function peekOpenWindow($, n, target) {
+  if (peekWin && peekWin.target === target && peekWin.isOpen) return
+  peekCloseWindow()
+  const me = { target, isOpen: true }
+  peekWin = me
+  await peekLoad($, n)
+  const pic = (await peekVal(await soon($, $.state.get(PEEK_PICS), null), {}))[n]
+  if (!pic || !pic.file || !me.isOpen) { if (peekWin === me) peekWin = null; return }
+  let shown = false, said = ''
+  try {
+    const child = $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', PEEK_WINDOW],
+      env: { PEEK_FILE: pic.file, PEEK_SIZE: String(WINDOW.size), PEEK_LIFE: String(WINDOW.life) } })
+    for await (const piece of child) {
+      if (said.length < 2000 && piece.text) said += piece.text
+      if (/^shown$/m.test(piece.text || '')) shown = true
+      if (!me.isOpen) break
+    }
+  } catch (err) {
+    said += String(err && err.message ? err.message : err)
+  }
+  if (peekWin === me) peekWin = null
+  if (shown || !me.isOpen) return
+  void $.ui.log(`ghostfleet peek: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'osascript did not start'}); cells from now on`, { to: 'debug' })
+  peekMode = 'cells'
+  peekPixels.delete(n)
+  const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  const { [n]: _gone, ...rest } = pics
+  await soon($, $.state.set(PEEK_PICS, rest), null)
+  void peekLoad($, n)
+  await peekChange($, now => (now && now.edge === 'window' ? null : now))
+}
+
+function peekCloseWindow() {
+  if (peekWin) peekWin.isOpen = false
+  peekWin = null
+}
+
+async function peekOpenImage($, n) {
+  await peekLoad($, n)
+  const pic = (await peekVal(await soon($, $.state.get(PEEK_PICS), null), {}))[n]
+  if (!pic || !pic.file) return
+  await soon($, $.process.run(openArgv(peekPlatform, pic.file), { timeoutMs: IO_MS }), null)
+}
+
+// ── the hooks ──
+
+async function peekStart($, e) {
+  if (peekFresh) await peekBegin($, Boolean(e && e.isInteractive))
+  else peekInteractive = Boolean(e && e.isInteractive)
+  await peekFollow($)
+  await peekSync($)
+}
+
+// From onTurnComplete, the main loop's end: the switch again.
+async function peekTurnComplete($) {
+  await peekSync($)
+}
+
+function peekEnd() {
+  if (peekPoll) { peekPoll.cancel(); peekPoll = null }
+  peekCloseWindow()
+}
+
+// From onPromptSubmit, before `next`: the prompt's own pastes, while the engine still hands
+// their bytes over. After this hook they are only in the transcript, the expensive place.
+async function peekPrompt($, e) {
+  if (!peekOn || !Array.isArray(e.attachments) || !e.attachments.length) return
+  const images = e.attachments.filter(a => a && a.type === 'image' && a.id)
+  for (const { n, image } of pairPastes(pastesIn(e.text), images)) {
+    let base64 = '', offset, mediaType = image.mediaType || ''
+    for (let i = 0; i < 8; i++) {
+      const m = await soon($, $.prompt.media({ id: image.id, ...(offset !== undefined ? { offset } : {}) }), null)
+      if (!m || !m.base64) break
+      base64 += m.base64; mediaType = m.mediaType || mediaType
+      if (m.next === undefined) { peekPastes.set(n, { mediaType, base64 }); break }
+      offset = m.next
+    }
+  }
+}
+
+// From onPromptSubmit, after `next`: the draft is gone, and so are its chips and preview.
+async function peekSubmitted($, e) {
+  if (!peekOn || !e.origin || e.origin.kind !== 'composer') return
+  peekDraftIds = []
+  await soon($, $.state.set(PEEK_DRAFT, []), null)
+  await peekChange($, () => null)
+  for (const n of pastesIn(e.text)) void peekLoad($, n)
+}
+
+async function onPeekEdit($, e, next) {
+  const box = await next(e)
+  if (!peekOn) return box
+  await peekChange($, peekCloseChip)
+  await peekTrack($, box.text)
+  return box
+}
+
+async function onPeekMessage($, e, next) {
+  const result = await next(e)
+  if (!peekOn) return result
+  const chip = chipOf(e.element)
+  if (!chip) return result
+  const target = `${e.requestId}/${e.element}`
+  const data = e.data && typeof e.data === 'object' ? e.data : {}
+  if (data.isClicked === true) {
+    // The viewer opens over where a preview would stand: close it first.
+    await peekChange($, () => null)
+    void peekOpenImage($, chip.n)
+    return result
+  }
+  const isOver = data.isOver === true
+  if (isOver) void peekLoad($, chip.n)
+  await peekChange($, now => (!isOver ? (now && now.target === target ? null : now)
+    : now && now.target === target ? now : peekPlace(chip.n, target)))
+  return result
+}
+
+// The fullscreen layout is the one that reports the pointer.
+const peekPointer = e => e.surface === 'terminal' && !(e.viewport && e.viewport.isFullscreen === false)
+
+// The card, in the terminal: the picture in a round border, its caption under it, every line
+// written to the card's full width so the transcript under it does not show through.
+function peekCard(ui, pic, n, cols, rows) {
+  const { Box, Text, Raster, Image } = ui
+  const label = `[Image #${n}]`
+  const line = (t, w) => h(Text, { dimColor: true, wrap: 'truncate-end' }, t.padEnd(w))
+  // { card, rows }: the element, and how many rows it takes (border and caption included).
+  const frame = (w, inner, ...kids) => ({ rows: inner + 2 + kids.length - 1,
+    card: h(Box, { key: `card-${n}`, flexDirection: 'column', borderStyle: 'round', borderDimColor: true, flexShrink: 0, width: w + 2 }, ...kids) })
+  if (!pic || (!pic.ready && !pic.why)) return frame(cols, 1, line(`${label} loading…`, cols))
+  if (pic.why) return frame(cols, 1, line(`${label} no preview: ${pic.why}`, cols))
+  const cap = caption({ label }, { width: pic.width, height: pic.height, format: pic.format, size: pic.bytes })
+  let inner = null, w = 0, hgt = 0
+  // Shrunk to fit, never enlarged: a picture smaller than the room is drawn at its own size.
+  if (pic.width && pic.height) { cols = Math.min(cols, pic.width); rows = Math.min(rows, Math.ceil(pic.height / 2)) }
+  if (pic.png && Image) {
+    const fit = fitCells(pic.width || 1, pic.height || 1, cols, rows)
+    w = fit.cols; hgt = fit.rows
+    inner = h(Image, { key: `image-${n}`, source: { file: pic.png, format: 'png' }, columns: w, rows: hgt, alt: label })
+  } else if (peekPixels.has(n) && Raster) {
+    const r = rasterOf(peekPixels.get(n), cols, rows)
+    if (r) { w = r.cols; hgt = r.rows; inner = h(Raster, { key: `image-${n}`, columns: w, rows: hgt, cells: r.cells }) }
+  }
+  if (!inner) return frame(cols, 1, line(`${label} loading…`, cols))
+  const width = Math.max(w, Math.min(cap.length, cols))
+  const left = Math.floor((width - w) / 2), right = width - w - left
+  const side = (k, m) => m > 0 ? [h(Text, { key: k }, Array.from({ length: hgt }, () => ' '.repeat(m)).join('\n'))] : []
+  return frame(width, hgt + 1, h(Box, { key: 'pic', flexDirection: 'row' }, ...side('l', left), inner, ...side('r', right)), line(cap, width))
+}
+
+// Above the prompt: the card a hover opened, over a chip each for the draft's pastes. The card
+// is drawn here whichever target opened it, a chip of this row or an `[Image #N]` of a sent
+// prompt, because this is the one place in the terminal it lays out (see onPeekSent). Called
+// from the band's AbovePrompt hook, beneath its rows; what is beneath it is drawn after.
+async function onPeekBand($, e, next) {
+  if (e.props.hasSurvey || !peekPointer(e) || !(await peekVal(await soon($, $.state.get(PEEK_ON), null), false))) return next(e)
+  const ids = await peekVal(await soon($, $.state.get(PEEK_DRAFT), null), [])
+  const now = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
+  const showing = Boolean(now && now.edge === 'card')
+  const below = await next(e)
+  if (!ids.length && !showing) return below
+  const ui = $.ui.resolve(e)
+  const { Box, Text, Client } = ui
+  const cols = Math.max(12, Math.min(96, e.props.bodyColumns - 2))
+  // In the flow: the slot is a window of at most `maxRows` that clips what is floated out of
+  // it (measured: a card at `bottom: 1` was in the tree and never on the screen). So the card
+  // takes the slot's rows while it shows, less the chips' row, its own border and caption, and
+  // room for the band's rows above it.
+  const rows = Math.max(3, Math.min(24, (e.props.maxRows || 12) - 8))
+  const pics = showing ? peekVal(await soon($, $.state.get(PEEK_PICS), null), {}) : {}
+  return h(Box, { flexDirection: 'column' },
+    ...(showing ? [peekCard(ui, pics[now.n], now.n, cols, rows).card] : []),
+    ...(ids.length ? [h(Box, { key: 'peek-chips', flexDirection: 'row', columnGap: 1 },
+      ...ids.map(n => h(Client, { key: `chip:${n}`, module: './peek-chip.js', props: { label: `[Image #${n}]` } })),
+      h(Text, { key: 'hint', dimColor: true }, 'hover to preview · click to open'))] : []),
+    ...(below ? [below] : []))
+}
+
+// A sent prompt: an unpainted chip over each `[Image #N]` of its first line and over each row
+// Claude Code lists its images in. Targets only: a card floated from here was drawn under the
+// rows the transcript lays out after it, and clamped to the screen's top (measured), so the
+// card a hover here opens is drawn above the prompt (onPeekBand), or is the window.
+async function onPeekSent($, e, next) {
+  if (!peekPointer(e) || !e.props.origin || e.props.origin.kind !== 'composer') return next(e)
+  const ns = pastesIn(e.props.text)
+  if (!ns.length || !(await peekVal(await soon($, $.state.get(PEEK_ON), null), false))) return next(e)
+  const pics = peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
+  for (const n of ns) if (!pics[n]) void peekLoad($, n)
+  const drawn = await next(e)
+  const has = n => Boolean(pics[n] && !pics[n].why)
+  const { Box, Client } = $.ui.resolve(e)
+  const over = []
+  for (const t of listedTargets(ns, has)) {
+    over.push(h(Box, { key: `listed-${t.n}`, position: 'absolute', bottom: t.bottom, left: t.left },
+      h(Client, { key: `sent:${t.n}`, module: './peek-chip.js', width: t.width, height: 1 })))
+  }
+  for (const t of tokenTargets(e.props.text, e.viewport && e.viewport.columns, has)) {
+    over.push(h(Box, { key: `token-${t.n}`, position: 'absolute', top: 1, left: t.left },
+      h(Client, { key: `token:${t.n}`, module: './peek-chip.js', width: t.width, height: 1 })))
+  }
+  if (!over.length) return drawn
+  return h(Box, { flexDirection: 'column' }, drawn, ...over)
 }

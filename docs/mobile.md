@@ -384,6 +384,118 @@ The layers answer different questions, which is why all of them are here: Tailne
 *can this device join*; the ACL — *may it reach this port*; the passkey — *is this the
 owner*; the session token — *is that still true right now*.
 
+### On the Mac itself: `http://localhost:8787`
+
+The same client opens on the Mac without Tailscale: `ghostfleet web` (or `fleet-web`)
+opens `http://localhost:<port>` in the default browser. It starts nothing; if `fleet-serve`
+is not running, it says so and prints the command that starts it.
+
+`fleet-serve` listens on **`127.0.0.1`** on the same port, beside its tailnet address.
+Nothing about the tailnet listener changes, and the phone sees no difference.
+
+**The two listeners are independent.** Either one can be unavailable while the other serves.
+- **The tailnet address is gone** (tailscaled down, or the machine moved to another
+  tailnet): the daemon serves localhost and logs once that the tailnet listener is off, with
+  the `fleet-serve init` line that fixes it.
+- **127.0.0.1:<port> is held by something else:** the reverse. The tailnet serves, and the
+  log says localhost is off, once.
+
+A listener that is down is retried every 30 s. The retries are silent, and one more line
+says when it comes up. The daemon exits only when neither can listen, and then names both
+reasons. A configured address that policy refuses (a wildcard, a LAN or a public address)
+is still fatal at startup, as it always was.
+
+Two configurations
+have no second listener, and both are reported at startup and by `fleet-serve check`:
+- a config that is already `--bind 127.0.0.1` for `localhost`, where the configured
+  listener is the Mac's own door;
+- `127.0.0.1` bound for another name (a tunnel's). Serving two relying parties from one
+  socket would mean reading the scope from the `Host` header, which the client writes.
+
+`localhost` is **its own relying party**. A passkey is bound to the rp_id it was made for,
+so the Mac enrols its own the first time, through the same flow as the phone:
+`fleet-serve enroll mac`, then the code, then Touch ID. `http://localhost` is a secure
+context without TLS, the one `http://` origin WebAuthn accepts. The two listeners share
+nothing. Origin, `clientData.origin`, the authenticator's rpIdHash, the challenge, the
+credential and the session token each belong to the socket they were made on. An assertion
+made at localhost is refused on the tailnet and the reverse, a POST carrying the other
+listener's Origin is refused, and a token minted on one is dead on the other. The tailnet's
+passkeys and sessions are untouched.
+
+**Why localhost still needs the passkey.** `127.0.0.1` cannot be reached from the network,
+but **every process on the Mac** can reach it: every agent the fleet runs, every
+`npm install` postinstall script, and every page open in a local browser that tries a
+`fetch`. Without the tailnet there is no second layer. The passkey, the idle session, the
+second assertion on destructive verbs, the Origin check and the `Host` allowlist (which
+keeps DNS rebinding out) are all that stand between those processes and an endpoint that
+runs code as you. So localhost gets a different rp_id, and nothing else is relaxed.
+
+### Several machines, one app: `fleet-serve pair`
+
+Someone with a fleet on a laptop and another on an always-on VM had two home-screen apps and
+two passkeys, because each `fleet-serve` is its own app. Tailscale connects the devices but
+merges nothing. Pairing merges them: open the app from either machine and it shows both.
+
+```
+laptop$ fleet-serve pair --as laptop          # opens a 5-minute, one-use window, prints a code
+vm$     fleet-serve pair https://<laptop>.ts.net ABCDE-FGHJK --as vm
+```
+
+**The phone still logs in to one machine.** A passkey belongs to the rp_id it was made for,
+and WebAuthn does not work across origins, so the client never talks to the other machine
+directly. The machine it opened (the *home host*) answers for the other one by proxying,
+server to server, signed with a credential the two exchanged once, at pairing.
+
+- **Addresses.** The other machine's projects are `<name>@<host>` (`acme-api@vm`). A project
+  name cannot contain `@`, so a bare name always means this machine. Every address that
+  existed before pairing keeps its meaning, the card digits included. This machine's
+  projects come first.
+- **What the screens show.** Each tab carries its machine (`laptop · work`, `vm · work`),
+  and so does every project row, every queue item and every account line. A machine that does
+  not answer is still listed, as one card reading `offline · last seen 3h0m ago`. It is never
+  left out. With one machine, nothing on any screen changes.
+- **What crosses:** the projects list, grids, a conversation (read and send), the pane, the
+  queue, usage, and wake, park and resume. Search covers both machines, because it searches
+  the merged list. One read exists for the hosts themselves rather than for the phone:
+  `/api/presence`, two fields saying how long since someone typed there, which each host's
+  push hold asks the other ([§9](#9-push)).
+- **Photos cross where a send does.** The home host forwards the photo, signed, to the
+  machine the session runs on. That machine stores it and runs every check a local photo
+  gets. It answers with *its own* path, and the send that follows goes to the same machine,
+  so that path names the file where the agent will read it. Both audit logs record it. The
+  permission is not a separate setting: a photo is allowed only while `fleet_send` is. A
+  machine that does not answer shows as a failed upload that names it.
+- **What does not cross:** the web terminal (a shell is opened only by the machine it runs
+  on; for another machine's project the control is absent, with one line saying why), any
+  passkey verb (a passkey only verifies on the machine it was made on), and project
+  settings. Each is refused on the home host, by name.
+
+**The credential.** Pairing leaves two secrets on each side, one per direction. Each side
+signs with the secret it uses to call the other, and checks the other's requests with the
+second one, so a signature cannot be replayed back to the machine that made it. Both are
+in `serve-peers.json` beside `serve.json`, at 0600. After pairing, the secret itself is
+never sent again. Every proxied request carries an HMAC over its method, path and query,
+body digest, timestamp, a single-use nonce, and the client it acts for. So there is nothing
+in a URL or a log that could be used to make another request. Pairing over plain `http://`
+is refused unless both ends are loopback.
+
+**Identity.** The remote machine takes its *host* half of an identity (`laptop/phone`) from
+its own record of the pairing. The *client* half comes from the signed request. An
+`X-Fleet-On-Behalf` header that is not inside a valid signature is refused outright, so a
+phone's own token cannot use it to write someone else's name into the audit log.
+
+**Limits and the record.** The phone's request passes the home host's rate limits and
+per-client caps before it is forwarded. The forwarded request passes the remote's limits,
+per address and per `<host>/<client>`. Every proxied action is written to **both** audit
+logs: the home host records that it forwarded it (`via: proxy`, `host: vm`), and the remote
+records that it ran it (`via: pair`, `origin_host`, `origin_client`).
+
+**Unpair** with `fleet-serve unpair <host>` or from the settings sheet's *machines* list.
+It revokes on both machines if the other answers, and on this one regardless, so the other
+machine's signature stops working here at once. `fleet-serve pairs` lists the paired
+machines and when each was last heard from. `fleet-serve relabel <host|self> <label>`
+renames how a machine is shown here. Its address does not change.
+
 ## 6. Client: a PWA, and the reason is the repo
 
 The client is a **Progressive Web App**, served by `fleet-serve`, installed to the home
@@ -436,8 +548,11 @@ they are already cards. Screens map one to one: Projects → grid → session. K
 touch: `1-9`/`⏎` → tap, `⇧hjkl` → drag to reorder, `p`/`P` → swipe, `x` → long-press with
 the same `y = yes` confirmation.
 
-**The stack has no phone equivalent** and does not need one. It exists to put four
-sessions side by side; a phone has no side, and at `nc = 1` that is just the card list.
+**The stack** was the one screen with no phone equivalent, because it exists to put four
+sessions side by side and a phone has no side. The owner has since asked for it on the web
+anyway, and it takes the shape each window allows: side-by-side columns at a desk, and on a
+phone one conversation at a time, a swipe apart, with `2/4` in the bar (web/README.md, *The
+stack*).
 
 The one screen that is **not** a mirror of a TUI screen is the session screen, because the
 TUI has no such screen: `⏎` on a card *attaches to the pane*. §7a is what that means on a
@@ -539,24 +654,36 @@ and becomes about *proving who is doing it, and leaving a record*:
 Enforcement is **server-side on the tool name**, never on which buttons the client draws.
 A client-side restriction is a suggestion.
 
-### The two things that cannot transfer
+### The things that could not transfer
 
-Physical constraints, not policy:
+**The `Ctrl-n` editor tab was the first, and the owner has since asked for it** — the desk's
+LazyVim from the web. It is the terminal's screen with the editor tab in it (`bin/fleet-tab
+edit`, `_edit-<project>`), opened by the same request and behind the same four gates below:
+nvim's `:terminal` is a shell, so the editor is no lesser surface than the terminal and gets
+nothing lighter. `Ctrl-n` itself is the browser's, so on the web it is `Ctrl-a n` — the desk's
+own fallback — or `editor` beside `terminal` behind a `⋯`.
 
-- **The stack** (§6) — it exists to put sessions side by side, and a phone has no side.
-- **`Ctrl-t` terminal and `Ctrl-n` editor tabs** — these open a shell and neovim in the
-  session's folder. There is no local shell on the phone to open them in. Streaming a
-  remote shell is a much larger surface than the rest of this document combined and is
-  deliberately out of scope; the fleet verbs cover what those tabs are usually reached
-  for.
+**The stack was the second, and the owner has since asked for it** — several agents, across
+projects, on screen at once — so it is on the web as columns at a desk and as a swipe between
+conversations on a phone (§6, and web/README.md *The stack*). "A phone has no side" is still
+true; what changed is that one conversation at a time, a swipe apart, turned out to be the
+phone's way of having several.
 
-  **§7a does not reopen this, and the difference is the whole reason it is safe.** The pane
-  view is a periodic `capture-pane` — a photograph of a grid tmux already laid out, one
-  direction, no pty, no session of its own, nothing the phone can type into except the
-  verbs that were already server-side and audited. A terminal tab is an interactive shell:
-  a pty, a live byte stream both ways, and arbitrary command execution outside the verb
-  vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface, and
-  "we already show a terminal" is not an argument for the second.
+**The `Ctrl-t` terminal tab was the third, and the owner has since reopened it** — on purpose,
+with its own gates, and the argument that kept it out is the reason those gates exist rather
+than something that stopped being true. The pane view (§7a) is a periodic `capture-pane`:
+one direction, no session of its own, nothing to type into but the audited verbs. A terminal
+is an interactive shell — a live byte stream both ways and arbitrary commands outside the
+verb vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface.
+
+So the terminal is not a shell of its own: it is the project's fleet tab (`bin/fleet-tab`,
+`_term-<project>`), attached as a tmux control-mode client, so the desk sees the same session
+the phone types into. And it is everything a verb is plus four more (web/README.md, *The
+terminal*, and `bin/fleet-serve.mjs` TERMINAL): **off per device** until switched on in
+settings, which takes a passkey and is recorded on that device's enrolment; **a fresh passkey
+at every open**; a WebSocket that needs a configured **Origin** and a one-use ticket, on the
+address this daemon already binds; and an **idle close** after 15 minutes without a
+keystroke — the session token's own window. Nothing it prints reaches `serve.log`.
 
 ### The one place the phone shows LESS, and why the numbers did not move
 
@@ -811,13 +938,14 @@ away. The owner asked for one on every message, beside the other per-message con
 is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
 starting one message stops the other.
 
-**Conversation mode, in every session** — while Jarvis (experimental, off by default) is
-switched on; with it off there is no talk button anywhere. The composer of every session — not only Jarvis's —
+**Conversation mode, in every session** — whether or not Jarvis (experimental, off by
+default) is switched on: talking to a session never goes through Jarvis, only through the
+Mac's transcriber and the session itself. The composer of every session — not only Jarvis's —
 has the **talk** button, the same control in the same place: tap it once and the mic opens,
 **3.5 seconds of quiet** ends what you said (counted from your last word; a setting, 1.5–8 s,
 under **conversation mode** in settings — a pause to think does not send half a sentence),
-the Mac transcribes it (whisper.cpp, the transcriber Jarvis uses — `fleet-jarvis voice
---install`), it is sent to *that* session as a prompt, and when the session's turn is over its
+the Mac transcribes it (whisper.cpp, through `/api/voice/hear` — `fleet-jarvis voice
+--install` sets it up; Jarvis uses the same one), it is sent to *that* session as a prompt, and when the session's turn is over its
 final reply is read aloud in the Mac's voice (or the device's, as below) before the mic opens
 again. While the quiet runs, the band above the chat drains a bar and says how long is left;
 talking again fills it, and **a tap on the band sends now**. **Talking over an answer cuts
@@ -1071,9 +1199,36 @@ LAN-only and does not help from a café.
 > is dropped. A newer event for the same session replaces the held one. Every decision is one
 > line in `serve.log`: `push: held 1 — at the Mac (idle 14s)`, `push: released 2 held — left
 > the Mac (screen locked)`, `push: dropped 1 held as seen`, `push: expired 1 held after 600s
-> at the Mac`. `push.at_mac_idle: 0` turns it off; on Linux and WSL it is off (there is no
-> reading, and no reading never counts as "at the Mac" — an unreadable sensor fails toward a
-> push, never toward silence). `fleet-serve push` prints which.
+> at the Mac`. `push.at_mac_idle: 0` turns it off. A reading that cannot be taken never counts
+> as "at the Mac" — an unreadable sensor fails toward a push, never toward silence.
+>
+> **Not while he is at ANY keyboard — a VM's too.** A Mac's HID is one keyboard, and a Linux
+> host (a VM typed into over SSH) has none, so that reading alone let a VM's phone buzz about
+> the fleet he was typing into. Two more readings count, and the push is held when **any** of
+> them says he is there:
+>
+> - **tmux**, on every platform: the newest `client_activity` of a client attached to any of
+>   this server's fleet sockets (and the stack's). tmux moves it on a keystroke and on attach —
+>   not on pane output, a resize or a command client — so a build printing to a pane nobody is
+>   at reads as nobody there. No attached client is no reading. The phone's own web terminal is
+>   a tmux client too and is left out, by its pid.
+> - **the paired host** ([several machines, one app](#several-machines-one-app-fleet-serve-pair)):
+>   each host asks every peer `GET /api/presence`, which answers exactly `{"idle": <seconds>,
+>   "locked": <bool>}` from that host's OWN HID and tmux readings — nothing else, and never its
+>   own peers' answers, so two hosts cannot answer each other in a circle. It is a pairing read
+>   on purpose (`PAIR_READS`), signed like every other one, asked with a 1.5s timeout and cached
+>   for five seconds. A peer that does not answer is a reading that could not be taken: it
+>   holds nothing.
+>
+> The threshold and the hold window are the asking host's own, under the same keys as before —
+> `push.at_mac_idle` and `push.at_mac_hold` mean "at this keyboard" on a host with no Mac in it
+> too, so a `serve.json` that already sets them keeps working unchanged. An owner who types
+> into a VM's fleet from a Mac and wants the phone to wait until he has been away for a quarter
+> of an hour sets `"at_mac_idle": 900` on both. The log names whichever reading held it:
+> `push: held 1 — at the keyboard (tmux, idle 12s)`, `push: held 1 — at the keyboard (peer vm,
+> idle 40s)`, and a release lists every reading it saw — `left the keyboard (tmux, idle 950s ·
+> peer vm, idle 1210s)`. The Mac's own HID keeps the words it always had (`at the Mac (idle
+> 14s)`). `fleet-serve push` prints which readings this host takes and what each says now.
 >
 > Native Claude Code push (below) is still worth having and is not replaced by this: it
 > fires on the permission prompts inside ONE session, and this says which of thirty
@@ -1110,11 +1265,20 @@ building a chat client.
   composed here, which is why it cannot drift from what the desk sees. A conversation you
   can read is a rendering of `/api/session`; a conversation you can *unblock* is the pane,
   and the two are one tap apart with a banner between them.
-- **No routing.** The back gesture works by pushing history entries that reuse the current
-  href — the stack carries a depth, never a route. So there is no URL to parse on a cold
-  open, no link that can name a session that has since been reclaimed, and nothing to keep
-  in step with the screens. (*"can we not have urls? if I go back it takes me to the last
-  page I was, not back."*)
+- **No routing — but the address names the place.** The back gesture works by pushing
+  history entries that carry a depth, never a route, and popstate goes by that depth: no
+  URL is read on the way back, so a stale entry cannot send it anywhere. (*"can we not have
+  urls? if I go back it takes me to the last page I was, not back."*) What changed later is
+  the other half. The place you are on is restored from one stored state, which is the
+  origin's and not the tab's, so two desk tabs overwrote each other and nothing could be
+  linked to — *"we should start using url parameters for reload survival"*. So the address
+  now names the place (`web/place.js`): `?screen=session&tab=work&p=acme-api&s=api-fix`,
+  `?screen=reviews`, `?screen=review&host=vm&profile=work&run=…`. It is written as you move
+  (pushed only where an entry was already pushed, replaced for everything else) and read
+  ONCE, at boot, through the same clamps the stored state goes through — a link naming a
+  session that has gone lands where a stored one would. A link lands after the unlock,
+  never instead of it. The installed app opens `start_url`, which names no place, so it
+  restores from the stored state exactly as before.
 - **No terminal emulation.** `capture-pane` hands over a grid tmux has already laid out, so
   the client renders SGR attributes and drops everything else — cursor movement, scroll
   regions, wrapping. Re-deriving any of it would be a second answer to "what does this pane

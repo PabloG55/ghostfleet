@@ -53,6 +53,8 @@ These need no terminal:
   ghostfleet <project> --plain   print that project's sessions once, and exit
   ghostfleet update              update to the latest release (git or npm) and reinstall;
                                    ghostfleet update --help for its flags
+  ghostfleet web                 open the web client on this Mac (http://localhost:<port>);
+                                   it starts nothing — fleet-serve has to be running
   ghostfleet --sync-check        one line if the runtime is behind its source repo
   ghostfleet --update-check      one line if npm has a newer release
   ghostfleet -h | --help         this
@@ -186,6 +188,8 @@ if [ "${1:-}" = "--update-check" ]; then npm_status; exit 0; fi
 # phone daemon, offer to restart the sessions. Its own file, so it can be run and tested
 # without the control plane's requirements (tmux, the awake inhibitor) in front of it.
 if [ "${1:-}" = update ]; then shift; exec "$BIN_DIR/fleet-update" "$@"; fi
+# `ghostfleet web`: the web client on this Mac, at http://localhost:<port> (bin/fleet-web).
+if [ "${1:-}" = web ]; then shift; exec "$BIN_DIR/fleet-web" "$@"; fi
 
 command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }
@@ -290,6 +294,11 @@ _fail() {
   _clear
 }
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# -u IS NOT IN TM, because TM also attaches, and on an attach it would force UTF-8 onto the
+# person's real terminal. A read says `TM -u <verb>` itself, which keeps tmux from rewriting what
+# it prints (see fleet-grid.mjs). On the line and not in a second wrapper: the suite lifts these
+# functions out and runs them against a TM of its own, where a wrapper only this file defines is
+# "command not found", and the 2>/dev/null on a read turns that into "the session did not start".
 # CREATE A SESSION AND PROVE IT EXISTS — the same check #70 put in fleet-spawn, which
 # this path never got. Both grid_loop branches used a bare `TM new-session` whose result
 # was never tested, followed by an attach that swallowed its own failure with
@@ -317,13 +326,13 @@ _new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "
   local name="$1" cwd="$2" agent="$3" sid
   local extra=(); [ "${4:-}" = 1 ] && extra=(-e "CLAUDE_FLEET_FRESH=1")
   sid="$(TM new-session -d -P -F '#{session_id}' -s "$name" -c "$cwd" \
-    -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
+    -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=$CFG_DIR/fleet" -e "CLAUDE_FLEET_SOCK=$SOCK" \
     ${extra[@]+"${extra[@]}"} -e "CLAUDE_FLEET_AGENT=$agent" \
     "exec agent-here \"$name\"")" || sid=""
   sid="${sid%%$'\n'*}"
   [ -n "$sid" ] || return 1
   sleep 0.5
-  TM list-sessions -F '#{session_id}' 2>/dev/null | grep -qxF -- "$sid"
+  TM -u list-sessions -F '#{session_id}' 2>/dev/null | grep -qxF -- "$sid"
 }
 
 # Re-source the bindings on a LIVE server (a cf-sync only reaches a running fleet
@@ -334,6 +343,12 @@ _new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "
 # failing silently inside run-shell.
 tm_wire() {
   TM source-file "$CONF" 2>/dev/null || true
+  # A server started by somebody else — a session of another profile's project spawning or
+  # asking into this one — took THAT caller's global env, and every session opened on it
+  # since without its own -e wrote to that profile's fleet dir. Entering the project is the
+  # moment the owner is looking, so the server is put right here (lib/fleet-env.mjs) and any
+  # session still running on the wrong dir is named in the inbox, not restarted.
+  [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] && node "$BIN_DIR/../lib/fleet-env.mjs" heal "$SOCK" >/dev/null 2>&1
   TM set-option -g @cf_bin "$BIN_DIR" 2>/dev/null || true
   # Hand the server the grid's CARD ORDER (⇧hjkl in the grid persists one). ⇧←→ runs
   # fleet-cycle inside run-shell, which inherits the server's environment and not this
@@ -362,7 +377,7 @@ grid_sessions() {
   else
     # Tabs are excluded here too, or this fallback would disagree with the grid it is
     # standing in for — and this list IS the card numbering (JUMP_SESS counts it).
-    tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-'
+    tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-'
   fi
 }
 
@@ -558,15 +573,32 @@ master_checkout() {                # <project-root> <project-name> -> the checko
   printf '%s\n' "${main:-${first:-$root}}"
 }
 
+# CREATE master ONLY WHEN IT IS NOT THERE. This was `has-session || remember_agent` with the
+# create on the NEXT line, indented as though it were part of the `||` — it was not, so the
+# create ran on every entry. With master alive tmux refused and printed "duplicate session:
+# master" to the terminal, and the attach a moment later wiped it: a message flashed on
+# entering master and was gone before it could be read. No second session was ever made, which
+# is why it went unnoticed; the create was also never checked, the gap _new_session closes.
+# Braces make the guard cover both commands; the create is the checked one every other path uses.
+_ensure_master() {                   # $1=main checkout
+  TM has-session -t master 2>/dev/null && return 0
+  remember_agent master "${PROJECT_AGENT:-}"
+  _new_session master "$1" "${PROJECT_AGENT:-}" "" && return 0
+  "$BIN_DIR/fleet-agent" forget -s "$SOCK" master 2>/dev/null || true   # no marker without a session
+  return 1
+}
+
 # the "master" lead session runs in the project's main checkout. From inside it,
 # `C-s` (or C-a s) writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
 # we read that marker here to decide where to go next: the grid, or (on a plain
 # `/C-a g detach) back to Projects. Sets MASTER_GOTO for the caller.
 enter_master() {
   local main; main="$(master_checkout "$PROJECT_ROOT" "$PROJECT")"
-  TM has-session -t master 2>/dev/null || \
-    remember_agent master "${PROJECT_AGENT:-}"
-    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"
+  if ! _ensure_master "$main"; then
+    _fail "master did not start for $PROJECT" \
+          "its pane exits immediately when agent-here is not on PATH — run ./install.sh, or cf-sync if the runtime is half-synced"
+    MASTER_GOTO=grid; return 0       # nothing to attach to; the grid still works
+  fi
   tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count
@@ -574,7 +606,7 @@ enter_master() {
   TM set-option -t master status-left \
     "#[bg=colour148,fg=colour16,bold] ● master · #($BIN_DIR/fleet-statusbar '$PROJECT' '$SOCK') #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null || true
   local sp marker curf cur
-  sp="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null)"
+  sp="$(TM -u display-message -t master -p '#{socket_path}' 2>/dev/null)"
   marker="$sp.goto"; curf="$sp.cur"
   rm -f "$marker" "$curf" 2>/dev/null                  # clear any stale signal
   _loading "opening $PROJECT · master"
@@ -691,7 +723,7 @@ grid_loop() {
         fi
         # C-p inside a session drops a "projects" marker then detaches (see
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
-        gsp="$(TM display-message -p '#{socket_path}' 2>/dev/null)"
+        gsp="$(TM -u display-message -p '#{socket_path}' 2>/dev/null)"
         gmark="$gsp.goto"; gcur="$gsp.cur"; rm -f "$gmark" "$gcur" 2>/dev/null
         TM attach -t "$name" 2>/dev/null || true; _clear
         gv="$(cat "$gmark" 2>/dev/null)"; rm -f "$gmark" 2>/dev/null

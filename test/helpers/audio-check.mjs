@@ -63,6 +63,10 @@ const STUBS = `(() => {
     cancel() {}, getVoices() { return []; }, addEventListener() {},
   };
   Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: synth });
+  // Every click the page receives, counted before the app sees it: a tap is waited for by
+  // its click ARRIVING, and a tap that delivers two is a broken tap (see tapAt).
+  window.__clicks = 0;
+  window.addEventListener('click', () => { window.__clicks++; }, { capture: true });
 })();`;
 
 let b = null, srv = null;
@@ -98,15 +102,33 @@ try {
   }
   const log = () => b.evaluate(() => (window.__audio || ['no stubs']).slice());
   const clear = () => b.evaluate(() => { window.__audio.length = 0; return null; });
-  // A REAL TAP: touch then mouse, the order a phone delivers them, so both of the old
-  // listener's events arrive trusted. Aimed at a point the caller found with a selector.
+  // A REAL TAP, AND ONE OF THEM. The touch pair alone is the whole tap: on a mobile page
+  // Chrome turns it into touchstart, touchend, mousedown, mouseup, click — the order a phone
+  // delivers them, all trusted, so the old listener's touchend AND click both arrive.
+  //   It used to be followed by a mousePressed/mouseReleased pair as well, which is a
+  // SECOND click at the same point, hit-tested against whatever the first one had drawn.
+  // On an idle machine that was the same card twice and harmless; on a loaded runner the
+  // project tap had already drawn the grid, so the second click opened the session card
+  // under the finger — the grid was skipped, never seen, and both session rows went red
+  // on a client that was fine. Measured: 1 run in 16 with 16 running at once.
+  //   Returns once the click has ARRIVED (the gesture is turned into one asynchronously),
+  // so a "touches no audio" row read straight after it is about a tap that happened.
+  const clicks = () => b.evaluate(() => window.__clicks || 0);
   const tapAt = async ({ x, y }) => {
+    const n0 = await clicks();
     await b.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
     await b.call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    for (const type of ['mousePressed', 'mouseReleased'])
-      await b.call('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
-    await sleep(300);
+    return !!(await until(async () => (await clicks()) > n0 || null, 5000));
   };
+  // What the screen is, for a row that has to say why it is red, and for tapUntil to know
+  // whether a tap moved anything.
+  const screen = () => b.evaluate(() => {
+    const s = document.querySelector('#app > .hdr .scope');
+    return { scope: s ? s.textContent.trim() : null,
+             cards: document.querySelectorAll('#app .card').length,
+             speakers: document.querySelectorAll('#app button.speak').length };
+  });
+  const said = (v) => `scope ${JSON.stringify(v.scope)}, ${v.cards} cards, ${v.speakers} speakers`;
   const where = (sel) => b.evaluate((s) => {
     const e = document.querySelector(s);
     if (!e) return null;
@@ -133,7 +155,12 @@ try {
   await until(() => b.evaluate(() => !!document.querySelector('#app .card')));
   // The header is chrome with nothing behind it: a tap on it is the purest "plain tap".
   const hdr = await where('#app > .hdr');
+  // ...and it is the tap to count, since nothing behind it redraws: 1 is a tap. 2 is the
+  // double delivery tapAt describes, whose second click lands on whatever the first drew;
+  // 0 is a tap that never arrived, which would make every "touches no audio" row vacuous.
+  const c0 = await clicks();
   if (hdr) await tapAt(hdr);
+  is('a tap is one click', 1, (await clicks()) - c0);
   is('a tap on the Projects header touches no audio', [], await log());
 
   // Into a session, by tapping — two more plain taps, a project then a session card.
@@ -147,31 +174,39 @@ try {
     && !!document.querySelector('#app .card'));
   // A TAP CAN ALSO BE LOST, not just late: a screen that re-renders between the press and
   // the release (a poll landing mid-tap) replaces the node and no click fires. So a tap
-  // that has not arrived is tapped again — bounded, each try waiting on the end state. A
-  // repeat is harmless here: every one of them is a plain tap, and all of them are logged.
-  async function tapUntil(sel, arrived, tries = 3) {
-    for (let i = 0; i < tries; i++) {
-      const at = await until(() => where(sel));
-      if (!at) return null;
-      await tapAt(at);
-      const v = await until(arrived, 5000);
-      if (v) return v;
+  // that has not arrived is tapped again — but ONLY while the screen it was aimed at is
+  // still the one showing. A screen that has moved on is waited for, never tapped again: a
+  // second tap there lands on the NEXT screen's card and skips the one the row asks about,
+  // which is the same failure the double click in tapAt was. One deadline for the whole
+  // step, and a miss says what was on screen when it ran out.
+  async function tapUntil(sel, arrived, ms = 15000) {
+    const t0 = Date.now();
+    let taps = 0, from = null, last = 0;
+    while (Date.now() - t0 < ms) {
+      const v = await arrived();
+      if (v) return { v };
+      const here = await screen();
+      if (!taps || (here.scope === from && Date.now() - last > 5000)) {
+        const at = await where(sel);
+        if (at) { from = here.scope; last = Date.now(); taps++; await tapAt(at); continue; }
+      }
+      await sleep(100);
     }
-    return null;
+    return { why: `no: ${taps} tap(s) on ${sel} in ${ms / 1000}s, and then ${said(await screen())}` };
   }
   is('there is a project card to open', true, !!(await until(() => where('#app .card'))));
   const grid = await tapUntil('#app .card', onGrid);
-  is('there is a session card to open', true, !!grid);
-  const spk = grid ? await tapUntil('#app .card', () => where('#app button.speak')) : null;
+  is('there is a session card to open', true, grid.v ? true : grid.why);
+  const spk = grid.v ? await tapUntil('#app .card', () => where('#app button.speak')) : { why: 'no: never reached the grid' };
   is('opening a project and a session touches no audio', [], await log());
-  is('the session has a speaker on a bubble', true, !!spk);
+  is('the session has a speaker on a bubble', true, spk.v ? true : spk.why);
   // Scrolling and tapping around in a transcript is the other thing a reader does.
   const bub = await where('#app .turn .bub, #app .turn');
   if (bub) await tapAt(bub);
   is('a tap on a message touches no audio', [], await log());
 
   // ── the speaker DOES unlock, and inside its own tap ───────────────────────
-  if (spk) {
+  if (spk.v) {
     await clear();
     // Synchronously within the click handler: what the log holds the instant the event
     // is delivered, before any timer or fetch the speech path goes on to start.

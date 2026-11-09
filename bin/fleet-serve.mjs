@@ -44,10 +44,18 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
 import { promptSummary } from '../lib/permission-dialog.mjs';
-import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
+import { fleetDirs as scanDirs, scanStatus, masterRecords } from '../lib/fleet-scan.mjs';
 import * as jarvis from '../lib/jarvis.mjs';
 import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
+import * as A from '../lib/accounts.mjs';
+import * as X from '../lib/experimental.mjs';
+import * as shots from '../lib/shots.mjs';
+import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseState, repaint } from '../lib/web-term.mjs';
+import * as P from '../lib/peers.mjs';
+import * as K from '../lib/know.mjs';
+import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
+import { createAutomations } from '../lib/automations.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -60,6 +68,10 @@ const CONFIG = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(CFG_HOME, 'serve
 // another process, and a file both processes write is a file one of them clobbers.
 const SESSIONS = path.join(path.dirname(CONFIG), 'serve-sessions.json');
 const AUDIT = process.env.GHOSTFLEET_SERVE_AUDIT || path.join(CFG_HOME, 'serve-audit.jsonl');
+// The paired hosts (lib/peers.mjs): beside serve.json and 0600 like it, and a file of its own
+// for the reason SESSIONS is — `pair`, `unpair` and `relabel` rewrite it from a terminal.
+const PEERS = P.peersFile(CONFIG);
+const PEERS_SEEN = P.seenFile(CONFIG);
 const VERSION = '1.0.0';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -105,6 +117,7 @@ const DEFAULTS = {
   session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
+  terminal_idle: 900,        // a web terminal with no KEYSTROKE for this long is closed — see TERMINAL below
   rate: { window: 60, read: 240, write: 30, auth: 10, challenge: 60 },
   push: null,                // filled from PUSH_DEFAULTS below — see the push section
   clients: [],
@@ -434,16 +447,42 @@ function verifySig(jwk, alg, data, sig) {
 // for nothing. What matters is unchanged: the challenge has to be one WE issued, still
 // live, and NOT YET USED. takeChallenge consumes it, because a replayed assertion is
 // exactly what somebody with a copy of the traffic would send.
-function checkClientData(raw, c, expectType) {
+// ── which listener a request arrived on, and what it may accept ─────────────────
+// Two sockets, two relying parties. The configured bind (the tailnet) is the phone's, with
+// the rp_id and origins in serve.json. The second is 127.0.0.1 on the same port, so the
+// Mac itself can open http://localhost:<port> without Tailscale — a secure context with no
+// TLS, which is the one http:// origin WebAuthn accepts — and it is its own rp_id,
+// 'localhost', because a passkey is bound to the rp_id it was made for and one made at the
+// tailnet name cannot be asserted at localhost anyway.
+//
+// NOTHING CROSSES. A request is judged by the scope of the socket it came in on and by
+// nothing it says about itself: Origin, clientData.origin, the authenticator's rpIdHash,
+// the challenge, the credential and the session token each belong to one listener, so an
+// assertion made at localhost is refused on the tailnet and the reverse, and a token minted
+// on one is dead on the other. Any process on the Mac can reach 127.0.0.1, which is why
+// the localhost listener gets no shortcut past the passkey — only a different rp_id.
+//
+// `ls` absent means the configured listener, which is what every caller was before there
+// were two.
+export const LOCAL_BIND = '127.0.0.1';
+export const LOCAL_RP = 'localhost';
+const scopeOf = (c, ls) => ls && ls.local
+  ? { rp_id: LOCAL_RP, origins: [`http://${LOCAL_RP}:${ls.port}`], local: true }
+  : { rp_id: c.rp_id, origins: c.origins || [], local: false };
+// What a credential or session was made on. Rows written before there were two listeners
+// carry no tag, and every one of them was made on the configured listener.
+const rpOfRow = (c, row) => (row && row.rp_id) || c.rp_id;
+
+function checkClientData(raw, c, expectType, ls) {
   let cd;
   try { cd = JSON.parse(raw.toString('utf8')); } catch { return { error: 'clientDataJSON is not JSON' }; }
   if (cd.type !== expectType) return { error: `clientData type is '${cd.type}', expected '${expectType}'` };
-  const origins = c.origins || [];
-  if (!origins.includes(cd.origin)) return { error: `origin '${cd.origin}' is not in this server's origins (${origins.join(', ') || 'none configured'})` };
+  const { origins, rp_id } = scopeOf(c, ls);
+  if (!origins.includes(cd.origin)) return { error: `origin '${cd.origin}' is not in this listener's origins (${origins.join(', ') || 'none configured'})` };
   if (cd.crossOrigin === true) return { error: 'cross-origin assertion refused' };
   if (typeof cd.challenge !== 'string') return { error: 'no challenge in clientDataJSON' };
-  const ch = takeChallenge(cd.challenge);
-  if (!ch) return { error: 'that challenge is not one this server issued, or it has expired or already been used' };
+  const ch = takeChallenge(cd.challenge, rp_id);
+  if (!ch) return { error: 'that challenge is not one this listener issued, or it has expired or already been used' };
   return { ch };
 }
 
@@ -503,19 +542,19 @@ function rateRoom(name, key, res) {
 }
 
 const CHALLENGE_TTL = 120;
-function newChallenge() {
+function newChallenge(rp) {
   const challenge = rand(32);
-  challenges.set(challenge, { exp: now() + CHALLENGE_TTL });
+  challenges.set(challenge, { exp: now() + CHALLENGE_TTL, rp });
   // A challenge is cheap and unauthenticated to ask for, so cap the table rather than
   // let anyone who can reach the port grow it without limit.
   if (challenges.size > 512) for (const k of challenges.keys()) { challenges.delete(k); if (challenges.size <= 256) break; }
   return challenge;
 }
-function takeChallenge(ch) {
+function takeChallenge(ch, rp) {
   const c = challenges.get(ch);
   if (!c || c.exp <= now()) return null;
   challenges.delete(ch);                                  // single use, always
-  return c;
+  return c.rp === rp ? c : null;                          // ...and spent even when refused
 }
 
 // ONE TOKEN, and a passkey assertion is the only thing that mints it.
@@ -539,16 +578,19 @@ function takeChallenge(ch) {
 // gone unused for fifteen minutes, which a thief using it never lets happen — and that is
 // exactly why revocation is immediate and does not wait for the window. There is no
 // absolute cap, by decision: an app in use should never ask for a face mid-sentence.
-function mintSession(clientId, purpose = 'open') {
+function mintSession(clientId, purpose = 'open', rp_id = loadConfig().rp_id) {
   const c = loadConfig(), tok = rand(32), ttl = c.session_ttl || 900;
-  sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose });
+  sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose, rp_id });
   persistSessions();                                      // a mint is worth a write NOW
   return { token: tok, ttl, expires_at: now() + ttl };
 }
-function liveSession(tok) {
+function liveSession(tok, rp_id = loadConfig().rp_id) {
   if (!tok) return null;
   const k = sha256(tok), s = sessions.get(k);
   if (!s || s.exp <= now()) return null;
+  // A token is good on the listener that minted it and nowhere else. Refused, not deleted:
+  // it is still its owner's on the right socket.
+  if (rpOfRow(loadConfig(), s) !== rp_id) return null;
   // Revoked between two requests: the token dies with the client, which is what makes
   // revocation land on a RUNNING daemon instead of at the next restart. Deleted, not just
   // refused, so the persisted copy goes on the next flush.
@@ -607,7 +649,8 @@ function loadSessions() {
   for (const [k, v] of Object.entries(raw)) {
     const ok = /^[0-9a-f]{64}$/.test(k) && v && typeof v.client === 'string' &&
                Number.isFinite(v.exp) && Number.isFinite(v.born) && v.exp > t && sessionClientLive(v);
-    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open') }); kept++; }
+    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open'),
+                                ...(typeof v.rp_id === 'string' && v.rp_id ? { rp_id: v.rp_id } : {}) }); kept++; }
     else dropped++;
   }
   if (dropped) persistSessions();
@@ -677,6 +720,10 @@ const TOOLS_ALLOWED = {
   // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
   // the 'since last look' stamp.
   fleet_digest:          { fields: ['json', 'peek'], noProject: true },
+  // The fleet's memory: a read across every fleet and paired machine, so noProject — and its
+  // project is `about`, which this daemon does not resolve or forward (acme-api@vm is
+  // answered HERE, from the events this host already fetched over the pairing).
+  fleet_know:            { fields: ['about', 'waiting', 'touched', 'find', 'history', 'since', 'until', 'at', 'json'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
@@ -705,6 +752,7 @@ const TOOLS_ALLOWED = {
   // would put Face ID in front of a preference, which is how a passkey stops meaning
   // anything on the taps that matter.
   fleet_project_agent:   { fields: ['name', 'agent'],                          write: true, noProject: true, subject: 'name' },
+  fleet_project_model:   { fields: ['name', 'model'],                          write: true, noProject: true, subject: 'name' },
 };
 // `branch` is accepted on fleet_worktree_remove and thrown away: web/api.js sends it so
 // its fixture backend can name the branch in a refusal. Silently ignoring an argument is
@@ -736,6 +784,15 @@ const IGNORED = new Set(['fleet_worktree_remove.branch']);
 //
 // Until then they are refused BY NAME with that reason, so the buttons behind them fail
 // loudly. A 404 or a generic "unknown tool" would look like a typo in the client.
+// A project's default model (lib/session-model.sh): `<cfg>/fleet/<sock>.model`, or null for none.
+// Held to model_name_valid's charset, so the phone shows what a launch would actually use.
+function projectModel(t) {
+  try {
+    const v = fs.readFileSync(path.join(t.cfg, 'fleet', `${t.sock}.model`), 'utf8').trim();
+    return (v !== 'default' && /^[A-Za-z0-9._:/@\[\]-]{1,100}$/.test(v)) ? v : null;
+  } catch { return null; }
+}
+
 const NOT_YET = {
   fleet_schedule: 'the schedule marker is written by the grid; bin/fleet-schedule writes a different, un-namespaced path',
   fleet_label: 'the card label is a marker file only fleet-grid.mjs writes',
@@ -743,9 +800,10 @@ const NOT_YET = {
   fleet_budget: 'the budget-ceiling marker is written by the grid\'s settings screen',
   fleet_order: 'the card order is <sock>.order plus a tmux option, both written by the grid',
   fleet_project_order: 'the projects order is written by the Projects screen',
+  fleet_model: 'moving one running session is a lead\'s call, made with a reason; the phone sets a project\'s default (fleet_project_model)',
 };
 
-const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek']);
+const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting']);
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
@@ -874,7 +932,14 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
     return { status: 409, json: { ok: false, changed: true,
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
   if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true, status: tool === 'fleet_send' });
+  // fleet_wake asks for the exit status too: see `unwoken` below.
+  // human IS THE REQUEST BEING THE OWNER, and it is what marks a send as the person speaking
+  // (mcp/fleet-dispatch.mjs asOwner). An automation is not: its prompt was written earlier, maybe
+  // by the draft model, and nobody is holding the phone. Marked, it landed in the receiving
+  // session's ledger as the owner's own words, which is owner authority in the memory and in the
+  // lead's briefing. Unmarked it arrives as a brief, the way a lead's does.
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
+                                               status: tool === 'fleet_send' || tool === 'fleet_wake' });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
   // non-zero when the prompt never reached the session — the mod refused to submit it, the
@@ -885,7 +950,13 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   if (undelivered) text = undeliveredText(args.session, text);
   if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
     return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
-  const refused = undelivered || (typeof out !== 'string' && out.isError === true);
+  // A WAKE THAT DID NOT WAKE IS A FAILURE, for the send's reason. fleet-hibernate exits 1
+  // with "FAILED — '<session>' exited…" and the pane's last lines when the session it started
+  // died, and that status was dropped here too: 200, ok:true, a green toast carrying the word
+  // FAILED, and the phone went on to open a session that was not there.
+  const unwoken = tool === 'fleet_wake' && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (unwoken) text = text.replace(/^fleet-hibernate: (FAILED — )?/gm, '');
+  const refused = undelivered || unwoken || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -894,7 +965,9 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // session it came through — a Face ID with no 15-minute idle gap since — while a TAPPED yes
   // on a proposal asks for a fresh one (/api/jarvis/confirm). A spoken yes must also be two
   // words, because one word is what an open microphone hears in noise.
-  if (!refused && tool === 'fleet_send' && args.session === 'master') {
+  // An automation's send is the owner's words written in advance, not said now: it is not
+  // recorded as something he told Jarvis.
+  if (!refused && tool === 'fleet_send' && args.session === 'master' && !client.automation) {
     try {
       const jm = jarvis.readMarker();
       if (jm && (args.project === jm.name || args.project === jm.sock)) jarvis.recordSaid(String(args.prompt || ''), 'phone');
@@ -903,12 +976,15 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
 
   if (v.write) {
     auditAppend({ ts: now(), client: client.id, ip, verb: tool, project: args.project || null, subject,
+                  // A PAIRED HOST ACTED: which host, and which of its clients — the host from
+                  // this side's own record of the pairing, the client from its signature.
+                  ...(client.pair ? { via: 'pair', origin_host: client.pair.label, origin_client: client.onBehalf || 'host' } : {}),
                   args: Object.fromEntries(Object.entries(args).map(([k, val]) =>
                     [k, typeof val === 'string' ? val.slice(0, 500) : val])),
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
                   confirmed: v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
-                  result: undelivered ? 'not delivered' : refused ? 'refused' : 'ran',
+                  result: undelivered ? 'not delivered' : unwoken ? 'failed' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
   }
@@ -1004,15 +1080,40 @@ function gridJson(t, sub = '') {
 // socket, a fallback rebuilt from session_id and the pane's cwd, and a deliberate refusal
 // to take "the newest .jsonl in that directory" because several sessions can share a
 // checkout and newest-wins prints a DIFFERENT session's conversation. One reader.
-async function sessionMessages(t, session, limit, before) {
+//
+// ONE READ PER PAGE, HOWEVER MANY ASK, AND NONE WHEN NOTHING CHANGED. An open chat polls this
+// every few seconds from every device it is open on, and the log of the evening this was
+// written showed the cost compounding: answers that took under a second took 8-26 s in
+// clusters, because each slow read left the next poll arriving while it still ran, and every
+// one of them spawned its own fleet-read over the same transcript. So a read already running
+// for the same page is joined rather than repeated, and the last answer is kept beside its
+// `stamp` — fleet-read's checksum of which file, how big, when written — which goes back as
+// `unless`: an unchanged transcript then costs fleet-read its lookup and a stat, and the page
+// is the one already here. Still one reader: fleet-read decides what "unchanged" means.
+const sessReads = new Map();    // page key -> the read in flight for it
+const sessCache = new Map();    // page key -> { stamp, json }, most recent last
+const SESS_CACHE_MAX = 64;
+function sessionMessages(t, session, limit, before) {
+  const key = [t.name, session, limit, before || ''].join('\x1f');
+  let p = sessReads.get(key);
+  if (!p) {
+    p = readSession(t, session, limit, before, key).finally(() => sessReads.delete(key));
+    sessReads.set(key, p);
+  }
+  return p;
+}
+async function readSession(t, session, limit, before, key, ask = true) {
+  const had = ask ? sessCache.get(key) : null;
   const args = { project: t.name, session, json: true, limit, before };
+  if (had) args.unless = had.stamp;
   // 32 MB, not the 1 MB default: a page is 20 messages and a message is a whole assistant
   // turn, which is routinely tens of KB and occasionally far more. Overflow is not a
   // truncated page here — the dispatch refuses it by name — but the cap has to sit above
   // what a real conversation produces or an ordinary read starts failing.
   const out = await callToolAsync('fleet_read', args, { timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
   const text = typeof out === 'string' ? out : String(out.text);
-  try { return { json: JSON.parse(text) }; }
+  let json;
+  try { json = JSON.parse(text); }
   catch {
     // A runtime whose fleet-read predates --json prints its usage line here rather than
     // JSON. Say which flag is missing instead of handing the phone a parse error.
@@ -1020,6 +1121,32 @@ async function sessionMessages(t, session, limit, before) {
       ? `this runtime's bin/fleet-read has no --json flag — it carries the per-message timestamp and role /api/session needs`
       : `fleet-read --json did not return JSON: ${text.trim().slice(0, 200)}` };
   }
+  if (json && json.unchanged) {
+    // The page this said was unchanged has to be the one we hold; anything else (it was
+    // evicted while the read ran) is asked for again, in full.
+    if (had && json.stamp === had.stamp) return { json: had.json };
+    return ask ? readSession(t, session, limit, before, key, false) : { error: 'fleet-read answered unchanged to a read that asked for the page' };
+  }
+  // The NEWEST page only: it is the one a chat polls, and an older page is asked for once, on
+  // a tap. Keeping those too would let a reader paging back through a long transcript fill
+  // this with pages of whole assistant turns that nobody will ask for again.
+  if (!before && json && typeof json.stamp === 'string' && json.stamp) {
+    sessCache.delete(key);
+    sessCache.set(key, { stamp: json.stamp, json });
+    while (sessCache.size > SESS_CACHE_MAX) sessCache.delete(sessCache.keys().next().value);
+  }
+  return { json };
+}
+
+// AN ETAG OVER THE WHOLE ANSWER, transcript and queue alike, and a 304 to a client that
+// already holds it. What it saves is the trip, not the read: the page is the same bytes the
+// phone already drew, and on a WireGuard tunnel over cellular that is what costs.
+function etagOf(obj) {
+  return '"' + crypto.createHash('sha1').update(JSON.stringify(obj)).digest('base64url').slice(0, 22) + '"';
+}
+function holdsTag(req, tag) {
+  const h = String(req.headers['if-none-match'] || '');
+  return !!h && h.split(',').some(x => x.trim().replace(/^W\//, '') === tag);
 }
 
 // ── what is still WAITING to be delivered ──────────────────────────────────
@@ -1143,7 +1270,7 @@ function nudgeSettings(t, sessionNames) {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png',
-  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
+  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.mp4': 'video/mp4' };
 
 function send(res, status, obj, extra = {}) {
   const body = Buffer.from(JSON.stringify(obj) + '\n');
@@ -1181,8 +1308,12 @@ async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
 // that then 403'd every single request as an unexpected Host — a server that looked up
 // and answered nothing.
 let listening = null;
-function allowedHosts(c) {
+function allowedHosts(c, ls) {
   const h = new Set();
+  // The localhost listener answers to its own name and nothing else — not 127.0.0.1, whose
+  // page could not use a passkey anyway (an IP is never an rp_id), and above all not the
+  // tailnet's names, which would let one socket stand in for the other.
+  if (ls && ls.local) { h.add(`${LOCAL_RP}:${ls.port}`); return h; }
   for (const o of c.origins || []) { try { h.add(new URL(o).host); } catch {} }
   const port = listening?.port ?? c.port;
   for (const a of [c.bind, listening?.bind]) {
@@ -1214,7 +1345,7 @@ function allowedHosts(c) {
 // travel are matched against NAME_OK first. The sender never opens a transcript — its
 // whole input is the status files the hook writes, and those hold a status word, not
 // prose.
-const PUSH_KINDS = new Set(['needs-you', 'answer']);
+const PUSH_KINDS = new Set(['needs-you', 'answer', 'account', 'waiting']);
 // Deliberately narrow, and deliberately NOT a sanitiser: a name that does not look like
 // a name is dropped rather than trimmed into one. Project names come from the projects
 // file (a space is legal in a folder name) and session names from fleet-rename, which
@@ -1392,6 +1523,32 @@ export function pushPayload(events, detail) {
   // anonymous mode too — it says which screen, not which project.
   let jm = null; try { jm = jarvis.readMarker(); } catch {}
   if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
+  // A push that is only about items a master holds for the owner opens the list of them (the
+  // Projects screen), wherever the app was left: the answer is a reply to the item, not
+  // whatever session happened to be on screen.
+  else if (events.length && events.every(e => e.kind === 'waiting')) out.open = 'waiting';
+  // AN ACCOUNT NOTICE (fleet-accounts) is the one kind that is not about a session: which
+  // profile moved to which login, or ran out until when. Same rule as the rest — every key
+  // literal, every name through NAME_OK, numbers as numbers — so web/sw.js composes the
+  // sentence and the payload still has nowhere to put one. Names are dropped in anonymous
+  // mode; the event word and the time are not, since neither says whose they are.
+  const acct = events.find(e => e.kind === 'account' && e.account);
+  if (acct) {
+    const a = acct.account, named = detail !== 'anonymous';
+    const EV = new Set(['switched', 'exhausted', 'needs-login', 'blocked', 'resumed']);
+    const CAUSE = new Set(['limit', 'needs-login', 'blocked', 'by-hand', 'none-active']);
+    out.account = { event: EV.has(a.event) ? a.event : 'switched' };
+    if (CAUSE.has(a.cause)) out.account.cause = a.cause;
+    if (a.limit === '5h' || a.limit === '7d') out.account.limit = a.limit;
+    if (Number.isFinite(a.pct)) out.account.pct = Math.max(0, Math.min(100, Math.floor(a.pct)));
+    if (Number.isFinite(a.until) && a.until > 0) out.account.until = Math.floor(a.until);
+    if (['paused', 'running', 'mixed'].includes(a.workers)) out.account.workers = a.workers;
+    if (named) {
+      for (const k of ['profile', 'from', 'to', 'account']) { const v = safeName(a[k]); if (v) out.account[k] = v; }
+      const nl = (Array.isArray(a.needs_login) ? a.needs_login : []).map(safeName).filter(Boolean).slice(0, 4);
+      if (nl.length) out.account.needs_login = nl;
+    }
+  }
   if (detail !== 'anonymous') {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
@@ -1416,7 +1573,7 @@ function sockProjects() {
   return m;
 }
 // The hook's status files are the whole input: {sock, slot, status, ts, …}. Only those
-// four fields are read. There is no transcript in a status file and this never opens one.
+// four fields are read, and `turn` — a resume turn's verdict — when the record has one. There is no transcript in a status file and this never opens one.
 //
 // NEWEST PER (sock, slot), which is not tidiness — it is the difference between a bell
 // and a phone that buzzes every thirty seconds forever. Status files are keyed by SESSION
@@ -1458,20 +1615,27 @@ let pushLastSent = 0;
 // not tear them, and one MISSED buzz in the case where something else does is much
 // cheaper than a phantom one — a bell that rings for nothing is a bell you learn to
 // ignore, and §9's whole argument is that these have to be rare and true.
-function pushEvents(rows) {
+export function pushEvents(rows) {
   const names = sockProjects(), events = [], seen = new Set();
   for (const r of rows) {
     const key = `${r.sock}/${r.slot}`;
     seen.add(key);
     const known = pushState.has(key);
     const prev = pushState.get(key);
+    // A RESUME TURN IS NOT AN ANSWER UNLESS IT MADE ONE. Every park and resume ends in a
+    // turn, and a worker with nothing to pick up says so and stops: that was a buzz per
+    // resume. The hook files the turn's verdict in the record (hooks/fleet-event.sh,
+    // RESUME_TAG) — but the mod writes `ready` from inside Claude Code and can land before
+    // the hook's Stop has judged the turn, so a `ready` still marked `resume` is not decided
+    // yet: the old status is kept, and the next scan, which sees the verdict, decides.
+    if (known && prev === 'working' && r.status === 'ready' && r.turn === 'resume') continue;
     pushState.set(key, r.status);
     if (!known || prev === r.status) continue;
     const project = names.get(r.sock) || r.sock.replace(/^cf-/, '');
     if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot, sock: r.sock });
     // working -> ready is a turn that ENDED. `idle` (SessionStart) is not an answer, and
     // ready -> ready is the same session sitting where it was.
-    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
+    else if (r.status === 'ready' && prev === 'working' && r.turn !== 'resumed') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
   }
   for (const k of [...pushState.keys()]) if (!seen.has(k)) pushState.delete(k);
   return events;
@@ -1479,25 +1643,27 @@ function pushEvents(rows) {
 
 // ── A WAKE THAT NEVER LANDED IS A NEED-YOU FOR THE LEAD ─────────────────────
 // The worker's own need-you buzzes above; what nothing announced is that its lead was never
-// woken to deal with it. hooks/fleet-event.sh's deferred wake retries for ten minutes while
-// the lead's input box reads occupied, then appends a line to <sock>.<kind>.undelivered —
+// woken to deal with it. hooks/fleet-event.sh's deferred wake retries while the lead's input
+// box reads occupied, and at ten minutes appends a line to <sock>.<kind>.undelivered (and goes
+// on holding the wake: heldWakes, below) —
 // a file nobody reads, so a worker sat on a permission prompt behind four of them until it
 // was found by hand. That marker GROWING is the event: no status changes (the lead is
 // idle, as it was), so the transition rule above cannot see it.
-//   The kind names the target: `notify` and `jarvis` wake the socket's master, a sub-lead's
-// is `<lead>.notify`. A socket can carry dots no better than a session can be trusted not
+//   The kind names the target: `notify`, `jarvis` and `needyou` wake the socket's master, a
+// sub-lead's is `<lead>.notify` or `<lead>.needyou` (a worker's need-you has a wake of its own,
+// hooks/fleet-event.sh _needyou_nudge, so it cannot be held behind a finish's). A socket can carry dots no better than a session can be trusted not
 // to, so the socket is matched against the ones the scan KNOWS, longest first.
 //   SAME BASELINE RULE: the first sight of a marker is its size, never a buzz — a daemon
 // starting next to a week of expiries must not ring for all of them.
-export function undeliveredTarget(name, socks) {
-  const suf = '.undelivered';
+export function undeliveredTarget(name, socks, suf = '.undelivered') {
   if (!name.endsWith(suf)) return null;
   const base = name.slice(0, -suf.length);
   const sock = [...socks].filter(s => base.startsWith(`${s}.`)).sort((a, b) => b.length - a.length)[0];
   if (!sock) return null;
   const kind = base.slice(sock.length + 1);
-  if (kind === 'notify' || kind === 'jarvis') return { sock, session: 'master' };
-  if (kind.endsWith('.notify') && kind.length > '.notify'.length) return { sock, session: kind.slice(0, -'.notify'.length) };
+  if (kind === 'notify' || kind === 'jarvis' || kind === 'needyou') return { sock, session: 'master' };
+  for (const k of ['.notify', '.needyou'])
+    if (kind.endsWith(k) && kind.length > k.length) return { sock, session: kind.slice(0, -k.length) };
   return null;
 }
 export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
@@ -1523,6 +1689,174 @@ export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
   return events;
 }
 const undeliveredSizes = new Map();  // marker path -> its size at the last scan
+
+// ── A WAKE STILL HELD IS ON THE OWNER'S LIST UNTIL IT LANDS ──────────────────
+// The buzz above is one moment, at the timeout. The wake itself is not dropped there any more:
+// hooks/fleet-event.sh goes on retrying for as long as the lead's box holds something, and
+// rewrites <sock>.<kind>.blocked on every poll. One fleet's master sat 13 days with a stray
+// character in its box, 14 wakes expiring behind it, and nothing a person would look at said
+// so. So while the file is fresh the lead is a row in the queue (/api/waiting), worded as what
+// the person can do about it — the box is theirs, and the fleet never clears or sends it.
+//   ONE ROW PER LEAD, the earliest hold: a need-you and a finish held behind the same box are
+// one thing to go and fix. FRESH means rewritten within HELD_STALE_MS (four of the retry's
+// default polls): a retry killed without its trap leaves a file that is not a hold.
+export const HELD_STALE_MS = 120_000;
+export function heldWakes(list, nowMs = Date.now(), dirs = scanDirs(list)) {
+  const bySock = new Map(list.map(t => [t.sock, t]));
+  const socks = [...bySock.keys()];
+  const by = new Map();
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      const t = undeliveredTarget(n, socks, '.blocked');
+      if (!t) continue;
+      const p = path.join(dir, n);
+      let st, text;
+      try { st = fs.statSync(p); text = fs.readFileSync(p, 'utf8'); } catch { continue; }
+      if (nowMs - st.mtimeMs > HELD_STALE_MS) continue;
+      const [since, why] = text.split('\n')[0].split('\x1f');
+      const s = Number(since) || 0;
+      if (!s) continue;
+      const key = `${t.sock}/${t.session}`, prev = by.get(key);
+      if (prev && prev.since <= s) continue;
+      const proj = bySock.get(t.sock);
+      by.set(key, {
+        project: proj.name, profile: proj.profile, session: t.session, key: `held:${key}`, id: 'held', state: 'held',
+        text: why === '1' ? `${t.session}'s input box has unsent text` : `${t.session} shows no input box`,
+        reason: 'a fleet wake is waiting for that box to be empty; send or clear what is there yourself — the fleet never will',
+        at: s, since: s,
+      });
+    }
+  }
+  return [...by.values()].sort((a, b) => a.since - b.since);
+}
+
+// ── an account notice is a line in <fleet dir>/accounts.notify ──────────────
+// lib/accounts.mjs appends one JSON line per switch / exhausted / needs-login / blocked / resumed.
+// Read by growth, exactly as the undelivered markers are: the first sight of a file is a
+// baseline (yesterday's switch is not news), and only the bytes added since are read. Each
+// line becomes one event; pushPayload() copies its fields out by name, never by spreading.
+export function accountEvents(dirs, sizes) {
+  const events = [], present = new Set();
+  for (const dir of dirs) {
+    const p = path.join(dir, 'accounts.notify');
+    let size;
+    try { size = fs.statSync(p).size; } catch { continue; }
+    present.add(p);
+    const known = sizes.has(p), before = sizes.get(p) || 0;
+    sizes.set(p, size);
+    if (!known || size <= before) continue;
+    let chunk = '';
+    try {
+      const fd = fs.openSync(p, 'r');
+      try { const b = Buffer.alloc(Math.min(size - before, 65536)); fs.readSync(fd, b, 0, b.length, before); chunk = b.toString('utf8'); }
+      finally { fs.closeSync(fd); }
+    } catch { continue; }
+    for (const line of chunk.split('\n')) {
+      let j; try { j = JSON.parse(line); } catch { continue; }
+      if (j && typeof j === 'object') events.push({ kind: 'account', project: '', session: '', account: j });
+    }
+  }
+  for (const p of [...sizes.keys()]) if (!present.has(p)) sizes.delete(p);
+  return events;
+}
+const accountSizes = new Map();
+
+// ── what each master holds for the owner: its ledger's waiting items ────────
+// mods/ghostfleet/hooks/ledger.js keeps a master's asks of the owner as items in state
+// `waiting`, and goes on with everything else; this is where they leave the session. One
+// reader for the list (/api/waiting) and the bell (waitingEvents), so the phone's list and
+// the push cannot disagree about what is waiting. MASTERS ONLY: a worker's asks reach the
+// owner through its master, and listing both would be the same ask twice.
+//   The ledger is read whole, through the mod's own parseLedger/heldItems, never a copy of
+// their rules here. A file is re-read only when its mtime or size moved: the push watcher
+// asks every few seconds and a master's ledger changes once a turn.
+//   Rows carry the ask's TEXT, which is why they travel only on the authenticated read
+// (/api/waiting, beside /api/session's transcript) and never into a push payload: the
+// event below names a project and a kind, and pushPayload() copies nothing else out.
+//   IMPORTED, NOT REQUIRED: the ledger's vocabulary is the mod's file, staged beside bin/ by
+// cf-sync and shipped in the package, and a copy of the daemon without it (an older runtime,
+// a hand-copied bin/) must still serve the phone everything else. So a failed import is the
+// one feature off and a line in serve.log saying why — and /api/waiting says it too, rather
+// than answering an empty list that would read as "nothing is waiting".
+let L = null, ledgerWhy = '';
+try { L = await import('../mods/ghostfleet/hooks/ledger.js'); }
+catch (e) { ledgerWhy = `the mod's ledger.js could not be loaded (${String(e && e.message || e).split('\n')[0]})`; }
+const ledgerCache = new Map();    // ledger path -> { st, l }
+export function heldScan(list, nowMs = Date.now(), cache = ledgerCache) {
+  const bySock = new Map(list.map(t => [t.sock, t]));
+  const rows = [], socks = new Set(), live = new Set();
+  if (!L) return { rows, socks };
+  const { ledgerFile, parseLedger, heldItems } = L;
+  for (const m of masterRecords(scanDirs(list))) {
+    const t = bySock.get(m.sock);
+    if (!t) continue;
+    socks.add(m.sock);
+    const file = ledgerFile(m.dir, m.sessionId);
+    const st = stampOf(file);
+    if (!st) continue;
+    live.add(file);
+    let hit = cache.get(file);
+    if (!hit || hit.st !== st) {
+      let text;
+      try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+      hit = { st, l: parseLedger(text) };
+      cache.set(file, hit);
+    }
+    for (const i of heldItems(hit.l, nowMs))
+      rows.push({ project: t.name, profile: t.profile, sock: m.sock, session: 'master', key: `${m.sessionId}:${i.id}`, ...i });
+  }
+  for (const f of [...cache.keys()]) if (!live.has(f)) cache.delete(f);
+  rows.sort((a, b) => a.since - b.since || a.project.localeCompare(b.project));
+  return { rows, socks };
+}
+// An item NEWLY waiting is the event, ONE per project however many entered at once (a turn
+// that asks three things is one thing to come and answer). The same baseline rule as every
+// other event here: the first sight of a master is what is already there, never a buzz, so
+// the daemon starting beside yesterday's items does not ring for them; they are on the list.
+// Keyed by the master's session and the item, so a restarted master (a new ledger whose ids
+// start again at 1) cannot hide its first item behind the old session's.
+//   An item the owner replied to that then waits again HAS newly entered waiting: it rings.
+export function waitingEvents({ rows, socks }, seen) {
+  const cur = new Map([...socks].map(s => [s, new Set()]));
+  const project = new Map();
+  for (const r of rows) {
+    if (r.state !== 'waiting' || !cur.has(r.sock)) continue;
+    cur.get(r.sock).add(r.key);
+    project.set(r.sock, r.project);
+  }
+  const events = [];
+  for (const [sock, keys] of cur) {
+    const before = seen.get(sock);
+    seen.set(sock, keys);
+    if (!before) continue;
+    if ([...keys].some(k => !before.has(k))) events.push({ kind: 'waiting', project: project.get(sock), session: 'master', sock });
+  }
+  for (const k of [...seen.keys()]) if (!cur.has(k)) seen.delete(k);
+  return events;
+}
+const waitingSeen = new Map();    // sock -> the waiting keys at the last scan
+// The projects the owner can see: Jarvis switched off takes its project off the phone
+// (/api/projects), and its master's items with it.
+function shownToPhone() {
+  const jHide = jarvis.enabled() ? null : jarvis.readMarkerFile();
+  return projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
+}
+
+// ── the Claude accounts each listed profile runs on (fleet-accounts) ─────────
+// What `fleet-accounts list` says, for the profiles this daemon already shows the phone and no
+// other: A.describe() is the list's own words for each account, so the phone cannot word one
+// differently from the desk. With the experiment off, that sentence and nothing else — no
+// state file is read. Labels, figures, times and states only; describe() picks each field by
+// name, and a login, an address or an organization is never one of them.
+export function usageReport(list = shownToPhone(), now = A.nowS()) {
+  const thr = A.threshold();
+  if (!X.enabled('accounts')) return { ok: true, at: now, enabled: false, off: X.disabledWhy('accounts', 'accounts'), threshold: thr, profiles: [] };
+  const shown = new Set(list.map(t => (t.profile === 'default' ? 'work' : t.profile)));
+  return { ok: true, at: now, enabled: true, threshold: thr,
+           profiles: A.profiles().filter(p => shown.has(p)).map(p => A.describe(p, thr, now)) };
+}
 
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
@@ -1570,12 +1904,116 @@ async function readAtMac() {
 export function atMac(reading, limit) {
   return !!(reading && limit > 0 && Number.isFinite(reading.idle) && reading.idle < limit && !reading.locked);
 }
+
+// ── at the keyboard: tmux, and the paired host ───────────────────────────────
+// HID IS ONE KEYBOARD, AND A LINUX HOST HAS NONE. A fleet on a VM is typed into over SSH
+// from another machine, so the VM has no ioreg and its reading was null — every push went to
+// the phone while he was typing into that very fleet. Two more sources, and `here` is ANY of
+// them saying yes (keyboardStep below); each one that cannot be read is simply absent, so
+// atMac()'s rule holds for all three: no reading never holds.
+//
+// TMUX: the newest `client_activity` of an ATTACHED client on any socket this server serves.
+// Measured on 3.7b: it is set when the client attaches and moved by its KEYSTROKES only —
+// not by pane output, not by a resize, not by a command client like `display-message` — so a
+// build printing into a pane nobody is at does not read as somebody there. `list-clients`
+// lists attached clients and nothing else; no attached client is no reading, never "idle".
+// The two fields are split by a TAB, the one byte every tmux this repo supports prints
+// verbatim (CLAUDE.md, the tmux 3.4 vis(3) entry) — `\x1f` would come back as `\037`.
+//   THE PHONE'S OWN TERMINAL IS A TMUX CLIENT TOO (a `-C` control client per open web
+// terminal), and its keystrokes are the phone, not a keyboard. Its pid is left out, by pid:
+// "control mode" would also drop a desktop terminal's tmux integration, which IS a keyboard.
+//   No `locked` here: tmux cannot know, and an SSH session typing into a VM is a person at a
+// keyboard whatever any screen says.
+//
+// THE PAIRED HOST: GET /api/presence answers {idle, locked} from that host's OWN readings —
+// HID and tmux, never its own peers', so two hosts cannot answer each other in a circle, and
+// the threshold is the ASKER's (each host's serve.json has its own). Asked over the pairing's
+// signed request with a short timeout, cached like the HID reading, and a peer that does not
+// answer is a reading that could not be taken.
+const STACK_SOCK = process.env.CLAUDE_FLEET_STACK_SOCK || 'cf-stack';
+const PEER_PRESENCE_TIMEOUT = 1500;
+let tmuxCache = { at: 0, v: null };
+const peerPresence = new Map();     // peer key -> { at, v }
+export function parseClientActivity(out, skip = new Set()) {
+  let newest = null;
+  for (const line of String(out || '').split('\n')) {
+    const [pid, at] = line.split('\t');
+    if (!/^\d+$/.test(at || '') || skip.has(Number(pid))) continue;
+    newest = Math.max(newest ?? 0, Number(at));
+  }
+  return newest;
+}
+const tmuxOut = (args) => new Promise((resolve) => {
+  execFile('tmux', args, { encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024 }, (e, out) => resolve(e ? '' : out));
+});
+// The fleet sockets, plus the stack's: a stack's panes attach to the fleets, so a key typed
+// there reaches the fleet's own client as well — but the stack's client is the one he holds.
+async function readTmuxPresence() {
+  if (now() - tmuxCache.at < AT_MAC_CACHE) return tmuxCache.v;
+  const socks = [...new Set([...sockProjects().keys(), STACK_SOCK])];
+  const mine = new Set([...terms].map(b => b.pid).filter(Boolean));
+  const outs = await Promise.all(socks.map(s => tmuxOut(['-u', '-L', s, 'list-clients', '-F', '#{client_pid}\t#{client_activity}'])));
+  let newest = null;
+  for (const o of outs) { const n = parseClientActivity(o, mine); if (n != null) newest = Math.max(newest ?? 0, n); }
+  tmuxCache = { at: now(), v: newest == null ? null : { idle: Math.max(0, now() - newest), locked: false } };
+  return tmuxCache.v;
+}
+async function localPresence() {
+  const [mac, tmux] = await Promise.all([readAtMac(), readTmuxPresence()]);
+  return [mac && { source: 'mac', ...mac }, tmux && { source: 'tmux', ...tmux }].filter(Boolean);
+}
+// What /api/presence answers: the freshest unlocked reading; a locked screen only when that
+// is all there is; and nulls — which atMac() never counts — when nothing could be read.
+export function presenceAnswer(readings) {
+  const ok = readings.filter(r => r && Number.isFinite(r.idle));
+  const open = ok.filter(r => !r.locked);
+  if (open.length) return { idle: Math.min(...open.map(r => r.idle)), locked: false };
+  if (ok.length) return { idle: Math.min(...ok.map(r => r.idle)), locked: true };
+  return { idle: null, locked: null };
+}
+async function peerPresenceReadings(v = peers()) {
+  return (await Promise.all(v.peers.map(async (peer) => {
+    const hit = peerPresence.get(peer.key);
+    if (hit && now() - hit.at < AT_MAC_CACHE) return hit.v;
+    const r = await callPeer(peer, { pathq: '/api/presence', timeout: PEER_PRESENCE_TIMEOUT }, { fan: true });
+    const j = r.status === 200 && r.json ? r.json : null;
+    const val = j && Number.isFinite(j.idle) ? { source: 'peer', label: peer.label, idle: j.idle, locked: !!j.locked } : null;
+    peerPresence.set(peer.key, { at: now(), v: val });
+    return val;
+  }))).filter(Boolean);
+}
+async function presenceReadings() {
+  const [local, remote] = await Promise.all([localPresence(), peerPresenceReadings()]);
+  return [...local, ...remote];
+}
+// One reading in the words serve.log uses. The HID one keeps its old wording exactly —
+// "(idle 14s)" — so a log line from before this change reads the same after it.
+export function describeReading(r) {
+  const what = r.locked ? 'screen locked' : `idle ${Math.round(r.idle)}s`;
+  return r.source === 'tmux' ? `tmux, ${what}` : r.source === 'peer' ? `peer ${r.label}, ${what}` : what;
+}
+// THE PRESENCE HALF OF THE DECISION, PURE: whether any reading holds, which one, and how the
+// log line should name the place. "the Mac" only when the Mac's own HID is the reading that
+// speaks — a VM's tmux client is a keyboard, not a Mac.
+export function keyboardStep(readings, limit) {
+  const holder = readings.find(r => atMac(r, limit)) || null;
+  const macOnly = readings.length > 0 && readings.every(r => r.source === 'mac');
+  const place = holder ? (holder.source === 'mac' ? 'the Mac' : 'the keyboard') : macOnly ? 'the Mac' : 'the keyboard';
+  const why = holder ? ` (${describeReading(holder)})` : readings.length ? ` (${readings.map(describeReading).join(' · ')})` : '';
+  return { here: !!holder, holder, place, why };
+}
 // Whether the session has moved on from the event: a need-you that is no longer need-you
 // was answered (at the Mac, most likely), and an answer whose session is working again was
 // read and replied to. A session that is gone has nothing left to tell him about.
 //   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
 // so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
+  // An account notice belongs to no session, so no status can answer it: only the phone
+  // polling (readAt) or the hold expiring does.
+  if (ev.kind === 'account') return false;
+  // Nor can a master's waiting item: the master is often working on other things while one
+  // waits, so its status says nothing about whether the owner has seen the item.
+  if (ev.kind === 'waiting') return false;
   if (status === undefined) return true;
   if (ev.undelivered) return status === 'working';
   return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
@@ -1586,7 +2024,8 @@ export function pushResolved(ev, status) {
 //   here     atMac() now          readAt   newest poll by any subscribed phone (seconds)
 //   status   (key) -> the session's status now, for pushResolved()
 // Returns what is still held, what to send now, and one log line per decision.
-export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
+//   place    how the log names where he is ('the Mac', or 'the keyboard' — keyboardStep)
+export function holdStep(held, { events, here, now: t, hold, readAt, status, place = 'the Mac' }) {
   const log = [], keep = [];
   let expired = 0, seen = 0;
   const key = (e) => `${e.sock}/${e.session}`;
@@ -1598,14 +2037,14 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
     if (readAt > h.at || pushResolved(h.ev, status(key(h.ev))) || newer.has(key(h.ev))) { seen++; continue; }
     keep.push(h);
   }
-  if (expired) log.push(`push: expired ${expired} held after ${hold}s at the Mac`);
+  if (expired) log.push(`push: expired ${expired} held after ${hold}s at ${place}`);
   if (seen) log.push(`push: dropped ${seen} held as seen`);
   if (here) {
     for (const ev of events) keep.push({ ev, at: t });
-    if (events.length) log.push(`push: held ${events.length} — at the Mac`);
+    if (events.length) log.push(`push: held ${events.length} — at ${place}`);
     return { held: keep, send: [], released: 0, log };
   }
-  if (keep.length) log.push(`push: released ${keep.length} held — left the Mac`);
+  if (keep.length) log.push(`push: released ${keep.length} held — left ${place}`);
   return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
 }
 let pushHeld = [];
@@ -1616,24 +2055,25 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); pushHeld = []; return; }
+  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); waitingSeen.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
   const rows = scanFleet(), names = sockProjects();
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
-  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names)];
+  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
+                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
   if (!fresh.length && !pushHeld.length) return;
-  // AT THE MAC: what would have been sent is held instead, and what was held goes when he
-  // leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  // AT THE KEYBOARD: what would have been sent is held instead, and what was held goes when
+  // he leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  // The keys keep their at_mac_ names: they are in owners' serve.json files, and on a host
+  // with no Mac in it they mean the same thing about whichever keyboard is there.
   const limit = Number(c.push.at_mac_idle) || 0;
-  const reading = limit > 0 ? await readAtMac() : null;
-  const here = atMac(reading, limit);
+  const kb = keyboardStep(limit > 0 ? await presenceReadings() : [], limit);
   const readAt = Math.max(0, ...subs.map(s => lastRead.get(s.client) || 0));
-  const step = holdStep(pushHeld, { events: fresh, here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
-                                    status: (k) => pushState.get(k) });
-  const why = !reading ? '' : reading.locked ? ' (screen locked)' : ` (idle ${Math.round(reading.idle)}s)`;
-  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + why : l);
+  const step = holdStep(pushHeld, { events: fresh, here: kb.here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
+                                    status: (k) => pushState.get(k), place: kb.place });
+  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + kb.why : l);
   pushHeld = step.held;
   const events = step.send;
   if (!events.length) return;
@@ -1675,6 +2115,32 @@ async function pushTick() {
   if (sent) pushLastSent = now();
 }
 
+// ── automations (lib/automations.mjs) ──────────────────────────────────────────
+// The module decides WHEN; this is everything it may do. A step is a verb through runVerb and
+// the same one-at-a-time chain as a tap, its client named for the automation so the audit row
+// and the inbox say who acted. A passkey verb carries the approval its save recorded instead of
+// a tap's assertion — the module refuses to run one that has none.
+const automations = createAutomations({
+  perform: (tool, args, { id, name, approved }) => serialize(async () => {
+    const r = await runVerb({ tool, rawArgs: args, client: { id: `automation:${name}`, automation: id }, ip: 'local', session: null,
+                              assertion: approved ? { purpose: `automation:${id}@${approved.at}` } : null });
+    return { ok: !!r.json.ok, text: r.json.text };
+  }),
+  // What the grid says, every project the phone can see: the same --json it renders from, so
+  // Jarvis switched off is gone from here too, not only from the Projects screen.
+  // `share` is what may leave for the draft model: only a project plainly on `include`, so a
+  // setting that cannot be read keeps it here (lib/automations.mjs, the draft).
+  fleet: () => Promise.all(shownToPhone().map(async (t) => {
+    const g = await gridJson(t);
+    let share = false;
+    try { share = K.privacyFor(path.join(t.cfg, 'fleet'), t.sock).mode === 'include'; } catch {}
+    return { name: t.name, share, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
+  })),
+  audit: (row) => auditAppend({ ts: now(), ip: 'local', ...row }),
+  clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; },
+  log,
+});
+
 function armPushWatch() {
   const c = loadConfig();
   const every = Math.max(1, Number(c.push.scan) || 3) * 1000;
@@ -1686,7 +2152,9 @@ function armPushWatch() {
   }, every).unref();
 }
 
-const OPEN = new Set(['/api/auth/challenge', '/api/auth/register', '/api/auth/assert']);
+// /api/pair/accept is the fourth: the host that printed a pairing code has no token for the
+// host typing it in, and the code is what authorises it — the same shape as register.
+const OPEN = new Set(['/api/auth/challenge', '/api/auth/register', '/api/auth/assert', '/api/pair/accept']);
 
 function serveStatic(req, res, pathname) {
   // The app shell is unauthenticated on purpose: the passkey prompt lives inside it, so
@@ -1716,8 +2184,13 @@ function serveStatic(req, res, pathname) {
   // a blank page — and a blank page looks like the server is fine. MIME above has the
   // .js and .webmanifest types the client needs; anything not in it falls back to
   // octet-stream rather than to a guess.
+  // A VIDEO IS READ IN RANGES. The Reviews screen's fixture recording comes through here
+  // when fixtures are forced, and a file served whole with no Accept-Ranges cannot be
+  // seeked: a tap on chapter 3 set currentTime to 6s and the player went on from 0:00. iOS
+  // goes further and will not play it at all. The media route's own Range handling serves it.
+  if (req.headers.range) return shots.serveFile(req, res, full, MIME[path.extname(full)] || 'application/octet-stream');
   res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream',
-    'content-length': st.size, 'cache-control': 'no-cache' });
+    'content-length': st.size, 'cache-control': 'no-cache', 'accept-ranges': 'bytes' });
   fs.createReadStream(full).pipe(res);
 }
 
@@ -1725,19 +2198,21 @@ function serveStatic(req, res, pathname) {
 // action" (the X-Fleet-Assertion header on a destructive verb). One implementation, so
 // the second factor cannot end up weaker than the first — which is the shape this kind of
 // bug takes.
-function verifyAssertion(body, c) {
+function verifyAssertion(body, c, ls) {
   for (const k of ['id', 'client_data', 'authenticator_data', 'signature'])
     if (typeof body[k] !== 'string' || !body[k]) return { error: `assertion is missing '${k}'` };
   const cl = clientByCredential(body.id);
   if (!cl) return { error: 'that credential is not enrolled here (or its client is revoked)' };
   const cred = (cl.creds || []).find(x => x.id === body.id);
   if (!ALG_OK.has(cred.alg)) return { error: `credential algorithm ${cred.alg} is not supported` };
+  const { rp_id } = scopeOf(c, ls);
+  if (rpOfRow(c, cred) !== rp_id) return { error: `that passkey was enrolled for '${rpOfRow(c, cred)}', not for this listener's '${rp_id}'` };
   const clientData = Buffer.from(body.client_data, 'base64url');
-  const cd = checkClientData(clientData, c, 'webauthn.get');
+  const cd = checkClientData(clientData, c, 'webauthn.get', ls);
   if (cd.error) return { error: cd.error };
   let ad;
   try { ad = parseAuthData(Buffer.from(body.authenticator_data, 'base64url')); } catch (e) { return { error: e.message }; }
-  if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(c.rp_id))) return { error: `authenticator signed for a different rpId than '${c.rp_id}'` };
+  if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(rp_id))) return { error: `authenticator signed for a different rpId than '${rp_id}'` };
   if (!ad.up) return { error: 'user-presence flag is not set — the authenticator was not touched' };
   const data = Buffer.concat([Buffer.from(body.authenticator_data, 'base64url'),
                               crypto.createHash('sha256').update(clientData).digest()]);
@@ -1795,103 +2270,404 @@ const proj = (name) => resolveProject(name).t || null;
 // that has always protected it — a cap is per purpose here, not global, and the refusal
 // says the number rather than dying opaquely.
 const ATTACH_BODY_CAP = 9 * 1024 * 1024;   // 6 MB of photo is 8 MB of base64, plus room
-const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is checked too
-// SEVERAL PHOTOS GO IN ONE MESSAGE, and the phone uploads them one request at a time before
-// the message is sent. The quota drops the OLDEST files first, so at 24 MB a message of ten
-// full-size photos on a machine with no converter (nothing shrinks them) deleted its own
-// first six while the last four were still arriving — and the agent was handed six paths to
-// files that no longer existed. Sized so one whole message always fits: what gets dropped is
-// then only ever an earlier message's.
-export const ATTACH_PER_MESSAGE = 10;      // web/api.js holds the phone to the same number
-const ATTACH_QUOTA = Math.max(24 * 1024 * 1024, ATTACH_PER_MESSAGE * ATTACH_MAX_BYTES);  // per session, oldest deleted first
-const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
-const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
+// The decoded cap, the per-message count, the quota and the converter live in
+// lib/attach.mjs now, shared with the Telegram channel: one store behind both doors.
+// Re-exported because the phone's count is held to the server's by name (attach-quota).
+export { ATTACH_PER_MESSAGE, enforceQuota };
 // Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 90 s (it
 // waits through pauses now, so a thought spoken slowly runs long), and this is the headroom.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
+// Both spellings of hearing: /api/voice/hear is the Mac's ears, answered with Jarvis on or
+// off; /api/jarvis/hear is the same handler under the old name, kept for an installed phone
+// still running a client from before the split, and gone with Jarvis like the rest of it.
+const HEAR_PATHS = new Set(['/api/voice/hear', '/api/jarvis/hear']);
 let hearChain = Promise.resolve();
+// HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
+// kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
+// further than this process and a private temp dir that is gone before the reply is. The
+// words go back to the phone, which shows them and sends them itself, so what a session is
+// told is exactly what the owner saw they said.
+async function hear(req, res, body) {
+  if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+  if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
+  if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
+  const v = jarvis.voiceStatus();
+  if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
+  const t0 = Date.now();
+  // One at a time: whisper uses every core it is given, and two at once would each take
+  // twice as long while the owner waits on both.
+  const run = () => jarvis.transcribeAsync(body, { prompt: vocabulary() });
+  const r = await (hearChain = hearChain.then(run, run));
+  const ms = Date.now() - t0;
+  if (r.error) return send(res, 502, { ok: false, text: r.error });
+  // The size and the time, never the words: a log file is a surface too.
+  log(`voice: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
+  return send(res, 200, { ok: true, text: r.text, ms });
+}
 // One line per sentence spoken, saying which voice read it and whether it was made or
 // replayed — the record that proves a mixed reply really did switch voices.
 const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang} ${job.it.voice} ${job.it.text.length} chars ${m.ok ? (m.cached ? 'cached' : `synth ${m.ms}ms`) : `FAILED ${m.error}`}`);
 
-// SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
-// bytes are what the file is. SVG is refused loudly and specifically further down: it is an
-// image that is also a script container.
-function sniffImage(buf) {
-  if (buf.length < 12) return null;
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  // HEIC/HEIF is ISO-BMFF: a size, then 'ftyp', then a brand.
-  if (buf.slice(4, 8).toString('latin1') === 'ftyp') {
-    const brand = buf.slice(8, 12).toString('latin1');
-    if (['heic', 'heix', 'hevc', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand)) return 'heic';
-  }
-  if (buf.slice(0, 5).toString('latin1').trim().startsWith('<')) return 'markup';
-  return null;
+// ── PAIRED HOSTS: one web client, several machines (lib/peers.mjs) ───────────
+// The phone logs in to ONE host — its passkey cannot work anywhere else — and that host
+// answers for its peers by proxying, signed with the credential the two exchanged at
+// pairing. Each control below answers its own question:
+//
+//   THE SIGNATURE       is this request from the host we paired with, made just now, once
+//   THE SCOPE           is this something a paired host may ask for at all (PAIR_READS,
+//                       PAIR_VERBS): never a passkey verb (a passkey is bound to the host it
+//                       was made on, so the remote could not check one), never the terminal,
+//                       never another hop onwards. A photo crosses wherever a send does
+//                       (pairAllows below)
+//   THE ON-BEHALF NAME  which person on the home host asked. Taken ONLY from a signed
+//                       request; the host half of the identity comes from this host's own
+//                       record of the pairing, never from anything the request says
+//   BOTH AUDIT LOGS     the home host records that it forwarded, the remote that it ran, and
+//                       each row names the originating host and client
+//   THE RATE LIMITS     the home host's buckets saw the phone's request before it was
+//                       forwarded; the remote's see the forwarded one, per address AND per
+//                       `<host>/<client>`, so a paired host is not a way around either
+//
+// A machine with no peers is untouched by all of it: no field is added to any payload,
+// and an address without an `@` is this host's, exactly as before.
+// /api/presence is here ON PURPOSE, and it is the one read that exists FOR a paired host
+// rather than for a phone it proxies: the push hold on each machine asks the other whether
+// he is at a keyboard, because he types into a VM's fleet from the Mac and its own phone
+// should not buzz about a screen he is looking at. It answers two fields, {idle, locked},
+// computed from this host's own readings — no project, no session, no name — so what it
+// tells a paired host is only "someone touched a key here N seconds ago".
+// REVIEWS (lib/shots.mjs, "PAIRED HOSTS"), so one app reviews every machine's runs. Each
+// is safe to hand a paired host for its own reason, and none needs a passkey:
+//   /api/shots        the run list: branch names, commits, states and step counts — what
+//                     /api/grid already tells a paired host about the same branches
+//   /api/shots/run    one run's steps, requests and provenance: the URLs fleet-shots drove
+//                     and what they answered, recorded for a human to read, in the same
+//                     fleet whose conversations /api/session already shares
+//   /api/shots/media  one run's recording or stills, by name, matched against the media
+//                     pattern and resolved inside THAT run's own dir on this host — the same
+//                     checks a ticketed phone request gets, with the signature standing in for
+//                     the ticket. It is a read of a file this host made to be watched
+//   /api/know/events  the fleet's memory (docs/MEMORY.md): this host's recorded events after
+//                     a time, so the other side's fleet-know can answer about this machine's
+//                     projects. Never a private or excluded project's (eventsForPeer), and
+//                     never a third host's: what this host fetched from ITS peers stays here
+const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
+                            '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
+// THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
+// lets one machine write a merge-gating file on another — which is the point: the verdict
+// has to land where the run and its --check are. It is safe to expose because it is no more
+// than the phone on THIS host could already write here: the route takes no passkey for a
+// phone either (lib/shots.mjs, the verdict route), it writes one file, verdict.json, only
+// inside a run dir this host's own runDir() resolves, with a body cleanVerdict() checks
+// against this host's own manifest — and it is serialized and audited here with the paired
+// host's label and the client it acted for, exactly as a paired send is.
+const PAIR_POSTS = new Set(['/api/shots/verdict']);
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
+// WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
+// the remote asks it before it serves, so the two cannot drift into one forwarding what the
+// other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
+// crosses exactly where a send crosses, because a photo exists only to be named in a send:
+// the attach puts the file on the machine whose session will read it, and the fleet_send
+// after it hands that path over. So it is keyed on fleet_send being in PAIR_VERBS rather
+// than listed beside it: make the pairing read-only and the photo goes with the send, with
+// no second list for somebody to forget.
+// (`verbs` is a parameter only so the suite can ask what a read-only pairing would allow.)
+export function pairAllows(method, p, body, verbs = PAIR_VERBS) {
+  if (method === 'GET') return PAIR_READS.has(p);
+  if (method !== 'POST') return false;
+  if (p === '/api/verb') return verbs.has(body?.tool);
+  if (p === '/api/attach') return verbs.has('fleet_send');
+  return PAIR_POSTS.has(p);
 }
-
-// LINUX IS SUPPORTED AND sips IS NOT ON IT (CLAUDE.md: every macOS-only call needs a
-// guard). Probed in order and remembered, because three spawns per photo to re-learn the
-// same answer is three spawns per photo.
-let converterCache;
-function imageConverter() {
-  if (converterCache !== undefined) return converterCache;
-  const has = (bin) => { try { return execFileSync('command', ['-v', bin], { shell: '/bin/sh', encoding: 'utf8' }).trim(); } catch { return ''; } };
-  for (const [bin, kind] of [['sips', 'sips'], ['heif-convert', 'heif'], ['magick', 'magick']]) {
-    const at = has(bin);
-    if (at) { converterCache = { bin: at, kind }; return converterCache; }
-  }
-  converterCache = null;
-  return converterCache;
+// THE TIME A FORWARDED PHOTO GETS. The body can be ATTACH_BODY_CAP, and the remote may run a
+// converter on it before it answers, so a flat 15 s would cut a big photo off over a slow
+// link while the remote was still writing it. Budgeted at 256 KB/s plus half a minute for the
+// conversion: the 9 MB cap gets ~66 s, a small PNG the half minute.
+export const attachForwardTimeout = (bytes) => 30000 + Math.ceil(Math.max(0, bytes) / (256 * 1024)) * 1000;
+export const TERM_REMOTE_WHY = 'the terminal never crosses machines: a shell is opened only by the host it runs on — open that host\'s own app for one';
+const pairNonces = new Map();       // "<pid>:<nonce>" -> expiry: the replay table for signed requests
+const peerLive = new Map();         // key -> { online, why, at, down_until }: what the last call found
+const peerCache = new Map();        // key -> { at, json }: the last good /api/projects, for a slow answer
+let peerSeen = null, peerSeenTimer = null;
+function peers() {
+  try { return P.loadPeers(PEERS); }
+  catch (e) { log(`peers: ${e.message}`); return { self: '', open: null, peers: [] }; }
 }
-
-// Returns '' on success, or a sentence saying what could not be done. Never throws into
-// the request path: a silently dropped attachment is the worst outcome this feature has.
-function convertImage(kind, src, dst) {
-  const c = imageConverter();
-  if (!c) return 'no image converter on this machine (looked for sips, heif-convert, magick)';
-  try {
-    if (c.kind === 'sips') {
-      execFileSync(c.bin, ['-s', 'format', 'jpeg', '-Z', String(ATTACH_MAX_PX), src, '--out', dst],
-                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
-    } else if (c.kind === 'heif') {
-      // heif-convert only reads HEIF; a JPEG or PNG that reaches it would fail, so those
-      // are copied instead (below) and this only ever sees HEIC.
-      execFileSync(c.bin, [src, dst], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
-    } else {
-      execFileSync(c.bin, [src, '-auto-orient', '-resize', `${ATTACH_MAX_PX}x${ATTACH_MAX_PX}>`, dst],
-                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
+function seenAt(key) { if (!peerSeen) peerSeen = P.loadSeen(PEERS_SEEN); return Number(peerSeen[key]) || 0; }
+function markPeer(peer, ok, why = '') {
+  const t = now();
+  const prev = peerLive.get(peer.key) || {};
+  peerLive.set(peer.key, { online: ok, why: ok ? '' : why, at: t, down_until: ok ? 0 : t + 10 });
+  if (ok !== prev.online && prev.at) log(`peer ${peer.label}: ${ok ? 'back online' : `offline — ${why}`}`);
+  if (!ok) return;
+  if (!peerSeen) peerSeen = P.loadSeen(PEERS_SEEN);
+  peerSeen[peer.key] = t;
+  // A poll every few seconds is a heartbeat; the file only has to be right to the minute.
+  if (!peerSeenTimer) { peerSeenTimer = setTimeout(() => { peerSeenTimer = null; P.saveSeen(PEERS_SEEN, peerSeen); }, 5000); peerSeenTimer.unref?.(); }
+}
+// The rows behind every host label the client draws: this host first, then each peer with
+// whether the last call reached it and when one last did. `online: null` is "not asked yet".
+function hostRows(v = peers()) {
+  return [{ key: '', label: P.selfLabel(v), self: true, online: true },
+    ...v.peers.map(p => {
+      const l = peerLive.get(p.key);
+      const seen = seenAt(p.key) || p.created || 0;
+      return { key: p.key, label: p.label, self: false, online: l ? l.online : null,
+               last_seen: seen, last_seen_ago: A.ago(seen), ...(l && !l.online ? { why: l.why } : {}) };
+    })];
+}
+// A request that came back with the remote's own "who are you?" is a pairing the OTHER side
+// has dropped — not an outage, and the fix is different, so it is told apart here.
+const unpairedThere = (r) => r.status === 401 && r.json && r.json.needs === 'pairing';
+async function callPeer(peer, opts, { fan = false } = {}) {
+  // A fan-out read skips a peer that just failed, for a few seconds: the Projects poll is
+  // every few seconds, and asking a sleeping laptop each time would put its timeout in
+  // front of every answer the awake host gives. A tap (fan=false) always asks.
+  const l = peerLive.get(peer.key);
+  if (fan && l && !l.online && l.down_until > now()) return { status: 0, error: l.why || 'offline' };
+  let r;
+  try { r = await P.peerRequest(peer, opts); } catch (e) { r = { status: 0, error: e.message }; }
+  if (!r.status) markPeer(peer, false, r.error || 'no answer');
+  else if (unpairedThere(r)) markPeer(peer, false, `it no longer accepts this pairing — unpair it here: fleet-serve unpair ${peer.key}`);
+  else markPeer(peer, true);
+  return r;
+}
+async function fanOut(pathq, req, timeout = 8000) {
+  const v = peers();
+  if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
+  return Promise.all(v.peers.map(async (peer) => ({ peer, r: await callPeer(peer, { pathq, onBehalf: req.client.id, timeout }, { fan: true }) })));
+}
+// What lib/shots.mjs may do with this host's peers, on behalf of the phone that asked: its
+// list fans out like /api/waiting's, and a tap is a single signed call. The media is the one
+// call whose body is not JSON, so it streams (P.peerStream) — and is marked like any other
+// call, so a peer that stopped answering mid-video shows offline on Projects too.
+function shotsPeers(req) {
+  const v = peers();
+  // No req.client is the ticketed media route — a <video> carries no bearer — and there the
+  // client it acts for is the one the ticket was minted for, which lib/shots.mjs passes in.
+  const me = req.session ? req.client : null;     // see the Reviews dispatch: req.client may be a socket
+  if (!v.peers.length || (me && me.pair)) return null;
+  const who = (x) => x || (me && me.id) || '';
+  const byKey = (k) => v.peers.find(x => x.key === k.key);
+  return {
+    self: () => P.selfLabel(v),
+    list: () => v.peers.map(x => ({ key: x.key, label: x.label })),
+    fan: (pathq, ms) => fanOut(pathq, req, ms),
+    call: (k, { method = 'GET', pathq, body = null, ms }) => callPeer(byKey(k), { method, pathq, body, onBehalf: who(''), timeout: ms }),
+    stream: async (k, { method = 'GET', pathq, headers = {}, ms, onBehalf = '' }) => {
+      const peer = byKey(k);
+      let r;
+      try { r = await P.peerStream(peer, { method, pathq, headers, onBehalf: who(onBehalf), timeout: ms }); } catch (e) { r = { status: 0, error: e.message }; }
+      markPeer(peer, !!r.status, r.error || '');
+      return r;
+    },
+  };
+}
+const addrOf = (name, peer) => (peer ? P.joinAddr(name, peer.key) : name);
+// /api/projects with every peer's projects after this host's. This host's rows keep their
+// index (the digit on a card is what `Ctrl-f <p>` counts at the desk), so the peers'
+// rows only ever come after them.
+async function mergeProjects(local, fan, v) {
+  if (!fan) return local;
+  const self = P.selfLabel(v);
+  const rows = local.projects.map(r => ({ ...r, host: self, host_key: '' }));
+  for (const { peer, r } of fan) {
+    let j = r.status === 200 && r.json && Array.isArray(r.json.projects) ? r.json : null;
+    if (j) peerCache.set(peer.key, { at: now(), json: j });
+    // SLOW IS NOT GONE. A peer that timed out answering a full rollup a minute after it
+    // last answered one is a busy machine, and its projects stay on screen from that answer.
+    else if (r.error && /no answer in/.test(r.error)) { const hit = peerCache.get(peer.key); if (hit && now() - hit.at < 60) j = hit.json; }
+    if (!j) continue;
+    for (const x of j.projects) rows.push({ ...x, name: addrOf(x.name, peer), host: peer.label, host_key: peer.key, home: j.home || '' });
+  }
+  return { ...local, projects: rows, hosts: hostRows(v) };
+}
+function mergeWaiting(local, fan) {
+  if (!fan) return local;
+  const items = (local.items || []).map(i => ({ ...i, host: P.selfLabel(peers()) }));
+  for (const { peer, r } of fan)
+    if (r.status === 200 && r.json && Array.isArray(r.json.items))
+      for (const i of r.json.items) items.push({ ...i, project: addrOf(i.project, peer), host: peer.label });
+  return { ...local, ok: true, items };
+}
+function mergeUsage(local, fan) {
+  if (!fan) return local;
+  const self = P.selfLabel(peers());
+  const profiles = (local.profiles || []).map(p => ({ ...p, profile: `${self} · ${p.profile}` }));
+  let enabled = !!local.enabled;
+  for (const { peer, r } of fan)
+    if (r.status === 200 && r.json && r.json.enabled) {
+      enabled = true;
+      for (const p of r.json.profiles || []) profiles.push({ ...p, profile: `${peer.label} · ${p.profile}` });
     }
-  } catch (e) {
-    return `${c.kind} could not convert it: ${String((e.stderr || e.message || '')).split('\n')[0].slice(0, 160)}`;
-  }
-  try { if (!fs.statSync(dst).size) return `${c.kind} produced an empty file`; } catch { return `${c.kind} produced no file`; }
-  return '';
+  return { ...local, enabled, profiles };
 }
 
-// $CLAUDE_FLEET_DIR/attach/<sock>.<session>/<random>.jpg — the same <sock>.<session> key
-// every other piece of per-session state under that directory already uses, so a directory
-// whose session is gone is an orphan of a class fleet-clean already understands.
-function attachDir(sock, session) {
-  return path.join(process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'),
-                   'attach', `${sock}.${session}`);
-}
-// OLDEST FIRST, to a fixed ceiling. fleet-clean can only help once a session is dead; a
-// session that lives for weeks and gets a photo a day needs the bound enforced here.
-export function enforceQuota(dir, quota = ATTACH_QUOTA) {
-  let files = [];
-  try {
-    files = fs.readdirSync(dir).map(f => {
-      const full = path.join(dir, f);
-      try { const st = fs.statSync(full); return { full, size: st.size, at: st.mtimeMs }; } catch { return null; }
-    }).filter(Boolean).sort((a, b) => a.at - b.at);
-  } catch { return 0; }
-  let total = files.reduce((n, f) => n + f.size, 0), dropped = 0;
-  while (total > quota && files.length > 1) {
-    const oldest = files.shift();
-    try { fs.unlinkSync(oldest.full); total -= oldest.size; dropped++; } catch { break; }
+// A SIGNED REQUEST FROM A PAIRED HOST, before anything else reads it. Returns {body} or
+// answers the request itself and returns null.
+async function pairAuth(req, res, p, url, ip) {
+  let raw;
+  // A FORWARDED PHOTO IS THE ONE BIG SIGNED BODY. The signature covers the bytes, so they
+  // have to be read before it can be checked — but only a pairing id this host actually
+  // holds gets the photo-sized cap; anybody else is held to the 1 MB every other POST is.
+  const pid = String(req.headers['x-fleet-pair'] || '');
+  const cap = p === '/api/attach' && pid && peers().peers.some(x => x.id === pid) ? ATTACH_BODY_CAP : undefined;
+  try { raw = req.method === 'POST' ? await readBody(req, cap, { raw: true }) : Buffer.alloc(0); }
+  catch (e) { send(res, e.tooBig ? 413 : 400, { ok: false, text: e.message }); try { req.resume(); } catch {} return null; }
+  const v = peers();
+  const r = P.verifySigned(v, req, url.pathname + url.search, raw, pairNonces);
+  if (r.error) {
+    log(`pair: refused a signed request from ${ip}: ${r.error}`);
+    send(res, 401, { ok: false, needs: 'pairing', text: r.error });
+    return null;
   }
-  return dropped;
+  let body = {};
+  if (raw.length) { try { body = JSON.parse(raw.toString('utf8')); } catch { send(res, 400, { ok: false, text: 'body is not JSON' }); return null; } }
+  if (!pairAllows(req.method, p, body) && !(req.method === 'POST' && p === '/api/pair/revoke')) {
+    send(res, 403, { ok: false, text: req.method === 'POST' && p === '/api/verb'
+      ? `${String(body.tool || 'that')} does not cross machines — the pairing covers ${PAIR_SCOPE_WORDS}. Do it from this host's own app`
+      : `${req.method} ${p} is not something a paired host may ask for — the pairing covers ${PAIR_SCOPE_WORDS}` });
+    return null;
+  }
+  // ONE HOP. A paired host asks about this host's own projects, by their bare names; an
+  // address naming yet another host is refused rather than forwarded, so no chain of
+  // pairings can be walked and two hosts can never bounce one request between them.
+  const named = url.searchParams.get('project') || (body.args && body.args.project) || (p === '/api/attach' && body.project) || '';
+  if (P.splitAddr(named)) { send(res, 403, { ok: false, text: 'a paired host asks about this host\'s own projects; a request is never forwarded a second time' }); return null; }
+  req.client = { id: `${r.peer.label}/${r.onBehalf || 'host'}`, pair: r.peer, onBehalf: r.onBehalf || '' };
+  req.session = { exp: now(), purpose: 'pair' };
+  markPeer(r.peer, true);
+  if (!rateOk(req.method === 'POST' ? 'write' : 'read', `id:${req.client.id}`, res)) { send(res, 429, { ok: false, text: 'rate limited' }); return null; }
+  return { body };
+}
+
+// THE OTHER HALF OF `fleet-serve pair`: the host that printed the code receives the joiner's
+// half of the credential and answers with its own. Unauthenticated like /api/auth/register,
+// and gated the same way: a window opened from this host's terminal AND the code it printed.
+async function pairAccept(req, res, body, ip) {
+  if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+  if (!req.socket.encrypted && !['127.0.0.1', '::1'].includes(ip))
+    return send(res, 403, { ok: false, text: 'pairing over plain http is refused except on loopback — pair with this host\'s https origin' });
+  let v;
+  try { v = P.loadPeers(PEERS, { force: true }); } catch (e) { return send(res, 500, { ok: false, text: e.message }); }
+  if (!v.open || !(v.open.exp > now()))
+    return send(res, 403, { ok: false, text: 'no pairing is open here. On this host: fleet-serve pair — it prints a one-time code' });
+  if (typeof body.code !== 'string' || !sameSecret(sha256(normCode(body.code)), v.open.code_sha256))
+    return send(res, 403, { ok: false, text: 'wrong or missing pairing code' });
+  const bad = !/^[A-Za-z0-9_-]{16,64}$/.test(String(body.id || '')) ? "'id' is not a pairing id"
+    : !P.LABEL_OK.test(String(body.label || '')) ? "'label' must be 1-24 letters, digits, space, dot, dash or underscore"
+    : (typeof body.secret !== 'string' || body.secret.length < 32 || body.secret.length > 128) ? "'secret' is missing or the wrong size"
+    : P.urlProblem(body.url);
+  if (bad) return send(res, 400, { ok: false, text: bad });
+  const url = P.originOf(body.url);
+  const dup = v.peers.find(x => x.id === body.id || x.url === url);
+  if (dup) return send(res, 409, { ok: false, text: `already paired with ${dup.label} (${dup.url}) — unpair it first: fleet-serve unpair ${dup.key}` });
+  const key = P.keyFor(body.label, new Set(v.peers.map(x => x.key)));
+  const mine = P.rand(32);
+  v.peers.push({ id: body.id, key, label: body.label, url, out: body.secret, in: mine, created: now() });
+  v.open = null;
+  P.savePeers(PEERS, v);
+  markPeer(v.peers[v.peers.length - 1], true);
+  auditAppend({ ts: now(), client: `${body.label}/cli`, ip, verb: 'pair', subject: key, result: 'ran',
+                output: `paired with '${body.label}' at ${url}; its projects appear here as <name>@${key}` });
+  log(`paired with '${body.label}' at ${url} (key ${key}) from ${ip}`);
+  return send(res, 200, { ok: true, label: P.selfLabel(v), secret: mine });
+}
+
+// UNPAIR: tell the other side if it answers, and forget it here whether or not it does — a
+// pairing the owner revoked must not survive because the other machine was asleep.
+export async function unpairPeer(peer, who, ip) {
+  let told = false, why = '', r;
+  try { r = await P.peerRequest(peer, { method: 'POST', pathq: '/api/pair/revoke', body: {}, onBehalf: who.replace(/^.*\//, '') || 'host', timeout: 4000 }); }
+  catch (e) { r = { status: 0, error: e.message }; }
+  if (r.status === 200) told = true;
+  else if (unpairedThere(r)) { told = true; why = 'it had already forgotten this host'; }
+  else why = r.error || (r.json && r.json.text) || `HTTP ${r.status}`;
+  const v = P.loadPeers(PEERS, { force: true });
+  v.peers = v.peers.filter(x => x.id !== peer.id);
+  P.savePeers(PEERS, v);
+  peerLive.delete(peer.key); peerCache.delete(peer.key);
+  auditAppend({ ts: now(), client: who, ip, verb: 'unpair', subject: peer.key, result: 'ran',
+                output: `unpaired '${peer.label}' here; ${told ? 'and there' : `NOT there (${why}) — it will refuse this host's signature anyway, since the credential is gone from this side`}` });
+  return { told, why };
+}
+
+// What the HOME host does with a request that names a peer's project: refuse it here when
+// it is out of scope (so the refusal is immediate and says why), or forward it signed.
+async function proxyRemote(req, res, p, url, body, ip) {
+  const named = url.searchParams.get('project') ?? (p === '/api/verb' ? (body?.args?.project ?? (TOOLS_ALLOWED[body?.tool]?.noProject ? body?.args?.name : undefined))
+    : (p === '/api/attach' || p.startsWith('/api/term')) ? body?.project : undefined);
+  const addr = P.splitAddr(named || '');
+  if (!addr) return false;
+  const v = peers();
+  const peer = v.peers.find(x => x.key === addr.key);
+  if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
+  if (p.startsWith('/api/term')) { send(res, 403, { ok: false, remote: true, text: TERM_REMOTE_WHY }); return true; }
+  // 400, NOT 403, for everything refused below. web/api.js reads a 401 or a 403 on a read or
+  // a verb as "this session is dead" and locks the app — a refusal about WHERE a project is
+  // must not log the owner out of the machine he is on. (The terminal's 403 above is read by
+  // its own caller, which tells a refusal from a dead session.)
+  if (!pairAllows(req.method, p, body)) {
+    const what = p === '/api/verb' ? String(body.tool || 'that') : p === '/api/attach' ? 'a photo' : `${req.method} ${p}`;
+    const pk = p === '/api/verb' && TOOLS_ALLOWED[body.tool]?.passkey ? ' (it needs a passkey, and a passkey only works on the host it was made on)' : '';
+    send(res, 400, { ok: false, remote: true, text: `${what} does not cross to ${peer.label}${pk} — what crosses: ${PAIR_SCOPE_WORDS}. Do it from ${peer.label}'s own app` });
+    return true;
+  }
+  let pathq = p, out = null;
+  if (req.method === 'GET') { const q = new URLSearchParams(url.searchParams); q.set('project', addr.project); pathq = `${p}?${q}`; }
+  // A PHOTO GOES TO THE MACHINE WHOSE SESSION WILL READ IT. The same body, with the bare
+  // name; the remote runs the whole local attach on it (its projects file, the session-name
+  // rule, the sniffing, the SVG refusal, the O_EXCL write, the path check) and answers with
+  // ITS path, which is passed back untouched — the send that follows goes to the same
+  // machine, so that path is the one that names the file where it will be read.
+  else if (p === '/api/attach') out = { ...body, project: addr.project };
+  else out = { ...body, args: { ...(body.args || {}), project: addr.project } };
+  const headers = req.headers['if-none-match'] ? { 'if-none-match': String(req.headers['if-none-match']) } : {};
+  const r = await callPeer(peer, { method: req.method, pathq, body: out, onBehalf: req.client.id, headers,
+                                   timeout: p === '/api/verb' ? 15 * 60 * 1000
+                                     : p === '/api/attach' ? attachForwardTimeout(String(body.data || '').length) : 15000 });
+  if (p === '/api/verb') {
+    const args = Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
+                  via: 'proxy', host: peer.label, args: { ...args, project: named },
+                  result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
+                  output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
+  }
+  // ...and the photo, the same way: this host records that it forwarded one and where, the
+  // remote that it stored it. Never the bytes, never more of the path than the remote said.
+  if (p === '/api/attach')
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: 'attach', project: named, subject: String(body.session || '').slice(0, 64),
+                  via: 'proxy', host: peer.label,
+                  result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
+                  output: String((r.json && (r.json.ok ? r.json.path : r.json.text)) || r.error || '').slice(0, 500) });
+  if (!r.status) {
+    const seen = seenAt(peer.key) || peer.created;
+    send(res, 502, { ok: false, offline: true, host: peer.label, last_seen: seen,
+                     text: `${peer.label} is offline (${r.error}) · last seen ${A.ago(seen)}` });
+    return true;
+  }
+  if (unpairedThere(r)) {
+    send(res, 502, { ok: false, host: peer.label, text: `${peer.label} no longer accepts this host's pairing (${r.json.text}). Unpair it here: fleet-serve unpair ${peer.key}` });
+    return true;
+  }
+  // ...and the same rule for the remote's own 401/403, whatever caused it: it is about this
+  // host's standing there, never about the phone's session here, so it must not arrive as
+  // the status that makes the phone throw its token away.
+  if (r.status === 401 || r.status === 403) {
+    send(res, 502, { ok: false, host: peer.label, text: `${peer.label} refused it: ${String((r.json && (r.json.text || r.json.error)) || `HTTP ${r.status}`).slice(0, 300)}` });
+    return true;
+  }
+  if (r.status === 304) { res.writeHead(304, { ...(r.headers.etag ? { ETag: r.headers.etag } : {}), 'cache-control': 'no-store' }); res.end(); return true; }
+  let j = r.json;
+  // The payload says which project it is about; on this side that is the ADDRESS, so a
+  // screen that keys anything off it keys off the same string it asked with.
+  if (j && typeof j === 'object' && !Array.isArray(j)) {
+    j = { ...j, host: peer.label, host_key: peer.key };
+    if (j.project === addr.project) j.project = named;
+  }
+  send(res, r.status, j ?? { ok: false, text: String(r.text || '').slice(0, 300) }, r.headers.etag ? { ETag: r.headers.etag } : {});
+  return true;
 }
 
 async function api(req, res, url, ip) {
@@ -1899,12 +2675,14 @@ async function api(req, res, url, ip) {
   try { c = loadConfig(); } catch (e) { return send(res, 500, { ok: false, text: `config unreadable: ${e.message}` }); }
   const p = url.pathname;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const scope = scopeOf(c, req.ls);
 
-  // Every POST is checked against the configured origins as well. A browser sends Origin
+  // Every POST is checked against this listener's origins as well. A browser sends Origin
   // on a cross-site request; refusing an unrecognised one closes CSRF from any page that
-  // is not ours, and costs a client of ours nothing.
-  if (req.method === 'POST' && req.headers.origin && !(c.origins || []).includes(req.headers.origin))
-    return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured` });
+  // is not ours, and costs a client of ours nothing. THIS listener's: the tailnet origin is
+  // as foreign to the localhost socket as any other site, and the reverse.
+  if (req.method === 'POST' && req.headers.origin && !scope.origins.includes(req.headers.origin))
+    return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured for this listener` });
 
   if (p === '/api/auth/challenge') {
     if (!rateOk('challenge', ip, res)) return send(res, 429, { ok: false, text: 'rate limited' });
@@ -1915,11 +2693,26 @@ async function api(req, res, url, ip) {
   } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
 
-  if (!OPEN.has(p)) {
+  let pairBody = null;
+  if (!OPEN.has(p) && req.headers['x-fleet-pair'] !== undefined) {
+    // A PAIRED HOST, signing rather than holding a token (see PAIRED HOSTS above). Its body
+    // is read here, before any route, because the signature covers the bytes.
+    const pa = await pairAuth(req, res, p, url, ip);
+    if (!pa) return;
+    pairBody = pa.body;
+  } else if (!OPEN.has(p) && !shots.TICKETED.has(p)) {
+    // AN IDENTITY HEADER WITHOUT A SIGNATURE IS A FORGERY, whoever sends it. The on-behalf
+    // name is honoured only inside a paired host's signed request; on a phone's own token it
+    // would be a way to write somebody else's name into the audit log, so it is refused
+    // outright rather than ignored — ignoring it would leave the attempt unrecorded.
+    if (req.headers['x-fleet-on-behalf'] !== undefined) {
+      log(`refused an unsigned on-behalf header from ${ip}`);
+      return send(res, 403, { ok: false, text: 'X-Fleet-On-Behalf is only honoured inside a paired host\'s signed request — an identity header on its own is refused' });
+    }
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
     // only because a passkey signed a challenge, and it dies after session_ttl unused.
-    const s = liveSession(bearer);
+    const s = liveSession(bearer, scope.rp_id);
     if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires once idle)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
     // The slide, told to the client: web/api.js keeps its own copy of the expiry so it can
@@ -1941,11 +2734,11 @@ async function api(req, res, url, ip) {
   // the attachment route alone gets a cap sized for an unconverted phone photo, because
   // that is the one request that legitimately carries one. Keyed on the path because this
   // is the only point where the body is read and the path is already known.
-  let body;
-  try {
+  let body = pairBody;
+  if (body === null) try {
     body = req.method === 'POST'
-      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : p === '/api/jarvis/hear' ? HEAR_BODY_CAP : undefined,
-                       { raw: p === '/api/jarvis/hear' }) : {};
+      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : HEAR_PATHS.has(p) ? HEAR_BODY_CAP : undefined,
+                       { raw: HEAR_PATHS.has(p) }) : {};
   } catch (e) {
     // ...and the refusal says the NUMBER. "body larger than 8388608 bytes" is actionable;
     // a dropped connection is what this used to do.
@@ -1968,10 +2761,13 @@ async function api(req, res, url, ip) {
     // GET, and unauthenticated: it is what a cold open asks for before it has anything.
     // Single-use and short-lived, so handing them out freely costs nothing.
     const first = (c.clients || []).find(x => !x.revoked && (x.creds || []).length);
-    return send(res, 200, { challenge: newChallenge(), rp_id: c.rp_id, ttl: CHALLENGE_TTL,
+    return send(res, 200, { challenge: newChallenge(scope.rp_id), rp_id: scope.rp_id, ttl: CHALLENGE_TTL,
       user: { id: (c.enroll && c.enroll.exp > now() ? c.enroll.id : first?.id) || 'ghostfleet',
               name: (c.enroll && c.enroll.exp > now() ? c.enroll.id : first?.id) || 'ghostfleet' },
-      allow: (c.clients || []).filter(x => !x.revoked).flatMap(x => (x.creds || []).map(y => ({ type: 'public-key', id: y.id }))),
+      // Only the passkeys this listener can verify: offering the tailnet's at localhost would
+      // ask the browser for a credential it cannot produce here.
+      allow: (c.clients || []).filter(x => !x.revoked).flatMap(x => (x.creds || [])
+        .filter(y => rpOfRow(c, y) === scope.rp_id).map(y => ({ type: 'public-key', id: y.id }))),
       enrolling: !!(c.enroll && c.enroll.exp > now()) });
   }
 
@@ -1994,7 +2790,7 @@ async function api(req, res, url, ip) {
     for (const k of ['id', 'attestation', 'client_data'])
       if (typeof body[k] !== 'string' || !body[k]) return send(res, 400, { ok: false, text: `registration is missing '${k}'` });
     const clientData = Buffer.from(body.client_data, 'base64url');
-    const cd = checkClientData(clientData, c, 'webauthn.create');
+    const cd = checkClientData(clientData, c, 'webauthn.create', req.ls);
     if (cd.error) return send(res, 400, { ok: false, text: cd.error });
     let ad, key;
     try {
@@ -2005,12 +2801,12 @@ async function api(req, res, url, ip) {
       if (!ad.at || !ad.cose) return send(res, 400, { ok: false, text: 'no attested credential data' });
       key = coseToJwk(ad.cose);
     } catch (e) { return send(res, 400, { ok: false, text: `attestation could not be parsed: ${e.message}` }); }
-    if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(c.rp_id))) return send(res, 400, { ok: false, text: `credential was created for a different rpId than '${c.rp_id}'` });
+    if (!sameSecret(ad.rpIdHash.toString('hex'), sha256(scope.rp_id))) return send(res, 400, { ok: false, text: `credential was created for a different rpId than '${scope.rp_id}'` });
     if (!ad.up) return send(res, 400, { ok: false, text: 'user-presence flag is not set' });
     if (!ALG_OK.has(key.alg)) return send(res, 400, { ok: false, text: `algorithm ${key.alg} is not supported (ES256 or RS256)` });
     if (b64u(ad.credId) !== body.id) return send(res, 400, { ok: false, text: "the credential id does not match the authenticator's own" });
 
-    const cred = { id: b64u(ad.credId), jwk: key.jwk, alg: key.alg, counter: ad.signCount, created: now() };
+    const cred = { id: b64u(ad.credId), jwk: key.jwk, alg: key.alg, counter: ad.signCount, created: now(), rp_id: scope.rp_id };
     let cl = c.clients.find(x => x.id === pend.id);
     if (cl) {
       if ((cl.creds || []).some(x => x.id === cred.id)) return send(res, 409, { ok: false, text: 'that passkey is already enrolled' });
@@ -2025,15 +2821,15 @@ async function api(req, res, url, ip) {
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'enroll', subject: cred.id.slice(0, 12), result: 'ran',
                   output: `passkey enrolled (${(cl.creds || []).length} on this client)` });
     log(`enrolled '${cl.id}' passkey ${cred.id.slice(0, 12)}… from ${ip}`);
-    const sess = mintSession(cl.id, 'register');
+    const sess = mintSession(cl.id, 'register', scope.rp_id);
     return send(res, 200, { ok: true, client_id: cl.id, token: sess.token, expires_at: sess.expires_at });
   }
 
   if (p === '/api/auth/assert') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    const v = verifyAssertion(body, c);
+    const v = verifyAssertion(body, c, req.ls);
     if (v.error) { log(`auth FAILED from ${ip}: ${v.error}`); return send(res, 401, { ok: false, text: v.error }); }
-    const sess = mintSession(v.client.id, v.purpose || 'open');
+    const sess = mintSession(v.client.id, v.purpose || 'open', scope.rp_id);
     log(`session for '${v.client.id}' from ${ip} (${sess.ttl}s, ${v.purpose || 'open'})`);
     return send(res, 200, { ok: true, token: sess.token, expires_at: sess.expires_at, client_id: v.client.id });
   }
@@ -2049,6 +2845,50 @@ async function api(req, res, url, ip) {
     log(`session for '${req.client.id}' ended from ${ip}`);
     return send(res, 200, { ok: true });
   }
+
+  // ── paired hosts (PAIRED HOSTS, above) ────────────────────────────────────
+  if (p === '/api/pair/accept') return pairAccept(req, res, body, ip);
+  // The other side unpaired: forget it here too. Only a signed request reaches this — the
+  // scope check in pairAuth lets nothing else through — and it can only remove its OWN pair.
+  if (p === '/api/pair/revoke') {
+    if (!req.client.pair) return send(res, 403, { ok: false, text: 'only a paired host revokes its own pairing — from here, use /api/pairs/unpair' });
+    const v = P.loadPeers(PEERS, { force: true });
+    const was = v.peers.find(x => x.id === req.client.pair.id);
+    v.peers = v.peers.filter(x => x.id !== req.client.pair.id);
+    P.savePeers(PEERS, v);
+    if (was) { peerLive.delete(was.key); peerCache.delete(was.key); }
+    auditAppend({ ts: now(), client: req.client.id, ip, verb: 'unpair', subject: was ? was.key : '-', result: 'ran',
+                  output: `'${req.client.pair.label}' unpaired this host from its side` });
+    log(`'${req.client.pair.label}' unpaired from its side (${ip})`);
+    return send(res, 200, { ok: true });
+  }
+  // What the phone's settings sheet lists and what it can do about it: see the hosts, unpair
+  // one, rename one (or this host). A paired host's own requests never reach these.
+  if (p === '/api/pairs' || p.startsWith('/api/pairs/')) {
+    if (req.client.pair) return send(res, 403, { ok: false, text: 'a paired host does not manage pairings' });
+    if (p === '/api/pairs' && req.method === 'GET') return send(res, 200, { ok: true, hosts: hostRows() });
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const v = P.loadPeers(PEERS, { force: true });
+    const self = body.host === '' || body.host === 'self';
+    const peer = self ? null : P.findPeer(v, body.host);
+    if (!self && !peer) return send(res, 404, { ok: false, text: `no paired host '${String(body.host || '').slice(0, 40)}'` });
+    if (p === '/api/pairs/unpair') {
+      if (self) return send(res, 400, { ok: false, text: 'this host is not paired with itself' });
+      const r = await unpairPeer(peer, req.client.id, ip);
+      return send(res, 200, { ok: true, told: r.told, text: r.told ? `unpaired ${peer.label}, here and there` : `unpaired ${peer.label} here; it did not answer (${r.why}), and its signature no longer works on this host` });
+    }
+    if (p === '/api/pairs/label') {
+      const label = String(body.label || '').trim();
+      if (!P.LABEL_OK.test(label)) return send(res, 400, { ok: false, text: 'a label is 1-24 letters, digits, space, dot, dash or underscore' });
+      if (self) v.self = label; else peer.label = label;
+      P.savePeers(PEERS, v);
+      auditAppend({ ts: now(), client: req.client.id, ip, verb: 'relabel', subject: self ? 'self' : peer.key, result: 'ran', output: `now '${label}'` });
+      return send(res, 200, { ok: true, hosts: hostRows(v) });
+    }
+    return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
+  }
+  // A project address with an `@` is a peer's: forwarded, or refused here with the reason.
+  if (!req.client.pair && await proxyRemote(req, res, p, url, body, ip)) return;
 
 // WHICH AGENTS THE PHONE MAY OFFER, asked of the machine rather than listed here. The
 // names come from `fleet-agent list`, the presence from `fleet-agent installed`, and the
@@ -2089,6 +2929,8 @@ function agentCatalogue() {
     // the Projects screen would be the summary line lying at a glance, which is the one
     // place docs/mobile.md says it must not.
     const rollup = url.searchParams.get('rollup') !== '0' && gridSupportsJson();
+    // Asked of every peer at the same moment this host counts its own, not after.
+    const fan = fanOut(`/api/projects${rollup ? '' : '?rollup=0'}`, req);
     // JARVIS SWITCHED OFF IS GONE FROM THE PHONE, its own project included: that project is
     // Jarvis's home, and a card for it would be a way to start its master with the contract
     // and none of the switch. `jarvis_enabled` is how the client learns the switch — from
@@ -2099,9 +2941,9 @@ function agentCatalogue() {
     const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
     const counted = await Promise.all(all.map(async (t) => {
       let live = 0;
-      try { live = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
+      try { live = execFileSync('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean).length; } catch {}
-      const row = { name: t.name, profile: t.profile, path: t.path, agent: t.agent || 'claude', sock: t.sock, live };
+      const row = { name: t.name, profile: t.profile, path: t.path, agent: t.agent || 'claude', model: projectModel(t), sock: t.sock, live };
       if (!rollup) return row;
       const g = await gridJson(t);
       if (g.error) return { ...row, sessions: null };
@@ -2117,7 +2959,11 @@ function agentCatalogue() {
         parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() });
+    // `automations_enabled` is that switch's twin, and `automations_unseen` (null when off) is
+    // what the Projects screen counts on its entry to the automations screen.
+    const aUnseen = automations.unseen();
+    return send(res, 200, await mergeProjects({ home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status(),
+                                                automations_enabled: aUnseen !== null, automations_unseen: aUnseen }, await fan, peers()));
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
@@ -2153,7 +2999,10 @@ function agentCatalogue() {
     const [r, queue] = await Promise.all([sessionMessages(t, session, limit, before),
                                           before ? null : sessionQueue(t, session)]);
     if (r.error) return send(res, 502, { ok: false, text: r.error });
-    return send(res, 200, queue ? { ...r.json, queue } : r.json);
+    const body = queue ? { ...r.json, queue } : r.json;
+    const tag = etagOf(body);
+    if (holdsTag(req, tag)) { res.writeHead(304, { ETag: tag, 'cache-control': 'no-store' }); return res.end(); }
+    return send(res, 200, body, { ETag: tag });
   }
 
   if (p === '/api/pane' && req.method === 'GET') {
@@ -2199,9 +3048,50 @@ function agentCatalogue() {
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     let names = [];
-    try { names = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
+    try { names = execFileSync('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean); } catch {}
     return send(res, 200, nudgeSettings(t, names));
+  }
+
+  // ── what every master holds for the owner, across every project and profile ─
+  // The owner's list (web/app.js "waiting on you"): each master's waiting items, the ones the
+  // owner replied to that it has not closed yet, and requests nobody has touched in hours. Read off
+  // the ledger files (heldScan); nothing here changes one. An item leaves when its master
+  // closes or drops it — the reply is a message (fleet_send), never a close by hand.
+  if (p === '/api/waiting' && req.method === 'GET') {
+    const fan = fanOut('/api/waiting', req, 5000);
+    if (!L && !peers().peers.length) return send(res, 503, { ok: false, text: ledgerWhy });
+    const shown = shownToPhone();
+    const { rows } = heldScan(shown);
+    return send(res, 200, mergeWaiting({ ok: true, at: now(), items: [...heldWakes(shown), ...rows.map(r => ({
+      project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
+      text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
+      // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
+      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
+  }
+
+  // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
+  // switching an account stays at the desk.
+  if (p === '/api/usage' && req.method === 'GET') {
+    const fan = fanOut('/api/usage', req, 5000);
+    return send(res, 200, mergeUsage(usageReport(), await fan));
+  }
+
+  // THE FLEET'S MEMORY, as a paired host reads it (docs/MEMORY.md, PAIR_READS): this host's
+  // events after `after` (ms), oldest first, a page at a time. Read from the logs on each ask —
+  // no cache to go stale — and filtered by the privacy setting as it is NOW, so a project made
+  // private after its events were written stops crossing from that moment.
+  if (p === '/api/know/events' && req.method === 'GET') {
+    const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
+    const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 5000));
+    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit, tombstones: url.searchParams.get('tombstones') === '1' }) });
+  }
+
+  // Whether someone is at a keyboard HERE — the paired host's push hold asks it (see "at the
+  // keyboard" and PAIR_READS). Exactly two keys, and never this host's own peers' answers.
+  if (p === '/api/presence' && req.method === 'GET') {
+    const a = presenceAnswer(await localPresence());
+    return send(res, 200, { idle: a.idle, locked: a.locked });
   }
 
   if (p === '/api/inbox' && req.method === 'GET') {
@@ -2294,7 +3184,8 @@ function agentCatalogue() {
 
   if (p === '/api/health' && req.method === 'GET') {
     const f = funnelState();
-    return send(res, 200, { ok: true, version: VERSION, bind: c.bind, port: listening?.port ?? c.port,
+    return send(res, 200, { ok: true, version: VERSION, bind: req.ls?.local ? LOCAL_BIND : c.bind, port: listening?.port ?? c.port,
+      rp_id: scope.rp_id,
       client: req.client.id, session_expires_in: req.session.exp - now(),
       grid_json: gridSupportsJson(), web: webPresent ? WEB : null, awake: awakeHeld,
       funnel: f.checked ? (f.on.length ? { on: f.on } : 'off') : `unverified (${f.why})`,
@@ -2327,72 +3218,20 @@ function agentCatalogue() {
     // string is about to name a directory AND end up inside a prompt that gets pasted into
     // a terminal. Everything else in the path is generated here.
     const session = String(body.session || '');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(session) || session.includes('..'))
-      return send(res, 400, { ok: false, text: `'${session.slice(0, 40)}' is not a usable session name here — letters, digits, dot, dash and underscore only` });
-
     let buf;
     try { buf = Buffer.from(String(body.data || ''), 'base64'); }
     catch { return send(res, 400, { ok: false, text: "'data' is not base64" }); }
-    if (!buf.length) return send(res, 400, { ok: false, text: "'data' is empty" });
-    // Checked again after decoding: base64 that decodes to something implausible is a
-    // signal in itself, and the body cap alone does not bound the decoded length.
-    if (buf.length > ATTACH_MAX_BYTES)
-      return send(res, 413, { ok: false, text: `that photo is ${Math.round(buf.length / 1048576 * 10) / 10} MB and the limit is ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB` });
-
-    const kind = sniffImage(buf);
-    if (kind === 'markup')
-      return send(res, 415, { ok: false, text: 'that looks like markup, not a photo. SVG is refused here on purpose: it is an image that is also a script container' });
-    if (!kind)
-      return send(res, 415, { ok: false, text: 'that is not a JPEG, a PNG or a HEIC — the type is read from the file itself, not from what the phone called it' });
-    // HEIC is the iPhone's default and cannot be handed to an agent as-is.
-    if (kind === 'heic' && !imageConverter())
-      return send(res, 501, { ok: false, text: 'that is a HEIC and this machine has no converter for it — looked for sips (macOS), heif-convert and magick. Send a JPEG, or install one of those' });
-
-    const dir = attachDir(rp.t.sock, session);
-    let out = '';
-    try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const id = crypto.randomBytes(8).toString('hex');
-      const raw = path.join(dir, `.in-${id}`);
-      // O_EXCL on a name nothing has seen: never write through a path that existed before
-      // this request, and never follow a symlink into one.
-      fs.writeFileSync(raw, buf, { flag: 'wx', mode: 0o600 });
-      const conv = imageConverter();
-      // HEIC ALWAYS, because no agent reads it. Anything already readable is only put
-      // through a converter when it is big enough for that to be worth doing: measured,
-      // sips turns a 70-byte PNG into a 41 KB JPEG, so re-encoding by reflex can make a
-      // small picture bigger AND lossier for nothing.
-      const worthResizing = buf.length > ATTACH_RESIZE_OVER;
-      if (kind === 'heic' || (conv && conv.kind !== 'heif' && worthResizing)) {
-        out = path.join(dir, `${id}.jpg`);
-        const bad = convertImage(kind, raw, out);
-        if (bad) { try { fs.unlinkSync(raw); } catch {} try { fs.unlinkSync(out); } catch {}
-          return send(res, 500, { ok: false, text: bad }); }
-        fs.unlinkSync(raw);
-      } else {
-        // No converter, and it is already something an agent can read: keep the original
-        // rather than refuse. This is the Linux-without-sips path.
-        out = path.join(dir, `${id}.${kind}`);
-        fs.renameSync(raw, out);
-      }
-      fs.chmodSync(out, 0o600);
-    } catch (e) {
-      return send(res, 500, { ok: false, text: `could not store it: ${e.message}` });
-    }
-    const dropped = enforceQuota(dir);
-    const size = (() => { try { return fs.statSync(out).size; } catch { return 0; } })();
-    // THE PATH IS ABOUT TO BE PUT IN A PROMPT AND PASTED INTO A TERMINAL. Every component
-    // of it is either from the projects file or generated here, so this can only fail if
-    // one of those assumptions breaks — which is exactly when it should.
-    if (!/^[A-Za-z0-9._\/-]+$/.test(out)) {
-      try { fs.unlinkSync(out); } catch {}
-      return send(res, 500, { ok: false, text: 'refusing to hand back a path with characters a shell would read' });
-    }
+    // lib/attach.mjs: the same store, refusals and quota the Telegram channel uses.
+    const st = storePhoto({ buf, sock: rp.t.sock, session, fleetDir: defaultFleetDir() });
+    if (!st.ok) return send(res, st.status, { ok: false, text: st.text });
+    const { path: out, bytes: size, from: kind, dropped } = st;
     log(`attach: ${session} <- ${Math.round(size / 1024)} KB ${path.extname(out).slice(1)}${dropped ? ` (${dropped} older dropped)` : ''}`);
     // AUDITED LIKE A MUTATION, because it is one: after this call there are bytes on the
     // fleet's disk that were not there before. The subject is the session it is for.
     try {
       auditAppend({ ts: now(), client: req.client.id, ip, verb: 'attach', project: rp.t.name,
+        // A PAIRED HOST'S PHOTO, named like a paired send: which host, which of its clients.
+        ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf || 'host' } : {}),
         subject: session, result: 'ran',
         output: `${path.basename(out)} ${size} bytes from ${kind}${dropped ? `, ${dropped} older dropped` : ''}` });
     } catch {}
@@ -2400,16 +3239,36 @@ function agentCatalogue() {
       converted: path.extname(out) === '.jpg' && kind !== 'jpg', dropped });
   }
 
+  // ── the Mac's ears: every session's `talk` (docs/mobile.md) ──────────────────
+  // NOT JARVIS'S, and so not behind its switch. These used to live only under /api/jarvis/*,
+  // which made switching Jarvis off — to be rid of its session — also take the talk button
+  // off every session on the phone, a cost nothing on the switch said it had. Talking to a
+  // session never goes through Jarvis: it needs whisper.cpp on this machine and the session.
+  // `speak` rides beside `voice` because the phone's settings sheet reports both halves.
+  if (p === '/api/voice' && req.method === 'GET')
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status() });
+  if (p === '/api/voice/hear') return hear(req, res, body);
+
   // ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
   // Three routes, all behind the same token as everything else. What Jarvis IS — its
   // project, its session, whether it can hear, what waits on a yes — comes from the one
   // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
-  //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
-  // and every session's `talk` asks it here. `speak` likewise: whether the Mac reads replies
-  // with Kokoro, which the phone's settings sheet reports beside the device's own voices.
+  //   `voice` and `speak` are repeated here, and /api/jarvis/hear is /api/voice/hear under
+  // its old name, for an installed phone whose client predates /api/voice (CLAUDE.md: a
+  // PWA keeps its old client until it is relaunched). With Jarvis on, nothing it asks for
+  // has moved; with Jarvis off it had no talk button to ask with.
   // SWITCHED OFF, EVERY JARVIS ROUTE IS A 404 and says why — not a 200 that describes an
-  // absent Jarvis, which a client would draw as a band. /api/speak is NOT one of them: the
-  // per-message play button is the phone's own feature and keeps working.
+  // absent Jarvis, which a client would draw as a band. /api/speak and /api/voice are NOT
+  // among them: the play button and every session's talk are the phone's own features.
+  // REVIEWS (lib/shots.mjs). /api/shots/media is the one route past the token gate above: a
+  // <video> cannot send a bearer, so it carries the ticket the run read minted instead.
+  //   A PAIRED HOST'S RUNS come through `peers` — null when there are none, or when this
+  // request is itself a paired host's, which never fans out again (one hop).
+  //   `req.client` IS NOT UNSET ON THE TICKETED ROUTE: Node's IncomingMessage has a
+  // deprecated `client` alias for its socket, so `req.client || null` handed the media route a
+  // Socket for a client. Nothing read it until a paired host's media needed to know whether
+  // the request was signed. A session — a phone's or a signature's — is what made a client.
+  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req) });
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
@@ -2454,27 +3313,7 @@ function agentCatalogue() {
     return send(res, 200, { ok: true, id, answer: ans, summary: r.summary, told });
   }
 
-  // HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
-  // kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
-  // further than this process and a private temp dir that is gone before the reply is. The
-  // words go back to the phone, which shows them and sends them itself, so what Jarvis is
-  // told is exactly what the owner saw he said.
-  if (p === '/api/jarvis/hear') {
-    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
-    if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
-    const v = jarvis.voiceStatus();
-    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
-    const t0 = Date.now();
-    // One at a time: whisper uses every core it is given, and two at once would each take
-    // twice as long while he waits on both.
-    const r = await (hearChain = hearChain.then(() => jarvis.transcribeAsync(body, { prompt: vocabulary() }), () => jarvis.transcribeAsync(body, { prompt: vocabulary() })));
-    const ms = Date.now() - t0;
-    if (r.error) return send(res, 502, { ok: false, text: r.error });
-    // The size and the time, never the words: a log file is a surface too.
-    log(`jarvis: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
-    return send(res, 200, { ok: true, text: r.text, ms });
-  }
+  if (p === '/api/jarvis/hear') return hear(req, res, body);
 
   // SPEAKING: the reverse of hearing, and optional in the same way (lib/speech.mjs). The
   // phone POSTs the words it wants read; the answer is the sentences, each with the voice
@@ -2509,6 +3348,8 @@ function agentCatalogue() {
   }
 
   // ── writes ────────────────────────────────────────────────────────────────
+  if (p === '/api/term' || p === '/api/term/enable' || p === '/api/term/open') return termRoutes(p, req, res, body, c, ip);
+
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
     const tool = typeof body.tool === 'string' ? body.tool : '';
@@ -2525,6 +3366,12 @@ function agentCatalogue() {
     return send(res, r.status, r.json);
   }
 
+  // Automations (lib/automations.mjs) answer their own routes, a 404 when switched off.
+  // The assertion is a function because reading it spends its challenge: only a save or a run
+  // that needs one asks.
+  const ar = await automations.route({ method: req.method, p, body, client: req.client, assertion: () => headerAssertion(req, c) });
+  if (ar) return send(res, ar.status, ar.json);
+
   return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
 }
 
@@ -2537,12 +3384,280 @@ function headerAssertion(req, c) {
   let parsed;
   try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
   catch { return { error: 'X-Fleet-Assertion is not JSON' }; }
-  const r = verifyAssertion(parsed, c);
+  const r = verifyAssertion(parsed, c, req.ls);
   // An assertion signed by a DIFFERENT enrolled client is not this session's
   // confirmation: the token and the fingerprint have to be the same person.
   return r.error ? { error: r.error }
        : r.client.id !== req.client.id ? { error: 'that assertion belongs to another enrolled client' }
        : { purpose: r.purpose };
+}
+
+// ── TERMINAL: a real shell from the web client, inside the fleet's own tmux ─────
+// Everything else this server does is a verb with a name and an audit row. A terminal is
+// not: it is a shell, which is every verb at once, so it gets every control the verbs have
+// plus three of its own, and each one answers a different question:
+//
+//   OFF PER DEVICE        is this device one the owner chose to give a shell to at all.
+//                         Recorded on the enrolled client — the device — with when and from
+//                         where it was switched on, and switching it ON takes a fresh
+//                         passkey. Off is the default and switching off needs nothing.
+//   A FRESH ASSERTION     is the owner holding the phone at the moment a shell opens — the
+//   PER OPEN              unlock does not count, by the same rule as a destructive verb (§7).
+//   A ONE-USE TICKET      a browser cannot put a bearer token on a WebSocket, so the open
+//                         request (token + assertion) mints a ticket that is good for one
+//                         upgrade within TERM_TICKET_TTL, for this client, this session.
+//   ORIGIN + HOST         the upgrade is refused unless Origin is one of the configured
+//                         origins. A WebSocket is not covered by CORS, so without this any
+//                         page the phone visits could try one.
+//   THE IDLE CLOSE        terminal_idle seconds with no keystroke closes it (default 900).
+//                         The SAME window as the session token's idle slide, on purpose: a
+//                         phone left unlocked on a table must not hold a shell open longer
+//                         than it holds the app. Keystrokes, not output — a build printing
+//                         to a terminal nobody is at is exactly the case to close. Closing
+//                         loses nothing: the tab is a tmux session and stays on the grid.
+//
+// And it is never a shell of its own: it attaches to a fleet TAB (bin/fleet-tab's
+// `_term-<project>`), so the desk sees the same session the phone is typing into.
+//
+// NOTHING A TERMINAL PRINTS IS LOGGED. serve.log gets one line when one opens and one when
+// it closes, with byte counts. Not the bytes, not tmux's stderr beyond its first line, and
+// not the ticket (it rides in the query string, and only the path is ever logged).
+const TERM_TICKET_TTL = 30;
+const TERM_MAX_PER_CLIENT = 4;
+const TERM_MAX_MESSAGE = 1 << 20;          // a 1 MB paste is plenty; a browser sends less
+const TERM_PING_MS = 30_000;               // a phone that slept leaves a socket nobody will close
+const tickets = new Map();                 // sha(ticket) -> { client, project, sock, session, cols, rows, exp }
+const terms = new Set();                   // the live bridges, for the per-client cap and shutdown
+const termOn = (cl) => !!(cl && !cl.revoked && cl.terminal && cl.terminal.on);
+const termIdle = (c = loadConfig()) => Math.max(10, Number(c.terminal_idle) || 900);
+const termSize = (n, lo, hi, dflt) => (Number.isInteger(n) && n >= lo && n <= hi ? n : dflt);
+
+// The tab itself: bin/fleet-tab, not a second copy of its naming rule. -d because this
+// call has no client of its own to move — and without it fleet-tab's switch-client would
+// grab whoever IS attached to the fleet at the desk and drop them into the new tab.
+//   KIND IS term OR edit, AND NOTHING ELSE. The editor is the desk's Ctrl-n tab — neovim on
+// the folder, with lib/nvim-copy-on-select.lua — made by the same script, so it is a fleet
+// tab like the terminal and goes through every gate above it. It is not a second way to a
+// shell: `:terminal` inside nvim is one, which is exactly why it gets the terminal's gates
+// rather than lighter ones of its own.
+//   With no editor installed fleet-tab says so on the desk's status line, where nobody at a
+// phone will read it, and exits 1 with nothing on stderr — so the words are said here.
+const TERM_KINDS = { term: 'terminal', edit: 'editor' };
+function openTermTab(t, kind = 'term') {
+  const what = TERM_KINDS[kind];
+  return new Promise((resolve) => {
+    execFile(path.join(BIN, 'fleet-tab'), [kind, t.sock, t.path, t.name, '-f', TMUX_CONF, '-d'],
+      { encoding: 'utf8', timeout: 15000, env: { ...process.env, TMUX: '' } }, (err, stdout, stderr) => {
+        const name = String(stdout || '').trim().split('\n').pop() || '';
+        const said = String(stderr || '').trim().split('\n')[0] || (kind === 'edit' && err ? 'no editor on this machine — the installer adds Neovim, or set CLAUDE_FLEET_EDITOR' : '');
+        if (err || !name.startsWith(`_${kind}-`)) return resolve({ error: `could not open the ${what} tab: ${said || err?.message || 'fleet-tab said nothing'}` });
+        // THE LAST TO TYPE DECIDES THE SIZE, on this tab only. The fleet's servers run
+        // `window-size largest` so a stack pane never crops a session open full screen at
+        // the desk — but a phone sharing a tab with a 200-column desk client would then be
+        // handed a 200-column shell at 40 columns of screen. A tab is no agent's pane and
+        // in no stack, so here the usual shared-terminal rule is the right one.
+        execFile('tmux', ['-L', t.sock, 'set-option', '-w', '-t', name, 'window-size', 'latest'],
+          { timeout: 5000, env: { ...process.env, TMUX: '' } }, () => resolve({ name }));
+      });
+  });
+}
+
+async function termRoutes(p, req, res, body, c, ip) {
+  const cl = req.client;
+  if (p === '/api/term' && req.method === 'GET')
+    return send(res, 200, { ok: true, enabled: termOn(cl), since: cl.terminal?.on ? cl.terminal.at : null, idle: termIdle(c) });
+
+  if (p === '/api/term/enable') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const on = body.on === true;
+    // ON is a grant and takes a fresh passkey; OFF only ever takes something away.
+    let assertion = null;
+    if (on) {
+      assertion = headerAssertion(req, c);
+      if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'turning the terminal on needs a fresh passkey assertion in X-Fleet-Assertion' });
+      if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
+    }
+    const fresh = loadConfig({ force: true });
+    const me = fresh.clients.find(x => x.id === cl.id);
+    if (!me) return send(res, 401, { ok: false, needs: 'passkey', text: 'this client is no longer enrolled' });
+    me.terminal = on ? { on: true, at: now(), ip } : { on: false, at: now(), ip };
+    saveConfig(fresh);
+    auditAppend({ ts: now(), client: cl.id, ip, verb: on ? 'terminal_enable' : 'terminal_disable', project: null,
+                  subject: cl.id, args: {}, confirmed: on ? `passkey:${assertion.purpose || 'unnamed'}` : null,
+                  result: 'ran', output: '' });
+    log(`terminal ${on ? 'ENABLED' : 'disabled'} for '${cl.id}' from ${ip}`);
+    if (!on) for (const b of terms) if (b.client === cl.id) b.end(4003, 'the terminal was switched off for this device');
+    return send(res, 200, { ok: true, enabled: on });
+  }
+
+  if (p === '/api/term/open') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    // ORDER IS DELIBERATE: the device check first, so a disabled device is told what to do
+    // about it rather than asked for a fingerprint it cannot use.
+    if (!termOn(cl)) return send(res, 403, { ok: false, needs: 'enable', text: 'the terminal is off for this device — switch it on in settings (it asks for the passkey)' });
+    const assertion = headerAssertion(req, c);
+    if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'opening a terminal needs a fresh passkey assertion in X-Fleet-Assertion — every time, not only at unlock' });
+    if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
+    const rp = resolveProject(typeof body.project === 'string' ? body.project : '');
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const kind = body.kind == null ? 'term' : body.kind;
+    if (!Object.hasOwn(TERM_KINDS, kind)) return send(res, 400, { ok: false, text: `kind is 'term' or 'edit', not ${JSON.stringify(kind)}` });
+    let mine = 0;
+    for (const b of terms) if (b.client === cl.id) mine++;
+    if (mine >= TERM_MAX_PER_CLIENT) return send(res, 429, { ok: false, text: `this device already has ${mine} terminals open — close one first` });
+    const tab = await openTermTab(rp.t, kind);
+    if (tab.error) return send(res, 502, { ok: false, text: tab.error });
+    const ticket = rand(32);
+    // Tagged with the listener that minted it: termUpgrade spends it only on that one.
+    tickets.set(sha256(ticket), { client: cl.id, rp_id: scopeOf(c, req.ls).rp_id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
+      cols: termSize(body.cols, 2, 500, 80), rows: termSize(body.rows, 1, 300, 24), exp: now() + TERM_TICKET_TTL });
+    for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
+    auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
+                  confirmed: `passkey:${assertion.purpose || 'unnamed'}`, result: 'ran', output: '' });
+    inboxRow(rp.t, tab.name, `${TERM_KINDS[kind]} opened · from ${cl.id}@${ip}`);
+    return send(res, 200, { ok: true, project: rp.t.name, session: tab.name, ticket, ttl: TERM_TICKET_TTL, idle: termIdle(c) });
+  }
+  return send(res, 405, { ok: false, text: `${req.method} is not how ${p} is asked` });
+}
+
+// The upgrade. Every refusal is a plain HTTP answer on the raw socket, before any 101: a
+// browser reports a refused WebSocket as nothing more than a close, so the status is for
+// the log and for the suite, which reads it.
+function termUpgrade(req, sock) {
+  const ip = (sock.remoteAddress || '').replace(/^::ffff:/, '');
+  let pathname = '';
+  const refuse = (status, why) => {
+    log(`${ip} WS ${pathname || '?'} -> ${status} (${why})`);
+    const body = `${why}\n`;
+    try { sock.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status] || ''}\r\ncontent-type: text/plain; charset=utf-8\r\n` +
+                   `content-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`); } catch {}
+  };
+  sock.on('error', () => {});
+  let url;
+  try { url = new URL(req.url, 'http://x'); pathname = url.pathname; } catch { return refuse(400, 'bad request line'); }
+  if (pathname !== '/api/term/ws') return refuse(404, 'no WebSocket here');
+  let c;
+  try { c = loadConfig(); } catch (e) { return refuse(500, 'config unreadable'); }
+  // THIS LISTENER'S Host and origins (scopeOf): the socket the upgrade arrived on stamped
+  // req.ls before this ran, and nothing the client sends can move it.
+  const scope = scopeOf(c, req.ls);
+  const hosts = allowedHosts(c, req.ls);
+  if (req.headers.host && hosts.size && !hosts.has(req.headers.host)) return refuse(403, `unexpected Host '${req.headers.host}'`);
+  // REQUIRED, not merely checked when present (POSTs check it only when present): every
+  // browser sends Origin on a WebSocket, so a missing one is not a browser of ours.
+  const origin = req.headers.origin || '';
+  if (!origin || !scope.origins.includes(origin)) return refuse(403, `origin '${origin || '(none)'}' is not configured for this listener`);
+  if (!rateOk('write', ip, { setHeader() {} })) return refuse(429, 'rate limited');
+  if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !req.headers['sec-websocket-key'])
+    return refuse(400, 'not a WebSocket upgrade');
+  const raw = url.searchParams.get('ticket') || '';
+  const k = sha256(raw), t = raw && tickets.get(k);
+  if (t) tickets.delete(k);                                  // single use, spent even on a refusal below
+  if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again (it asks for the passkey)');
+  // A ticket is the listener's that minted it, as a session token is: one minted on the
+  // tailnet is not a way in at localhost, nor the reverse. Spent above all the same.
+  if (rpOfRow(c, t) !== scope.rp_id)
+    return refuse(403, `that ticket was minted on the other listener ('${rpOfRow(c, t)}'), not this one ('${scope.rp_id}') — open the terminal again here`);
+  const cl = clientById(t.client);
+  if (!termOn(cl)) return refuse(403, 'the terminal is off for this device');
+  sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+             `Sec-WebSocket-Accept: ${wsAccept(req.headers['sec-websocket-key'])}\r\n\r\n`);
+  sock.setNoDelay(true);
+  termBridge(sock, t, ip);
+}
+
+function termBridge(sock, t, ip) {
+  const born = Date.now();
+  let lastInput = Date.now(), lastPong = Date.now(), bytesIn = 0, bytesOut = 0, closed = false, ready = false;
+  let cc = null;
+  const reader = new FrameReader(TERM_MAX_MESSAGE);
+  const write = (op, data) => {
+    if (closed || sock.destroyed) return;
+    if (op === OP.binary) bytesOut += data.length;
+    // BACKPRESSURE: a phone on a weak link reads slower than `cat bigfile` writes. Stop
+    // reading tmux until the socket drains rather than buffering the difference here.
+    if (!sock.write(wsFrame(op, data)) && cc && !cc.exited) {
+      cc.proc.stdout.pause();
+      sock.once('drain', () => { try { cc.proc.stdout.resume(); } catch {} });
+    }
+  };
+  const ctl = (o) => write(OP.text, JSON.stringify(o));
+  const b = {
+    client: t.client, project: t.project, session: t.session,
+    end(code, why) {
+      if (closed) return;
+      ctl({ t: 'closed', code, why });
+      const r = Buffer.from(why || '', 'utf8').subarray(0, 120);
+      const p = Buffer.alloc(2 + r.length); p.writeUInt16BE(code, 0); r.copy(p, 2);
+      write(OP.close, p);
+      closed = true;
+      try { sock.end(); } catch {}
+      setTimeout(() => { try { sock.destroy(); } catch {} }, 2000).unref();
+      if (cc) cc.close();
+      clearInterval(tick);
+      terms.delete(b);
+      log(`terminal closed: '${t.client}' ${t.project}/${t.session} after ${Math.round((Date.now() - born) / 1000)}s ` +
+          `(in ${bytesIn} B, out ${bytesOut} B) — ${why}`);
+    },
+  };
+  terms.add(b);
+  log(`terminal open: '${t.client}' ${t.project}/${t.session} from ${ip} (${t.cols}x${t.rows})`);
+  cc = new ControlClient({
+    sockArgs: ['-L', t.sock], session: t.session,
+    onOutput: (bytes) => write(OP.binary, bytes),
+    onExit: (why) => b.end(1000, /exit|ended|detached/i.test(why) ? 'the shell exited' : `tmux: ${why}`),
+  });
+  b.pid = cc.pid;     // the phone typing here is not someone at a keyboard (readTmuxPresence)
+  ctl({ t: 'hello', project: t.project, session: t.session, idle: termIdle() });
+  (async () => {
+    await cc.resize(t.cols, t.rows);
+    const st = parseState((await cc.command(`display-message -p "${STATE_FORMAT}"`))[0]);
+    if (!st) throw new Error('tmux did not describe the pane');
+    const visible = await cc.command(`capture-pane -p -e -t ${st.pane}`);
+    const normal = st.alt ? await cc.command(`capture-pane -p -e -a -q -t ${st.pane}`) : null;
+    cc.follow(st.pane);
+    write(OP.binary, repaint(st, visible, normal));
+    ready = true;
+    ctl({ t: 'ready', pane: st.pane });
+  })().catch((e) => b.end(1011, `could not attach: ${String(e.message || e).slice(0, 100)}`));
+
+  sock.on('data', (chunk) => {
+    for (const m of reader.push(chunk)) {
+      if (m.error) return b.end(m.code, m.error);
+      if (m.op === OP.close) return b.end(1000, 'closed by the browser');
+      if (m.op === OP.ping) { write(OP.pong, m.data); continue; }
+      if (m.op === OP.pong) { lastPong = Date.now(); continue; }
+      if (m.op === OP.binary) {
+        // A KEYSTROKE, which is the only thing that counts as somebody being there.
+        lastInput = Date.now(); bytesIn += m.data.length;
+        if (ready) cc.send(m.data);
+        continue;
+      }
+      let o = null;
+      try { o = JSON.parse(m.data.toString('utf8')); } catch {}
+      if (o && o.t === 'resize') {
+        const cols = termSize(o.cols, 2, 500, 0), rows = termSize(o.rows, 1, 300, 0);
+        if (cols && rows) cc.resize(cols, rows).catch(() => {});
+      }
+    }
+  });
+  // 'end' as well as 'close': an HTTP server's sockets are half-open (allowHalfOpen), so a
+  // peer that just goes away — a phone put to sleep — delivers its FIN as 'end' and the
+  // socket never closes by itself. Measured: without this the tmux client stayed attached
+  // until something else ended it.
+  sock.on('end', () => b.end(1006, 'the connection dropped'));
+  sock.on('close', () => b.end(1006, 'the connection dropped'));
+  sock.on('error', () => b.end(1006, 'the connection failed'));
+  const tick = setInterval(() => {
+    const idle = termIdle();
+    if (Date.now() - lastInput > idle * 1000) return b.end(4000, `idle for ${idle >= 120 ? `${Math.round(idle / 60)} minutes` : `${idle}s`} — closed; the tab is still open on the desk`);
+    // Revoked, or switched off from another device, since it opened.
+    if (!termOn(clientById(t.client))) return b.end(4003, 'the terminal was switched off for this device');
+    if (Date.now() - lastPong > TERM_PING_MS * 2 + 5000) return b.end(1001, 'the browser stopped answering');
+    write(OP.ping, Buffer.alloc(0));
+  }, Math.min(TERM_PING_MS, Math.max(1000, termIdle() * 250)));
+  tick.unref?.();
+  return b;
 }
 
 let awakeHeld = false;
@@ -2562,7 +3677,16 @@ function requestHandler(req, res) {
   res.setHeader('x-frame-options', 'DENY');
   // Self-contained client, no third-party anything: the strictest policy that still works
   // is the correct one for a page that can spawn processes.
-  res.setHeader('content-security-policy', "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  //   TWO NAMED EXCEPTIONS, both for the terminal and neither for script. style-src allows
+  // inline styles because xterm.js's renderer writes its cell metrics and palette into
+  // <style> elements it creates at runtime — refused, it draws rows of zero height. Script
+  // stays 'self' and nothing else, which is the half of a CSP that stops an injection from
+  // running. connect-src names this host's ws:/wss: because CSP2 browsers do not count a
+  // WebSocket to the same host as 'self'; the Host was checked against allowedHosts below
+  // before any of this is used, and a request it fails never reaches a page.
+  const wsHost = /^[A-Za-z0-9.:[\]-]+$/.test(req.headers.host || '') ? req.headers.host : '';
+  res.setHeader('content-security-policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   res.on('finish', () => {
     if (req.url !== '/healthz') log(`${ip} ${req.method} ${(req.url || '').split('?')[0]} -> ${res.statusCode} ${Date.now() - t0}ms${req.client ? ` [${req.client.id}]` : ''}`);
   });
@@ -2573,7 +3697,7 @@ function requestHandler(req, res) {
 
   let c;
   try { c = loadConfig(); } catch (e) { log('config:', e.message); return send(res, 500, { ok: false, error: `config unreadable: ${e.message}` }); }
-  const hosts = allowedHosts(c);
+  const hosts = allowedHosts(c, req.ls);
   if (req.headers.host && hosts.size && !hosts.has(req.headers.host))
     return send(res, 403, { ok: false, error: `unexpected Host '${req.headers.host}' — this server answers to ${[...hosts].join(', ')}` });
 
@@ -2641,6 +3765,40 @@ function pmsetWarning() {
 }
 
 // ── starting up ─────────────────────────────────────────────────────────────
+// Whether the localhost listener is a second socket, and why not when it is not. Two cases
+// make it one socket or none:
+//   - the configured rp_id IS localhost: the configured listener is already the Mac's door
+//     (`fleet-serve init --bind 127.0.0.1`), and a second one would be the same scope twice;
+//   - the configured bind is 127.0.0.1 under another name (a tunnel's): that socket is
+//     taken, and serving two rp_ids from one socket would mean choosing the scope from the
+//     Host header — which the client writes, and which is exactly what must not decide it.
+export function localPlan(addrs, rp_id) {
+  if (rp_id === LOCAL_RP) return { on: false, why: 'the configured listener is already localhost' };
+  if ((addrs || []).some(a => a.address === LOCAL_BIND))
+    return { on: false, why: `the configured bind is ${LOCAL_BIND} itself (for '${rp_id}'), and one socket cannot be two relying parties without trusting the Host header` };
+  return { on: true };
+}
+// `quiet`: a retry. It says nothing when it fails again, so a socket held for an hour is
+// one line in the log and not 120.
+let localErr = '';                          // why the last localhost attempt failed
+async function listenLocal(addrs, port, c, tune, { quiet = false } = {}) {
+  const plan = localPlan(addrs, c.rp_id);
+  if (!plan.on) { if (!quiet) log(`  localhost: not a second listener — ${plan.why}`); return null; }
+  const ls = Object.freeze({ local: true, bind: LOCAL_BIND, port });
+  const srv = tune(http.createServer((req, res) => { req.ls = ls; requestHandler(req, res); }), ls);
+  const err = await new Promise((resolve) => {
+    srv.once('error', resolve);
+    srv.listen(port, LOCAL_BIND, () => resolve(null));
+  });
+  if (err) {
+    localErr = err.code || err.message;
+    if (!quiet) log(`  localhost: NOT listening on ${LOCAL_BIND}:${port} (${localErr}) — the other listener is unaffected; retrying quietly, and saying so only when it comes up`);
+    return null;
+  }
+  log(`  localhost: also listening on ${LOCAL_BIND}:${port} · rp_id ${LOCAL_RP} · origin http://${LOCAL_RP}:${port} — its own passkeys, sessions and origin; nothing crosses to the tailnet listener`);
+  return srv;
+}
+
 async function serve(argv) {
   const c = loadConfig();
   const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; };
@@ -2669,7 +3827,13 @@ async function serve(argv) {
     `  config: ${CONFIG}`,
   ]);
   const b = await assertBindable(bind);
-  if (!b.ok) die([
+  // A REFUSAL BY POLICY STAYS FATAL: a wildcard, a LAN or a public address is a config that
+  // would publish this endpoint, and serving localhost beside it would make that easy to
+  // miss. An address that is simply NOT HERE (the tailnet went away, or the machine moved
+  // to another one) is not that. It is the moment the Mac's own door matters most, so it
+  // is handled below, by the listeners, and is not an exit.
+  const policy = (b.addrs || []).some(a => !BINDABLE.has(a.kind));
+  if (policy) die([
     `refusing to bind '${bind}':`,
     ...b.why.map(w => `  - ${w}`),
     'only loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are allowed — the two',
@@ -2678,7 +3842,7 @@ async function serve(argv) {
     'addresses this machine has:',
     ...localAddrs().map(a => `  - ${a.address}  (${a.iface}, ${a.kind})`),
   ]);
-  const kind = b.addrs[0].kind;
+  const kind = b.addrs ? b.addrs[0].kind : classifyAddr(bind).kind === 'name' ? 'tailnet' : classifyAddr(bind).kind;
 
   // §11.1: Funnel is the one setting that would undo all of §5, so it is asserted rather
   // than remembered — and reported as UNVERIFIED, not as a pass, when the CLI is absent.
@@ -2694,28 +3858,89 @@ async function serve(argv) {
     `  fleet-serve init --bind ${bind} --port ${port} [--rp-id <host>]`,
   ]);
 
-  const server = c.tls
-    ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, requestHandler)
-    : http.createServer(requestHandler);
-  server.headersTimeout = 20000;
-  server.requestTimeout = 20 * 60 * 1000;      // a spawn can legitimately take minutes
-  server.keepAliveTimeout = 65000;
-  server.maxConnections = 64;
-  server.on('clientError', (e, sock) => { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} });
-
-  await new Promise((resolve) => {
-    server.once('error', (e) => {
-      if (e.code === 'EADDRNOTAVAIL') die([`${bind} is not an address on this machine right now.`,
-        kind === 'tailnet' ? '  is tailscaled up and signed in?  tailscale status' : '']);
-      if (e.code === 'EADDRINUSE') die([`port ${port} is already in use on ${bind} — another fleet-serve?`]);
-      die([`listen failed: ${e.message}`]);
-    });
-    server.listen(port, bind, resolve);
-  });
-
+  // Each socket stamps its own scope on the request before anything reads it, so no
+  // handler can learn the listener from a header the client chose. That includes the web
+  // terminal's WebSocket (TERMINAL, above): an upgrade is a request too, and it is judged
+  // by the socket it arrived on like every other. Nothing else here upgrades, and a request
+  // that asks to anywhere else is refused by termUpgrade on its path.
+  const tune = (srv, ls) => {
+    srv.headersTimeout = 20000;
+    srv.requestTimeout = 20 * 60 * 1000;       // a spawn can legitimately take minutes
+    srv.keepAliveTimeout = 65000;
+    srv.maxConnections = 64;
+    srv.on('clientError', (e, sock) => { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} });
+    srv.on('upgrade', (req, sock) => { req.ls = ls; termUpgrade(req, sock); });
+    return srv;
+  };
+  const onConfigured = (req, res) => { req.ls = null; requestHandler(req, res); };
+  const makeServer = () => tune(c.tls
+    ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, onConfigured)
+    : http.createServer(onConfigured), null);
+  const lit = net.isIPv6(bind) ? `[${bind}]` : bind;
   listening = { bind, port };
-  log(`fleet-serve ${VERSION} listening on ${net.isIPv6(bind) ? `[${bind}]` : bind}:${port} (${kind}${c.tls ? ', tls' : ''})`);
+
+  // TWO INDEPENDENT LISTENERS. Either may be unavailable; the daemon exits only when
+  // NEITHER can listen. Measured on the owner's Mac: the machine moved to another tailnet,
+  // its configured 100.x address went away, fleet-serve refused to start, and launchd
+  // restarted it every few seconds, thousands of times, while the one door that did not
+  // need the tailnet stayed shut with it. So a configured bind that is absent or taken is
+  // logged ONCE, retried quietly, and announced once more when it comes up.
+  let server = null;                         // the configured listener, once it is up
+  const tryConfigured = async () => {
+    const bb = await assertBindable(bind);
+    // assertBindable's own hint is dropped: fixHint below says the same thing, once.
+    if (!bb.ok) return bb.why.map(w => w.replace(/ — is tailscaled running.*$/, '')).join('; ');
+    const srv = makeServer();
+    const err = await new Promise((resolve) => {
+      srv.once('error', resolve);
+      srv.listen(port, bind, () => resolve(null));
+    });
+    if (!err) { server = srv; return null; }
+    return err.code === 'EADDRNOTAVAIL' ? `${bind} is not an address on this machine right now`
+         : err.code === 'EADDRINUSE' ? `port ${port} is already in use on ${bind} — another fleet-serve?`
+         : `listen failed: ${err.message}`;
+  };
+  const fixHint = kind === 'tailnet'
+    ? `is tailscaled up, and signed in to the tailnet this config names? \`tailscale ip -4\` should list ${bind}; if the machine moved tailnets: fleet-serve init --bind "$(tailscale ip -4)" --rp-id <name>.ts.net`
+    : `check what holds ${lit}:${port}, or re-run: fleet-serve init --bind <addr>`;
+  const why = await tryConfigured();
+  if (!why) log(`fleet-serve ${VERSION} listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''})`);
   log(`  config ${CONFIG} · audit ${AUDIT} · rp_id ${c.rp_id} · origins ${c.origins.join(' ')}`);
+
+  // THE MAC'S OWN DOOR: 127.0.0.1, same port, plain http, rp_id localhost (see scopeOf).
+  // Best effort, deliberately: the configured listener is the phone's, and nothing about
+  // this one may stop it serving — so a refusal here is a log line, not an exit.
+  let localSrv = await listenLocal(b.addrs, port, c, tune);
+  if (why && !localSrv) die([
+    'nothing can listen, so there is nothing to serve:',
+    `  - the configured listener on ${lit}:${port}: ${why}`,
+    `    ${fixHint}`,
+    `  - localhost: ${localPlan(b.addrs, c.rp_id).on ? `${LOCAL_BIND}:${port} could not be bound (${localErr})` : localPlan(b.addrs, c.rp_id).why}`,
+  ]);
+  // One retry loop per listener that is down. Silent while it keeps failing; one line when
+  // it comes up. Unref'd: a retry must never be the thing that keeps a stopping daemon up.
+  const every = Math.max(50, Number(process.env.GHOSTFLEET_SERVE_RETRY_MS) || 30000);
+  const keepTrying = (attempt, upLine) => {
+    const t0 = Date.now();
+    let busy = false;
+    const t = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try { if (await attempt()) { clearInterval(t); log(upLine(Math.round((Date.now() - t0) / 1000))); } }
+      catch (e) { log(`  retry: ${e.message}`); }
+      finally { busy = false; }
+    }, every);
+    t.unref?.();
+  };
+  const everyText = every >= 1000 ? `${Math.round(every / 1000)}s` : `${every}ms`;
+  if (why) {
+    log(`fleet-serve ${VERSION}: the tailnet listener is OFF — ${why}. ${fixHint}. Serving localhost only; retrying ${lit}:${port} every ${everyText}, and saying so only when it comes up.`);
+    keepTrying(async () => !(await tryConfigured()),
+      (s) => `fleet-serve: the tailnet listener is UP — listening on ${lit}:${port} (${kind}${c.tls ? ', tls' : ''}), after ${s}s off`);
+  }
+  if (!localSrv && localPlan(b.addrs, c.rp_id).on)
+    keepTrying(async () => !!(localSrv = await listenLocal(b.addrs, port, c, tune, { quiet: true })),
+      (s) => `  localhost: UP after ${s}s off`);
   if (!f.checked) log(`  funnel: UNVERIFIED — ${f.why}. Assert it by hand: tailscale funnel status`);
   else log('  funnel: off (asserted)');
   webPresent = (() => { try { return fs.statSync(WEB).isDirectory(); } catch { return false; } })();
@@ -2740,9 +3965,11 @@ async function serve(argv) {
   }
   setInterval(sweep, 30000).unref();
   armPushWatch();
+  automations.start();
+  if (ledgerWhy) log(`  waiting on you: OFF — ${ledgerWhy}`);
   {
     const n = allSubs().length, pc = loadConfig().push;
-    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? (process.platform === 'darwin' ? `held while at the Mac (input within ${pc.at_mac_idle}s, unlocked) for up to ${pc.at_mac_hold}s` : 'at-the-Mac hold off (not macOS)') : 'at-the-Mac hold off'}`
+    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? `held while at a keyboard (${process.platform === 'darwin' ? 'Mac input, unlocked, ' : ''}a fleet tmux keystroke${peers().peers.length ? ', or a paired host saying so' : ''} within ${pc.at_mac_idle}s) for up to ${pc.at_mac_hold}s` : 'at-the-keyboard hold off'}`
           : '  push: nothing subscribed — a home-screen PWA subscribes from its settings sheet (docs/mobile.md §9)');
   }
   // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
@@ -2757,9 +3984,14 @@ async function serve(argv) {
     if (stopping) { log(`${sig} again — exiting now`); process.exit(1); }
     stopping = true;
     persistSessions();                    // the last few seconds of slide, before anything else
+    // An upgraded socket is no longer the server's to drain, so close() would wait on it
+    // for the whole grace. Say goodbye to each terminal; the tabs stay open in tmux.
+    for (const t of [...terms]) t.end(1001, 'fleet-serve is restarting — open the terminal again');
     log(`${sig} — draining, then stopping`);
-    server.close(() => { log('stopped'); process.exit(0); });
-    server.closeIdleConnections?.();
+    const live = [server, localSrv].filter(Boolean);
+    let open = live.length;
+    const closed = () => { if (--open === 0) { log('stopped'); process.exit(0); } };
+    for (const srv of live) { srv.close(closed); srv.closeIdleConnections?.(); }
     setTimeout(() => { log('grace expired with a request still open — cutting it off'); process.exit(0); }, 15000).unref();
   });
 }
@@ -2779,6 +4011,13 @@ const USAGE = `fleet-serve — the fleet's HTTP endpoint, for the phone (docs/mo
   fleet-serve push [--detail named|anonymous] [--test]
                                            who is subscribed, what a lock screen shows,
                                            and one real notification to prove it arrives
+  fleet-serve pair [--as LABEL]            open a one-time pairing with another machine (prints a code)
+  fleet-serve pair <URL> <CODE> [--as LABEL] [--label LABEL] [--url THIS-URL]
+                                           pair with the machine that printed the code: each
+                                           then shows the other's projects in its web client
+  fleet-serve pairs                        the paired machines, and when each was last heard from
+  fleet-serve unpair <host>                revoke a pairing, on both machines if the other answers
+  fleet-serve relabel <host|self> <LABEL>  rename how a machine is shown here
   fleet-serve check                        preflight: bind, funnel, config — no listen
   fleet-serve check-bind <addr>            classify one address and exit
 
@@ -2824,7 +4063,9 @@ async function main() {
     console.log(`rp_id      ${c.rp_id || '(unset)'}`);
     console.log(`origins    ${(c.origins || []).join(' ') || '(unset)'}`);
     console.log(`tls        ${c.tls ? `${c.tls.cert}` : 'none'}`);
-    console.log(`clients    ${c.clients.length ? c.clients.map(x => `${x.id}${x.revoked ? ' (revoked)' : ''}/${(x.creds || []).length} passkeys`).join(', ') : '(none enrolled)'}`);
+    { const lp = localPlan(b.addrs, c.rp_id);
+      console.log(`localhost  ${lp.on ? `${LOCAL_BIND}:${c.port} also, rp_id ${LOCAL_RP} · origin http://${LOCAL_RP}:${c.port}` : `no second listener — ${lp.why}`}`); }
+    console.log(`clients    ${c.clients.length ? c.clients.map(x => `${x.id}${x.revoked ? ' (revoked)' : ''}/${(x.creds || []).length} passkeys${(x.creds || []).some(y => y.rp_id === LOCAL_RP && c.rp_id !== LOCAL_RP) ? ` (${(x.creds || []).filter(y => y.rp_id === LOCAL_RP).length} localhost)` : ''}`).join(', ') : '(none enrolled)'}`);
     console.log(`grid --json ${gridSupportsJson() ? 'present' : 'MISSING — /api/grid will 503'}`);
     console.log(`client     ${(() => { try { return fs.statSync(WEB).isDirectory() ? WEB : `${WEB} is not a directory`; } catch { return `NONE at ${WEB}`; } })()}`);
     console.log(`funnel     ${f.checked ? (f.on.length ? `ON for ${f.on.join(', ')} — REFUSED` : 'off (asserted)') : `unverified (${f.why})`}`);
@@ -2873,6 +4114,9 @@ async function main() {
     console.log(`enrolment open for '${id}' — ${Math.round((c.enroll_ttl || 900) / 60)} minutes, one use.`);
     console.log(`\n    code:  ${code}\n`);
     console.log(`Open ${(c.origins || ['(no origin configured)'])[0]} on the phone and enter it.`);
+    // The same window serves the Mac's own door; the passkey it makes is a localhost one.
+    if (c.rp_id && c.rp_id !== LOCAL_RP)
+      console.log(`On this Mac, open http://${LOCAL_RP}:${c.port || 8787} instead (or: ghostfleet web) — it enrols a localhost passkey.`);
     console.log(existing ? 'It adds a passkey to that client.'
                          : 'It enrols the passkey; from then on the phone signs in with it.');
     console.log('A running daemon picks this up on its next request; no restart needed.');
@@ -2941,7 +4185,16 @@ async function main() {
     console.log(`subject    ${vapidSubject(c)}${c.push.subject ? '' : '  (default — push.subject in the config overrides it)'}`);
     console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
     console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
-    console.log(`at the Mac ${!(c.push.at_mac_idle > 0) ? 'off (push.at_mac_idle is 0)' : process.platform !== 'darwin' ? 'off — macOS only' : `held while there was input within ${c.push.at_mac_idle}s and the screen is unlocked; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
+    // WHICH KEYBOARD, AND WHAT IT SAYS NOW: "why did that push wait" has an answer here, read
+    // the same way the watcher reads it — including a paired host's, over the pairing.
+    const limit = Number(c.push.at_mac_idle) || 0;
+    const srcs = [process.platform === 'darwin' || process.env.GHOSTFLEET_AT_MAC_FILE ? 'input on the Mac (screen unlocked)' : '',
+                  "a keystroke in a fleet's tmux", peers().peers.length ? 'a paired host saying either' : ''].filter(Boolean);
+    console.log(`keyboard   ${!(limit > 0) ? 'off (push.at_mac_idle is 0)' : `held while there was ${srcs.join(', or ')} within ${limit}s; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
+    if (limit > 0) {
+      const kb = keyboardStep(await presenceReadings(), limit);
+      console.log(`now        ${kb.why ? (kb.here ? `at ${kb.place}` : 'away') + kb.why : 'no reading — nothing would be held'}`);
+    }
     console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);
     console.log(`subscribed ${subs.length ? subs.map(x => `${x.client} ${new URL(x.endpoint).host}`).join(', ') : '(nobody — a home-screen PWA subscribes from its settings sheet)'}`);
     if (!argv.includes('--test')) return;
@@ -2973,6 +4226,94 @@ async function main() {
       let o; try { o = JSON.parse(l); } catch { console.log(`?? ${l}`); continue; }
       console.log(`${new Date((o.ts || 0) * 1000).toISOString().slice(0, 19).replace('T', ' ')}  ${String(o.client || '-').padEnd(12)} ${String(o.verb || '-').padEnd(12)} ${String(o.subject || '-').padEnd(16)} ${o.result || '-'}${o.confirmed ? ' ' + o.confirmed : ''}`);
     }
+    return;
+  }
+
+  // ── pairing: one web client for several machines (PAIRED HOSTS, above) ──────
+  // `pair` with nothing after it OPENS a window here and prints a code; `pair <url> <code>`
+  // on the other machine JOINS it. One explicit act on each machine, and nothing ever pairs
+  // by being reachable.
+  if (cmd === 'pair') {
+    const c = loadConfig();
+    const v = P.loadPeers(PEERS, { force: true });
+    const as = flag('--as');
+    if (as !== null) {
+      if (!P.LABEL_OK.test(as)) { console.error('fleet-serve: --as takes 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+      v.self = as;
+    }
+    const target = argv[1] && !argv[1].startsWith('-') ? argv[1] : null;
+    if (!target) {
+      const code = enrolCode();
+      v.open = { code_sha256: sha256(normCode(code)), exp: now() + P.PAIR_TTL };
+      P.savePeers(PEERS, v);
+      console.log(`pairing open on '${P.selfLabel(v)}' — ${Math.round(P.PAIR_TTL / 60)} minutes, one use.`);
+      console.log(`\n    code:  ${code}\n`);
+      console.log('On the other machine:');
+      console.log(`    fleet-serve pair ${(c.origins || ['<this host\'s https origin>'])[0]} ${code}`);
+      console.log(`The other machine will show this one as '${P.selfLabel(v)}' (rename it here with --as, or there with relabel).`);
+      return;
+    }
+    const code = argv[2];
+    if (!code || code.startsWith('-')) { console.error('fleet-serve: pair <url> <code> — the code `fleet-serve pair` printed on the other machine'); process.exitCode = 2; return; }
+    const bad = P.urlProblem(target);
+    if (bad) { console.error(`fleet-serve: ${bad}`); process.exitCode = 1; return; }
+    const mine = flag('--url') || (c.origins || [])[0];
+    const badMine = mine ? P.urlProblem(mine) : 'this host has no origin configured (fleet-serve init), so the other machine could not call it back';
+    if (badMine) { console.error(`fleet-serve: this host's own URL — ${badMine}. Pass --url <this host's https origin>`); process.exitCode = 1; return; }
+    const label = flag('--label');
+    if (label !== null && !P.LABEL_OK.test(label)) { console.error('fleet-serve: --label takes 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+    const id = P.rand(18), secret = P.rand(32);
+    const r = await P.request(P.originOf(target), { method: 'POST', pathq: '/api/pair/accept', timeout: 15000,
+      body: { code, id, label: P.selfLabel(v), url: P.originOf(mine), secret } });
+    if (r.status !== 200 || !r.json || typeof r.json.secret !== 'string' || !P.LABEL_OK.test(String(r.json.label || ''))) {
+      console.error(`fleet-serve: ${P.originOf(target)} did not pair: ${(r.json && r.json.text) || r.error || `HTTP ${r.status}`}`);
+      process.exitCode = 1; return;
+    }
+    const name = label || r.json.label;
+    const key = P.keyFor(name, new Set(v.peers.map(x => x.key)));
+    v.peers.push({ id, key, label: name, url: P.originOf(target), out: r.json.secret, in: secret, created: now() });
+    P.savePeers(PEERS, v);
+    auditAppend({ ts: now(), client: 'cli', ip: 'cli', verb: 'pair', subject: key, result: 'ran',
+                  output: `paired with '${name}' at ${P.originOf(target)}; its projects appear here as <name>@${key}` });
+    console.log(`fleet-serve: paired with '${name}' (${P.originOf(target)}).`);
+    console.log(`  its projects appear in this web client as <name>@${key}, under tabs '${name} · <profile>';`);
+    console.log(`  it shows this machine as '${P.selfLabel(v)}'. A running daemon picks this up on its next request.`);
+    return;
+  }
+
+  if (cmd === 'pairs') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const seen = P.loadSeen(PEERS_SEEN);
+    console.log(`this machine: '${P.selfLabel(v)}'`);
+    if (v.open && v.open.exp > now()) console.log(`pairing open (${v.open.exp - now()}s left)`);
+    if (!v.peers.length) { console.log('(no paired machines — fleet-serve pair)'); return; }
+    console.log(`${'HOST'.padEnd(12)} ${'LABEL'.padEnd(18)} ${'URL'.padEnd(36)} LAST SEEN`);
+    for (const x of v.peers) console.log(`${x.key.padEnd(12)} ${x.label.padEnd(18)} ${x.url.padEnd(36)} ${A.ago(Number(seen[x.key]) || x.created)}`);
+    return;
+  }
+
+  if (cmd === 'unpair') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const peer = P.findPeer(v, argv[1]);
+    if (!peer) { console.error(`fleet-serve: no paired host '${argv[1] || ''}' (see: fleet-serve pairs)`); process.exitCode = 1; return; }
+    const r = await unpairPeer(peer, 'cli', 'cli');
+    console.log(r.told ? `fleet-serve: unpaired '${peer.label}' — here and there${r.why ? ` (${r.why})` : ''}.`
+      : `fleet-serve: unpaired '${peer.label}' here. It did not answer (${r.why}); its signature no longer works on this machine, and it will see the pairing refused the next time it calls.`);
+    return;
+  }
+
+  if (cmd === 'relabel') {
+    const v = P.loadPeers(PEERS, { force: true });
+    const label = argv[2];
+    if (!label || !P.LABEL_OK.test(label)) { console.error('fleet-serve: relabel <host|self> <label> — 1-24 letters, digits, space, dot, dash or underscore'); process.exitCode = 2; return; }
+    if (argv[1] === 'self') v.self = label;
+    else {
+      const peer = P.findPeer(v, argv[1]);
+      if (!peer) { console.error(`fleet-serve: no paired host '${argv[1] || ''}' (see: fleet-serve pairs)`); process.exitCode = 1; return; }
+      peer.label = label;
+    }
+    P.savePeers(PEERS, v);
+    console.log(`fleet-serve: ${argv[1] === 'self' ? 'this machine' : `'${argv[1]}'`} is now shown as '${label}' here (its address does not change).`);
     return;
   }
 

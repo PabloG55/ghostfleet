@@ -10,10 +10,10 @@ var f$2;
 var c$1;
 var a$1;
 var s$1;
-var h;
+var h$1;
 var p$1;
 var v$1;
-var d = {};
+var d$1 = {};
 var w$1 = [];
 var _$1 = /acit|ex(?:s|g|n|p|$)|rph|grid|ows|mnc|ntw|ine[ch]|zoo|^ord|itera/i;
 var g = Array.isArray;
@@ -62,7 +62,7 @@ function $(n, l) {
 function I(n) {
 	if (n.__P && n.__d) {
 		var u = n.__v, t = u.__e, i = [], r = [], o = m$1({}, u);
-		o.__v = u.__v + 1, l$1.vnode && l$1.vnode(o), q(n.__P, o, u, n.__n, n.__P.namespaceURI, 32 & u.__u ? [t] : null, i, null == t ? $(u) : t, !!(32 & u.__u), r), o.__v = u.__v, o.__.__k[o.__i] = o, D(i, o, r), u.__e = u.__ = null, o.__e != t && P(o);
+		o.__v = u.__v + 1, l$1.vnode && l$1.vnode(o), q(n.__P, o, u, n.__n, n.__P.namespaceURI, 32 & u.__u ? [t] : null, i, null == t ? $(u) : t, !!(32 & u.__u), r), o.__v = u.__v, o.__.__k[o.__i] = o, D$1(i, o, r), u.__e = u.__ = null, o.__e != t && P(o);
 	}
 }
 function P(n) {
@@ -82,7 +82,7 @@ function H() {
 }
 function L(n, l, u, t, i, r, o, e, f, c, a) {
 	var s, h, p, v, y, _, g = t && t.__k || w$1, m = l.length;
-	for (f = T$1(u, l, g, f, m), s = 0; s < m; s++) null != (p = u.__k[s]) && (h = -1 != p.__i && g[p.__i] || d, p.__i = s, _ = q(n, p, h, i, r, o, e, f, c, a), v = p.__e, p.ref && h.ref != p.ref && (h.ref && J(h.ref, null, p), a.push(p.ref, p.__c || v, p)), null == y && null != v && (y = v), 4 & p.__u ? (f = j$1(p, f, n), h.__e && (h.__e = null)) : "function" == typeof p.type && void 0 !== _ ? f = _ : v && (f = v.nextSibling), p.__u &= -7);
+	for (f = T$1(u, l, g, f, m), s = 0; s < m; s++) null != (p = u.__k[s]) && (h = -1 != p.__i && g[p.__i] || d$1, p.__i = s, _ = q(n, p, h, i, r, o, e, f, c, a), v = p.__e, p.ref && h.ref != p.ref && (h.ref && J(h.ref, null, p), a.push(p.ref, p.__c || v, p)), null == y && null != v && (y = v), 4 & p.__u ? (f = j$1(p, f, n), h.__e && (h.__e = null)) : "function" == typeof p.type && void 0 !== _ ? f = _ : v && (f = v.nextSibling), p.__u &= -7);
 	return u.__e = y, f;
 }
 function T$1(n, l, u, t, i) {
@@ -121,7 +121,7 @@ function N(n, l, u, t, i) {
 		if ("string" == typeof t && (n.style.cssText = t = ""), t) for (l in t) u && l in u || z$1(n.style, l, "");
 		if (u) for (l in u) t && u[l] == t[l] || z$1(n.style, l, u[l]);
 	}
-	else if ("o" == l[0] && "n" == l[1]) r = l != (l = l.replace(s$1, "$1")), o = l.toLowerCase(), l = o in n || "onFocusOut" == l || "onFocusIn" == l ? o.slice(2) : l.slice(2), n.l || (n.l = {}), n.l[l + r] = u, u ? t ? u[a$1] = t[a$1] : (u[a$1] = h, n.addEventListener(l, r ? v$1 : p$1, r)) : n.removeEventListener(l, r ? v$1 : p$1, r);
+	else if ("o" == l[0] && "n" == l[1]) r = l != (l = l.replace(s$1, "$1")), o = l.toLowerCase(), l = o in n || "onFocusOut" == l || "onFocusIn" == l ? o.slice(2) : l.slice(2), n.l || (n.l = {}), n.l[l + r] = u, u ? t ? u[a$1] = t[a$1] : (u[a$1] = h$1, n.addEventListener(l, r ? v$1 : p$1, r)) : n.removeEventListener(l, r ? v$1 : p$1, r);
 	else {
 		if ("http://www.w3.org/2000/svg" == i) l = l.replace(/xlink(H|:h)/, "h").replace(/sName$/, "s");
 		else if ("width" != l && "height" != l && "href" != l && "list" != l && "form" != l && "tabIndex" != l && "download" != l && "rowSpan" != l && "colSpan" != l && "role" != l && "popover" != l && l in n) try {
@@ -135,7 +135,7 @@ function V(n) {
 	return function(u) {
 		if (this.l) {
 			var t = this.l[u.type + n];
-			if (null == u[c$1]) u[c$1] = h++;
+			if (null == u[c$1]) u[c$1] = h$1++;
 			else if (u[c$1] < t[a$1]) return;
 			return t(l$1.event ? l$1.event(u) : u);
 		}
@@ -180,7 +180,7 @@ function q(n, u, t, i, r, o, e, f, c, a) {
 function B$1(n) {
 	n && (n.__c && (n.__c.__e = !0), n.__k && n.__k.some(B$1));
 }
-function D(n, u, t) {
+function D$1(n, u, t) {
 	for (var i = 0; i < t.length; i++) J(t[i], t[++i], t[++i]);
 	l$1.__c && l$1.__c(u, n), n.some(function(u) {
 		try {
@@ -196,7 +196,7 @@ function E(n) {
 	return "object" != typeof n || null == n || n.__b > 0 ? n : g(n) ? n.map(E) : void 0 !== n.constructor ? null : m$1({}, n);
 }
 function G(u, t, i, r, o, e, f, c, a) {
-	var s, h, p, v, y, w, _, m = i.props || d, k = t.props, x = t.type;
+	var s, h, p, v, y, w, _, m = i.props || d$1, k = t.props, x = t.type;
 	if ("svg" == x ? o = "http://www.w3.org/2000/svg" : "math" == x ? o = "http://www.w3.org/1998/Math/MathML" : o || (o = "http://www.w3.org/1999/xhtml"), null != e) {
 		for (s = 0; s < e.length; s++) if ((y = e[s]) && "setAttribute" in y == !!x && (x ? y.localName == x : 3 == y.nodeType)) {
 			u = y, e[s] = null;
@@ -246,7 +246,7 @@ function Q(n, l, u) {
 }
 function R(u, t, i) {
 	var r, o, e, f;
-	t == document && (t = document.documentElement), l$1.__ && l$1.__(u, t), o = (r = "function" == typeof i) ? null : i && i.__k || t.__k, e = [], f = [], q(t, u = (!r && i || t).__k = k$1(S, null, [u]), o || d, d, t.namespaceURI, !r && i ? [i] : o ? null : t.firstChild ? n.call(t.childNodes) : null, e, !r && i ? i : o ? o.__e : t.firstChild, r, f), D(e, u, f), u.props.children = null;
+	t == document && (t = document.documentElement), l$1.__ && l$1.__(u, t), o = (r = "function" == typeof i) ? null : i && i.__k || t.__k, e = [], f = [], q(t, u = (!r && i || t).__k = k$1(S, null, [u]), o || d$1, d$1, t.namespaceURI, !r && i ? [i] : o ? null : t.firstChild ? n.call(t.childNodes) : null, e, !r && i ? i : o ? o.__e : t.firstChild, r, f), D$1(e, u, f), u.props.children = null;
 }
 n = w$1.slice, l$1 = { __e: function(n, l, u, t) {
 	for (var i, r, o; l = l.__;) if ((i = l.__c) && !i.__) try {
@@ -262,7 +262,7 @@ n = w$1.slice, l$1 = { __e: function(n, l, u, t) {
 	this.__v && (this.__e = !0, n && this.__h.push(n), A$1(this));
 }, C$1.prototype.render = S, i$2 = [], o$1 = "function" == typeof Promise ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, e$1 = function(n, l) {
 	return n.__v.__b - l.__v.__b;
-}, H.__r = 0, f$2 = Math.random().toString(8), c$1 = "__d" + f$2, a$1 = "__a" + f$2, s$1 = /(PointerCapture)$|Capture$/i, h = 0, p$1 = V(!1), v$1 = V(!0);
+}, H.__r = 0, f$2 = Math.random().toString(8), c$1 = "__d" + f$2, a$1 = "__a" + f$2, s$1 = /(PointerCapture)$|Capture$/i, h$1 = 0, p$1 = V(!1), v$1 = V(!0);
 //#endregion
 //#region node_modules/preact/hooks/dist/hooks.module.js
 var t;
@@ -285,6 +285,46 @@ function s(n, t) {
 		__h: []
 	});
 	return n >= u.__.length && u.__.push({}), u.__[n];
+}
+function d(n) {
+	return o = 1, y(D, n);
+}
+function y(n, u, i) {
+	var o = s(t++, 2);
+	if (o.t = n, !o.__c && (o.__ = [i ? i(u) : D(void 0, u), function(n) {
+		var t = o.__N ? o.__N[0] : o.__[0], r = o.t(t, n);
+		t !== r && (o.__N = [r, o.__[1]], o.__c.setState({}));
+	}], o.__c = r, !r.__f)) {
+		var f = function(n, t, r) {
+			if (!o.__c.__H) return !0;
+			var u = !1, i = o.__c.props !== n;
+			if (o.__c.__H.__.some(function(n) {
+				if (n.__N) {
+					u = !0;
+					var t = n.__[0];
+					n.__ = n.__N, n.__N = void 0, t !== n.__[0] && (i = !0);
+				}
+			}), c) {
+				var f = c.call(this, n, t, r);
+				return u ? f || i : f;
+			}
+			return !u || i;
+		};
+		r.__f = !0;
+		var c = r.shouldComponentUpdate, e = r.componentWillUpdate;
+		r.componentWillUpdate = function(n, t, r) {
+			if (this.__e) {
+				var u = c;
+				c = void 0, f(n, t, r), c = u;
+			}
+			e && e.call(this, n, t, r);
+		}, r.shouldComponentUpdate = f;
+	}
+	return o.__N || o.__;
+}
+function h(n, u) {
+	var i = s(t++, 3);
+	!c.__s && C(i.__H, u) && (i.__ = n, i.u = u, r.__H.__h.push(i));
 }
 function _(n, u) {
 	var i = s(t++, 4);
@@ -368,6 +408,9 @@ function C(n, t) {
 		return t !== n[r];
 	});
 }
+function D(n, t) {
+	return "function" == typeof t ? t(n) : t;
+}
 //#endregion
 //#region node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js
 var f = 0;
@@ -397,4 +440,4 @@ function u(e, t, n, o, i, u) {
 	return l$1.vnode && l$1.vnode(l), l;
 }
 //#endregion
-export { S as a, R as i, A as n, _ as r, u as t };
+export { h as a, d as i, A as n, R as o, _ as r, S as s, u as t };

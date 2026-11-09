@@ -75,6 +75,21 @@
 # Not a sandbox: a worker that writes the merge into a script and runs the script is not
 # caught here. It is the line that makes "I will just merge it" a refused tool call with
 # the rule in the reason, rather than a habit.
+#
+# THE FOURTH: a merge with no review behind it (the REVIEW GATE, lib/review-gate.sh).
+#
+# Off by default, and with it off nothing below changes — the check costs one glob for a
+# marker and returns. On, it binds EVERY session, the lead in the main checkout included:
+# a merge (any of the forms above, --match-head-commit too) is let through only when the
+# PR's CURRENT head commit, asked of GitHub, has a pass recorded by `fleet-review`. A push
+# after the review moves the head and voids it. Whose setting decides is the PR's AUTHOR's —
+# its head branch, through the manifest, names the session — so a worker switched off for
+# itself is not stranded behind a refusal its contract never told it about; a PR no session
+# owns falls back to the merging session's, which is the project's unless overridden.
+# Refused while it is on: `--auto` (it lands whatever the head is when checks finish, which
+# a pass at today's head does not cover) and a GraphQL merge (its PR id cannot be resolved
+# here). And no session — the lead included — switches it OFF or writes a review record by
+# hand: a line the bound session can lift is the brief again. A human does that.
 
 # Route by the LIVE tmux server, not a possibly-stale CLAUDE_FLEET_SOCK — same
 # reasoning as fleet-event.sh: a --resume/--fork Claude can carry an old env var.
@@ -87,7 +102,7 @@ input="$(cat)"
 # EVERY Bash call in every session comes through here now, and almost none is a merge:
 # leave before jq when the payload cannot be one. A payload this glob misses (other JSON
 # spacing) just takes the slow path below; it cannot be let through by it.
-case "$input" in *'"tool_name":"Bash"'*) case "$input" in *[Mm]erge*|*agents-approve*|*fleet-project*) ;; *) exit 0 ;; esac ;; esac
+case "$input" in *'"tool_name":"Bash"'*) case "$input" in *[Mm]erge*|*agents-approve*|*fleet-project*|*review*) ;; *) exit 0 ;; esac ;; esac
 MERGE=0
 # \x1f and not tab, because SUBAGENT is OPTIONAL and tab is IFS-whitespace: an absent
 # subagent_type would collapse and shift the field order. Our own wire, so \x1f is the
@@ -150,7 +165,7 @@ if [ -z "${CLAUDE_FLEET_SOCK:-}" ]; then
   command -v tmux >/dev/null 2>&1 || exit 0
   PROJ="$(registered_project "$GITROOT")" || exit 0
   [ -n "$PROJ" ] || exit 0
-  tmux -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
+  tmux -u -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
   OUTSIDE=1
 fi
 
@@ -162,9 +177,83 @@ is_linked() {                          # $1 = a directory -> 0 when it is a LINK
   gcd="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
   [ -n "$gd" ] && [ "$gd" != "$gcd" ]
 }
+# WHAT THE COMMAND RUNS, not what it says. A worker's acknowledgement of a brief about
+# merging restates the brief — "I push, the lead runs gh pr merge" — and the patterns below
+# read that quoted sentence as a merge: the fleet-ack the contract requires was refused twice
+# before a reworded third got through. So the arguments of a messaging command (fleet-ack,
+# fleet-send, fleet-ledger, git commit), which reach a file or another session's input box and
+# never a shell, are taken out before matching. guard-shape.js whatRuns says the rules; this
+# is the same scan, and test/run.sh holds the two to one answer. In short: only a simple
+# command whose bare command word is one of those is trimmed; a `$(`, backtick, `<(` or `>(`
+# in it keeps the whole of it (the shell runs those inside double quotes too); an
+# unterminated quote returns the command unchanged; and `; & | ( )` and NEWLINE end a simple
+# command, which is why this runs BEFORE the fold — folded, a merge on the line after an ack
+# would become one of the ack's arguments.
+what_runs() {
+  awk '
+  { buf = buf (NR > 1 ? "\n" : "") $0 }
+  function endword() { if (inw) { nw++; w[nw] = cur }; cur = ""; inw = 0 }
+  function trimmed(   i, j, c) {
+    if (raw ~ /\$\(|`|[<>]\(/) return raw
+    i = 1
+    while (i <= nw && w[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) i++
+    c = (i <= nw) ? w[i] : ""          # w[] keeps the last segment past nw
+    if (c == "fleet-ack" || c == "fleet-send" || c == "fleet-ledger") return " " c " "
+    if (c == "git") {
+      for (j = i + 1; j <= nw; j++) {
+        if (w[j] == "-C" || w[j] == "-c") { j++; continue }
+        if (substr(w[j], 1, 1) == "-") continue
+        if (w[j] == "commit") return " git commit "
+        break
+      }
+    }
+    return raw
+  }
+  function endseg(op) { endword(); out = out trimmed() op; raw = ""; nw = 0 }
+  END {
+    s = buf; n = length(s); out = ""; raw = ""; nw = 0; cur = ""; inw = 0
+    Q = sprintf("%c", 39); BS = "\\"
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1); d = substr(s, i + 1, 1)
+      if (c == Q || (c == "$" && d == Q)) {
+        ansi = (c == "$"); j = i + (ansi ? 2 : 1); t = ""
+        while (j <= n && substr(s, j, 1) != Q) {
+          if (ansi && substr(s, j, 1) == BS && j < n) j++
+          t = t substr(s, j, 1); j++
+        }
+        if (j > n) { printf "%s", s; exit }
+        raw = raw substr(s, i, j - i + 1); cur = cur t; inw = 1; i = j; continue
+      }
+      if (c == "\"") {
+        j = i + 1; t = ""
+        while (j <= n && substr(s, j, 1) != "\"") {
+          if (substr(s, j, 1) == BS && j < n) j++
+          t = t substr(s, j, 1); j++
+        }
+        if (j > n) { printf "%s", s; exit }
+        raw = raw substr(s, i, j - i + 1); cur = cur t; inw = 1; i = j; continue
+      }
+      if (c == BS) {
+        if (i >= n) { printf "%s", s; exit }
+        raw = raw c d
+        if (d != "\n") { cur = cur d; inw = 1 }
+        i++; continue
+      }
+      if ((c == "$" || c == "<" || c == ">") && d == "(") {
+        raw = raw c d; cur = cur c d; inw = 1; i++; continue
+      }
+      if (index(";&|()\n", c)) { endseg(c); continue }
+      raw = raw c
+      if (c == " " || c == "\t") { endword(); continue }
+      cur = cur c; inw = 1
+    }
+    endseg("")
+    printf "%s", out
+  }'
+}
 merges_a_pr() {                        # the Bash command on stdin merges a pull request
   # Whitespace folded first, so a merge split across lines is still one.
-  tr '\n\t' '  ' | grep -Eq \
+  what_runs | tr '\n\t' '  ' | grep -Eq \
     -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?pr[[:space:]]+merge([[:space:]]|$)' \
     -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?api[[:space:]][^|;&]*pulls/[^[:space:]/]+/merge' \
     -e 'mergePullRequest|enablePullRequestAutoMerge'
@@ -173,36 +262,166 @@ merges_a_pr() {                        # the Bash command on stdin merges a pull
 # project or for one sub-master session. And a worker may not flip it — for itself or a
 # sibling — because a boundary the bounded session can lift is the brief again.
 changes_a_boundary() {                 # the Bash command on stdin writes a boundary setting
-  tr '\n\t' '  ' | grep -Eq \
+  what_runs | tr '\n\t' '  ' | grep -Eq \
     -e '(^|[^[:alnum:]_.-])fleet-project[[:space:]]+set([[:space:]]|$)' \
-    -e '\.(workers-merge|agents-approve)(-off)?([^[:alnum:]_-]|$)'
+    -e '\.(workers-merge|agents-approve|review-gate)(-off)?([^[:alnum:]_-]|$)' \
+    -e '\.reviews(/|[^[:alnum:]_-]|$)'
+}
+# THE REVIEW GATE IS LIFTED by nobody in a session — the lead included, since it binds the
+# lead's merges too. Switching it off or to inherit, an -off marker, removing the project's
+# marker, and any write into the review records (fleet-review is their one writer). Reads
+# of the markers and records are not writes and are let through.
+lifts_review_gate() {                  # the Bash command on stdin lifts the review gate
+  what_runs | tr '\n\t' '  ' | grep -Eq \
+    -e '(^|[^[:alnum:]_.-])fleet-project[[:space:]]+set[[:space:]]([^|;&]*[[:space:]])?review-gate[[:space:]]+(off|inherit)([[:space:]]|$)' \
+    -e '\.review-gate-off([^[:alnum:]_-]|$)' \
+    -e '(^|[[:space:];&|(])(rm|mv|unlink)[[:space:]][^|;&]*\.review-gate([^[:alnum:]_-]|$)' \
+    -e '(^|[[:space:];&|(])(rm|mv|cp|tee|touch|ln|truncate|unlink)[[:space:]][^|;&]*\.reviews(/|[^[:alnum:]_-]|$)' \
+    -e '>[[:space:]]*[^[:space:]|;&]*\.reviews(/|[^[:alnum:]_-]|$)' \
+    -e '(^|[[:space:];&|(])(sed|perl)[[:space:]][^|;&]*-[A-Za-z]*i[^|;&]*\.reviews/'
+}
+# WHICH PR A MERGE NAMES, as words rather than a regex over the line: a --subject "two
+# words" or a --match-head-commit <sha> put bare words after `merge` that are not the PR.
+# Sets _sel (number, URL or branch; empty = the current branch's PR), _repo, _mhc (the
+# --match-head-commit value) and _auto. xargs does the shell's quote-splitting.
+merge_target() {                       # $1 = the Bash command
+  local flat seg w want="" seen_pr=0 in_merge=0
+  _sel=""; _repo=""; _mhc=""; _auto=0
+  flat="$(printf '%s' "$1" | tr '\n\t' '  ')"
+  seg="$(sed -nE 's/.*(^|[^[:alnum:]_.-])(gh[[:space:]]([^|;&]*[[:space:]])?pr[[:space:]]+merge([[:space:]][^|;&]*)?).*/\2/p' <<< "$flat")"
+  [ -n "$seg" ] || return 0
+  while IFS= read -r w; do
+    if [ -n "$want" ]; then
+      case "$want" in repo) _repo="$w" ;; mhc) _mhc="$w" ;; esac; want=""; continue
+    fi
+    case "$w" in
+      -R|--repo) want=repo; continue ;;
+      --repo=*) _repo="${w#--repo=}"; continue ;;
+      --match-head-commit) want=mhc; continue ;;
+      --match-head-commit=*) _mhc="${w#*=}"; continue ;;
+      --auto) _auto=1; continue ;;
+      -t|--subject|-b|--body|-F|--body-file|-A|--author-email) want=skip; continue ;;
+    esac
+    [ "$w" = pr ] && [ "$in_merge" = 0 ] && { seen_pr=1; continue; }
+    [ "$w" = merge ] && [ "$seen_pr" = 1 ] && [ "$in_merge" = 0 ] && { in_merge=1; continue; }
+    [ "$in_merge" = 1 ] || continue
+    case "$w" in -*) continue ;; esac
+    [ -z "$_sel" ] && _sel="$w"
+  done < <(xargs -n1 printf '%s\n' <<< "$seg" 2>/dev/null)
+  return 0
+}
+_gate_refuse() {                       # $1 = the reason line; the rest is the same every time
+  { echo "ghostfleet: the review gate is on — $1"
+    [ -n "${2:-}" ] && echo "  $2"
+    echo
+    echo "  \"review gate\" (review-gate) is on here: no session, the lead included, merges a PR until"
+    echo "  an independent review has passed at the PR's CURRENT head commit. A push after the review"
+    echo "  moves the head and voids it."
+    echo
+    echo "  What to do instead: the session that owns the PR${_gowner:+ ($_gowner)} runs the review loop its"
+    echo "  contract describes — a reviewer subagent, then fleet-review round ${_gnum:-<pr>} — until it"
+    echo "  says PASS. Then merge, with --match-head-commit <that head> to pin it."
+    echo "      fleet-review status ${_gnum:-<pr>}        # the rounds so far, and whether the head is passed"
+    echo "  Only a human turns the gate off (fleet-project set -s $_bsock review-gate off in their own"
+    echo "  terminal, or the grid's , page)."; } >&2
+  exit 2
+}
+# review_gate_check — returns when the merge may go on; exits 2 when it may not.
+review_gate_check() {
+  review_gate_anywhere "$_bdir" "$_bsock" || return 0
+  _gowner=""; _gnum=""
+  local info num url head hbranch key rec lp
+  if [ "$TOOL" != Bash ]; then
+    _sel="$(printf '%s' "$input" | jq -r '.tool_input.pullNumber // .tool_input.pull_number // ""' 2>/dev/null)"
+    _repo="$(printf '%s' "$input" | jq -r 'if (.tool_input.owner // "") != "" and (.tool_input.repo // "") != "" then .tool_input.owner + "/" + .tool_input.repo else "" end' 2>/dev/null)"
+    _mhc="$(printf '%s' "$input" | jq -r '.tool_input.sha // ""' 2>/dev/null)"; _auto=0
+  else
+    _flat="$(printf '%s' "$_cmd" | tr '\n\t' '  ')"
+    if grep -Eq 'pulls/[^[:space:]/]+/merge' <<< "$_flat"; then
+      _sel="$(sed -nE 's#.*pulls/([0-9]+)/merge.*#\1#p' <<< "$_flat")"
+      _repo="$(sed -nE 's#.*repos/([^/[:space:]]+/[^/[:space:]]+)/pulls/.*#\1#p' <<< "$_flat")"
+      _mhc="$(sed -nE 's#.*[[:space:]]-[fF][[:space:]]+sha=([0-9a-fA-F]+).*#\1#p' <<< "$_flat")"; _auto=0
+    elif grep -Eq 'mergePullRequest|enablePullRequestAutoMerge' <<< "$_flat"; then
+      _gate_refuse "a GraphQL merge names its PR by node id, which cannot be checked against a review here." \
+                   "Use gh pr merge <number> instead."
+    else
+      merge_target "$_cmd"
+    fi
+  fi
+  if [ "$_auto" = 1 ]; then
+    _gate_refuse "--auto schedules a merge of whatever the head is when the checks finish, and a pass covers" \
+                 "one head. Merge the reviewed head now instead, with --match-head-commit."
+  fi
+  local to=(); command -v timeout >/dev/null 2>&1 && to=(timeout 15)
+  info="$( cd "${_where:-$CWD}" 2>/dev/null && ${to[@]+"${to[@]}"} gh pr view ${_sel:+"$_sel"} ${_repo:+-R "$_repo"} \
+             --json number,url,headRefOid,headRefName \
+             -q '[(.number|tostring), .url, .headRefOid, .headRefName] | join("\t")' 2>/dev/null )"
+  IFS=$'\t' read -r num url head hbranch <<< "$info"
+  _gnum="$num"
+  if [ -z "$head" ] || ! key="$(review_key "$url")"; then
+    _gate_refuse "could not learn the PR's head commit from GitHub (gh pr view${_sel:+ $_sel})," \
+                 "and with the gate on a merge that cannot be checked is refused, not let through."
+  fi
+  # The author's setting, by head branch: the manifest (fleet-spawn), then the pane of a live
+  # session on this socket whose checkout is on that branch is not asked — too slow for a hook.
+  _gowner="$(awk -F'\t' -v b="$hbranch" '$3 == b { print $2; exit }' "$_bdir/$_bsock.manifest.tsv" 2>/dev/null)"
+  review_gate_on "$_bdir" "$_bsock" "${_gowner:-$_bsess}" || return 0
+  if [ -n "$_mhc" ]; then
+    case "$head" in "$_mhc"*) ;; *)
+      _gate_refuse "--match-head-commit names ${_mhc:0:7}, but PR #$num's head is ${head:0:7}." ;; esac
+  fi
+  rec="$(review_file "$_bdir" "$_bsock" "$key")"
+  review_passed_at "$rec" "$head" && return 0
+  lp="$(review_last_pass "$rec")"
+  if [ -n "$lp" ]; then
+    _gate_refuse "PR #$num has no passing review at its head ${head:0:7}." \
+                 "The last pass was at ${lp:0:7}; the PR has moved since, so it no longer counts."
+  fi
+  _gate_refuse "PR #$num has no passing review at its head ${head:0:7}." "No review is recorded for this PR."
 }
 if [ "$MERGE" = 1 ]; then
   _cmd=""
   [ "$TOOL" = Bash ] && _cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
   _kind=""
-  if [ "$TOOL" != Bash ] || merges_a_pr <<< "$_cmd"; then _kind=merge
+  if [ "$TOOL" = Bash ] && lifts_review_gate <<< "$_cmd"; then _kind=lift
+  elif [ "$TOOL" != Bash ] || merges_a_pr <<< "$_cmd"; then _kind=merge
   elif changes_a_boundary <<< "$_cmd"; then _kind=setting
   else exit 0; fi
+  # Which fleet, session and settings: the session's own override first, then its project.
+  _bsock="${CLAUDE_FLEET_SOCK:-}"; [ -n "$_bsock" ] || _bsock="cf-$PROJ"
+  _bdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+  _bsess="$(tmux -u -L "$_bsock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
+  [ -n "$_bsess" ] || _bsess="${CLAUDE_FLEET_SLOT:-}"
+  _blib="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib"
+  . "$_blib/boundary.sh" 2>/dev/null; . "$_blib/review-gate.sh" 2>/dev/null
+  # No `command -v` fallback that lets it through: a lib that did not load must not turn
+  # the gate into nothing, so its absence is treated as "on, unchecked" and refused.
+  command -v review_gate_anywhere >/dev/null 2>&1 || review_gate_anywhere() { [ -n "$(ls "$1/$2".review-gate "$1/$2".*.review-gate 2>/dev/null)" ]; }
+  if [ "$_kind" = lift ]; then
+    { echo "ghostfleet: no session turns the review gate off, or writes a review record by hand."
+      echo "  \"review gate\" binds this session's merges too — the lead's included — and a line the"
+      echo "  bound session can lift is the brief again. A human switches it off, from their own terminal"
+      echo "  or the grid's , page. Review records have one writer: fleet-review round | pass | stuck."; } >&2
+    exit 2
+  fi
   _where=""
   is_linked "$CWD" && _where="$CWD"
   [ -z "$_where" ] && is_linked "${CLAUDE_PROJECT_DIR:-}" && _where="$CLAUDE_PROJECT_DIR"
-  [ -n "$_where" ] || exit 0                   # the main checkout: the lead merges, so it may
+  if [ -z "$_where" ]; then                    # the main checkout: the lead merges, so it may —
+    [ "$_kind" = merge ] && review_gate_check  # behind the review gate, when that is on
+    exit 0
+  fi
   _wb="$(git -C "$_where" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   if [ "$_kind" = setting ]; then
     { echo "ghostfleet: a worker does not change its own boundaries."
-      echo "  \"workers can merge\" and \"agents can approve tool calls\" are set by the lead (from the"
-      echo "  main checkout) or a human (the grid's , page) — never by a session in a linked worktree,"
-      echo "  which is the session they bound. Ask the lead if your task needs one."; } >&2
+      echo "  \"workers can merge\", \"agents can approve tool calls\" and \"review gate\" are set by the lead"
+      echo "  (from the main checkout) or a human (the grid's , page) — never by a session in a linked"
+      echo "  worktree, which is the session they bound. Ask the lead if your task needs one."; } >&2
     exit 2
   fi
-  # Is it allowed here? The session's own override first, then its project.
-  _bsock="${CLAUDE_FLEET_SOCK:-}"; [ -n "$_bsock" ] || _bsock="cf-$PROJ"
-  _bdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-  _bsess="$(tmux -L "$_bsock" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"
-  [ -n "$_bsess" ] || _bsess="${CLAUDE_FLEET_SLOT:-}"
-  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib/boundary.sh" 2>/dev/null \
-    && boundary_on workers-merge "$_bdir" "$_bsock" "$_bsess" && exit 0
+  if command -v boundary_on >/dev/null 2>&1 && boundary_on workers-merge "$_bdir" "$_bsock" "$_bsess"; then
+    review_gate_check; exit 0
+  fi
   # ── A SUB-LEAD MERGES ITS CHILDREN'S PRs INTO ITS OWN BRANCH ────────────────
   # Nested leads (bin/fleet-spawn): a worker's children branch from its branch and PR into
   # it, and nobody but the sub-lead integrates them — so with "workers can merge" off, that
@@ -223,7 +442,7 @@ if [ "$MERGE" = 1 ]; then
       _kbr=""                                  # the children's branches: manifest, then pane
       for _k in $_kids; do
         _b="$(awk -F'\t' -v s="$_k" '$2==s{print $3; exit}' "$_bdir/$_bsock.manifest.tsv" 2>/dev/null)"
-        [ -n "$_b" ] || _b="$(git -C "$(tmux -L "$_bsock" display-message -p -t "$_k" '#{pane_current_path}' 2>/dev/null)" \
+        [ -n "$_b" ] || _b="$(git -C "$(tmux -u -L "$_bsock" display-message -p -t "$_k" '#{pane_current_path}' 2>/dev/null)" \
                                rev-parse --abbrev-ref HEAD 2>/dev/null)"
         [ -n "$_b" ] && _kbr="$_kbr $_b"
       done
@@ -245,7 +464,7 @@ if [ "$MERGE" = 1 ]; then
       _base="${_bh%%$'\t'*}"; _head="${_bh#*$'\t'}"
       if [ -n "$_bh" ] && [ "$_base" = "$_wb" ] && [ "$_head" != "$_bh" ] \
          && case " $_kbr " in *" $_head "*) true ;; *) false ;; esac; then
-        exit 0
+        review_gate_check; exit 0
       fi
     fi
   fi
@@ -273,7 +492,7 @@ _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 # asks: the pane first (a renamed session keeps its launch-time env), then the env.
 _me=""
 case "${TMUX:-}" in *"/${CLAUDE_FLEET_SOCK:-/},"*)
-  [ -n "${TMUX_PANE:-}" ] && _me="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+  [ -n "${TMUX_PANE:-}" ] && _me="$(tmux -u -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
 [ -n "$_me" ] || _me="${CLAUDE_FLEET_SLOT:-}"
 _fdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 SUBWORKER=0

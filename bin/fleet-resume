@@ -44,6 +44,12 @@ if [ -n "$MSG" ]; then
   src="${BASH_SOURCE[0]}"
   while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
   BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+  # The tag makes the turn a RESUME turn (hooks/fleet-event.sh, RESUME_TAG): it is filed as
+  # DONE only if it made a commit, a push, a PR or closed a ledger item, and as RESUMED —
+  # no lead nudge — otherwise. "Continue" into a worker with nothing left produced a DONE per
+  # resume. The prompt is still a person's words, so the mod's ledger still records it, and
+  # closing it is an answer that makes the turn a DONE.
+  case "$MSG" in "[fleet] resume:"*) ;; *) MSG="[fleet] resume: $MSG" ;; esac
   "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MSG"
 elif [ "$CLEARED" -gt 0 ]; then
   echo "fleet-resume: un-parked '$SESSION' (send it work to wake it)"

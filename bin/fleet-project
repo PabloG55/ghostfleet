@@ -3,7 +3,11 @@
 # fleet-project agent <name> [<agent>|--none] [--session S]
 # fleet-project list
 # fleet-project rm <name>
-# fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
+# fleet-project set <name | -s SOCK> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]
+# fleet-project set <name | -s SOCK> review-<model|level|stalled|rounds> <value|default>
+# fleet-project set <name | -s SOCK> context-window <300k|off|default>
+# fleet-project set <name | -s SOCK> model-<verify|ci|docs|video|build> <model|default>
+# fleet-project set <name | -s SOCK> model <model|default>
 # fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
@@ -20,12 +24,34 @@
 #           conversation that agent had (lib/agent-switch.sh). --session S switches that
 #           one session instead and leaves the column alone. Running workers keep theirs.
 #   rm      drop the list entry only — sessions, worktrees and history are untouched
-#   set     one of the two BOUNDARY settings (lib/boundary.sh), both OFF by default:
+#   set     one of the three BOUNDARY settings (lib/boundary.sh), all OFF by default:
 #             workers-merge   a worker in a linked worktree may merge a PR
 #             agents-approve  an agent may approve another session's permission dialog
+#             review-gate     no session merges a PR until a review passed at its head
+#           and the review gate's values, project-wide (lib/review-gate.sh):
+#             review-model sonnet|opus|haiku|fable, review-level low..max,
+#             review-stalled N (3), review-rounds N (8); `default` drops one
 #           for the whole project, or with --session for ONE session — the sub-master of
 #           its task, while its siblings stay blocked. `inherit` (session only) drops the
 #           override. The grid's settings page calls this for the project-wide form.
+#           set <name> context-window <size|off|default> — the CONTEXT CEILING every
+#           session of the project is launched with (lib/context-window.sh): 300k when
+#           unset, `off` for the model's whole window, `default` to drop the override.
+#           Sessions read it when they start, so a running one takes it at its next start.
+#           set <name> model-<kind> <model|default> — the model `fleet-spawn --kind <kind>`
+#           starts a worker on (lib/model-kind.sh). Unset, a kind gets the account default,
+#           exactly as a spawn without --kind does; an explicit --model always wins.
+#           set <name> model <model|default> — the model EVERY session of the project
+#           starts on (lib/session-model.sh): topic sessions, workers, a wake, a restart —
+#           all but master, which moves only when someone names it (fleet-model master
+#           <model>). A session's own pin (fleet-model) and a spawn's --model/--kind win;
+#           `default` (or `unset`) drops it, back to the profile default. Read at launch,
+#           so a running session takes it at its next start, or now with fleet-model.
+#           set <name> know <include|private|exclude|default> — what the fleet's memory
+#           (fleet-know, docs/MEMORY.md) does with this project: include (the default)
+#           records it; private records it for this machine's leads only, never sends a
+#           turn of it to a model vendor and marks it in every answer; exclude records
+#           nothing. `default` drops the override (the profile's default, then include).
 #   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
@@ -141,11 +167,20 @@ case "$cmd" in
       if tmux -L "$SOCK" has-session -t master 2>/dev/null; then
         echo "fleet-project: master already running on $SOCK"
       else
+        # The project's profile both ways: per session with -e, and in the tmux client's own
+        # environment, which a server this starts takes as its GLOBAL one. Run from a session on
+        # another profile (the MCP's fleet_project_add is), the server otherwise took the
+        # caller's fleet dir, and every session opened on it later wrote there.
+        env CLAUDE_CONFIG_DIR="$CDIR" CLAUDE_FLEET_DIR="$CDIR/fleet" CLAUDE_FLEET_PROFILE="$PROFILE" \
         tmux -L "$SOCK" -f "$CONF" new-session -d -s master -c "$main" \
-          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master" \
+          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_DIR=$CDIR/fleet" -e "CLAUDE_FLEET_PROFILE=$PROFILE" \
+          -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master" \
           && echo "fleet-project: started master in $main" \
           || { echo "fleet-project: could not start master" >&2; exit 1; }
       fi
+      # ...and a server that was already up may have been started by somebody else's env.
+      command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] \
+        && node "$BIN_DIR/../lib/fleet-env.mjs" heal "$SOCK" 2>/dev/null | sed 's/^/fleet-project: /' >&2
       echo "fleet-project: dispatch to it with:  fleet-send -s $SOCK master \"<brief>\""
     fi
     ;;
@@ -291,16 +326,148 @@ case "$cmd" in
     done
     [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
     SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    # The memory's setting as it resolves: the project's marker, then the profile's default
+    # (<fleet-dir>/know.privacy, set by `fleet-know privacy --profile`), then include.
+    know_label() {
+      local v src=project
+      v="$(head -1 "$DIR/$SOCK.know" 2>/dev/null)"
+      case "$v" in include|private|exclude) ;; *) v="$(head -1 "$DIR/know.privacy" 2>/dev/null)"; src="profile default" ;; esac
+      case "$v" in include|private|exclude) ;; *) v=include; src=default ;; esac
+      printf '%s (from %s; fleet-know, docs/MEMORY.md)' "$v" "$src"
+    }
+    . "$BIN_DIR/../lib/context-window.sh"
+    . "$BIN_DIR/../lib/model-kind.sh"
+    . "$BIN_DIR/../lib/session-model.sh"
+    . "$BIN_DIR/../lib/review-gate.sh"
     if [ "$cmd" = get ]; then
       for b in $BOUNDARY_SETTINGS; do
         boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
         printf '%-15s %-4s  (%s)\n' "$b" "$v" "$(boundary_label "$b")"
       done
+      IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
+      printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
+        context-window "$(context_window_label "$cw")" "$cwsrc"
+      printf '%-15s %s\n' know "$(know_label)"
+      m="$(session_model_project "$DIR" "$SOCK")"
+      printf '%-15s %-4s  (%s)\n' model "${m:--}" \
+        "$([ -n "$m" ] && echo "what its sessions start on, master excepted; a pin or --model wins" || echo 'unset: sessions start on the profile default')"
+      for k in $MODEL_KINDS; do
+        m="$(model_kind_resolve "$DIR" "$SOCK" "$k")"
+        printf '%-15s %-4s  (%s; %s)\n' "model-$k" "${m:--}" "$(model_kind_label "$k")" \
+          "$([ -n "$m" ] && echo "fleet-spawn --kind $k uses it" || echo 'unset: the account default')"
+      done
+      # The review gate's four values (lib/review-gate.sh), shown whether or not the gate is
+      # on, so turning it on never surprises anyone with a reviewer they did not know about.
+      for k in $REVIEW_GATE_KEYS; do
+        v="$(review_gate_value "$DIR" "$SOCK" "$k" 2>/dev/null)"
+        case "$k" in
+          model)   d="the reviewer subagent's model" ;;
+          level)   d="the code-review skill's level" ;;
+          stalled) d="stalled rounds before a review is STUCK" ;;
+          rounds)  d="rounds in all before a review is STUCK" ;;
+        esac
+        printf '%-15s %-6s  (%s%s)\n' "review-$k" "$v" "$d" \
+          "$([ -f "$DIR/$SOCK.review-$k" ] || echo '; default')"
+      done
       exit 0
     fi
     B="${POS[0]:-}"; V="${POS[1]:-}"
+    # THE MEMORY'S PRIVACY (docs/MEMORY.md): one value in <sock>.know, beside the fleet's other
+    # markers, read by every writer of the memory as it writes — so it applies from the next
+    # event on, with no restart. Project-wide: a private project's sessions are all private.
+    if [ "$B" = know ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: know is set for the whole project, not --session" >&2; exit 1; }
+      case "$V" in
+        include|private|exclude) mkdir -p "$DIR" 2>/dev/null; printf '%s\n' "$V" > "$DIR/$SOCK.know" ;;
+        default) rm -f "$DIR/$SOCK.know" ;;
+        *) echo "fleet-project: know takes include, private, exclude or default" >&2; exit 1 ;;
+      esac
+      echo "fleet-project: memory for project '$NAME': $(know_label) — from the next event on"
+      exit 0
+    fi
+    # THE CONTEXT CEILING is a value, not a switch, and project-wide only: the measurement
+    # it answers is a fleet's whole bill, and a per-session override would be a second place
+    # to look when a session's size is a surprise. Read at launch by bin/claude-here, so it
+    # reaches a running session the next time that session is started (wake, restart).
+    if [ "$B" = context-window ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: context-window is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.context-window"
+      elif context_window_parse "$V" >/dev/null; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.context-window"
+      else
+        echo "fleet-project: context-window takes a size (300k, 400000, 0.5m), off, or default" >&2; exit 1
+      fi
+      IFS=$'\t' read -r cw cwsrc < <(context_window_resolve "$DIR" "$SOCK")
+      echo "fleet-project: context ceiling for project '$NAME': $(context_window_label "$cw") (from $cwsrc) — sessions pick it up when they next start"
+      exit 0
+    fi
+    # THE MODEL FOR A KIND OF TASK (lib/model-kind.sh): what `fleet-spawn --kind <kind>` starts
+    # a worker on. Project-wide, like the ceiling, and it changes no running session — a worker
+    # takes its model when it is spawned. `default` drops the entry, so that kind goes back to
+    # the account default; nothing here sets a model for a kind that was not asked about.
+    # THE MODEL EVERY SESSION OF THE PROJECT STARTS ON (lib/session-model.sh) — not just the
+    # workers a kind map reaches. Project-wide only: one session's model is its pin, set with
+    # fleet-model, which also moves it while it runs. Master is not given this one (the lead
+    # decides what ships; moving it is a call made about it by name), and nothing running is
+    # touched — sessions read it when they start.
+    if [ "$B" = model ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: model is the project default; one session's model is fleet-model $SESS <model> (it moves the running session too)" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      case "$V" in
+        default|unset)
+          rm -f "$DIR/$SOCK.model"
+          echo "fleet-project: '$NAME' sessions start on the profile default (a pin or --model still wins)" ;;
+        *)
+          model_name_valid "$V" || { echo "fleet-project: model takes a model name (opus, sonnet, haiku, claude-sonnet-5-5, …) or default" >&2; exit 1; }
+          printf '%s\n' "$V" > "$DIR/$SOCK.model"
+          echo "fleet-project: '$NAME' sessions start on $V from their next start — master excepted (fleet-model master $V moves it); a running session moves now with fleet-model <session> $V" ;;
+      esac
+      exit 0
+    fi
+    case "$B" in model-*)
+      k="${B#model-}"
+      model_kind_valid "$k" || { echo "fleet-project: unknown kind '$k' (known: $MODEL_KINDS)" >&2; exit 1; }
+      [ -z "$SESS" ] || { echo "fleet-project: model-$k is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.model-$k"
+        echo "fleet-project: '$NAME' $k workers start on the account default"
+      elif model_name_valid "$V"; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.model-$k"
+        echo "fleet-project: '$NAME' $k workers start on $V (fleet-spawn --kind $k; an explicit --model still wins)"
+      else
+        echo "fleet-project: model-$k takes a model name (sonnet, haiku, claude-opus-5-5, …) or default" >&2; exit 1
+      fi
+      exit 0 ;;
+    esac
+    # THE REVIEW GATE'S VALUES (lib/review-gate.sh): project-wide, like the model map — the
+    # reviewer and its caps are a quality call for the project, and a per-session value would
+    # let one worker review itself more leniently than its siblings. Validated here, so a value
+    # that would become an instruction nobody can follow (a model the Agent tool will not take)
+    # never reaches the contract.
+    case "$B" in review-model|review-level|review-stalled|review-rounds)
+      k="${B#review-}"
+      [ -z "$SESS" ] || { echo "fleet-project: $B is set for the whole project, not --session" >&2; exit 1; }
+      mkdir -p "$DIR" 2>/dev/null
+      if [ "$V" = default ]; then
+        rm -f "$DIR/$SOCK.$B"
+      elif review_gate_valid "$k" "$V"; then
+        printf '%s\n' "$V" > "$DIR/$SOCK.$B"
+      else
+        case "$k" in
+          model) echo "fleet-project: review-model takes sonnet, opus, haiku or fable (the Agent tool's model names), or default" >&2 ;;
+          level) echo "fleet-project: review-level takes low, medium, high, xhigh or max, or default" >&2 ;;
+          *)     echo "fleet-project: $B takes a whole number from 1 to 99, or default" >&2 ;;
+        esac
+        exit 1
+      fi
+      echo "fleet-project: '$NAME' $B: $(review_gate_value "$DIR" "$SOCK" "$k")$([ "$V" = default ] && echo ' (default)') — read when a gated session next starts, and by fleet-review on its next round"
+      exit 0 ;;
+    esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> model <model|default>  |  set <name|-s sock> know <include|private|exclude|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -348,7 +515,12 @@ case "$cmd" in
     echo "  fleet-project agent <name> [<agent>|--none] [--session S]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
-    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project set <name|-s sock> review-<model|level|stalled|rounds> <value|default>" >&2
+    echo "  fleet-project set <name|-s sock> context-window <300k|off|default>" >&2
+    echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
+    echo "  fleet-project set <name|-s sock> model <model|default>" >&2
+    echo "  fleet-project set <name|-s sock> know <include|private|exclude|default>" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac

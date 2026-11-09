@@ -14,6 +14,7 @@
 //                                               -> { session, rows?, cols?, at, pane: "<SGR text>" }
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
+//   GET  /api/usage                             -> { enabled, off?, threshold, profiles: [ accounts.mjs describe() ] }
 //   POST /api/verb   { tool, args }             -> { ok, text }        (Bearer token required)
 //   GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 //   POST /api/auth/register { code, … }         -> { token, expires_at }
@@ -42,11 +43,25 @@
 // file. Anything added here has to be added there too, and the server is the half that
 // matters.
 
-import { setHome } from './grid.js';
+import { setHome, bareName } from './grid.js';
 
 const LS = {
   base: 'gf.base',          // absent = ask this page's own origin; see pref()
   fixture: 'gf.fixture',    // which grid fixture the fixture backend serves
+  // Sessions the FIXTURE treats as having shipped their task, comma-separated. fleet-send
+  // refuses a send to one (bin/fleet-send, "a new task is a new session"), so this is how
+  // the fixture shows a send the daemon would refuse — the path a failed send takes in the
+  // client, which no fixture could reach while every fixture send succeeded.
+  shipped: 'gf.fixture.shipped',
+  // Milliseconds the fixture takes to answer a send — a slow tunnel. The client's promise
+  // that a draft outlives a send that has not been answered yet is only testable with a
+  // send that has not been answered yet.
+  delay: 'gf.fixture.delay',
+  // A second machine paired with this one, as fixtures: '' (one machine, the default), 'online'
+  // (the vm answering, its projects listed after this one's) or 'offline' (the vm asleep).
+  // The only way to see the paired screens without two fleet-serves — and the way the suite
+  // looks at them.
+  paired: 'gf.fixture.paired',
 };
 
 // Verbs that take a second passkey assertion at the moment of action (§7).
@@ -290,17 +305,50 @@ function record(tool, args, result) {
 // ── plumbing ──────────────────────────────────────────────────────────────
 export class AuthError extends Error {}
 export class OfflineError extends Error {}
+// THE DAEMON SAID WAIT, and every read from here waits with it. Its read bucket counts per
+// client and per address, not per path, so a 429 on the grid is a 429 on the transcript too —
+// and a client that went on asking spent a bucket it had just been told was empty. Measured
+// in the daemon's log: one phone, 399 reads in under three minutes from polls that had piled
+// up behind slow answers, then nineteen 429s in two seconds. So `Retry-After` is honoured for
+// ALL reads, by refusing them here without a request, and the pollers ask heldFor() when to
+// come back rather than finding out by asking.
+export class RateLimitedError extends Error {}
+let holdUntil = 0;
+export function heldFor() { return Math.max(0, holdUntil - Date.now()); }
+function hold(r) {
+  const s = Number(r && r.headers && r.headers.get && r.headers.get('Retry-After'));
+  // A missing or unreadable header still means "not now": five seconds, the old poll.
+  const ms = Math.min(Math.max(Number.isFinite(s) && s > 0 ? s * 1000 : 5000, 1000), 120000);
+  holdUntil = Math.max(holdUntil, Date.now() + ms);
+}
+function held(pathAndQuery, local = false) {
+  const ms = heldFor();
+  const e = new RateLimitedError(`the Mac asked this device to slow down — trying again in ${Math.ceil(ms / 1000)} s`);
+  // `local`: refused here, without asking — the daemon has already been heard once.
+  e.status = 429; e.retryAfter = ms; e.path = pathAndQuery; e.local = local;
+  return e;
+}
 
-async function get(pathAndQuery) {
+// `etag` makes it a conditional read: a 304 comes back as { notModified: true } and the
+// caller keeps what it has. `signal` lets a poller drop a read it no longer wants.
+async function get(pathAndQuery, { etag = '', signal } = {}) {
+  if (heldFor() > 0) throw held(pathAndQuery, true);
   const url = baseUrl() + pathAndQuery;
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if (etag) headers['If-None-Match'] = etag;
   let r;
   try {
-    r = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' });
+    r = await fetch(url, { headers, cache: 'no-store', signal });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
+  if (r.status === 304) return { notModified: true };
+  if (r.status === 429) { hold(r); throw held(pathAndQuery); }
   if (!r.ok) { const e = new Error(`${pathAndQuery} → HTTP ${r.status}`); e.status = r.status; throw e; }
-  return r.json();
+  const j = await r.json();
+  const tag = r.headers && r.headers.get && r.headers.get('ETag');
+  if (tag && j && typeof j === 'object' && !Array.isArray(j)) j.etag = tag;
+  return j;
 }
 
 // The fixture backend. Same shapes, same pagination, no server: the screens cannot tell
@@ -329,8 +377,28 @@ export async function getProjects() {
   // which is where the `sessions` field in the fixture comes from.
   const projects = [];
   for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
-    agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent });
-  return { ...j, projects };
+    agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent,
+    model: overlay.projModel.has(p.name) ? overlay.projModel.get(p.name) : (p.model ?? null) });
+  const pr = await pairedFixture();
+  if (!pr) return { ...j, projects };
+  // fleet-serve's mergeProjects, as fixtures: this machine's rows keep their places and gain
+  // a host; the peer's come after, addressed `<name>@<key>`; and a peer that is down is in
+  // `hosts` as offline with no rows of its own.
+  const nowS = Math.floor(Date.now() / 1000);
+  const rows = projects.map(p => ({ ...p, host: pr.label, host_key: '' }));
+  if (pr.mode === 'online')
+    for (const p of pr.j.projects) rows.push({ ...p, name: `${p.name}@${pr.j.peer.key}`, host: pr.j.peer.label, host_key: pr.j.peer.key, home: pr.j.home });
+  return { ...j, projects: rows, hosts: [
+    { key: '', label: pr.label, self: true, online: true },
+    { key: pr.j.peer.key, label: pr.peerLabel, self: false, online: pr.mode === 'online',
+      last_seen: nowS - (pr.mode === 'online' ? 4 : pr.j.peer.last_seen_ago) }] };
+}
+async function pairedFixture() {
+  let mode = '';
+  try { mode = localStorage.getItem(LS.paired) || ''; } catch {}
+  if ((mode !== 'online' && mode !== 'offline') || overlay.unpaired) return null;
+  const j = await fixture('paired.json');
+  return { mode, j, label: overlay.relabel.get('self') || j.self, peerLabel: overlay.relabel.get(j.peer.key) || j.peer.label };
 }
 async function rollup(project) {
   let g; try { g = await getGrid(project); } catch { return { need: 0, working: 0, parked: 0, total: 0 }; }
@@ -341,6 +409,184 @@ async function rollup(project) {
     parked: cards.filter(c => c.status === 'parked').length,
     total: cards.length,
   };
+}
+
+// ── what every master holds for the owner ───────────────────────────────
+// fleet-serve /api/waiting: each master's ledger items that wait on the owner, across every
+// project and profile. A daemon older than the list answers 404, which is "no section", not
+// a broken Projects screen — the same rule as the Jarvis band.
+//   The fixture stores AGES (`since_ago`, `at_ago`, seconds before now) rather than epochs,
+// so "waited 2h" stays 2h however long after the file was written the demo is run. A reply
+// sent in fixture mode turns its item `replied`, as the daemon's would once the master's
+// ledger read the message (ledger.js wakeWaiting); nothing closes it, since only a master can.
+export async function getWaiting() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/waiting'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  const j = await fixture('waiting.json');
+  const nowS = Math.floor(Date.now() / 1000);
+  const pr = await pairedFixture();
+  const peerItems = pr && pr.mode === 'online'
+    ? pr.j.waiting.map(i => ({ ...i, project: `${i.project}@${pr.j.peer.key}`, host: pr.peerLabel })) : [];
+  const items = [...(j.items || []).map(i => (pr ? { ...i, host: pr.label } : i)), ...peerItems].map(({ since_ago, at_ago, ...i }) => {
+    const row = { ...i, since: nowS - (Number(since_ago) || 0), at: nowS - (Number(at_ago) || 0) };
+    const replied = overlay.replied.get(`${i.project}#${i.id}`);
+    return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
+  });
+  return { ...j, items };
+}
+
+// ── reviews: the runs fleet-shots recorded ──────────────────────────────────
+// fleet-serve /api/shots (lib/shots.mjs). EXPERIMENTAL, behind the `shots` switch, and off
+// is a 404 — which here is null, "no Reviews entry anywhere", not a broken Projects screen.
+// The same rule as the Jarvis band and the queue.
+export async function getShots() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/shots'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  // THE FIXTURE LIST IS DERIVED from the run files, as fleet-serve derives it from the
+  // manifests: one group per profile/project/branch, its newest run first. Stored as a list
+  // of ids so a verdict given in fixture mode moves the card it belongs to, and so the card
+  // and the run it opens cannot disagree about its state.
+  let r;
+  try { r = await fetch('./fixtures/shots.json', { cache: 'no-store' }); }
+  catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  if (r.status === 404) return null;
+  if (!r.ok) throw new OfflineError('fixture shots.json is not available');
+  const j = await r.json();
+  // fleet-serve's paired merge, as fixtures: once a machine is paired every group carries its
+  // host, the peer's runs come from paired.json's `shots`, and a peer that is down is one
+  // `missing` entry and no runs of its own.
+  const pr = await pairedFixture();
+  const runs = [];
+  for (const id of j.runs || []) { try { runs.push({ ...(await shotsFixtureRun(id)).run, host: pr ? pr.label : undefined, host_key: '' }); } catch {} }
+  if (pr && pr.mode === 'online')
+    for (const id of pr.j.shots || []) { try { runs.push((await shotsFixtureRun(id, pr.j.peer.key)).run); } catch {} }
+  const by = new Map();
+  for (const run of runs) {
+    const key = `${run.host_key || ''}\x1f${run.profile}\x1f${run.project}\x1f${run.branch}`;
+    if (!by.has(key)) by.set(key, { key, profile: run.profile, project: run.project, branch: run.branch, runs: [],
+                                    ...(pr ? { host: run.host, host_key: run.host_key || '' } : {}) });
+    by.get(key).runs.push({ id: run.id, profile: run.profile, at: run.at, commit: run.provenance.commit, dirty: run.provenance.dirty,
+      kind: run.kind, steps: run.steps.length, flagged: run.steps.filter(s => s.notes && s.notes.length).length,
+      state: { label: run.state.label, cls: run.state.cls, text: run.state.text } });
+  }
+  const groups = [...by.values()].map(g => {
+    g.runs.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+    const [latest, ...earlier] = g.runs;
+    return { key: g.key, profile: g.profile, project: g.project, branch: g.branch, latest, earlier, waiting: latest.state.cls !== 'ok',
+             ...(pr ? { host: g.host, host_key: g.host_key } : {}) };
+  }).sort((a, b) => Date.parse(b.latest.at) - Date.parse(a.latest.at));
+  const profiles = [...new Set(groups.map(g => g.profile))];
+  const out = { ok: true, profiles, multi: profiles.length > 1, groups, waiting: groups.filter(g => g.waiting).length };
+  if (!pr) return out;
+  return { ...out, hosts: [{ key: '', label: pr.label, self: true }, { key: pr.j.peer.key, label: pr.peerLabel }],
+           missing: pr.mode === 'online' ? [] : [{ host: pr.peerLabel, host_key: pr.j.peer.key, why: 'did not answer' }] };
+}
+// The fixture stores AGES (`at_ago`) for the reason waiting.json does: "40 minutes ago"
+// stays 40 minutes however long after the file was written the demo runs.
+// A paired machine's run is `shots-run-<host key>-<id>.json`: the same folder name can be on
+// both machines, as it can on two real ones.
+async function shotsFixtureRun(id, host = '') {
+  const j = await fixture(`shots-run-${host ? `${host}-` : ''}${id}.json`);
+  const at = new Date(Date.now() - (Number(j.run.at_ago) || 0) * 1000).toISOString();
+  const { at_ago, ...run } = j.run;
+  const ov = `${host}/${run.profile}/${id}`;
+  const verdict = overlay.shots.has(ov) ? overlay.shots.get(ov) : (run.verdict || {});
+  const pr = host ? await pairedFixture() : null;
+  return { ok: true, run: { ...run, at, provenance: { ...run.provenance, at }, verdict, state: shotsState(run, verdict),
+                            ...(pr ? { host: pr.peerLabel, host_key: host } : {}) }, media: { ticket: '', exp: 0 } };
+}
+// One run: its steps, provenance and verdict, and a TICKET for its media — a <video> cannot
+// send the bearer the reads carry (lib/shots.mjs, "media tickets"). The URLs are built here,
+// once, so the screen never needs to know which backend answered: `videoSrc` and each
+// step's `src` are simply where the picture is.
+//   `host` is a paired machine's key ('' for this one). Its run is still read from, and its
+// media still fetched from, THIS origin — this host proxies both, signed — so the CSP's
+// `'self'` holds and the ticket is this host's.
+export async function getShotsRun(profile, id, host = '') {
+  const server = (await ready()).mode === 'server';
+  const hq = host ? `host=${encodeURIComponent(host)}&` : '';
+  const j = server ? await get(`/api/shots/run?${hq}profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}`)
+                   : await shotsFixtureRun(id, host);
+  const k = (j.media && j.media.ticket) || '';
+  const src = (file) => !file ? null : server
+    ? `${baseUrl()}/api/shots/media?${hq}profile=${encodeURIComponent(profile)}&run=${encodeURIComponent(id)}&file=${encodeURIComponent(file)}&k=${encodeURIComponent(k)}`
+    : `./fixtures/shots/${encodeURIComponent(file)}`;
+  const run = j.run;
+  return { ...j, run: { ...run, videoSrc: src(run.video), steps: run.steps.map(s => ({ ...s, src: src(s.file) })) } };
+}
+// A verdict. NOT a verb: it runs nothing and goes through no tool, so it has its own route
+// and its own audit row on the Mac (verb `shots_verdict`). The body is the whole verdict
+// for that run, the way verdict.json holds it, and the answer carries the state it now
+// gives — which is what `fleet-shots --check` will say.
+export async function postShotsVerdict(body) {
+  if ((await ready()).mode === 'server') {
+    if (!haveToken()) throw new AuthError('no live session token');
+    let r;
+    try {
+      r = await fetch(baseUrl() + '/api/shots/verdict', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+      });
+    } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+    if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the verdict'); }
+    slid(r);
+    const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+    record('shots_verdict', { profile: body.profile, run: body.run }, j.ok ? `ok: ${j.state && j.state.label}` : `refused: ${j.text || r.status}`);
+    if (!j.ok) throw Object.assign(new Error(j.text || 'the verdict was not saved'), { body: j });
+    return j;
+  }
+  const { run } = await shotsFixtureRun(body.run, body.host || '');
+  const v = run.kind === 'recorded'
+    ? { flow: body.flow && body.flow.v ? { v: body.flow.v, note: String(body.flow.note || '') } : null,
+        chapters: Object.fromEntries(Object.entries(body.chapters || {}).filter(([, t]) => String(t || '').trim())) }
+    : Object.fromEntries(Object.entries(body.state || {}).filter(([, x]) => x && x.v));
+  overlay.shots.set(`${body.host || ''}/${run.profile}/${body.run}`, v);
+  const state = shotsState(run, v);
+  record('shots_verdict', { profile: body.profile, run: body.run }, `ok (fixture — recorded, not written): ${state.label}`);
+  return { ok: true, verdict: v, state };
+}
+// lib/shots.mjs runState, for the FIXTURE backend only: on a server the state always comes
+// from the Mac. A second spelling of one rule is a rule that drifts, so
+// test/helpers/reviews-check.mjs gives both the same verdicts and compares what they say.
+export function shotsState(m, v) {
+  v = v || {};
+  const note = (n) => String(((v.chapters || {})[String(n)]) || '').trim();
+  if (m.video) {
+    const fv = (v.flow || {}).v || '';
+    const flagged = m.steps.filter(st => st.notes && st.notes.length && !note(st.n)).length;
+    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : 'approved';
+    return { total: 1, marked: fv ? 1 : 0, problem: fv === 'reject' ? 1 : 0, flagged, label,
+             cls: fv === 'reject' ? 'bad' : !fv ? 'warn' : 'ok',
+             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed'
+               : flagged ? `approved · ${flagged} flag${flagged === 1 ? '' : 's'} accepted` : 'approved' };
+  }
+  const at = (n) => v[String(n)] || {};
+  const total = m.steps.length;
+  const marked = m.steps.filter(st => at(st.n).v).length;
+  const problem = m.steps.filter(st => at(st.n).v === 'problem').length;
+  const flagged = m.steps.filter(st => st.notes && st.notes.length && !(['ok', 'skip'].includes(at(st.n).v) && (at(st.n).note || '').trim())).length;
+  const label = problem ? `${problem} problem` : flagged ? `${flagged} flagged` : marked < total ? `${total - marked} unreviewed` : 'approved';
+  const text = problem ? `${problem} needs changes` : marked < total ? `${total - marked} unreviewed` : flagged ? `${flagged} need a reason` : 'approved';
+  return { total, marked, problem, flagged, label, text, cls: problem ? 'bad' : (marked < total || flagged) ? 'warn' : 'ok' };
+}
+
+// ── the Claude accounts each profile runs on ───────────────────────────────
+// fleet-serve /api/usage: `fleet-accounts list`'s data for the profiles the daemon lists. A
+// daemon older than the line answers 404, which is "no line", like the two above. The fixture
+// is the payload as served, its times already in words, so it reads the same whenever it runs.
+export async function getUsage() {
+  if ((await ready()).mode === 'server') {
+    try { return await get('/api/usage'); }
+    catch (e) { if (e && e.status === 404) return null; throw e; }
+  }
+  const u = await fixture('usage.json');
+  // fleet-serve's mergeUsage, as fixtures: once a machine is paired every profile line says
+  // whose it is. (The fixture vm's accounts are off, so it adds no line of its own.)
+  const pr = await pairedFixture();
+  return pr ? { ...u, profiles: (u.profiles || []).map(p => ({ ...p, profile: `${pr.label} · ${p.profile}` })) } : u;
 }
 
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
@@ -360,8 +606,11 @@ export async function getGrid(project, sub = '') {
   // otherwise the first fixture for that project. A project with no fixture gets the
   // empty one rather than the wrong fleet's cards, which would be a lie with a name on
   // it — the same reason fleet-read refuses to fall back to another session's transcript.
-  const use = (chosen && chosen.project === project) ? chosen
-            : FIXTURES.find(f => f.project === project)
+  // Another machine's project (`acme-api@vm`) is drawn from the fixture of the same NAME:
+  // the fixtures are one sample fleet, and the address is the only thing that differs.
+  const bare = bareName(project);
+  const use = (chosen && chosen.project === bare) ? chosen
+            : FIXTURES.find(f => f.project === bare)
             || FIXTURES.find(f => f.file === 'grid-empty.json');
   const g = await fixture(use.file);
   // The project you opened is the project the header names, even when the payload came
@@ -392,16 +641,18 @@ export async function getSettings(project) {
 // down a tunnel on cellular — it is a performance decision, not a security control, and
 // the content itself is served unredacted.
 export const PAGE = 20;
-export async function getSession(project, session, before = null) {
+// `opts` is get()'s: { etag, signal }. Only the newest page is polled, so only it is worth
+// asking conditionally; a page reached with `before` is fetched once, when asked for.
+export async function getSession(project, session, before = null, opts = {}) {
   if ((await ready()).mode === 'server') {
     const q = `/api/session?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}` +
               `&limit=${PAGE}` + (before ? `&before=${encodeURIComponent(before)}` : '');
-    return get(q);
+    return get(q, opts);
   }
   // Fixture mode paginates locally over the whole file, so the client walks the same
   // cursor path it will walk against the server.
   let all;
-  try { all = await fixture(`session-${project}-${session}.json`); }
+  try { all = await fixture(`session-${bareName(project)}-${session}.json`); }
   catch {
     // fleet-read's own answer for a session that exists but has not taken a turn. Not
     // an empty screen: "no messages" and "no transcript yet" are different facts.
@@ -442,7 +693,7 @@ export async function getPane(project, session, scrollback = 0) {
   // Fixture mode carries a REAL capture — one of a working session mid-turn, one of a
   // live permission dialog — because the thing being checked is a renderer, and a
   // hand-written escape sequence would only prove it can parse what I thought to write.
-  try { return await fixture(`pane-${project}-${session}.json`); }
+  try { return await fixture(`pane-${bareName(project)}-${session}.json`); }
   catch {
     return { session, pane: '', rows: 0, cols: 0,
              note: `no pane captured for '${session}' in fixture mode.` };
@@ -560,15 +811,60 @@ export async function jarvisConfirm(id, answer, assertion = null) {
   record('jarvis_confirm', { id, answer }, 'ok');
   return j;
 }
-// One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
-export async function jarvisHear(wav) {
-  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
+// ── automations (EXPERIMENTAL, lib/automations.mjs) ─────────────────────────
+// Server only. Fixture mode answers the way a daemon with the switch off does, a 404, so the
+// screen has exactly one "not here" path. A save holding start or stop carries a fresh
+// assertion; without one the daemon answers 428 with needs:'passkey' — NOT 401, which this
+// client reads as a dead session token.
+export async function getAutomations() {
+  if ((await ready()).mode !== 'server') { const e = new Error('/api/automations → HTTP 404'); e.status = 404; throw e; }
+  return get('/api/automations');
+}
+async function autoPost(kind, path, body, assertion = null) {
+  if ((await ready()).mode !== 'server') throw new Error('automations need a real fleet-serve, not fixtures');
   if (!haveToken()) throw new AuthError('no live session token');
-  let r;
+  const r = await authFetch(kind, path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
+               ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+    body: JSON.stringify(body || {}),
+  }).catch((e) => { if (e.status === 401 || e.status === 403) clearToken(); throw e; });
+  record(kind, body && (body.id || (body.automation && body.automation.name)) || '', 'ok');
+  return r;
+}
+export const saveAutomation = (automation, assertion) => autoPost('automation_save', '/api/automations', { automation }, assertion);
+export const deleteAutomation = (id) => autoPost('automation_delete', '/api/automations/delete', { id });
+export const runAutomation = (id, assertion) => autoPost('automation_run', '/api/automations/run', { id }, assertion);
+export const automationsSeen = () => autoPost('automation_seen', '/api/automations/seen', {});
+export const automationDraft = (messages, draft) => autoPost('automation_draft', '/api/automations/draft', { messages, draft });
+
+// ── the Mac's ears (every session's talk) ─────────────────────────────────
+// Whether the Mac can transcribe, and whether it reads replies with Kokoro. NOT Jarvis's:
+// /api/voice answers with Jarvis switched off, which is the whole reason it is its own
+// route. A daemon from before the split answers 404, and the caller falls back to the
+// `voice` /api/jarvis carries. The fixture cannot hear, for the reason getJarvis gives, and
+// says so from the one place the fixtures record the Mac's ears (jarvis.json) — read as a
+// file, so it answers with the fixture's Jarvis switched off as the daemon does.
+export async function getVoice() {
+  if ((await ready()).mode === 'server') return get('/api/voice');
+  const j = await fixture('jarvis.json');
+  return { ok: true, voice: j.voice || null, speak: j.speak || null };
+}
+// One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
+//   /api/voice/hear first; a 404 there is a daemon from before the split, which only hears
+// under Jarvis's name — so that is asked next, and with Jarvis off it 404s as well, which
+// is said as what it is rather than as "hearing failed".
+async function postHear(path, wav) {
   try {
-    r = await fetch(baseUrl() + '/api/jarvis/hear', { method: 'POST',
+    return await fetch(baseUrl() + path, { method: 'POST',
       headers: { 'Content-Type': 'audio/wav', Authorization: `Bearer ${token}` }, body: wav });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+}
+export async function hear(wav) {
+  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r = await postHear('/api/voice/hear', wav);
+  if (r.status === 404) r = await postHear('/api/jarvis/hear', wav);
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
@@ -655,6 +951,77 @@ export async function attach(project, session, file) {
   return j;
 }
 
+// ── the terminal (bin/fleet-serve.mjs TERMINAL) ───────────────────────────
+// Server mode only: a fixture fleet has no tmux to attach to, and a terminal that appeared
+// to open against one would be the one lie this screen cannot afford. Three requests and a
+// socket. The socket is opened HERE because this is the file that knows where the fleet is
+// — a ticket from /api/term/open is good for one upgrade within half a minute, and the
+// browser sends no Authorization on a WebSocket, which is why there is a ticket at all.
+export class TermRefused extends Error {}
+async function termCall(path, method, body, assertion) {
+  if ((await ready()).mode !== 'server') throw new TermRefused('the terminal needs the fleet server — fixtures have no shell to open');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + path, {
+      method, cache: 'no-store',
+      headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}),
+                 ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  // A 401 that asks for a PASSKEY is about the fresh assertion, not the session: the token
+  // is fine and clearing it would lock the app over a cancelled Face ID.
+  if (r.status === 401 && j.needs !== 'passkey') { clearToken(); throw new AuthError('the server refused the session'); }
+  if (!j.ok) throw Object.assign(new TermRefused(j.text || `HTTP ${r.status}`), { status: r.status, needs: j.needs || '' });
+  return j;
+}
+export const getTerm = () => termCall('/api/term', 'GET');
+export const termEnable = (on, assertion = null) => termCall('/api/term/enable', 'POST', { on: !!on }, assertion);
+// kind 'edit' is the desk's Ctrl-n editor tab instead of the shell: the same request, the
+// same gates. Left out for the terminal, so a daemon from before the editor still answers it.
+export const termOpen = (project, size, assertion, kind = 'term') =>
+  termCall('/api/term/open', 'POST', { project, ...size, ...(kind === 'term' ? {} : { kind }) }, assertion);
+export function termSocket(ticket) {
+  const u = new URL(baseUrl() + '/api/term/ws');
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  u.searchParams.set('ticket', ticket);
+  const ws = new WebSocket(u.href);
+  ws.binaryType = 'arraybuffer';
+  return ws;
+}
+
+// ── the machines this one answers for (fleet-serve pair) ─────────────────────
+// Unpair and rename, from the settings sheet. Neither is a verb: they change this daemon's
+// pairing file rather than a fleet, and a paired host can ask for neither.
+async function postPairs(path, body) {
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + path, { method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server refused the session'); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  if (!j.ok) throw new Error(j.text || `HTTP ${r.status}`);
+  return j;
+}
+export async function unpairHost(host) {
+  if ((await ready()).mode === 'server') return postPairs('/api/pairs/unpair', { host });
+  overlay.unpaired = true;
+  record('unpair', { host }, 'ok (fixture — recorded, not executed)');
+  return { ok: true, told: true, text: `fixture: unpaired ${host}, nothing ran` };
+}
+export async function relabelHost(host, label) {
+  if ((await ready()).mode === 'server') return postPairs('/api/pairs/label', { host, label });
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,23}$/.test(String(label || ''))) throw new Error('a label is 1-24 letters, digits, space, dot, dash or underscore');
+  overlay.relabel.set(host, label);
+  return { ok: true };
+}
+
 export async function verb(tool, args, assertion = null) {
   if ((await ready()).mode === 'server') {
     if (!haveToken()) throw new AuthError('no live session token');
@@ -679,6 +1046,8 @@ export async function verb(tool, args, assertion = null) {
     if (!j.ok) throw Object.assign(new Error(j.text || `${tool} failed`), { body: j });
     return j;
   }
+  const wait = tool === 'fleet_send' ? (() => { try { return Number(localStorage.getItem(LS.delay)) || 0; } catch { return 0; } })() : 0;
+  if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, 30000)));
   const res = fixtureVerb(tool, args);
   record(tool, args, res.ok ? 'ok (fixture — recorded, not executed)' : `refused: ${res.text}`);
   if (!res.ok) throw Object.assign(new Error(res.text), { body: res });
@@ -689,7 +1058,8 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), projModel: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
+                  shots: new Map(), unpaired: false, relabel: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start
@@ -740,6 +1110,12 @@ function fixtureVerb(tool, a) {
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send': {
+      if ((() => { try { return String(localStorage.getItem(LS.shipped) || '').split(',').includes(a.session); } catch { return false; } })())
+        return { ok: false, text: `fleet-send: '${a.session}' already finished a task that shipped (fixture) — a new task is a new session: fleet-stop --reclaim ${a.session}, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway` };
+      // A reply to a waiting item (app.js replyText) answers it, as the master's ledger would
+      // once it reads the message, queued behind a turn or not.
+      const re = /^Re your ledger item (\d+):/.exec(String(a.prompt || ''));
+      if (re && a.session === 'master' && a.project) overlay.replied.set(`${a.project}#${re[1]}`, Math.floor(Date.now() / 1000));
       // Held behind the prompt in its pane, as fleet-serve reports it: `queued: 'question'`.
       if (lastStatus.get(a.session) === 'need-you')
         return { ...ok(`fleet-send: → ${a.session} (queued #1 behind a question — it is waiting on an answer in its pane)`), queued: 'question' };
@@ -835,6 +1211,12 @@ function fixtureVerb(tool, a) {
       overlay.projAgent.set(a.name, String(a.agent || ''));
       return ok(a.agent ? `'${a.name}' will start its master as ${a.agent}`
                         : `'${a.name}' is back to the default agent (claude)`);
+    // null, not '', for a cleared one: the daemon sends null for "no default", and the row
+    // has to read the same from both.
+    case 'fleet_project_model':
+      overlay.projModel.set(a.name, String(a.model || '').trim() || null);
+      return ok(a.model ? `'${a.name}' sessions start on ${a.model} from their next start`
+                        : `'${a.name}' is back to the profile default model`);
     case 'fleet_nudge':  return ok(`auto-nudge for '${a.session}' → ${a.state}`);
     case 'fleet_budget': return ok(`budget limit for '${a.project}' → ${a.state}`);
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };
