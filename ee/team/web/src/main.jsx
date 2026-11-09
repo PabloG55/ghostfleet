@@ -18,7 +18,7 @@ import { Automations, noticesSeen } from './automations.jsx';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import '@fontsource/silkscreen/400.css';
-import '../../brand/tokens.css';
+import '../../../../brand/tokens.css';
 import './styles.css';
 import './skin.css';
 import { Icon } from './icon.jsx';

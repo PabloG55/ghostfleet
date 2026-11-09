@@ -12,7 +12,8 @@ import preact from '@preact/preset-vite';
 // import analysis adds each resolved import to a safe set before the list is consulted. So
 // web/ansi.js, web/grid.js (through ansi.js) and web/md.js load in dev, while a direct request
 // for web/app.js, which nothing here imports, is refused, which is the only thing a wider allow
-// list would change.
+// list would change. The brand's tokens.css (the repo's brand/, imported by web/src/main.jsx)
+// is served the same way, and brand/manual.html beside it is refused.
 export default defineConfig({
   root: 'web',
   plugins: [preact()],

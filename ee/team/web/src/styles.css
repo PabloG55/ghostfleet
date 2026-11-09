@@ -1,9 +1,9 @@
 /* ghostfleet team — the app's layout. Colour, type and motion come from the brand's tokens
- * (ee/team/brand/tokens.css), and skin.css lays the terminal look over this file: window title
+ * (the repo's brand/tokens.css), and skin.css lays the terminal look over this file: window title
  * bars, the pixel grid, square lights, the pixel face for titles. Dark, because the brand is a
  * terminal on a dark profile. */
 :root {
-  /* the brand's tokens (ee/team/brand/tokens.css) under the names this file has always used */
+  /* the brand's tokens (the repo's brand/tokens.css) under the names this file has always used */
   --bg: var(--gf-bg);
   --panel: var(--gf-panel);
   --panel2: var(--gf-panel-2);

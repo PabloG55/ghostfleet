@@ -4,7 +4,7 @@
  * hex, plus the app's dark neutrals. Everything carries a --gf- prefix so it can load next
  * to styles.css without overriding its --red/--cyan while the app migrates.
  * manual.html carries a literal copy of this file (the one make-logo.mjs injects);
- * ee/team/test/brand.test.mjs goes red if the two drift apart. */
+ * brand/brand.test.mjs goes red if the two drift apart. */
 :root {
   /* ── signal: the grid's six colors ────────────────────── */
   --gf-teal: #5fd7d7;          /* xterm 80  — the brand, "working", links, focus */

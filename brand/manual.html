@@ -16,7 +16,7 @@
  * hex, plus the app's dark neutrals. Everything carries a --gf- prefix so it can load next
  * to styles.css without overriding its --red/--cyan while the app migrates.
  * manual.html carries a literal copy of this file (the one make-logo.mjs injects);
- * ee/team/test/brand.test.mjs goes red if the two drift apart. */
+ * brand/brand.test.mjs goes red if the two drift apart. */
 :root {
   /* ── signal: the grid's six colors ────────────────────── */
   --gf-teal: #5fd7d7;          /* xterm 80  — the brand, "working", links, focus */
@@ -830,7 +830,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 
 <!-- Every word on the page, in both languages. The markup above carries only keys, so a
      sentence cannot exist in one language and be missing from the other without
-     ee/team/test/brand.test.mjs going red. Values are HTML; an attribute key (data-t-aria,
+     brand/brand.test.mjs going red. Values are HTML; an attribute key (data-t-aria,
      data-t-value) gets plain text. -->
 <script type="application/json" id="i18n">
 {
@@ -862,7 +862,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "story.p3": "The brand keeps what already worked in the terminal: a dark background, six signal colors and a monospaced face. What it adds is calm: room to breathe, a readable text face, and motion only where it matters.",
     "story.sprite": "The original sprite, exactly as it sits in the grid",
     "story.spriteAria": "The ship sprite in half-block characters",
-    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — the single source. <code>ee/team/brand/make-logo.mjs</code> reads it and regenerates every SVG.",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — the single source. <code>brand/make-logo.mjs</code> reads it and regenerates every SVG.",
     "story.traits": "Personality",
     "trait.calm": "Calm",
     "trait.calm.p": "Shows a lot without shouting. Red exists, but only for “needs you”.",
@@ -1096,7 +1096,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "slide.byhand": "terminals opened by hand",
     "slide.cap": "<b>16:9 slide.</b> A two-line mono title, the second line in teal; the fleet on the right; figures along the bottom; the lockup in the corner.",
 
-    "foot.source": "Source: <code>ee/team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+    "foot.source": "Source: <code>brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
   },
   "es": {
     "meta.title": "Manual de marca ghostfleet",
@@ -1126,7 +1126,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "story.p3": "La marca hereda lo que ya funcionaba en el terminal: fondo oscuro, seis colores de señal y una tipografía monoespaciada. Lo que añade es calma: espacio, una tipografía de texto legible y movimiento sólo donde importa.",
     "story.sprite": "El sprite original, tal como está en el grid",
     "story.spriteAria": "Sprite del barco en caracteres de medio bloque",
-    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — la fuente única. <code>ee/team/brand/make-logo.mjs</code> la lee y regenera todos los SVG.",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — la fuente única. <code>brand/make-logo.mjs</code> la lee y regenera todos los SVG.",
     "story.traits": "Personalidad",
     "trait.calm": "Sereno",
     "trait.calm.p": "Muestra mucho sin gritar. El rojo existe, pero sólo para «te necesita».",
@@ -1360,12 +1360,12 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "slide.byhand": "terminales abiertas a mano",
     "slide.cap": "<b>Diapositiva 16:9.</b> Título en mono a dos líneas, la segunda en teal; la flota a la derecha; cifras abajo; lockup en la esquina.",
 
-    "foot.source": "Fuente: <code>ee/team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+    "foot.source": "Fuente: <code>brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
   }
 }
 </script>
 <script>
-// The grid's ship (bin/fleet-grid.mjs), row by row. ee/team/test/brand.test.mjs compares these
+// The grid's ship (bin/fleet-grid.mjs), row by row. brand/brand.test.mjs compares these
 // rows with the grid's: if someone redraws the ship, this goes red.
 const SHIP = [
   '         ▄▄▄▄▄▄█                ',

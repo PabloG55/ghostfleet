@@ -99,4 +99,5 @@ The work is always done with **Claude Code**. The admin picks the mode in
 
 ghostfleet's personality is part of the product: the pixelated ghost submarine, the grid's
 palette (xterm 203/114/80/221/245), boats that move, and status LEDs. The brand manual lives
-in `ee/team/brand/`, and the app takes its tokens from there.
+in the repo's `brand/` (the core's, MIT, so the phone client can take the same look), and
+the app takes its tokens from there.

@@ -29,16 +29,20 @@ const EMOJI = /[\p{Extended_Pictographic}\p{Regional_Indicator}\u2600-\u26FF\uFE
 // one fewer, so an entry cannot outlive the reason it was written for.
 const ALLOWED = [
   // The brand manual is the lead's document; whether its samples follow the app is the lead's call.
-  { file: 'brand/manual.html', ch: '\u23F8', count: 3, why: "status glyph samples (parked); the app draws a pause sprite" },
-  { file: 'brand/manual.html', ch: '\u26A0', count: 3, why: "status glyph samples (interrupted); the app draws a warning sprite" },
-  { file: 'brand/manual.html', ch: '\u263E', count: 3, why: "status glyph samples (asleep); the app draws a moon sprite" },
-  { file: 'brand/manual.html', ch: '\u25B6', count: 2, why: "the 'Try it now' sample button, en and es" },
-  { file: 'brand/manual.html', ch: '\u{1F389}', count: 4, why: "the voice guide's counter-example of what not to say" },
+  // It lives in the repo's brand/ (the core's, MIT), which this app takes its look from, so the
+  // scan reads that folder too: see files().
+  { file: '../../brand/manual.html', ch: '\u23F8', count: 3, why: "status glyph samples (parked); the app draws a pause sprite" },
+  { file: '../../brand/manual.html', ch: '\u26A0', count: 3, why: "status glyph samples (interrupted); the app draws a warning sprite" },
+  { file: '../../brand/manual.html', ch: '\u263E', count: 3, why: "status glyph samples (asleep); the app draws a moon sprite" },
+  { file: '../../brand/manual.html', ch: '\u25B6', count: 2, why: "the 'Try it now' sample button, en and es" },
+  { file: '../../brand/manual.html', ch: '\u{1F389}', count: 4, why: "the voice guide's counter-example of what not to say" },
 ];
 
 const TEXT = /\.(m?js|jsx|css|html|json|md|sh|txt|svg|webmanifest)$/;
 function files() {
-  return execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' }).split('\n')
+  // This folder, and the brand folder at the root whose tokens.css the app imports: an emoji there
+  // reaches the product as surely as one in web/src. Paths come back relative to this folder.
+  return execFileSync('git', ['ls-files', '.', '../../brand'], { cwd: ROOT, encoding: 'utf8' }).split('\n')
     .filter(f => f && TEXT.test(f) && fs.existsSync(path.join(ROOT, f)));
 }
 

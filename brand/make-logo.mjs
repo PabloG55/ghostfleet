@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// ee/team/brand/make-logo.mjs — the logo variants, from the grid's ship.
+// brand/make-logo.mjs — the logo variants, from the grid's ship.
 //
-//     node ee/team/brand/make-logo.mjs       # rewrites logo/*.svg and the manual's tokens block
+//     node brand/make-logo.mjs       # rewrites logo/*.svg and the manual's tokens block
 //
 // The logo IS the SHIP sprite in bin/fleet-grid.mjs: 32 × 16 pixels in half-blocks. It is
 // read from the source, as web/icons/make-icons.mjs does, so a redrawn ship reaches the logo
@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const GRID = path.join(HERE, '..', '..', '..', 'bin', 'fleet-grid.mjs');
+const GRID = path.join(HERE, '..', 'bin', 'fleet-grid.mjs');
 const OUT = path.join(HERE, 'logo');
 
 export function shipRows(src = fs.readFileSync(GRID, 'utf8')) {

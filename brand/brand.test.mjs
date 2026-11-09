@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { shipRows, pixels, shipPath, variants, injectTokens } from '../brand/make-logo.mjs';
+import { shipRows, pixels, shipPath, variants, injectTokens } from './make-logo.mjs';
 
-const BRAND = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'brand');
+const BRAND = path.dirname(fileURLToPath(import.meta.url));
 const read = (f) => fs.readFileSync(path.join(BRAND, f), 'utf8');
 const manual = read('manual.html');
 
@@ -26,7 +26,7 @@ test('the manual\'s ship is the grid\'s, row by row', () => {
 
 test('the manual carries tokens.css verbatim (make-logo.mjs injects it)', () => {
   assert.equal(injectTokens(manual, read('tokens.css')), manual,
-    'manual.html and tokens.css drifted apart: run node ee/team/brand/make-logo.mjs');
+    'manual.html and tokens.css drifted apart: run node brand/make-logo.mjs');
 });
 
 test('the committed SVGs are the ones the current sprite generates', () => {
