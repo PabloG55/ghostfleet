@@ -656,6 +656,9 @@ textarea { resize: vertical; }
 
 .auto-title { font-size: 20px; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 4px 6px; margin-top: 4px; color: var(--white); }
 .auto-title:hover, .auto-title:focus { border-color: var(--line); background: var(--panel2); }
+/* Focus is the cyan every other field takes; it was the hover border, so a keyboard user landing
+   on the name could not tell that it had the caret, or that the pointer was not just resting. */
+.auto-title:focus { border-color: var(--cyan); }
 .autos-edit .page-head { align-items: flex-end; }
 .tabs-m { display: none; }
 .builder { display: grid; grid-template-columns: 200px minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
