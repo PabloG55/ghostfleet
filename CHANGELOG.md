@@ -7,7 +7,7 @@ the detail, and every entry here names the PR that carries the argument.
 ## Unreleased
 
 **`fleet-restart` no longer loses a session whose old process is slow to exit, and no longer says
-it restarted one it lost.** In one restart 22 of 42 sessions vanished, with every fleet reporting
+it restarted one it lost** (#157). In one restart 22 of 42 sessions vanished, with every fleet reporting
 them as relaunched and exiting 0: on a swapping machine the old processes took 20-60 s to exit,
 the new launcher gave them 3 s, refused, and closed the pane. Now:
 
