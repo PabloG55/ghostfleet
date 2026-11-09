@@ -684,6 +684,8 @@ textarea { resize: vertical; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; flex-wrap: wrap; }
 .seg button { background: transparent; border: 0; color: var(--dim); padding: 4px 10px; cursor: pointer; font: inherit; font-size: 13px; }
 .seg button.on { background: var(--line); color: var(--white); }
+/* A count beside the selected tab's label ("Mine 0") is --fg: --dim on the --line fill was 4.03:1. */
+.seg button.on .muted { color: var(--fg); }
 .seg.sm button { font-size: 12.5px; }
 .days { display: flex; gap: 4px; flex-wrap: wrap; }
 .days button { width: 44px; padding: 5px 0; border-radius: var(--r); border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; font: inherit; font-size: 13px; }

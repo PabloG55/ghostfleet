@@ -4,7 +4,12 @@
 .ai-mode { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 12px 14px; border-radius: var(--r);
   background: var(--bg); border: 1px solid var(--line); color: var(--fg); font: inherit; cursor: pointer; }
 .ai-mode:hover:not(:disabled) { border-color: #3a4450; }
-.ai-mode:disabled { opacity: .5; cursor: default; }
+/* An option that cannot be picked yet is drawn in --dim rather than at half opacity. At .5 every
+   line of it fell to 2.2-3.8:1, and one of those lines is the only place the page says how to
+   make it pickable ("Save the key below to pick it"). Grey on --bg is 5.6:1, and the card still
+   reads as unavailable: its title is grey where the others' are white. */
+.ai-mode:disabled { cursor: default; }
+.ai-mode:disabled b, .ai-mode:disabled span { color: var(--dim); }
 .ai-mode.on { border-color: var(--cyan); background: #0f1a1d; }
 .ai-mode b { color: var(--white); font-size: 14.5px; }
 .ai-mode span { font-size: 12.5px; }
