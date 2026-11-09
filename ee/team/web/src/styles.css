@@ -214,6 +214,10 @@ textarea { resize: vertical; }
 .sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .owner-pick { display: inline-flex; align-items: center; gap: .4em; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 2px 4px 2px 6px; }
 .owner-pick select { border: 0; background: transparent; padding: .3em .2em; width: auto; }
+/* The select inside has no border of its own, so the cyan border a focused field takes had no
+   width to show in, and the skin turns the ring off for fields: a keyboard user on the owner
+   picker saw nothing but its 4px chevron turn cyan. The box around it takes the focus instead. */
+.owner-pick:focus-within { border-color: var(--cyan); }
 .presence { margin: 0; color: var(--yellow); font-size: 13px; display: flex; align-items: center; gap: 4px; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
