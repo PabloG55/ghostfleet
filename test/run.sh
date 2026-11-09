@@ -21242,6 +21242,25 @@ else
 fi
 rm -rf "$SHC"
 
+# THE RUNNER ON ITS OWN. A week of downtime, an hour of runs and a sixty-minute wait all take a
+# clock, so the helper replaces Date.now and hands in the sleep, and the fleet is a fake whose
+# statuses a row sets. The route-level group above covers the same code through the real verb path.
+# Every row was watched red against a copy of lib/ with that one guard taken out.
+group "automations: the clock, the files, the runs, the draft"
+if command -v node >/dev/null 2>&1; then
+  AE="$(mktemp -d "$TEST_RUNS.$$.autoeng.XXXXXX")"
+  node "$ROOT/test/helpers/automations-engine.mjs" > "$AE/out" 2> "$AE/err"
+  is "automations-engine ran"           "0"   "$?"
+  is "...without complaining"           ""    "$(head -2 "$AE/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"       "yes" "$([ "$(wc -l < "$AE/out")" -ge 50 ] && echo yes || echo "no: $(wc -l < "$AE/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$AE/out"
+  rm -rf "$AE"
+else
+  skip "automations engine" "node missing"
+fi
+
 # THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
 # notification could ever reach it; a subscription is now one of the steps, both ways.
 group "fleet-phone says notifications: not set up, until a subscription exists"
