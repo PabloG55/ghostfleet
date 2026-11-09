@@ -29,7 +29,7 @@ const SWITCH = path.join(process.env.CLAUDE_FLEET_EXPERIMENTAL_DIR, 'automations
 const setSwitch = (on) => fs.writeFileSync(SWITCH, on ? 'on\n' : 'off\n');
 setSwitch(true);
 
-const { createAutomations } = await import(`${LIB}/automations.mjs`);
+const { createAutomations, oneShot } = await import(`${LIB}/automations.mjs`);
 const model = await import(`${LIB}/automations-model.mjs`);
 const { normalize } = model;
 
@@ -561,6 +561,106 @@ const yes = () => ({ purpose: 'run it' });
   row('...and the phone is told what to do', '1', (await r.list()).notices.filter(n => /revoked/.test(n.text) && /Save it again/.test(n.text)).length);
   const byHand = await r.call('POST', '/api/automations/run', { id: a.id }, yes);
   row('...while a fresh passkey from a trusted device can still run it', 'true', byHand.json.ok);
+}
+
+// ── the draft: what leaves, and what comes back ──────────────────────────────────────────
+const AGENT = path.join(TMP, 'agent');
+const SAID = path.join(TMP, 'said');
+const REPLY = path.join(TMP, 'reply');
+fs.writeFileSync(AGENT, `#!/bin/sh\npwd -P > "${SAID}.cwd"\nprintf '%s\\n' "$@" > "${SAID}"\ncat "${REPLY}"\n`, { mode: 0o755 });
+process.env.CLAUDE_FLEET_AUTOMATIONS_AGENT = AGENT;
+const reply = (v) => fs.writeFileSync(REPLY, typeof v === 'string' ? v : JSON.stringify({ structured_output: v }));
+const said = () => { try { return fs.readFileSync(SAID, 'utf8'); } catch { return ''; } };
+const ask = async (r, draft = null) => { fs.rmSync(SAID, { force: true }); return r.call('POST', '/api/automations/draft', { messages: [{ role: 'user', text: 'every weekday at nine, say good morning' }], draft }); };
+reply({ reply: 'built it', automation: { name: 'good morning', trigger: DAILY, steps: [{ action: 'notify', text: 'morning' }] } });
+{
+  const r = rig({});
+  Object.assign(r.state.sessions, { 'billing-svc/master': 'ready', 'billing-svc/w9': 'working' });
+  const ok = await ask(r);
+  row('a draft comes back', 'good morning', ok.json.automation?.name);
+  row('...the model is told about a project that may be shared', 'yes', /acme-api: /.test(said()) ? 'yes' : 'no');
+  row('...and not about one kept private', 'no', /billing-svc/.test(said()) ? 'yes' : 'no');
+  row('...nor its sessions', 'no', /w9/.test(said()) ? 'yes' : 'no');
+  row('...while the phone itself still lists it', 'yes', (await r.list()).fleet.some(p => p.name === 'billing-svc') ? 'yes' : 'no');
+  row('...and it does not run where the daemon runs', fs.realpathSync(os.tmpdir()), fs.readFileSync(`${SAID}.cwd`, 'utf8').trim());
+  const held = await ask(r, { name: 'x', trigger: DAILY, steps: [{ action: 'send', project: 'billing-svc', session: 'master', prompt: 'p' }] });
+  row('a draft that names a private project is not sent', '', said());
+  row('...and says why', '409', held.status);
+  row('...in words that say what to do', 'yes', /billing-svc/.test(held.json.text) && /by hand/.test(held.json.text) ? 'yes' : held.json.text);
+  const heldT = await ask(r, { name: 'x', trigger: { type: 'event', event: 'finished', project: 'billing-svc', session: '*' }, steps: [] });
+  row('...nor one whose trigger watches it', '409', heldT.status);
+  const fine = await ask(r, { name: 'x', trigger: DAILY, steps: [{ action: 'send', project: 'acme-api', session: 'w1', prompt: 'the draft so far' }] });
+  row('a draft on a shared project goes', '200', fine.status);
+  row('...with the draft in it', 'yes', /the draft so far/.test(said()) ? 'yes' : 'no');
+  const ev = await ask(r, { name: 'x', trigger: { type: 'event', event: 'finished', project: '*', session: '*' }, steps: [{ action: 'notify', text: 'x' }] });
+  row('any project and the event\'s project are not names', '200', ev.status);
+}
+{
+  const r = rig({ fleet: async () => { throw new Error('no grid'); } });
+  const ok = await ask(r);
+  row('a fleet that cannot be read shares nothing', 'yes', /could not be read/.test(said()) ? 'yes' : said().slice(0, 80));
+  const held = await ask(r, { name: 'x', trigger: DAILY, steps: [{ action: 'send', project: 'acme-api', session: 'w1', prompt: 'p' }] });
+  row('...and a draft naming a project is not sent either', '409', held.status);
+  row('(the first still answered)', '200', ok.status);
+}
+{
+  const r = rig({ fleet: async () => [{ name: 'acme-api', sessions: [{ name: 'w1', status: 'ready' }] }] });
+  await ask(r);
+  row('a project with no answer about sharing is not shared', 'no', /acme-api: /.test(said()) ? 'yes' : 'no');
+}
+{
+  const r = rig({});
+  for (const [what, v] of [['null', 'null'], ['nothing', '']]) {
+    fs.writeFileSync(REPLY, v);
+    const res = await ask(r);
+    row(`a model that answers ${what} is a 502, not a crash`, '502', res.status);
+  }
+  fs.writeFileSync(REPLY, JSON.stringify({ result: 'null' }));
+  row('...and a result of null', '502', (await ask(r)).status);
+  reply({ reply: 42, automation: null });
+  row('a reply that is not a string is made one', '42', (await ask(r)).json.reply);
+  reply({ reply: 'x'.repeat(50000), automation: null });
+  row('...and a very long one is cut', '2000', (await ask(r)).json.reply.length);
+  reply({ reply: 'here', automation: { name: 'evil', trigger: DAILY, steps: [{ action: '__proto__' }] } });
+  const bad = await ask(r);
+  row('a draft holding an action that is not one comes back as words', 'null', String(bad.json.automation));
+  row('...saying so', 'yes', /problem/.test(bad.json.reply) ? 'yes' : bad.json.reply);
+  reply({ reply: 'here', automation: { id: 'someone-else', name: 'stolen id', trigger: DAILY, steps: [] } });
+  row('a draft cannot name an existing automation to overwrite', 'undefined', String((await ask(r)).json.automation?.id));
+  reply({ reply: 'here', automation: { name: 'nothing saved', trigger: DAILY, steps: [{ action: 'notify', text: 'x' }] } });
+  await ask(r);
+  row('...and asking saves nothing', '0', (await r.list()).automations.length);
+}
+{
+  // The child that will not go. It ignores SIGTERM and never closes its pipes.
+  const stuck = path.join(TMP, 'stuck');
+  const pidFile = path.join(TMP, 'stuck.pid');
+  fs.writeFileSync(stuck, `#!/bin/sh\ntrap '' TERM\necho $$ > "${pidFile}"\nwhile :; do sleep 0.05; done\n`, { mode: 0o755 });
+  process.env.CLAUDE_FLEET_AUTOMATIONS_AGENT = stuck;
+  const t0 = realNow();
+  const r = await oneShot({ system: 's', prompt: 'p', schema: {}, timeoutMs: 300, killAfterMs: 100 });
+  row('a child that ignores SIGTERM still gets an answer on time', 'false', r.ok);
+  row('...saying so', 'the model did not answer in time', r.text);
+  row('...promptly', 'yes', realNow() - t0 < 2000 ? 'yes' : `${realNow() - t0} ms`);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+  await new Promise(res => setTimeout(res, 400));
+  let alive = 'gone';
+  try { process.kill(pid, 0); alive = 'alive'; } catch {}
+  row('...and it does not outlive the kill', 'gone', alive);
+
+  const noisy = path.join(TMP, 'noisy');
+  fs.writeFileSync(noisy, '#!/bin/sh\nwhile :; do printf "%01000d" 0; done\n', { mode: 0o755 });
+  process.env.CLAUDE_FLEET_AUTOMATIONS_AGENT = noisy;
+  const big = await oneShot({ system: 's', prompt: 'p', schema: {}, timeoutMs: 8000, killAfterMs: 50, maxBytes: 200000 });
+  row('a child that never stops talking is cut off', 'the model answered with far too much', big.text);
+  process.env.CLAUDE_FLEET_AUTOMATIONS_AGENT = path.join(TMP, 'no-such-agent');
+  const absent = await oneShot({ system: 's', prompt: 'p', schema: {} });
+  row('a binary that is not there is an answer too', 'yes', /could not start/.test(absent.text) ? 'yes' : absent.text);
+  process.env.CLAUDE_FLEET_AUTOMATIONS_AGENT = AGENT;
+  // ...and after all of that, the next draft is not told one is still being written.
+  reply({ reply: 'still here', automation: null });
+  const s = rig({});
+  row('...and the next draft is not refused', '200', (await ask(s)).status);
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

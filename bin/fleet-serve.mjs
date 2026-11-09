@@ -2128,9 +2128,13 @@ const automations = createAutomations({
   }),
   // What the grid says, every project the phone can see: the same --json it renders from, so
   // Jarvis switched off is gone from here too, not only from the Projects screen.
+  // `share` is what may leave for the draft model: only a project plainly on `include`, so a
+  // setting that cannot be read keeps it here (lib/automations.mjs, the draft).
   fleet: () => Promise.all(shownToPhone().map(async (t) => {
     const g = await gridJson(t);
-    return { name: t.name, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
+    let share = false;
+    try { share = K.privacyFor(path.join(t.cfg, 'fleet'), t.sock).mode === 'include'; } catch {}
+    return { name: t.name, share, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
   })),
   audit: (row) => auditAppend({ ts: now(), ip: 'local', ...row }),
   clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; },

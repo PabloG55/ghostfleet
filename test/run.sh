@@ -19847,8 +19847,9 @@ rm -rf "$JW"
 group "fleet-serve: automations — the switch, the passkey at save, a run"
 # needs: free_port answers in digits
 AW="$(mktemp -d "$TEST_RUNS.$$.auto.XXXXXX")"
-cat > "$AW/agent" <<'AGENT'
+cat > "$AW/agent" <<AGENT
 #!/bin/sh
+printf '%s\n' "\$@" > "$AW/said"
 printf '%s\n' '{"structured_output":{"reply":"built it","automation":{"name":"good morning","trigger":{"type":"schedule","mode":"days","at":"09:00","days":[1,2,3,4,5]},"steps":[{"action":"notify","text":"good morning"}]}}}'
 AGENT
 chmod +x "$AW/agent"
@@ -19856,6 +19857,10 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   apf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }
   aj()  { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$3"; }
   ASW="$CLAUDE_FLEET_EXPERIMENTAL_DIR/automations.enabled"
+  # One project kept private through the real file `fleet-know` writes, so the row below proves
+  # the daemon's own wiring: the engine's rows only prove what it does with the answer.
+  APRIV="$(HOME="$SV/home" node --input-type=module -e "import('$ROOT/lib/projects.mjs').then(m => { const t = m.projects().find(x => x.name === 'other'); console.log(t.cfg + '/fleet/' + t.sock + '.know'); })")"
+  mkdir -p "$(dirname "$APRIV")"; printf 'private\n' > "$APRIV"
   : > "$SV/ran"
   printf 'on\n' > "$ASW"
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations "$(sv_code auton)" > "$SV/probe.auton" 2>"$SV/probe.auton.err"
@@ -19901,6 +19906,9 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and fleet-spawn was called for it"     "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
   is "the save with a passkey is audited as one" "1"    "$(grep '"verb":"automation_save"' "$SV/audit.jsonl" | grep -c 'passkey:automation nightly check' || true)"
   is "asking for it in a sentence gives a draft" "200"  "$(apf draft auton)"
+  is "...the model is told about a project not kept private" "yes" "$(grep -q -- '^- demo: ' "$AW/said" && echo yes || echo no)"
+  is "...and not about the one that is"         "no"    "$(grep -q -- '^- other: ' "$AW/said" && echo yes || echo no)"
+  is "...which the phone still lists"           "1"     "$(aj list auton fleet | grep -c '"name":"other"' || true)"
   is "...normalised, ready for the editor"      "good morning" "$(aj draft auton automation.name)"
   is "...and nothing was saved by it"           "0"     "$(aj list.full auton automations | grep -c '"good morning"' || true)"
   is "...an empty conversation is refused"      "400"   "$(apf draft.empty auton)"
@@ -19922,7 +19930,7 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and delete"                            "404"   "$(apf delete autoff)"
   is "...still behind the token"                "401"   "$(apf list.noToken autoff)"
   is "...and nothing ran"                       "0"     "$(grep -v 'the owner typed this' "$AW/ran.off" | grep -c . || true)"
-  rm -f "$ASW"
+  rm -f "$ASW" "$APRIV"
   serve_stop
 else
   skip "fleet-serve automations" "server did not come up: $SV_WHY"
