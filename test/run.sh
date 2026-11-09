@@ -6130,8 +6130,9 @@ if command -v node >/dev/null 2>&1; then
     for (const [id, kind] of [['1-a', 'owner'], ['1-b', 'nudge'], ['1-c', ''], ['1-d', 'lead']]) writeHandoff('$MO/spool', id, 'hi', null, kind);" 2>/dev/null
   is "the handoff carries owner and nudge, nothing else" "owner nudge - -" \
      "$(for i in 1-a 1-b 1-c 1-d; do node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('$MO/spool/$i.json','utf8')).kind || '-'))"; printf ' '; done | sed 's/ $//')"
-  # the phone's daemon is the door that passes it, for every verb it runs
-  is "fleet-serve runs the phone's verbs as the human" "1" "$(grep -c "callToolAsync(tool, args, { timeout: 15 \* 60 \* 1000, human: true," "$ROOT/bin/fleet-serve.mjs" || true)"
+  # the phone's daemon is the door that passes it, for every verb it runs; an automation goes
+  # through the same function with nobody there, and it is the one caller that does not pass it
+  is "fleet-serve runs the phone's verbs as the human, unless the caller is an automation" "yes" "$(grep -qF 'callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,' "$ROOT/bin/fleet-serve.mjs" && echo yes || echo no)"
   rm -rf "${MO:?}"
 else
   skip "fleet_send owner mark" "node missing"
