@@ -13,6 +13,11 @@
 #                                      --continue always does, with that prompt
 #   fleet-restart --self-test          the built-in checks (test/run.sh runs these)
 #
+# Exits non-zero when anything under Failed: did not come back, with the command that does it.
+#   CLAUDE_FLEET_RESTART_WAIT       seconds to outwait the old process, then TERM it (120; 0: neither)
+#   CLAUDE_FLEET_RESTART_TERM_WAIT  seconds to give it after that TERM (10)
+#   CLAUDE_FLEET_RESTART_CONFIRM    seconds for the new agent to show its conversation (60)
+#
 # ── WHY THIS EXISTS ───────────────────────────────────────────────────────────
 # bin/agent-here already says it: a fleet turns the binary-swap race into a routine
 # one, so "fleet sessions do not auto-update; you update deliberately, with the
@@ -62,7 +67,7 @@ while [ $# -gt 0 ]; do
     --no-continue) NO_CONTINUE=1 ;;
     --continue) FORCE_CONT="${2:-}"; shift ;;
     --self-test) SELFTEST=1 ;;
-    -h|--help)  sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "fleet-restart: unknown argument '$1'" >&2; exit 2 ;;
   esac
   shift
@@ -352,12 +357,164 @@ write_snapshot() {
   local d="${SNAP_DIR:-$FLEET_DIR}"
   mkdir -p "$d" 2>/dev/null
   SNAP="$d/restart-$(date +%Y%m%d-%H%M%S).tsv"
+  # Fleets restarted one after another land in the same second, and --reopen reads these.
+  [ -e "$SNAP" ] && SNAP="${SNAP%.tsv}-$$.tsv"
   {
     printf '# fleet-restart snapshot %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf '# sock\tslot\tagent\tstatus\taction\tsession_id\tcwd\tnote\n'
     printf '%s' "$PLAN" | tr '\037' '\t'
   } > "$SNAP"
   echo "fleet-restart: snapshot written to $SNAP"
+}
+
+# ── OUTLAST THE OLD PROCESS ───────────────────────────────────────────────────
+# 22 of 42 sessions vanished in one restart. kill-session does not end an agent: it hangs up the
+# pane, and a process with a large transcript on a swapping machine then writes its exit record
+# 20-60 s later. The new launcher, started in the same breath, gives a live holder 3 s, refuses,
+# and exits, and its pane and card go with it. So the old process is outlasted first, and the
+# launcher's few seconds are only for a process this could not name.
+#   THE PID IS CAPTURED BEFORE THE KILL AND IS THE ONLY THING EVER SIGNALLED, and its start time
+# travels with it, because a number can be reused during a two-minute wait. TERM at the bound and
+# nothing stronger: a process that survives TERM is still writing, and the owner decides. A holder
+# outside this pane is another session's business, so it is neither waited for nor signalled; the
+# launcher refuses, and that is what gets reported.
+#   A bad value in these must not read as 0, which takes the wait out and is the old race.
+_secs() { case "${1:-}" in ''|*[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac; }
+RESTART_WAIT="$(_secs "${CLAUDE_FLEET_RESTART_WAIT:-}" 120)"
+RESTART_TERM_WAIT="$(_secs "${CLAUDE_FLEET_RESTART_TERM_WAIT:-}" 10)"
+RESTART_CONFIRM="$(_secs "${CLAUDE_FLEET_RESTART_CONFIRM:-}" 60)"
+RESTART_SETTLE="$(_secs "${CLAUDE_FLEET_RESTART_SETTLE:-}" 5)"
+
+# Exactly this session's panes. list-panes -a and a compare, not a target: bare -t falls through
+# to a prefix once the name is gone, and display-message with `=` answers empty (CLAUDE.md).
+pane_pids() {
+  tmux -u -L "$1" list-panes -a -F "#{session_name}"$'\t'"#{pane_pid}" 2>/dev/null \
+    | awk -F'\t' -v s="$2" '$1==s {print $2}' | tr '\n' ' '
+}
+# Separate -o flags, and a zombie is not alive: `kill -0` says yes to one, and a process whose
+# parent never reaps it would hold this for the whole bound over nothing.
+proc_line() { LC_ALL=C TZ=UTC ps -o stat= -o lstart= -p "$1" 2>/dev/null; }
+proc_alive() {
+  local st rest
+  read -r st rest <<< "$(proc_line "$1")"
+  [ -n "$st" ] || return 1
+  case "$st" in Z*) return 1 ;; esac
+  [ "$rest" = "$2" ]
+}
+OLD_PID=""; OLD_START=""
+capture_old() {
+  local sock="$1" slot="$2" id="$3" agent="${4:-claude}" roots out st
+  OLD_PID=""; OLD_START=""
+  roots="$(pane_pids "$sock" "$slot")"
+  [ -n "$roots" ] || return 0
+  out="$(node "$LIB/slot-claim.mjs" old-agent --id "$id" --agent "$agent" --roots "$roots" 2>/dev/null)"
+  OLD_PID="${out%%"$US"*}"
+  case "$OLD_PID" in ''|*[!0-9]*) OLD_PID="${roots%% *}" ;; esac
+  read -r st OLD_START <<< "$(proc_line "$OLD_PID")"
+  [ -n "$st" ] || OLD_PID=""
+}
+outlast_old() {
+  local slot="$1" pid="$OLD_PID" start="$OLD_START" t0=$SECONDS gap=0.05 said=0
+  [ -n "$pid" ] && [ "$RESTART_WAIT" -gt 0 ] || return 0
+  while proc_alive "$pid" "$start"; do
+    if [ $((SECONDS - t0)) -ge "$RESTART_WAIT" ]; then
+      echo "fleet-restart: $slot: old process $pid is still alive after ${RESTART_WAIT}s — sending TERM to that pid" >&2
+      kill -TERM "$pid" 2>/dev/null
+      t0=$SECONDS
+      while proc_alive "$pid" "$start" && [ $((SECONDS - t0)) -lt "$RESTART_TERM_WAIT" ]; do sleep 0.25; done
+      proc_alive "$pid" "$start" \
+        && echo "fleet-restart: $slot: old process $pid survived TERM; nothing stronger is sent, and the launcher will refuse" >&2
+      return 0
+    fi
+    if [ "$said" = 0 ] && [ $((SECONDS - t0)) -ge 5 ]; then
+      echo "fleet-restart: $slot: waiting for old process $pid to exit (up to ${RESTART_WAIT}s)" >&2
+      said=1
+    fi
+    sleep "$gap"
+    case "$gap" in 0.05) gap=0.1 ;; 0.1) gap=0.25 ;; esac
+  done
+}
+
+# ── DID IT COME BACK ──────────────────────────────────────────────────────────
+# new-session returning says a pane opened. The launcher decides seconds later whether anything
+# runs in it, so a count taken here reported every one of those 22 lost sessions as relaunched,
+# and exited 0. What counts is an agent in this session's panes showing this conversation. Its
+# note is proof at once, since an agent writes that when it is up. An argv is proof of a start,
+# and a resume with nothing to resume exits moments later, so that has to stay up for the settle.
+# Sets CONFIRM_WHY when it did not come back.
+CONFIRM_WHY=""
+failed_row() {   # sock slot since -> the newest failed row's text. A sub-lead has an inbox of its own.
+  local f
+  for f in "$FLEET_DIR/$1.inbox" "$FLEET_DIR/$1".*.inbox; do
+    [ -f "$f" ] || continue
+    awk -F'\t' -v s="$2" -v t="$3" '$2==s && $3=="failed" && $1+0>=t+0 {print $1"\t"$4}' "$f" 2>/dev/null
+  done | sort -n | tail -n 1 | cut -f2-
+}
+why_not_back() {  # sock slot id since what-happened last-on-screen
+  local row
+  row="$(failed_row "$1" "$2" "$4")"
+  if [ -n "$row" ]; then printf '%s' "${row%% — once that process*}"; return; fi
+  if [ -n "$OLD_PID" ] && proc_alive "$OLD_PID" "$OLD_START"; then
+    printf '%s while old process %s still held conversation %s' "$5" "$OLD_PID" "$3"; return
+  fi
+  printf '%s before showing conversation %s%s' "$5" "$3" "${6:+; last on screen: $6}"
+}
+confirm_resumed() {
+  local sock="$1" slot="$2" id="$3" agent="${4:-claude}" since="$5"
+  local until=$((SECONDS + RESTART_CONFIRM)) seen="" seen_at=0 roots out pid how last="" line
+  CONFIRM_WHY=""
+  while :; do
+    if ! tmux -L "$sock" has-session -t "=$slot" 2>/dev/null; then
+      CONFIRM_WHY="$(why_not_back "$sock" "$slot" "$id" "$since" "its pane closed" "$last")"; return 1
+    fi
+    if [ -f "$FLEET_DIR/$sock.$slot.exited" ]; then
+      CONFIRM_WHY="$(why_not_back "$sock" "$slot" "$id" "$since" "its agent exited and the pane is holding" "$last")"; return 1
+    fi
+    roots="$(pane_pids "$sock" "$slot")"; out=""
+    [ -n "$roots" ] && out="$(node "$LIB/slot-claim.mjs" witness --id "$id" --agent "$agent" --roots "$roots" 2>/dev/null)"
+    if [ -n "$out" ]; then
+      IFS="$US" read -r pid how <<< "$out"
+      [ "$how" = note ] && return 0
+      if [ "$pid" != "$seen" ]; then seen="$pid"; seen_at=$SECONDS
+      elif [ $((SECONDS - seen_at)) -ge "$RESTART_SETTLE" ]; then return 0
+      fi
+    else
+      seen=""
+    fi
+    line="$(tmux -L "$sock" capture-pane -p -t "=$slot:" 2>/dev/null | sed '/^[[:space:]]*$/d' | tail -n 1 | tr '\t' ' ' | cut -c1-160)"
+    [ -n "$line" ] && last="$line"
+    if [ "$SECONDS" -ge "$until" ]; then
+      [ -n "$seen" ] && return 0
+      CONFIRM_WHY="still up after ${RESTART_CONFIRM}s, but nothing in its pane shows conversation $id${last:+; last on screen: $last}"
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
+# ── THE WAY BACK, PRINTED ─────────────────────────────────────────────────────
+# One word, as bash and zsh both read it back. printf %q is not enough: it leaves a leading `=`
+# bare, which zsh expands as a command lookup, so `-t =name` fails there before tmux ever runs.
+_shq() {
+  case "$1" in
+    =*|''|*[!A-Za-z0-9_./=:@%+,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+# --reopen when it would resume this very id, the explicit form when it would not, since it is
+# free to settle a slot on another conversation. A name still taken has to be cleared either way.
+way_back() {
+  local sock="$1" slot="$2" id="$3" cwd="$4" agent="${5:-}" cmd="" w
+  load_records
+  if resolve_reopen "$sock" "$slot" 2>/dev/null && [ "$RO_ID" = "$id" ]; then
+    cmd="fleet-restart -s $(_shq "$sock") --reopen $(_shq "$slot")"
+  else
+    relaunch_cmd "$sock" "$slot" "$id" "${cwd:-$HOME}" "$agent"
+    for w in "${RL_CMD[@]}"; do cmd="$cmd${cmd:+ }$(_shq "$w")"; done
+  fi
+  tmux -L "$sock" has-session -t "=$slot" 2>/dev/null \
+    && cmd="tmux -L $(_shq "$sock") kill-session -t $(_shq "=$slot") && $cmd"
+  printf '%s' "$cmd"
 }
 
 # ── RELAUNCH ONE SESSION, BY ITS OWN TMUX TARGET ──────────────────────────────
@@ -370,13 +527,36 @@ write_snapshot() {
 # markers beside it, so relaunching under the same name replaces the agent process
 # and nothing else. agent-here recovers the AGENT from its own marker, so a
 # non-claude session comes back as itself rather than reverting to claude.
+#
+# `=` ON THE KILL. A bare -t falls through to a prefix when the exact name is gone, and a reopen
+# comes through here with the name gone by definition: reopening a lost `api` killed a live
+# `api-2`, and reported the reopen as a success.
+#
+# Everything that can refuse comes before the kill: a session this cannot relaunch stays up.
 relaunch() {
   local sock="$1" slot="$2" id="$3" cwd="$4" agent="${5:-}"
   [ -n "$cwd" ] || cwd="$HOME"
-  tmux -L "$sock" kill-session -t "$slot" 2>/dev/null
+  [ -n "$RCFG" ] || return 1
+  capture_old "$sock" "$slot" "$id" "$agent"
+  tmux -L "$sock" kill-session -t "=$slot" 2>/dev/null
+  outlast_old "$slot"
   # a stale park marker would boot the fresh session "parked" (same guard fleet-open
-  # and fleet-spawn use)
-  rm -f "$FLEET_DIR/$sock.$slot.parked" "$FLEET_DIR/$slot.parked" 2>/dev/null
+  # and fleet-spawn use). A session killed while its pane held on an exit keeps its .exited
+  # marker until the new agent-here gets as far as removing it, and confirm_resumed reads it.
+  rm -f "$FLEET_DIR/$sock.$slot.parked" "$FLEET_DIR/$slot.parked" "$FLEET_DIR/$sock.$slot.exited" 2>/dev/null
+  relaunch_cmd "$sock" "$slot" "$id" "$cwd" "$agent"
+  "${RL_CMD[@]}" 2>/dev/null || return 1
+  # A server that was already up kept whatever global env its first client had; the -e above
+  # fixes this session, and this fixes the server and names any session still on the wrong
+  # fleet dir — the one this restart is often run to cure is now right, the rest are listed.
+  [ -f "$LIB/fleet-env.mjs" ] && node "$LIB/fleet-env.mjs" heal "$sock" 2>/dev/null | sed 's/^/fleet-restart: /' >&2
+  return 0
+}
+
+# The one command that starts a session, in RL_CMD, so what a Failed: row prints is what ran.
+RL_CMD=()
+relaunch_cmd() {
+  local sock="$1" slot="$2" id="$3" cwd="$4" agent="${5:-}"
   # CLAUDE_FLEET_FRESH=0, EXPLICITLY. A tmux server's global environment is whatever its
   # FIRST client exported, and a fleet started from inside a session spawned as a parallel
   # one carries CLAUDE_FLEET_FRESH=1 there (found on a live fleet). Every <agent>-here takes
@@ -394,7 +574,6 @@ relaunch() {
   # account too, not the caller's.
   local -a conf=() prof=() penv=()
   [ -f "$CONF" ] && conf=(-f "$CONF")
-  [ -n "$RCFG" ] || return 1
   prof=(-e "CLAUDE_CONFIG_DIR=$RCFG" -e "CLAUDE_FLEET_DIR=$RCFG/fleet" -e "CLAUDE_FLEET_PROFILE=$RPROF"
         -e "CLAUDE_FLEET_SCOPE=$RNAME" -e "CLAUDE_FLEET_ROOT=$RROOT")
   penv=(CLAUDE_CONFIG_DIR="$RCFG" CLAUDE_FLEET_DIR="$RCFG/fleet" CLAUDE_FLEET_PROFILE="$RPROF"
@@ -404,17 +583,12 @@ relaunch() {
   # running a reopen exports CLAUDE_FLEET_AGENT=claude, and a codex session it brought
   # back would have come back as claude, `--resume`ing a codex id.
   [ -n "$agent" ] && prof+=(-e "CLAUDE_FLEET_AGENT=$agent")
-  env "${penv[@]}" tmux -L "$sock" ${conf[@]+"${conf[@]}"} new-session -d -s "$slot" -c "$cwd" \
-    ${prof[@]+"${prof[@]}"} \
-    -e "CLAUDE_FLEET_SOCK=$sock" \
-    -e "CLAUDE_FLEET_RESUME=$id" \
-    -e "CLAUDE_FLEET_FRESH=0" \
-    "exec agent-here \"$slot\"" 2>/dev/null || return 1
-  # A server that was already up kept whatever global env its first client had; the -e above
-  # fixes this session, and this fixes the server and names any session still on the wrong
-  # fleet dir — the one this restart is often run to cure is now right, the rest are listed.
-  [ -f "$LIB/fleet-env.mjs" ] && node "$LIB/fleet-env.mjs" heal "$sock" 2>/dev/null | sed 's/^/fleet-restart: /' >&2
-  return 0
+  RL_CMD=(env "${penv[@]}" tmux -L "$sock" ${conf[@]+"${conf[@]}"} new-session -d -s "$slot" -c "$cwd"
+    ${prof[@]+"${prof[@]}"}
+    -e "CLAUDE_FLEET_SOCK=$sock"
+    -e "CLAUDE_FLEET_RESUME=$id"
+    -e "CLAUDE_FLEET_FRESH=0"
+    "exec agent-here \"$slot\"")
 }
 
 # ── THE WALK ──────────────────────────────────────────────────────────────────
@@ -424,7 +598,7 @@ relaunch() {
 # and the useful summary is which ones did NOT come back.
 run_plan() {
   local sock slot agent st act id cwd why
-  local n_ok=0 n_cont=0 n_skip=0 n_idle=0
+  local n_ok=0 n_cont=0 n_skip=0 n_idle=0 n_fail=0 since
   local skipped="" needyou="" failed="" selfrow="" RSOCK=""
 
   while IFS="$US" read -r sock slot agent st act id cwd why; do
@@ -436,7 +610,18 @@ run_plan() {
       resume-continue|resume-idle)
         # the plan spans fleets under --all; each relaunch is under its own fleet's account
         [ "$sock" = "$RSOCK" ] || { use_fleet "$sock"; RSOCK="$sock"; }
-        if relaunch "$sock" "$slot" "$id" "$cwd" "$agent"; then
+        since="$(date +%s)"
+        if ! relaunch "$sock" "$slot" "$id" "$cwd" "$agent"; then
+          n_fail=$((n_fail+1))
+          failed="$failed  $sock/$slot — relaunch failed (conversation $id)
+    → $(way_back "$sock" "$slot" "$id" "$cwd" "$agent")
+"
+        elif ! confirm_resumed "$sock" "$slot" "$id" "$agent" "$since"; then
+          n_fail=$((n_fail+1))
+          failed="$failed  $sock/$slot — $CONFIRM_WHY
+    → $(way_back "$sock" "$slot" "$id" "$cwd" "$agent")
+"
+        else
           n_ok=$((n_ok+1))
           if [ "$act" = resume-continue ]; then
             # The agent needs a moment to be listening before a prompt is typed into
@@ -445,7 +630,9 @@ run_plan() {
             if fleet-send -s "$sock" "$slot" "${FORCE_CONT:-$CONTINUE_PROMPT}" >/dev/null 2>&1; then
               n_cont=$((n_cont+1))
             else
+              n_fail=$((n_fail+1))
               failed="$failed  $sock/$slot — relaunched, but the continue prompt did not send
+    → fleet-send -s $(_shq "$sock") $(_shq "$slot") $(_shq "${FORCE_CONT:-$CONTINUE_PROMPT}")
 "
             fi
           else
@@ -453,9 +640,6 @@ run_plan() {
             [ "$st" = need-you ] && needyou="$needyou  $sock/$slot — $why
 "
           fi
-        else
-          failed="$failed  $sock/$slot — relaunch failed
-"
         fi ;;
     esac
   done <<EOF_PLAN
@@ -463,7 +647,7 @@ $PLAN
 EOF_PLAN
 
   echo
-  echo "fleet-restart: $n_ok relaunched ($n_cont continued, $n_idle left idle), $n_skip skipped"
+  echo "fleet-restart: $n_ok relaunched ($n_cont continued, $n_idle left idle), $n_skip skipped${failed:+, $n_fail failed}"
   [ -n "$skipped" ] && { echo; echo "NOT restarted — still on the old binary:"; printf '%s' "$skipped"; }
   [ -n "$needyou" ] && { echo; echo "Was waiting on you, and has NOT been told to continue:"; printf '%s' "$needyou"; }
   [ -n "$failed" ]  && { echo; echo "Failed:"; printf '%s' "$failed"; }
@@ -487,6 +671,7 @@ EOF_SELF
     echo "           -e CLAUDE_FLEET_SOCK=$s_sock -e CLAUDE_FLEET_RESUME=$s_id \\"
     echo "           'exec agent-here \"$s_slot\"'"
   fi
+  [ -z "$failed" ]
 }
 
 # ── THE BUILT-IN CHECKS ───────────────────────────────────────────────────────
@@ -624,6 +809,80 @@ if [ "$SELFTEST" = 1 ]; then self_test; exit $?; fi
 # agent at all SEVEN places a session is created, and a renderer change on both
 # the desk and the phone. This makes exit RECOVERABLE in one command, which is the
 # part that was actually lost.
+#
+# WHERE THE ID COMES FROM, IN ORDER, AND THE ORDER IS THE WHOLE RULE. The slot's records first.
+# When they name nothing, or name an id with no transcript, the restart's own snapshot: recovering
+# from a restart that lost sessions, three refused here while the snapshot written before its
+# first kill held the right id for each, with the transcripts there. A snapshot row is this
+# socket's and this slot's own history, so reading it is not a guess. "The newest conversation in
+# this folder" is, and stays refused.
+#   --all keeps its snapshot with the caller rather than the fleet, so every profile's dir is
+# walked, newest first by name, which is by time.
+snapshot_files() {
+  local d f
+  for d in "$FLEET_DIR" "$CALLER_FLEET_DIR" "$HOME/.claude/fleet" "$HOME"/.claude-*/fleet; do
+    for f in "$d"/restart-*.tsv; do [ -f "$f" ] && printf '%s\t%s\n' "${f##*/}" "$f"; done
+  done | sort -r | cut -f2- | awk '!seen[$0]++'
+}
+# Which file a conversation has to be in, under the account it is about to run as. Empty when
+# the agent keeps none this can name.
+conversation_file() {
+  local agent="$1" id="$2" cwd="$3" tr="${4:-}" want=""
+  if [ "$agent" = claude ]; then
+    want="$RCFG/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')/$id.jsonl"
+    [ -f "$want" ] || case "$tr" in "$RCFG"/*) [ -f "$tr" ] && want="$tr" ;; esac
+  elif [ -n "$tr" ]; then
+    want="$tr"
+  fi
+  printf '%s' "$want"
+}
+# Sets RO_ID RO_CWD RO_TR RO_AGENT and RO_SRC (where the id came from), or RO_WHY and returns 1.
+RO_ID=""; RO_CWD=""; RO_TR=""; RO_AGENT=""; RO_SRC=""; RO_WHY=""
+resolve_reopen() {
+  local sock="$1" name="$2" id cwd="" tr="" ragent="" agent want rec f row sid scwd sagent str unusable=""
+  RO_ID=""; RO_CWD=""; RO_TR=""; RO_AGENT=""; RO_SRC=""; RO_WHY=""
+  id="$(sid_for "$sock" "$name")"
+  if [ -n "$id" ]; then
+    IFS="$US" read -r cwd tr ragent < <(jq -r --arg i "$id" 'select(.session_id==$i) | [(.cwd // ""), (.transcript // ""), (.agent // "")] | join("\u001f")' "$FLEET_DIR"/*.json 2>/dev/null | head -1)
+    # The record knows its agent when the agent wrote it (codex's does); the marker otherwise.
+    agent="${ragent:-$(agent_for "$sock" "$name")}"
+    if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then RO_WHY="the conversation's checkout ($cwd) is gone"; return 1; fi
+    # THE CONVERSATION HAS TO BE THERE, UNDER THE ACCOUNT IT IS ABOUT TO RUN AS. A resume of an
+    # id that account has no transcript for is a pane that prints "no conversation found" and
+    # exits — the card comes back for a second and goes, and the reason is gone with the pane.
+    # Claude keeps a conversation in <config dir>/projects/<cwd, every non-alphanumeric a '-'>;
+    # the record's own path is taken too when it is under that account. Another agent keeps it
+    # where its record says, so that is the file asked about.
+    want="$(conversation_file "$agent" "$id" "$cwd" "$tr")"
+    if [ -z "$want" ] || [ -f "$want" ]; then
+      RO_ID="$id"; RO_CWD="$cwd"; RO_TR="$tr"; RO_AGENT="$agent"; RO_SRC="the slot's record"
+      return 0
+    fi
+    rec="the slot's record names $id, which has no transcript"
+    RO_WHY="'$name''s conversation $id has no transcript under $RCFG (looked for $want) — resuming it would open a pane that exits, so it is not reopened"
+  else
+    rec="no record names this slot"
+    RO_WHY="no recorded conversation for '$name' on $sock — nothing to resume by id, and this will not guess with --continue"
+  fi
+  while IFS= read -r f; do
+    row="$(awk -F'\t' -v k="$sock" -v s="$name" '$1==k && $2==s && $6!="" {print $3 "\037" $6 "\037" $7; exit}' "$f" 2>/dev/null)"
+    [ -n "$row" ] || continue
+    IFS="$US" read -r sagent sid scwd <<< "$row"
+    case "$sagent" in ''|-) sagent="$(agent_for "$sock" "$name")" ;; esac
+    str=""
+    [ "$sagent" = codex ] && str="$(node "$LIB/slot-claim.mjs" rollout --id "$sid" 2>/dev/null)"
+    want="$(conversation_file "$sagent" "$sid" "$scwd" "$str")"
+    if [ -z "$scwd" ] || [ ! -d "$scwd" ] || { [ "$sagent" = codex ] && [ -z "$str" ]; } || { [ -n "$want" ] && [ ! -f "$want" ]; }; then
+      [ -n "$unusable" ] || unusable="$f names $sid, with no checkout or transcript here"
+      continue
+    fi
+    RO_ID="$sid"; RO_CWD="$scwd"; RO_TR="$str"; RO_AGENT="$sagent"; RO_SRC="$f ($rec)"; RO_WHY=""
+    return 0
+  done < <(snapshot_files)
+  [ -z "$unusable" ] || RO_WHY="$RO_WHY (the snapshot $unusable)"
+  return 1
+}
+
 reopen_one() {
   local name="$1" sock="$ONE" id cwd
   if [ -z "$sock" ]; then
@@ -639,30 +898,9 @@ reopen_one() {
   fi
   use_fleet "$sock" || { echo "fleet-restart: $(unowned "$sock")" >&2; return 1; }
   load_records
-  id="$(sid_for "$sock" "$name")"
-  [ -n "$id" ] || { echo "fleet-restart: no recorded conversation for '$name' on $sock — nothing to resume by id, and this will not guess with --continue" >&2; return 1; }
-  local tr ragent agent
-  IFS="$US" read -r cwd tr ragent < <(jq -r --arg i "$id" 'select(.session_id==$i) | [(.cwd // ""), (.transcript // ""), (.agent // "")] | join("\u001f")' "$FLEET_DIR"/*.json 2>/dev/null | head -1)
-  # The record knows its agent when the agent wrote it (codex's does); the marker otherwise.
-  agent="${ragent:-$(agent_for "$sock" "$name")}"
-  [ -n "$cwd" ] && [ -d "$cwd" ] || { echo "fleet-restart: the conversation's checkout ($cwd) is gone" >&2; return 1; }
-  # THE CONVERSATION HAS TO BE THERE, UNDER THE ACCOUNT IT IS ABOUT TO RUN AS. A resume of an
-  # id that account has no transcript for is a pane that prints "no conversation found" and
-  # exits — the card comes back for a second and goes, and the reason is gone with the pane.
-  # Claude keeps a conversation in <config dir>/projects/<cwd, every non-alphanumeric a '-'>;
-  # the record's own path is taken too when it is under that account. Another agent keeps it
-  # where its record says, so that is the file asked about.
-  local want=""
-  if [ "$agent" = claude ]; then
-    want="$RCFG/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')/$id.jsonl"
-    [ -f "$want" ] || case "$tr" in "$RCFG"/*) [ -f "$tr" ] && want="$tr" ;; esac
-  elif [ -n "$tr" ]; then
-    want="$tr"
-  fi
-  if [ -n "$want" ] && [ ! -f "$want" ]; then
-    echo "fleet-restart: '$name''s conversation $id has no transcript under $RCFG (looked for $want) — resuming it would open a pane that exits, so it is not reopened" >&2
-    return 1
-  fi
+  resolve_reopen "$sock" "$name" || { echo "fleet-restart: $RO_WHY" >&2; return 1; }
+  local tr="$RO_TR" agent="$RO_AGENT"
+  id="$RO_ID"; cwd="$RO_CWD"
   # ONE CONVERSATION, ONE PANE. A codex process holds its rollout open, so "somebody has it
   # open" is "it is live in some pane already" — under another name, on another fleet, or
   # in a terminal outside any fleet. Resuming it again would put two writers on one file.
@@ -683,11 +921,11 @@ reopen_one() {
   # beside --reopen it printed "reopened" and created the session. Asked here, after every
   # refusal above has had its say, so a dry run reports the same outcome the real one would.
   if [ "$DRY" = 1 ]; then
-    echo "fleet-restart: would reopen '$name' on $sock, resuming $id in $cwd as $RCFG — --dry-run, nothing was touched"
+    echo "fleet-restart: would reopen '$name' on $sock, resuming $id in $cwd as $RCFG, id from $RO_SRC — --dry-run, nothing was touched"
     return 0
   fi
   if relaunch "$sock" "$name" "$id" "$cwd" "$agent"; then
-    echo "fleet-restart: reopened '$name' on $sock, resuming ${id%%-*} in $cwd"
+    echo "fleet-restart: reopened '$name' on $sock, resuming ${id%%-*} in $cwd, id from $RO_SRC"
   else
     echo "fleet-restart: failed to reopen '$name'" >&2; return 1
   fi

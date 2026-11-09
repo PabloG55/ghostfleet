@@ -394,9 +394,14 @@ if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
   # ...and never into a SECOND pane. Two processes on one transcript interleave their turns
   # into one file and each answers from a history the other is rewriting. lib/slot-claim.mjs
   # gives a holder a few seconds first: every relaunch kills the old pane just before this.
+  #   FILED, BECAUSE THE PANE TAKES THE MESSAGE WITH IT. And 126, which agent-here reads as "the
+  # agent never started" however long this took: the grace above plus a loaded machine can pass
+  # its minimum run, and exit 1 would then hold the pane on the session this just refused, as
+  # `exited`, so --reopen says "already running" and a later restart cannot resolve it.
   if [ -n "$SLOTCLAIM" ] && holder="$(node "$SLOTCLAIM" held --id "$resume_id" 2>/dev/null)"; then
     echo "claude-here: refusing — conversation $resume_id is open in live process $holder; a conversation is never resumed into a second pane" >&2
-    exit 1
+    node "$SLOTCLAIM" refused --dir "$FLEET_DIR" --slot "$slot" --id "$resume_id" --holder "$holder" 2>/dev/null
+    exit 126
   fi
 fi
 
