@@ -13,7 +13,11 @@ the detail, and every entry here names the PR that carries the argument.
   same verb path a tap takes: send, start, pause, resume, wake, interrupt, reopen, stop, plus
   "tell me", "wait" and "continue only if…". Built on the phone by taps or by saying it in a
   sentence. A start or a stop asks for the passkey when the automation is saved, since
-  nobody holds the phone when it runs. `fleet-experimental enable automations`;
+  nobody holds the phone when it runs, and again on "run now", since somebody does. A missed
+  schedule is not run late, and a run going when it is switched off, deleted or edited stops.
+  The sentence builder names only projects whose memory setting is `include` to the model
+  vendor. While an enabled automation listens for a session changing, each registered project
+  costs one `fleet-grid --json` every 8 seconds. `fleet-experimental enable automations`;
   docs/automations.md.
 
 ## 0.6.1 — 2026-10-16
