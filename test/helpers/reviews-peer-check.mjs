@@ -131,13 +131,16 @@ const B = await host('b', ['acme-api', 'toolbox'], [
   ['2026-03-04_09-00-00', 'toolbox', 'docs-pass', '2026-03-04T09:00:00.000Z', 'the docs index'],
 ]);
 const code = (h) => (h.cli('enroll', 'phone').out.match(/[A-Z0-9]{5}-[A-Z0-9]{5}/) || [''])[0];
-const ca = code(A);
+const ca = code(A), cb = code(B);
 if (!(await start(A)) || !(await start(B))) {
   is('both daemons come up', 'up', `down: ${fs.readFileSync(A.log, 'utf8').slice(0, 200)} | ${fs.readFileSync(B.log, 'utf8').slice(0, 200)}`);
   finish(1);
 }
 const pa = new Authenticator({ rpId: 'localhost', origin: A.base });
 await pa.enroll(A.base, ca);
+// The vm's own phone: what a hidden project's runs look like to the machine that has them.
+const pb = new Authenticator({ rpId: 'localhost', origin: B.base });
+await pb.enroll(B.base, cb);
 const audit = (h) => { try { return fs.readFileSync(h.audit, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
 const cards = (r) => ((r.json && r.json.groups) || []).map(g => `${g.host || '-'}:${g.project}:${g.branch}`).join(' ');
 // Raw bytes, which serve-client's utf8 text cannot give back.
@@ -266,6 +269,57 @@ is('the scope, exactly: the three reads and the verdict cross, nothing else of s
    [pairAllows('GET', '/api/shots'), pairAllows('GET', '/api/shots/run'), pairAllows('GET', '/api/shots/media'),
     pairAllows('POST', '/api/shots/verdict', {}), pairAllows('GET', '/api/shots/verdict'), pairAllows('POST', '/api/shots', {}),
     pairAllows('POST', '/api/verb', { tool: 'shots_verdict' })].join(' '));
+
+// ── a project the vm keeps from paired machines: its runs go with it ─────────────────
+// billing-svc joins the vm with one run, and is hidden (`fleet-project set billing-svc pair
+// hide`; its marker is written here directly, the command has its rows in pair-check). A
+// second run belongs to a checkout of the same name that is no registered project, which
+// carries only a name — and a name that is hidden anywhere fails closed. The laptop's list, a
+// run read, its media and a verdict must each answer as a run the vm never had does, and the
+// vm's own phone must still have both.
+const bProj = path.join(B.home, '.config', 'ghostfleet', 'projects');
+const bProjBefore = fs.readFileSync(bProj, 'utf8');
+fs.mkdirSync(path.join(B.dir, 'billing-svc'), { recursive: true });
+fs.appendFileSync(bProj, `billing-svc\t${path.join(B.dir, 'billing-svc')}\twork\n`);
+fs.writeFileSync(path.join(B.home, '.claude', 'fleet', 'cf-billing-svc.pair'), 'hide\n');
+write(path.join(B.shots, 'ledger-run'), recorded(prov('ledger-fix', '2026-03-07T09:00:00.000Z', path.join(B.dir, 'billing-svc')), 'the hidden ledger'), { 'flow.mp4': VID.b });
+write(path.join(B.shots, 'ledger-copy'), recorded(prov('ledger-copy', '2026-03-08T09:00:00.000Z', path.join(B.dir, 'elsewhere', 'billing-svc')), 'the hidden copy'), { 'flow.mp4': VID.b });
+const hiddenIn = (j) => /billing-svc|ledger/.test(JSON.stringify(j || {}));
+const said = (x) => `${x.status} ${(x.json && x.json.text) || ''}`;
+r = await pa.api(A.base, 'GET', '/api/shots');
+is('hidden: the laptop\'s list has none of a hidden project\'s runs', 'vm:acme-api:api-fix laptop:acme-api:api-fix vm:toolbox:docs-pass', cards(r));
+is('...and names neither the project nor its branches anywhere in it', false, hiddenIn(r.json));
+s = await signedAs(lapOnB.id, vmOnA.out, 'GET', '/api/shots');
+is('...the vm\'s own signed answer leaves both runs out', '200 acme-api:api-fix toolbox:docs-pass false',
+   `${s.res.status} ${((s.res.json && s.res.json.groups) || []).map(g => `${g.project}:${g.branch}`).join(' ')} ${hiddenIn(s.res.json)}`);
+r = await pb.api(B.base, 'GET', '/api/shots');
+is('...while the vm\'s own phone lists both', 'billing-svc:ledger-copy billing-svc:ledger-fix',
+   ((r.json && r.json.groups) || []).filter(g => g.project === 'billing-svc').map(g => `${g.project}:${g.branch}`).sort().join(' '));
+const runNope = await pa.api(A.base, 'GET', '/api/shots/run?host=vm&profile=work&run=no-such-run');
+for (const run of ['ledger-run', 'ledger-copy']) {
+  r = await pa.api(A.base, 'GET', `/api/shots/run?host=vm&profile=work&run=${run}`);
+  is(`...reading ${run} from the laptop is reading a run the vm never had`, said(runNope), said(r));
+}
+const lr = await pb.api(B.base, 'GET', '/api/shots/run?profile=work&run=ledger-run');
+is('...and the vm\'s own phone opens it', '200 the hidden ledger', `${lr.status} ${lr.json && lr.json.run && lr.json.run.steps[0].name}`);
+const mNope = (await signedAs(lapOnB.id, vmOnA.out, 'GET', '/api/shots/media?profile=work&run=no-such-run&file=flow.mp4')).res;
+s = await signedAs(lapOnB.id, vmOnA.out, 'GET', '/api/shots/media?profile=work&run=ledger-run&file=flow.mp4');
+is('...its video, asked for by signature, is a run that never was', said(mNope), said(s.res));
+m = await raw(B.base, mq('', 'ledger-run', 'flow.mp4', (lr.json && lr.json.media && lr.json.media.ticket) || ''), { range: 'bytes=0-1' });
+is('...and plays on the vm\'s own phone', `206 ${VID.b.subarray(0, 2).toString('hex')}`, `${m.status} ${m.body.toString('hex')}`);
+const ledgerVerdict = () => fs.existsSync(path.join(B.shots, 'ledger-run', 'verdict.json'));
+const vNope = await post('/api/shots/verdict', { host: 'vm', profile: 'work', run: 'no-such-run', flow: { v: 'approve' }, chapters: {} });
+r = await post('/api/shots/verdict', { host: 'vm', profile: 'work', run: 'ledger-run', flow: { v: 'approve' }, chapters: {} });
+is('...a verdict on it from the laptop is a verdict on a run that never was', said(vNope), said(r));
+const sNope = (await signedAs(lapOnB.id, vmOnA.out, 'POST', '/api/shots/verdict', { profile: 'work', run: 'no-such-run', flow: { v: 'approve' }, chapters: {} })).res;
+s = await signedAs(lapOnB.id, vmOnA.out, 'POST', '/api/shots/verdict', { profile: 'work', run: 'ledger-run', flow: { v: 'approve' }, chapters: {} });
+is('...and signed straight to the vm', said(sNope), said(s.res));
+is('...none of which wrote a verdict there', false, ledgerVerdict());
+r = await pb.api(B.base, 'POST', '/api/shots/verdict', { profile: 'work', run: 'ledger-run', flow: { v: 'approve' }, chapters: {} });
+is('...while the vm\'s own phone gives it one', '200 true', `${r.status} ${ledgerVerdict()}`);
+// Back to the vm the rest of this file expects.
+fs.writeFileSync(bProj, bProjBefore);
+for (const run of ['ledger-run', 'ledger-copy']) fs.rmSync(path.join(B.shots, run), { recursive: true, force: true });
 
 // ── a vm with Reviews off contributes nothing ─────────────────────────────────────────
 B.switchTo('off');

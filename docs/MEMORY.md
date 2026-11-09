@@ -449,6 +449,14 @@ new events and hides the old ones from every answer (they stay in the log — no
 deleted — and `include` again shows them). Which projects are private is the owner's call; the
 switch ships set to `include` everywhere.
 
+**Crossing a pairing takes a second switch as well.** `fleet-project set <name> pair hide` keeps a
+project from paired machines altogether, not only its memory ([mobile.md](mobile.md#several-machines-one-app-fleet-serve-pair)).
+An event crosses only when its project is `include` here **and** `share` there; `private` keeps
+meaning what the table says, whatever the pairing setting is. A relation (`depends-on`) that
+names a hidden project stays on this machine too, even when the project it belongs to is shared.
+As with `private`, an event a paired machine fetched before the project was hidden stays in that
+machine's copy.
+
 ## Secrets
 
 A prompt and a turn's text are stored as written, and the log crosses pairings. So

@@ -470,6 +470,38 @@ server to server, signed with a credential the two exchanged once, at pairing.
   passkey verb (a passkey only verifies on the machine it was made on), and project
   settings. Each is refused on the home host, by name.
 
+**Keeping a project to this machine.** Each project says what a paired machine may have of it,
+set on the machine that has the project:
+
+```
+fleet-project pair                               # every project: profile, value, where it comes from, whether a paired machine sees it
+fleet-project set billing-svc pair hide          # one project
+fleet-project set --profile personal pair hide   # every project of a profile that has no value of its own
+fleet-project set scratch pair share             # one project of that profile, shared back
+fleet-project set scratch pair default           # back to the profile's default
+```
+
+- **`share`** (the default) is everything above. A machine where nothing was set behaves as it
+  always did.
+- **`hide`** makes the project absent from every paired read: no row, session, pane,
+  conversation, queue item, review run or memory event, and no name in any of them. A send,
+  wake, park, resume, photo or review verdict aimed at it is answered exactly as a project this
+  machine never had is answered (`unknown project`, `no such run`), so the answer does not
+  confirm it is there.
+- **Only a paired machine's signed requests are filtered.** This machine's own phone, web
+  client, leads and commands see every project, whatever the setting says.
+- **It applies from the next request**, with nothing restarted. The one lag is on the other
+  machine: when this one does not answer in time, the other may show its last good list, up to
+  a minute old.
+- **The memory needs both switches.** A project's events cross only when its privacy is
+  `include` *and* this setting is `share` ([MEMORY.md](MEMORY.md)).
+- **It hides projects, not words.** A shared project's conversation, pane or memory that
+  mentions a hidden project by name still carries the name.
+- Stored beside the project's other settings: `<fleet-dir>/<sock>.pair`, and the profile's
+  default in `<fleet-dir>/pair.default`. A value this version does not know reads as `hide`, so
+  a later version can name machines one by one without an older one sharing a project with all
+  of them.
+
 **The credential.** Pairing leaves two secrets on each side, one per direction. Each side
 signs with the secret it uses to call the other, and checks the other's requests with the
 second one, so a signature cannot be replayed back to the machine that made it. Both are

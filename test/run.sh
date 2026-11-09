@@ -11784,6 +11784,67 @@ is "a value that is not a size is refused" "1" "$rc"
 is "...and writes nothing"                 "no" "$([ -f "$CW/home/.claude/fleet/cf-acme-api.context-window" ] && echo yes || echo no)"
 rm -rf "$CW"
 
+# ── what a paired machine may have of a project (fleet-project … pair) ──────────
+# One value per project in <sock>.pair, a profile's default in its fleet dir's pair.default,
+# `share` when neither is set — read by lib/projects.mjs pairFor, the one reader the daemon
+# asks too. `fleet-project pair` prints what it resolves to for every project and where that
+# came from; the daemon's half (every paired route, both directions) is in the two-machine
+# group, which also checks that this table and the daemon agree project for project. These
+# rows are the command's: each case printed, a project beating its profile, `default`
+# dropping a value, and every refusal writing nothing.
+group "fleet-project pair: share or hide, per project and per profile"
+PS="$(mktemp -d)" && PS="$(cd "${PS:?}" && pwd -P)"
+mkdir -p "$PS/home/.config/ghostfleet" "$PS/home/.claude/fleet" "$PS/home/.claude-personal" "$PS/p"
+printf 'acme-api\t%s\twork\nbilling-svc\t%s\twork\n' "$PS/p/acme-api" "$PS/p/billing-svc" > "$PS/home/.config/ghostfleet/projects"
+printf 'acme-web\t%s\tpersonal\nscratch\t%s\tpersonal\n' "$PS/p/acme-web" "$PS/p/scratch" > "$PS/home/.config/ghostfleet/projects.personal"
+PFP() { HOME="$PS/home" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+# One table row as words, so the assertion is about the values and not the padding.
+prow() { PFP pair | awk -v n="$1" '$1 == n { $1 = $1; print }'; }
+is "nothing set: every project is shared, from the default" \
+   "acme-api work share default yes|acme-web personal share default yes" "$(prow acme-api)|$(prow acme-web)"
+is "...and the table says what each column is"  "1" "$([ "$(grep -c 'PROJECT .*PROFILE .*PAIR .*FROM .*A PAIRED MACHINE SEES IT' <<< "$(PFP pair | sed -n 1p)")" -ge 1 ] && echo 1 || echo 0)"
+PFP set billing-svc pair hide >/dev/null
+is "a project hidden on its own"                "billing-svc work hide project no" "$(prow billing-svc)"
+is "...written beside its other markers"        "hide" "$(cat "$PS/home/.claude/fleet/cf-billing-svc.pair" 2>/dev/null)"
+is "...and get shows it with where it came from" "1" "$([ "$(PFP get billing-svc | grep -cE '^pair +hide \(from project')" -ge 1 ] && echo 1 || echo 0)"
+PFP set --profile personal pair hide >/dev/null
+is "a profile's default hides every project of it that has no value of its own" \
+   "acme-web personal hide profile no|scratch personal hide profile no" "$(prow acme-web)|$(prow scratch)"
+is "...written in that profile's fleet dir"     "hide" "$(cat "$PS/home/.claude-personal/fleet/pair.default" 2>/dev/null)"
+is "...and no other profile's"                  "acme-api work share default yes" "$(prow acme-api)"
+PFP set scratch pair share >/dev/null
+is "a project's own value beats its profile's"  "scratch personal share project yes" "$(prow scratch)"
+PFP set scratch pair default >/dev/null
+is "default drops the project's value: the profile's applies again" "scratch personal hide profile no|no" \
+   "$(prow scratch)|$([ -f "$PS/home/.claude-personal/fleet/cf-personal-scratch.pair" ] && echo yes || echo no)"
+PFP set --profile personal pair default >/dev/null
+is "...and the profile's default drops the same way" "scratch personal share default yes|no" \
+   "$(prow scratch)|$([ -f "$PS/home/.claude-personal/fleet/pair.default" ] && echo yes || echo no)"
+# A value from a later version (naming machines) must fail CLOSED on this one.
+printf 'share:laptop\n' > "$PS/home/.claude/fleet/cf-acme-api.pair"
+is "a value this version does not know reads as hide, and says so" "1" \
+   "$([ "$(PFP pair | grep -cE "^acme-api +work +hide +project +no +\('share:laptop' is not share or hide, so it reads as hide\)$")" -ge 1 ] && echo 1 || echo 0)"
+rm -f "$PS/home/.claude/fleet/cf-acme-api.pair"
+is "--json carries the same rows"               "acme-api:share:default:true billing-svc:hide:project:false" \
+   "$(PFP pair --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).rows.filter(x=>x.profile==="work");console.log(r.map(x=>`${x.project}:${x.mode}:${x.from}:${x.peer_sees}`).join(" "))})')"
+# Refusals, each writing nothing.
+pls() { find "$PS/home" -name '*.pair' -o -name 'pair.default' | sort | tr '\n' ' '; }
+before="$(pls)"
+PFP set acme-api pair banana >/dev/null; rc=$?
+is "a value that is not share, hide or default is refused" "1" "$rc"
+PFP set --profile nope pair hide >/dev/null; rc=$?
+is "...a profile nothing names"                  "1" "$rc"
+PFP set --profile personal know private >/dev/null; rc=$?
+is "...--profile on anything but pair"           "1" "$rc"
+PFP set --profile personal pair banana >/dev/null; rc=$?
+is "...a bad value for a profile"                "1" "$rc"
+PFP set acme-api pair hide --session w1 >/dev/null; rc=$?
+is "...one session of a project"                 "1" "$rc"
+PFP pair --bogus >/dev/null; rc=$?
+is "...and pair with an option it does not take" "1" "$rc"
+is "...none of which wrote anything"             "$before" "$(pls)"
+rm -rf "${PS:?}"
+
 # ── 4c4b. the model by KIND of task (lib/model-kind.sh) ──────────────────────
 # Opt-in per project: `fleet-spawn --kind verify` starts on the project's model-verify, an
 # explicit --model beats it, and a kind with NO entry launches exactly as a spawn without
@@ -21271,8 +21332,14 @@ fi
 # header, a second hop), takes one host down and sees it listed offline, and unpairs from
 # each side. A photo for a remote session is forwarded and stored on the machine that runs
 # it, with that machine's path handed back and its own refusals (SVG, a path-shaped session,
-# an unknown project, a second hop, a changed body) intact. Watched red against staging's
-# daemon (52 rows: no pair, no proxy, no merge),
+# an unknown project, a second hop, a changed body) intact. A project the vm keeps from
+# paired machines (fleet-project's pair setting: one hidden on its own, one by its profile's
+# default, one shared back) is absent from every paired read — list, grid, conversation, pane,
+# settings, queue, memory — and a send, wake, park, resume or photo aimed at it is answered
+# word for word as a project the vm never had, with a REAL pane checked to be unchanged; the
+# vm's own phone and fleet-know still have all of it. Watched red against staging's daemon
+# (52 rows: no pair, no proxy, no merge; then 30 of the hidden-project rows, a peer's send
+# typed into the hidden pane among them),
 # and the rows staging passes — the ones about a machine on its own, and the refusals that
 # a daemon with no pairing gives for nothing — against copies of this one broken on purpose
 # (listed in the PR).
@@ -21283,7 +21350,7 @@ if command -v node >/dev/null 2>&1; then
   prcrc=$?
   is "pair-check ran"                 "0" "$prcrc"
   is "...without complaining"         ""  "$(head -2 "$PRC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PRC/out")" -ge 120 ] && echo yes || echo "no: $(wc -l < "$PRC/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PRC/out")" -ge 180 ] && echo yes || echo "no: $(wc -l < "$PRC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PRC/out"
@@ -21298,8 +21365,12 @@ fi
 # in the laptop's run of the same name, audited on both; unsigned, a stranger's pairing, a
 # replay and a second hop are refused; a vm with Reviews off contributes nothing and a laptop
 # with Reviews off shows none; a silent vm and a dead one each cost only their own runs, with
-# one entry saying so. Watched red against staging's daemon (31 of 58 rows), and the rows
-# staging passes against copies of this one broken on purpose (listed in the PR).
+# one entry saying so. A project the vm keeps from paired machines takes its runs with it:
+# none in the list, and a run read, its media and a verdict are each a run that never was,
+# while the vm's own phone lists, plays and approves them. Watched red against staging's
+# daemon (31 of 58 rows; then the 9 hidden-run rows, a verdict written into the hidden run
+# among them), and the rows staging passes against copies of this one broken on purpose
+# (listed in the PR).
 group "fleet-serve: Reviews across two paired machines — listed, ranged, a verdict lands on the peer"
 if command -v node >/dev/null 2>&1; then
   RPC="$(mktemp -d "$TEST_RUNS.$$.rvpeer.XXXXXX")"
@@ -21307,7 +21378,7 @@ if command -v node >/dev/null 2>&1; then
   rpcrc=$?
   is "reviews-peer-check ran"         "0" "$rpcrc"
   is "...without complaining"         ""  "$(head -2 "$RPC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$RPC/out")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$RPC/out") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$RPC/out")" -ge 68 ] && echo yes || echo "no: $(wc -l < "$RPC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$RPC/out"
