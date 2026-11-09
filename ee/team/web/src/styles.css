@@ -687,6 +687,11 @@ textarea { resize: vertical; }
 /* A count beside the selected tab's label ("Mine 0") is --fg: --dim on the --line fill was 4.03:1. */
 .seg button.on .muted { color: var(--fg); }
 .seg.sm button { font-size: 12.5px; }
+/* A picker is as wide as its options wherever it sits. In a flex column (a .field, a node's body)
+   it was stretched: the global role's two options sat at the left of a 702px box, beside four
+   project pickers that hug theirs on the same panel. fit-content, not align-self, so a picker in a
+   row keeps its vertical alignment, and a narrow screen can still wrap it. */
+.seg { width: fit-content; }
 .days { display: flex; gap: 4px; flex-wrap: wrap; }
 .days button { width: 44px; padding: 5px 0; border-radius: var(--r); border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; font: inherit; font-size: 13px; }
 .days button.on { background: rgba(255,215,95,.15); border-color: var(--yellow); color: var(--yellow); }

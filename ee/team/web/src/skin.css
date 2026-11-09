@@ -213,6 +213,11 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .card { padding: 11px 14px 11px 15px; }
 .card::before { width: 2px; }
 .card h3, .row-item b, .fleet-name, .island-name, .tree-name, .auto-name, .stat b, .ubar-v { font-family: var(--mono); }
+/* ...but a person's name is not something the terminal printed, so it is Inter, as it is in
+   Activity, Usage and a session's owner. A row that opens with an avatar is a person; the
+   generic rule above had set Settings' team, the admin's people and the AI page's per-person
+   profiles in mono, while project and profile names in the same kind of row stay mono. */
+.row-item > .avatar ~ b, .row-item > .avatar ~ .grow > b { font-family: var(--sans); }
 .stat b { font-weight: 600; }
 .ask, .ask.question { background: color-mix(in srgb, var(--yellow) 5%, var(--panel)); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); }
 .ask.limit { background: color-mix(in srgb, var(--red) 5%, var(--panel)); }
