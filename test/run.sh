@@ -19930,8 +19930,25 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and delete"                            "404"   "$(apf delete autoff)"
   is "...still behind the token"                "401"   "$(apf list.noToken autoff)"
   is "...and nothing ran"                       "0"     "$(grep -v 'the owner typed this' "$AW/ran.off" | grep -c . || true)"
-  rm -f "$ASW" "$APRIV"
+  rm -f "$APRIV"
   serve_stop
+  # JARVIS SWITCHED OFF IS GONE FROM HERE TOO: its own project is off the phone's list, so it must
+  # not come back through the editor's pickers or what the draft model is told. A daemon of its
+  # own, because a fleet read is shared for a few seconds and the one above would answer this. The
+  # marker sits on a project the group has, so the row can only pass because the marker was read.
+  AJV="$SV/home/.config/ghostfleet"
+  printf 'name=demo\nsock=cf-demo\ncfg=%s\npath=%s\nprofile=work\n' "$SV/home/.claude" "$SV/repo" > "$AJV/jarvis"
+  printf 'off\n' > "$AJV/jarvis.enabled"
+  printf 'on\n' > "$ASW"
+  if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data.jv" sv_start autojv; then
+    node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations-list "$(sv_code autojv)" > "$SV/probe.autojv" 2>"$SV/probe.autojv.err"
+    is "Jarvis off: its project is not in the editor's pickers" "0" "$(aj list autojv fleet | grep -c '"name":"demo"' || true)"
+    is "...and the rest of the fleet is"        "1"     "$(aj list autojv fleet | grep -c '"name":"other"' || true)"
+    serve_stop
+  else
+    skip "fleet-serve automations, Jarvis off" "server did not come up: $SV_WHY"
+  fi
+  rm -f "$ASW" "$AJV/jarvis" "$AJV/jarvis.enabled"
 else
   skip "fleet-serve automations" "server did not come up: $SV_WHY"
 fi

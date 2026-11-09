@@ -288,6 +288,12 @@ if (phase === 'jarvisswitch') {
   row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
 }
 
+// ── automations: the one list, with a token, for a row that changed something first ──
+if (phase === 'automations-list') {
+  await a.enroll(base, arg);
+  row('list', await a.api(base, 'GET', '/api/automations'));
+}
+
 // ── automations (EXPERIMENTAL): every route, once switched on and once off ──────────
 //     node serve-probe.mjs <base> automations <enrol-code>
 // run.sh compares the two runs, so an "off" row can only pass because the switch changed
