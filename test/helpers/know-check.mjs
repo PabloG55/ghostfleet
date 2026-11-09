@@ -71,7 +71,7 @@ await section('brief', () => {
   row('...the last deploy, at its commit', 'yes', yes(/last deploy .*vercel deploy at a1b2c3d4 \(master\)/.test(b)));
   row('...three things waiting on the owner', '3', (b.match(/^ {2}waits on you:/gm) || []).length);
   row('...a decision, with where it came from', 'yes', yes(/Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls \/v1\/export +\[stated, 2026-03-05\]/.test(b)));
-  row('...and the worker\'s, from its ack', 'yes', yes(/RFC 4180 quoting; no new dependency .*\[ack, 2026-03-05\]/.test(b)));
+  row('...and the worker\'s, from its ack', 'yes', yes(/RFC 4180 quoting; no new dependency .*\[ack, 2026-03-05\]/.test(know(['acme-api', '--all']).stdout)));
   // DECAY: closed eleven days before the instant asked about — counted, never listed
   row('...an old closed request is counted, not listed', 'counted, listed 0',
     `${/^EARLIER +1 closed request since/m.test(b) ? 'counted' : 'not counted'}, listed ${(b.match(/Rotate the staging/g) || []).length}`);
@@ -406,6 +406,8 @@ await section('mcp', async () => {
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: 'acme-api' } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: 'acme-api', since: iso(m(45)), until: iso(m(50)) } } },
     { method: 'tools/call', params: { name: 'fleet_know', arguments: { history: '-rf' } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', all: true } } },
+    { method: 'tools/call', params: { name: 'fleet_know', arguments: { about: 'acme-api', json: true, all: false } } },
   ];
   const ch = spawn('node', [path.join(ROOT, 'mcp', 'fleet-mcp.mjs')], {
     env: { ...base(), HOME: FX, CLAUDE_FLEET_SOCK: 'cfmcpknow', CLAUDE_FLEET_NOW_MS: String(m(120)) }, stdio: ['pipe', 'pipe', 'ignore'],
@@ -432,7 +434,9 @@ await section('mcp', async () => {
   row('...touched, at a past time', 'yes', yes(/PR #1170 open/.test(text(5))));
   row('...json: data', 'acme-api', (() => { try { return JSON.parse(text(6)).project; } catch (e) { return `not json: ${text(6).slice(0, 60)}`; } })());
   row('...and a flag where a name goes is refused, not run', 'yes', yes(err(7)));
-  row('...the page says who said it', 'yes', yes(/• \[worker\] RFC 4180 quoting/.test(text(2))));
+  row('...the page says who said it', 'yes yes', `${yes(/• \[lead\] Keep the v1 export/.test(text(2)))} ${yes(/• \[worker\] RFC 4180 quoting/.test(text(12)))}`);
+  row('...the page leaves a worker\'s out and counts it, as the CLI does', 'no yes no', `${yes(/RFC 4180/.test(text(2)))} ${yes(/^ {2}\+\d+ from workers: --all$/m.test(text(2)))} ${yes(/from workers/.test(text(12)))}`);
+  row('...and its json keeps the worker\'s decision, with its authority', 'worker', ((() => { try { return JSON.parse(text(13)).decisions.find(d => /RFC 4180/.test(d.text)).authority; } catch { return 'absent'; } })()));
   row('...history: what happened, in order', 'yes yes', `${yes(!!(t && t.inputSchema.properties.history && t.inputSchema.properties.since && t.inputSchema.properties.until))} ${yes(/history, newest last[\s\S]*PR #1170 merged/.test(text(9)))}`);
   row('...since and until narrow it', 'no', yes(text(10).split('\n').length >= text(9).split('\n').length));
   row('...a flag where its name goes is refused', 'yes', yes(err(11)));
@@ -896,9 +900,47 @@ await section('forget', async () => {
   row('...while the local log is untouched', 'yes', yes(text(Z.log).includes(lc.id)));
 });
 
+// ══ the page's DECISIONS: the owner's and the lead's, with the workers' counted ═══════════════
+// Every worker's fleet-ack is stored as a worker decision, so on a busy project they outnumbered
+// what the owner decided and pushed it below the cap. The page filters at read time; the events are
+// untouched, which is the last row: the same log, read both ways.
+await section('page-decisions', () => {
+  const X = newHome('page-decisions');
+  const t = Date.now() - 86400e3;
+  let n = 0;
+  const put = (kind, f, src) => K.record(kind, f, { fleetDir: X.fl, project: 'acme-api', sock: 'cf-acme-api', t: t + (n++) * 1000, src });
+  put('decision', { text: 'o-owner-decided', source: 'stated' }, { via: 'fleet-know', by: 'terminal' });
+  put('decision', { text: 'l-lead-decided', source: 'stated' }, { via: 'fleet-know', slot: 'master' });
+  put('ack', { worker: 'w1', branch: 'fix/a', repo: 'acme/acme-api', understood: 'first ack', decisions: 'a1-first-ack' }, { via: 'ack', slot: 'w1' });
+  put('ack', { worker: 'w2', branch: 'fix/b', repo: 'acme/acme-api', understood: 'second ack', decisions: 'a2-second-ack' }, { via: 'ack', slot: 'w2' });
+  put('decision', { text: 'w-worker-decided', source: 'stated' }, { via: 'fleet-know', slot: 'api-fix' });
+  const seen = (out) => ['o-owner', 'l-lead', 'a1-first', 'a2-second', 'w-worker'].map(k => (out.includes(k) ? '1' : '0')).join('');
+  const before = fs.readFileSync(X.log, 'utf8');
+  const page = kh(X, ['acme-api']).stdout, all = kh(X, ['acme-api', '--all']).stdout, tr = kh(X, ['acme-api', '--trusted']).stdout;
+  row('page decisions: by default the owner\'s and the lead\'s, not the workers\'', '11000', seen(page));
+  row('...and the one line counts what was left out', '1 yes', `${(page.match(/^ {2}\+\d+ from workers: --all$/gm) || []).length} ${yes(/^ {2}\+3 from workers: --all$/m.test(page))}`);
+  row('...it is the last line of the section', 'yes', yes((() => { const L = page.split('\n'), i = L.findIndex(l => /^ {2}\+3 from workers/.test(l)); return i > 0 && L[i - 1].startsWith('  • ') && !(L[i + 1] || '').startsWith('  '); })()));
+  row('--all: every decision, and no count line', '11111 0', `${seen(all)} ${(all.match(/from workers/g) || []).length}`);
+  row('--trusted: still only the owner\'s and the lead\'s, with no count line of its own', '11000 0', `${seen(tr)} ${(tr.match(/from workers/g) || []).length}`);
+  const j = kjson(X, ['acme-api']);
+  row('--json keeps every decision, each with its authority', 'owner lead worker worker worker', ['o-owner', 'l-lead', 'a1-first', 'a2-second', 'w-worker'].map(k => (j.decisions || []).find(d => d.text.startsWith(k))?.authority).join(' '));
+  row('...and the log was not rewritten by reading it', 'yes', yes(fs.readFileSync(X.log, 'utf8').startsWith(before)));
+  // Nothing to hide: no line.
+  const Z = newHome('page-decisions-none');
+  K.record('decision', { text: 'only-the-owner', source: 'stated' }, { fleetDir: Z.fl, project: 'acme-api', sock: 'cf-acme-api', t, src: { via: 'fleet-know', by: 'terminal' } });
+  const zp = kh(Z, ['acme-api']).stdout;
+  row('...with nothing left out there is no count line', 'yes 0', `${yes(zp.includes('only-the-owner'))} ${(zp.match(/from workers/g) || []).length}`);
+  // A worker's decision older than a week was counted under EARLIER; it is not counted twice.
+  const O = newHome('page-decisions-old');
+  K.record('decision', { text: 'old-worker-guess', source: 'stated' }, { fleetDir: O.fl, project: 'acme-api', sock: 'cf-acme-api', t: Date.now() - 40 * 86400e3, src: { via: 'fleet-know', slot: 'api-fix' } });
+  K.record('session.start', { branch: 'main' }, { fleetDir: O.fl, project: 'acme-api', sock: 'cf-acme-api', t: Date.now(), src: { via: 'hook', session: 's-api', slot: 'master' } });
+  const op = kh(O, ['acme-api']).stdout;
+  row('...a worker\'s old decision is counted once: as left out, not also as earlier', '1 0', `${(op.match(/^ {2}\+1 from workers: --all$/gm) || []).length} ${(op.match(/EARLIER.*decision/g) || []).length}`);
+});
+
 await section('authority', () => {
   // On the fixture fleet, which holds a lead's decision and a worker's ack.
-  const b = know(['acme-api']).stdout;
+  const b = know(['acme-api', '--all']).stdout;
   row('authority: a lead\'s decision says so', 'yes', yes(/• \[lead\] Keep the v1 export endpoint/.test(b)));
   row('...a worker\'s fleet-ack says so', 'yes', yes(/• \[worker\] RFC 4180 quoting/.test(b)));
   row('...what the project is says who wrote it', 'yes', yes(/what it is +The public REST API.*\[lead\]$/m.test(b)));
@@ -1255,7 +1297,8 @@ await section('decisions and facts that close', () => {
   row('the page: what the owner or a lead said does not age out', 'yes', yes(ds.some(s => /lead decision 01/.test(s))));
   row('...owner and lead first, newest first, a worker\'s after them', 'lead decision 01 yes', `${String(ds[0]).slice(0, 16)} ${yes(ds.every((s, i) => i === 0 || !/worker/.test(ds[i - 1]) || /worker/.test(s)))}`);
   row('...bounded, with a count of the rest', '8 4', `${ds.length} ${bp.decisionsMore}`);
-  row('...and the count is on the page', 'yes', yes(/\+ 4 more still hold/.test(kh(Y, ['acme-api']).stdout)));
+  row('...and the count is on the page, with --all', 'yes', yes(/\+ 4 more still hold/.test(kh(Y, ['acme-api', '--all']).stdout)));
+  row('...by default it counts what is left of the owner\'s and the lead\'s, and what it left out', 'yes yes', `${yes(/\+ 3 more still hold/.test(kh(Y, ['acme-api']).stdout))} ${yes(/^ {2}\+2 from workers: --all$/m.test(kh(Y, ['acme-api']).stdout))}`);
   const shown = asJson(kh(Y, ['acme-api', '--trusted', '--json']));
   row('a worker\'s keeps the seven days', 'no 1', `${yes(ds.some(s => /a month ago/.test(s)))} ${bp.earlier && bp.earlier.decisions}`);
   row('...and a narrowed page counts none, since it shows none', '0', String(shown.earlier && shown.earlier.decisions));
