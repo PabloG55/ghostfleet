@@ -3,17 +3,22 @@
 // or opens it, where Claude Code keeps a session's pasted images, where a hover target goes
 // over a sent prompt, and how a picture becomes terminal cells when it is drawn in the terminal.
 //
-// THREE WAYS TO SHOW A PICTURE, picked once a session (previewMode):
+// THREE WAYS TO SHOW A PICTURE (previewMode), in this order:
 //   window  macOS, not over SSH: a borderless panel by the pointer (./peek-window.js). The
-//           picture's own pixels, so a screenshot's text reads; nothing to install.
-//   kitty   Ghostty or kitty, NOT inside tmux: the terminal draws the PNG itself through the
-//           kitty graphics protocol (the engine's `Image`). Inside tmux that needs
-//           `allow-passthrough`, and every fleet session runs inside tmux with the outer
-//           terminal's variables still in its environment, which is why TMUX rules it out.
-//   cells   everywhere else, over SSH, and on Linux and WSL (no native window there yet): a
-//           card of half-block cells, `▀`, two pixels a cell, each with its own colour. Any
-//           true-colour terminal draws it, through tmux too; it shows a screenshot's layout,
-//           not text you can read.
+//           picture's own pixels, so a screenshot's text reads; nothing to install. First on a
+//           Mac even inside tmux, where the terminal could draw it too.
+//   kitty   the terminal draws the PNG itself (the engine's `Image`: kitty graphics in kitty
+//           and Ghostty, inline images in iTerm2 3.5+). Outside tmux, here or over SSH, the
+//           session's own TERM/TERM_PROGRAM say which terminal that is. Inside tmux they cannot
+//           (tmux sets TERM_PROGRAM itself, and the rest are the tmux server's stale ones), so
+//           tmux is asked, when a preview opens, which terminal the person is looking through
+//           (lookingClient). Inside tmux or over SSH the picture goes as PNG bytes, never as a
+//           file name: the terminal there cannot read this machine's files (pictureSource).
+//   cells   everywhere else: a card of half-block cells, `▀`, two pixels a cell, each with its
+//           own colour. Any true-colour terminal draws it, through tmux too; it shows a
+//           screenshot's layout, not text you can read. Also what `kitty` falls back to when
+//           the engine says it draws its pictures as their alt here (drawsAlt), which is how a
+//           session started with no terminal attached to its tmux stays all its life.
 //
 // NO DEPENDENCY. PNG is decoded here (zlib's inflate included). Anything else is shrunk to a
 // PNG by what the machine already has (sips on macOS, ImageMagick elsewhere), and failing that
@@ -463,22 +468,120 @@ export const platformOf = uname => {
   return u === 'Darwin' ? 'macos' : u === 'Linux' ? 'linux' : 'other'
 }
 
-// How this session shows a picture: 'window' | 'kitty' | 'cells' (the header says what each
-// is). `env` is the session's environment. CLAUDE_FLEET_PEEK names one outright, for a person
-// who wants the cells on a Mac (or the window off): a mode this machine cannot draw is not
-// taken from it, so `window` off macOS is still cells.
-export function previewMode({ platform, env = {}, isInteractive = true }) {
+// How a preview shows its picture: 'window' | 'kitty' | 'cells' (the header says what each is).
+// `env` is the session's environment; `client` is what tmux says of the terminal the person is
+// looking through (lookingClient), asked as a preview opens and absent outside tmux; `refused`
+// is the engine having drawn one of PEEK's pictures as its alt in this process (drawsAlt), so
+// no `Image` will draw here. CLAUDE_FLEET_PEEK names a mode outright: `cells` on a Mac, say,
+// or `kitty` through a tmux whose client tmux cannot name. A window this machine cannot open is
+// not taken from it (`window` off macOS is cells), nor a picture the engine refused.
+export function previewMode({ platform, env = {}, isInteractive = true, client = null, refused = false }) {
   const remote = Boolean(env.SSH_CONNECTION || env.SSH_TTY)
-  const kitty = !remote && !env.TMUX && (env.TERM_PROGRAM === 'ghostty' || env.TERM === 'xterm-ghostty'
+  const tmux = Boolean(env.TMUX)
+  // The terminal Claude Code writes to directly, on this machine or across SSH (which forwards
+  // TERM, and TERM_PROGRAM where the terminal sends it). Inside tmux these are not today's
+  // terminal: TERM_PROGRAM is tmux's own, and an inherited KITTY_WINDOW_ID was the server's.
+  const own = !tmux && (env.TERM_PROGRAM === 'ghostty' || env.TERM === 'xterm-ghostty'
     || env.TERM === 'xterm-kitty' || Boolean(env.KITTY_WINDOW_ID))
-  // Over SSH a window would open on the other machine, and the terminal there cannot read a
-  // file of this one: both are this machine's, so both are out.
+  const through = tmux && Boolean(client) && drawsPictures(client.termtype)
+  // Over SSH a window would open on the other machine: out.
   const window = !remote && isInteractive && platform === 'macos'
   const asked = String(env.CLAUDE_FLEET_PEEK || '').trim().toLowerCase()
   if (asked === 'cells') return 'cells'
   if (asked === 'window') return window ? 'window' : 'cells'
-  if (asked === 'kitty') return kitty ? 'kitty' : 'cells'
-  return kitty ? 'kitty' : window ? 'window' : 'cells'
+  if (asked === 'kitty') return refused ? 'cells' : 'kitty'
+  if (own && !refused) return 'kitty'
+  if (window) return 'window'
+  return through && !refused ? 'kitty' : 'cells'
+}
+
+// Whether the mode turns on which client is looking, so tmux is asked as each preview opens:
+// inside tmux, unless the answer is the same whoever it is (a Mac's window, an override).
+export const asksClient = opts => Boolean(opts.env && opts.env.TMUX)
+  && previewMode({ ...opts, client: { termtype: 'ghostty' } }) !== previewMode({ ...opts, client: null })
+
+// ── which terminal is looking, through tmux ─────────────────────────────────
+//
+// Inside tmux the terminal Claude Code writes to is tmux; the one that draws is whichever a
+// person attached through, which over SSH can be Ghostty today and a plain terminal tomorrow,
+// on a server started from neither. tmux knows: `client_termtype` is each attached terminal's
+// own answer to XTVERSION (tmux 3.3+ asks it on attach), and the engine draws `Image` from the
+// same reading. Asked as a preview opens, not once a session: a fleet session usually starts
+// with nothing attached at all. Of the clients showing this pane's window, the one with the
+// latest input is the one looking, since the hover that opened the preview is input from it.
+
+// One row a client: its last input, the window it shows, its XTVERSION answer, its TERM.
+// Tab-separated: the one separator every tmux prints verbatim (see CLAUDE.md).
+export const CLIENT_FORMAT = '#{client_activity}\t#{window_id}\t#{client_termtype}\t#{client_termname}'
+
+// The looking client among list-clients rows, as { termtype, termname }, or null for none
+// showing `windowId` (or for none at all).
+export function lookingClient(stdout, windowId) {
+  let best = null
+  for (const line of String(stdout || '').split('\n')) {
+    const f = line.split('\t')
+    if (f.length < 4 || (windowId && f[1] !== windowId)) continue
+    const at = Number(f[0]) || 0
+    if (!best || at > best.at) best = { at, termtype: f[2], termname: f[3] }
+  }
+  return best && { termtype: best.termtype, termname: best.termname }
+}
+
+// The terminals the engine draws an `Image` in from inside tmux, by their XTVERSION answer:
+// kitty 0.28 or later (`kitty(0.35.2)`), any Ghostty (`ghostty 1.1.3`), and iTerm2 3.5 or later
+// (`iTerm2 3.5.0`). The engine's own list, so PEEK expects a picture where it would draw one.
+// A nested tmux (`tmux 3.4`), an xterm and no answer at all (tmux before 3.3, or a terminal
+// that ignores the query) are not on it.
+export function drawsPictures(termtype) {
+  const t = String(termtype || '').trim()
+  const atLeast = (m, major, minor) => Boolean(m) && (Number(m[1]) > major || (Number(m[1]) === major && Number(m[2]) >= minor))
+  return /^ghostty\b/i.test(t) || atLeast(/^kitty[( ]v?(\d+)\.(\d+)/i.exec(t), 0, 28) || atLeast(/^iTerm2 (\d+)\.(\d+)/.exec(t), 3, 5)
+}
+
+// What `$.ui.blit` answers for an `Image` the engine draws as its alt: the stable code for tmux
+// holding pictures back, or its words for every other cause (they are the only signal there
+// is). Neither "not mounted yet" nor "asked now, blit again" is one: those may still draw.
+export const drawsAlt = r => Boolean(r && r.deny) && (r.fix === 'tmux-passthrough' || /^the Image draws its alt\b/.test(r.deny))
+
+// The engine's refusal in a few words, a line of its own under the cells it falls back to, so
+// a card as narrow as a small picture still holds it. It decides once, when Claude Code starts
+// (measured: a client attaching later, or a focus-in, changes nothing).
+export function refusalNote(r) {
+  const d = String((r && r.deny) || '')
+  if (r && r.fix === 'tmux-passthrough') return 'tmux let no pictures through at start'
+  if (/does not know which terminal is outside/.test(d)) return 'started with no terminal attached'
+  if (/as the terminal outside/.test(d)) return 'the terminal outside tmux draws none'
+  return 'the terminal draws no pictures here'
+}
+
+// ── what an `Image` is handed ───────────────────────────────────────────────
+//
+// A file name is read by the terminal itself, and only a terminal on this machine that Claude
+// Code writes to directly can: tmux passes pictures through for bytes only, and across SSH the
+// terminal is on the other machine and draws a blank box. So bytes inside tmux and over SSH,
+// a PNG of at most PNG_MAX decoded (the engine's bound), shrunk to what the card can show. The
+// file stays for the terminal that reads it, which then needs no copy through `$`.
+export const PNG_MAX = 2 * 1024 * 1024
+export const sendsBytes = env => Boolean(env && (env.TMUX || env.SSH_CONNECTION || env.SSH_TTY))
+// The source for a picture whose PNG is `file` and, where it goes as bytes, `base64`: null where
+// it would have to be bytes and there are none within the bound, so the card draws cells.
+export function imageSource(env, file, base64) {
+  if (sendsBytes(env)) return base64 && decodedSize(base64) <= PNG_MAX ? { png: base64 } : null
+  return file ? { file, format: 'png' } : null
+}
+export const decodedSize = b64 => {
+  const s = String(b64 || '')
+  return Math.floor(s.length * 3 / 4) - (s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0)
+}
+// The widest a card is drawn (register.js onPeekBand: 96 columns) at 16 device pixels a column,
+// a Retina cell at a 13-point font: past that the terminal only scales it down again.
+export const KITTY_SIDE = 1600
+// The sides to shrink to for the bytes, largest first, until one fits PNG_MAX. `undefined`
+// first means "as it is" (still converted to a PNG when it is not one): never enlarged.
+export function kittySides(width, height) {
+  const long = Math.max(width || 0, height || 0)
+  const steps = [KITTY_SIDE, 1200, 800, 400]
+  return long && long <= KITTY_SIDE ? [undefined, ...steps.filter(s => s < long)] : steps
 }
 
 // What the window is told: its longest side in points, and how long it may stay up even with
