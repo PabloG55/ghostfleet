@@ -55,6 +55,7 @@ import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseS
 import * as P from '../lib/peers.mjs';
 import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
+import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
 
 const HOME = os.homedir();
@@ -807,7 +808,7 @@ const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'star
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
-function buildArgs(tool, rawArgs) {
+function buildArgs(tool, rawArgs, scope = null) {
   const v = TOOLS_ALLOWED[tool];
   if (!v) {
     if (NOT_YET[tool])
@@ -845,7 +846,7 @@ function buildArgs(tool, rawArgs) {
   if (!v.noProject) {
     if (typeof a.project !== 'string' || !a.project)
       return { error: `${tool}: 'project' is required — fleet-serve is not inside a fleet, so there is no default one` };
-    const rp = resolveProject(a.project);
+    const rp = resolveProject(a.project, scope);
     if (rp.error) return { error: `${tool}: ${rp.error}` };
     t = rp.t;
     args.project = t.name;
@@ -890,7 +891,7 @@ export function unslashPhotoPrompt(prompt) {
 }
 
 async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
-  const built = buildArgs(tool, rawArgs);
+  const built = buildArgs(tool, rawArgs, scopeOfClient(client));
   if (built.error) return { status: built.status || 400, json: { ok: false, text: built.error } };
   const { args, t, v } = built;
 
@@ -2239,9 +2240,15 @@ function verifyAssertion(body, c, ls) {
 // free worktree" card naming a checkout with a live agent in it, and fleet_spawn --reuse
 // behind it. Nothing about that response is malformed, which is exactly why it has to be
 // refused here instead of returned.
-function resolveProject(name) {
+//   A PROJECT HIDDEN FROM THE PAIRING IS UNKNOWN HERE, to a request a paired machine signed
+// (`scope`, from peerScope): it is never found, so every route that resolves a project
+// answers it exactly as it answers a name this machine never had — the same status, the same
+// words — and nothing in the refusal says there is a project, let alone a session, behind it.
+// Filtered inside the find, not after it: two profiles can each have a project of one name,
+// and a paired machine asking for it must get the shared one, never a refusal over the other.
+function resolveProject(name, scope = null) {
   if (!name) return { error: "'project' is required" };
-  const t = projects().find(x => x.name === name || x.sock === name);
+  const t = projects().find(x => (x.name === name || x.sock === name) && (!scope || scope.sees(x)));
   if (!t) return { error: `unknown project '${name}'` };
   if (!t.path) return { error: `project '${t.name}' has no root in the projects file` };
   try { if (!fs.statSync(t.path).isDirectory()) throw new Error('not a directory'); }
@@ -2249,6 +2256,16 @@ function resolveProject(name) {
   return { t };
 }
 const proj = (name) => resolveProject(name).t || null;
+// WHAT A PAIRED MACHINE MAY HAVE OF THIS ONE, per request (lib/projects.mjs, pairScope). null
+// for every request this machine makes of itself — its phone, its web client, an automation —
+// so nothing any of them sees changes; only a request a paired machine signed gets a scope.
+// Decided once per request and kept on it, so one answer cannot read the setting twice and
+// list a project its own rows then refuse.
+const scopeOfClient = (client) => (client && client.pair ? pairScope(projects(), client.pair) : null);
+const peerScope = (req) => (req && req.client && req.client.pair ? (req.pairScope ||= scopeOfClient(req.client)) : null);
+// The projects a request may be told about: the phone's (shownToPhone), narrowed to the
+// pairing's for a paired one.
+const shownTo = (req) => { const sc = peerScope(req); const all = shownToPhone(); return sc ? all.filter(sc.sees) : all; };
 
 // ── attachments: a photo from the phone, as a file on this machine ─────────
 // "can I send a picture?", twice. docs/attachments.md measured the hard part and found it
@@ -2319,6 +2336,9 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //                       was made on, so the remote could not check one), never the terminal,
 //                       never another hop onwards. A photo crosses wherever a send does
 //                       (pairAllows below)
+//   THE PROJECT         is this project one it may have (peerScope; `fleet-project … pair`).
+//                       A hidden one is filtered out of every list and refused by every route
+//                       that names one, in the words a project this host never had gets
 //   THE ON-BEHALF NAME  which person on the home host asked. Taken ONLY from a signed
 //                       request; the host half of the identity comes from this host's own
 //                       record of the pairing, never from anything the request says
@@ -2938,7 +2958,10 @@ function agentCatalogue() {
     // is the phone's, not Jarvis's, and /api/jarvis (which also reports it) is gone with it.
     const jOn = jarvis.enabled();
     const jHide = jOn ? null : jarvis.readMarkerFile();
-    const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
+    // A PAIRED MACHINE'S LIST leaves out every project hidden from it (peerScope): no row, so
+    // no name, no path and no count — and this machine's own phone still gets every one.
+    const sc = peerScope(req);
+    const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile) && (!sc || sc.sees(t)));
     const counted = await Promise.all(all.map(async (t) => {
       let live = 0;
       try { live = execFileSync('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
@@ -2967,7 +2990,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     if (!gridSupportsJson())
@@ -2986,7 +3009,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/session' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     const session = url.searchParams.get('session') || '';
@@ -3006,7 +3029,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/pane' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     const session = url.searchParams.get('session') || '';
@@ -3036,7 +3059,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/checkouts' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     const r = await checkouts(t);
@@ -3044,7 +3067,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/settings' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     let names = [];
@@ -3061,7 +3084,8 @@ function agentCatalogue() {
   if (p === '/api/waiting' && req.method === 'GET') {
     const fan = fanOut('/api/waiting', req, 5000);
     if (!L && !peers().peers.length) return send(res, 503, { ok: false, text: ledgerWhy });
-    const shown = shownToPhone();
+    // Narrowed for a paired machine (shownTo): a hidden project's master holds nothing it is told about.
+    const shown = shownTo(req);
     const { rows } = heldScan(shown);
     return send(res, 200, mergeWaiting({ ok: true, at: now(), items: [...heldWakes(shown), ...rows.map(r => ({
       project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
@@ -3072,6 +3096,8 @@ function agentCatalogue() {
 
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
   // switching an account stays at the desk.
+  //   It names no project — a profile, its accounts and their figures — so a project hidden
+  // from paired machines (lib/projects.mjs pairScope) needs no filter here.
   if (p === '/api/usage' && req.method === 'GET') {
     const fan = fanOut('/api/usage', req, 5000);
     return send(res, 200, mergeUsage(usageReport(), await fan));
@@ -3080,11 +3106,15 @@ function agentCatalogue() {
   // THE FLEET'S MEMORY, as a paired host reads it (docs/MEMORY.md, PAIR_READS): this host's
   // events after `after` (ms), oldest first, a page at a time. Read from the logs on each ask —
   // no cache to go stale — and filtered by the privacy setting as it is NOW, so a project made
-  // private after its events were written stops crossing from that moment.
+  // private after its events were written stops crossing from that moment. The pairing's own
+  // setting is the second filter (eventsForPeer's `scope`): an event crosses only when its
+  // project is `include` AND `share`. Asked by this machine's own client, the route answers as
+  // it always did — the privacy filter and nothing more.
   if (p === '/api/know/events' && req.method === 'GET') {
     const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
     const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 5000));
-    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit, tombstones: url.searchParams.get('tombstones') === '1' }) });
+    return send(res, 200, { ok: true, machine: P.selfLabel(peers()), ...K.eventsForPeer({ after, limit, tombstones: url.searchParams.get('tombstones') === '1',
+                                                                                           scope: req.client.pair ? peerScope(req) : false }) });
   }
 
   // Whether someone is at a keyboard HERE — the paired host's push hold asks it (see "at the
@@ -3095,7 +3125,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/inbox' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     // --all, always. The default mode CONSUMES the "new since last look" marker, and a
@@ -3120,7 +3150,7 @@ function agentCatalogue() {
   }
 
   if (p === '/api/worktrees' && req.method === 'GET') {
-    const rp = resolveProject(url.searchParams.get('project') || '');
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const t = rp.t;
     const out = await callToolAsync('fleet_worktrees', { project: t.name }, { timeout: 60000 });
@@ -3211,7 +3241,7 @@ function agentCatalogue() {
   // (/api/push/subscribe is the standing precedent for a POST route that audits itself.)
   if (p === '/api/attach') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    const rp = resolveProject(String(body.project || ''));
+    const rp = resolveProject(String(body.project || ''), peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     // THE SESSION NAME IS A PATH COMPONENT AND COMES FROM A PHONE. Validated by shape
     // rather than sanitised: sanitising is a list of things somebody remembered, and this
@@ -3268,7 +3298,7 @@ function agentCatalogue() {
   // deprecated `client` alias for its socket, so `req.client || null` handed the media route a
   // Socket for a client. Nothing read it until a paired host's media needed to know whether
   // the request was signed. A session — a phone's or a signature's — is what made a client.
-  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req) });
+  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req), pairScope: req.session ? peerScope(req) : null });
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
@@ -3355,7 +3385,7 @@ function agentCatalogue() {
     const tool = typeof body.tool === 'string' ? body.tool : '';
     const v = TOOLS_ALLOWED[tool];
     if (!v) {
-      const b = buildArgs(tool, body.args);
+      const b = buildArgs(tool, body.args, peerScope(req));
       return send(res, b.status || 400, { ok: false, text: b.error });
     }
     // The destructive verbs' fresh assertion travels in a header (web/api.js), verified
@@ -3498,7 +3528,7 @@ async function termRoutes(p, req, res, body, c, ip) {
     const assertion = headerAssertion(req, c);
     if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'opening a terminal needs a fresh passkey assertion in X-Fleet-Assertion — every time, not only at unlock' });
     if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
-    const rp = resolveProject(typeof body.project === 'string' ? body.project : '');
+    const rp = resolveProject(typeof body.project === 'string' ? body.project : '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const kind = body.kind == null ? 'term' : body.kind;
     if (!Object.hasOwn(TERM_KINDS, kind)) return send(res, 400, { ok: false, text: `kind is 'term' or 'edit', not ${JSON.stringify(kind)}` });

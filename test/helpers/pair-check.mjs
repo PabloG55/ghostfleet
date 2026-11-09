@@ -34,6 +34,9 @@ const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const kids = [];
 const T = fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR || os.tmpdir(), 'pair-check.'));
+// The panes below are real tmux servers, and they live under the run's own dir: never the
+// default one, where a live fleet's servers are.
+if (!process.env.TMUX_TMPDIR) { process.env.TMUX_TMPDIR = path.join(T, 'tx'); fs.mkdirSync(process.env.TMUX_TMPDIR, { mode: 0o700 }); }
 function finish(code = 0) {
   for (const k of kids) { try { process.kill(k.pid, 'SIGKILL'); } catch {} }
   console.log(rows.join('\n'));
@@ -54,6 +57,14 @@ const stub = `#!/bin/sh
 printf '%s' "$(basename "$0")" >> "$MH_RAN"
 for a in "$@"; do printf ' [%s]' "$a" >> "$MH_RAN"; done
 printf ' {scope=%s root=%s}\\n' "\${CLAUDE_FLEET_SCOPE:-}" "\${CLAUDE_FLEET_ROOT:-}" >> "$MH_RAN"
+# A send TYPES into the session's pane when the fleet has one, as the real one does, so a send
+# that must not happen is asserted on the pane and not only on this file. Its arguments end in
+# \`-- <session> <prompt>\`; with no server on that socket it types nothing anywhere.
+if [ "$(basename "$0")" = fleet-send ] && [ -n "\${CLAUDE_FLEET_SOCK:-}" ]; then
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+  [ "\${1:-}" = -- ] && shift
+  [ $# -ge 2 ] && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "=$1" 2>/dev/null && tmux -L "$CLAUDE_FLEET_SOCK" send-keys -t "$1" -l "$2"
+fi
 echo "STUB $(basename "$0") ok"
 `;
 for (const c of ['fleet-send', 'fleet-hibernate', 'fleet-pause', 'fleet-resume', 'fleet-spawn', 'fleet-stop',
@@ -119,8 +130,7 @@ async function stop(h) {
   for (let i = 0; i < 50 && h.kid.exitCode === null && h.kid.signalCode === null; i++) await sleep(50);
 }
 // A master holding one item for the owner, on that host's work fleet dir.
-function plantWaiting(h, sock, sid, text) {
-  const fd = path.join(h.home, '.claude', 'fleet');
+function plantWaiting(h, sock, sid, text, fd = path.join(h.home, '.claude', 'fleet')) {
   fs.writeFileSync(path.join(fd, `${sid}.json`), JSON.stringify({ session_id: sid, sock, slot: 'master', status: 'ready', ts: Math.floor(now / 1000) }) + '\n');
   fs.writeFileSync(path.join(fd, `${sid}.ledger`), JSON.stringify({ v: 1, seq: 2, items: [
     { id: '1', text, at: now - 3 * 3600e3, state: 'waiting', source: 'user', progress: { at: now - 2 * 3600e3, reason: 'waits on the person: pick one' } }] }));
@@ -468,6 +478,173 @@ kvm('cache-keys', 'fix/vm-token', `Rotate the deploy key ${crossing} tonight`);
 s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
 is('a token in a task is replaced before it can cross', 'no yes', `${JSON.stringify(s.res.json || {}).includes(crossing) ? 'yes' : 'no'} ${JSON.stringify(s.res.json || {}).includes('[redacted:github-token]') ? 'yes' : 'no'}`);
 is('...and is not on the disk of the machine that wrote it', false, fs.readFileSync(path.join(bFleet, 'know.jsonl'), 'utf8').includes(crossing));
+
+// ── a project this machine keeps from paired machines (fleet-project … pair) ────────
+// The vm gains three projects: billing-svc (work), hidden on its own; acme-web and scratch in
+// a personal profile whose DEFAULT is hide, with scratch shared back on its own. So the two
+// hidden ones are hidden two different ways, and scratch proves the project beats the
+// profile. Each paired route is asked twice: signed as the laptop, where the hidden two must
+// be absent, and by the vm's own phone, which must see all five. `nope` is a project the vm
+// never had, and a hidden project must be answered exactly the way it is.
+const bProjects = path.join(B.home, '.config', 'ghostfleet', 'projects');
+const bProjectsBefore = fs.readFileSync(bProjects, 'utf8');
+const bPersonal = path.join(B.home, '.claude-personal', 'fleet');
+const HIDDEN = ['billing-svc', 'acme-web'];
+for (const n of ['billing-svc', 'acme-web', 'scratch']) fs.mkdirSync(path.join(B.dir, n), { recursive: true });
+fs.mkdirSync(bPersonal, { recursive: true });
+fs.appendFileSync(bProjects, `billing-svc\t${path.join(B.dir, 'billing-svc')}\twork\n`);
+fs.writeFileSync(path.join(B.home, '.config', 'ghostfleet', 'projects.personal'),
+  `acme-web\t${path.join(B.dir, 'acme-web')}\tpersonal\nscratch\t${path.join(B.dir, 'scratch')}\tpersonal\n`);
+const fp = (...args) => { try { return { code: 0, out: execFileSync('bash', [path.join(RT, 'bin', 'fleet-project'), ...args], { env: B.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }) }; }
+                          catch (e) { return { code: e.status ?? 1, out: String(e.stdout || '') + String(e.stderr || '') }; } };
+const marks = [[path.join(bFleet, 'cf-billing-svc.pair'), 'hide'], [path.join(bPersonal, 'pair.default'), 'hide'],
+               [path.join(bPersonal, 'cf-personal-scratch.pair'), 'share']];
+const markText = () => marks.map(([f]) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return 'missing'; } }).join(' ');
+c = fp('set', 'billing-svc', 'pair', 'hide');
+is('fleet-project hides one project from paired machines', true, c.code === 0 && /'billing-svc' to a paired machine: hide \(from project/.test(c.out));
+c = fp('set', '--profile', 'personal', 'pair', 'hide');
+is('...sets a profile\'s default', true, c.code === 0 && /profile 'personal': a paired machine gets hide/.test(c.out));
+c = fp('set', 'scratch', 'pair', 'share');
+is('...and shares one project of that profile back', true, c.code === 0 && /'scratch' to a paired machine: share \(from project/.test(c.out));
+is('...each written where the daemon reads it', 'hide hide share', markText());
+// The daemon's contract is the file, so a route row below fails on the daemon's account and
+// not the command's: on a checkout without the command, the same bytes are written here.
+for (const [f, v] of marks) if (!fs.existsSync(f)) fs.writeFileSync(f, v + '\n');
+c = fp('pair');
+is('fleet-project pair: per project, its profile, the setting, where it comes from, whether a peer sees it',
+   'acme-api work share default yes|toolbox work share default yes|billing-svc work hide project no|acme-web personal hide profile no|scratch personal share project yes',
+   c.out.split('\n').slice(1).filter(Boolean).map(l => l.trim().split(/\s+/).join(' ')).join('|'));
+c = fp('pair', '--json');
+const pairRowsB = (() => { try { return JSON.parse(c.out).rows || []; } catch { return []; } })();
+
+// THE PANES: a real tmux server for one hidden and one shared session, so a send that must
+// not happen is checked on the screen it would have typed into.
+const TX = (sock, ...a) => { try { return execFileSync('tmux', ['-f', '/dev/null', '-L', sock, ...a], { encoding: 'utf8', env: { ...process.env, TMUX: '' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }); } catch { return null; } };
+const PANES = { 'cf-billing-svc': 'billing pane: hidden', 'cf-personal-scratch': 'scratch pane: shared' };
+for (const [sock, text] of Object.entries(PANES)) TX(sock, 'new-session', '-d', '-s', 'w1', '-x', '100', '-y', '12', `printf '%s\\n' '${text}'; exec cat`);
+const screen = (sock) => TX(sock, 'capture-pane', '-p', '-t', 'w1') || '';
+for (let i = 0; i < 30 && !Object.entries(PANES).every(([k, v]) => screen(k).includes(v)); i++) await sleep(100);
+const waitFor = async (sock, text) => { for (let i = 0; i < 30 && !screen(sock).includes(text); i++) await sleep(100); return screen(sock).includes(text); };
+is('the vm has a live pane in a hidden and in a shared project', 'yes yes', Object.entries(PANES).map(([k, v]) => screen(k).includes(v) ? 'yes' : 'no').join(' '));
+
+plantWaiting(B, 'cf-billing-svc', 'mh-b-billing', 'the hidden billing ask');
+plantWaiting(B, 'cf-personal-acme-web', 'mh-b-acme-web', 'the hidden personal ask', bPersonal);
+plantWaiting(B, 'cf-personal-scratch', 'mh-b-scratch', 'the shared personal ask', bPersonal);
+
+// The answer a peer gets for a project, with the name taken out: a hidden project's must be
+// a project-that-never-was's, word for word, so nothing in it says the project is there.
+const shape = (res, name) => `${res.status} ${String((res.json && (res.json.text || res.json.error)) || '').split(name).join('<name>')}`;
+const anyName = (j) => HIDDEN.filter(n => JSON.stringify(j || {}).includes(n)).join(' ');
+
+// ── reads, signed as the laptop ──
+s = await signed(vmOnA.out, 'GET', '/api/projects');
+is('hidden: a paired machine\'s project list leaves both out', 'acme-api scratch toolbox', names(s.res));
+is('...and names neither anywhere in the payload', '', anyName(s.res.json));
+r = await pb.api(B.base, 'GET', '/api/projects');
+is('...while this machine\'s own phone lists all five of its own', 'acme-api acme-web billing-svc scratch toolbox', names(r).split(' ').filter(n => !n.includes('@')).join(' '));
+r = await pa.api(A.base, 'GET', '/api/projects');
+is('...and the laptop\'s phone, through the pairing, sees the vm\'s three', 'acme-api@vm scratch@vm toolbox@vm',
+   names(r).split(' ').filter(n => n.endsWith('@vm')).join(' '));
+is('...with neither name anywhere in what the laptop merged', '', anyName(r.json));
+for (const [route, q] of [['/api/grid', ''], ['/api/session', '&session=w1'], ['/api/pane', '&session=w1'], ['/api/settings', '']]) {
+  const nope = (await signed(vmOnA.out, 'GET', `${route}?project=nope${q}`)).res;
+  const hid = (await signed(vmOnA.out, 'GET', `${route}?project=billing-svc${q}`)).res;
+  const byProfile = (await signed(vmOnA.out, 'GET', `${route}?project=acme-web${q}`)).res;
+  is(`hidden: ${route} answers a peer as it answers a project that never was`, `${shape(nope, 'nope')} | ${shape(nope, 'nope')}`,
+     `${shape(hid, 'billing-svc')} | ${shape(byProfile, 'acme-web')}`);
+  const shared = (await signed(vmOnA.out, 'GET', `${route}?project=scratch${q}`)).res;
+  const local = await pb.api(B.base, 'GET', `${route}?project=billing-svc${q}`);
+  is(`...the shared one is served to the peer, and the hidden one to this machine`, '200 200', `${shared.status} ${local.status}`);
+}
+s = await signed(vmOnA.out, 'GET', '/api/pane?project=scratch&session=w1');
+is('...a shared pane is the pane', true, JSON.stringify(s.res.json || {}).includes('scratch pane: shared'));
+r = await pb.api(B.base, 'GET', '/api/pane?project=billing-svc&session=w1');
+is('...and the hidden pane is there for this machine', true, JSON.stringify(r.json || {}).includes('billing pane: hidden'));
+r = await pa.api(A.base, 'GET', '/api/grid?project=billing-svc@vm');
+const rNope = await pa.api(A.base, 'GET', '/api/grid?project=nope@vm');
+is('...through the laptop, a hidden project is a project the vm does not have', shape(rNope, 'nope'), shape(r, 'billing-svc'));
+
+s = await signed(vmOnA.out, 'GET', '/api/waiting');
+const qItems = (j) => ((j && j.items) || []).filter(i => !String(i.project).includes('@')).map(i => `${i.project}:${i.text}`).sort().join(' | ');
+is('hidden: the queue a peer reads holds nothing of a hidden project', 'scratch:the shared personal ask | toolbox:the vm ask', qItems(s.res.json));
+is('...and names neither', '', anyName(s.res.json));
+r = await pb.api(B.base, 'GET', '/api/waiting');
+is('...while this machine\'s queue holds all of them',
+   'acme-web:the hidden personal ask | billing-svc:the hidden billing ask | scratch:the shared personal ask | toolbox:the vm ask', qItems(r.json));
+r = await pa.api(A.base, 'GET', '/api/waiting');
+is('...and the laptop\'s merged queue has the vm\'s shared items and no name of the hidden ones', 'yes ',
+   `${/the shared personal ask/.test(JSON.stringify(r.json || {})) ? 'yes' : 'no'} ${anyName(r.json)}`);
+// /api/usage and /api/presence take no filter: usage is a profile's accounts and their figures,
+// presence two readings of this machine's keyboard, and neither names a project.
+
+// ── verbs: refused like a project that never was, and nothing typed ──
+const beforeHidden = screen('cf-billing-svc');
+const ranBefore = fs.readFileSync(B.ran, 'utf8').split('\n').length;
+const sendNope = (await signed(vmOnA.out, 'POST', '/api/verb', { tool: 'fleet_send', args: { project: 'nope', session: 'w1', prompt: 'typed by a peer' } })).res;
+s = await signed(vmOnA.out, 'POST', '/api/verb', { tool: 'fleet_send', args: { project: 'billing-svc', session: 'w1', prompt: 'typed by a peer' } });
+is('hidden: a signed send is refused the way a project that never was is', shape(sendNope, 'nope'), shape(s.res, 'billing-svc'));
+r = await pa.verb(A.base, 'fleet_send', { project: 'billing-svc@vm', session: 'w1', prompt: 'typed through the laptop' });
+const vNope = await pa.verb(A.base, 'fleet_send', { project: 'nope@vm', session: 'w1', prompt: 'typed through the laptop' });
+is('...and so is the same send from the laptop\'s phone', shape(vNope, 'nope'), shape(r, 'billing-svc'));
+for (const tool of ['fleet_wake', 'fleet_pause', 'fleet_resume']) {
+  const a = (await signed(vmOnA.out, 'POST', '/api/verb', { tool, args: { project: 'acme-web', session: 'w1' } })).res;
+  const b = (await signed(vmOnA.out, 'POST', '/api/verb', { tool, args: { project: 'nope', session: 'w1' } })).res;
+  is(`...${tool} too, on a project hidden by its profile`, shape(b, 'nope'), shape(a, 'acme-web'));
+}
+const pic2 = { project: 'billing-svc', session: 'w1', data: PNG };
+const filesBefore = filesUnder(attachRoot(B)).length;
+s = await signed(vmOnA.out, 'POST', '/api/attach', pic2);
+const attNope = (await signed(vmOnA.out, 'POST', '/api/attach', { ...pic2, project: 'nope' })).res;
+is('...and a photo', shape(attNope, 'nope'), shape(s.res, 'billing-svc'));
+await sleep(300);
+is('...the hidden pane is exactly as it was: nothing was typed', beforeHidden, screen('cf-billing-svc'));
+is('...no fleet command ran on the vm for any of it', ranBefore, fs.readFileSync(B.ran, 'utf8').split('\n').length);
+is('...and no photo was stored', filesBefore, filesUnder(attachRoot(B)).length);
+r = await pa.verb(A.base, 'fleet_send', { project: 'scratch@vm', session: 'w1', prompt: 'typed through the pairing' });
+is('shared: the same send to a shared project is typed into its pane', '200 yes', `${r.status} ${await waitFor('cf-personal-scratch', 'typed through the pairing') ? 'yes' : 'no'}`);
+r = await pb.verb(B.base, 'fleet_send', { project: 'billing-svc', session: 'w1', prompt: 'typed on this machine' });
+is('...and this machine\'s own phone still types into the hidden one', '200 yes', `${r.status} ${await waitFor('cf-billing-svc', 'typed on this machine') ? 'yes' : 'no'}`);
+
+// ── memory: include AND share, or it stays here ──
+// toolbox is private + share (above); billing-svc include + hide; acme-web include + hidden by
+// its profile; acme-api and scratch include + share. A relation is held to the project it
+// names as well: acme-api depends on billing-svc stays here, on toolbox it crosses.
+fs.writeFileSync(path.join(bFleet, 'cf-billing-svc.know'), 'include\n');
+const kspawn = (fleet, sock, dir, branch, task) => know(B, 'fleet-know-event.mjs', 'spawn', `fleet=${fleet}`, `sock=${sock}`, `cwd=${path.join(B.dir, dir)}`, 'worker=w1', `branch=${branch}`, `task=${task}`, 'parent=master');
+kspawn(bFleet, 'cf-billing-svc', 'billing-svc', 'fix/ledger-rounding', 'A hidden billing task');
+kspawn(bPersonal, 'cf-personal-acme-web', 'acme-web', 'fix/nav-focus', 'A hidden personal task');
+kspawn(bPersonal, 'cf-personal-scratch', 'scratch', 'fix/notes-sync', 'A shared personal task');
+kspawn(bFleet, 'cf-acme-api', 'acme-api', 'fix/shared-retry', 'A shared work task');
+know(B, 'fleet-know.mjs', 'relate', 'acme-api', 'depends-on', 'billing-svc');
+know(B, 'fleet-know.mjs', 'relate', 'acme-api', 'depends-on', 'toolbox');
+s = await signed(vmOnA.out, 'GET', '/api/know/events?after=0');
+const kj = JSON.stringify(s.res.json || {});
+const relTo = ((s.res.json && s.res.json.events) || []).filter(e => e.kind === 'relate').map(e => e.f && e.f.to).sort().join(' ');
+is('memory: include + share crosses, in either profile', 'yes yes', `${kj.includes('A shared work task') ? 'yes' : 'no'} ${kj.includes('A shared personal task') ? 'yes' : 'no'}`);
+is('memory: include + hide does not, hidden on its own or by its profile', 'no no', `${kj.includes('A hidden billing task') ? 'yes' : 'no'} ${kj.includes('A hidden personal task') ? 'yes' : 'no'}`);
+is('memory: private + share does not either', false, kj.includes('private toolbox task'));
+is('...a relation naming a hidden project stays here, the one beside it crosses', 'toolbox', relTo);
+is('...and no hidden project is named anywhere in what crosses', '', anyName(s.res.json));
+c = know(A, 'fleet-know.mjs', 'sync');
+is('the laptop\'s copy, after a sync, holds the shared and not the hidden', 'yes no no',
+   `${peerLogText().includes('A shared personal task') ? 'yes' : 'no'} ${peerLogText().includes('A hidden billing task') ? 'yes' : 'no'} ${HIDDEN.some(n => peerLogText().includes(n)) ? 'yes' : 'no'}`);
+c = know(B, 'fleet-know.mjs', 'find', 'hidden', 'billing');
+is('...while this machine\'s own fleet-know still finds the hidden project\'s task', true, c.code === 0 && /A hidden billing task/.test(c.out));
+
+// THE COMMAND AND THE DAEMON AGREE: what fleet-project pair says a peer sees is what it lists.
+s = await signed(vmOnA.out, 'GET', '/api/projects');
+const listed = new Set(((s.res.json && s.res.json.projects) || []).map(p => p.name));
+is('fleet-project pair says what the daemon does, project for project', 'acme-api:yes toolbox:yes billing-svc:no acme-web:no scratch:yes',
+   pairRowsB.map(x => `${x.project}:${x.peer_sees && listed.has(x.project) ? 'yes' : (!x.peer_sees && !listed.has(x.project) ? 'no' : 'DISAGREE')}`).join(' '));
+// A value this version does not know reads as hide: naming machines later must fail closed here.
+fs.writeFileSync(path.join(bPersonal, 'cf-personal-scratch.pair'), 'share:laptop\n');
+s = await signed(vmOnA.out, 'GET', '/api/projects');
+is('a value this version does not know hides the project', 'acme-api toolbox', names(s.res));
+
+// Back to the vm the rest of this file expects: its two projects, and no panes.
+fs.writeFileSync(bProjects, bProjectsBefore);
+fs.rmSync(path.join(B.home, '.config', 'ghostfleet', 'projects.personal'), { force: true });
+for (const sock of Object.keys(PANES)) TX(sock, 'kill-server');
 
 // ── a host that is down stays visible ───────────────────────────────────────────────
 await stop(B);

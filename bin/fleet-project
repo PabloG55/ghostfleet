@@ -8,7 +8,10 @@
 # fleet-project set <name | -s SOCK> context-window <300k|off|default>
 # fleet-project set <name | -s SOCK> model-<verify|ci|docs|video|build> <model|default>
 # fleet-project set <name | -s SOCK> model <model|default>
+# fleet-project set <name | -s SOCK> pair <share|hide|default>
+# fleet-project set --profile P pair <share|hide|default>
 # fleet-project get <name | -s SOCK> [--session S]
+# fleet-project pair [--json]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
 # screen's "+ add project" does. Without this a lead had no way to create one, so
@@ -52,7 +55,18 @@
 #           records it; private records it for this machine's leads only, never sends a
 #           turn of it to a model vendor and marks it in every answer; exclude records
 #           nothing. `default` drops the override (the profile's default, then include).
+#           set <name> pair <share|hide|default> — what a PAIRED MACHINE (fleet-serve pair)
+#           may have of this project: share (the default) is everything the pairing covers;
+#           hide keeps it off every paired route — no row, session, pane, conversation, run,
+#           memory event or queue item, and a send, wake, park, photo or verdict from there is
+#           answered as for a project this machine never had. This machine's own phone, web
+#           client, leads and commands are not affected. `default` drops the override.
+#           set --profile <p> pair <share|hide|default> — the same, as the default for every
+#           project of profile <p> that has no value of its own (most specific wins).
 #   get     what those resolve to, for the project or one session
+#   pair    read only: every project, its profile, its pair value, where the value comes from
+#           (project, profile or default) and whether a paired machine sees it — what the
+#           daemon decides, from the same reader. --json for the rows.
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
 # worktrees (same rule the TUI uses).
@@ -298,17 +312,53 @@ case "$cmd" in
     esac
     ;;
 
+  # WHAT A PAIRED MACHINE GETS, read only. The rows come from lib/projects.mjs's pairRows,
+  # which asks the same pairFor fleet-serve asks before it answers a signed request — a second
+  # reader of the markers here would be free to say `share` about a project the daemon hides.
+  pair)
+    case "${1:-}" in ''|--json) ;; *) echo "fleet-project: usage: fleet-project pair [--json]   (read only; set one with: fleet-project set <name> pair <share|hide|default>)" >&2; exit 1 ;; esac
+    exec node "$BIN_DIR/../lib/projects.mjs" pair ${1:+"$1"}
+    ;;
+
   set|get)
     . "$BIN_DIR/../lib/boundary.sh"
-    NAME=""; BSOCK=""; SESS=""; POS=()
+    NAME=""; BSOCK=""; SESS=""; PPROF=""; POS=()
     while [ $# -gt 0 ]; do
       case "$1" in
         -s)        BSOCK="${2:?}"; shift 2 ;;
         --session) SESS="${2:?}";  shift 2 ;;
+        --profile) PPROF="${2:?}"; shift 2 ;;
         -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
         *)  POS+=("$1"); shift ;;
       esac
     done
+    # THE PROFILE'S DEFAULT for the pairing: <fleet-dir>/pair.default, beside know.privacy, read
+    # for every project of that profile with no <sock>.pair of its own. A profile is named, not
+    # created: one with no projects list is a typo, and writing under it would make a config dir
+    # nothing reads.
+    if [ -n "$PPROF" ]; then
+      [ "$cmd" = set ] && [ "${POS[0]:-}" = pair ] && [ -z "$BSOCK" ] && [ -z "$SESS" ] && [ "${#POS[@]}" -eq 2 ] \
+        || { echo "fleet-project: --profile sets one thing, the pairing's default: fleet-project set --profile <p> pair <share|hide|default>" >&2; exit 1; }
+      case "$PPROF" in *[!A-Za-z0-9_-]*) echo "fleet-project: '$PPROF' is not a profile name" >&2; exit 1 ;; esac
+      # Known the two ways lib/projects.mjs knows one: its own list, or a project of any list
+      # whose third column names it.
+      known=0; [ -f "$(cfg_for "$PPROF")" ] && known=1
+      for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+        [ "$known" = 1 ] && break; [ -f "$f" ] || continue
+        case "${f##*/}" in projects) ;; *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;; esac
+        awk -F'\t' -v p="$PPROF" '$1 !~ /^#/ && $3 == p { f = 1 } END { exit !f }' "$f" && known=1
+      done
+      [ "$known" = 1 ] || { echo "fleet-project: no profile '$PPROF' (no projects list at $(cfg_for "$PPROF"), and no project names it)" >&2; exit 1; }
+      PDIR="$(profile_dir "$PPROF")/fleet"
+      case "${POS[1]}" in
+        share|hide) mkdir -p "$PDIR" 2>/dev/null; printf '%s\n' "${POS[1]}" > "$PDIR/pair.default" ;;
+        default)    rm -f "$PDIR/pair.default" ;;
+        *) echo "fleet-project: pair takes share, hide or default" >&2; exit 1 ;;
+      esac
+      v="$(head -1 "$PDIR/pair.default" 2>/dev/null)"
+      echo "fleet-project: profile '$PPROF': a paired machine gets ${v:-share}$([ -n "$v" ] || echo ' (default)') for every project of it without a value of its own — from its next request (fleet-project pair shows each)"
+      exit 0
+    fi
     [ -n "$BSOCK" ] || { NAME="${POS[0]:-}"; POS=("${POS[@]:1}"); }
     # Find the project's profile — it decides both the socket and the fleet dir the markers
     # live in. By name, or by socket (what a refusal knows), across every profile's list.
@@ -335,6 +385,12 @@ case "$cmd" in
       case "$v" in include|private|exclude) ;; *) v=include; src=default ;; esac
       printf '%s (from %s; fleet-know, docs/MEMORY.md)' "$v" "$src"
     }
+    # The pairing's setting as it resolves, from lib/projects.mjs — the reader the daemon uses.
+    pair_label() {
+      local r; r="$(node "$BIN_DIR/../lib/projects.mjs" pair-of "$SOCK" 2>/dev/null)"
+      [ -n "$r" ] || { printf '? (could not read it)'; return; }
+      printf '%s (from %s; what a paired machine may have, fleet-project pair)' "${r%%$'\x1f'*}" "${r#*$'\x1f'}"
+    }
     . "$BIN_DIR/../lib/context-window.sh"
     . "$BIN_DIR/../lib/model-kind.sh"
     . "$BIN_DIR/../lib/session-model.sh"
@@ -348,6 +404,7 @@ case "$cmd" in
       printf '%-15s %-4s  (context ceiling, from %s; a session takes it when it next starts)\n' \
         context-window "$(context_window_label "$cw")" "$cwsrc"
       printf '%-15s %s\n' know "$(know_label)"
+      printf '%-15s %s\n' pair "$(pair_label)"
       m="$(session_model_project "$DIR" "$SOCK")"
       printf '%-15s %-4s  (%s)\n' model "${m:--}" \
         "$([ -n "$m" ] && echo "what its sessions start on, master excepted; a pin or --model wins" || echo 'unset: sessions start on the profile default')"
@@ -372,6 +429,20 @@ case "$cmd" in
       exit 0
     fi
     B="${POS[0]:-}"; V="${POS[1]:-}"
+    # WHAT A PAIRED MACHINE MAY HAVE (lib/projects.mjs, "what a paired machine may have"): one
+    # value in <sock>.pair, beside know. fleet-serve reads it on every signed request, so it
+    # applies from the next one, with no restart. Project-wide: a paired machine cannot be
+    # shown one session of a project it is not shown.
+    if [ "$B" = pair ]; then
+      [ -z "$SESS" ] || { echo "fleet-project: pair is set for the whole project, not --session" >&2; exit 1; }
+      case "$V" in
+        share|hide) mkdir -p "$DIR" 2>/dev/null; printf '%s\n' "$V" > "$DIR/$SOCK.pair" ;;
+        default) rm -f "$DIR/$SOCK.pair" ;;
+        *) echo "fleet-project: pair takes share, hide or default" >&2; exit 1 ;;
+      esac
+      echo "fleet-project: '$NAME' to a paired machine: $(pair_label) — from its next request"
+      exit 0
+    fi
     # THE MEMORY'S PRIVACY (docs/MEMORY.md): one value in <sock>.know, beside the fleet's other
     # markers, read by every writer of the memory as it writes — so it applies from the next
     # event on, with no restart. Project-wide: a private project's sessions are all private.
@@ -467,7 +538,7 @@ case "$cmd" in
       exit 0 ;;
     esac
     case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
-      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> model <model|default>  |  set <name|-s sock> know <include|private|exclude|default>" >&2; exit 1 ;; esac
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve|review-gate> <on|off|inherit> [--session S]  |  set <name|-s sock> review-<model|level|stalled|rounds> <value|default>  |  set <name|-s sock> context-window <300k|off|default>  |  set <name|-s sock> model-<kind> <model|default>  |  set <name|-s sock> model <model|default>  |  set <name|-s sock> know <include|private|exclude|default>  |  set <name|-s sock> pair <share|hide|default>  |  set --profile <p> pair <share|hide|default>" >&2; exit 1 ;; esac
     mkdir -p "$DIR" 2>/dev/null
     if [ -n "$SESS" ]; then
       m="$DIR/$SOCK.$SESS.$B"
@@ -521,6 +592,9 @@ case "$cmd" in
     echo "  fleet-project set <name|-s sock> model-<verify|ci|docs|video|build> <model|default>" >&2
     echo "  fleet-project set <name|-s sock> model <model|default>" >&2
     echo "  fleet-project set <name|-s sock> know <include|private|exclude|default>" >&2
+    echo "  fleet-project set <name|-s sock> pair <share|hide|default>" >&2
+    echo "  fleet-project set --profile <p> pair <share|hide|default>" >&2
+    echo "  fleet-project pair [--json]" >&2
     echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac
