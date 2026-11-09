@@ -272,5 +272,62 @@ for (const [what, seed] of [['null', 'null'], ['a string where the list goes', '
   row('a notice that cannot be written does not throw out of the clock', 'no', threwAt);
   row('...and is logged', 'yes', s.logs.some(l => /clock failed/.test(l)) ? 'yes' : `no: ${s.logs.join('|')}`);
 }
+// ── a run in flight answers to the switch, a delete and an edit ──────────────────────────
+// Lets every wait in flight finish its current slice, the way time would.
+const slice = async (r) => { await settle(); for (const p of r.sleeps.pending.splice(0)) p.r(); await settle(); };
+const WAITS = [{ action: 'wait', minutes: 5 }, SEND];
+const dueRun = (id, steps = WAITS, extra = {}) => JSON.stringify({ automations: [{ id, name: id, enabled: true, nextRun: clock - 5, trigger: EVERY, steps, ...extra }] });
+const stoppedRow = (r) => lines(r.file('runs.jsonl')).map(l => JSON.parse(l)).find(x => x.status === 'stopped');
+{
+  const r = rig({ seed: dueRun('sw') });
+  r.engine.tick(); await settle();
+  row('a wait is in flight', '1', r.sleeps.pending.length);
+  setSwitch(false);
+  await slice(r);
+  row('switched off during a wait, the next step is not sent', '0', r.did.length);
+  row('...the wait ends with the slice it was in', '0', r.sleeps.pending.length);
+  setSwitch(true);
+  row('...and the log says why it stopped', 'yes', /switched off/.test(stoppedRow(r)?.text || '') ? 'yes' : `no: ${JSON.stringify(stoppedRow(r))}`);
+  row('...and it is not reported as a failure', '0', (await r.list()).notices.length);
+}
+{
+  const r = rig({ seed: dueRun('del') });
+  r.engine.tick(); await settle();
+  await r.call('POST', '/api/automations/delete', { id: 'del' });
+  await slice(r);
+  row('deleted during a wait, the next step is not sent', '0', r.did.length);
+  row('...and it says so', 'yes', /deleted/.test(stoppedRow(r)?.text || '') ? 'yes' : 'no');
+  row('...and the file does not get it back', '0', JSON.parse(fs.readFileSync(r.file('automations.json'), 'utf8')).automations.length);
+}
+{
+  const r = rig({ seed: dueRun('edit') });
+  r.engine.tick(); await settle();
+  await r.save({ id: 'edit', name: 'edit', trigger: DAILY, steps: [{ ...SEND, prompt: 'the new words' }] });
+  await slice(r);
+  row('edited during a wait, the old steps do not go on', '0', r.did.length);
+  row('...and it says so', 'yes', /changed/.test(stoppedRow(r)?.text || '') ? 'yes' : 'no');
+  const a = (await r.list()).automations[0];
+  row('...and the new revision is the one that stands', 'the new words', a.steps[0].prompt);
+  row('...not marked as having failed by the old run', 'undefined', String(a.lastRun));
+}
+{
+  const r = rig({ seed: dueRun('slices', [{ action: 'wait', minutes: 2 }, SEND]) });
+  r.engine.tick(); await settle();
+  let turns = 0, longest = 0;
+  while (r.sleeps.pending.length && turns < 100) { longest = Math.max(longest, r.sleeps.pending[0].ms); await slice(r); turns++; }
+  row('a wait left alone lasts what it was asked to', '120000', r.sleeps.total);
+  row('...in slices short enough to answer', 'yes', longest <= 5000 ? 'yes' : `${longest} ms`);
+  row('...and the step after it runs', '1', r.did.length);
+}
+{
+  // A one-off switches itself off the moment it fires, and that must not end the run it fired.
+  const once = { type: 'schedule', mode: 'once', date: nowDate(1), at: '09:00' };
+  const r = rig({ seed: dueRun('oneoff', WAITS, { trigger: once }) });
+  r.engine.tick(); await settle();
+  row('a one-off is switched off as it fires', 'false', (await r.list()).automations[0].enabled);
+  await slice(r); while (r.sleeps.pending.length) await slice(r);
+  row('...and its run still reaches its last step', '1', r.did.length);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(0);
