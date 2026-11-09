@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Under the ghostfleet Team License; see ../LICENSE. Owner-only offline tooling.
 import { generateKeyPairSync, createPrivateKey, randomUUID, sign } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isoTime, validPayload, verifyKey } from './index.mjs';
@@ -13,7 +12,7 @@ const inside = (parent, target) => {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 };
 
-// Resolve existing ancestors before mkdir, so a symlink cannot hide the repository.
+// Resolve existing ancestors before mkdir, so symlinks cannot hide a Git boundary.
 function safeOutput(path) {
   let ancestor = resolve(path);
   const suffix = [];
@@ -23,7 +22,10 @@ function safeOutput(path) {
   }
   const target = resolve(realpathSync(ancestor), ...suffix);
   if (inside(repo, target)) throw new Error('Key output must be outside the repository tree');
-  if (inside(realpathSync(homedir()), target)) throw new Error('Private keys must be stored outside the home directory');
+  for (let dir = target; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, '.git'))) throw new Error('Key output must be outside any git work tree');
+    if (dirname(dir) === dir) break;
+  }
   return target;
 }
 
@@ -53,6 +55,7 @@ function main([command, ...args]) {
     }
     mkdirSync(out, { recursive: true, mode: 0o700 });
     safeOutput(out);
+    chmodSync(out, 0o700);
     const { privateKey, publicKey } = generateKeyPairSync('ed25519', {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -60,6 +63,7 @@ function main([command, ...args]) {
     writeFileSync(join(out, 'private.pem'), privateKey, { mode: 0o600, flag: 'wx' });
     writeFileSync(join(out, 'public.pem'), publicKey, { mode: 0o644, flag: 'wx' });
     console.log(`export const PUBLIC_KEY = ${JSON.stringify(publicKey)};`);
+    console.log('Keep an offline backup of private.pem in a password manager; losing it means every existing customer key must be reissued.');
   } else if (command === 'mint') {
     const options = argumentsFor(args, ['--private', '--org', '--seats', '--expires']);
     required(options, ['--private', '--org', '--seats', '--expires']);

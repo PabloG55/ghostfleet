@@ -39,18 +39,20 @@ A forged or malformed key cannot grant the existing-account exception. These
 functions provide policy decisions; the app must enforce creation checks.
 
 The owner runs the following from a case-sensitive checkout (the `ee/LICENSE`
-file and `ee/license/` directory require distinct paths). Choose a persistent,
-private directory outside both the repository and the home directory:
+file and `ee/license/` directory require distinct paths). Store the signing pair
+in a private directory outside every Git worktree:
 
 ```sh
-KEY_DIR=/secure/ghostfleet-signing
+KEY_DIR="$HOME/.config/ghostfleet-license"
 node ee/license/mint.mjs keygen --out "$KEY_DIR"
 ```
 
-The directory must be writable by the owner. This creates `private.pem` with mode
-0600 and `public.pem`, refuses existing keys, and prints an `export const
+The directory must be writable by the owner. Key generation creates or secures it
+with mode 0700, creates `private.pem` with mode 0600 and `public.pem`, refuses
+existing keys, and prints an `export const
 PUBLIC_KEY = ...;` line. Paste that line over the placeholder in `public-key.mjs`.
-Keep the private PEM offline; never commit it or put it in a home directory.
+Keep an offline backup of `private.pem` in a password manager. Losing the private
+key means every existing customer key must be reissued. Never commit the PEM.
 
 ```sh
 node ee/license/mint.mjs mint --private "$KEY_DIR/private.pem" \
@@ -61,9 +63,10 @@ node ee/license/mint.mjs check '<key>'
 
 Minting requires an explicit Ed25519 private PEM and a future expiration date.
 `check` exits 0 for a valid key and 1 otherwise. Key generation refuses output
-inside the repository or home directory, including through symlinked ancestors.
+inside this repository or any other Git worktree, including through symlinked
+ancestors. A home directory is allowed when it is outside a Git worktree.
 
 Run `node --test ee/license/test/*.test.mjs` or
 `./test/run.sh "offline Team license and seats"`. Tests generate only disposable
-pairs inside an OS temporary directory outside the checkout and home directory,
-then remove them. The shipped placeholder remains empty.
+pairs inside OS temporary directories, including a temporary HOME, then remove
+them. The shipped placeholder remains empty.

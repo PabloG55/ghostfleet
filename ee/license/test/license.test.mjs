@@ -2,8 +2,8 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -20,7 +20,9 @@ const mint = (value, signer = privateKey) => {
   const bytes = Buffer.from(JSON.stringify(value));
   return `gft1.${bytes.toString('base64url')}.${sign(null, bytes, signer).toString('base64url')}`;
 };
-const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', timeout: 10000 });
+const runWithEnv = (env, ...args) => spawnSync(process.execPath, [cli, ...args],
+  { encoding: 'utf8', timeout: 10000, env: { ...process.env, ...env } });
+const run = (...args) => runWithEnv({}, ...args);
 const verify = (value, options = {}) => verifyKey(value, { publicKey, now, ...options });
 const seats = (users, value = key) => ({ users, key: value, publicKey, now });
 const result = (allowed, capacity, reason = null) => ({ allowed, free: 2, seats: capacity, reason });
@@ -189,7 +191,7 @@ test('CLI keygen produces a disposable pair, secure mode and pasteable public li
   const privatePem = readFileSync(join(out, 'private.pem'), 'utf8');
   const signed = mint(payload, privatePem);
   assert.deepEqual([generated.status, generated.stderr, statSync(join(out, 'private.pem')).mode & 0o777,
-    generated.stdout.trim(), verify(signed, { publicKey: publicPem }).ok],
+    generated.stdout.trim().split('\n')[0], verify(signed, { publicKey: publicPem }).ok],
   [0, '', 0o600, `export const PUBLIC_KEY = ${JSON.stringify(publicPem)};`, true]);
 });
 test('CLI keygen refuses to overwrite an existing pair', () => {
@@ -200,7 +202,6 @@ test('CLI keygen refuses to overwrite an existing pair', () => {
     [1, '', true]);
 });
 for (const [name, target] of [['repository', () => join(repo, '.scratch.tmp', 'refused-keys')],
-  ['home', () => join(homedir(), 'refused-license-keys')],
   ['symlink to repository', () => {
     const link = join(temp, 'repo-link');
     symlinkSync(repo, link, 'dir');
@@ -209,8 +210,51 @@ for (const [name, target] of [['repository', () => join(repo, '.scratch.tmp', 'r
   test(`CLI keygen refuses output inside ${name}`, () => {
     const out = target();
     const attempted = run('keygen', '--out', out);
-    const message = name === 'home' ? 'outside the home directory' : 'outside the repository tree';
+    const message = 'outside the repository tree';
     assert.deepEqual([attempted.status, attempted.stdout, existsSync(out), attempted.stderr.includes(message)],
       [1, '', false, true]);
+  });
+}
+
+for (const existing of [false, true]) {
+  test(`CLI keygen allows temp HOME with secure directory and private modes: existing=${existing}`, () => {
+    const home = join(temp, existing ? 'existing-home' : 'new-home');
+    mkdirSync(home);
+    const out = join(home, 'x');
+    if (existing) mkdirSync(out, { mode: 0o755 });
+    const generated = runWithEnv({ HOME: home }, 'keygen', '--out', out);
+    const privatePem = join(out, 'private.pem');
+    const publicPem = join(out, 'public.pem');
+    assert.deepEqual([generated.status, generated.stderr,
+      existsSync(out) ? statSync(out).mode & 0o777 : null,
+      existsSync(privatePem) ? statSync(privatePem).mode & 0o777 : null,
+      existsSync(publicPem)], [0, '', 0o700, 0o600, true]);
+  });
+}
+
+test('CLI keygen explains offline backup and customer key reissue risk', () => {
+  const generated = run('keygen', '--out', join(temp, 'backup-notice'));
+  const notice = generated.stdout.trim().split('\n').slice(1);
+  assert.deepEqual([generated.status, notice.length,
+    /offline backup.*private\.pem.*password manager.*every existing customer key.*reissued/i.test(notice[0] ?? '')],
+    [0, 1, true]);
+});
+
+for (const marker of ['directory', 'file', 'symlink']) {
+  test(`CLI keygen refuses a different git work tree: ${marker}`, () => {
+    const root = join(temp, `git-${marker}`);
+    mkdirSync(root);
+    // Both a checkout's directory and a linked worktree's file identify a Git boundary.
+    if (marker === 'file') writeFileSync(join(root, '.git'), 'gitdir: ../git-metadata\n');
+    else mkdirSync(join(root, '.git'));
+    let target = root;
+    if (marker === 'symlink') {
+      target = join(temp, 'other-repo-link');
+      symlinkSync(root, target, 'dir');
+    }
+    const out = join(target, 'nested', 'keys');
+    const attempted = run('keygen', '--out', out);
+    assert.deepEqual([attempted.status, attempted.stdout, existsSync(out),
+      attempted.stderr.includes('outside any git work tree')], [1, '', false, true]);
   });
 }
