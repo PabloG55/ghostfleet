@@ -354,7 +354,7 @@ ul.clean { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column
 .slide { aspect-ratio: 16 / 9; border-radius: var(--gf-radius-md); overflow: hidden; position: relative; border: 1px solid var(--gf-hair); box-shadow: var(--gf-shadow-2);
   background: radial-gradient(70% 90% at 80% 40%, rgba(95,215,215,.12), transparent 60%), repeating-linear-gradient(0deg, transparent 0 22px, rgba(95,215,215,.03) 22px 23px), var(--gf-bg);
   padding: 5% 6%; display: flex; flex-direction: column; justify-content: space-between; container-type: inline-size; }
-.slide .k { font: 600 1.6cqw var(--gf-font-mono); color: var(--gf-teal); text-transform: uppercase; letter-spacing: .1em; }
+.slide .k { font: 600 1.6cqw var(--gf-font-mono); color: var(--gf-teal); } /* the name, so not set in capitals */
 .slide h3 { font: 700 5cqw/1.05 var(--gf-font-mono); letter-spacing: -.03em; max-width: 60%; }
 .slide h3 em { font-style: normal; color: var(--gf-teal); font-weight: 500; }
 .slide .bottom { display: flex; justify-content: space-between; align-items: flex-end; gap: 4%; }
@@ -425,7 +425,7 @@ h3::before { content: '▸ '; color: var(--gf-teal); }
 
 /* header: the masthead in pixels, the sections as paths, the language as a flag */
 .top { background: rgba(6,8,10,.92); border-bottom: 2px dashed var(--gf-line); }
-.top .brand .px { font: 400 15px var(--px-font); }
+.top .brand .px { font-size: 15px; } /* the name keeps the brand's face: see the hero below */
 .top nav a { font: 12.5px var(--gf-font-mono); border-radius: 0; padding: 6px 4px; }
 .top nav a::before { content: './'; color: var(--gf-dim); }
 .lang { align-items: center; gap: 6px; padding: 3px 8px; border: 1px dashed var(--gf-line); border-radius: 0; font: 13px var(--gf-font-mono); }
@@ -438,10 +438,11 @@ h3::before { content: '▸ '; color: var(--gf-teal); }
 /* hero */
 .hero { background: radial-gradient(900px 420px at 70% 30%, rgba(95,215,215,.10), transparent 60%); border-bottom: 2px dashed var(--gf-line); }
 .hero .cmd { margin-top: 18px; }
-/* Silkscreen's bold advances about 0.8 em, so "ghostfleet" needs 8 em: 4.6vw keeps it inside the
-   hero's text column at desktop widths instead of breaking the word in two */
-.hero h1 { font: 700 clamp(30px, 4.6vw, 60px)/1.1 var(--px-font); letter-spacing: 0; margin-top: 14px; }
-.hero h1 em { font-weight: 400; }
+/* The product's name is the one heading this skin leaves in the brand's face, JetBrains Mono like
+   every lockup: Silkscreen has no lowercase, so it drew the name, which is written in lowercase,
+   as GHOSTFLEET TEAM. The size is the skin's; 4.6vw keeps "ghostfleet" inside the hero's text
+   column at desktop widths instead of breaking the word in two. */
+.hero h1 { font: 700 clamp(30px, 4.6vw, 60px)/1.1 var(--gf-font-mono); letter-spacing: -.04em; margin-top: 14px; }
 .hero-ship .gf-ship svg { width: 384px; max-width: 100%; }
 
 /* a window per section: a pixel border (box-shadows, so the corners step and nothing

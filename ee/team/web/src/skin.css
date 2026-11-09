@@ -5,10 +5,11 @@
  * quiet title bar, corners are square, borders are one hairline, the lights are square LEDs,
  * the pixel grid is only in the background, and the boats move one sprite pixel at a time.
  *
- * Type, as the brand sets it: Silkscreen is a pixel face for the wordmark, page titles and
- * section labels only — never body text, buttons, tables, forms or data, where it would be
- * hard to read and look like a game. Text is Inter; names, branches and numbers are
- * JetBrains Mono. */
+ * Type, as the brand sets it: Silkscreen is a pixel face for page titles and section labels
+ * only — never body text, buttons, tables, forms or data, where it would be hard to read and
+ * look like a game. Text is Inter; names, branches, numbers and the wordmark are JetBrains
+ * Mono. The wordmark is not Silkscreen because Silkscreen has no lowercase: it drew the
+ * product's name, which is written in lowercase, as GHOSTFLEET TEAM. */
 
 :root {
   --grid: rgba(95,215,215,.035);
@@ -67,7 +68,7 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 .admin-users > .row h2 { font-size: 14px; }
 
 /* ── the wordmark ───────────────────────────────────── */
-.brand b { font: 400 14px/1.2 var(--px); letter-spacing: .02em; color: var(--white); }
+.brand b { font: 700 14px/1.2 var(--mono); letter-spacing: var(--gf-tracking-tight); color: var(--white); } /* the manual's lockup face */
 .brand.big b { font-size: 18px; }
 .brand small { font-family: var(--sans); }
 .logo { border-radius: var(--r); background: var(--gf-abyss); box-shadow: inset 0 0 0 1px var(--hair); }
