@@ -21115,6 +21115,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "...with jarvis off, and tagged"             "yes" "$(grep -qE 'jarvis +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...and shots, tagged"                       "yes" "$(grep -qE 'shots +[○●] (on|off) +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...and peek, off and tagged"                "yes" "$(grep -qE 'peek +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...and automations, off and tagged"         "yes" "$(grep -qE 'automations +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...with no project row for Jarvis's project" "no" "$(grep -qE '^ *(▸ )? *jarvis +work' <<< "$scr" && echo yes || echo no)"
   # acme-api is the only project row, so one ↓ is the jarvis row.
   tmux -L cfjxgrid send-keys j; sleep 0.5
@@ -22366,6 +22367,42 @@ if [ -d "$ROOT/web" ]; then
     done < "$QUE/out"
   fi
   rm -rf "$QUE"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the automations screens, in a real browser"
+if [ -d "$ROOT/web" ]; then
+  # The list, the editor and the sentence builder against a stand-in daemon, with touch at 390x844
+  # and a mouse and keys at 1280x900, in every state a person can land in: reading, nothing there,
+  # a failed read, a full list. The daemon counts what reached it, because most of what matters
+  # here is what was NOT sent: a switch or a proposal before its passkey, a delete on the first tap,
+  # a proposal nobody saved. The rules behind the routes are the fleet-serve group's and the
+  # runner's are the engine's; this one is what a thumb gets.
+  # WATCHED GOING RED: against the client as it arrived (the bundle rows, then the first row that
+  # needs the new shape), and against copies with one thing broken, twenty-seven in all: among
+  # them the notices' snap point, day toggles under a thumb, the switch beneath the stretched name
+  # (which a tap in its middle does not notice, because the knob paints above it either way), the
+  # desk's Projects list not read, a relaunch with no trail, save left primary beside a proposal, a
+  # one-tap delete, a passkey not asked, keys falling through to Projects, and a bundle without
+  # the screen. Several breakages in one copy hid each other: a bar pushed off the screen stranded
+  # the editor open, and "the card opens it" passed for it. So a row that stays green in a batch is
+  # tried again alone.
+  AUC="$(mktemp -d "$TEST_RUNS.$$.autos.XXXXXX")"
+  node "$ROOT/test/helpers/automations-check.mjs" > "$AUC/out" 2> "$AUC/err"
+  aucrc=$?
+  if grep -q 'no chrome' "$AUC/out" 2>/dev/null; then
+    skip "the automations screens" "no chrome to tap in"
+  else
+    is "automations-check ran"          "0" "$aucrc"
+    is "...without complaining"         ""  "$(head -2 "$AUC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUC/out")" -ge 150 ] && echo yes || echo "no: $(wc -l < "$AUC/out")")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$AUC/out"
+  fi
+  rm -rf "$AUC"
 else
   skip "phone client" "web/ not present"
 fi
