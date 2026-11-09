@@ -19875,7 +19875,7 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "the list needs a token"                   "401"   "$(apf list.noToken auton)"
   is "...and with one it answers"               "200"   "$(apf list auton)"
   is "...empty on a new install"                "[]"    "$(aj list auton automations)"
-  is "...with the fleet to pick from"           "1"     "$(aj list auton fleet | grep -c '"name":"demo"' || true)"
+  is "...with the fleet to pick from"           "yes"   "$(grep -q '"name":"demo"' <<< "$(aj list auton fleet)" && echo yes || echo no)"
   is "a send needs no passkey to save"          "200"   "$(apf save.send auton)"
   is "...and is armed for its next run"         "1"     "$([ -n "$(aj save.send auton automation.nextRun)" ] && [ "$(aj save.send auton automation.nextRun)" != undefined ] && echo 1 || echo 0)"
   is "an automation with no steps is refused"   "400"   "$(apf save.noSteps auton)"
@@ -19908,7 +19908,7 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "asking for it in a sentence gives a draft" "200"  "$(apf draft auton)"
   is "...the model is told about a project not kept private" "yes" "$(grep -q -- '^- demo: ' "$AW/said" && echo yes || echo no)"
   is "...and not about the one that is"         "no"    "$(grep -q -- '^- other: ' "$AW/said" && echo yes || echo no)"
-  is "...which the phone still lists"           "1"     "$(aj list auton fleet | grep -c '"name":"other"' || true)"
+  is "...which the phone still lists"           "yes"   "$(grep -q '"name":"other"' <<< "$(aj list auton fleet)" && echo yes || echo no)"
   is "...normalised, ready for the editor"      "good morning" "$(aj draft auton automation.name)"
   is "...and nothing was saved by it"           "0"     "$(aj list.full auton automations | grep -c '"good morning"' || true)"
   is "...an empty conversation is refused"      "400"   "$(apf draft.empty auton)"
@@ -19923,7 +19923,7 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and counts nothing"                    "null"  "$(aj projects autoff automations_unseen)"
   is "off: the list is a 404"                   "404"   "$(apf list autoff)"
   is "...that says it is disabled"              "true"  "$(aj list autoff disabled)"
-  is "...and how to turn it on"                 "1"     "$(aj list autoff text | grep -c 'fleet-experimental enable automations' || true)"
+  is "...and how to turn it on"                 "yes"   "$(grep -q 'fleet-experimental enable automations' <<< "$(aj list autoff text)" && echo yes || echo no)"
   is "...a save is a 404"                       "404"   "$(apf save.send autoff)"
   is "...so is run now"                         "404"   "$(apf run.send autoff)"
   is "...and a draft"                           "404"   "$(apf draft autoff)"
@@ -19942,8 +19942,8 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   printf 'on\n' > "$ASW"
   if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data.jv" sv_start autojv; then
     node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations-list "$(sv_code autojv)" > "$SV/probe.autojv" 2>"$SV/probe.autojv.err"
-    is "Jarvis off: its project is not in the editor's pickers" "0" "$(aj list autojv fleet | grep -c '"name":"demo"' || true)"
-    is "...and the rest of the fleet is"        "1"     "$(aj list autojv fleet | grep -c '"name":"other"' || true)"
+    is "Jarvis off: its project is not in the editor's pickers" "no" "$(grep -q '"name":"demo"' <<< "$(aj list autojv fleet)" && echo yes || echo no)"
+    is "...and the rest of the fleet is"        "yes"   "$(grep -q '"name":"other"' <<< "$(aj list autojv fleet)" && echo yes || echo no)"
     serve_stop
   else
     skip "fleet-serve automations, Jarvis off" "server did not come up: $SV_WHY"
