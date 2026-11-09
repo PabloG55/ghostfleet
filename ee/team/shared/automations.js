@@ -10,7 +10,7 @@
 // A step's project/session can be the literal '{proyecto}' / '{sesion}': the session the
 // event happened to. Prompts, names and notices can use {fecha} {hora} {proyecto} {sesion}.
 //
-// The scope (docs/ARQUITECTURA-TEAM.md §5) says who sees it and whose permissions it runs with:
+// The scope (docs/TEAM-ARCHITECTURE.md §5) says who sees it and whose permissions it runs with:
 // a personal one is its creator's, and runs as them; a company one is made by an admin, seen by
 // whoever can read its projects, and runs as the admin who saved it last (`savedBy`).
 

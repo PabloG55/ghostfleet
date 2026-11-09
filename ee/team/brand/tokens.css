@@ -4,7 +4,7 @@
  * hex, plus the app's dark neutrals. Everything carries a --gf- prefix so it can load next
  * to styles.css without overriding its --red/--cyan while the app migrates.
  * manual.html carries a literal copy of this file (the one make-logo.mjs injects);
- * team/test/brand.test.mjs goes red if the two drift apart. */
+ * ee/team/test/brand.test.mjs goes red if the two drift apart. */
 :root {
   /* ── signal: the grid's six colors ────────────────────── */
   --gf-teal: #5fd7d7;          /* xterm 80  — the brand, "working", links, focus */
@@ -78,7 +78,7 @@
 
 /* ── status LED ────────────────────────────────────────────
  * <i class="gf-led" data-s="need-you"></i>. The names are the app's statuses
- * (STATUS in team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
+ * (STATUS in ee/team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
  * the yellow of starting up blinks; everything else holds still. */
 .gf-led {
   --c: var(--gf-grey);
@@ -98,7 +98,7 @@
 
 /* ── the ship ──────────────────────────────────────────────
  * <span class="gf-ship" data-s="work"><svg viewBox="0 0 32 16">…</svg></span>. The
- * names are the board's LOOKS (team/web/src/board.jsx). */
+ * names are the board's LOOKS (ee/team/web/src/board.jsx). */
 .gf-ship { display: inline-block; color: var(--gf-white); line-height: 0; }
 .gf-ship svg { fill: currentColor; display: block; overflow: visible; shape-rendering: crispEdges; }
 .gf-ship[data-s="need"] { color: var(--gf-red); }

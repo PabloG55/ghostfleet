@@ -1,5 +1,7 @@
 # ghostfleet team
 
+This folder is under the [ghostfleet Team License](../LICENSE), not the MIT license of the rest of the repo.
+
 The Claude Code fleet of [ghostfleet](https://github.com/PabloG55/ghostfleet), in the browser and
 for a small team: clicks instead of commands, an owner for every session, and a voice assistant
 that hands out the work.

@@ -122,7 +122,7 @@ export function AiAccount({ ctx }) {
             </div>
           ))}
         </div>
-        <p class="ai-note small"><b>{t('ai.notYet')}</b> {t('ai.notYetWhy')} <code>team/docs/CUENTA-IA-POR-PERSONA.md</code>.</p>
+        <p class="ai-note small"><b>{t('ai.notYet')}</b> {t('ai.notYetWhy')} <code>ee/team/docs/PER-USER-AI-ACCOUNT.md</code>.</p>
       </section>
 
       <section class="panel">

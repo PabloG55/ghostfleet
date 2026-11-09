@@ -16,7 +16,7 @@
  * hex, plus the app's dark neutrals. Everything carries a --gf- prefix so it can load next
  * to styles.css without overriding its --red/--cyan while the app migrates.
  * manual.html carries a literal copy of this file (the one make-logo.mjs injects);
- * team/test/brand.test.mjs goes red if the two drift apart. */
+ * ee/team/test/brand.test.mjs goes red if the two drift apart. */
 :root {
   /* ── signal: the grid's six colors ────────────────────── */
   --gf-teal: #5fd7d7;          /* xterm 80  — the brand, "working", links, focus */
@@ -90,7 +90,7 @@
 
 /* ── status LED ────────────────────────────────────────────
  * <i class="gf-led" data-s="need-you"></i>. The names are the app's statuses
- * (STATUS in team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
+ * (STATUS in ee/team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
  * the yellow of starting up blinks; everything else holds still. */
 .gf-led {
   --c: var(--gf-grey);
@@ -110,7 +110,7 @@
 
 /* ── the ship ──────────────────────────────────────────────
  * <span class="gf-ship" data-s="work"><svg viewBox="0 0 32 16">…</svg></span>. The
- * names are the board's LOOKS (team/web/src/board.jsx). */
+ * names are the board's LOOKS (ee/team/web/src/board.jsx). */
 .gf-ship { display: inline-block; color: var(--gf-white); line-height: 0; }
 .gf-ship svg { fill: currentColor; display: block; overflow: visible; shape-rendering: crispEdges; }
 .gf-ship[data-s="need"] { color: var(--gf-red); }
@@ -830,7 +830,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 
 <!-- Every word on the page, in both languages. The markup above carries only keys, so a
      sentence cannot exist in one language and be missing from the other without
-     team/test/brand.test.mjs going red. Values are HTML; an attribute key (data-t-aria,
+     ee/team/test/brand.test.mjs going red. Values are HTML; an attribute key (data-t-aria,
      data-t-value) gets plain text. -->
 <script type="application/json" id="i18n">
 {
@@ -862,7 +862,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "story.p3": "The brand keeps what already worked in the terminal: a dark background, six signal colors and a monospaced face. What it adds is calm: room to breathe, a readable text face, and motion only where it matters.",
     "story.sprite": "The original sprite, exactly as it sits in the grid",
     "story.spriteAria": "The ship sprite in half-block characters",
-    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — the single source. <code>team/brand/make-logo.mjs</code> reads it and regenerates every SVG.",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — the single source. <code>ee/team/brand/make-logo.mjs</code> reads it and regenerates every SVG.",
     "story.traits": "Personality",
     "trait.calm": "Calm",
     "trait.calm.p": "Shows a lot without shouting. Red exists, but only for “needs you”.",
@@ -1096,7 +1096,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "slide.byhand": "terminals opened by hand",
     "slide.cap": "<b>16:9 slide.</b> A two-line mono title, the second line in teal; the fleet on the right; figures along the bottom; the lockup in the corner.",
 
-    "foot.source": "Source: <code>team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+    "foot.source": "Source: <code>ee/team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
   },
   "es": {
     "meta.title": "Manual de marca ghostfleet",
@@ -1126,7 +1126,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "story.p3": "La marca hereda lo que ya funcionaba en el terminal: fondo oscuro, seis colores de señal y una tipografía monoespaciada. Lo que añade es calma: espacio, una tipografía de texto legible y movimiento sólo donde importa.",
     "story.sprite": "El sprite original, tal como está en el grid",
     "story.spriteAria": "Sprite del barco en caracteres de medio bloque",
-    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — la fuente única. <code>team/brand/make-logo.mjs</code> la lee y regenera todos los SVG.",
+    "story.spriteCap": "<b>bin/fleet-grid.mjs · SHIP</b> — la fuente única. <code>ee/team/brand/make-logo.mjs</code> la lee y regenera todos los SVG.",
     "story.traits": "Personalidad",
     "trait.calm": "Sereno",
     "trait.calm.p": "Muestra mucho sin gritar. El rojo existe, pero sólo para «te necesita».",
@@ -1360,12 +1360,12 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "slide.byhand": "terminales abiertas a mano",
     "slide.cap": "<b>Diapositiva 16:9.</b> Título en mono a dos líneas, la segunda en teal; la flota a la derecha; cifras abajo; lockup en la esquina.",
 
-    "foot.source": "Fuente: <code>team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
+    "foot.source": "Fuente: <code>ee/team/brand/</code> · tokens.css · logo/*.svg · make-logo.mjs"
   }
 }
 </script>
 <script>
-// The grid's ship (bin/fleet-grid.mjs), row by row. team/test/brand.test.mjs compares these
+// The grid's ship (bin/fleet-grid.mjs), row by row. ee/team/test/brand.test.mjs compares these
 // rows with the grid's: if someone redraws the ship, this goes red.
 const SHIP = [
   '         ▄▄▄▄▄▄█                ',
@@ -1463,13 +1463,13 @@ function renderDonts() {
   }).join('');
 }
 
-// states: the app's (STATUS in team/web/src/ui.jsx), with their LED, glyph and colour
+// states: the app's (STATUS in ee/team/web/src/ui.jsx), with their LED, glyph and colour
 const STATUS = [
   ['need-you', '●', 'red'], ['working', '◆', 'teal'], ['ready', '✓', 'green'], ['starting', '…', 'yellow'],
   ['limit', '⧗', 'yellow'], ['interrupted', '⚠', 'yellow'], ['parked', '⏸', 'grey'], ['idle', '·', 'grey'],
   ['asleep', '☾', 'grey'], ['lost', '✕', 'grey'],
 ];
-// the fleet: the board's LOOKS (team/web/src/board.jsx)
+// the fleet: the board's LOOKS (ee/team/web/src/board.jsx)
 const LOOKS = [['need', 'red', 'acme-api'], ['work', 'teal', 'acme-web'], ['fresh', 'green', 'toolbox'],
                ['warn', 'yellow', 'billing-svc'], ['open', 'white', 'scratch'], ['off', 'grey', 'docs']];
 function renderStates() {

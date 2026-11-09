@@ -1,6 +1,6 @@
 # ghostfleet team — architecture of the business edition
 
-This document is the contract shared by the parallel pieces of work on `team/`. If a piece of
+This document is the contract shared by the parallel pieces of work on `ee/team/`. If a piece of
 work needs something that is not here, it says so in its report instead of inventing it.
 
 ## 1. One instance per company
@@ -99,4 +99,4 @@ The work is always done with **Claude Code**. The admin picks the mode in
 
 ghostfleet's personality is part of the product: the pixelated ghost submarine, the grid's
 palette (xterm 203/114/80/221/245), boats that move, and status LEDs. The brand manual lives
-in `team/brand/`, and the app takes its tokens from there.
+in `ee/team/brand/`, and the app takes its tokens from there.

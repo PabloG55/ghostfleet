@@ -3,7 +3,7 @@
 Contract §3: in `per-user` mode each user is linked to a ghostfleet profile (a
 `CLAUDE_CONFIG_DIR`), and the sessions **they** create start in that profile. This round
 delivers the data and the screen; it does not deliver the launching, because that cannot be
-done properly from `team/` without changing ghostfleet. This document says why, and what
+done properly from `ee/team/` without changing ghostfleet. This document says why, and what
 change is needed.
 
 ## What already exists
@@ -30,7 +30,7 @@ would overwrite it. And if it did not, the session would fall out of view: its t
 to `<its config dir>/projects/`, which is where `fleet-read` and the grid do **not** look for
 that fleet, and its usage reading lands in another profile's meter.
 
-## The change that is needed (in ghostfleet, not in team/)
+## The change that is needed (in ghostfleet, not in ee/team/)
 
 Separate two things that are one today: **which fleet** the session belongs to (socket, fleet
 dir, state, markers) and **which account** Claude runs on inside it (config dir: login,
@@ -48,7 +48,7 @@ transcripts, settings).
    person's profile has to trust the project's worktrees, or the first launch stalls on the
    trust dialog.
 
-## What `team/` will do once that exists
+## What `ee/team/` will do once that exists
 
 - In `perform()`, for `fleet_spawn` (and relaunches) by a user with `ai.perUser` in
   `per-user` mode: add `account` with `cfgFor(profile)`. An automation runs with its owner's

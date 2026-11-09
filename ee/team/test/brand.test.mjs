@@ -26,7 +26,7 @@ test('the manual\'s ship is the grid\'s, row by row', () => {
 
 test('the manual carries tokens.css verbatim (make-logo.mjs injects it)', () => {
   assert.equal(injectTokens(manual, read('tokens.css')), manual,
-    'manual.html and tokens.css drifted apart: run node team/brand/make-logo.mjs');
+    'manual.html and tokens.css drifted apart: run node ee/team/brand/make-logo.mjs');
 });
 
 test('the committed SVGs are the ones the current sprite generates', () => {
