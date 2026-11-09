@@ -14753,6 +14753,16 @@ if command -v git >/dev/null 2>&1; then
   cfm --prs >/dev/null
   is "...and the fresh path DOES call it"        "yes" "$([ -f "$MG/GH_RAN" ] && echo yes || echo no)"
   is "...leaving the cache undamaged"            "3" "$(fm --prs | grep -c . || true)"
+  # A fresh cache must be served with NO gh on PATH: gh is needed to refresh, not to read. The
+  # check used to sit at the top, so a host without gh (a bare Linux runner) printed nothing
+  # for a good cache while a Mac with gh installed passed. PATH is pinned so the row means the
+  # same on both.
+  nogh() { env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
+           "$ROOT/bin/fleet-merged" "$@" "$MG/repo" 2>/dev/null; }
+  is "no gh: a fresh cache is still served"      "3" "$(nogh --prs | grep -c . || true)"
+  is "...and a stale one too, rather than nothing" "3" \
+     "$(env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" CLAUDE_FLEET_MERGED_TTL=0 \
+        "$ROOT/bin/fleet-merged" --prs "$MG/repo" 2>/dev/null | grep -c . || true)"
   is "...and no lock behind it"                  "0" "$(find "$MG/fleet" -name '*.lock' 2>/dev/null | grep -c . || true)"
   # 4. no cache at all is the cold-start case a card must survive: nothing, exit 0.
   rm -f "$MG/fleet/prs.acme_widget"
