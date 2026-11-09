@@ -4,6 +4,26 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## Unreleased
+
+**`fleet-restart` no longer loses a session whose old process is slow to exit, and no longer says
+it restarted one it lost.** In one restart 22 of 42 sessions vanished, with every fleet reporting
+them as relaunched and exiting 0: on a swapping machine the old processes took 20-60 s to exit,
+the new launcher gave them 3 s, refused, and closed the pane. Now:
+
+- It waits for the old process before starting the new one, up to 120 s, then sends `TERM` to
+  that pid and no other (`CLAUDE_FLEET_RESTART_WAIT`, `CLAUDE_FLEET_RESTART_TERM_WAIT`).
+- It counts a session only once an agent is seen on the right conversation, so a restart takes a
+  few seconds longer per session (`CLAUDE_FLEET_RESTART_CONFIRM`). Anything else is listed under
+  `Failed:` with its reason and the exact command that brings it back, and the exit status is
+  non-zero. **A script that reads `fleet-restart`'s exit status can now see a failure.**
+- A launcher that refuses a conversation another process holds files a `failed` row in the inbox
+  and closes its pane, which then reads as `lost` with the reopen beside it.
+- `--reopen` falls back to the newest restart snapshot naming that socket and slot when the slot's
+  records name nothing, or name an id with no transcript, and says where the id came from. It still
+  never guesses the newest conversation in a folder.
+- `--reopen <name>` no longer kills a live session whose name starts with `<name>`.
+
 ## 0.7.0 — 2026-11-09
 
 **After upgrading**, the pieces that are long-lived keep their old code until they restart.

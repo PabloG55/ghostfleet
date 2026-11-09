@@ -147,9 +147,11 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # fleet-open <id>: resume exactly that conversation, by id — unless a live process already
 # has it open, which would put two writers on one rollout.
 if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  # Filed, and 126, for the reasons claude-here gives at the same refusal.
   if [ -n "$SLOTCLAIM" ] && holder="$(node "$SLOTCLAIM" held --agent codex --id "$CLAUDE_FLEET_RESUME" 2>/dev/null)"; then
     echo "codex-here: refusing — conversation $CLAUDE_FLEET_RESUME is open in live process $holder; a conversation is never resumed into a second pane" >&2
-    exit 1
+    node "$SLOTCLAIM" refused --dir "$FLEET_DIR" --slot "$slot" --id "$CLAUDE_FLEET_RESUME" --holder "$holder" 2>/dev/null
+    exit 126
   fi
   echo "codex-here: resuming session ${CLAUDE_FLEET_RESUME} in $PWD" >&2
   exec codex resume "$CLAUDE_FLEET_RESUME" ${OPTS[@]+"${OPTS[@]}"} "$@"

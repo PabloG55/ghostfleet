@@ -25315,7 +25315,9 @@ group "fleet-restart resumes the live conversation, or refuses"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   RL="$(cd "$(mktemp -d "$TEST_RUNS.$$.rlive.XXXXXX")" && pwd -P)"
   mkdir -p "$RL/fleet" "$RL/cfg" "$RL/wt" "$RL/stub"
-  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-}" >> "%s/relaunched"\nexec sleep 600\n' "$RL" > "$RL/stub/agent-here"
+  # Shows the conversation in its argv, as an agent does: a restart counts only what it can see
+  # resuming.
+  printf '#!/usr/bin/env bash\necho "$1 ${CLAUDE_FLEET_RESUME:-}" >> "%s/relaunched"\nexec -a "claude --resume ${CLAUDE_FLEET_RESUME:-}" sleep 600\n' "$RL" > "$RL/stub/agent-here"
   chmod +x "$RL/stub/agent-here"
   R_OLD=aaaaaaaa-6666-6666-6666-000000000001; R_NEW=aaaaaaaa-7777-7777-7777-000000000002
   R_EMPTY=aaaaaaaa-8888-8888-8888-000000000003; R_REC=aaaaaaaa-9999-9999-9999-000000000004
@@ -25400,6 +25402,331 @@ else
   skip "fleet-restart resumes the live conversation" "tmux or jq is not installed"
 fi
 
+# ── fleet-restart waits for the old process, and counts only who came back ───
+# 22 of 42 sessions vanished in one run over 19 fleets, each printing "N relaunched" and
+# exiting 0, on a machine swapping at 19.4 of 20 GB. The relaunch ran kill-session and
+# new-session in the same breath, but a process with a large transcript under swap writes its
+# exit record 20-60 s after it is killed, and the new launcher gives a live holder 3 s
+# (lib/slot-claim.mjs). So it refused, the pane closed, the card went, and the summary had
+# already counted it. Nothing recorded the refusal anywhere.
+#   Everything here is real except the agent: tmux, agent-here, claude-here, slot-claim and
+# the hook-free launch chain, with a stub `claude` in the shape the holder check reads (its
+# argv and its note) that ignores SIGHUP and exits a known number of seconds after the pane
+# is killed. One session per case, plus one unrelated holder: three processes at most.
+# WATCHED GOING RED on the code before this: the session gone with "1 relaunched" printed and
+# exit 0, no second start, no TERM, no Failed:, no inbox row.
+group "fleet-restart waits out the old process and counts who came back"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  RW="$(cd "$(mktemp -d "$TEST_RUNS.$$.rwait.XXXXXX")" && pwd -P)"
+  RWH="$RW/home"; RWC="$RWH/.claude"; RWF="$RWC/fleet"; RWS=cf-acme-api
+  mkdir -p "$RW/bin" "$RW/ev" "$RW/ctl" "$RW/wt" "$RWF" "$RWC/sessions" "$RWH/.config/ghostfleet"
+  printf 'acme-api\t%s\twork\n' "$RW/wt" > "$RWH/.config/ghostfleet/projects"
+  # THE STUB. ctl/<slot>.exit-after is how long it outlives the pane, read when the pane dies so
+  # the replacement it is about to become a predecessor of can be told apart; ctl/<slot>.noterm
+  # makes it ignore TERM; ctl/<slot>.dies has it exit at once, the way a resume that finds no
+  # conversation does; ctl/<slot>.hang holds the launcher at its first question to the binary.
+  cat > "$RW/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"; slot="${CLAUDE_FLEET_SLOT:-}"; ev="$d/ev/$slot"
+case "${1:-}" in
+  agents) [ -f "$d/ctl/$slot.hang" ] && sleep 30; exit 0 ;;
+  --help) exit 0 ;;
+esac
+id=""; for ((i = 1; i <= $#; i++)); do [ "${!i}" = --resume ] && { j=$((i + 1)); id="${!j}"; }; done
+echo "start $$ $id" >> "$ev"
+if [ -f "$d/ctl/$slot.dies" ]; then echo "No conversation found with session ID: $id"; exit 1; fi
+printf '{"pid":%s,"sessionId":"%s","cwd":"%s","procStart":"%s","kind":"interactive"}\n' \
+  "$$" "$id" "$PWD" "$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ | sed 's/ *$//')" > "$CLAUDE_CONFIG_DIR/sessions/$$.json"
+kid=""; hup=0; trap 'hup=1' HUP
+if [ -f "$d/ctl/$slot.noterm" ]; then trap '' TERM
+else trap '[ -n "$kid" ] && kill "$kid" 2>/dev/null; echo "term $$" >> "$ev"; exit 143' TERM; fi
+sleep 600 & kid=$!; wait "$kid"; kill -KILL "$kid" 2>/dev/null   # it inherited an ignored TERM
+sleep "$(cat "$d/ctl/$slot.exit-after" 2>/dev/null || echo 0)" & kid=$!; wait "$kid"
+echo "exit $$" >> "$ev"
+exit 0
+STUB
+  chmod +x "$RW/bin/claude"
+  HOME="$RWH" tmux -L "$RWS" kill-server 2>/dev/null
+  # A tab keeps the server up across every kill, so the PATH set on it is the relaunch's.
+  HOME="$RWH" tmux -L "$RWS" new-session -d -s _term -c "$RW/wt" "sleep 600" 2>/dev/null
+  tmux -L "$RWS" set-environment -g PATH "$RW/bin:$ROOT/bin:$PATH"
+  tmux -L "$RWS" set-environment -g HOME "$RWH"
+  tmux -L "$RWS" set-environment -g CLAUDE_FLEET_NO_OBSERVE_CONTRACT 1
+  # The caller: nothing of the session running this suite, and the fake HOME.
+  rwr() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_RESUME \
+            -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_AGENT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
+            -u CLAUDE_FLEET_PROFILE HOME="$RWH" PATH="$RW/bin:$ROOT/bin:$PATH" "$@" 2>&1; }
+  rwrec() {   # slot id [ts]: a record, and a transcript with a real turn where claude keeps one
+    local cwd="$RW/wt/$1" pd
+    mkdir -p "$cwd"; pd="$RWC/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$pd"
+    printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$pd/$2.jsonl"
+    jq -n --arg id "$2" --arg sock "$RWS" --arg slot "$1" --arg cwd "$cwd" --arg tr "$pd/$2.jsonl" --argjson ts "${3:-$(date +%s)}" \
+      '{session_id:$id, sock:$sock, slot:$slot, cwd:$cwd, status:"ready", transcript:$tr, ts:$ts}' > "$RWF/$2.json"
+  }
+  rwopen() {  # slot id: started the way a resumed session is, and waited for until it is up
+    rwrec "$1" "$2"
+    # PATH ON THE CLIENT: a pane takes the PATH of the client that ran new-session, over any
+    # `set-environment -g PATH`. Left to the -g one this started the INSTALLED agent-here and
+    # the real claude, which sat at its first-run screen and made every later row meaningless.
+    env HOME="$RWH" PATH="$RW/bin:$ROOT/bin:$PATH" tmux -L "$RWS" new-session -d -s "$1" -c "$RW/wt/$1" \
+      -e "CLAUDE_FLEET_SOCK=$RWS" -e "CLAUDE_CONFIG_DIR=$RWC" -e "CLAUDE_FLEET_DIR=$RWF" \
+      -e "CLAUDE_FLEET_RESUME=$2" -e CLAUDE_FLEET_FRESH=0 "exec agent-here \"$1\"" 2>/dev/null
+    wait_for 10 "$1 to start" "grep -q '^start ' '$RW/ev/$1'"
+  }
+  rwpid() { awk '$1=="start"{p=$2} END{print p}' "$RW/ev/$1" 2>/dev/null; }     # its newest process
+  rwgone() { wait_for "${2:-20}" "pid $1 to exit" "! kill -0 '$1' 2>/dev/null"; }
+  rwup() { tmux -L "$RWS" has-session -t "=$1" 2>/dev/null && echo yes || echo no; }
+  # The id its REPLACEMENT resumed: only a start after the old process ended counts, or the
+  # first start alone would satisfy this and a lost session would read as a resumed one.
+  rwlast() { awk '$1=="exit"||$1=="term"{e=1} e&&$1=="start"{l=$3} END{print l}' "$RW/ev/$1" 2>/dev/null; }
+  rwcmd() { sed -n 's/^ *→ //p' <<< "$1" | head -1; }                           # the printed way back
+  rwfail() { awk -F'\t' -v s="$1" '$2==s && $3=="failed"' "$RWF/$RWS.inbox" 2>/dev/null; }
+
+  # ── a holder slower than the launcher's grace: waited for, and the same id comes back ──
+  W1=aaaaaaaa-1111-4111-8111-000000000001
+  rwopen api-fix "$W1"; W1P="$(rwpid api-fix)"; echo 5 > "$RW/ctl/api-fix.exit-after"
+  out="$(rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session api-fix --no-continue --yes)"; rc=$?
+  rwgone "$W1P"; sleep 0.5
+  is "wait: a holder that outlives the launcher's grace does not lose the session" "yes" "$(rwup api-fix)"
+  is "wait: ...and the old process was gone BEFORE the new one started" "start exit start" \
+     "$(awk '{print $1}' "$RW/ev/api-fix" 2>/dev/null | paste -sd' ' -)"
+  is "wait: ...resuming the same conversation" "$W1" "$(rwlast api-fix)"
+  is "wait: ...counted as relaunched" "yes" "$(grep -q '1 relaunched' <<< "$out" && echo yes || echo "no: $out")"
+  is "wait: ...with nothing under Failed" "no" "$(grep -q '^Failed:' <<< "$out" && echo yes || echo no)"
+  is "wait: ...exiting 0" "0" "$rc"
+  is "wait: ...and no failed row" "" "$(rwfail api-fix)"
+  rm -f "$RW/ctl/api-fix.exit-after"; tmux -L "$RWS" kill-session -t "=api-fix" 2>/dev/null; rwgone "$(rwpid api-fix)"
+
+  # ── a holder that outlives the bound: TERM, to that pid and no other ───────────
+  # The bystander has the same shape as the holder and a different id: anything that killed by
+  # pattern or by name would take it too.
+  W2=aaaaaaaa-1111-4111-8111-000000000002; W2B=bbbbbbbb-1111-4111-8111-000000000002
+  rwopen rate-limit "$W2"; W2P="$(rwpid rate-limit)"; echo 40 > "$RW/ctl/rate-limit.exit-after"
+  ( exec -a "claude --resume $W2B" sleep 120 ) & RWBY=$!; disown "$RWBY"
+  out="$(CLAUDE_FLEET_RESTART_WAIT=1 CLAUDE_FLEET_RESTART_TERM_WAIT=5 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session rate-limit --no-continue --yes)"; rc=$?
+  is "term: a holder past the bound gets TERM, at its captured pid" "term $W2P" "$(grep '^term ' "$RW/ev/rate-limit" 2>/dev/null)"
+  is "term: ...which is said" "yes" "$(grep -q "TERM.*$W2P\|$W2P.*TERM" <<< "$out" && echo yes || echo "no: $out")"
+  is "term: ...and an unrelated holder of the same shape is untouched" "yes" "$(kill -0 "$RWBY" 2>/dev/null && echo yes || echo no)"
+  is "term: ...and the session comes back on its conversation" "yes $W2" "$(rwup rate-limit) $(rwlast rate-limit)"
+  is "term: ...counted as relaunched" "yes" "$(grep -q '1 relaunched' <<< "$out" && echo yes || echo "no: $out")"
+  is "term: ...exiting 0" "0" "$rc"
+  kill "$W2P" 2>/dev/null; rm -f "$RW/ctl/rate-limit.exit-after"; tmux -L "$RWS" kill-session -t "=rate-limit" 2>/dev/null; rwgone "$(rwpid rate-limit)"
+
+  # ── the wait removed: the refusal is what happens, and the report says so ─────
+  # =0 is the switch that takes the wait out altogether, so this is the old race on purpose.
+  W3=aaaaaaaa-1111-4111-8111-000000000003
+  rwopen docs-pass "$W3"; W3P="$(rwpid docs-pass)"; echo 6 > "$RW/ctl/docs-pass.exit-after"
+  out="$(CLAUDE_FLEET_RESTART_WAIT=0 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session docs-pass --no-continue --yes)"; rc=$?
+  is "no wait: the holder was not touched" "yes" "$(kill -0 "$W3P" 2>/dev/null && echo yes || echo no)"
+  is "no wait: a session that did not survive is not counted" "yes" "$(grep -q '0 relaunched' <<< "$out" && echo yes || echo "no: $out")"
+  is "no wait: ...it is under Failed, by name, with the id it was refused" "yes" \
+     "$(grep -q "$RWS/docs-pass.*refused.*$W3" <<< "$(grep -A3 '^Failed:' <<< "$out")" && echo yes || echo "no: $out")"
+  is "no wait: ...and the exit status says so" "1" "$rc"
+  W3C="$(rwcmd "$out")"
+  is "no wait: ...with the command that brings it back" "fleet-restart -s $RWS --reopen docs-pass" "$W3C"
+  W3R="$(rwfail docs-pass)"
+  is "no wait: the refusal left a failed row in the fleet's inbox, naming the id and the holder" "yes" \
+     "$(grep -q "$W3.*$W3P" <<< "$W3R" && echo yes || echo "no: $W3R")"
+  is "no wait: ...and one row, not one per poll" "1" "$(rwfail docs-pass | wc -l | tr -d ' ')"
+  is "no wait: ...which the reader of the inbox is shown" "yes" \
+     "$(grep -q "docs-pass.*FAILED.*$W3" <<< "$(rwr "$ROOT/bin/fleet-inbox" -s "$RWS" --all)" && echo yes || echo no)"
+  # CLOSED, NOT HELD: gone from tmux, it reads as `lost` with the way back beside it.
+  is "no wait: the pane closed, so fleet-list reads it as lost with the reopen beside it" "yes" \
+     "$(grep -qE "^docs-pass +lost .*--reopen docs-pass" <<< "$(rwr "$ROOT/bin/fleet-list" -s "$RWS")" && echo yes || echo no)"
+  rwgone "$W3P"
+  out2="$(rwr bash -c "$W3C")"; rc=$?
+  wait_for 10 "docs-pass to resume" "[ \"\$(rwlast docs-pass)\" = '$W3' ] && [ \"\$(grep -c '^start ' '$RW/ev/docs-pass')\" -ge 2 ]"
+  is "no wait: the printed command works once the holder has gone" "0 yes $W3" "$rc $(rwup docs-pass) $(rwlast docs-pass)"
+  is "no wait: ...and it says where the id came from" "yes" "$(grep -q 'from the .*record' <<< "$out2" && echo yes || echo "no: $out2")"
+  rm -f "$RW/ctl/docs-pass.exit-after"; tmux -L "$RWS" kill-session -t "=docs-pass" 2>/dev/null; rwgone "$(rwpid docs-pass)"
+
+  # ── the plan's id is not the one --reopen would pick: the explicit form ───────
+  # Two records claim the slot. --reopen settles them by name history, which here is the one
+  # the process is NOT in, so printing it would bring back the wrong conversation.
+  W4=aaaaaaaa-1111-4111-8111-000000000004; W4O=aaaaaaaa-1111-4111-8111-000000000044
+  rwrec cache-keys "$W4O" 1000
+  W4PD="$RWC/projects/$(printf '%s' "$RW/wt/cache-keys" | sed 's/[^A-Za-z0-9]/-/g')"
+  printf '{"type":"custom-title","customTitle":"acme-api/cache-keys","sessionId":"%s"}\n' "$W4O" >> "$W4PD/$W4O.jsonl"
+  rwopen cache-keys "$W4"; W4P="$(rwpid cache-keys)"; echo 5 > "$RW/ctl/cache-keys.exit-after"
+  out="$(CLAUDE_FLEET_RESTART_WAIT=0 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session cache-keys --no-continue --yes)"; rc=$?
+  W4C="$(rwcmd "$out")"
+  is "explicit: a slot --reopen would settle differently is given the explicit form" "yes" \
+     "$(grep -q "new-session.*CLAUDE_FLEET_RESUME=$W4" <<< "$W4C" && echo yes || echo "no: $out")"
+  rwgone "$W4P"
+  rwr bash -c "$W4C" >/dev/null; rc=$?
+  wait_for 10 "cache-keys to resume" "[ \"\$(grep -c '^start ' '$RW/ev/cache-keys')\" -ge 2 ]"
+  is "explicit: ...which brings back the conversation it was in, not the record's" "0 yes $W4" "$rc $(rwup cache-keys) $(rwlast cache-keys)"
+  rm -f "$RW/ctl/cache-keys.exit-after"; tmux -L "$RWS" kill-session -t "=cache-keys" 2>/dev/null; rwgone "$(rwpid cache-keys)"
+
+  # ── TERM is the last thing it does: a holder that survives it is reported, not killed ──
+  W5=aaaaaaaa-1111-4111-8111-000000000005
+  # noterm first: the stub reads it once, as it starts. Long enough to outlast the two 1 s bounds,
+  # the launcher's 3 s and a loaded machine, and short enough to wait out below, since it cannot
+  # be told to go.
+  : > "$RW/ctl/rotate-keys.noterm"
+  rwopen rotate-keys "$W5"; W5P="$(rwpid rotate-keys)"; echo 12 > "$RW/ctl/rotate-keys.exit-after"
+  out="$(CLAUDE_FLEET_RESTART_WAIT=1 CLAUDE_FLEET_RESTART_TERM_WAIT=1 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session rotate-keys --no-continue --yes)"; rc=$?
+  is "immune: a holder that ignores TERM is alive afterwards, nothing stronger was sent" "yes" "$(kill -0 "$W5P" 2>/dev/null && echo yes || echo no)"
+  is "immune: ...and the session is under Failed, naming the process in the way" "yes" \
+     "$(grep -q "rotate-keys.*$W5P" <<< "$(grep -A3 '^Failed:' <<< "$out")" && echo yes || echo "no: $out")"
+  is "immune: ...with a non-zero exit" "1" "$rc"
+  is "immune: ...and a failed row" "yes" "$(grep -q "$W5" <<< "$(rwfail rotate-keys)" && echo yes || echo no)"
+  rm -f "$RW/ctl/rotate-keys."*; rwgone "$W5P"
+
+  # ── a resume that dies by itself is not a relaunch either ─────────────────────
+  W6=aaaaaaaa-1111-4111-8111-000000000006
+  rwopen csv-export "$W6"; W6P="$(rwpid csv-export)"; : > "$RW/ctl/csv-export.dies"
+  out="$(rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session csv-export --no-continue --yes)"; rc=$?
+  is "died: an agent that exits at once is not counted" "yes 1" "$(grep -q '0 relaunched' <<< "$out" && echo yes || echo "no: $out") $rc"
+  is "died: ...and is under Failed with the way back" "yes" \
+     "$(grep -q "^ *→ fleet-restart -s $RWS --reopen csv-export" <<< "$out" && echo yes || echo "no: $out")"
+  rm -f "$RW/ctl/csv-export.dies"
+
+  # ── still up, never seen on the id: not a relaunch, and --reopen would refuse the name ──
+  W7=aaaaaaaa-1111-4111-8111-000000000007
+  rwopen list-pages "$W7"; : > "$RW/ctl/list-pages.hang"
+  out="$(CLAUDE_FLEET_RESTART_CONFIRM=1 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session list-pages --no-continue --yes)"; rc=$?
+  is "unseen: a session whose agent never showed the id is not counted" "yes 1" "$(grep -q '0 relaunched' <<< "$out" && echo yes || echo "no: $out") $rc"
+  is "unseen: ...and its way back clears the name first" "yes" \
+     "$(grep -q "kill-session -t '=list-pages' .*--reopen list-pages" <<< "$(rwcmd "$out")" && echo yes || echo "no: $out")"
+  W7C="$(rwcmd "$out")"; rm -f "$RW/ctl/list-pages.hang"; : > "$RW/ev/list-pages"
+  # QUOTED, because the owner's shell may be zsh, which reads a bare `=name` as a command lookup
+  # and fails before tmux runs. Run there when there is one.
+  if command -v zsh >/dev/null 2>&1; then W7S=(zsh -f -c); else W7S=(bash -c); fi
+  rwr "${W7S[@]}" "$W7C" >/dev/null; rc=$?
+  wait_for 10 "list-pages to resume" "grep -q '^start ' '$RW/ev/list-pages'"
+  is "unseen: ...and that command works, in the shell it is pasted into" "0 yes $W7" \
+     "$rc $(rwup list-pages) $(awk '$1=="start"{l=$3} END{print l}' "$RW/ev/list-pages" 2>/dev/null)"
+  W7P="$(rwpid list-pages)"; tmux -L "$RWS" kill-session -t "=list-pages" 2>/dev/null; rwgone "$W7P"
+
+  # ── a refusal slower than agent-here's minimum run still closes the pane ──────
+  # Under swap the launcher's grace and a slow node can pass that minimum, and exit 1 would then
+  # hold the pane on a session that never started: `exited`, so --reopen says "already running".
+  # WATCHED GOING RED with the launcher on exit 1: the session still up, and a marker beside it.
+  # The minimum is lowered here rather than the machine slowed.
+  W9=aaaaaaaa-1111-4111-8111-000000000009
+  rwopen date-picker "$W9"; W9P="$(rwpid date-picker)"; echo 7 > "$RW/ctl/date-picker.exit-after"
+  tmux -L "$RWS" set-environment -g CLAUDE_FLEET_MIN_RUN 1
+  out="$(CLAUDE_FLEET_RESTART_WAIT=0 rwr "$ROOT/bin/fleet-restart" -s "$RWS" --session date-picker --no-continue --yes)"; rc=$?
+  tmux -L "$RWS" set-environment -gu CLAUDE_FLEET_MIN_RUN
+  is "slow refusal: the pane closes rather than holding, and it is under Failed" "no 1 yes" \
+     "$(rwup date-picker) $rc $(grep -q "date-picker.*refused.*$W9" <<< "$out" && echo yes || echo "no: $out")"
+  is "slow refusal: ...and no .exited marker makes it read as anything but lost" "no" \
+     "$([ -e "$RWF/$RWS.date-picker.exited" ] && echo yes || echo no)"
+  rwgone "$W9P"; rm -f "$RW/ctl/date-picker.exit-after"
+
+  # ── a name that is a prefix of a live one ─────────────────────────────────────
+  # A bare `kill-session -t api` with no `api` kills `api-fix`: tmux falls through to a prefix.
+  # --reopen runs that kill on its way in, so reopening a lost card took its sibling with it.
+  W8=aaaaaaaa-1111-4111-8111-000000000008; W8S=aaaaaaaa-1111-4111-8111-000000000088
+  rwopen api-2 "$W8S"; W8P="$(rwpid api-2)"; rwrec api "$W8"
+  out="$(rwr "$ROOT/bin/fleet-restart" -s "$RWS" --reopen api)"
+  wait_for 10 "api to resume" "grep -q '^start ' '$RW/ev/api'"
+  is "prefix: reopening 'api' leaves the live 'api-2' running" "yes" "$(kill -0 "$W8P" 2>/dev/null && [ "$(rwup api-2)" = yes ] && echo yes || echo "no: $out")"
+  is "prefix: ...and reopens its own conversation" "$W8" "$(awk '$1=="start"{l=$3} END{print l}' "$RW/ev/api" 2>/dev/null)"
+
+  tmux -L "$RWS" kill-server 2>/dev/null
+  for p in "$RWBY" "$W1P" "$W2P" "$W3P" "$W4P" "$W5P" "$W6P" "$W8P"; do reap "$p"; done
+  rm -rf "${RW:?}"
+else
+  skip "fleet-restart waits out the old process" "tmux, jq or node missing"
+fi
+
+# ── --reopen falls back to the restart's own snapshot ────────────────────────
+# Recovering those lost sessions by hand, three of them refused: two with "no recorded
+# conversation", one whose record named an id with no transcript. The restart's own snapshot,
+# written before its first kill, held the right id for all three and the transcripts were
+# there. A snapshot is the slot's own history, keyed by socket and slot, so reading it is not a
+# guess; "the newest conversation in this folder" still is, and stays refused.
+#   WATCHED GOING RED on the code before this: every row that resumes, refused instead.
+group "fleet-restart --reopen falls back to the restart snapshot"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  RS="$(cd "$(mktemp -d "$TEST_RUNS.$$.rsnap.XXXXXX")" && pwd -P)"
+  RSH="$RS/home"; RSC="$RSH/.claude"; RSF="$RSC/fleet"; RSK=cf-acme-api
+  mkdir -p "$RS/stub" "$RS/wt" "$RSF" "$RSH/.config/ghostfleet" "$RSH/.claude-personal/fleet"
+  printf 'acme-api\t%s\twork\n' "$RS/wt" > "$RSH/.config/ghostfleet/projects"
+  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-}" >> "%s/launched"\nexec sleep 600\n' "$RS" > "$RS/stub/agent-here"
+  chmod +x "$RS/stub/agent-here"
+  HOME="$RSH" tmux -L "$RSK" kill-server 2>/dev/null
+  HOME="$RSH" tmux -L "$RSK" new-session -d -s _term -c "$RS/wt" "sleep 600" 2>/dev/null
+  tmux -L "$RSK" set-environment -g PATH "$RS/stub:$ROOT/bin:$PATH"
+  rsr() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH \
+            -u CLAUDE_FLEET_AGENT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_PROFILE \
+            HOME="$RSH" PATH="$RS/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" "$@" 2>&1; }
+  rstr() { local cwd="$RS/wt/$1" pd; mkdir -p "$cwd"; pd="$RSC/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$pd"
+           printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$pd/$2.jsonl"; }
+  # snapshot <dir> <stamp> <sock> <slot> <id>: the file write_snapshot writes
+  rssnap() { printf '# fleet-restart snapshot\n# sock\tslot\tagent\tstatus\taction\tsession_id\tcwd\tnote\n%s\t%s\tclaude\tready\tresume-idle\t%s\t%s\t\n' \
+               "$3" "$4" "$5" "$RS/wt/$4" >> "$1/restart-$2.tsv"; }
+  rslaunched() { wait_for 5 "$1 to launch" "grep -q '^$1 ' '$RS/launched'"; grep "^$1 " "$RS/launched" 2>/dev/null | tail -1; }
+  rsup() { tmux -L "$RSK" has-session -t "=$1" 2>/dev/null && echo yes || echo no; }
+  S1=dddddddd-2222-4222-8222-000000000001; S2=dddddddd-2222-4222-8222-000000000002
+  S3=dddddddd-2222-4222-8222-000000000003; S4=dddddddd-2222-4222-8222-000000000004
+
+  # NO RECORD AT ALL. An older snapshot beside it names something else: the newest wins.
+  rstr w1 "$S1"; rstr w1 "$S2"
+  rssnap "$RSF" 20261101-100000 "$RSK" w1 "$S2"; rssnap "$RSF" 20261109-100000 "$RSK" w1 "$S1"
+  out="$(rsr -s "$RSK" --reopen w1 --dry-run)"
+  is "snapshot: a dry run says it would resume from it, naming the file" "yes" \
+     "$(grep -q "would reopen 'w1'.*$S1.*restart-20261109-100000.tsv" <<< "$out" && echo yes || echo "no: $out")"
+  is "snapshot: ...and touches nothing" "no" "$(rsup w1)"
+  out="$(rsr -s "$RSK" --reopen w1)"; rc=$?
+  is "snapshot: no record: the newest snapshot's id is resumed" "0 w1 $S1" "$rc $(rslaunched w1)"
+  is "snapshot: ...and the output says where the id came from" "yes" \
+     "$(grep -q "restart-20261109-100000.tsv" <<< "$out" && grep -q 'no record' <<< "$out" && echo yes || echo "no: $out")"
+
+  # A RECORD WHOSE TRANSCRIPT IS GONE: it is not believed over the snapshot.
+  rstr w2 "$S3"
+  jq -n --arg id "$S4" --arg sock "$RSK" --arg cwd "$RS/wt/w2" '{session_id:$id, sock:$sock, slot:"w2", cwd:$cwd, status:"ready", ts:1}' > "$RSF/$S4.json"
+  rssnap "$RSF" 20261109-110000 "$RSK" w2 "$S3"
+  out="$(rsr -s "$RSK" --reopen w2)"; rc=$?
+  is "snapshot: a record with no transcript gives way to the snapshot" "0 w2 $S3" "$rc $(rslaunched w2)"
+  is "snapshot: ...saying what was wrong with the record" "yes" \
+     "$(grep -q "$S4.*no transcript" <<< "$out" && grep -q 'restart-20261109-110000.tsv' <<< "$out" && echo yes || echo "no: $out")"
+
+  # A GOOD RECORD WINS, and says so: the snapshot is a fallback, not a second opinion.
+  rstr w3 "$S1"; rstr w3 "$S2"
+  jq -n --arg id "$S2" --arg sock "$RSK" --arg cwd "$RS/wt/w3" '{session_id:$id, sock:$sock, slot:"w3", cwd:$cwd, status:"ready", ts:1}' > "$RSF/w3.json"
+  rssnap "$RSF" 20261109-120000 "$RSK" w3 "$S1"
+  out="$(rsr -s "$RSK" --reopen w3)"; rc=$?
+  is "snapshot: a record with a transcript is taken over any snapshot" "0 w3 $S2" "$rc $(rslaunched w3)"
+  is "snapshot: ...and the output says it came from the record" "yes" "$(grep -q "from the slot's record" <<< "$out" && echo yes || echo "no: $out")"
+
+  # ANOTHER PROFILE'S DIR: `--all` keeps its snapshot with the caller, not with each fleet.
+  rstr w4 "$S4"; rssnap "$RSH/.claude-personal/fleet" 20261109-130000 "$RSK" w4 "$S4"
+  out="$(rsr -s "$RSK" --reopen w4)"; rc=$?
+  is "snapshot: one kept in another profile's fleet dir is found too" "0 w4 $S4" "$rc $(rslaunched w4)"
+
+  # SCOPED, AND NEVER A GUESS. `master` is in every fleet; a row of another fleet's says nothing
+  # about this one's, and a transcript sitting in the folder is not this slot's history.
+  rstr w5 "$S1"; rssnap "$RSF" 20261109-140000 cf-acme-web w5 "$S1"
+  out="$(rsr -s "$RSK" --reopen w5)"; rc=$?
+  is "snapshot: another fleet's row for the same slot is not used" "1 no" "$rc $(rsup w5)"
+  is "snapshot: ...and it still refuses to guess" "yes" \
+     "$(grep -q 'no recorded conversation' <<< "$out" && grep -q -- '--continue' <<< "$out" && echo yes || echo "no: $out")"
+  # A row with no id (a skipped session has none) is passed over.
+  rstr w6 "$S2"; rssnap "$RSF" 20261109-090000 "$RSK" w6 "$S2"; rssnap "$RSF" 20261109-150000 "$RSK" w6 ""
+  out="$(rsr -s "$RSK" --reopen w6)"; rc=$?
+  is "snapshot: a row with no id is passed over for the one before it" "0 w6 $S2" "$rc $(rslaunched w6)"
+  # A snapshot id with no transcript under this account would open a pane that exits.
+  rssnap "$RSF" 20261109-160000 "$RSK" w7 "$S3"; mkdir -p "$RS/wt/w7"
+  out="$(rsr -s "$RSK" --reopen w7)"; rc=$?
+  is "snapshot: an id with no transcript there is refused, naming it" "1 no yes" \
+     "$rc $(rsup w7) $(grep -q "$S3" <<< "$out" && echo yes || echo "no: $out")"
+  # Fleets restarted one after another land in the same second: neither snapshot is overwritten.
+  # A fixed clock, because the two runs falling into one second by themselves is a coin toss. The
+  # plan skips this slot (no live conversation to establish), so nothing is killed.
+  # WATCHED GOING RED without the -$$: one file.
+  printf '#!/bin/sh\ncase "$1" in +%%Y%%m%%d-%%H%%M%%S) echo 20261109-170000 ;; *) exec /bin/date "$@" ;; esac\n' > "$RS/stub/date"; chmod +x "$RS/stub/date"
+  rsr -s "$RSK" --session w1 --no-continue --yes >/dev/null; rsr -s "$RSK" --session w1 --no-continue --yes >/dev/null
+  is "snapshot: two in one second are two files" "2" "$(ls "$RSF"/restart-20261109-170000*.tsv 2>/dev/null | wc -l | tr -d ' ')"
+
+  tmux -L "$RSK" kill-server 2>/dev/null
+  rm -rf "${RS:?}"
+else
+  skip "fleet-restart --reopen falls back to the restart snapshot" "tmux, jq or node missing"
+fi
+
 # ── a fleet is restarted, and drawn, under ITS OWN account ───────────────────
 # Four tmux servers died at once, and the recovery ran from a pane on another profile. A
 # fleet session exports CLAUDE_FLEET_DIR for its own profile, and fleet-restart took the
@@ -25427,7 +25754,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   mkdir -p "$H/.config/ghostfleet" "$WK/fleet" "$CL/fleet" "$PA/stub" "$PA/src/acme-api" "$PA/src/acme-web"
   printf 'acme-web\t%s\twork\nacme-api\t%s\tpersonal\n' "$PA/src/acme-web" "$PA/src/acme-api" > "$H/.config/ghostfleet/projects"
   # A stub agent-here writes down what it was launched as, then stays up like an agent.
-  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$PA" > "$PA/stub/agent-here"
+  printf '#!/usr/bin/env bash\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec -a "claude --resume ${CLAUDE_FLEET_RESUME:-}" sleep 600\n' "$PA" > "$PA/stub/agent-here"
   chmod +x "$PA/stub/agent-here"
   NOW="$(date +%s)"
   # prec <config-dir> <sock> <slot> <id> [<config-dir the transcript is under>]
@@ -26741,6 +27068,18 @@ STUB
   is "reload: ...and so is a mod that names no code" "reload: stale mod" "$(row list-pages "$plan" | awk -F' [|] ' '{print $5}')"
   is "reload: the dry run touched nothing"    "$before" "$(snap)"
   is "reload: ...and no stub read a line"     "" "$(cat "$MR"/fleet/*.got 2>/dev/null)"
+  # The restart path, which --apply here never reaches (--reload-only, and a real restart would
+  # need a real Claude). KILLED INSIDE ITS WAIT, fleet-restart has already killed the old session
+  # and not yet started the new one, so the timeout has to outlast every bound it has.
+  mrq() { (cd "$ROOT" && node --input-type=module -e "import('./lib/mod-reload.mjs').then(m => { $1 })" 2>/dev/null); }
+  is "reload: a restart's timeout outlasts all of fleet-restart's waits" "yes" \
+     "$(mrq "console.log(m.restartTimeoutMs({}) > (120 + 10 + 60) * 1000 ? 'yes' : 'no')")"
+  is "reload: ...and grows with an owner who raised them" "yes" \
+     "$(mrq "console.log(m.restartTimeoutMs({ CLAUDE_FLEET_RESTART_WAIT: '900' }) > 900 * 1000 ? 'yes' : 'no')")"
+  is "reload: a session that came back has no ✗" "" \
+     "$(mrq "console.log(m.restartResult('fleet-restart: 1 relaunched (0 continued, 1 left idle), 0 skipped\\n'))")"
+  is "reload: one that did not shows fleet-restart's reason" "✗ refused: conversation 1234 is open in live process 99" \
+     "$(mrq "console.log(m.restartResult('fleet-restart: 0 relaunched (0 continued, 0 left idle), 0 skipped, 1 failed\\n\\nFailed:\\n  cf-acme-api/api-fix — refused: conversation 1234 is open in live process 99\\n    → fleet-restart -s cf-acme-api --reopen api-fix\\n'))")"
   is "reload: --reload-only never restarts"   "skip: Claude 2.1.284 needs a restart (--reload-only)" \
      "$(row cache-keys "$(mrun --reload-only)" | awk -F' [|] ' '{print $5}')"
   is "reload: --count is every claude not on the current mod" "7" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
@@ -27354,6 +27693,7 @@ STUB
         HOME="$OC/home" PATH="$OC/bin:$PATH" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_DIR="$OCF" \
         CLAUDE_FLEET_SOCK="$OCS" CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "${@:2}" \
         /bin/bash "$ROOT/bin/claude-here" "$1" 2>"$OC/stderr" )
+    echo "$?" > "$OC/rc"
     sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null
   }
 
@@ -27398,6 +27738,15 @@ STUB
      "$(launch master CLAUDE_FLEET_RESUME="$V" >/dev/null; [ -f "$OC/argv.claude" ] && echo ran || echo refused)"
   is "...saying who holds it" "yes" \
      "$(grep -q "refusing — conversation $V is open in live process $OCH" "$OC/stderr" && echo yes || echo no)"
+  is "...exiting 126, which agent-here closes the pane on however long the refusal took" "126" "$(cat "$OC/rc")"
+  # A REFUSAL NOBODY CAN SEE IS HOW SESSIONS VANISHED: the pane closes, and with it the message.
+  OCRW="$(awk -F'\t' '$2=="master" && $3=="failed"' "$OCF/$OCS.inbox" 2>/dev/null)"
+  is "...and it leaves a failed row in the fleet's inbox, naming the session, the id and the holder" "yes" \
+     "$(grep -q "$V.*$OCH" <<< "$OCRW" && echo yes || echo "no: $OCRW")"
+  is "...and the way back" "yes" "$(grep -q "fleet-restart -s $OCS --reopen master" <<< "$OCRW" && echo yes || echo "no: $OCRW")"
+  rm -f "${OCF:?}/$OCS.inbox"
+  is "...while outside a fleet it stays on the terminal, with nowhere to file it" "refused no" \
+     "$(launch master CLAUDE_FLEET_RESUME="$V" CLAUDE_FLEET_SOCK= >/dev/null; [ -f "$OC/argv.claude" ] && echo ran || echo refused) $([ -e "$OCF/$OCS.inbox" ] || [ -e "$OCF/.inbox" ] && echo yes || echo no)"
   reap "$OCH"
   # ...but a holder that is already dying — every relaunch kills the old pane just before —
   # is given its few seconds, so a restart does not refuse its own predecessor.
@@ -27463,6 +27812,8 @@ STUB
   sleep 0.3
   is "codex: an explicit id another process holds is refused" "refused" \
      "$(cxlaunch api CLAUDE_FLEET_RESUME="$CV" >/dev/null; [ -f "$OC/argv.codex" ] && echo ran || echo refused)"
+  is "codex: ...and it leaves the same failed row" "yes" \
+     "$(grep -q "$CV.*$OCH" <<< "$(awk -F'\t' '$2=="api" && $3=="failed"' "$OCF/$OCS.inbox" 2>/dev/null)" && echo yes || echo no)"
   reap "$OCH"
 
   # Q2 AT THE WRITER: the hook files a conversation under the pane it runs in. Moving into
