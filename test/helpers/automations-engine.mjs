@@ -329,5 +329,153 @@ const stoppedRow = (r) => lines(r.file('runs.jsonl')).map(l => JSON.parse(l)).fi
   row('...and its run still reaches its last step', '1', r.did.length);
 }
 
+// ── the watcher: two things that happen together are two things, and nothing feeds itself ──
+const TELL = { action: 'notify', text: '{session} finished' };
+const FINISHED = (extra = {}) => ({ type: 'event', event: 'finished', project: '*', session: '*', cooldown: 1, ...extra });
+const go = async (r, statuses) => { Object.assign(r.state.sessions, statuses); await r.engine.watch(); await settle(); };
+const finish = async (r, k) => {
+  clock += 61;
+  await go(r, { [k]: 'working' });
+  clock += 61;
+  await go(r, { [k]: 'ready' });
+};
+{
+  const r = rig({});
+  await r.save({ name: 'tell me', trigger: FINISHED(), steps: [TELL] });
+  await r.engine.watch();
+  r.state.sessions['acme-api/w1'] = 'working'; r.state.sessions['acme-api/w2'] = 'working';
+  clock += 6; await r.engine.watch();
+  clock += 6; await go(r, { 'acme-api/w1': 'ready', 'acme-api/w2': 'ready' });
+  const texts = (await r.list()).notices.map(n => n.text).sort().join();
+  row('two sessions finishing in one look are two notices', 'w1 finished,w2 finished', texts);
+}
+{
+  // The same session again, while the run it started is still waiting: refused, and not charged.
+  const r = rig({});
+  await r.save({ name: 'slow', trigger: FINISHED(), steps: [{ action: 'wait', minutes: 1 }, TELL] });
+  await r.engine.watch();
+  await finish(r, 'acme-api/w1');
+  row('a run is waiting', '1', r.sleeps.pending.length);
+  await finish(r, 'acme-api/w1');
+  const skipped = lines(r.file('runs.jsonl')).map(l => JSON.parse(l)).filter(x => x.status === 'skipped');
+  row('the same session finishing again is refused while it runs', '1', skipped.length);
+  while (r.sleeps.pending.length) await slice(r);
+  clock += 6;
+  await go(r, { 'acme-api/w1': 'working' });
+  clock += 6;
+  await go(r, { 'acme-api/w1': 'ready' });
+  row('...and the refusal did not use up its cooldown', 'yes', r.sleeps.pending.length === 1 ? 'yes' : `${r.sleeps.pending.length} waiting`);
+}
+{
+  // The slow loop: each turn outlasts the cooldown, so it fires only a few times an hour, and the
+  // hourly count never sees it.
+  const r = rig({});
+  await r.save({ name: 'keep going', trigger: FINISHED({ session: 'w1', cooldown: 10 }), steps: [{ action: 'send', project: '{project}', session: '{session}', prompt: 'next' }] });
+  await r.engine.watch();
+  const turn = async () => { clock += 6; await go(r, { 'acme-api/w1': 'working' }); clock += 720; await go(r, { 'acme-api/w1': 'ready' }); };
+  await turn();
+  row('a step on the session it watches runs', '1', r.did.length);
+  for (let i = 0; i < 30; i++) await turn();
+  row('...and a chain of them stops by itself', '10', r.did.length);
+  const a = (await r.list()).automations[0];
+  row('...switched off', 'false', a.enabled);
+  row('...with a notice that says why', '1', (await r.list()).notices.filter(n => /in a row/.test(n.text)).length);
+  row('...though it never reached the hourly count', 'yes', 10 * 726 > 3600 ? 'yes' : 'no');
+}
+{
+  // Two automations feeding each other: each is innocent on its own.
+  const r = rig({});
+  await r.save({ name: 'a to b', trigger: FINISHED({ session: 'w1', cooldown: 1 }), steps: [{ action: 'send', project: 'acme-api', session: 'w2', prompt: 'go' }] });
+  await r.save({ name: 'b to a', trigger: FINISHED({ session: 'w2', cooldown: 1 }), steps: [{ action: 'send', project: 'acme-api', session: 'w1', prompt: 'go' }] });
+  await r.engine.watch();
+  // Only a session a step just sent to takes a turn: nothing else is working in this fleet.
+  let k = 'acme-api/w1', n = 0;
+  for (let i = 0; i < 40; i++) {
+    await finish(r, k);
+    if (r.did.length === n) break;
+    n = r.did.length;
+    k = `acme-api/${r.did.at(-1).args.session}`;
+  }
+  row('two automations feeding each other stop too', 'yes', r.did.length <= 11 && r.did.length >= 5 ? 'yes' : `${r.did.length} sends`);
+  row('...with one of them switched off', '1', (await r.list()).automations.filter(a => !a.enabled).length);
+}
+{
+  // A spawned session finishing sets off the next spawn: a new name each time, one chain.
+  const r = rig({});
+  const appr = () => ({ purpose: 'automation nightly' });
+  await r.save({ name: 'spawner', trigger: FINISHED({ cooldown: 1 }), steps: [{ action: 'spawn', project: 'acme-api', name: 'n{time}', prompt: 'go' }] }, appr);
+  await r.engine.watch();
+  r.state.sessions['acme-api/w1'] = 'ready';
+  let target = 'acme-api/w1', n = 0;
+  for (let i = 0; i < 40; i++) {
+    await finish(r, target);
+    const last = r.did.at(-1);
+    if (r.did.length === n) break;
+    n = r.did.length;
+    target = `acme-api/${last.args.name}`;
+    r.state.sessions[target] = 'ready';
+    await r.engine.watch();
+  }
+  row('a spawn that sets off the next spawn stops too', 'yes', r.did.length <= 11 && r.did.length >= 5 ? 'yes' : `${r.did.length} spawns`);
+}
+{
+  // A turn nobody's step started ends the chain, and a person working in a session is not a loop.
+  const r = rig({});
+  await r.save({ name: 'summary', trigger: FINISHED({ session: 'w1', cooldown: 1 }), steps: [{ action: 'send', project: '{project}', session: '{session}', prompt: 'summarise' }] });
+  await r.engine.watch();
+  const owner = async () => {
+    await finish(r, 'acme-api/w1');                    // the owner's task ends: it fires
+    clock += 6; await go(r, { 'acme-api/w1': 'working' });
+    clock += 6; await go(r, { 'acme-api/w1': 'ready' }); // the summary ends inside the cooldown: nothing fires
+  };
+  for (let i = 0; i < 25; i++) await owner();
+  row('a person working in a session is not a chain', 'true', (await r.list()).automations[0].enabled);
+  row('...it answered every turn of theirs', '25', r.did.length);
+}
+{
+  const r = rig({});
+  await r.save({ name: 'too fast', trigger: FINISHED({ session: 'w1', cooldown: 1 }), steps: [TELL] });
+  await r.engine.watch();
+  for (let i = 0; i < 31; i++) { clock += 6; await go(r, { 'acme-api/w1': 'working' }); clock += 61; await go(r, { 'acme-api/w1': 'ready' }); }
+  row('the hourly count is a limit with no step on a session', 'false', (await r.list()).automations[0].enabled);
+}
+{
+  // Being switched off by a limit ends a run in flight on another session, as a person doing it does.
+  const r = rig({});
+  await r.save({ name: 'limited', trigger: FINISHED({ cooldown: 1 }), steps: [{ action: 'wait', minutes: 1 }, TELL] });
+  await r.engine.watch();
+  const fin = async (k) => { clock += 6; await go(r, { [k]: 'working' }); clock += 61; await go(r, { [k]: 'ready' }); };
+  for (let i = 0; i < 29; i++) { await fin('acme-api/w1'); while (r.sleeps.pending.length) await slice(r); }
+  const told = (await r.list()).notices.length;
+  await fin('acme-api/w2');
+  row('the thirtieth run is waiting', '1', r.sleeps.pending.length);
+  await fin('acme-api/w1');
+  row('...the thirty-first switches it off', 'false', (await r.list()).automations[0].enabled);
+  while (r.sleeps.pending.length) await slice(r);
+  row('...and the run still waiting stops there', '1', (await r.list()).notices.filter(n => /30 times/.test(n.text)).length + (await r.list()).notices.length - told - 1);
+}
+{
+  // One read of every project's grid, shared.
+  const r = rig({});
+  await r.list(); await r.list(); await r.list();
+  row('the screen polling three times reads the fleet once', '1', r.state.reads);
+  clock += 6; await r.list();
+  row('...and a few seconds later reads it again', '2', r.state.reads);
+  await r.save({ name: 'checks', trigger: DAILY, steps: [{ action: 'check', project: 'acme-api', session: 'w1', status: ['ready'] }, { action: 'check', project: 'acme-api', session: 'w1', status: ['ready'] }] });
+  const id = (await r.list()).automations[0].id;
+  const before = r.state.reads;
+  await r.call('POST', '/api/automations/run', { id });
+  row('...but a "continue only if" reads the session as it is now', '2', r.state.reads - before);
+
+  let calls = 0, release;
+  const slow = rig({ fleet: () => { calls++; return new Promise((res) => { release = () => res([]); }); } });
+  await slow.save({ name: 'slow grid', trigger: FINISHED(), steps: [TELL] });
+  const first = slow.engine.watch();
+  clock += 6;
+  await slow.engine.watch();
+  row('a watcher still reading is not started again', '1', calls);
+  release(); await first;
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(0);
