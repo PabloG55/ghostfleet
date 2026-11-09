@@ -933,7 +933,12 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
   if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
   // fleet_wake asks for the exit status too: see `unwoken` below.
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true,
+  // human IS THE REQUEST BEING THE OWNER, and it is what marks a send as the person speaking
+  // (mcp/fleet-dispatch.mjs asOwner). An automation is not: its prompt was written earlier, maybe
+  // by the draft model, and nobody is holding the phone. Marked, it landed in the receiving
+  // session's ledger as the owner's own words, which is owner authority in the memory and in the
+  // lead's briefing. Unmarked it arrives as a brief, the way a lead's does.
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
                                                status: tool === 'fleet_send' || tool === 'fleet_wake' });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits

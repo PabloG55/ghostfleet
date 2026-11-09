@@ -19877,6 +19877,12 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "run now answers"                          "200"   "$(apf run.send auton)"
   is "...and it worked"                         "true"  "$(aj run.send auton ok)"
   is "...through the real verb path to fleet-send" "1"  "$(grep '^fleet-send' "$AW/ran.on" | grep -c 'review what is open on 20' || true)"
+  # NOT THE OWNER'S WORDS. --owner is what makes the receiving session's ledger record a prompt
+  # as the person speaking, which is `owner` authority in the memory and the lead's briefing. An
+  # unattended run was written earlier, perhaps by the draft model, so it arrives as a brief.
+  # Asserted both ways: a stub that never saw the flag would pass the first row alone.
+  is "an automation's send is not the owner speaking" "0" "$(grep 'review what is open on 20' "$AW/ran.on" | grep -c -- '\[--owner\]' || true)"
+  is "...while the phone's own send to that session is" "1" "$(grep 'the owner typed this' "$AW/ran.on" | grep -c -- '\[--owner\]' || true)"
   # 428, NOT 401: the phone reads a 401 as a dead session token and locks itself.
   is "a step that starts a session: no passkey, refused" "428" "$(apf save.spawnNoKey auton)"
   is "...saying it needs one"                   "passkey" "$(aj save.spawnNoKey auton needs)"
@@ -19909,7 +19915,7 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and a draft"                           "404"   "$(apf draft autoff)"
   is "...and delete"                            "404"   "$(apf delete autoff)"
   is "...still behind the token"                "401"   "$(apf list.noToken autoff)"
-  is "...and nothing ran"                       "0"     "$(grep -c . "$AW/ran.off" || true)"
+  is "...and nothing ran"                       "0"     "$(grep -v 'the owner typed this' "$AW/ran.off" | grep -c . || true)"
   rm -f "$ASW"
   serve_stop
 else

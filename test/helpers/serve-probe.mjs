@@ -307,6 +307,9 @@ if (phase === 'automations') {
   row('save.send', send);
   row('save.noSteps', await save({ name: 'nothing', enabled: true, trigger: daily, steps: [] }));
   row('run.send', await a.api(base, 'POST', '/api/automations/run', { id: send.json?.automation?.id || 'NOPE' }));
+  // The same session, the same verb, from the owner's own thumb: run.sh tells the two apart by
+  // the mark the receiving session's ledger reads as the person speaking.
+  row('verb.phone', await a.api(base, 'POST', '/api/verb', { tool: 'fleet_send', args: { project: 'demo', session: 'w1', prompt: 'the owner typed this' } }));
   const spawn = { name: 'nightly check', enabled: true, trigger: daily,
     steps: [{ action: 'spawn', project: 'demo', name: 'nightly', prompt: 'run the checks' }] };
   row('save.spawnNoKey', await save(spawn));
