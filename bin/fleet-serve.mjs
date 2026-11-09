@@ -55,6 +55,7 @@ import { wsAccept, wsFrame, FrameReader, OP, ControlClient, STATE_FORMAT, parseS
 import * as P from '../lib/peers.mjs';
 import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
+import { createAutomations } from '../lib/automations.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -932,7 +933,12 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
   if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
   // fleet_wake asks for the exit status too: see `unwoken` below.
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true,
+  // human IS THE REQUEST BEING THE OWNER, and it is what marks a send as the person speaking
+  // (mcp/fleet-dispatch.mjs asOwner). An automation is not: its prompt was written earlier, maybe
+  // by the draft model, and nobody is holding the phone. Marked, it landed in the receiving
+  // session's ledger as the owner's own words, which is owner authority in the memory and in the
+  // lead's briefing. Unmarked it arrives as a brief, the way a lead's does.
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
                                                status: tool === 'fleet_send' || tool === 'fleet_wake' });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
@@ -959,7 +965,9 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // session it came through — a Face ID with no 15-minute idle gap since — while a TAPPED yes
   // on a proposal asks for a fresh one (/api/jarvis/confirm). A spoken yes must also be two
   // words, because one word is what an open microphone hears in noise.
-  if (!refused && tool === 'fleet_send' && args.session === 'master') {
+  // An automation's send is the owner's words written in advance, not said now: it is not
+  // recorded as something he told Jarvis.
+  if (!refused && tool === 'fleet_send' && args.session === 'master' && !client.automation) {
     try {
       const jm = jarvis.readMarker();
       if (jm && (args.project === jm.name || args.project === jm.sock)) jarvis.recordSaid(String(args.prompt || ''), 'phone');
@@ -2107,6 +2115,32 @@ async function pushTick() {
   if (sent) pushLastSent = now();
 }
 
+// ── automations (lib/automations.mjs) ──────────────────────────────────────────
+// The module decides WHEN; this is everything it may do. A step is a verb through runVerb and
+// the same one-at-a-time chain as a tap, its client named for the automation so the audit row
+// and the inbox say who acted. A passkey verb carries the approval its save recorded instead of
+// a tap's assertion — the module refuses to run one that has none.
+const automations = createAutomations({
+  perform: (tool, args, { id, name, approved }) => serialize(async () => {
+    const r = await runVerb({ tool, rawArgs: args, client: { id: `automation:${name}`, automation: id }, ip: 'local', session: null,
+                              assertion: approved ? { purpose: `automation:${id}@${approved.at}` } : null });
+    return { ok: !!r.json.ok, text: r.json.text };
+  }),
+  // What the grid says, every project the phone can see: the same --json it renders from, so
+  // Jarvis switched off is gone from here too, not only from the Projects screen.
+  // `share` is what may leave for the draft model: only a project plainly on `include`, so a
+  // setting that cannot be read keeps it here (lib/automations.mjs, the draft).
+  fleet: () => Promise.all(shownToPhone().map(async (t) => {
+    const g = await gridJson(t);
+    let share = false;
+    try { share = K.privacyFor(path.join(t.cfg, 'fleet'), t.sock).mode === 'include'; } catch {}
+    return { name: t.name, share, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
+  })),
+  audit: (row) => auditAppend({ ts: now(), ip: 'local', ...row }),
+  clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; },
+  log,
+});
+
 function armPushWatch() {
   const c = loadConfig();
   const every = Math.max(1, Number(c.push.scan) || 3) * 1000;
@@ -2925,7 +2959,11 @@ function agentCatalogue() {
         parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, await mergeProjects({ home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() }, await fan, peers()));
+    // `automations_enabled` is that switch's twin, and `automations_unseen` (null when off) is
+    // what the Projects screen counts on its entry to the automations screen.
+    const aUnseen = automations.unseen();
+    return send(res, 200, await mergeProjects({ home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status(),
+                                                automations_enabled: aUnseen !== null, automations_unseen: aUnseen }, await fan, peers()));
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
@@ -3327,6 +3365,12 @@ function agentCatalogue() {
     const r = v.write ? await serialize(go) : await go();
     return send(res, r.status, r.json);
   }
+
+  // Automations (lib/automations.mjs) answer their own routes, a 404 when switched off.
+  // The assertion is a function because reading it spends its challenge: only a save or a run
+  // that needs one asks.
+  const ar = await automations.route({ method: req.method, p, body, client: req.client, assertion: () => headerAssertion(req, c) });
+  if (ar) return send(res, ar.status, ar.json);
 
   return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
 }
@@ -3921,6 +3965,7 @@ async function serve(argv) {
   }
   setInterval(sweep, 30000).unref();
   armPushWatch();
+  automations.start();
   if (ledgerWhy) log(`  waiting on you: OFF — ${ledgerWhy}`);
   {
     const n = allSubs().length, pc = loadConfig().push;

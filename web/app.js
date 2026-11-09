@@ -63,6 +63,11 @@ const S = {
   speaking: '',         // the text currently being read aloud, '' when silent
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
   jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
+  autosOn: null,        // the automations switch (/api/projects automations_enabled): null = not told yet
+  autosUnseen: 0,       // notices about automations nobody has looked at (a run that failed or was skipped)
+  autos: null,          // last /api/automations payload, while that screen is open
+  autosErr: '',         // why the first read of it failed: with nothing to show, that IS the screen
+  autosEdit: null,      // the automation open in the editor: an id, 'new', or null for the list
   speak: null,          // the Mac's voice (/api/projects speak) — reported with Jarvis off too
   voice: null,          // last /api/voice payload (the Mac's ears) — null until asked, false = a daemon without the route
   jarvisMode: false,    // the session screen is showing JARVIS (see openJarvis): back goes to Projects
@@ -254,6 +259,8 @@ async function refreshOnce() {
       // 404. Talking to a session stays (talkShown). A daemon
       // older than the switch sends no field, and keeps the old behaviour.
       if (typeof j.jarvis_enabled === 'boolean') S.jarvisOn = j.jarvis_enabled;
+      // AUTOMATIONS ARE EXPERIMENTAL TOO, and the same rule holds: off, the menu has no entry.
+      if (typeof j.automations_enabled === 'boolean') { S.autosOn = j.automations_enabled; S.autosUnseen = Number(j.automations_unseen) || 0; }
       if (j.speak) S.speak = j.speak;
       // The Jarvis band. Its own request, and allowed to fail on its own: a daemon older
       // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
@@ -299,6 +306,26 @@ async function refreshOnce() {
         const it = items()[S.wantCard - 1];
         S.wantCard = 0;
         if (it && it.card) { S.sel = items().indexOf(it); save(); openItem(it); return; }
+      }
+    }
+    else if (S.screen === 'automations') {
+      // Switched off while it was open answers 404: there is no screen to stay on.
+      try { S.autos = await api.getAutomations(); S.autosErr = ''; }
+      catch (e) {
+        if (e.status === 404) { S.autosOn = false; S.autos = null; S.autosEdit = null; S.autosErr = ''; S.screen = 'projects'; setDepth(0); render(); refresh(); return; }
+        // A list already on screen stays, with its age, like every other screen. With nothing
+        // there yet the wait would otherwise never end, under a toast that fades.
+        if (S.autos || e instanceof api.AuthError || e instanceof api.RateLimitedError) throw e;
+        S.autosErr = e instanceof api.OfflineError ? 'fleet-serve did not answer. Check the connection and try again.'
+          : `fleet-serve answered with an error (HTTP ${e.status || '?'}). Its log on the Mac says why.`;
+      }
+      // Two panes: Projects is the list beside this one, and it is read by its own request. Without
+      // it the list beside the automations stopped moving for as long as they were open.
+      if (wideNow()) {
+        const j = await api.getProjects();
+        S.projects = j.projects; S.agents = j.agents || []; S.hosts = Array.isArray(j.hosts) && j.hosts.length > 1 ? j.hosts : null;
+        // A relaunch lands here without ever having read Projects, and the menu beside it asks this.
+        if (typeof j.automations_enabled === 'boolean') { S.autosOn = j.automations_enabled; S.autosUnseen = Number(j.automations_unseen) || 0; }
       }
     }
     else if (S.screen === 'stackpick') {
@@ -460,10 +487,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'reviews', 'review', 'term', 'stack', 'stackpick']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue', 'reviews', 'review', 'term', 'stack', 'stackpick', 'automations']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, queue: 1, reviews: 1, grid: 1, review: 2, stackpick: 2, stack: 2, session: 2, term: 3 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, reviews: 1, automations: 1, grid: 1, review: 2, stackpick: 2, stack: 2, session: 2, term: 3 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -515,7 +542,7 @@ function slideNav() {
   } catch { return false; }
 }
 // THE SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
-const PREACT_SCREENS = new Set(['projects', 'grid', 'queue', 'reviews', 'review']);
+const PREACT_SCREENS = new Set(['projects', 'grid', 'queue', 'reviews', 'review', 'automations']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
@@ -550,7 +577,7 @@ function renderDuo(app, side) {
   side.classList.toggle('shell', true);
   navFrom = S.screen;
   // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
-  const queue = S.screen === 'queue';
+  const queue = S.screen === 'queue' || S.screen === 'automations';
   // Reviews too, and a run opens beside the LIST of runs — the way a session opens beside
   // its grid — so the next branch is one click away rather than a back and a click.
   const reviews = S.screen === 'reviews', review = S.screen === 'review';
@@ -571,7 +598,7 @@ function renderDuo(app, side) {
   if (inSession) { paintElScreen(app); return; }
   // THE QUEUE OPENS ON THE RIGHT, where a conversation would: it is the list of things to
   // answer, and Projects stays where it was beside it.
-  if (queue) { mountPreact(app, 'queue', queueProps()); return; }
+  if (queue) { mountPreact(app, S.screen, S.screen === 'automations' ? automationsProps() : queueProps()); return; }
   if (reviews || review) { mountPreact(app, S.screen, reviews ? reviewsProps() : reviewProps()); return; }
   if (preactUp) { screensUI.unmount(app); preactUp = false; }
   // The session's nodes leave with it: keepScreen() must not later take this line for a
@@ -632,7 +659,8 @@ function render() {
   // card list being the screen's scrolling region and let the whole page scroll.
   if (!S.locked && PREACT_SCREENS.has(S.screen)) {
     mountPreact(app, S.screen, S.screen === 'grid' ? gridProps() : S.screen === 'queue' ? queueProps()
-      : S.screen === 'reviews' ? reviewsProps() : S.screen === 'review' ? reviewProps() : projectsProps());
+      : S.screen === 'reviews' ? reviewsProps() : S.screen === 'review' ? reviewProps()
+      : S.screen === 'automations' ? automationsProps() : projectsProps());
     return;
   }
   // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
@@ -1112,6 +1140,8 @@ function projectsProps() {
       { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
       // Several sessions, from any project, on screen at once — the desk's Ctrl-x.
       { label: 'stack', onClick: () => openStackPicker() },
+      // EXPERIMENTAL, and absent while it is off — the switch is the Mac's (lib/automations.mjs).
+      ...(S.autosOn ? [{ label: S.autosUnseen ? `automations · ${S.autosUnseen}` : 'automations', onClick: () => openAutomations() }] : []),
       { label: 'settings', onClick: () => sheetSettings() },
       // Registering and removing a project is the desk's job on the machine it is on.
       { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p && isRemote(p.name)) { toast(`${said(p.name)}: remove it on ${hostLabelOf(p.name)} itself`, 'bad'); render(); } else if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
@@ -1288,6 +1318,75 @@ function openQueue() {
   S.screen = 'queue'; S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.qsel = 0;
   setDepth(1);
   save(); render(); refresh();
+}
+// ── automations (EXPERIMENTAL) ─────────────────────────────────────────────
+// One level under Projects, like the queue; the editor one level under the list. A reload or a
+// relaunch comes back to the list, with the trail back to Projects (web/place.js), and never to
+// the editor: a draft is not kept. It was restored with no trail, so the first swipe back left
+// the app. The switch still rules: off, the first read answers 404 and that lands on Projects.
+function openAutomations() {
+  if (!S.autosOn) return;
+  S.screen = 'automations'; S.autosEdit = null; S.autos = null; S.autosErr = ''; S.srch = null;
+  setDepth(1);
+  render(); refresh();
+}
+async function autoDo(fn, ok) {
+  try { const r = await fn(); if (ok) toast(ok); return r; }
+  catch (e) { toast(e.message || String(e), 'bad'); return null; }
+  finally { render(); refresh(); }
+}
+function automationsProps() {
+  return {
+    mode: modeSpec(), stale: S.stale, toast: S.toast,
+    data: S.autos, editing: S.autosEdit, error: S.autosErr,
+    onBack: () => back(),
+    onEdit: (id) => { S.autosEdit = id; pushNav(); render(); },
+    onCancel: () => back(),
+    onRetry: () => { S.autosErr = ''; render(); refresh(); },
+    onSay: (text) => { toast(text, 'bad'); render(); },
+    // A save that can start or stop sessions asks for the passkey first, as a tap on start
+    // or stop would; the daemon refuses it without one (428), so this is not the only check.
+    // It ANSWERS rather than toasts, because the answer belongs beside the thing that was
+    // tapped: a refused form stays open with what was typed, and the reason stays with it.
+    onSave: async (a, key) => {
+      try {
+        const assertion = key ? await assertFor(`automation ${a.name || 'new'}`) : null;
+        const r = await api.saveAutomation(a, assertion);
+        toast(`saved ${a.name || 'the automation'}`);
+        // The answer is the row, so a switch does not fall back to the old state until the poll.
+        if (S.autos && r.automation) {
+          const rows = S.autos.automations || [];
+          S.autos = { ...S.autos, automations: rows.some(x => x.id === r.automation.id)
+            ? rows.map(x => (x.id === r.automation.id ? { ...x, ...r.automation } : x)) : [...rows, r.automation] };
+        }
+        if (S.autosEdit) back(); else { render(); refresh(); }
+        return { ok: true };
+      } catch (e) { return { error: e.message || String(e) }; }
+    },
+    onDelete: async (id) => { const r = await autoDo(() => api.deleteAutomation(id), 'deleted'); if (r && S.autosEdit) back(); },
+    // By hand, so one that can start or stop sessions asks what that tap asks; the daemon refuses
+    // it otherwise. What it says is what happened: a long run is still running, and one that
+    // failed at once has its reason.
+    onRun: async (id, key, name) => {
+      let assertion = null;
+      if (key) {
+        try { assertion = await assertFor(`run automation ${name || ''}`.trim()); }
+        catch (e) { toast(e.message || String(e), 'bad'); render(); return; }
+      }
+      const r = await autoDo(() => api.runAutomation(id, assertion));
+      if (r) toast(r.running ? 'it is running' : r.ok ? 'it ran' : (r.text || 'it failed'), r.running || r.ok ? undefined : 'bad');
+      render();
+    },
+    // Marked before the request and not after it, or the count and the list say two things for a
+    // poll. A failure comes back on the next one.
+    onSeen: () => {
+      S.autosUnseen = 0;
+      if (S.autos) S.autos = { ...S.autos, notices: (S.autos.notices || []).map(n => ({ ...n, seen: true })) };
+      return autoDo(() => api.automationsSeen());
+    },
+    // Not autoDo: the editor shows what went wrong in its own conversation.
+    onDraft: (messages, draft) => api.automationDraft(messages, draft),
+  };
 }
 function queueProps() {
   const rows = S.waiting || [];
@@ -1731,6 +1830,7 @@ function toProjects() {
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null; S.fromStack = false; S.pick = null;
   stopSpeaking(); S.jarvisMode = false; talkStop('');
   S.entry = ''; S.srch = null; S.wantCard = 0; S.foundBack = null;
+  S.autos = null; S.autosEdit = null; S.autosErr = '';
   setDepth(0);
   render(); refresh();
 }
@@ -6718,6 +6818,9 @@ function popTo() {
   // than left on a timer that would fire after the screen it belongs to has gone.
   else if (S.screen === 'review') { rvFlushNow(); S.screen = 'reviews'; S.rv = null; S.rvRun = null; S.rvErr = ''; S.rvSave = ''; }
   else if (S.screen === 'reviews') S.screen = 'projects';
+  // The editor is one level under the list, and the list one under Projects.
+  else if (S.screen === 'automations' && S.autosEdit) S.autosEdit = null;
+  else if (S.screen === 'automations') { S.screen = 'projects'; S.autos = null; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
@@ -8471,6 +8574,7 @@ function onKey(e) {
   else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
   else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
   else if (S.screen === 'reviews') used = reviewsKey(e, k, lk, ctrl);
+  else if (S.screen === 'automations') used = automationsKey(e, k, lk, ctrl);
   else if (S.screen === 'review') used = reviewKey(e, k, lk, ctrl);
   else used = projectsKey(e, k, lk, ctrl);
   if (used) e.preventDefault();
@@ -8773,6 +8877,25 @@ function reviewsKey(e, k, lk, ctrl) {
     case ' ': case 'l': if (at && at.g.earlier.length) rvToggle(at.g.key); break;
     case 'q': case '`': back(); break;
     case 'Q': toProjects(); break;
+    default: return false;
+  }
+  return true;
+}
+// Falling through to Projects' keys meant ⏎ opened the project under a screen nobody could see, and
+// n started a new one. Its controls are real buttons, so Tab and ⏎ are the browser's. In the editor
+// a bare key does nothing: `q` from a seg button would have thrown away the form.
+function automationsKey(e, k, lk, ctrl) {
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    if (lk === 'x') { openStackPicker(); return true; }
+    return false;
+  }
+  if (S.autosEdit) return false;
+  switch (k) {
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    case 'n': S.autosEdit = 'new'; pushNav(); render(); break;
     default: return false;
   }
   return true;

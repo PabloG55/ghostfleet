@@ -288,6 +288,54 @@ if (phase === 'jarvisswitch') {
   row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
 }
 
+// ── automations: the one list, with a token, for a row that changed something first ──
+if (phase === 'automations-list') {
+  await a.enroll(base, arg);
+  row('list', await a.api(base, 'GET', '/api/automations'));
+}
+
+// ── automations (EXPERIMENTAL): every route, once switched on and once off ──────────
+//     node serve-probe.mjs <base> automations <enrol-code>
+// run.sh compares the two runs, so an "off" row can only pass because the switch changed
+// something. A step that starts a session is the one that needs a passkey AT SAVE TIME —
+// nobody is holding the phone when it runs — so a save is tried without one, with a forged
+// one, with a real one, and switched off (which needs none: it cannot run until it is on).
+if (phase === 'automations') {
+  await a.enroll(base, arg);
+  const save = (automation, assertion = null) => a.api(base, 'POST', '/api/automations', { automation },
+    assertion ? { headers: { 'x-fleet-assertion': JSON.stringify(assertion) } } : {});
+  const daily = { type: 'schedule', mode: 'days', at: '09:00', days: [1, 2, 3, 4, 5] };
+  row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
+  row('list.noToken', await request(base, 'GET', '/api/automations'));
+  row('list', await a.api(base, 'GET', '/api/automations'));
+  const send = await save({ name: 'morning review', enabled: true, trigger: daily,
+    steps: [{ action: 'send', project: 'demo', session: 'w1', prompt: 'review what is open on {date}' }] });
+  row('save.send', send);
+  row('save.noSteps', await save({ name: 'nothing', enabled: true, trigger: daily, steps: [] }));
+  row('run.send', await a.api(base, 'POST', '/api/automations/run', { id: send.json?.automation?.id || 'NOPE' }));
+  // The same session, the same verb, from the owner's own thumb: run.sh tells the two apart by
+  // the mark the receiving session's ledger reads as the person speaking.
+  row('verb.phone', await a.api(base, 'POST', '/api/verb', { tool: 'fleet_send', args: { project: 'demo', session: 'w1', prompt: 'the owner typed this' } }));
+  const spawn = { name: 'nightly check', enabled: true, trigger: daily,
+    steps: [{ action: 'spawn', project: 'demo', name: 'nightly', prompt: 'run the checks' }] };
+  row('save.spawnNoKey', await save(spawn));
+  row('save.spawnForged', await save(spawn, await a.signChallenge({ purpose: 'automation nightly check', tamper: { signature: Buffer.alloc(64) } })));
+  const keyed = await save(spawn, await a.fresh(base, 'automation nightly check'));
+  row('save.spawnKey', keyed);
+  row('save.spawnOff', await save({ ...spawn, name: 'nightly, later', enabled: false }));
+  const runKeyed = (assertion = null) => a.api(base, 'POST', '/api/automations/run', { id: keyed.json?.automation?.id || 'NOPE' },
+    assertion ? { headers: { 'x-fleet-assertion': JSON.stringify(assertion) } } : {});
+  row('run.spawnNoKey', await runKeyed());
+  row('run.spawnForged', await runKeyed(await a.signChallenge({ purpose: 'run nightly check', tamper: { signature: Buffer.alloc(64) } })));
+  row('run.spawn', await runKeyed(await a.fresh(base, 'run nightly check')));
+  row('draft', await a.api(base, 'POST', '/api/automations/draft', { messages: [{ role: 'user', text: 'every weekday at nine, say good morning' }] }));
+  row('draft.empty', await a.api(base, 'POST', '/api/automations/draft', { messages: [] }));
+  row('list.full', await a.api(base, 'GET', '/api/automations'));
+  row('delete', await a.api(base, 'POST', '/api/automations/delete', { id: send.json?.automation?.id || 'NOPE' }));
+  row('seen', await a.api(base, 'POST', '/api/automations/seen', {}));
+  row('list.after', await a.api(base, 'GET', '/api/automations'));
+}
+
 // THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7
 // put `answer keys` on the session screen from the start, and it was close to useless: a
 // worker blocked on "Allow pnpm test?" since 9pm is exactly the case the app exists for,

@@ -6130,8 +6130,9 @@ if command -v node >/dev/null 2>&1; then
     for (const [id, kind] of [['1-a', 'owner'], ['1-b', 'nudge'], ['1-c', ''], ['1-d', 'lead']]) writeHandoff('$MO/spool', id, 'hi', null, kind);" 2>/dev/null
   is "the handoff carries owner and nudge, nothing else" "owner nudge - -" \
      "$(for i in 1-a 1-b 1-c 1-d; do node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('$MO/spool/$i.json','utf8')).kind || '-'))"; printf ' '; done | sed 's/ $//')"
-  # the phone's daemon is the door that passes it, for every verb it runs
-  is "fleet-serve runs the phone's verbs as the human" "1" "$(grep -c "callToolAsync(tool, args, { timeout: 15 \* 60 \* 1000, human: true," "$ROOT/bin/fleet-serve.mjs" || true)"
+  # the phone's daemon is the door that passes it, for every verb it runs; an automation goes
+  # through the same function with nobody there, and it is the one caller that does not pass it
+  is "fleet-serve runs the phone's verbs as the human, unless the caller is an automation" "yes" "$(grep -qF 'callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,' "$ROOT/bin/fleet-serve.mjs" && echo yes || echo no)"
   rm -rf "${MO:?}"
 else
   skip "fleet_send owner mark" "node missing"
@@ -19837,6 +19838,123 @@ else
 fi
 rm -rf "$JW"
 
+# ── automations (EXPERIMENTAL): off means gone, and start or stop is approved at save ──
+# One daemon, the same probe twice: switched on, then off. Off, every /api/automations* is a
+# 404 that says how to turn it on, and the project list says it is off. On, a step that
+# STARTS A SESSION is saved only with a fresh passkey — the run happens with nobody holding
+# the phone, so the save is the moment of action — and a run reaches the real verb path
+# (the stub fleet-send / fleet-spawn). The AI draft is a stub agent: what is proved is the
+# route (a sentence in, a normalised draft out, nothing saved), not the model.
+group "fleet-serve: automations — the switch, the passkey at save, a run"
+# needs: free_port answers in digits
+AW="$(mktemp -d "$TEST_RUNS.$$.auto.XXXXXX")"
+cat > "$AW/agent" <<AGENT
+#!/bin/sh
+printf '%s\n' "\$@" > "$AW/said"
+printf '%s\n' '{"structured_output":{"reply":"built it","automation":{"name":"good morning","trigger":{"type":"schedule","mode":"days","at":"09:00","days":[1,2,3,4,5]},"steps":[{"action":"notify","text":"good morning"}]}}}'
+AGENT
+chmod +x "$AW/agent"
+if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/agent" sv_start automations; then
+  apf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }
+  aj()  { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$3"; }
+  ASW="$CLAUDE_FLEET_EXPERIMENTAL_DIR/automations.enabled"
+  # One project kept private through the real file `fleet-know` writes, so the row below proves
+  # the daemon's own wiring: the engine's rows only prove what it does with the answer.
+  APRIV="$(HOME="$SV/home" node --input-type=module -e "import('$ROOT/lib/projects.mjs').then(m => { const t = m.projects().find(x => x.name === 'other'); console.log(t.cfg + '/fleet/' + t.sock + '.know'); })")"
+  mkdir -p "$(dirname "$APRIV")"; printf 'private\n' > "$APRIV"
+  : > "$SV/ran"
+  printf 'on\n' > "$ASW"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations "$(sv_code auton)" > "$SV/probe.auton" 2>"$SV/probe.auton.err"
+  cp "$SV/ran" "$AW/ran.on"; : > "$SV/ran"
+  printf 'off\n' > "$ASW"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations "$(sv_code autoff)" > "$SV/probe.autoff" 2>"$SV/probe.autoff.err"
+  cp "$SV/ran" "$AW/ran.off"
+  is "the probe ran without complaining (on)"   ""      "$(head -2 "$SV/probe.auton.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and off"                               ""      "$(head -2 "$SV/probe.autoff.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "on: the project list says so"             "true"  "$(aj projects auton automations_enabled)"
+  is "...with nothing unseen yet"               "0"     "$(aj projects auton automations_unseen)"
+  is "the list needs a token"                   "401"   "$(apf list.noToken auton)"
+  is "...and with one it answers"               "200"   "$(apf list auton)"
+  is "...empty on a new install"                "[]"    "$(aj list auton automations)"
+  is "...with the fleet to pick from"           "yes"   "$(grep -q '"name":"demo"' <<< "$(aj list auton fleet)" && echo yes || echo no)"
+  is "a send needs no passkey to save"          "200"   "$(apf save.send auton)"
+  is "...and is armed for its next run"         "1"     "$([ -n "$(aj save.send auton automation.nextRun)" ] && [ "$(aj save.send auton automation.nextRun)" != undefined ] && echo 1 || echo 0)"
+  is "an automation with no steps is refused"   "400"   "$(apf save.noSteps auton)"
+  is "run now answers"                          "200"   "$(apf run.send auton)"
+  is "...and it worked"                         "true"  "$(aj run.send auton ok)"
+  is "...through the real verb path to fleet-send" "1"  "$(grep '^fleet-send' "$AW/ran.on" | grep -c 'review what is open on 20' || true)"
+  # NOT THE OWNER'S WORDS. --owner is what makes the receiving session's ledger record a prompt
+  # as the person speaking, which is `owner` authority in the memory and the lead's briefing. An
+  # unattended run was written earlier, perhaps by the draft model, so it arrives as a brief.
+  # Asserted both ways: a stub that never saw the flag would pass the first row alone.
+  is "an automation's send is not the owner speaking" "0" "$(grep 'review what is open on 20' "$AW/ran.on" | grep -c -- '\[--owner\]' || true)"
+  is "...while the phone's own send to that session is" "1" "$(grep 'the owner typed this' "$AW/ran.on" | grep -c -- '\[--owner\]' || true)"
+  # 428, NOT 401: the phone reads a 401 as a dead session token and locks itself.
+  is "a step that starts a session: no passkey, refused" "428" "$(apf save.spawnNoKey auton)"
+  is "...saying it needs one"                   "passkey" "$(aj save.spawnNoKey auton needs)"
+  is "...a forged one is refused too"           "428"   "$(apf save.spawnForged auton)"
+  is "...a real one is taken"                   "200"   "$(apf save.spawnKey auton)"
+  is "...and the approval is kept on it"        "automation nightly check" "$(aj save.spawnKey auton automation.approved.purpose)"
+  is "...switched off it needs none"            "200"   "$(apf save.spawnOff auton)"
+  is "...and carries no approval"               "null"  "$(aj save.spawnOff auton automation.approved)"
+  # §7 ON THE TAP AS WELL AS THE SAVE. A live token could otherwise run a saved stop at any moment.
+  is "run now on one that starts a session: no passkey, refused" "428" "$(apf run.spawnNoKey auton)"
+  is "...saying it needs one"                   "passkey" "$(aj run.spawnNoKey auton needs)"
+  is "...a forged one is refused too"           "428"   "$(apf run.spawnForged auton)"
+  is "...and neither reached fleet-spawn"       "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
+  is "...the run is audited with what approved it" "1"  "$(grep '"verb":"automation_run"' "$SV/audit.jsonl" | grep -c 'passkey:run nightly check' || true)"
+  is "the approved one runs"                    "true"  "$(aj run.spawn auton ok)"
+  is "...and fleet-spawn was called for it"     "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
+  is "the save with a passkey is audited as one" "1"    "$(grep '"verb":"automation_save"' "$SV/audit.jsonl" | grep -c 'passkey:automation nightly check' || true)"
+  is "asking for it in a sentence gives a draft" "200"  "$(apf draft auton)"
+  is "...the model is told about a project not kept private" "yes" "$(grep -q -- '^- demo: ' "$AW/said" && echo yes || echo no)"
+  is "...and not about the one that is"         "no"    "$(grep -q -- '^- other: ' "$AW/said" && echo yes || echo no)"
+  is "...which the phone still lists"           "yes"   "$(grep -q '"name":"other"' <<< "$(aj list auton fleet)" && echo yes || echo no)"
+  is "...normalised, ready for the editor"      "good morning" "$(aj draft auton automation.name)"
+  is "...and nothing was saved by it"           "0"     "$(aj list.full auton automations | grep -c '"good morning"' || true)"
+  is "...an empty conversation is refused"      "400"   "$(apf draft.empty auton)"
+  is "three are saved"                          "3"     "$(aj list.full auton automations | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "...the runs are listed"                   "2"     "$(aj list.full auton runs | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "delete answers"                           "200"   "$(apf delete auton)"
+  is "...and is audited"                        "1"     "$(grep -c '"verb":"automation_delete"' "$SV/audit.jsonl" || true)"
+  is "...and two are left"                      "2"     "$(aj list.after auton automations | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))')"
+  is "the files are the owner's only"           "600"   "$(stat -c %a "$AW/data/automations.json" 2>/dev/null || stat -f %Lp "$AW/data/automations.json")"
+  # OFF MEANS GONE.
+  is "off: the project list says so"            "false" "$(aj projects autoff automations_enabled)"
+  is "...and counts nothing"                    "null"  "$(aj projects autoff automations_unseen)"
+  is "off: the list is a 404"                   "404"   "$(apf list autoff)"
+  is "...that says it is disabled"              "true"  "$(aj list autoff disabled)"
+  is "...and how to turn it on"                 "yes"   "$(grep -q 'fleet-experimental enable automations' <<< "$(aj list autoff text)" && echo yes || echo no)"
+  is "...a save is a 404"                       "404"   "$(apf save.send autoff)"
+  is "...so is run now"                         "404"   "$(apf run.send autoff)"
+  is "...and a draft"                           "404"   "$(apf draft autoff)"
+  is "...and delete"                            "404"   "$(apf delete autoff)"
+  is "...still behind the token"                "401"   "$(apf list.noToken autoff)"
+  is "...and nothing ran"                       "0"     "$(grep -v 'the owner typed this' "$AW/ran.off" | grep -c . || true)"
+  rm -f "$APRIV"
+  serve_stop
+  # JARVIS SWITCHED OFF IS GONE FROM HERE TOO: its own project is off the phone's list, so it must
+  # not come back through the editor's pickers or what the draft model is told. A daemon of its
+  # own, because a fleet read is shared for a few seconds and the one above would answer this. The
+  # marker sits on a project the group has, so the row can only pass because the marker was read.
+  AJV="$SV/home/.config/ghostfleet"
+  printf 'name=demo\nsock=cf-demo\ncfg=%s\npath=%s\nprofile=work\n' "$SV/home/.claude" "$SV/repo" > "$AJV/jarvis"
+  printf 'off\n' > "$AJV/jarvis.enabled"
+  printf 'on\n' > "$ASW"
+  if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data.jv" sv_start autojv; then
+    node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" automations-list "$(sv_code autojv)" > "$SV/probe.autojv" 2>"$SV/probe.autojv.err"
+    is "Jarvis off: its project is not in the editor's pickers" "no" "$(grep -q '"name":"demo"' <<< "$(aj list autojv fleet)" && echo yes || echo no)"
+    is "...and the rest of the fleet is"        "yes"   "$(grep -q '"name":"other"' <<< "$(aj list autojv fleet)" && echo yes || echo no)"
+    serve_stop
+  else
+    skip "fleet-serve automations, Jarvis off" "server did not come up: $SV_WHY"
+  fi
+  rm -f "$ASW" "$AJV/jarvis" "$AJV/jarvis.enabled"
+else
+  skip "fleet-serve automations" "server did not come up: $SV_WHY"
+fi
+rm -rf "$AW"
+
 # THE CLIENT'S EARS, WITHOUT A PHONE. Two pieces of web/app.js decide what reaches the Mac:
 # the voice-activity detector (when an utterance ENDS) and the WAV encoder (what it sounds
 # like). Both are lifted out of the client exactly as written, the way this file lifts
@@ -20998,6 +21116,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "...with jarvis off, and tagged"             "yes" "$(grep -qE 'jarvis +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...and shots, tagged"                       "yes" "$(grep -qE 'shots +[○●] (on|off) +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...and peek, off and tagged"                "yes" "$(grep -qE 'peek +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...and automations, off and tagged"         "yes" "$(grep -qE 'automations +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
   is "...with no project row for Jarvis's project" "no" "$(grep -qE '^ *(▸ )? *jarvis +work' <<< "$scr" && echo yes || echo no)"
   # acme-api is the only project row, so one ↓ is the jarvis row.
   tmux -L cfjxgrid send-keys j; sleep 0.5
@@ -21155,6 +21274,25 @@ else
   done < "$SHC/out"
 fi
 rm -rf "$SHC"
+
+# THE RUNNER ON ITS OWN. A week of downtime, an hour of runs and a sixty-minute wait all take a
+# clock, so the helper replaces Date.now and hands in the sleep, and the fleet is a fake whose
+# statuses a row sets. The route-level group above covers the same code through the real verb path.
+# Every row was watched red against a copy of lib/ with that one guard taken out.
+group "automations: the clock, the files, the runs, the draft"
+if command -v node >/dev/null 2>&1; then
+  AE="$(mktemp -d "$TEST_RUNS.$$.autoeng.XXXXXX")"
+  node "$ROOT/test/helpers/automations-engine.mjs" > "$AE/out" 2> "$AE/err"
+  is "automations-engine ran"           "0"   "$?"
+  is "...without complaining"           ""    "$(head -2 "$AE/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"       "yes" "$([ "$(wc -l < "$AE/out")" -ge 50 ] && echo yes || echo "no: $(wc -l < "$AE/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$AE/out"
+  rm -rf "$AE"
+else
+  skip "automations engine" "node missing"
+fi
 
 # THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
 # notification could ever reach it; a subscription is now one of the steps, both ways.
@@ -22230,6 +22368,42 @@ if [ -d "$ROOT/web" ]; then
     done < "$QUE/out"
   fi
   rm -rf "$QUE"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the automations screens, in a real browser"
+if [ -d "$ROOT/web" ]; then
+  # The list, the editor and the sentence builder against a stand-in daemon, with touch at 390x844
+  # and a mouse and keys at 1280x900, in every state a person can land in: reading, nothing there,
+  # a failed read, a full list. The daemon counts what reached it, because most of what matters
+  # here is what was NOT sent: a switch or a proposal before its passkey, a delete on the first tap,
+  # a proposal nobody saved. The rules behind the routes are the fleet-serve group's and the
+  # runner's are the engine's; this one is what a thumb gets.
+  # WATCHED GOING RED: against the client as it arrived (the bundle rows, then the first row that
+  # needs the new shape), and against copies with one thing broken, twenty-seven in all: among
+  # them the notices' snap point, day toggles under a thumb, the switch beneath the stretched name
+  # (which a tap in its middle does not notice, because the knob paints above it either way), the
+  # desk's Projects list not read, a relaunch with no trail, save left primary beside a proposal, a
+  # one-tap delete, a passkey not asked, keys falling through to Projects, and a bundle without
+  # the screen. Several breakages in one copy hid each other: a bar pushed off the screen stranded
+  # the editor open, and "the card opens it" passed for it. So a row that stays green in a batch is
+  # tried again alone.
+  AUC="$(mktemp -d "$TEST_RUNS.$$.autos.XXXXXX")"
+  node "$ROOT/test/helpers/automations-check.mjs" > "$AUC/out" 2> "$AUC/err"
+  aucrc=$?
+  if grep -q 'no chrome' "$AUC/out" 2>/dev/null; then
+    skip "the automations screens" "no chrome to tap in"
+  else
+    is "automations-check ran"          "0" "$aucrc"
+    is "...without complaining"         ""  "$(head -2 "$AUC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUC/out")" -ge 150 ] && echo yes || echo "no: $(wc -l < "$AUC/out")")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$AUC/out"
+  fi
+  rm -rf "$AUC"
 else
   skip "phone client" "web/ not present"
 fi

@@ -49,6 +49,7 @@ const PLACES = {
   'Jarvis':                        { screen: 'session', session: 'master', jarvisMode: true, profile: 'all' },
   'the queue':                     { screen: 'queue', profile: 'all' },
   'Reviews':                       { screen: 'reviews', profile: 'all' },
+  'Automations':                   { screen: 'automations', profile: 'all' },
   'a run':                         { screen: 'review', profile: 'all', rv: { host: '', profile: 'work', run: '2026-03-05_14-02-11' } },
   "a paired machine's run":        { screen: 'review', profile: 'all', rv: { host: 'vm', profile: 'work', run: '2026-03-05_13-20-00' } },
   'the stack':                     { screen: 'stack', profile: 'all' },
