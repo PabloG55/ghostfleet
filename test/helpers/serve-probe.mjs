@@ -317,7 +317,11 @@ if (phase === 'automations') {
   const keyed = await save(spawn, await a.fresh(base, 'automation nightly check'));
   row('save.spawnKey', keyed);
   row('save.spawnOff', await save({ ...spawn, name: 'nightly, later', enabled: false }));
-  row('run.spawn', await a.api(base, 'POST', '/api/automations/run', { id: keyed.json?.automation?.id || 'NOPE' }));
+  const runKeyed = (assertion = null) => a.api(base, 'POST', '/api/automations/run', { id: keyed.json?.automation?.id || 'NOPE' },
+    assertion ? { headers: { 'x-fleet-assertion': JSON.stringify(assertion) } } : {});
+  row('run.spawnNoKey', await runKeyed());
+  row('run.spawnForged', await runKeyed(await a.signChallenge({ purpose: 'run nightly check', tamper: { signature: Buffer.alloc(64) } })));
+  row('run.spawn', await runKeyed(await a.fresh(base, 'run nightly check')));
   row('draft', await a.api(base, 'POST', '/api/automations/draft', { messages: [{ role: 'user', text: 'every weekday at nine, say good morning' }] }));
   row('draft.empty', await a.api(base, 'POST', '/api/automations/draft', { messages: [] }));
   row('list.full', await a.api(base, 'GET', '/api/automations'));

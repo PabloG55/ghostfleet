@@ -1339,7 +1339,19 @@ function automationsProps() {
       if (r && S.autosEdit) back();
     },
     onDelete: (id) => autoDo(() => api.deleteAutomation(id), 'deleted'),
-    onRun: (id) => autoDo(() => api.runAutomation(id), 'running it now'),
+    // By hand, so one that can start or stop sessions asks what that tap asks; the daemon refuses
+    // it otherwise. What it says is what happened: a long run is still running, and one that
+    // failed at once has its reason.
+    onRun: async (id, key, name) => {
+      let assertion = null;
+      if (key) {
+        try { assertion = await assertFor(`run automation ${name || ''}`.trim()); }
+        catch (e) { toast(e.message || String(e), 'bad'); render(); return; }
+      }
+      const r = await autoDo(() => api.runAutomation(id, assertion));
+      if (r) toast(r.running ? 'it is running' : r.ok ? 'it ran' : (r.text || 'it failed'), r.running || r.ok ? undefined : 'bad');
+      render();
+    },
     onSeen: () => autoDo(() => api.automationsSeen()).then(() => { S.autosUnseen = 0; }),
     // Not autoDo: the editor shows what went wrong in its own conversation.
     onDraft: (messages, draft) => api.automationDraft(messages, draft),

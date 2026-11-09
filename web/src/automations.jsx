@@ -96,7 +96,7 @@ function Item({ a, onEdit, onSave, onDelete, onRun }) {
       <div class="autos-foot">
         <span class="autos-dim">{status}{a.lastRun ? ` · last ${when(a.lastRun.at)} ${a.lastRun.ok ? '✓' : '✕'}` : ''}</span>
         <span class="autos-grow" />
-        <Btn label="run now" onClick={() => onRun(a.id)} />
+        <Btn label="run now" onClick={() => onRun(a.id, needsPasskey(a), a.name)} />
         <Btn label="edit" onClick={() => onEdit(a.id)} />
         {sure ? <Btn label="delete it" cls="danger" onClick={() => onDelete(a.id)} />
               : <Btn label="delete" onClick={() => setSure(true)} />}

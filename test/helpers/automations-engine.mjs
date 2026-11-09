@@ -477,5 +477,91 @@ const finish = async (r, k) => {
   release(); await first;
 }
 
+// ── run now is a tap: it asks what the tap asks, and it answers ──────────────────────────
+const STOP = { action: 'stop', project: 'acme-api', session: 'w1' };
+const yes = () => ({ purpose: 'run it' });
+{
+  const r = rig({});
+  const a = await r.save({ name: 'stopper', trigger: DAILY, steps: [STOP] }, () => ({ purpose: 'saved it' }));
+  const none = await r.call('POST', '/api/automations/run', { id: a.id });
+  row('run now on a stop, with no passkey, is refused', '428', none.status);
+  row('...saying it needs one', 'passkey', none.json.needs);
+  row('...and nothing ran', '0', r.did.length);
+  const forged = await r.call('POST', '/api/automations/run', { id: a.id }, () => ({ error: 'that assertion is no good' }));
+  row('...and with a bad one', '428', forged.status);
+  row('...and nothing ran for that either', '0', r.did.length);
+  row('...and neither was recorded as a run', '0', r.audits.filter(x => x.verb === 'automation_run').length);
+  const good = await r.call('POST', '/api/automations/run', { id: a.id }, yes);
+  row('with a fresh one it runs', '200', good.status);
+  row('...once', '1', r.did.length);
+  row('...on the tap\'s approval, not the save\'s', 'run it', r.did[0].meta.approved.purpose);
+  const row0 = r.audits.find(x => x.verb === 'automation_run');
+  row('...and the audit names who tapped', 'phone-1', row0?.client);
+  row('...and what confirmed it', 'passkey:run it', row0?.confirmed);
+}
+{
+  const r = rig({});
+  const a = await r.save({ name: 'plain', trigger: DAILY, steps: [SEND] });
+  let asked = 0;
+  const res = await r.call('POST', '/api/automations/run', { id: a.id }, () => { asked++; return null; });
+  row('a step with no passkey needs none to run now', '200', res.status);
+  row('...and its challenge is not spent asking', '0', asked);
+  row('...it is audited too', '1', r.audits.filter(x => x.verb === 'automation_run').length);
+}
+{
+  const r = rig({});
+  const a = await r.save({ name: 'slept on', enabled: false, trigger: DAILY, steps: [STOP] });
+  row('one saved off carries no approval', 'null', String(a.approved));
+  const res = await r.call('POST', '/api/automations/run', { id: a.id }, yes);
+  row('...and run now with a fresh passkey still runs it', 'true', res.json.ok);
+}
+{
+  // The request does not wait for a sixty-minute step.
+  const r = rig({});
+  const a = await r.save({ name: 'long', trigger: DAILY, steps: [{ action: 'wait', minutes: 60 }, SEND] });
+  const pending = r.call('POST', '/api/automations/run', { id: a.id });
+  await settle();
+  // The first sleep to finish is run-now's own timer, armed as the run's wait began.
+  for (const p of r.sleeps.pending.filter(x => x.ms === 4000)) p.r();
+  r.sleeps.pending = r.sleeps.pending.filter(x => x.ms !== 4000);
+  const res = await pending;
+  row('run now on a long run answers that it is running', 'true', res.json.running);
+  row('...and that is a success', 'true', res.json.ok);
+  row('...the list says so', 'true', (await r.list()).automations[0].running);
+  const again = await r.call('POST', '/api/automations/run', { id: a.id });
+  row('...and a second tap is refused, saying why', '409', again.status);
+  row('...in words', 'it is already running', again.json.text);
+  while (r.sleeps.pending.length) await slice(r);
+  row('...and the run finishes on its own', '1', r.did.length);
+}
+{
+  // ok:false is not "running it now".
+  const r = rig({ perform: async () => ({ ok: false, text: 'the session is not there' }) });
+  const a = await r.save({ name: 'fails', trigger: DAILY, steps: [SEND] });
+  const res = await r.call('POST', '/api/automations/run', { id: a.id });
+  row('a run that fails at once says so', 'false', res.json.ok);
+  row('...with the reason', 'the session is not there', res.json.text);
+}
+
+// ── an approval dies with the device that gave it ────────────────────────────────────────
+{
+  let live = true;
+  const r = rig({ clientLive: () => live });
+  const a = await r.save({ name: 'nightly stop', trigger: EVERY, steps: [STOP] }, () => ({ purpose: 'saved it' }));
+  row('the approval names the device', 'phone-1', a.approved.by);
+  const saved = JSON.parse(fs.readFileSync(r.file('automations.json'), 'utf8'));
+  clock = saved.automations[0].nextRun + 1;
+  r.engine.tick(); await settle();
+  row('while that device is trusted it runs', '1', r.did.length);
+  live = false;
+  clock = (await r.list()).automations[0].nextRun + 1;
+  r.engine.tick(); await settle();
+  row('revoked, it does not run again', '1', r.did.length);
+  row('...it is switched off', 'false', (await r.list()).automations[0].enabled);
+  row('...and the phone is told what to do', '1', (await r.list()).notices.filter(n => /revoked/.test(n.text) && /Save it again/.test(n.text)).length);
+  const byHand = await r.call('POST', '/api/automations/run', { id: a.id }, yes);
+  row('...while a fresh passkey from a trusted device can still run it', 'true', byHand.json.ok);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(0);

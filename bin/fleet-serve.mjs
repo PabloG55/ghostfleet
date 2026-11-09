@@ -2126,12 +2126,14 @@ const automations = createAutomations({
                               assertion: approved ? { purpose: `automation:${id}@${approved.at}` } : null });
     return { ok: !!r.json.ok, text: r.json.text };
   }),
-  // What the grid says, every local project: the same --json the phone renders from.
-  fleet: () => Promise.all(projects().map(async (t) => {
+  // What the grid says, every project the phone can see: the same --json it renders from, so
+  // Jarvis switched off is gone from here too, not only from the Projects screen.
+  fleet: () => Promise.all(shownToPhone().map(async (t) => {
     const g = await gridJson(t);
     return { name: t.name, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
   })),
   audit: (row) => auditAppend({ ts: now(), ip: 'local', ...row }),
+  clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; },
   log,
 });
 
@@ -3361,8 +3363,8 @@ function agentCatalogue() {
   }
 
   // Automations (lib/automations.mjs) answer their own routes, a 404 when switched off.
-  // The assertion is a function because reading it spends its challenge: only a save that
-  // needs one asks.
+  // The assertion is a function because reading it spends its challenge: only a save or a run
+  // that needs one asks.
   const ar = await automations.route({ method: req.method, p, body, client: req.client, assertion: () => headerAssertion(req, c) });
   if (ar) return send(res, ar.status, ar.json);
 

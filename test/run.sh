@@ -19891,6 +19891,12 @@ if CLAUDE_FLEET_AUTOMATIONS_DIR="$AW/data" CLAUDE_FLEET_AUTOMATIONS_AGENT="$AW/a
   is "...and the approval is kept on it"        "automation nightly check" "$(aj save.spawnKey auton automation.approved.purpose)"
   is "...switched off it needs none"            "200"   "$(apf save.spawnOff auton)"
   is "...and carries no approval"               "null"  "$(aj save.spawnOff auton automation.approved)"
+  # §7 ON THE TAP AS WELL AS THE SAVE. A live token could otherwise run a saved stop at any moment.
+  is "run now on one that starts a session: no passkey, refused" "428" "$(apf run.spawnNoKey auton)"
+  is "...saying it needs one"                   "passkey" "$(aj run.spawnNoKey auton needs)"
+  is "...a forged one is refused too"           "428"   "$(apf run.spawnForged auton)"
+  is "...and neither reached fleet-spawn"       "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
+  is "...the run is audited with what approved it" "1"  "$(grep '"verb":"automation_run"' "$SV/audit.jsonl" | grep -c 'passkey:run nightly check' || true)"
   is "the approved one runs"                    "true"  "$(aj run.spawn auton ok)"
   is "...and fleet-spawn was called for it"     "1"     "$(grep -c '^fleet-spawn.*nightly' "$AW/ran.on" || true)"
   is "the save with a passkey is audited as one" "1"    "$(grep '"verb":"automation_save"' "$SV/audit.jsonl" | grep -c 'passkey:automation nightly check' || true)"

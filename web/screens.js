@@ -525,6 +525,7 @@ var DAY_NAMES = [
 ];
 var EVENT_PROJECT = "{project}";
 var EVENT_SESSION = "{session}";
+var own = (o, k) => typeof k === "string" && Object.hasOwn(o, k);
 var blankTrigger = (type = "schedule") => type === "event" ? {
 	type: "event",
 	event: "finished",
@@ -563,7 +564,7 @@ var blankAutomation = () => ({
 	trigger: blankTrigger("schedule"),
 	steps: []
 });
-var needsPasskey = (a) => (a?.steps || []).some((s) => ACTIONS[s.action]?.passkey);
+var needsPasskey = (a) => (a?.steps || []).some((s) => own(ACTIONS, s.action) && ACTIONS[s.action].passkey);
 var everyWords = (m) => m % 1440 === 0 ? `${m / 1440} day${m > 1440 ? "s" : ""}` : m % 60 === 0 ? `${m / 60} h` : `${m} min`;
 function daysWords(days) {
 	const s = [...days].sort().join(",");
@@ -574,7 +575,7 @@ function daysWords(days) {
 }
 function describeTrigger(t) {
 	if (!t) return "";
-	if (t.type === "event") return `when ${t.session && t.session !== "*" ? t.session : "any session"} ${!t.project || t.project === "*" ? "in any project" : `in ${t.project}`} ${EVENTS[t.event]?.label || t.event}`;
+	if (t.type === "event") return `when ${t.session && t.session !== "*" ? t.session : "any session"} ${!t.project || t.project === "*" ? "in any project" : `in ${t.project}`} ${own(EVENTS, t.event) ? EVENTS[t.event].label : t.event}`;
 	if (t.mode === "once") return `once, ${t.date || "?"} at ${t.at}`;
 	if (t.mode === "every") return `every ${everyWords(t.minutes)}`;
 	return `${daysWords(t.days)} at ${t.at}`;
@@ -585,8 +586,8 @@ var clip = (v, n) => {
 	return x.length > n ? `${x.slice(0, n)}…` : x;
 };
 function describeStep(s) {
+	if (!own(ACTIONS, s?.action)) return String(s?.action ?? "");
 	const d = ACTIONS[s.action];
-	if (!d) return s.action;
 	switch (s.action) {
 		case "send": return `send ${where(s)}: "${clip(s.prompt, 60)}"`;
 		case "spawn": return `start session ${s.name || "?"} in ${s.project || "?"}${s.prompt ? " with a task" : ""}`;
@@ -749,7 +750,7 @@ function Item({ a, onEdit, onSave, onDelete, onRun }) {
 					/* @__PURE__ */ u("span", { class: "autos-grow" }),
 					/* @__PURE__ */ u(Btn, {
 						label: "run now",
-						onClick: () => onRun(a.id)
+						onClick: () => onRun(a.id, needsPasskey(a), a.name)
 					}),
 					/* @__PURE__ */ u(Btn, {
 						label: "edit",

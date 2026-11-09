@@ -834,7 +834,7 @@ async function autoPost(kind, path, body, assertion = null) {
 }
 export const saveAutomation = (automation, assertion) => autoPost('automation_save', '/api/automations', { automation }, assertion);
 export const deleteAutomation = (id) => autoPost('automation_delete', '/api/automations/delete', { id });
-export const runAutomation = (id) => autoPost('automation_run', '/api/automations/run', { id });
+export const runAutomation = (id, assertion) => autoPost('automation_run', '/api/automations/run', { id }, assertion);
 export const automationsSeen = () => autoPost('automation_seen', '/api/automations/seen', {});
 export const automationDraft = (messages, draft) => autoPost('automation_draft', '/api/automations/draft', { messages, draft });
 
