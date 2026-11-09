@@ -4,21 +4,295 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
-## Unreleased
+## 0.7.0 — 2026-11-09
+
+**After upgrading**, the pieces that are long-lived keep their old code until they restart.
+`ghostfleet update` runs the install, restarts a launchd `fleet-serve`, offers
+`fleet-restart --all` and tells you to relaunch the phone app. A bare `cf-sync` does none of
+that. What this release changes, piece by piece:
+
+- **The install:** run `./install.sh`, not only `cf-sync`. `fleet-accounts`, `fleet-know`,
+  `fleet-know-event`, `fleet-model`, `fleet-telegram` and `fleet-web` are new commands, and
+  each profile's `settings.json` gains two hooks: `PreCompact` (#145) and the Telegram guard
+  (#134). An upgrade through npm or `ghostfleet update` does this for you.
+- **`fleet-serve` is a daemon: restart it** for everything below that reaches the phone or
+  the web, among them the localhost listener (#93), pairing (#99), the terminal (#89), the
+  queue (#81, #90), Reviews (#124) and automations (#137). Only a launchd job is restarted
+  for you. Run by hand, or under systemd, restart it yourself.
+- **The installed phone app runs the client it cached**, and this release takes it from v72
+  to v100. Swipe it away and relaunch it, since reopening it from the app switcher is a
+  resume and keeps the old one. The launch that fetches the new client can still paint the
+  cached one, so if nothing looks different, do it once more.
+- **A running Claude session keeps its mod and its MCP server.** `fleet-mod reload --apply`
+  moves every idle session onto the new mod, one at a time, and says which it skipped
+  (#132). The mod carries the ledger (#83, #108, #109, #117), delivery (#100, #132), the
+  memory's writes (#133) and peek (#128). Use it rather than sending `/reload-plugins` by
+  hand, which reloads a session on the old mod twice. A reload does not replace the MCP
+  server, only a new start does, and that is what `fleet-restart --all` is for: it
+  relaunches each session on its own conversation. It is needed for `fleet_know`,
+  `fleet_model`, `fleet_project_model`, `fleet_telegram_send` and `fleet_spawn`'s `kind`.
+  The same start picks up the context ceiling (#111), a project's default model (#135) and
+  the profile's environment (#72).
+- **A running grid or Projects screen** keeps the old code until you back out and re-enter
+  it. Re-entering a project also restarts its governor, which notices its code changed. The
+  tmux bindings and the zellij layout did not change, so neither needs anything.
+
+**This release gives the fleet a memory and makes the web client a place to work.**
+`fleet-know` records what the fleet does as it works, so a lead answers "where does acme-api
+stand" from that record instead of reading files, and a session's reasons outlive it. The
+phone and web client gain a real terminal and editor, a two-pane desk layout, the stack, one
+search across machines, and a second machine in the same app. A Telegram chat can talk
+straight to a session. Several Claude logins can share a usage limit. And the wake path is
+quieter and more honest: a lead hears about a finished worker once, after the worker has
+gone quiet, and a wake that did not land says so.
+
+**Behind a switch, and off until you turn it on** (`fleet-experimental enable <name>`, with
+the defaults in `lib/experimental.mjs`):
+
+- `accounts`: several Claude logins per profile, moved between at a usage limit (#68).
+- `peek`: a pasted `[Image #N]` previewed on hover in Claude Code (#128).
+- `know-infer`: a small model reads each finished turn for decisions. It sends that turn's
+  text to the model vendor, and only for a project whose memory setting is `include` (#133).
+- `know-brief`: a project's lead starts, resumes and comes back from `/compact` briefed
+  (#145).
+- `automations`: a trigger and steps `fleet-serve` runs on its own (#137).
+
+`jarvis` and `shots` are unchanged: on only if this install had already used them. The
+review gate (#122) is off by default too, as a per-project setting rather than a switch. The
+memory's own recording is **on**, with no switch; its entry below says how to narrow or stop
+it.
 
 ### Added
 
-- **Automations (experimental, off by default).** A trigger — on days at a time, once, every
-  N minutes, or a session changing state — and steps the fleet runs on its own through the
-  same verb path a tap takes: send, start, pause, resume, wake, interrupt, reopen, stop, plus
-  "tell me", "wait" and "continue only if…". Built on the phone by taps or by saying it in a
-  sentence. A start or a stop asks for the passkey when the automation is saved, since
-  nobody holds the phone when it runs, and again on "run now", since somebody does. A missed
-  schedule is not run late, and a run going when it is switched off, deleted or edited stops.
-  The sentence builder names only projects whose memory setting is `include` to the model
-  vendor. While an enabled automation listens for a session changing, each registered project
-  costs one `fleet-grid --json` every 8 seconds. `fleet-experimental enable automations`;
-  docs/automations.md.
+- **The fleet keeps a memory, recording from the day you install** (#133, #140, #142, #152,
+  #154). `fleet-know <project>` prints where a project stands: what it is, its sessions,
+  branches and PRs, the last deploy, what waits on you, and the decisions that hold, each
+  saying who said it (workers' decisions are a count, and `--all` lists them). `waiting`
+  lists what waits on you across every project and paired machine, `touched <path>` finds
+  who changed a file, `find <text>` searches everything recorded, `history <project>` reads
+  it back by day, and `--at` / `--known-at` answer as things stood and as they were known.
+  Agents get it as the MCP tool `fleet_know`. The log is per profile, in that profile's
+  fleet dir. It goes to a machine you paired, to a session that asks, and with `know-infer`
+  on to the model vendor, and nowhere else.
+  `fleet-know privacy <project> include|private|exclude` sets what is kept: `exclude` writes
+  nothing, and `private` is never sent to a model or across a pairing.
+  `CLAUDE_FLEET_KNOW=off` stops it all. Secret-shaped text is scrubbed as it is recorded,
+  which does not reach lines already written, and `fleet-know forget <id> [--purge]` takes a
+  line back. `fleet-know backfill [--dry-run]` fills in the past from merged PRs, ledgers,
+  spawn manifests and git logs; nothing runs it for you. It adds about 10 ms to a turn's
+  end, and a project page answers in under 300 ms at 30k events. docs/MEMORY.md.
+- **A project's lead can start already knowing your rules (experimental, off)** (#145,
+  #152). With `know-brief` on, a lead that starts, resumes or comes back from `/compact`
+  gets a briefing of at most 2,000 characters: your standing rules, the decisions from you
+  and from leads that still hold, and what waits on you. A worker never gets one.
+  `fleet-know rule add|list|accept|close|share-from` keeps the rules, `decide --supersedes`
+  and `fact` let a fact close, and your answer to a numbered question becomes a decision.
+  `PreCompact` is wired for everyone, and leaves at once with the switch off.
+- **A Telegram chat talks to a fleet session, and the session is the bot** (#134, #141,
+  #144). `fleet-telegram link <project>/<session>`, then `start`. No second agent decides
+  when the session has finished: the reply is the final message of the turn that prompt
+  started. Only the allowlisted chat is delivered. A Telegram turn may use only what is on a
+  tool list, which starts as reading, the fleet's own tools and writing in a scratch folder,
+  so no `Bash`. A guard refuses the rest, including any tool shipped later, and a desk turn
+  in the same session is untouched. `config allow` widens it with `Bash(<prefix> *)` entries
+  and a `:checkout` scope; docs/TELEGRAM.md says plainly that an editable script plus a
+  command entry for it is a remote shell. Photos, any file up to 20 MB, voice notes (with
+  your own `transcribe-cmd`, and answered aloud with `speak-cmd`) and replies that keep what
+  they quote all arrive. The token comes only from a command you name and is never stored.
+  Agents can message you unprompted with `fleet_telegram_send`.
+- **Several Claude logins per profile, moved between at a usage limit (experimental, off)**
+  (#68, #69, #70, #71, #78, #79, #80, #91, #146). `fleet-experimental enable accounts`, then
+  `fleet-accounts add <profile> <name>`. At 97% of a 5-hour or 7-day window the profile
+  moves to another login and **nothing restarts**: a running Claude re-reads its login, so
+  no session loses its place. While every account has room it spends the allowance that
+  expires first. An account that hit a limit is out until its reset, and a planned move does
+  not trust a stale reading. With all of them spent, workers (never the lead) are parked and
+  resumed at the earliest reset, with one inbox row and one push, unless the project's
+  budget is set to ignored. A hand `/login` to a login you have not saved pauses failover,
+  and `list` says so. Saved logins live only in the OS secret store, or a mode-600 file on
+  Linux. Claude only.
+- **What each login has left, on the phone and the web** (#85). With `accounts` on, Projects
+  opens with a line per profile (`main · 5h 37% (2h10m) · 7d 42% (Sat)`) and a tap shows
+  every account. Read only.
+- **Two machines in one app** (#99, #119, #121, #126). `fleet-serve pair --as laptop` on
+  one, `fleet-serve pair <url> <code> --as vm` on the other, and `acme-api@vm` sits beside
+  your own projects under one passkey: grids, chat, photos, panes, the queue, usage,
+  Reviews, and wake, park and resume. The terminal, anything that needs a passkey, and
+  project settings do not cross. Requests are signed per direction, both sides audit them,
+  plain http is refused except on loopback, and an offline machine is a card rather than an
+  error. Push now holds while you are at either keyboard, by tmux activity as well as the
+  Mac's input, so Linux holds at all for the first time.
+- **A real terminal and editor in the web client** (#89, #106, #107). `Ctrl-a t` opens the
+  project's fleet tab and `Ctrl-a n` the editor, behind four gates: off per device, a fresh
+  passkey on every open, an Origin check with a one-use 30-second ticket, and only inside
+  the fleet's tmux. Idle closes it after 15 minutes. It works on a phone too: at least 64
+  columns, pinch or A−/A+, touch as a mouse, and a two-band key row with Ctrl and Alt
+  latches. If you audit such things, the CSP gains `style-src 'unsafe-inline'` for it.
+- **The web client works at a desk** (#87). At 1024 px and up with a mouse: two panes, the
+  grid's keys (web/README.md has the table), ⏎ sends and ⇧⏎ is a newline, images paste and
+  drop, and a draft per session survives a reload. The session screen's own letter keys
+  (p/P/x/r/l/s/q) are gone; those actions are under `⋯`.
+- **The web client on the machine itself, with no tailnet** (#93). `ghostfleet web` opens
+  `http://localhost:8787`, with its own passkey (`fleet-serve enroll mac`). It is a second
+  listener on loopback, and nothing crosses between the two. A missing tailnet address no
+  longer crash-loops the daemon: it retries every 30 seconds, and `fleet-serve check`
+  reports it.
+- **The stack on the web** (#101). A picker, then up to four columns plus chips at a desk,
+  and a swipe between them on the phone.
+- **One search finds projects and sessions** (#75, #94, #104). `/` at a desk and a field on
+  the phone, by name, label or branch, across paired machines. `/` on the terminal grid
+  finds an agent and highlights it in place.
+- **The address carries your place, per tab** (#131). A reload lands where that tab was, and
+  a link can name a screen, a project or a session. It never skips or previews the passkey
+  lock, and no token or message text goes in it.
+- **Everything a lead still holds reaches the phone** (#81, #90). A Queue page, with a
+  `queue · n ›` row on Projects, red while something waits, and one push per project for a
+  new waiting item. A reply goes back naming the ledger item. A short status question to a
+  lead ("whats the status") makes it list each one and ask.
+- **A review gate, per project and off by default** (#122).
+  `fleet-project set <p> review-gate on` and `fleet-review round|pass|stuck|status`:
+  `gh pr merge`, a REST or MCP merge, `--auto` and GraphQL are refused unless the last
+  verdict at the current head is a pass. It is not a sandbox, and a merge from GitHub's web
+  page is not seen.
+- **A running session can move to another model and stay there** (#135, #139).
+  `fleet-model <session> <model>`, or the MCP tool `fleet_model`. The conversation
+  continues, your profile's `settings.json` is put back (a hand `/model` makes that model
+  the default for every later session), and the pin survives hibernate, restart and reopen.
+  A launch takes the pin, then the model it was spawned with, then
+  `fleet-project set <p> model <m|default>`, then the profile's; a master never takes the
+  project default. `fleet-list` gains a `MODEL` column. Claude only.
+- **A worker's model by the kind of job** (#115).
+  `fleet-spawn --kind verify|ci|docs|video|build` with
+  `fleet-project set <project> model-<kind> <model|default>`. With neither set, nothing
+  changes.
+- **A pasted image, previewed while you write (experimental, off)** (#125, #128). A row
+  above the prompt lists the draft's `[Image #N]`: hover previews, click opens the system
+  viewer, and a sent prompt's images work the same. A borderless window on macOS, terminal
+  graphics in Ghostty or kitty outside tmux, a half-block card elsewhere.
+  `fleet-experimental enable peek`.
+- **Automations (experimental, off by default)** (#137). A trigger — on days at a time,
+  once, every N minutes, or a session changing state — and steps the fleet runs on its own
+  through the same verb path a tap takes: send, start, pause, resume, wake, interrupt,
+  reopen, stop, plus "tell me", "wait" and "continue only if…". Built on the phone by taps
+  or by saying it in a sentence. A start or a stop asks for the passkey when the automation
+  is saved, since nobody holds the phone when it runs, and again on "run now", since
+  somebody does. A missed schedule is not run late, and a run going when it is switched off,
+  deleted or edited stops. The sentence builder names only projects whose memory setting is
+  `include` to the model vendor. While an enabled automation listens for a session changing,
+  each registered project costs one `fleet-grid --json` every 8 seconds.
+  `fleet-experimental enable automations`; docs/automations.md.
+
+### Changed
+
+- **Every Claude fleet session now starts with a 300k context ceiling** (#111). It compacts
+  around 238k. Measured before the change: 83% of cost was cache reads, and 54% of spend
+  came from calls at 500k or more.
+  `fleet-project set <project> context-window <size|off|default>`, or
+  `~/.config/ghostfleet/context-window`; `off` launches as before, and a value you exported
+  is kept. `fleet-meter --context` shows the effect.
+- **A worker's DONE now waits for a quiet window before it wakes the lead** (#112). 600
+  seconds by default, then one wake naming every worker, dropping any that went busy again
+  or that you already read. These nudges were 64% of a lead's turns. A need-you is still
+  immediate. `CLAUDE_FLEET_NOTIFY_QUIET=0` or `<sock>.notify-quiet` restores the old timing.
+  A wake blocked by text in the input box is held rather than expired, and says so on the
+  band and the phone.
+- **A turn that ends with its own background job running is WAITING, not DONE** (#130). It
+  wakes nobody, and the turn with nothing left running is the DONE, so a lead is not woken
+  before the PR exists. If the job outlives 30 minutes, or ends with no turn following, a
+  watcher files the DONE. A repeat DONE with nothing new is no row and no wake. If it cannot
+  tell, it wakes, as before. The phone's push path is unchanged, so a waiting turn can still
+  buzz it.
+- **A resume turn that made nothing is RESUMED, not DONE** (#92). It wakes nobody and sends
+  no push, and `fleet-inbox` folds them into one line.
+- **The ledger holds a brief to its proof, and stops counting what a turn already answered**
+  (#82, #83, #108, #109, #117). A brief from the lead is done only with proof, with one
+  nudge per brief. A person's message is owed only once it outlives its turn; 75% used to
+  close before the next message. Words sent from the phone count as the person's
+  (`fleet-send --owner`, only through the passkey door). Waiting items untouched for 24
+  hours become `expired`. `fleet-stop` hands a worker's open items to the lead,
+  `fleet-inbox` does it for a worker that died, and a merged PR closes them. Items already
+  closed keep their state, and `fleet-ledger drop-carried` clears what an older carry left
+  behind.
+- **A NEED-YOU says who and what** (#76). `permission · Bash command: …`, `question: …`,
+  `limit: …`, each with its own immediate nudge, and `fleet-inbox` pins what is pending
+  under `NEEDS YOU NOW`.
+- **Reviews move into the phone app, and `fleet-shots serve` is retired** (#124, #126,
+  #129). A `reviews · n` row behind `shots`, one card per branch, a video with chapters,
+  from every paired machine. `fleet-shots serve` now prints `<origin>/#reviews` and exits
+  non-zero, so a script calling it will notice. `list`, `verdict` and `--check` stay, and
+  your approve of a recorded flow is now enough for `--check`, with any flags printed as
+  accepted.
+- **Every login lands on Projects** (#105). A back swipe no longer previews the lock screen,
+  and Face ID after a cold relaunch no longer reopens the chat. Your draft is kept, and a
+  tapped notification still goes where it points.
+- **The web client is redesigned on one token system over the same palette** (#102, #103).
+  Count tiles wrap two by two on a 320 px phone. The GIFs in the docs still show the old
+  client.
+- **`fleet-list` starts one `jq` where it started hundreds** (#148). 50 sessions took 122 s
+  and take 0.78 s, with byte-identical output.
+- **The desk stack picker fits its window** (#96): `↑ N more` / `↓ N more`, `/` to search,
+  resize, and held keys count.
+- **Talking to a session no longer needs Jarvis on** (#73).
+- **The repository is open core now** (#138, #147). Everything is still MIT except `ee/`,
+  which holds only its Team License today, so nothing needs a subscription and the npm
+  package is MIT-only. Contributions now sign a CLA, by a click on the bot's page.
+  docs/LICENSING.md.
+
+### Fixed
+
+- **A fleet runs under its own profile, whoever started its tmux server** (#67, #72). Hooks
+  wrote to the default fleet dir, the phone showed no messages and a `--reply-to` question
+  was never answered, with no error anywhere. `fleet-restart` and the grid now use the
+  fleet's account, not the caller's. The governor corrects the server's environment and
+  files one inbox row naming any session still on the old one, with its `fleet-restart`
+  line; it restarts nothing itself.
+- **With no UTF-8 locale, the fleet read as empty and a working agent as idle** (#151). tmux
+  turns a tab and every non-ASCII byte into `_` for such a client, so records stopped
+  splitting; and `✻` did not match in the C locale, so an agent switch could replace a
+  spinning agent mid-turn. launchd and systemd start daemons with no locale, on any
+  platform.
+- **A wake that fails says so, and one that does not land is retried** (#95, #123). A wake
+  counts only if the session stays up 5 seconds, and a failure reports at once with its last
+  lines. A nudge that did not land is retried after 60 seconds and 180 more, then becomes a
+  `failed` row and a phone marker. A lead had sat idle for 8 hours behind one. A queued wake
+  is followed across a compaction.
+- **A brief that opens with a slash command runs it** (#100). `//`, a bare `/` and a path
+  are refused, as are the mod's own `/fleet`, `/inbox` and `/ledger`, with a pointer. A
+  delivery that fails becomes a `failed` inbox row for the lead.
+- **A handed-over `/reload-plugins` runs once, and `fleet-mod reload` finds sessions on old
+  mod code** (#132). One send had caused 65 reloads. A deploy bumps no version, so each
+  session now records a digest of the code it loaded, and `fleet-mod status` says how many
+  are behind. Slash text an old mod refuses is pasted instead of failing, and peek survives
+  a reload.
+- **A queued prompt survives the drain dying** (#110). `fleet-inbox` lists what was
+  stranded, and `fleet-send --requeue <session> <id>`, `--discard` and `--stranded` deal
+  with it.
+- **`fleet-send` can see a prompt the pane wrapped across rows** (#144). It reported a
+  landed send with the prompt still in the box. Prompts under 24 characters, which could
+  earn a second Enter and an empty turn, are fixed with it.
+- **An agent started from another agent's tool shell files nothing under its name** (#114).
+  One worker's nine short probes had filed nine DONEs and woken its lead nine times.
+- **The merge guard judges what a command runs** (#116), not the words inside a `fleet-ack`,
+  `fleet-send`, `fleet-ledger` or `git commit` message. A chained or `$(…)` merge is still
+  refused.
+- **An open chat converges to the transcript** (#86). A reply lands while you type, opening
+  always loads, sideways scroll and selection survive a poll, and older messages load as you
+  scroll up. A repeat read of a 42 MB transcript went from about 1,000 ms to 74 ms.
+- **Every sheet has an X and closes on an outside press** (#106), keeping what you typed.
+- **A burst of keys is each of them, and the settings pages fit their terminal** (#145,
+  #150). `jjj` in one read moved nothing. Both settings pages now keep their title and keys
+  at any size.
+- **A mouse drag in the editor tab copies** (#74). A keyboard selection does not.
+- **`fleet-list`'s MODEL read `?` when installed** (#139), because the symlink hid `lib/`;
+  lost sessions were never listed either.
+- **Entering a master no longer flashes `duplicate session: master`** (#127).
+- **The guard that keeps two panes off one conversation no longer switches itself off on a
+  busy machine** (#88, #97), and a worktree's path no longer leaks into the built client's
+  comments.
+- **`fleet-merged` serves a good cache when `gh` is absent** (#153), rather than exiting.
+
+Nothing to upgrade for: the suite and CI (#77, #84, #98, #143, #149), and docs alone
+(#113, #118, #120).
 
 ## 0.6.1 — 2026-10-16
 
