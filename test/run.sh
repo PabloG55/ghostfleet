@@ -29444,6 +29444,18 @@ else
   skip "a Telegram chat talks to a fleet session, end to end" "tmux, jq, node or curl missing, or mktemp not available"
 fi
 
+group "offline Team license and seats"
+if command -v node >/dev/null 2>&1; then
+  LIC_OUT="$(mktemp "$TMUX_TMPDIR/license.XXXXXX")"
+  node --test "$ROOT"/ee/license/test/*.test.mjs > "$LIC_OUT" 2>&1
+  lic_rc=$?
+  is "all offline license tests pass" "0" "$lic_rc"
+  [ "$lic_rc" -eq 0 ] || cat "$LIC_OUT"
+  rm -f "${LIC_OUT:?}"
+else
+  skip "offline Team license and seats" "node missing"
+fi
+
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────
 # A MARKER, NOT THE FIRST SUMMARY printf. cf_only used to take that printf as the end of the
 # last group, which made the n/a list below part of whichever group happened to be last — so
