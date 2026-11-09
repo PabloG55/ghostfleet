@@ -1186,20 +1186,49 @@ and nothing there lets you look at it again. With `peek` on:
 Both need the fullscreen layout (`"tui": "fullscreen"` in Claude Code's settings), because only
 there does the terminal report the pointer. On the main screen the mod draws nothing.
 
-**What the preview is**, decided once per session:
+**What the preview is**, first match wins:
 
 | where | preview |
 |---|---|
-| macOS, local (a fleet session in tmux included) | a borderless window by the pointer, with the picture's own pixels at the screen's scale: shrunk to 800 points and 70% of the screen at most, never enlarged. It never takes the focus or the pointer, stands over every window (full-screen spaces too), closes when the pointer leaves, and lives two minutes at most. It is a JavaScript for Automation program run by `osascript`, so nothing needs installing. |
-| Ghostty or kitty, **outside** tmux | the terminal draws the picture itself (the kitty graphics protocol, the engine's `Image`), in a card above the prompt. Inside tmux that would need `allow-passthrough`, so a fleet session gets the window instead. |
-| Linux, WSL, any other terminal, and anything over SSH | a card of half-block cells (`▀`, two pixels to a cell) above the prompt. It works through tmux in any true-colour terminal, and shows a picture's layout rather than text you can read. There is no native window on Linux or WSL. Over SSH a window would open on the other machine, which is why SSH always gets cells. |
+| Ghostty or kitty, **outside** tmux, here or over SSH | the terminal draws the picture itself (the kitty graphics protocol, the engine's `Image`), in a card above the prompt. The terminal is known by `TERM` (`xterm-ghostty`, `xterm-kitty`) or `TERM_PROGRAM`, which over SSH arrive only when forwarded. On this machine the terminal reads the file; over SSH it gets the PNG's bytes, since the file is on the other machine. |
+| macOS, local (a fleet session in tmux included) | a borderless window by the pointer, with the picture's own pixels at the screen's scale: shrunk to 800 points and 70% of the screen at most, never enlarged. It never takes the focus or the pointer, stands over every window (full-screen spaces too), closes when the pointer leaves, and lives two minutes at most. It is a JavaScript for Automation program run by `osascript`, so nothing needs installing. It comes first on a Mac even inside tmux, where the terminal could draw the picture too. |
+| **inside** tmux, the terminal you attached through is Ghostty, kitty 0.28+ or iTerm2 3.5+ (Linux, WSL, or a Mac over SSH) | the terminal draws the picture, as above, as PNG bytes through tmux's passthrough (`allow-passthrough on` in `tmux/cf.tmux.conf`). |
+| anything else | a card of half-block cells (`▀`, two pixels to a cell) above the prompt. It works through tmux in any true-colour terminal, and shows a picture's layout rather than text you can read. There is no native window on Linux or WSL, and over SSH a window would open on the other machine. |
+
+**Which terminal, inside tmux.** A session's own `TERM` and `TERM_PROGRAM` describe tmux, not
+the terminal, and over SSH the terminal's name is not forwarded at all. tmux knows: it asks each
+terminal that attaches for its version (XTVERSION) and keeps the answer as `client_termtype`,
+which is what Claude Code reads too. So as each preview opens the mod asks tmux which client is
+looking at the session's window. With two terminals attached, the one with the latest input
+counts (the hover that opened the preview came from it). If that is Ghostty and the other is a
+plain terminal, Ghostty shows the picture and the other shows the placeholder characters the
+picture is drawn with. A preview opened from the plain terminal is cells in both.
+
+**Start the session with your terminal attached.** Claude Code decides when it starts whether
+pictures can draw through tmux, and does not ask again. A session started while no terminal was
+attached to its fleet's tmux, which is how `fleet-spawn` starts a worker when nobody is looking,
+never draws one. Neither a terminal attaching later nor a focus change makes it ask again. The
+mod sees the engine draw the picture's alt instead, shows cells, and says why under the card:
+*cells: started with no terminal attached*. Restart that session while you are
+attached. Viewing through the stack screen is the same: the fleet's tmux sees another tmux
+attached, not your terminal, and a picture does not get through the nested tmux, so the card is
+cells.
+
+**What goes to the terminal.** Inside tmux and over SSH the picture is always sent as PNG bytes,
+never as a file name, because the terminal there cannot open this machine's files and would draw
+a blank box. The bytes are at most 2 MiB decoded, which is the most the engine takes, and at
+most 1600 pixels on the long side, which is the widest a card is drawn. A larger picture is
+shrunk to 1600, then 1200, 800 and 400 pixels until it fits, never enlarged. Outside tmux on
+this machine, the terminal reads the file itself.
 
 A card in the terminal is drawn above the prompt, over the chips, whichever `[Image #N]` opened
 it, and the transcript moves up while it shows: the prompt's slot clips anything drawn outside
 it, and a card floated over the transcript is painted over by the rows after it.
-`CLAUDE_FLEET_PEEK=cells` asks for the cells on a Mac; `=window` and `=kitty` are honoured only
-where that preview can open. If the window program ends without showing a window, the rest of the
-session uses cells.
+`CLAUDE_FLEET_PEEK=cells` asks for the cells on a Mac or anywhere else. `=kitty` asks the
+terminal to draw the picture, inside tmux and over SSH too, for a terminal tmux cannot name.
+`=window` is honoured only where a window can open. If the window program ends without showing a
+window, the rest of the session uses a card. If the engine draws the picture's alt, the rest of
+the session uses cells, whatever `CLAUDE_FLEET_PEEK` says.
 
 **What it reads.** Only the session's own pastes. First Claude Code's copy, under
 `$CLAUDE_CODE_TMPDIR` (or `/tmp`)`/claude-<uid>/<project>/<session>/images/<N>.<ext>`, which must

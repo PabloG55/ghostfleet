@@ -4989,13 +4989,35 @@ EOF
      "0 0 wake held 12m · this input box has unsent text true" "$bh"
   # PEEK (hooks/peek-shape.js): how a session shows a pasted picture. One letter a case
   # (Window, Kitty, Cells), in the helper's order: a fleet session in tmux on a Mac and a plain
-  # Mac terminal get the window; Ghostty and kitty draw it themselves, but not from inside tmux
-  # (an inherited KITTY_WINDOW_ID there is a window); SSH is cells, since both the window and
-  # the file would be the other machine's; Linux and anything else are cells, and kitty there
-  # draws it; CLAUDE_FLEET_PEEK=cells is honoured on a Mac, =window is not where none can open.
-  is "peek: the preview is a window on macOS, kitty's own in Ghostty/kitty outside tmux, cells elsewhere and over SSH" \
-     "wwkkwccckccc c macos linux other open -a Preview /x/1.png xdg-open /x/1.png" \
+  # Mac terminal get the window; Ghostty and kitty draw it themselves; inside tmux their
+  # variables say nothing (an inherited KITTY_WINDOW_ID there is still the Mac's window); tmux
+  # over SSH with nobody named attached is cells; Ghostty over SSH with no tmux draws it, as
+  # bytes; Linux and anything else are cells, and kitty there draws it; CLAUDE_FLEET_PEEK=cells
+  # is honoured on a Mac, =window is not where none can open.
+  is "peek: the preview is a window on macOS, the terminal's own in Ghostty/kitty, cells elsewhere" \
+     "wwkkwckckccc c macos linux other open -a Preview /x/1.png xdg-open /x/1.png" \
      "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" mode 2>&1)"
+  # Inside tmux, by the terminal tmux names as looking (its XTVERSION answer, which is what TERM
+  # over SSH cannot say). In the helper's order: Ghostty, kitty 0.28+ and iTerm2 3.5+ through
+  # tmux over SSH draw it; an xterm, no answer, a nested tmux (the stack), an older iTerm2 or
+  # kitty, and nobody attached are cells; a Linux desktop in tmux draws it; a Mac here keeps
+  # its window first, a Mac reached over SSH draws it; CLAUDE_FLEET_PEEK=kitty is taken in tmux
+  # and over SSH with nobody named (the person's word), =cells over a Ghostty that could draw.
+  # Then: once the engine has drawn one as its alt, cells (or a Mac's window) whoever asks; of
+  # three clients, the latest input among those showing this pane's window is the one looking;
+  # tmux is asked only where its answer changes the mode; and what counts as the engine
+  # drawing the alt (the words, or the tmux code) and what does not (not mounted yet).
+  is "peek: through tmux the terminal looking decides, by its own answer, and the engine's refusal is final" \
+     "kkkcccccckwkkckk ccw ghostty 1.1.3,kitty(0.35.2),none,none ynnn yynnn \"#{client_activity}\t#{window_id}\t#{client_termtype}\t#{client_termname}\"" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" through 2>&1)"
+  # What an Image is handed. Inside tmux, over SSH, and both: PNG bytes, or none at all (cells),
+  # never a file name, which the terminal over there cannot open (a blank box); outside them, on
+  # this machine, the file. At most 2 MiB decoded, the engine's bound, one byte over is none.
+  # The sides a picture is shrunk to for the bytes: the card's widest (1600) first, never larger
+  # than the picture itself, which is tried as it is first.
+  is "peek: kitty through tmux or SSH is PNG bytes within the bound, never a file" \
+     "png/none,png/none,png/none,png/none,file/file ok,none true 1600>1200>800>400 as-is>1200>800>400 as-is>800>400 as-is 1600>1200>800>400 2097152 1600" \
+     "$(node --no-warnings "$ROOT/test/helpers/peek-check.mjs" source 2>&1)"
   # The hover targets over a sent prompt: each [Image #N] of its FIRST line once, after the
   # two-column prompt mark, only where the session has the picture (#7 here it has not), none
   # past the line's end or after a wide glyph; and one per listed row under it, by number.
@@ -14520,6 +14542,73 @@ else
   is "...and another editor is not"       "0" \
      "$(tmux -L cfedin display-message -p -t _edit-api-2 '#{pane_start_command}' 2>/dev/null | grep -c 'luafile' || true)"
   tmux -L cfedout kill-server 2>/dev/null; tmux -L cfedin kill-server 2>/dev/null; rm -rf "$EC"
+fi
+
+# PICTURES THROUGH THE FLEET'S TMUX. Claude Code's `Image` (PEEK's card is one) reaches the
+# terminal outside tmux only as passthrough: kitty graphics wrapped in `\ePtmux;…\e\\`, which
+# tmux unwraps and writes to the attached terminal while the pane's allow-passthrough is on, and
+# drops while it is off. With it off the engine draws the picture's alt, and a card over SSH was
+# half-block cells where Ghostty could have drawn the picture. So it is asked where it is
+# decided: of the bytes an ATTACHED client receives, on a pty with no window
+# (test/helpers/pty-record.py) answering XTVERSION as Ghostty does, never of the pane, which is
+# the other side of tmux. Both directions on one server: with the fleet's config the marker
+# arrives unwrapped; turned off, it does not arrive at all, while the text printed after it
+# does, which is what says the recorder was listening the whole time.
+group "a pane's pictures reach the terminal through the fleet's tmux"
+if command -v tmux >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  PT="$(mktemp -d)"
+  PTH="$ROOT/test/helpers/pty-record.py"
+  cat > "$PT/emit.sh" <<'EMIT'
+printf '\033Ptmux;\033\033_Ga=q,i=7,f=100;PEEKMARK-%s\033\033\\\033\\' "$1"
+printf 'after-%s' "$1"
+sleep 120
+EMIT
+  tmux -L cfpass kill-server 2>/dev/null
+  is "the fleet's config loads with nothing said" "" \
+     "$(tmux -L cfpass -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s s -x 100 -y 30 'sleep 120' 2>&1)"
+  is "...and turns passthrough on, not all" "on" "$(tmux -u -L cfpass show-options -gv allow-passthrough 2>/dev/null)"
+  # One leg: attach a recorder, have the pane print the wrapped marker, detach, say what came.
+  pass_leg() {
+    TERM=xterm-256color python3 -I "$PTH" --record "$PT/$1.rec" --xtversion 'ghostty 1.1.3' --seconds 20 \
+      -- tmux -L cfpass attach -t s >/dev/null 2>&1 &
+    local rec=$! i
+    for i in $(seq 1 50); do
+      grep -q '^ghostty' <<< "$(tmux -u -L cfpass list-clients -F '#{client_termtype}' 2>/dev/null)" && break
+      sleep 0.1
+    done
+    tmux -L cfpass respawn-pane -k -t s "sh '$PT/emit.sh' $1" 2>/dev/null
+    for i in $(seq 1 50); do
+      grep -q "after-$1" <<< "$(tmux -L cfpass capture-pane -p -t s 2>/dev/null)" && break
+      sleep 0.1
+    done
+    sleep 0.3   # the client is written after the pane
+    tmux -L cfpass detach-client -s s 2>/dev/null
+    wait "$rec" 2>/dev/null
+    local got; got="$(python3 -I "$PTH" --count "$PT/$1.rec" "PEEKMARK-$1")"
+    local bare="${got#bare=}"; bare="${bare%% *}"
+    printf '%s %s %s' "$([ "${bare:-0}" -ge 1 ] && echo drawn || echo dropped)" "${got#* }" \
+      "$(grep -aq "after-$1" "$PT/$1.rec" && echo listening || echo deaf)"
+  }
+  is "the attached terminal gets the picture, unwrapped" "drawn wrapped=0 listening" "$(pass_leg on)"
+  tmux -L cfpass set -g allow-passthrough off 2>/dev/null
+  is "...and with passthrough off it gets nothing of it"  "dropped wrapped=0 listening" "$(pass_leg off)"
+  # The terminal a fleet session is drawn in, as tmux names it to the engine and to PEEK: the
+  # attached terminal's own XTVERSION answer, which is what TERM over SSH cannot say.
+  TERM=xterm-256color python3 -I "$PTH" --record "$PT/name.rec" --xtversion 'ghostty 1.1.3' --seconds 20 \
+    -- tmux -L cfpass attach -t s >/dev/null 2>&1 &
+  PTR=$!
+  for i in $(seq 1 50); do
+    grep -q '^ghostty' <<< "$(tmux -u -L cfpass list-clients -F '#{client_termtype}' 2>/dev/null)" && break
+    sleep 0.1
+  done
+  is "tmux names the attached terminal by its answer, not by its TERM" "ghostty 1.1.3|xterm-256color" \
+     "$(tmux -u -L cfpass list-clients -F '#{client_termtype}|#{client_termname}' 2>/dev/null)"
+  tmux -L cfpass detach-client -s s 2>/dev/null
+  wait "$PTR" 2>/dev/null
+  tmux -L cfpass kill-server 2>/dev/null
+  rm -rf "${PT:?}"
+else
+  skip "pictures through tmux" "tmux or python3 missing"
 fi
 
 # fleet-copy picks a clipboard tool at run time — pbcopy is macOS-only and this repo

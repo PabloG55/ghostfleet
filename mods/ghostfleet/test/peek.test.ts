@@ -18,14 +18,28 @@ const FOLDER = '/tmp/claude-501/-w-acme-api/sess-1'
 // Inside tmux on a Mac, as every fleet session is: no picture in the terminal, a window.
 const MAC_TMUX = { TERM_PROGRAM: 'tmux', TERM: 'tmux-256color', TMUX: '/tmp/tmux-501/cf-acme-api,1,0' }
 
-type Opts = { peek?: string | null; draft?: string; env?: Record<string, string>; system?: string; images?: Record<string, string>; window?: 'shown' | 'error'; api?: any[] }
+// The clients tmux lists for this pane's window (`peek-shape.js CLIENT_FORMAT`): its last input,
+// the window it shows, its XTVERSION answer, its TERM.
+const client = (at: number, termtype: string, termname = 'xterm-256color', win = '@1') => `${at}\t${win}\t${termtype}\t${termname}`
+// A Linux machine reached over SSH, the session in the fleet's tmux there, as `fleet-spawn` starts it.
+const SSH_TMUX = { TERM_PROGRAM: 'tmux', TERM: 'tmux-256color', TMUX: '/tmp/tmux-1000/cf-acme-api,1,0', TMUX_PANE: '%1', SSH_CONNECTION: '10.0.0.2 51000 10.0.0.1 22' }
 
-function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Darwin', images = { '3.png': PNG }, window = 'shown', api = [] }: Opts = {}) {
+type Opts = {
+  peek?: string | null; draft?: string; env?: Record<string, string>; system?: string; images?: Record<string, string>; window?: 'shown' | 'error'; api?: any[]
+  /** list-clients rows, for a tmux that answers; absent, every tmux call fails. */
+  clients?: string[]
+  /** What `$.ui.blit` answers: the engine drawing the picture ({}), or its alt. */
+  blit?: any
+  /** What a shrinker writes, by the side it is asked for (`as-is` for none). */
+  shrunk?: Record<string, string>
+}
+
+function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Darwin', images = { '3.png': PNG }, window = 'shown', api = [], clients, blit = {}, shrunk = {} }: Opts = {}) {
   const files = new Map<string, string>()
   if (peek !== null) files.set(`${XD}/peek.enabled`, `${peek}\n`)
   for (const [name, b64] of Object.entries(images)) files.set(`${FOLDER}/images/${name}`, b64)
   const box = { text: draft }
-  const w = { files, box, runs: [] as string[][], reads: [] as string[], windows: [] as { argv: string[]; env: Record<string, string>; isEnded: boolean }[], api: { reads: 0 }, looks: { n: 0 } }
+  const w = { files, box, runs: [] as string[][], reads: [] as string[], windows: [] as { argv: string[]; env: Record<string, string>; isEnded: boolean }[], api: { reads: 0 }, looks: { n: 0 }, blits: [] as any[] }
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.env(on, { HOME: '/home/u', CLAUDE_FLEET_DIR: '/fleet', ...env })
   on('session.id', () => ({ value: 'sess-1' }))
@@ -57,7 +71,13 @@ function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Dar
     let stdout = '', exitCode = 0
     if (argv[0] === 'id') stdout = '501\n'
     else if (argv[0] === 'uname') stdout = `${system}\n`
+    else if (argv[0] === 'tmux' && clients && argv.includes('list-clients')) stdout = `${argv.includes('display-message') ? '@1\n' : ''}${clients.join('\n')}\n`
     else if (argv[0] === 'tmux') exitCode = 1
+    else if (argv[0] === 'sips') {
+      const side = argv.includes('-Z') ? argv[argv.indexOf('-Z') + 1] : 'as-is'
+      // As before for a test that names nothing: it says it worked and writes nothing.
+      if (shrunk[side] !== undefined) files.set(argv[argv.indexOf('--out') + 1], shrunk[side])
+    }
     else if (argv[0] === '/bin/sh' && /base64 -d >/.test(argv[2] || '')) files.set(argv[4], e.init?.stdin ?? e.stdin ?? '')
     else if (argv[0] === '/bin/sh' && argv[2] === 'echo $PPID') stdout = '4242\n'
     return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -86,6 +106,7 @@ function world(on: any, { peek = 'on', draft = '', env = MAC_TMUX, system = 'Dar
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: '' }))
   on('ui.message', () => ({}))
+  on('ui.blit', (_$: any, e: any) => { w.blits.push(e); return { value: blit } })
   // The engine's own drawing, so a slot or a row the mod left alone is told from one it drew.
   on('ui.render', ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
@@ -242,12 +263,118 @@ test('in Ghostty outside tmux the terminal draws the picture itself, from the fi
   expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { file: `${FOLDER}/images/3.png`, format: 'png' } } })
 })
 
-test('...but Ghostty\'s variables inside tmux are a window: the picture would need passthrough', async ($, on) => {
-  const w = world(on, { draft: '[Image #3]', env: { ...MAC_TMUX, KITTY_WINDOW_ID: '1', TERM_PROGRAM: 'ghostty' } })
+test('...but on a Mac inside tmux the window comes first, Ghostty attached or not, and tmux is not asked', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', env: { ...MAC_TMUX, KITTY_WINDOW_ID: '1', TERM_PROGRAM: 'ghostty' }, clients: [client(5, 'ghostty 1.1.3')] })
   await start($, w.clock)
   await point(await mount($, BAND), 'chip:3')
   await w.clock.advance(100)
   expect(w.windows.map(x => x.argv[0])).toEqual(['osascript'])
+  expect(w.runs.filter(a => a[0] === 'tmux' && a.includes('list-clients'))).toEqual([])
+})
+
+// A PNG that says it is 4000x3000 and is more than the engine takes (2 MiB decoded).
+const BIG = 'iVBORw0KGgoAAAANSUhEUgAAD6AAAAu4' + 'A'.repeat(3_000_000)
+
+test('over SSH into tmux, Ghostty attached: the terminal draws the picture, sent as PNG bytes, never as a file', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: SSH_TMUX, clients: [client(5, 'ghostty 1.1.3')] })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { png: PNG }, columns: 16, rows: 4 } })
+  // tmux was asked which terminal looks, as UTF-8, about this pane's window, as the preview opened.
+  const asked = w.runs.filter(a => a[0] === 'tmux' && a.includes('list-clients'))
+  expect(asked.length).toBeGreaterThanOrEqual(2)
+  expect(asked[0].slice(0, 9)).toEqual(['tmux', '-u', '-S', '/tmp/tmux-1000/cf-acme-api', 'display-message', '-p', '-t', '%1', '#{window_id}'])
+  // The engine was asked whether it drew it, with the source it already had: it did.
+  await w.clock.advance(1100)
+  expect(w.blits[0]).toMatchObject({ requestId: 'above-prompt', key: 'image-3', source: { png: PNG } })
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image' })
+  expect(await band.find({ type: 'Text', text: /cells:/ })).toBeUndefined()
+})
+
+test('...and of two terminals on the window, the one with the latest input is looking: an xterm is cells', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: SSH_TMUX, clients: [client(5, 'ghostty 1.1.3'), client(9, 'XTerm(390)')] })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster', props: { columns: 16, rows: 4 } })
+  expect(w.blits).toEqual([])
+})
+
+test('tmux is asked as each preview opens: an xterm looking is cells, Ghostty looking at the next one draws it', async ($, on) => {
+  const clients = [client(5, 'XTerm(390)')]
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: SSH_TMUX, clients })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster' })
+  await point(band, 'chip:3', 'leave')
+  await w.clock.settle()
+  // Ghostty attaches over another SSH connection, and it is where the next hover comes from.
+  clients.push(client(9, 'ghostty 1.1.3'))
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  await w.clock.advance(1100)
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { png: PNG } } })
+})
+
+test('the engine drawing it as its alt (the session started with no terminal attached): cells from then on, and why', async ($, on) => {
+  const deny = 'the Image draws its alt here: the terminal draws neither kitty placeholder images (probe: tmux passthrough on, but tmux does not know which terminal is outside) nor iTerm2 inline images'
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: SSH_TMUX, clients: [client(5, 'ghostty 1.1.3')], blit: { deny } })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  await w.clock.advance(1100)
+  await w.clock.settle()
+  // Never the alt alone where cells draw.
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster', props: { columns: 16, rows: 4 } })
+  expect(await band.find({ type: 'Text', text: /^cells: started with no terminal attached/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^\[Image #3\] · 16×8 · PNG/ })).toBeDefined()
+  // ...and the next preview does not try again: the engine decided when it started.
+  const tried = w.blits.length
+  await point(band, 'chip:3', 'leave')
+  await w.clock.settle()
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  await w.clock.advance(1100)
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Raster' })
+  expect(w.blits.length).toBe(tried)
+})
+
+test('Ghostty over SSH with no tmux draws it too, from bytes: the file is this machine\'s, a blank box over there', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: { TERM: 'xterm-ghostty', SSH_CONNECTION: '10.0.0.2 51000 10.0.0.1 22' } })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { png: PNG } } })
+  expect((await band.find({ key: 'image-3' }))?.props.source.file).toBeUndefined()
+})
+
+test('CLAUDE_FLEET_PEEK=kitty is taken inside tmux over SSH, with no terminal tmux can name: bytes', async ($, on) => {
+  const w = world(on, { draft: '[Image #3]', system: 'Linux', env: { ...SSH_TMUX, CLAUDE_FLEET_PEEK: 'kitty' } })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { png: PNG } } })
+})
+
+test('a picture larger than the engine takes is shrunk, side by side, till its PNG fits, and sent as those bytes', async ($, on) => {
+  // The card's widest side still comes out too big; the next one fits.
+  const w = world(on, { draft: '[Image #3]', system: 'Darwin', env: { ...SSH_TMUX }, clients: [client(5, 'ghostty 1.1.3')],
+    images: { '3.png': BIG }, shrunk: { '1600': BIG, '1200': PNG } })
+  await start($, w.clock)
+  const band = await mount($, BAND)
+  await point(band, 'chip:3')
+  await w.clock.settle()
+  const sides = w.runs.filter(a => a[0] === 'sips').map(a => a[a.indexOf('-Z') + 1])
+  expect(sides).toEqual(['1600', '1200'])
+  expect(await band.find({ key: 'image-3' })).toMatchObject({ type: 'Image', props: { source: { png: PNG } } })
 })
 
 test('on Linux the card is cells (no native window there)', async ($, on) => {

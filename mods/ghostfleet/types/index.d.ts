@@ -34,16 +34,21 @@ export type PeekPicture = {
   bytes?: number
   width?: number
   height?: number
-  /** A PNG the terminal draws itself (kitty graphics). */
+  /** A PNG the terminal draws itself (kitty graphics): read by the terminal outside tmux on this
+   *  machine, sent as its bytes (register.js peekPngs) through tmux or SSH. */
   png?: string
+  /** The way it was read to be shown (peek-shape.js previewMode): a preview shown another way
+   *  reads it again. */
+  drawn?: 'window' | 'kitty' | 'cells'
   ready?: boolean
   /** Why it is words and not a picture (peek-shape.js WHY); `retry` when it may come yet. */
   why?: string
   retry?: boolean
 }
 /** The preview open now: paste `n`, opened by the chip `target` (`<requestId>/<chip key>`),
- *  as a card above the prompt or as a window of its own. */
-export type PeekShown = { n: number; target: string; edge: 'card' | 'window' }
+ *  as a card above the prompt or as a window of its own, shown the way `mode` says (decided as
+ *  it opened: inside tmux, by the terminal looking). */
+export type PeekShown = { n: number; target: string; edge: 'card' | 'window'; mode?: 'window' | 'kitty' | 'cells' }
 
 /** The handoff DELIVERY submitted and has not seen start (register.js `.sent`): its id, and the
  *  ledger items its claim named and made, so the process a reload starts can stamp or undo them. */
