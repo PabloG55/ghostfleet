@@ -2265,8 +2265,9 @@ rm -rf "$IM"
 #             drive the fleet and still cannot tell it anything, so its status is read from
 #             its pane and a question it asks may never reach the inbox.
 #   mcp_self  codex starts an MCP server with a scrubbed environment (measured by calling
-#             the tool: fleet_list with no arguments answered "fleet-list: no socket"), so
-#             its sessions must NAME the project. opencode passes its env and does not.
+#             the tool: fleet_list with no arguments answered "fleet-list: no socket"), and
+#             since 2026-11-10 install.sh lists the session's fleet variables in the table's
+#             env_vars, so it resolves its own fleet. cursor still must NAME the project.
 #   skill     ghostfleet-orchestrate is a Claude Code skill and stays Claude-only, so the
 #             other two have the tools without the instructions for using them.
 group "agent capabilities are declared, not hardcoded"
@@ -2287,9 +2288,11 @@ is "all three have the fleet_* tools" "yes" \
    "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
 is "...and only claude, agy and cursor have the skill" "claudeagycursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
-# cursor joins codex here, measured by calling fleet_list from a real cursor worker: the
-# server it starts gets none of the session's environment.
-is "...and only codex and cursor need a project" "codexcursor" \
+# cursor alone, measured by calling fleet_list from a real cursor worker: the server it
+# starts gets none of the session's environment. codex left this list on 2026-11-10, when
+# install.sh began writing the env_vars line that forwards it (the install group proves it
+# end to end, in both directions).
+is "...and only cursor needs a project" "cursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" mcp_self)" = no ] && printf '%s' "$a"; done)"
 # The caveat is COMPOSED from those fields, so a fourth agent gets a warning by declaring
 # them. Both directions, because a composer that always returned text would be as useless
@@ -2311,8 +2314,9 @@ is "...and it is NOT blind to events" "0" "$(fa caveat opencode | grep -c 'no fl
 is "codex: no events, still"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
 # What replaced it, per agent — and the other direction on each, since a composer that
 # printed every clause for everybody would pass all the positives above.
-is "codex must name the project"      "1" "$(fa caveat codex | grep -c 'must name the project' || true)"
-is "...and opencode must not"         "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
+is "cursor must name the project"     "1" "$(fa caveat cursor | grep -c 'must name the project' || true)"
+is "...and codex no longer must"      "0" "$(fa caveat codex | grep -c 'must name the project' || true)"
+is "...nor opencode"                  "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
 is "opencode: no orchestrate skill"   "1" "$(fa caveat opencode | grep -c 'no orchestrate skill' || true)"
 is "codex: no skill either"           "1" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
 is "...and claude keeps its skill"    "0" "$(fa caveat claude | grep -c 'no orchestrate skill' || true)"
@@ -2361,10 +2365,26 @@ else
   # A codex that RECORDS its argv: the thing worth asserting is the exact command line,
   # because `codex mcp add NAME -- COMMAND` is the syntax and a missing `--` would register
   # a server with no command and fail only when a session tried to use it.
+  #   It also does to config.toml what codex-cli 0.166.0 was measured doing, because the
+  # env_vars line is written by hand AFTER the add: `mcp add` drops the old table and
+  # appends a fresh one with command + args only (a hand-added env_vars line is gone after a
+  # second add — which is why the installer writes it after every add), and `mcp get --json`
+  # names what the table holds. MR_GET_BAD plays a codex that cannot parse the result.
   cat > "$MR/bin/codex" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MR_RAN"
-exit "${MR_CODEX_RC:-0}"
+[ "${MR_CODEX_RC:-0}" = 0 ] || exit "$MR_CODEX_RC"
+cfg="${CODEX_HOME:-${HOME:?the stub refuses to run without a HOME}/.codex}/config.toml"
+case "$1 $2" in
+  "mcp add")
+    mkdir -p "$(dirname "$cfg")"; [ -f "$cfg" ] || : > "$cfg"
+    awk '/^\[/ { skip = ($0 == "[mcp_servers.ghostfleet]") } !skip' "$cfg" > "$cfg.t" && cat "$cfg.t" > "$cfg" && rm -f "$cfg.t"
+    printf '\n[mcp_servers.ghostfleet]\ncommand = "%s"\nargs = ["%s"]\n' "$5" "$6" >> "$cfg" ;;
+  "mcp get")
+    [ -z "${MR_GET_BAD:-}" ] || exit 1
+    awk '/^\[/ { t = ($0 == "[mcp_servers.ghostfleet]") } t' "$cfg" ;;
+esac
+exit 0
 STUB
   printf '#!/bin/sh\nexit 0\n' > "$MR/bin/opencode"      # only needs to EXIST
   chmod +x "$MR/bin/codex" "$MR/bin/opencode"
@@ -2372,17 +2392,82 @@ STUB
   # --verbose detail in the installer's own run (one line per agent, and the default is a
   # summary), so asserting on it means asking for it. The quiet direction is asserted
   # below rather than assumed.
+  #   CODEX_HOME and HOME ARE ALWAYS SET, both to scratch. The registrar now EDITS
+  # ${CODEX_HOME:-$HOME/.codex}/config.toml itself, so a row that left them alone would
+  # rewrite the developer's own codex config — the opencode trap below, met from our side.
   mr() {   # $1=xdg-config-home ... runs one registrar with the stubs in front
     ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" VERBOSE=1 \
+      HOME="$MR/home" CODEX_HOME="${MR_CXH-$MR/codex}" \
       bash -c 'set -uo pipefail; source "$0"; shift; "$@"' "$MR/lib.sh" x "$2" 2>&1 )
   }
 
   # ── codex: the argv, and the failure path ─────────────────────────────────
   : > "$MR/ran"
+  mkdir -p "$MR/codex"
+  printf 'model = "keep-me"\n\n[mcp_servers.other]\ncommand = "true"\n' > "$MR/codex/config.toml"
+  chmod 600 "$MR/codex/config.toml"
   out="$(mr "$MR/x1" register_codex_mcp)"
+  cxc="$MR/codex/config.toml"
   is "codex is registered by the CLI"       "1" "$(printf '%s' "$out" | grep -c 'registered ghostfleet MCP' || true)"
-  is "...with the exact argv"               "mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" "$(cat "$MR/ran")"
+  is "...with the exact argv"               "mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" "$(head -1 "$MR/ran")"
+  is "...then read back through codex"      "mcp get ghostfleet --json" "$(sed -n 2p "$MR/ran")"
   is "...and the config file is named"      "1" "$(printf '%s' "$out" | grep -c 'config.toml (codex, global)' || true)"
+  # THE SESSION'S FLEET REACHES THE SERVER: codex scrubs an MCP child's environment, and
+  # env_vars is the one way a table can ask for names back. Without this line a codex
+  # session's fleet_list() says "no socket" — proven end to end below, not just by the text.
+  cxl='env_vars = ["CLAUDE_FLEET_SOCK", "CLAUDE_CONFIG_DIR", "CLAUDE_FLEET_DIR", "CLAUDE_FLEET_SLOT", "CLAUDE_FLEET_AGENT", "CLAUDE_FLEET_PROJECTS", "TMUX", "TMUX_PANE", "TMUX_TMPDIR"]'
+  is "the table forwards the session's fleet"  "$cxl" "$(awk '/^\[/ { t = ($0 == "[mcp_servers.ghostfleet]") } t && /^env_vars/' "$cxc")"
+  is "...and keeps the user's other keys"      'model = "keep-me"|command = "true"' \
+     "$(grep -E '^model|^command = "true"' "$cxc" | paste -sd '|' -)"
+  is "...in a file that stays 0600"            "600" "$(stat -c %a "$cxc" 2>/dev/null || stat -f %Lp "$cxc")"
+  # A RE-RUN — the add drops the line, so this is the case that would stack or lose it.
+  : > "$MR/ran"; out="$(mr "$MR/x1" register_codex_mcp)"
+  is "a second run keeps ONE ghostfleet table" "1" "$(grep -c '^\[mcp_servers.ghostfleet\]' "$cxc")"
+  is "...with ONE env_vars line in it"         "1" "$(grep -c '^env_vars' "$cxc")"
+  is "...and still the other server"           "1" "$(grep -c '^\[mcp_servers.other\]' "$cxc")"
+  # A WRITE CODEX DOES NOT CONFIRM IS UNDONE: a config.toml it cannot parse breaks every
+  # codex session, so the edit is put back and the line to add is printed instead.
+  before="$(cat "$cxc")"
+  out="$(MR_GET_BAD=1 mr "$MR/x1" register_codex_mcp)"
+  is "an unconfirmed edit is not a success"    "0" "$(grep -c '✓' <<< "$out" || true)"
+  is "...it says the calls must name the project" "1" "$(grep -c 'must name the project' <<< "$out" || true)"
+  is "...and prints the line to add"           "1" "$(grep -cF "$cxl" <<< "$out" || true)"
+  is "...with the table put back as codex left it" "0" "$(grep -c '^env_vars' "$cxc")"
+  is "...which is the add's own table"         "1" "$(grep -c '^\[mcp_servers.ghostfleet\]' "$cxc")"
+  # NO CODEX_HOME: the default is ~/.codex, which is where the CLI writes too.
+  : > "$MR/ran"; out="$(MR_CXH= mr "$MR/x1" register_codex_mcp)"
+  is "without CODEX_HOME it is ~/.codex"       "1" "$(grep -c '^env_vars' "$MR/home/.codex/config.toml" 2>/dev/null || true)"
+  # ── end to end: a codex-shaped client, the real server, a real fleet ──────
+  # The rows above prove the line is WRITTEN; these prove it is the line that matters. The
+  # client builds the server's environment the way codex 0.166.0 was measured to (base set
+  # + env_vars, everything else dropped), out of an environment that plays a codex pane's,
+  # and calls fleet_list with no project. TMUX is unset there so a suite run from inside a
+  # live fleet pane cannot answer with the live fleet; the socket has to come through
+  # CLAUDE_FLEET_SOCK and this run's TMUX_TMPDIR, both of which are on the list.
+  #   BOTH DIRECTIONS, from one config: the same table minus its env_vars line must lose the
+  # fleet. That is also what keeps the client honest — one that passed the whole
+  # environment through would find the fleet both times, and the second row goes red.
+  if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    E="$MR/e2e"; mkdir -p "$E/cfg/fleet" "$E/codex"
+    ( FLEET_HOME="$ROOT" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" HOME="$MR/home" CODEX_HOME="$E/codex" \
+      bash -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" >/dev/null 2>&1 )
+    tmux -L cf-cxmcp kill-server 2>/dev/null
+    tmux -L cf-cxmcp -f /dev/null new-session -d -s master 'sleep 120'
+    cxcall() {  # $1 = a config.toml -> fleet_list() as a codex session in cf-cxmcp makes it
+      env -u TMUX -u TMUX_PANE HOME="$MR/home" CLAUDE_FLEET_SOCK=cf-cxmcp CLAUDE_CONFIG_DIR="$E/cfg" \
+        CLAUDE_FLEET_DIR="$E/cfg/fleet" CLAUDE_FLEET_SLOT=master CLAUDE_FLEET_AGENT=codex \
+        node "$ROOT/test/helpers/codex-mcp-client.mjs" "$1" ghostfleet fleet_list '{}' 2>&1
+    }
+    out="$(cxcall "$E/codex/config.toml")"
+    is "a codex session's fleet_list() finds its own fleet" "1" "$(grep -c '^master ' <<< "$out" || true)"
+    grep -v '^env_vars' "$E/codex/config.toml" > "$E/bare.toml"
+    out="$(cxcall "$E/bare.toml")"
+    is "...and without env_vars it says no socket"  "1" "$(grep -c 'no socket' <<< "$out" || true)"
+    is "...with no fleet in its answer"             "0" "$(grep -c '^master ' <<< "$out" || true)"
+    tmux -L cf-cxmcp kill-server 2>/dev/null
+  else
+    skip "a codex session's fleet_list() end to end" "tmux or node missing"
+  fi
   # A CLI that fails must not be reported as success — and must say what to run by hand.
   out="$(MR_CODEX_RC=1 mr "$MR/x1" register_codex_mcp)"
   is "a failing codex add is not a success" "0" "$(printf '%s' "$out" | grep -c '✓' || true)"

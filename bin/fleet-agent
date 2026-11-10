@@ -51,11 +51,12 @@
 #               from `mcp` alone would say nothing is missing when something is
 #   mcp_self    yes = a tool call with NO `project` argument resolves THIS session's own
 #               fleet. That needs the session's CLAUDE_FLEET_SOCK to reach the MCP server,
-#               which is the agent's choice and not ours: measured 2026-08-27, opencode
-#               passes its environment to the server and codex scrubs it. A third field
-#               rather than a footnote on `mcp`, because "can call the tools" and "knows
-#               which fleet it is in" are different capabilities and codex has only the
-#               first — see the caveat
+#               which is the agent's choice before it is ours: opencode passes its
+#               environment to the server, codex scrubs it unless the registration lists
+#               the variables (install.sh does, since 2026-11-10), cursor scrubs it. A
+#               third field rather than a footnote on `mcp`, because "can call the tools"
+#               and "knows which fleet it is in" are different capabilities and cursor has
+#               only the first — see the caveat
 #   limit_re    ERE matching "this account is spent until the window rolls over".
 #               Empty/absent = this agent has no such signal. NEVER sufficient on its
 #               own — the caller must also see the session's own usage figure at 100%+,
@@ -341,18 +342,19 @@ agent_field() {
         # fleet still cannot be told anything by it. See the `caveat` command.
         mcp)        printf 'yes' ;;
         skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
-        # NO, and this is the half of the wiring that did NOT work — found by calling the
-        # tool rather than by reading `codex mcp list`, which says "enabled" either way.
-        # codex launches an MCP server with a SCRUBBED environment: a real session with
-        # CLAUDE_FLEET_SOCK=cf-mcptest exported called fleet_list, and the server's child
-        # answered `fleet-list: no socket (run inside a fleet session, or pass -s <socket>)`.
-        # `-c shell_environment_policy.inherit=all` does not change it — that policy governs
-        # its shell tool, not its MCP children.
-        #   So a codex session must NAME the project: fleet_list(project: "ghostfleet")
-        # returned the live fleet in the same test, because fleet-dispatch then builds the
-        # child's env from the projects file instead of inheriting one. Everything except
-        # "my own fleet" works; fleet_send's reply_to needs a self too, so it stays out.
-        mcp_self)   printf 'no'  ;;
+        # YES since 2026-11-10 (codex-cli 0.166.0), and it was NO before that for a reason
+        # that still holds: codex launches an MCP server with a SCRUBBED environment. A real
+        # session with CLAUDE_FLEET_SOCK exported called fleet_list and the server's child
+        # answered `fleet-list: no socket` (2026-08-27); `-c shell_environment_policy.
+        # inherit=all` does not change it, since that policy governs its shell tool.
+        #   What changed is the registration, not codex: a server table may list `env_vars`,
+        # names forwarded from the session, and install.sh now writes that list. Measured by
+        # CALLING the tool from a scratch fleet, two servers side by side: the one with the
+        # list answered fleet_list() with its own fleet, the one without it said "no
+        # socket". So this is yes only for a config the current install.sh wrote — a codex
+        # registered by an older one still needs a re-run of install.sh, and says so the
+        # same way it always did, by answering "no socket".
+        mcp_self)   printf 'yes' ;;
         budget)     printf 'no'  ;;
         # YES since codex-cli 0.160.1, re-measured 2026-10-10 in a scratch fleet. Under
         # 0.146.0 this was NO: the TUI persisted its rollout only on a clean exit, so a
