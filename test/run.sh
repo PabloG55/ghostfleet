@@ -2369,7 +2369,8 @@ else
   # env_vars line is written by hand AFTER the add: `mcp add` drops the old table and
   # appends a fresh one with command + args only (a hand-added env_vars line is gone after a
   # second add — which is why the installer writes it after every add), and `mcp get --json`
-  # names what the table holds. MR_GET_BAD plays a codex that cannot parse the result.
+  # names what the table holds. MR_GET_BAD plays a codex that cannot parse the result, and
+  # MR_ADD_KEEPS one whose add leaves an existing table as it is.
   cat > "$MR/bin/codex" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MR_RAN"
@@ -2377,6 +2378,7 @@ printf '%s\n' "$*" >> "$MR_RAN"
 cfg="${CODEX_HOME:-${HOME:?the stub refuses to run without a HOME}/.codex}/config.toml"
 case "$1 $2" in
   "mcp add")
+    [ -z "${MR_ADD_KEEPS:-}" ] || exit 0
     mkdir -p "$(dirname "$cfg")"; [ -f "$cfg" ] || : > "$cfg"
     awk '/^\[/ { skip = ($0 == "[mcp_servers.ghostfleet]") } !skip' "$cfg" > "$cfg.t" && cat "$cfg.t" > "$cfg" && rm -f "$cfg.t"
     printf '\n[mcp_servers.ghostfleet]\ncommand = "%s"\nargs = ["%s"]\n' "$5" "$6" >> "$cfg" ;;
@@ -2434,6 +2436,15 @@ STUB
   is "...and prints the line to add"           "1" "$(grep -cF "$cxl" <<< "$out" || true)"
   is "...with the table put back as codex left it" "0" "$(grep -c '^env_vars' "$cxc")"
   is "...which is the add's own table"         "1" "$(grep -c '^\[mcp_servers.ghostfleet\]' "$cxc")"
+  # AN ADD THAT KEEPS THE TABLE. 0.166.0's rewrites it, so the installer never meets its own
+  # line there; a build that keeps keys, or a hand edit, would leave one, and the installer's
+  # line has to replace it rather than stack beside it. Spelled across lines, as a hand edit
+  # might be, so the skip has to find the closing bracket and not stop at the first line.
+  printf 'model = "keep-me"\n\n[mcp_servers.ghostfleet]\ncommand = "node"\nenv_vars = [\n  "OLD_NAME",\n]\nargs = ["x"]\n' > "$cxc"
+  : > "$MR/ran"; out="$(MR_ADD_KEEPS=1 mr "$MR/x1" register_codex_mcp)"
+  is "an add that keeps the table: still ONE env_vars line" "1" "$(grep -c 'env_vars' "$cxc")"
+  is "...the installer's, not the old one"     "0" "$(grep -c 'OLD_NAME' <<< "$(cat "$cxc")" || true)"
+  is "...and the table's other keys stay"      'command = "node"|args = ["x"]' "$(grep -E '^command|^args' "$cxc" | paste -sd '|' -)"
   # NO CODEX_HOME: the default is ~/.codex, which is where the CLI writes too.
   : > "$MR/ran"; out="$(MR_CXH= mr "$MR/x1" register_codex_mcp)"
   is "without CODEX_HOME it is ~/.codex"       "1" "$(grep -c '^env_vars' "$MR/home/.codex/config.toml" 2>/dev/null || true)"
