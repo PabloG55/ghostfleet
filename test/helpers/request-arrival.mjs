@@ -57,6 +57,9 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
   for (const w of [390, 320, 1280]) {
     await b.viewport(w, 844);
     await b.evaluate(install);
+    // Start a new session view with the empty pane fixture already installed.
+    await b.evaluate(() => { location.hash = '#/'; });
+    await until(() => !document.querySelector('.session'));
     await go();
     await until(() => !!document.querySelector('.session .chat .msg'));
     // Let the pane poll observe the empty fixture, then settle fonts and layout.
@@ -67,6 +70,7 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     const sentAtStart = await count();
     const n = `${app} ${w}${readonly ? ' read-only' : ''}: request arrival`;
     is(`${n}: starts with the three measured surfaces`, true, before.every(Boolean));
+    is(`${n}: starts with no pending request`, false, await b.evaluate(() => !!document.querySelector('.session .request-return, .session [role=dialog]')));
     await shot(w, 'before');
     await b.evaluate(() => { window.__arrive = { ...window.__originalPrompt, fingerprint: window.__originalPrompt.fingerprint }; });
     const opened = await until(() => !!document.querySelector('[role=dialog] .ask'));
