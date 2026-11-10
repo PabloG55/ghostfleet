@@ -30564,6 +30564,25 @@ else
   skip "offline Team seats" "node missing"
 fi
 
+# The seats module is only a policy until something asks it. This group runs the team app's
+# side: the three places an account is added (the panel, re-enabling, admin-cli as a real
+# process) refuse past the seats and allow within them, and a renewal is asked for only when
+# there is a URL and the setting is on. It is here because no CI job runs ee/team's own tests,
+# and a gate nobody runs is a gate that can be deleted without a red row.
+#   TAP and a floor for the same reason as the brand group: a file that loads and declares no
+# tests also exits 0. Keys are signed by a pair the test generates and discards.
+#   Watched red: deleting the check before the panel's create, before the re-enable, and in
+# admin-cli each fail their own tests; counting disabled accounts fails two.
+group "Team seat limit on account additions"
+if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/license.test.mjs" ]; then
+  TLIC="$(node --test --test-reporter=tap "$ROOT/ee/team/test/license.test.mjs" 2>&1)"
+  is "ee/team/test/license.test.mjs passes" "0" "$?"
+  is "...and ran its checks"               "yes" "$(n="$(grep -c '^ok [0-9]' <<< "$TLIC")"; [ "$n" -ge 15 ] && echo yes || echo "no: $n top-level oks")"
+  is "...none of them failing"             "" "$(grep '^not ok' <<< "$TLIC" | head -3)"
+else
+  skip "Team seat limit" "node or ee/team not present"
+fi
+
 group "messages sent together from Telegram are one turn"
 # The bug this group exists for: a line, then the link it was about a second later, ran as two
 # turns, and the first asked for the link the owner had already sent. Its own stub API, home and
