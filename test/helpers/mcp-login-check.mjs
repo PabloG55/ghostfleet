@@ -31,6 +31,9 @@ async function host(id) {
   const cfg = path.join(dir, 'serve.json');
   const env = { ...process.env, HOME: home, TMUX: '', CLAUDE_FLEET_AWAKE: 'off', GHOSTFLEET_PUSH_ALLOW_HTTP: '1',
     GHOSTFLEET_SERVE_CONFIG: cfg, GHOSTFLEET_SERVE_AUDIT: path.join(dir, 'audit'), GHOSTFLEET_AT_MAC_FILE: path.join(dir, 'absent') };
+  if (process.argv[3] === 'account') {
+    env.TMUX_TMPDIR = path.join(dir, 'tmux'); fs.mkdirSync(env.TMUX_TMPDIR, { recursive: true, mode: 0o700 });
+  }
   for (const k of ['CLAUDE_FLEET_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_FLEET_SOCK']) delete env[k];
   fs.mkdirSync(path.join(home, '.config/ghostfleet'), { recursive: true });
   const fleet = path.join(home, '.claude/fleet');
@@ -69,6 +72,10 @@ try {
   await home.auth.api(home.base, 'GET', '/api/push/key');
   const subscription = await home.auth.api(home.base, 'POST', '/api/push/subscribe', read(sub));
   is('home subscribes through existing push route', 201, subscription.status);
+  if (process.argv[3] === 'account') {
+    const { checkAccountLogin } = await import('./account-login-check.mjs');
+    await checkAccountLogin({ home, remote, remotePeer, P, T, rt, is, read, files, sleep, request });
+  } else {
   function capture(h = remote, server = 'example', state = 'issued-state') {
     const authorize = new URL('https://auth.example.com/oauth/authorize');
     authorize.search = new URLSearchParams({ response_type: 'code', client_id: 'placeholder', code_challenge: 'placeholder', code_challenge_method: 'S256',
@@ -195,6 +202,7 @@ try {
   is('gone listener still consumes record', true, read(path.join(remote.fleet, 'logins', `${again.id}.json`)).used);
   await sleep(100);
   is('sentinel absent from every file and both stdout/stderr', [], files(T).filter(f => fs.readFileSync(f).includes(Buffer.from(sentinel))).map(f => path.relative(T, f)));
+  }
 } catch (e) { console.error(e.stack); process.exitCode = 1; }
 finally {
   for (const child of kids) { child.kill('SIGKILL'); await new Promise(r => child.exitCode !== null || child.signalCode !== null ? r() : child.once('exit', r)); }

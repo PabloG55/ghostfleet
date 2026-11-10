@@ -58,6 +58,7 @@ import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '.
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
 import { loginList, finishLogin } from '../lib/logins.mjs';
+import { startAccountLogin } from '../lib/account-logins.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -3430,6 +3431,18 @@ function agentCatalogue() {
 
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (body.tool === 'fleet_account_login_start') {
+      const r = await serialize(async () => {
+        let result;
+        try { result = await startAccountLogin(shownTo(req), body.args || {}); }
+        catch { result = { status: 500, json: { ok: false, text: 'could not start account sign-in' } }; }
+        auditAppend({ ts: now(), client: req.client.id, ip, verb: 'fleet_account_login_start',
+          project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
+          result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
+        return result;
+      });
+      return send(res, r.status, r.json);
+    }
     if (body.tool === 'fleet_login_finish') {
       const a = req.client.pair ? null : headerAssertion(req, c);
       if (!req.client.pair && (!a || a.error))
