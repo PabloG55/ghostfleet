@@ -1,20 +1,10 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
-import { Avatar, Btn, usePoll, clock, toast } from './ui.jsx';
-import { HomeAgent } from './assistant.jsx';
+import { Btn, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
+import { Avatar } from './avatar.jsx';
 import { t, lang, setLang, LANGS, LANG_NAMES } from './i18n.js';
 import { words } from '../../shared/i18n/index.js';
-import { Board } from './board.jsx';
-import { Icon } from './icon.jsx';
-
-export function Home({ ctx, projects }) {
-  return (
-    <div class="page home">
-      <HomeAgent ctx={ctx} projects={projects} />
-      <Board ctx={ctx} projects={projects} />
-    </div>
-  );
-}
+import { Icon } from '../../../../web/ui/icon.jsx';
 
 // "Ana <verb> acme-api": the verb reads right before the subject in either language.
 const VERBS = words(['fleet_send', 'attach', 'fleet_answer', 'fleet_interrupt', 'fleet_pause', 'fleet_resume', 'fleet_wake', 'fleet_reopen',

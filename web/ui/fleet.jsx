@@ -1,5 +1,5 @@
 // The fleet's two pieces of personality, used anywhere a session is drawn: the LED that says
-// what it is doing, and the boat that does it. Pure SVG + CSS (styles.css, "lights & boats"),
+// what it is doing, and the boat that does it. Pure SVG + CSS (ui.css, "lights & boats"),
 // and every motion is switched off under prefers-reduced-motion — the light keeps its colour
 // and glow, so nothing is lost but the movement.
 import { PIXELS, MAST } from './sprite.js';
@@ -51,5 +51,19 @@ export function Harbor() {
       </div>
       <div class="harbor-waves" />
     </div>
+  );
+}
+
+// The ghost ship itself: ghostfleet's SHIP sprite with no sea under it, the one the app icon is
+// drawn from. It is the assistant's face and the ship that flies over the map, so its `state` is
+// what the ghost is doing (idle|off|listening|routing|sending|thinking|acting|speaking), not a
+// session status; ui.css draws each one.
+export function GhostShip({ size = 64, state = 'idle', title }) {
+  return (
+    <span class={`ship st-${state}`} style={{ width: size, height: size / 2 }} title={title}>
+      <svg viewBox="0 0 32 16" width={size} height={size / 2} shape-rendering="crispEdges" aria-hidden="true">
+        {PIXELS.map(([x, y]) => <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" />)}
+      </svg>
+    </span>
   );
 }

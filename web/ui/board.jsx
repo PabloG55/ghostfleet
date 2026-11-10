@@ -3,9 +3,8 @@
 // name on hover, and on the boats that are waiting for an answer.
 import { useState } from 'preact/hooks';
 import { Ship, Led } from './fleet.jsx';
-import { Avatar } from './ui.jsx';
-import { t } from './i18n.js';
-import { worded } from '../../shared/i18n/index.js';
+import { t, worded } from './i18n.js';
+import { useSlot } from './adapter.jsx';
 
 const FRESH_S = 15 * 60;        // "just finished": ready, and its turn ended this recently
 
@@ -35,7 +34,10 @@ export function lookOf(s, now = Date.now() / 1000) {
 const sessionHref = (p, s) => `#/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
 const projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 
-export function Board({ ctx, projects }) {
+// `ownerName(session)` and `ownerBadge(session, size)` are an app's slots (adapter.jsx): who a
+// boat belongs to, in its title and as a badge on it. The single-user client has neither.
+export function Board({ projects }) {
+  const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
   const [showQuiet, setShowQuiet] = useState(false);
   const now = Date.now() / 1000;
   const fleets = (projects || []).map(p => {
@@ -66,13 +68,13 @@ export function Board({ ctx, projects }) {
               <a class="fleet-name" href={projectHref(f.name)} title={t('board.open', { name: f.name })}>{f.name}</a>
               <div class="fleet-sea">
                 {f.boats.map(b => {
-                  const owner = b.owner ? ctx.usersById?.[b.owner] : null;
+                  const owner = ownerName(b), badge = ownerBadge(b, 15);
                   return (
                     <a key={b.name} class={`fboat c-${LOOKS[b.look].color} lk-${b.look}`} href={sessionHref(f.name, b.name)}
-                       title={`${b.lead ? t('common.lead') : b.name} · ${LOOKS[b.look].label}${owner ? ` · ${owner.name}` : ''}`}>
+                       title={`${b.lead ? t('common.lead') : b.name} · ${LOOKS[b.look].label}${owner ? ` · ${owner}` : ''}`}>
                       <Ship size={b.lead ? 64 : 32} state={LOOKS[b.look].light} />
                       {b.look === 'need' ? <span class="fboat-name">{b.lead ? t('common.lead') : b.name}</span> : null}
-                      {owner ? <span class="fboat-owner"><Avatar user={owner} size={15} /></span> : null}
+                      {badge ? <span class="fboat-owner">{badge}</span> : null}
                     </a>
                   );
                 })}

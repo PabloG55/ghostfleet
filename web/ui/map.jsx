@@ -1,15 +1,18 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'preact/hooks';
-import { STATUS, StatusMark, sinceTs, Avatar } from './ui.jsx';
-import { Ship } from './assistant.jsx';
-import { Ship as Boat } from './fleet.jsx';
+import { STATUS, StatusMark, sinceTs } from './ui.jsx';
+import { GhostShip as Ship, Ship as Boat } from './fleet.jsx';
 import { t } from './i18n.js';
+import { useFleet, useSlot } from './adapter.jsx';
 
 // The whole fleet at once: every project an island, every session a boat in its status
 // colour, and the ghost ship flying to wherever something just happened — in any project.
 const shipState = (s) => (s === 'working' ? 'acting' : s === 'need-you' ? 'thinking' : s === 'starting' ? 'sending' : 'idle');
 const WORD = (s) => (STATUS[s] || STATUS.unknown).label.toLowerCase();
 
-export function FleetMap({ ctx, projects }) {
+// `ownerName` and `ownerBadge` are the same slots the board takes (adapter.jsx).
+export function FleetMap({ projects }) {
+  const { go } = useFleet();
+  const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
   const [events, setEvents] = useState([]);
   const [focus, setFocus] = useState(null);            // {project, session}
   const [pos, setPos] = useState(null);
@@ -72,20 +75,20 @@ export function FleetMap({ ctx, projects }) {
           {projects && !shown.length ? <p class="muted pad">{t('map.none')}</p> : null}
           {shown.map(p => (
             <section key={p.name} class={`island${p.counts.need_you ? ' hot' : ''}${focus?.project === p.name ? ' focus' : ''}`} data-island={p.name}>
-              <button class="island-name" onClick={() => ctx.go(`/p/${encodeURIComponent(p.name)}`)}>
+              <button class="island-name" onClick={() => go(`/p/${encodeURIComponent(p.name)}`)}>
                 {p.name}{p.counts.need_you ? <span class="badge need">{p.counts.need_you}</span> : null}
               </button>
               <div class="boats">
                 {p.sessions.map(s => {
                   const st = STATUS[s.status] || STATUS.unknown;
-                  const owner = s.owner ? ctx.usersById[s.owner] : null;
+                  const owner = ownerName(s), badge = ownerBadge(s, 15);
                   return (
                     <button key={s.name} class={`boat c-${st.color} st-${s.status}`} data-boat={`${p.name}/${s.name}`}
-                            title={`${s.name} · ${st.label}${owner ? ` · ${owner.name}` : ''}`}
-                            onClick={() => ctx.go(`/p/${encodeURIComponent(p.name)}/s/${encodeURIComponent(s.name)}`)}>
+                            title={`${s.name} · ${st.label}${owner ? ` · ${owner}` : ''}`}
+                            onClick={() => go(`/p/${encodeURIComponent(p.name)}/s/${encodeURIComponent(s.name)}`)}>
                       <Boat size={34} state={s.status} />
                       <span class="boat-name">{s.lead ? t('common.lead') : s.name}</span>
-                      {owner ? <span class="boat-owner"><Avatar user={owner} size={15} /></span> : null}
+                      {badge ? <span class="boat-owner">{badge}</span> : null}
                     </button>
                   );
                 })}
@@ -106,7 +109,7 @@ export function FleetMap({ ctx, projects }) {
           {!events.length ? <p class="muted small">{t('map.waiting')}</p> : null}
           {events.map(e => (
             <button key={e.id} class={`tick c-${(STATUS[e.status] || STATUS.unknown).color}`}
-                    onClick={() => { setFocus({ project: e.project, session: e.session }); if (e.session) ctx.go(`/p/${encodeURIComponent(e.project)}/s/${encodeURIComponent(e.session)}`); }}>
+                    onClick={() => { setFocus({ project: e.project, session: e.session }); if (e.session) go(`/p/${encodeURIComponent(e.project)}/s/${encodeURIComponent(e.session)}`); }}>
               <b><StatusMark status={e.status} /></b> <span>{e.text}</span> <small>{sinceTs(Math.floor(e.at / 1000))}</small>
             </button>
           ))}

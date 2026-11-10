@@ -5,7 +5,8 @@
 import { Fragment } from 'preact';
 import { useState } from 'preact/hooks';
 import { api } from '../api.js';
-import { Avatar, Btn, Modal, toast, usePoll } from '../ui.jsx';
+import { Btn, Modal, toast, usePoll } from '../../../../../web/ui/ui.jsx';
+import { Avatar } from '../avatar.jsx';
 import { t, locale } from '../i18n.js';
 import './usage.css';
 

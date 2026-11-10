@@ -23,7 +23,7 @@ export const EVENTS = worded({
 }, 'event', ['label', 'hint', 'verb']);
 
 // Each action: the words, the MCP tool it becomes, and which fields it needs. `icon` names a
-// sprite in web/src/icon.jsx, never a character: an emoji is drawn by the platform's font.
+// sprite in web/ui/icon.jsx, never a character: an emoji is drawn by the platform's font.
 export const ACTIONS = worded({
   send:      { icon: 'mail',      tool: 'fleet_send',      needs: ['project', 'session', 'prompt'] },
   spawn:     { icon: 'plus',      tool: 'fleet_spawn',     needs: ['project', 'name'], optional: ['prompt', 'branch'] },

@@ -1,13 +1,14 @@
-// The brand keeps three copies of one thing: the grid's ship, the generated SVGs and the
-// manual (which cannot load anything beside it, because it is published as a single page).
-// These tests fail when one copy drifts from the others, which is how a logo rots without
-// anyone noticing.
+// The brand keeps four copies of one thing: the grid's ship, the generated SVGs, the manual
+// (which cannot load anything beside it, because it is published as a single page) and the
+// browser's (web/ui/sprite.js, which every web screen draws its boats from). These tests fail
+// when one copy drifts from the others, which is how a logo rots without anyone noticing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { shipRows, pixels, shipPath, variants, injectTokens } from './make-logo.mjs';
+import { SHIP as webShip, PIXELS as webPixels } from '../web/ui/sprite.js';
 
 const BRAND = path.dirname(fileURLToPath(import.meta.url));
 const read = (f) => fs.readFileSync(path.join(BRAND, f), 'utf8');
@@ -22,6 +23,11 @@ const manualShip = () => {
 
 test('the manual\'s ship is the grid\'s, row by row', () => {
   assert.deepEqual(manualShip(), shipRows());
+});
+
+test('the browser\'s ship is the grid\'s, row by row and pixel by pixel', () => {
+  assert.deepEqual(webShip, shipRows());
+  assert.deepEqual(webPixels.map(String).sort(), pixels(shipRows()).map(String).sort());
 });
 
 test('the manual carries tokens.css verbatim (make-logo.mjs injects it)', () => {

@@ -6,7 +6,7 @@
 // light has on a machine: green is working, amber is waiting on a person, red is broken, and
 // dark is asleep. That puts need-you on amber, where the TUI draws it red: a session waiting
 // for an answer is not an error, and with red kept for errors the two never share a colour.
-import { worded } from '../../shared/i18n/index.js';
+import { worded } from './i18n.js';
 
 export const LIGHTS = worded({
   work:  { color: 'green',  motion: 'sail' },   // breathing light, boat under way

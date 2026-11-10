@@ -3,7 +3,7 @@
 // Claude Code reports to the status line (server/fleet.mjs usage()).
 import { t, locale } from './i18n.js';
 import { words } from '../../shared/i18n/index.js';
-import { Icon } from './icon.jsx';
+import { Icon } from '../../../../web/ui/icon.jsx';
 
 const NAMES = words(['work', 'personal'], 'usage.profile');
 const nameOf = (p) => NAMES[p] || p;

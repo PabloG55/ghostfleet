@@ -3,9 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { LIGHTS, STATUS_LIGHT, lightOf, colorOf, topLight } from '../web/src/lights.js';
+// The lights, the statuses and their styles are the shared screens' (the repo's web/ui/).
+import { LIGHTS, STATUS_LIGHT, lightOf, colorOf, topLight } from '../../../web/ui/lights.js';
 
-const src = (p) => fs.readFileSync(new URL(`../web/src/${p}`, import.meta.url), 'utf8');
+const src = (p) => fs.readFileSync(new URL(`../../../web/ui/${p}`, import.meta.url), 'utf8');
 
 test('the four lights the product promises: green working, amber waiting, red error, dark asleep', () => {
   assert.equal(colorOf('working'), 'green');
@@ -41,7 +42,7 @@ test('a group shows its most urgent light', () => {
 });
 
 test('every light is styled, and every moving one stops under prefers-reduced-motion', () => {
-  const css = src('styles.css');
+  const css = src('ui.css');
   for (const [l, v] of Object.entries(LIGHTS)) {
     assert.ok(['green', 'yellow', 'red', 'cyan', 'grey'].includes(v.color), l);
     assert.ok(css.includes(`.fship.m-${v.motion}`) || v.motion === 'moored', `boat motion '${v.motion}' has no rule`);

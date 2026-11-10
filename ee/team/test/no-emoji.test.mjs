@@ -1,6 +1,6 @@
 // No emoji in the product. An emoji is drawn by the platform's font, so the same button was a
 // colour picture on a phone and a thin outline on a desktop, and neither was the brand's; the app
-// draws its icons as pixel sprites (web/src/icon.jsx) instead.
+// draws its icons as pixel sprites (the shared screens' web/ui/icon.jsx, at the repo's root) instead.
 //
 // "Emoji" is wider than the code points that are emoji by default: a warning sign, a gear, a moon
 // or a pause bar are text characters that a phone still draws in colour. So the rule is every
@@ -40,9 +40,10 @@ const ALLOWED = [
 
 const TEXT = /\.(m?js|jsx|css|html|json|md|sh|txt|svg|webmanifest)$/;
 function files() {
-  // This folder, and the brand folder at the root whose tokens.css the app imports: an emoji there
-  // reaches the product as surely as one in web/src. Paths come back relative to this folder.
-  return execFileSync('git', ['ls-files', '.', '../../brand'], { cwd: ROOT, encoding: 'utf8' }).split('\n')
+  // This folder, the brand folder at the root whose tokens.css the app imports, and the shared
+  // screens (web/ui) the app is built from: an emoji in either reaches the product as surely as
+  // one in web/src. Paths come back relative to this folder.
+  return execFileSync('git', ['ls-files', '.', '../../brand', '../../web/ui'], { cwd: ROOT, encoding: 'utf8' }).split('\n')
     .filter(f => f && TEXT.test(f) && fs.existsSync(path.join(ROOT, f)));
 }
 
@@ -63,7 +64,8 @@ test('the rule catches what a platform draws as an emoji, and lets the text mark
 
 test('no emoji anywhere in the repo but the allowed places, and exactly as many there', () => {
   const list = files();
-  assert.ok(list.some(f => f.startsWith('server/')) && list.some(f => f.startsWith('shared/i18n/')) && list.length > 50,
+  assert.ok(list.some(f => f.startsWith('server/')) && list.some(f => f.startsWith('shared/i18n/'))
+    && list.some(f => f.startsWith('../../web/ui/')) && list.length > 50,
     `read only ${list.length} files`);
   const bad = [], seen = new Map();
   for (const f of list) for (const h of emojiIn(fs.readFileSync(path.join(ROOT, f), 'utf8'))) {
@@ -71,7 +73,7 @@ test('no emoji anywhere in the repo but the allowed places, and exactly as many 
     if (rule) seen.set(rule, (seen.get(rule) || 0) + 1);
     else bad.push(`${f}:${h.line}:${h.col} ${h.ch} ${h.cp}`);
   }
-  assert.deepEqual(bad, [], `emoji found; draw a pixel icon (web/src/icon.jsx) instead:\n${bad.join('\n')}`);
+  assert.deepEqual(bad, [], `emoji found; draw a pixel icon (web/ui/icon.jsx) instead:\n${bad.join('\n')}`);
   for (const a of ALLOWED)
     assert.equal(seen.get(a) || 0, a.count, `${a.file}: U+${a.ch.codePointAt(0).toString(16).toUpperCase()} allowed ${a.count} times (${a.why})`);
 });
@@ -79,15 +81,15 @@ test('no emoji anywhere in the repo but the allowed places, and exactly as many 
 // A name the sprite table does not have renders nothing at all, silently: the tables that name
 // icons must name real ones.
 test('every icon a table names is drawn', async () => {
-  const src = fs.readFileSync(path.join(ROOT, 'web/src/icon.jsx'), 'utf8');
+  const src = fs.readFileSync(path.join(ROOT, '../../web/ui/icon.jsx'), 'utf8');
   const drawn = new Set([...src.match(/const ROWS = \{([\s\S]*?)\n\};/)[1].matchAll(/^ {2}([a-z]+):/gm)].map(m => m[1]));
   assert.ok(drawn.size >= 20, `read ${drawn.size} icons`);
   const { ACTIONS } = await import('../shared/automations.js');
   for (const [k, a] of Object.entries(ACTIONS)) assert.ok(drawn.has(a.icon), `action '${k}' names icon '${a.icon}'`);
-  const ui = fs.readFileSync(path.join(ROOT, 'web/src/ui.jsx'), 'utf8');
-  const named = [...ui.matchAll(/icon: '([a-z]+)'/g), ...fs.readdirSync(path.join(ROOT, 'web/src'), { recursive: true })
-    .filter(f => /\.jsx$/.test(f))
-    .flatMap(f => [...fs.readFileSync(path.join(ROOT, 'web/src', f), 'utf8').matchAll(/<Icon name="([a-z]+)"|icon="([a-z]+)"/g)])]
+  const ui = fs.readFileSync(path.join(ROOT, '../../web/ui/ui.jsx'), 'utf8');
+  const jsx = (dir) => fs.readdirSync(path.join(ROOT, dir), { recursive: true }).filter(f => /\.jsx$/.test(f)).map(f => path.join(ROOT, dir, f));
+  const named = [...ui.matchAll(/icon: '([a-z]+)'/g), ...[...jsx('web/src'), ...jsx('../../web/ui')]
+    .flatMap(f => [...fs.readFileSync(f, 'utf8').matchAll(/<Icon name="([a-z]+)"|icon="([a-z]+)"/g)])]
     .map(m => m[1] || m[2]);
   assert.ok(named.length > 30, `found ${named.length} icon uses`);
   for (const n of named) assert.ok(drawn.has(n), `icon '${n}' is used but not drawn`);

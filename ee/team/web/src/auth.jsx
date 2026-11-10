@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
-import { Btn, Logo } from './ui.jsx';
-import { Harbor } from './fleet.jsx';
+import { Btn, Logo } from '../../../../web/ui/ui.jsx';
+import { Harbor } from '../../../../web/ui/fleet.jsx';
 import { t, lang, setLang, LANGS } from './i18n.js';
 
 // Set when the person flips the language here, so signing in makes that choice their account's.

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'preact/hooks';
-import { api, ATTACH_PER_MESSAGE } from './api.js';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Avatar, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
-import { render as renderAnsi } from '../../../../web/ansi.js';   // the repo's own; see vite.config.mjs
+import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
+import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
+import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
+import { sendsOnEnter } from './keys.js';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -74,7 +75,9 @@ function Terminal({ pane }) {
   );
 }
 
-function Chat({ ctx, msgs, queued, older, onOlder }) {
+// `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
+function Chat({ msgs, queued, older, onOlder }) {
+  const author = useSlot('author');
   const ref = useRef(null);
   const stick = useRef(true);
   const last = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].ts}` : '';
@@ -94,12 +97,11 @@ function Chat({ ctx, msgs, queued, older, onOlder }) {
             </details>
           );
         }
-        const by = m.by ? ctx.usersById[m.by] : null;
         return (
           <div key={`${m.ts}-${i}`} class={`msg ${m.role === 'user' ? 'me' : 'ai'}`}>
             <div class="who">
               {m.role === 'user'
-                ? <>{by ? <><Avatar user={by} size={18} /> {by.name}</> : t('sess.instruction')}</>
+                ? <>{author(m) || t('sess.instruction')}</>
                 : 'Claude'}
               <span class="when">{sinceTs(m.ts)}</span>
             </div>
@@ -144,7 +146,12 @@ function ScheduleModal({ name, onClose, onSave }) {
   );
 }
 
-export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
+// Slots (adapter.jsx): `ownerPicker({ project, name, owner, onChanged })` beside the session's
+// tools, and `presence(here)` under the header, where `here` is the pane's list of who else has
+// it open. The adapter's optional `presence(project, session, typing)` is told every 5 s.
+export function SessionView({ project, name, card, onChanged, onGone }) {
+  const fleet = useFleet();
+  const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
   const [extra, setExtra] = useState([]);      // older pages, loaded on demand
   const [before, setBefore] = useState(null);
@@ -161,23 +168,23 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
   const typing = useRef(false);
   useEffect(() => { setFiles([]); }, [project, name]);
 
-  const sess = usePoll(() => api.session(project, name), 3000, [project, name]);
-  const pane = usePoll(() => api.pane(project, name), 2500, [project, name]);
+  const sess = usePoll(() => fleet.session(project, name), 3000, [project, name]);
+  const pane = usePoll(() => fleet.pane(project, name), 2500, [project, name]);
   useEffect(() => { setBefore(sess.data?.next_before ?? null); }, [sess.data?.next_before]);
   useEffect(() => {
-    const iv = setInterval(() => { if (!document.hidden) api.presence(project, name, typing.current).catch(() => {}); }, 5000);
+    if (!fleet.presence) return undefined;
+    const iv = setInterval(() => { if (!document.hidden) fleet.presence(project, name, typing.current).catch(() => {}); }, 5000);
     return () => clearInterval(iv);
   }, [project, name]);
 
   const st = card ? statusOf(card) : (sess.data?.status || 'unknown');
   const owner = card?.owner || sess.data?.owner || null;
   const prompt = pane.data?.prompt || null;
-  const others = (pane.data?.here || []).filter(h => h.user !== ctx.me.id);
 
   const act = async (tool, args = {}, opts = {}) => {
     setBusy(true);
     try {
-      const r = await api.act(tool, { project, session: name, ...args }, opts);
+      const r = await fleet.act(tool, { project, session: name, ...args }, opts);
       if (r.queued === 'question') toast(t('sess.queuedQ'), '');
       else if (r.queued) toast(t('sess.queuedTurn'), '');
       onChanged(); sess.reload(); pane.reload();
@@ -191,13 +198,13 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
   const answer = (text, noEnter) => act('fleet_answer', { text, no_enter: noEnter, expect: prompt?.fingerprint });
   // Each file goes up as soon as it is picked, so "Send" only sends the words that name them.
   const addFiles = (list) => {
-    const picked = [...(list || [])].slice(0, Math.max(0, ATTACH_PER_MESSAGE - files.length));
-    if (list?.length > picked.length) toast(t('sess.maxFiles', { n: ATTACH_PER_MESSAGE }), '');
+    const picked = [...(list || [])].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
+    if (list?.length > picked.length) toast(t('sess.maxFiles', { n: fleet.attachPerMessage }), '');
     for (const f of picked) {
       const id = Math.random().toString(36).slice(2);
       const preview = f.type.startsWith('image/') ? URL.createObjectURL(f) : null;
       setFiles(x => [...x, { id, name: f.name || t('sess.pasted'), size: f.size, state: 'up', preview }]);
-      api.attach(project, name, f)
+      fleet.attach(project, name, f)
         .then(r => setFiles(x => x.map(y => y.id === id ? { ...y, state: 'ok', path: r.path } : y)))
         .catch(e => setFiles(x => x.map(y => y.id === id ? { ...y, state: 'err', why: e.message } : y)));
     }
@@ -217,7 +224,7 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
   };
   const loadOlder = async () => {
     try {
-      const r = await api.session(project, name, before);
+      const r = await fleet.session(project, name, before);
       setExtra(x => [...(r.messages || []), ...x]); setBefore(r.next_before ?? null);
     } catch (e) { toast(e.message, 'bad'); }
   };
@@ -251,16 +258,7 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
           ) : null}
         </div>
         <div class="sess-tools">
-          <label class="owner-pick" title={t('sess.ownerOf')}>
-            <Avatar user={owner ? ctx.usersById[owner] : null} size={24} />
-            <select value={owner || ''} onChange={async (e) => {
-              try { await api.assign(project, name, e.currentTarget.value || null); onChanged(); sess.reload(); }
-              catch (x) { toast(x.message, 'bad'); }
-            }}>
-              <option value="">{t('ui.noOwner')}</option>
-              {ctx.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-            </select>
-          </label>
+          {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); sess.reload(); } })}
           {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
           {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
@@ -279,13 +277,7 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
             ) : null}
           </div>
         </div>
-        {others.length ? (
-          <p class="presence">
-            {others.map(h => <Avatar key={h.user} user={ctx.usersById[h.user]} size={18} />)}
-            {' '}{others.map(h => ctx.usersById[h.user]?.name || h.user).join(t('common.and'))}
-            {others.some(h => h.typing) ? ` ${t('sess.othersTyping', { n: others.length })}` : ` ${t('sess.othersHere', { n: others.length })}`}
-          </p>
-        ) : null}
+        {presence(pane.data?.here || [])}
       </header>
 
       {st === 'limit' ? (
@@ -311,7 +303,7 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
       {tab === 'chat'
         ? (sess.error && !sess.data
             ? <p class="err pad">{t('sess.readFailed', { why: sess.error.message })}</p>
-            : <Chat ctx={ctx} msgs={msgs} queued={sess.data?.queued || []} older={before != null} onOlder={loadOlder} />)
+            : <Chat msgs={msgs} queued={sess.data?.queued || []} older={before != null} onOlder={loadOlder} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
       <form class={`composer${drag ? ' drag' : ''}`} onSubmit={(e) => { e.preventDefault(); sendDraft(); }}
@@ -336,7 +328,12 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
           <textarea rows={2} value={draft} placeholder={drag ? t('sess.drop') : prompt ? t('sess.pendingAbove') : t('sess.writeTo', { name })}
                     onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value; }}
                     onPaste={(e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } }}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendDraft(); } }} />
+                    onKeyDown={(e) => {
+                      // Esc leaves the box. ⏎ sends with a keyboard and is a new line on a phone's
+                      // on-screen one, never mid-composition (keys.js sendsOnEnter).
+                      if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
+                      else if (sendsOnEnter(e)) { e.preventDefault(); sendDraft(); }
+                    }} />
           <Btn kind="primary" type="submit" disabled={busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
         </div>
       </form>
@@ -358,7 +355,7 @@ export function SessionView({ ctx, project, name, card, onChanged, onGone }) {
           <form class="stack modal-body" onSubmit={async (e) => {
             e.preventDefault();
             const r = await act('fleet_rename', { new_name: rename.trim() }, { confirm: true });
-            if (r) { setRename(null); ctx.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(rename.trim())}`); }
+            if (r) { setRename(null); fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(rename.trim())}`); }
           }}>
             <label class="field"><span>{t('sess.newName')}</span><input value={rename} onInput={(e) => setRename(e.currentTarget.value)} autoFocus /></label>
             <footer><Btn onClick={() => setRename(null)}>{t('common.cancel')}</Btn><Btn kind="primary" type="submit" disabled={!rename.trim() || rename.trim() === name}>{t('sess.rename')}</Btn></footer>

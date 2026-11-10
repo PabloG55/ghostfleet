@@ -3,11 +3,12 @@
 // Codex/Gemini as tools inside Claude. Everything here is server/ai-account.mjs's view.
 import { useState, useEffect } from 'preact/hooks';
 import { api } from '../api.js';
-import { Btn, Avatar, toast } from '../ui.jsx';
+import { Btn, toast } from '../../../../../web/ui/ui.jsx';
+import { Avatar } from '../avatar.jsx';
 import { t, locale } from '../i18n.js';
 import { worded } from '../../../shared/i18n/index.js';
 import './ai.css';
-import { Icon } from '../icon.jsx';
+import { Icon } from '../../../../../web/ui/icon.jsx';
 
 const MODES = worded({ 'shared-subscription': {}, 'api-key': {}, 'per-user': {} }, 'aimode', ['name', 'pays', 'usage']);
 const when = (at) => new Date(at * 1000).toLocaleString(locale(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
