@@ -17,6 +17,17 @@
 .palette h3, .ai-panel h3 { font-size: 12px; color: var(--dim); }
 .home-agent-head h2 { font-size: 16px; color: var(--white); }
 .admin-users > .row h2 { font-size: 14px; }
+/* The product's name is a title here, so it takes the titles' pixel face, against the shared
+   skin's mono wordmark. Silkscreen has no lowercase and draws the name as its capitals; the
+   text stays lowercase, which is what a reader copies and a screen reader says. Sizes are the
+   face's 8-pixel em: 16 fits the sidebar's 239px brand box with 50px to spare. The phone bar's
+   name is 8 because at 390 the bar has 111px left beside the usage chips and 8 is what fits
+   (81px); at 360 it still steps out and the ship carries the brand alone, as the shared rule
+   arranges. On the sign-in card 24 wrapped onto a second line at 360, hence the step. */
+.brand b { font: 400 16px/1.2 var(--px); letter-spacing: 0; }
+.brand.big b { font-size: 24px; }
+.topbar .brand b { font-size: 8px; line-height: 22px; }
+@media (max-width: 380px) { .brand.big b { font-size: 16px; } }
 
 /* ── windows ────────────────────────────────────────────
  * A panel that holds a whole task gets a title bar: its own first heading, on a slightly
