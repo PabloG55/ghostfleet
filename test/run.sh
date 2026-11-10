@@ -4531,9 +4531,10 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     tmux -L "$SPS" resize-window -x 80 -y 12 2>/dev/null
     # Fewer columns fit, so more are off to the right: the one thing the old frame cannot say.
     i=0; NOW="$WAS"
-    while [ "$i" -lt 150 ] && [ "$NOW" = "$WAS" ]; do
+    while [ "$i" -lt 150 ] && [ "${NOW:-0}" -le "${WAS:-0}" ]; do
       NOW="$(grep -oE '→ [0-9]+$' <<< "$(spcap)" | grep -oE '[0-9]+' || true)"
-      [ "$NOW" = "$WAS" ] && sleep 0.1
+      # A capture during the clear/redraw can have no marker. That is not the new frame.
+      [ "${NOW:-0}" -le "${WAS:-0}" ] && sleep 0.1
       i=$((i+1))
     done
     is "a pane that shrinks is redrawn with no tick to help" "yes" "$([ "${NOW:-0}" -gt "${WAS:-0}" ] && echo yes || echo no)"
@@ -15906,11 +15907,19 @@ if command -v git >/dev/null 2>&1; then
   # check used to sit at the top, so a host without gh (a bare Linux runner) printed nothing
   # for a good cache while a Mac with gh installed passed. PATH is pinned so the row means the
   # same on both.
-  nogh() { env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
+  # /usr/bin can contain gh (the hosted Linux runner does). Link the tools this command
+  # actually needs, so this is absence on every host, not a guess about its install path.
+  mkdir -p "$MG/no-gh"
+  for tool in bash git sed mkdir tr date stat cat awk; do
+    ln -s "$(command -v "$tool")" "$MG/no-gh/$tool"
+  done
+  is "no gh: the fixture really cannot find gh" "1" \
+     "$(env PATH="$MG/no-gh" bash -c 'command -v gh >/dev/null'; echo $?)"
+  nogh() { env -i PATH="$MG/no-gh" HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
            "$ROOT/bin/fleet-merged" "$@" "$MG/repo" 2>/dev/null; }
   is "no gh: a fresh cache is still served"      "3" "$(nogh --prs | grep -c . || true)"
   is "...and a stale one too, rather than nothing" "3" \
-     "$(env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" CLAUDE_FLEET_MERGED_TTL=0 \
+     "$(env -i PATH="$MG/no-gh" HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" CLAUDE_FLEET_MERGED_TTL=0 \
         "$ROOT/bin/fleet-merged" --prs "$MG/repo" 2>/dev/null | grep -c . || true)"
   is "...and no lock behind it"                  "0" "$(find "$MG/fleet" -name '*.lock' 2>/dev/null | grep -c . || true)"
   # 4. no cache at all is the cold-start case a card must survive: nothing, exit 0.
@@ -15920,7 +15929,7 @@ if command -v git >/dev/null 2>&1; then
   is "...and never called gh for it"      "no" "$(rm -f "$MG/GH_RAN"; cfm --cached --prs >/dev/null; [ -f "$MG/GH_RAN" ] && echo yes || echo no)"
   # 5. no gh on PATH AT ALL is the other cold case — the one the header promises about.
   is "no gh: --cached is still fine"      "0" \
-     "$(env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
+     "$(env -i PATH="$MG/no-gh" HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
         "$ROOT/bin/fleet-merged" --cached --prs "$MG/repo" >/dev/null 2>&1; echo $?)"
   rm -rf "$MG"
 else
@@ -25219,7 +25228,14 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
     : > "$R/fleet/$S.w3.parked"
     printf 'codex\n' > "$R/fleet/$S.w4.agent"
     printf '%s\t%s\t%s\t%s\n' "$((now - 7200))" "aaaaaaaa-7777-7777-7777-000000000007" "$R/wt" 100 > "$R/fleet/$S.nap.asleep"
-    mkdir -p "$R/gone"; tmux -L "$S" new-session -d -s gone-wt -c "$R/gone" "sleep 600"; rmdir "$R/gone"
+    mkdir -p "$R/gone"
+    tmux -L "$S" new-session -d -s gone-wt -c "$R/gone" "touch '$R/gone-ready'; exec sleep 600"
+    # new-session returns before its child necessarily enters -c. Removing the directory
+    # first lets the child fall back to the server's cwd, so it is never an orphan fixture.
+    i=0
+    while [ ! -f "$R/gone-ready" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+    is "fleet-list: the orphan fixture entered its worktree" "yes" "$([ -f "$R/gone-ready" ] && echo yes || echo no)"
+    rmdir "$R/gone"
   }
   flp_run() {     # <root> <sock>: the list, with every spawn logged
     : > "$FP/log"
