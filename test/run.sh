@@ -28991,16 +28991,18 @@ AGENT
   is "...and it is the picture that was sent"           "89504e47" "$(head -c 4 "$pp" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   is "...in a turn as restricted as any from Telegram"  "Bash 2" "$(grep '^Bash ' "$TG/s/tools.3" 2>/dev/null)"
 
-  # THAT turn's answer: a message that arrives while the session is busy queues behind
-  # the running turn, and the running turn's Stop answers nobody on Telegram.
+  # THAT turn's answer: a message that arrives while the session is busy with a turn that
+  # is not from Telegram queues behind it (never into it: that turn has the desk's tools),
+  # and the running turn's Stop answers nobody on Telegram.
   FSD master "a slow desk task" >/dev/null
   until_ok 40 test -e "$TG/s/prompt.4"
   tgpost _push "$(tgmsg 21 4242 'give me the long answer')"
   until_ok 120 sent_has 'END-OF-LONG-ANSWER'
-  is "a message to a busy session is queued, and he is told" "1" "$(tgsent | grep -c 'your message is queued' || true)"
+  is "a message to a busy session is queued, and he is told" "1" "$(tgsent | grep -c 'master is working on something else; this runs right after it' || true)"
   is "...the busy turn's answer is not sent to him"     "0" "$(tgsent | grep -c 'a slow desk task' || true)"
   is "...nor was that turn restricted"                  "Bash 0" "$(grep '^Bash ' "$TG/s/tools.4" 2>/dev/null)"
-  is "...the message ran as its own turn"               "[telegram] give me the long answer" "$(cat "$TG/s/prompt.5" 2>/dev/null)"
+  is "...the message ran as its own turn"               "[telegram] (sent while an earlier turn was running, and held until it ended)
+give me the long answer" "$(cat "$TG/s/prompt.5" 2>/dev/null)"
   is "...a restricted one"                              "Bash 2" "$(grep '^Bash ' "$TG/s/tools.5" 2>/dev/null)"
   LONG="$(tgsent | grep -E 'Paragraph|END-OF-LONG-ANSWER')"
   is "...and its answer came back in several messages"  "yes" "$([ "$(grep -c . <<< "$LONG")" -ge 2 ] && echo yes || echo no)"
@@ -29673,6 +29675,94 @@ https://example.com/acme-web/pricing" "$P"
   sleep 12                                 # past a second window, for a second delivery that should not come
   is "...exactly once"                                  "1" "$(( $(delivered) - d0 ))"
   is "...and lets it go"                                "0" "$(jq '.pending.updates // [] | length' "$TD/state.json" 2>/dev/null)"
+
+  # ── more of the same request, while its Telegram turn is running ──────────
+  # Exactly one answer for the two, whichever way the turn takes the second: read in at its
+  # next step (`absorb`), or left waiting until it ends and run as a turn of its own.
+  TBC config coalesce-ms 1000 >/dev/null
+  leftover() { ls -A "$FF" 2>/dev/null | grep -E '^cf-acme-web\.master\.(reply-to|telegram)' | tr '\n' ' '; }
+  nows() { grep -c ' with --now (into the running turn)' "$TD/log" 2>/dev/null || true; }
+  answer_to() { tbreqs "$1" | jq -r '.text' | grep '^answer to:' || true; }
+  : > "$TB/s/absorb"
+  n0="$(nows)"
+  tbsay 161 'slow: check the acme-web deploy'
+  until_ok 40 test -e "$TB/s/prompt.$((tn + 1))"
+  sleep 1
+  tbsay 162 'and the billing-svc one too'
+  tbturn 120
+  sleep 3
+  is "a message to a running Telegram turn goes into it"   "1" "$(( $(nows) - n0 ))"
+  is "...typed into that turn"                          "[telegram] and the billing-svc one too" "$(cat "$TB/s/typed.$tn.1" 2>/dev/null)"
+  is "...which took it in, so no turn ran after it"     "$tn" "$(turns)"
+  is "...answered exactly once"                         "1" "$(( $(answers 161) + $(answers 162) ))"
+  is "...as a reply to the newer message"               "1" "$(answers 162)"
+  is "...with the answer to both"                       "answer to: [telegram] slow: check the acme-web deploy + [telegram] and the billing-svc one too" "$(answer_to 162)"
+  is "...a turn held to the phone's tools"              "Bash 2" "$(grep '^Bash ' "$TB/s/tools.$tn" 2>/dev/null)"
+  is "...and nothing is left addressed to the phone"    "" "$(leftover)"
+
+  rm -f "$TB/s/absorb"
+  n0="$(nows)"
+  tbsay 171 'slow: look at the acme-api logs'
+  until_ok 40 test -e "$TB/s/prompt.$((tn + 1))"
+  sleep 1
+  tbsay 172 'and the toolbox ones after'
+  tbturn 120; T1="$tn"
+  tbturn 120; T2="$tn"; P2="$P"
+  sleep 3
+  is "a message the turn never took in also went in with --now" "1" "$(( $(nows) - n0 ))"
+  is "...and ran as the next turn"                      "[telegram] and the toolbox ones after" "$P2"
+  is "...each message answered exactly once"            "1 1" "$(answers 171) $(answers 172)"
+  is "...the first by the turn it started"              "answer to: [telegram] slow: look at the acme-api logs" "$(answer_to 171)"
+  is "...the second by its own"                         "answer to: [telegram] and the toolbox ones after" "$(answer_to 172)"
+  is "...both turns held to the phone's tools"          "Bash 2|Bash 2" "$(grep '^Bash ' "$TB/s/tools.$T1" 2>/dev/null)|$(grep '^Bash ' "$TB/s/tools.$T2" 2>/dev/null)"
+  is "...and nothing is left addressed to the phone"    "" "$(leftover)"
+
+  # ── a message while the desk is using the session ─────────────────────────
+  FSB master "slow: a desk task on acme-web" >/dev/null
+  until_ok 40 test -e "$TB/s/prompt.$((tn + 1))"
+  sleep 1
+  n0="$(nows)"
+  tbsay 181 'what about the scratch branch'
+  until_ok 40 replied 181
+  tbturn 120; TD1="$tn"
+  tbturn 120; P2="$P"
+  sleep 2
+  is "a message to a desk turn is never put into it"    "0" "$(( $(nows) - n0 ))"
+  is "...it queues"                                     "1" "$(grep ' delivered ' "$TD/log" | tail -n 1 | grep -c '(queued)$' || true)"
+  is "...and the owner is told what it waits behind"  "master is working on something else; this runs right after it." "$(tbreqs 181 | jq -r '.text' | head -n 1)"
+  is "...the desk turn kept the desk's tools"           "Bash 0" "$(grep '^Bash ' "$TB/s/tools.$TD1" 2>/dev/null)"
+  is "...and its answer did not go to the phone"        "0" "$(grep -c 'a desk task' "$TB/stub/requests.jsonl" 2>/dev/null || true)"
+  is "...the owner's message ran next, saying it was held" "[telegram] (sent while an earlier turn was running, and held until it ended)
+what about the scratch branch" "$P2"
+  is "...held to the phone's tools"                     "Bash 2" "$(grep '^Bash ' "$TB/s/tools.$tn" 2>/dev/null)"
+  is "...and answered once"                             "1" "$(answers 181)"
+
+  # ── the two races, through the hook directly ──────────────────────────────
+  # A folded message whose turn ended between fleet-send's look and its write starts a turn
+  # of its own, and that turn's prompt hook gives it the address. A message handed on to a
+  # turn that never ran (the queue cleared at the desk) is not answered to the phone by
+  # whatever comes next.
+  HTR="$TB/held.jsonl"; : > "$HTR"
+  hk() { jq -nc --arg p "$1" --arg tr "$HTR" '{hook_event_name:"UserPromptSubmit",session_id:"tb-held",cwd:"/",transcript_path:$tr,prompt:$p}' \
+           | env -u TMUX -u TMUX_PANE HOME="$FH" CLAUDE_CONFIG_DIR="$FH/.claude" CLAUDE_FLEET_DIR="$FF" CLAUDE_FLEET_SOCK=cf-acme-web \
+                 CLAUDE_FLEET_SLOT=held CLAUDE_FLEET_NOTIFIER=off "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1; }
+  HRT="$FF/cf-acme-web.held.reply-to"
+  printf 'telegram\037m191\037%s\037%s\n' "$TD" "$(printf '%s' '[telegram] and one more' | base64 | tr -d '\n')" > "$HRT.fold"
+  hk '[telegram] and one more'
+  is "a fold whose turn had ended gives its address to the turn it starts" "telegram m191 $TD|0" \
+     "$(tr '\037' ' ' < "$HRT" 2>/dev/null)|$(head -n 1 "$HRT.armed" 2>/dev/null)"
+  is "...and is used up"                                "no" "$([ -e "$HRT.fold" ] && echo yes || echo no)"
+  rm -f "$HRT" "$HRT.armed"
+  printf 'telegram\037m192\037%s\n' "$TD" > "$HRT"
+  printf '0\nheld %s\n' "$(printf '%s' '[telegram] never ran' | base64 | tr -d '\n')" > "$HRT.armed"
+  hk 'a desk prompt about acme-api'
+  is "a handed-on address whose turn never ran is not a desk prompt's" "no" "$([ -e "$HRT" ] && echo yes || echo no)"
+  printf 'telegram\037m193\037%s\n' "$TD" > "$HRT"
+  printf '0\nheld %s\n' "$(printf '%s' '[telegram] it ran' | base64 | tr -d '\n')" > "$HRT.armed"
+  jq -nc '{type:"user",message:{role:"user",content:"[telegram] it ran"}}' >> "$HTR"
+  hk 'typed at the desk into that turn'
+  is "...but is kept when its turn is the one running"  "yes" "$([ -e "$HRT" ] && echo yes || echo no)"
+  rm -f "$HRT" "$HRT.armed"
   TBC config coalesce-ms '' >/dev/null
 
   TBC stop >/dev/null

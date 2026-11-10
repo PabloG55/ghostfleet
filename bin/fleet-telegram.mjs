@@ -495,7 +495,25 @@ async function deliver(msgs, sec) {
   // caption)" three times over says less than the caption beside them.
   const said = parts.some((p) => !p.bare);
   const body = parts.map((p, i) => [p.bare && (said || i > 0) ? '' : p.words, p.files].filter(Boolean).join('\n\n')).join('\n\n');
-  const prompt = `[telegram] ${body}`;
+
+  // A SESSION ALREADY WORKING. If the turn running is the owner's own from Telegram (the
+  // `.telegram` mark hooks/fleet-event.sh keeps for it), what the owner sends now is more of the same
+  // request — "and the pricing page too" — so it goes INTO that turn (fleet-send --now), and
+  // the turn's one answer covers both; fleet-send and the Stop hook see to it that exactly one
+  // answer comes back, as a reply to the newest message the turn took in.
+  //   Any other turn is NEVER joined: it was started at the desk or by the machine, it runs
+  // with the session's own tools, and hooks/fleet-telegram-guard.sh holds a turn to the
+  // phone's allowlist only while it is a Telegram turn. Folding the phone's words into it
+  // would hand them every tool the desk has — the one thing the allowlist is there to stop if
+  // the phone, or the Telegram account, is not the owner's. So the message queues behind that
+  // turn, the owner is told what it waits for, and the turn it starts says it was held.
+  //   Nor into a session stopped on a question (need-you): --now presses Enter, and Enter on
+  // a permission dialog answers it. fleet-send --would-queue makes the call the queue gate
+  // itself would make, so this and the gate cannot disagree.
+  const probe = (await run('fleet-send', ['-s', t.sock, '--would-queue', t.session], envFor(t), 15000)).out.trim().split('\n').pop();
+  const fold = probe === 'working' && fs.existsSync(path.join(t.fleetDir, `${t.sock}.${t.session}.telegram`));
+  const behind = !fold && ['working', 'need-you', 'backlog'].includes(probe);
+  const prompt = `[telegram] ${behind ? '(sent while an earlier turn was running, and held until it ended)\n' : ''}${body}`;
 
   // fleet-send, as the owner: to a busy session it QUEUES, and the queued turn carries the
   // reply address, so the answer is that turn's — the busy turn's own Stop answers nobody.
@@ -505,16 +523,20 @@ async function deliver(msgs, sec) {
   // when a turn is interrupted and never answers. A batch is answered as a reply to its last
   // message, and spoken if any message in it was a voice note.
   const reply = ackFor(sec, id);
-  const r = await run('fleet-send', ['-s', t.sock, '--owner', '--reply-to', `telegram/${spoken ? 'v' : 'm'}${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
+  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${spoken ? 'v' : 'm'}${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
   if (r.code !== 0) {
     log(`not delivered to ${t.session}: exit ${r.code}`);
     return reply(`Not delivered to ${t.session} — ${r.out.split('\n').map((l) => l.replace(/^fleet-send:\s*/, '')).filter(Boolean).slice(0, 2).join(' — ') || `fleet-send exited ${r.code}`}`);
   }
   state.delivered = (state.delivered || 0) + 1;
   const queued = /queued #\d+/.test(r.out);
-  log(`delivered ${prompt.length} chars from ${parts.length} message${parts.length === 1 ? '' : 's'} to ${t.name}/${t.session}${queued ? ' (queued)' : ''}`);
-  if (queued) reply(`${t.session} is in the middle of something — your message is queued and runs next.`);
-  else typing(sec);
+  const into = /\(into the running turn\)/.test(r.out);
+  log(`delivered ${prompt.length} chars from ${parts.length} message${parts.length === 1 ? '' : 's'} to ${t.name}/${t.session}${fold ? ' with --now' : ''}${into ? ' (into the running turn)' : queued ? ' (queued)' : ''}`);
+  if (queued) {
+    reply(/queued #\d+ behind a question/.test(r.out) || probe === 'need-you'
+      ? `${t.session} is stopped on a question at the desk; this runs once that is answered and its turn ends.`
+      : `${t.session} is working on something else; this runs right after it.`);
+  } else typing(sec);
 }
 
 // A voice note in, its words out, by the owner's own command (`config transcribe-cmd`),
