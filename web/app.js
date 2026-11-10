@@ -1433,7 +1433,7 @@ export function loginCard(row) {
       const start = btn('Sign in', async () => {
         start.disabled = true;
         try {
-          const r = await api.startAccountLogin(row.project, row.session);
+          const r = await api.startAccountLogin(row.project, row.session, row.sock);
           result.textContent = r.text;
           if (r.ok) {
             const j = await api.getLogins(); S.logins = j.items || []; render();

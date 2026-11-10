@@ -452,8 +452,8 @@ export async function getLogins() {
 export async function finishLogin(project, id, callback, assertion) {
   return loginRequest('fleet_login_finish', { project, id, callback }, assertion);
 }
-export async function startAccountLogin(project, session) {
-  return loginRequest('fleet_account_login_start', { project, session });
+export async function startAccountLogin(project, session, sock) {
+  return loginRequest('fleet_account_login_start', { project, session, sock });
 }
 export async function finishAccountLogin(project, id, code, assertion) {
   return loginRequest('fleet_account_login_finish', { project, id, code }, assertion);

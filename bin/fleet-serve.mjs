@@ -2066,9 +2066,13 @@ async function loginPushEvents() {
   const fan = await fanOut('/api/logins', { client: { id: 'push' } }, 5000);
   for (const { peer, r } of fan || []) if (r.status === 200 && Array.isArray(r.json?.items))
     for (const item of r.json.items) items.push({ ...item, project: addrOf(item.project, peer), sock: `${peer.key}/${item.sock}` });
+  const accountKey = item => `${item.sock}/account:${item.session}`;
+  const activeAccounts = new Set(items.filter(i => i.kind === 'account' && !i.used
+    && (i.status === 'needs-login' || i.expires > Date.now())).map(accountKey));
+  for (const key of loginSeen) if (key.includes('/account:') && !activeAccounts.has(key)) loginSeen.delete(key);
   const events = [];
   for (const item of items) {
-    const key = `${item.sock}/${item.id}`;
+    const key = item.kind === 'account' ? accountKey(item) : `${item.sock}/${item.id}`;
     if (item.used || (item.status !== 'needs-login' && item.expires <= Date.now()) || loginSeen.has(key)) continue;
     loginSeen.add(key);
     events.push({ kind: 'needs-you', login: true, server: item.server, project: item.project.split('@')[0], session: item.session, sock: item.sock });

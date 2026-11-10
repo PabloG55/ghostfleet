@@ -36,9 +36,9 @@ async function host(id) {
   const env = { ...process.env, HOME: home, TMUX: '', CLAUDE_FLEET_AWAKE: 'off', GHOSTFLEET_PUSH_ALLOW_HTTP: '1',
     GHOSTFLEET_SERVE_CONFIG: cfg, GHOSTFLEET_SERVE_AUDIT: path.join(dir, 'audit'), GHOSTFLEET_AT_MAC_FILE: path.join(dir, 'absent') };
   if (process.argv[3] === 'account') {
-    env.TMUX_TMPDIR = path.join(dir, 'tmux'); fs.mkdirSync(env.TMUX_TMPDIR, { recursive: true, mode: 0o700 });
+    env.TMUX_TMPDIR = path.join(T, id === 'home' ? 'h' : 'r'); fs.mkdirSync(env.TMUX_TMPDIR, { recursive: true, mode: 0o700 });
   }
-  for (const k of ['CLAUDE_FLEET_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_FLEET_SOCK']) delete env[k];
+  for (const k of ['CLAUDE_FLEET_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_FLEET_SOCK', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[k];
   fs.mkdirSync(path.join(home, '.config/ghostfleet'), { recursive: true });
   const fleet = path.join(home, '.claude/fleet');
   fs.mkdirSync(fleet, { recursive: true });
@@ -78,7 +78,7 @@ try {
   is('home subscribes through existing push route', 201, subscription.status);
   if (process.argv[3] === 'account') {
     const { checkAccountLogin } = await import('./account-login-check.mjs');
-    await checkAccountLogin({ home, remote, remotePeer, P, T, rt, is, read, files, sleep, request });
+    await checkAccountLogin({ home, remote, remotePeer, P, T, rt, pushed, is, read, files, sleep, request });
   } else {
   function capture(h = remote, server = 'example', state = 'issued-state') {
     const authorize = new URL('https://auth.example.com/oauth/authorize');

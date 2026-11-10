@@ -3348,7 +3348,7 @@ if (JSON_OUT) {
       // a marker that predates the field rather than a case the fleet can produce.
       sched:    c.sched ? { at: c.sched.at, msg: c.sched.msg ?? null } : null,
       limit_at: c.limitAt || null,   // "10:20pm" — when the usage window rolls over
-      login_reason: c.loginReason || null,
+      ...(c.loginReason ? { login_reason: c.loginReason } : {}),
       // THE ONE FIELD THE TUI'S CARD DOES NOT DRAW, and it is here because the TUI has no
       // lead card to draw it on. Without it a client can only tell the lead apart by
       // comparing the string "master" itself — in the card list, on the session screen,

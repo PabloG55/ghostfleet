@@ -33,12 +33,12 @@ try {
           provider:connector?'claude.ai':'auth.example.com',session:'api-1',expires:Date.now()+(state==='expired'?-1000:600000),
           status:state==='done'?'done':state==='expired'?'expired':'pending',kind:connector?'connector':'loopback',connector:'Example',
           first_site:state==='first-time-site',authorize:connector?'https://claude.ai/settings/connectors':'https://auth.example.com/oauth/authorize?state=placeholder'};
-        if (${account}) Object.assign(row,{kind:'account',profile:'work',provider:'Claude account sign-in',server:'Claude account',
+        if (${account}) Object.assign(row,{kind:'account',profile:'work',sock:'cf-acme-api',provider:'Claude account sign-in',server:'Claude account',
           status:state==='needs-login'?'needs-login':row.status,first_site:false,authorize:'https://claude.com/cai/oauth/authorize?state=placeholder'});
         return Promise.resolve(new Response(JSON.stringify({items:[row]}),{status:200}));
       }
       if(String(url).includes('/api/verb')) {
-        const b=JSON.parse(opts.body); window.__loginCalls.push({tool:b.tool,project:b.args.project,session:b.args.session,assertion:!!opts.headers['X-Fleet-Assertion']});
+        const b=JSON.parse(opts.body); window.__loginCalls.push({tool:b.tool,project:b.args.project,session:b.args.session,...(b.args.sock?{sock:b.args.sock}:{}),assertion:!!opts.headers['X-Fleet-Assertion']});
         if(b.tool==='fleet_account_login_start') loginState='pending';
         return new Promise(resolve=>setTimeout(()=>resolve(new Response(JSON.stringify({ok:true,text:'done · HTTP 200'}),{status:200})),200));
       }
@@ -81,7 +81,7 @@ try {
       if (account && state === 'needs-login') {
         await browser.evaluate(() => document.querySelector('.login-card button').click());
         await sleep(500);
-        is(`${width} Sign in sends one session to its own host`, { tool: 'fleet_account_login_start', project: 'acme-api@laptop', session: 'api-1', assertion: false },
+        is(`${width} Sign in sends one session to its own host`, { tool: 'fleet_account_login_start', project: 'acme-api@laptop', session: 'api-1', sock: 'cf-acme-api', assertion: false },
           await browser.evaluate(() => window.__loginCalls.at(-1)));
         is(`${width} Sign in replaces the need with a paste card`, true, await browser.evaluate(() => !!document.querySelector('.login-card input')));
       }

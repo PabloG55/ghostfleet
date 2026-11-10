@@ -1,0 +1,4 @@
+> hi
+  ⎿  API Error: 401 · OAuth token revoked · Please run /login
+
+❯

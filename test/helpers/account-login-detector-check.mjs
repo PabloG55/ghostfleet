@@ -5,7 +5,7 @@ const root = path.resolve(process.argv[2] || new URL('../..', import.meta.url).p
 const { accountLoginReason } = await import(pathToFileURL(path.join(root, 'lib/account-login-shape.mjs')));
 let n = 0;
 for (const file of fs.readdirSync(path.join(root, 'test/fixtures')).filter(f => f.endsWith('.txt'))) {
-  const want = file.startsWith('claude-account-login-');
+  const want = file.startsWith('claude-account-login-') || file === 'claude-account-expired-synthetic.txt';
   const got = !!accountLoginReason(fs.readFileSync(path.join(root, 'test/fixtures', file), 'utf8'));
   if (want !== got) { console.error(`${file}: expected ${want}, got ${got}`); process.exitCode = 1; }
   n++;
