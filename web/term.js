@@ -4,6 +4,13 @@
 // Loaded on demand (app.js imports it when a terminal opens), because xterm.js is most of
 // the client's bytes and most launches never open a shell.
 //
+// TWO CLIENTS, ONE COPY. The phone client (app.js) and the team app (through
+// web/ui/terminal.jsx) both drive their terminal with this file, so a byte typed, a key-row
+// key, a pinch and the font a phone opens at are the same in both. That is why nothing here
+// knows how a client reaches its server: the caller hands mount() a `socket(ticket)` that
+// opens the WebSocket. Importing the phone client's api.js for it would have put that whole
+// module, its token and its fixtures, inside the team app's bundle.
+//
 // WHAT xterm.js IS HERE: a VIEW of a tmux pane, not the pane's terminal. tmux is the
 // terminal the shell is running in — it parsed every byte before we saw it, and it ANSWERS
 // the shell's questions itself (where is the cursor, what are you, what colour is the
@@ -14,7 +21,6 @@
 // moment its client size changes.
 import { Terminal } from './xterm.js';
 import { FitAddon } from './xterm-fit.js';
-import * as api from './api.js';
 
 // The key row's keys, as bytes, in its two bands. Esc, Tab, Enter and the arrows are what a
 // phone keyboard lacks or hides behind a mode switch; : and | ~ / - are what it buries a page
@@ -54,6 +60,44 @@ export function modded(s, { ctrl = false, alt = false } = {}, arrowKey = '') {
 // and remembers the choice (app.js termFont).
 export const FONT_MIN = 6, FONT_MAX = 24;
 const clampFont = (px) => Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(Number(px) || 0)));
+export function isTouch() { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } }
+// THE PHONE'S FONT SIZE, AND SO ITS COLUMNS. The desk keeps 13px. A phone at 13px fits 37
+// columns at 390pt — LazyVim's explorer and a file beside it do not fit in that, and the
+// owner's first look at the editor was "I can't do anything". So the default is the size
+// that fits about seventy columns across the phone's SHORT side: floor(short / 42), because
+// a monospace cell is about 0.6em and 0.6 × 70 = 42. At 390pt that is 9px and 68 columns
+// (the suite asks for at least 64); a 320pt phone gets 8px, a 430pt one 10px. The short side,
+// so that turning the phone does not change the font — landscape is the same text with more
+// columns, not the same columns in bigger text. A pinch or A−/A+ replaces it, and each
+// client remembers that on the device.
+export function defaultFont() {
+  if (!isTouch()) return 13;
+  const w = Number(screen && screen.width) || innerWidth, h = Number(screen && screen.height) || innerHeight;
+  return Math.max(8, Math.min(12, Math.floor(Math.min(w, h) / 42)));
+}
+// THE KEY ROW, built into `row` (an empty element the caller owns), on touch only: a hardware
+// keyboard has every one of these keys, and at a desk the row would be fifteen buttons of
+// nothing. Two bands, each one line that scrolls sideways where a phone is too narrow for it.
+// pointerdown and preventDefault, so a tap never takes the focus from the terminal — the
+// on-screen keyboard stays up. `handle()` answers the mounted terminal, or nothing yet.
+export function keyRow(row, handle) {
+  for (const band of KEY_ROWS) {
+    const b = document.createElement('div');
+    b.className = 'tk-band';
+    for (const k of band) b.append(keyButton(k, handle));
+    row.append(b);
+  }
+}
+function keyButton(k, handle) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tk' + (k.latch ? ' latch' : '') + (k.wide ? ' wide' : '');
+  b.textContent = k.label;
+  b.setAttribute('aria-label', k.aria || k.label);
+  b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); const h = handle(); if (h) h.key(k, b); });
+  b.addEventListener('mousedown', (ev) => ev.preventDefault());
+  return b;
+}
 // THE ONE KEY THAT LEAVES (desktop). While the terminal has focus every key goes to the
 // shell — the desk's Ctrl-s, Ctrl-p, Ctrl-f, ` and the Ctrl-a prefix included, since inside
 // a terminal those belong to the shell and nvim, not to the fleet. ⇧Esc is the way out
@@ -67,13 +111,18 @@ const utf8 = new TextEncoder();
 
 // mount(host, opts) -> handle. host is an empty element the caller owns and keeps in the
 // document for as long as the terminal is open (app.js keeps the same node across renders).
-//   opts.onState({ state, why }) — 'opening' | 'open' | 'closed'
+//   opts.onState({ state, why, code }) — 'opening' | 'open' | 'closed', and a close's code
 //   opts.onLeave() — the leave key was pressed
 //   opts.fontSize — the starting size; opts.onFont(px) — a pinch or A−/A+ changed it
 //   opts.onFocus(up) — the terminal took or lost the focus (on a phone: the keyboard)
 //   opts.onCopy(text) — a long-press selection was copied to this device's clipboard
+//   opts.socket(ticket) — opens the WebSocket for one ticket (binaryType 'arraybuffer'); the
+//     client's own, since only it knows where its server is
+//   opts.onMessage(o) — every JSON message from the server, after this file has read it
+//     (hello, ready, closed), for a client that says more about each than a state does
 export function mount(host, { onState = () => {}, onLeave = () => {}, fontSize = 13, onFont = () => {},
-                              onFocus = () => {}, onCopy = () => {} } = {}) {
+                              onFocus = () => {}, onCopy = () => {}, socket, onMessage = () => {} } = {}) {
+  if (typeof socket !== 'function') throw new TypeError('term.js mount(): opts.socket(ticket) opens the WebSocket');
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
     fontSize: clampFont(fontSize), scrollback: 5000, cursorBlink: true, theme: THEME,
@@ -104,7 +153,8 @@ export function mount(host, { onState = () => {}, onLeave = () => {}, fontSize =
 
   let ws = null, state = 'opening', why = '';
   const mods = { ctrl: false, alt: false }, modNode = { ctrl: null, alt: null };
-  const set = (s, w = '') => { state = s; why = w; onState({ state, why }); };
+  // `code` is the close code of a 'closed' (4000 idle, 4001 taken over, 1006 dropped, …).
+  const set = (s, w = '', code = 0) => { state = s; why = w; onState({ state, why, code }); };
   const send = (bytes) => { if (ws && ws.readyState === 1) ws.send(bytes); };
   const sendText = (s) => send(utf8.encode(s));
   // The application cursor mode (DECCKM) decides whether an arrow is ESC [ A or ESC O A; a
@@ -141,16 +191,20 @@ export function mount(host, { onState = () => {}, onLeave = () => {}, fontSize =
     get why() { return why; },
     size() { resize(); return { cols: term.cols, rows: term.rows }; },
     connect(ticket) {
+      // A reconnect on the same terminal (its scrollback kept): the old socket, if it is
+      // somehow still up, is let go first, so its close cannot land on the new one's state.
+      if (ws) { const old = ws; old.onclose = old.onmessage = null; try { old.close(1000, 'reconnecting'); } catch {} }
       set('opening');
-      ws = api.termSocket(ticket);
+      ws = socket(ticket);
       ws.onopen = () => { resize(); ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows })); };
       ws.onmessage = (m) => {
         if (typeof m.data !== 'string') { term.write(new Uint8Array(m.data)); return; }
         let o = null; try { o = JSON.parse(m.data); } catch {}
         if (o && o.t === 'ready') set('open');
         if (o && o.t === 'closed') why = o.why || why;
+        if (o) onMessage(o);
       };
-      ws.onclose = (ev) => { ws = null; set('closed', why || ev.reason || (ev.code === 1006 ? 'the connection dropped' : `closed (${ev.code})`)); };
+      ws.onclose = (ev) => { ws = null; set('closed', why || ev.reason || (ev.code === 1006 ? 'the connection dropped' : `closed (${ev.code})`), ev.code); };
     },
     focus() { try { term.focus(); } catch {} },
     blur() { try { term.blur(); } catch {} },
