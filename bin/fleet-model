@@ -159,7 +159,7 @@ cfg_of() {
   d="$(envof CLAUDE_CONFIG_DIR)"; case "$d" in /*) printf '%s' "$d"; return ;; esac
   printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 }
-# `<model>\t<epoch>\t<how>` for the running process (lib/session-model.mjs current).
+# `<model>\t<epoch>\t<how>\t<effort>` for the running process (lib/session-model.mjs current).
 running_model() {
   local tr="$1" launch
   launch="$(envof CLAUDE_FLEET_MODEL_LAUNCH)"
@@ -192,7 +192,7 @@ do_get() {
   else dflt="the profile default (Claude Code's own; settings.json names none)"; fi
   echo "$SESSION"
   if live; then
-    IFS=$'\t' read -r m at how <<< "$(running_model "$tr")"
+    IFS=$'\t' read -r m at how _effort <<< "$(running_model "$tr")"
     case "$how" in
       reply)    echo "  now:     $m — the model its last reply came from, $(ago "$at") ago" ;;
       switch)   echo "  now:     $m — switched with /model $(ago "$at") ago, no reply since" ;;

@@ -12330,6 +12330,11 @@ STUB
     is "...through the symlink, a session started on a launch record still shows it" "1" "$(grep -cE '^docs-pass +[^ ]+ +sonnet( |$)' <<< "$out" || true)"
     is "...a Claude session with nothing to read is ?"                            "1" "$(grep -cE '^blank +[^ ]+ +\? ' <<< "$out" || true)"
     is "...a terminal tab is -"                                                   "1" "$(grep -cE '^_term-legacy +[^ ]+ +- ' <<< "$out" || true)"
+    # fleet-model reads the same reader, which answers FIVE columns since the fifth became
+    # codex's effort. Read into three, the effort lands inside `how` ("reply<TAB>-") and no
+    # case below it ever matches — the "now:" line silently disappears for every session.
+    is "fleet-model: a live session's now is its last reply" "1" \
+       "$(grep -cE 'now: +claude-opus-5-5 — the model its last reply came from' <<< "$(smenv "$ROOT/bin/fleet-model" -s cf-acme-api legacy 2>&1)" || true)"
     mv "$SMD/fleet/cf-acme-api.model" "$SMD/fleet/cf-acme-api.model.keep"   # the project default would answer for them
     out="$(smenv "$SMD/bin/fleet-list-link" -s cf-acme-api 2>/dev/null)"
     is "...an asleep session shows its last model"                                "1" "$(grep -cE '^nap +asleep +sonnet-5-5 ' <<< "$out" || true)"
@@ -12390,6 +12395,66 @@ case "$SMD" in "$_smr"/?*|/tmp/?*) rm -rf "${SMD:?}" ;; esac
 # The report the ceiling is judged by. Its corpus is built by hand (test/helpers/
 # context-corpus.mjs) so every number below can be worked out on paper: five priced calls
 # of 100k/200k/400k/600k/800k, each priced at its context x $0.20/MTok.
+# ── a codex session's model, read from its rollout ──────────────────────────
+# The MODEL column said `-` for every codex row while codex's own status line said
+# `GPT-6.1-Sol low`. The rollout records what each turn ran on (turn_context) and every
+# settings change (thread_settings_applied); test/fixtures/codex-rollout-0166.jsonl is a real
+# one from codex-cli 0.166.0, ids and paths replaced, long texts trimmed. Never the pane:
+# its status line is composed to the width and drops the effort first.
+#   "NEVER A WRONG MODEL" is the half that matters most, so it is asked three ways: a rollout
+# with no turn yet, a project default that is a Claude model name sitting right there, and
+# another agent's row pointing at a rollout that does have one. Each must read `-`.
+group "fleet-list: a codex session's model, from its rollout"
+CXM="$(cd "$(mktemp -d)" && pwd -P)"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  mkdir -p "$CXM/fleet" "$CXM/cfg" "$CXM/wt" "$CXM/ro"
+  RO="$FIX/codex-rollout-0166.jsonl"
+  cp "$RO" "$CXM/ro/turn.jsonl"
+  head -1 "$RO" > "$CXM/ro/new.jsonl"                     # started, no turn yet: nothing to say
+  { cat "$RO"; jq -c '.timestamp = "2026-11-10T09:30:00.000Z" | .payload.thread_settings.reasoning_effort = "high"' \
+      <<< "$(grep -F '"thread_settings_applied"' "$RO")"; } > "$CXM/ro/switch.jsonl"
+  jq -c 'if .type == "turn_context" then del(.payload.effort) else . end' "$RO" \
+    | grep -vF '"thread_settings_applied"' > "$CXM/ro/noeff.jsonl"
+  jq -nc '{type:"assistant",timestamp:"2026-11-10T09:00:00Z",message:{model:"claude-opus-5-5",content:[{type:"text",text:"hi"}]}}' > "$CXM/ro/claude.jsonl"
+  smc5() { printf 'x\t%s\t-\n' "$1" | node "$ROOT/lib/session-model.mjs" current | cut -f2,4,5; }
+  is "current: a codex turn's model, how and effort"   "gpt-6.1-sol	turn	low"     "$(smc5 "$CXM/ro/turn.jsonl")"
+  is "...a later settings change wins"                 "gpt-6.1-sol	switch	high"  "$(smc5 "$CXM/ro/switch.jsonl")"
+  is "...a rollout with no turn has none"              "-	none	-"                   "$(smc5 "$CXM/ro/new.jsonl")"
+  is "...and a Claude transcript has no effort column value" "claude-opus-5-5	reply	-" "$(smc5 "$CXM/ro/claude.jsonl")"
+  rec() { jq -nc --arg s "$1" --arg t "$2" '{slot:$s,sock:"cf-cxmodel",ts:1,status:"ready",transcript:$t}' > "$CXM/fleet/$1.json"; }
+  for n in turn new switch noeff; do rec "cx-$n" "$CXM/ro/$n.jsonl"; printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-$n.agent"; done
+  rec cl "$CXM/ro/claude.jsonl"
+  rec oc "$CXM/ro/turn.jsonl"; printf 'opencode\n' > "$CXM/fleet/cf-cxmodel.oc.agent"
+  printf 'sonnet\n' > "$CXM/fleet/cf-cxmodel.model"       # a Claude project default, for the rows that must ignore it
+  tmux -L cf-cxmodel kill-server 2>/dev/null
+  for n in cx-turn cx-new cx-switch cx-noeff cl oc; do
+    tmux -L cf-cxmodel -f /dev/null new-session -d -s "$n" -c "$CXM/wt" 'sleep 60' 2>/dev/null
+  done
+  # asleep rows read the dormant path: one codex whose record still names its rollout, one
+  # whose record is gone, and a claude one, which keeps showing what a wake would start on
+  for n in cx-nap cx-gone cl-nap; do printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "44444444-0000-4000-8000-00000000000${#n}" "$CXM/wt" 1 > "$CXM/fleet/cf-cxmodel.$n.asleep"; done
+  printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-nap.agent"; printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-gone.agent"
+  rec cx-nap "$CXM/ro/turn.jsonl"
+  cxl() { env -u TMUX -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_MODEL HOME="$CXM" \
+            CLAUDE_FLEET_DIR="$CXM/fleet" CLAUDE_CONFIG_DIR="$CXM/cfg" "$ROOT/bin/fleet-list" -s cf-cxmodel 2>&1; }
+  out="$(cxl)"
+  is "a codex row shows its last turn's model and effort" "1" "$(grep -cE '^cx-turn +[^ ]+ +gpt-6\.1-sol/low( |$)' <<< "$out" || true)"
+  is "...as ONE word, so the line still splits as before" "gpt-6.1-sol/low" "$(awk '$1 == "cx-turn" {print $3}' <<< "$out")"
+  is "...the newest settings change wins"                 "1" "$(grep -cE '^cx-switch +[^ ]+ +gpt-6\.1-sol/high( |$)' <<< "$out" || true)"
+  is "...no effort recorded: the model alone"             "1" "$(grep -cE '^cx-noeff +[^ ]+ +gpt-6\.1-sol( |$)' <<< "$out" || true)"
+  is "a rollout with no turn yet is -"                    "1" "$(grep -cE '^cx-new +[^ ]+ +- ' <<< "$out" || true)"
+  is "...not the Claude project default beside it"        "0" "$(grep -cE '^cx-new +[^ ]+ +sonnet' <<< "$out" || true)"
+  is "another agent's row is -, whatever its record names" "1" "$(grep -cE '^oc +[^ ]+ +- ' <<< "$out" || true)"
+  is "a claude row is untouched"                          "1" "$(grep -cE '^cl +[^ ]+ +opus-5-5( |$)' <<< "$out" || true)"
+  is "an asleep codex row reads its rollout"              "1" "$(grep -cE '^cx-nap +asleep +gpt-6\.1-sol/low ' <<< "$out" || true)"
+  is "...one with nothing to read is -, not the project's sonnet" "1" "$(grep -cE '^cx-gone +asleep +- ' <<< "$out" || true)"
+  is "...while an asleep claude row keeps the project default"    "1" "$(grep -cE '^cl-nap +asleep +sonnet ' <<< "$out" || true)"
+  tmux -L cf-cxmodel kill-server 2>/dev/null
+else
+  skip "a codex session's model" "node, jq or tmux missing"
+fi
+rm -rf "$CXM"
+
 group "fleet-meter --context"
 if command -v node >/dev/null 2>&1; then
   CM="$(mktemp -d)"; mkdir -p "$CM/corpus"
