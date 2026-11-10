@@ -3048,7 +3048,10 @@ group "codex-here runs without the shared daemon, when codex has the flag"
 # A stub codex that echoes its argv and answers --help like the build named by CXHELP:
 # 0.160.1's help lists --no-daemon, 0.146.0's does not, and passing it there would stop
 # the pane before codex drew anything. The real launcher, not a copy of its logic.
+# The whole argv is asserted, so it ends with the update skip codex-here passes by default
+# (U, below); the daemon opt-in is the one case without it, because a -c forces embedded mode.
 CX="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CX/bin" "$CX/w"
+U=" -c check_for_update_on_startup=false"
 cat > "$CX/bin/codex" <<'STUB'
 #!/bin/sh
 if [ "$1" = --help ]; then
@@ -3060,14 +3063,14 @@ printf codex; for a; do printf " %s" "$a"; done; echo
 STUB
 chmod +x "$CX/bin/codex"
 cxh() { ( cd "$CX/w" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL \
-          -u CLAUDE_FLEET_CODEX_DAEMON CLAUDE_FLEET_YOLO=0 CODEX_HOME="$CX/home" CXHELP=0.160.1 \
+          -u CLAUDE_FLEET_CODEX_DAEMON -u CLAUDE_FLEET_CODEX_UPDATE_CHECK CLAUDE_FLEET_YOLO=0 CODEX_HOME="$CX/home" CXHELP=0.160.1 \
           PATH="$CX/bin:$PATH" "$@" "$ROOT/bin/codex-here" w1 2>/dev/null ); }
-is "fresh: no daemon"                     "codex --no-daemon" "$(cxh CLAUDE_FLEET_FRESH=1)"
-is "resume by id: no daemon"              "codex resume abc --no-daemon" "$(cxh CLAUDE_FLEET_RESUME=abc)"
-is "resume --last: no daemon"             "codex resume --last --no-daemon" "$(cxh)"
-is "...after the other flags"             "codex --dangerously-bypass-approvals-and-sandbox --model m --no-daemon" \
+is "fresh: no daemon"                     "codex --no-daemon$U" "$(cxh CLAUDE_FLEET_FRESH=1)"
+is "resume by id: no daemon"              "codex resume abc --no-daemon$U" "$(cxh CLAUDE_FLEET_RESUME=abc)"
+is "resume --last: no daemon"             "codex resume --last --no-daemon$U" "$(cxh)"
+is "...after the other flags"             "codex --dangerously-bypass-approvals-and-sandbox --model m --no-daemon$U" \
    "$(cxh CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_YOLO=1 CLAUDE_FLEET_CODEX_TRUST=0 CLAUDE_FLEET_MODEL=m)"
-is "a codex without the flag never gets it" "codex resume --last" "$(cxh CXHELP=0.146.0)"
+is "a codex without the flag never gets it" "codex resume --last$U" "$(cxh CXHELP=0.146.0)"
 is "CLAUDE_FLEET_CODEX_DAEMON=1 attaches"  "codex resume --last" "$(cxh CLAUDE_FLEET_CODEX_DAEMON=1)"
 rm -rf "${CX:?}"
 
@@ -11730,6 +11733,84 @@ fi
 # answers the prompt in its pane. "queued — it is mid-turn" read as "sent" on the phone,
 # and the owner waited on a session that was waiting on him. The reply says which it is;
 # fleet-serve keys `queued: 'question'` on these words, so they are asserted exactly.
+# ── codex's update prompt: skipped at launch, and never answered by a spawn ──────
+# codex-cli 0.166.0 opens on "Update available" with "1. Update now (runs `brew upgrade
+# --cask codex`)" highlighted when a release is out (test/fixtures/codex-update-0166-*col.txt).
+# A spawn's brief waited the full ready timeout behind it and was then pasted into it, and the
+# Enter after a paste picks the highlighted row. Two halves: codex-here starts codex with the
+# check off, and the spawn wait reports a prompt it finds instead of typing into it, for the
+# cases the first half does not cover (the daemon opt-in, an older codex, any other menu).
+group "a codex update prompt is skipped at launch and never answered by a spawn"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  CU="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CU/stub" "$CU/cxh" "$CU/home/.config/ghostfleet" "$CU/fleet" "$CU/wt"
+  # ── codex-here: the argv it hands codex ──
+  cat > "$CU/stub/codex" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --help) echo "      --no-daemon"; exit 0 ;; --version) echo "codex-cli 0.166.0"; exit 0 ;; esac
+printf ' <%s>' "$@" > "${CU_ARGV:-/dev/null}"; printf '\n' >> "${CU_ARGV:-/dev/null}"
+STUB
+  chmod +x "$CU/stub/codex"
+  cxh() { ( cd "$CU/wt" && env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_CODEX_DAEMON \
+              -u CLAUDE_FLEET_CODEX_UPDATE_CHECK -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$CU/fleet" CLAUDE_CONFIG_DIR="$CU/cfg" \
+              HOME="$CU/home" CODEX_HOME="$CU/cxh" CU_ARGV="$CU/argv" \
+              PATH="$CU/stub:$PATH" "$@" bash "$ROOT/bin/codex-here" w1 >/dev/null 2>&1 ); cat "$CU/argv" 2>/dev/null; }
+  is "codex-here: a fresh codex starts with the update check off" "1" \
+     "$(grep -cF '<-c> <check_for_update_on_startup=false>' <<< "$(cxh env CLAUDE_FLEET_FRESH=1)" || true)"
+  is "...a resumed one too"                   "1" "$(grep -cE '^ <resume> <0000-r1>.*<-c> <check_for_update_on_startup=false>' <<< "$(cxh env CLAUDE_FLEET_RESUME=0000-r1)" || true)"
+  is "...and a resume --last"                 "1" "$(grep -cE '^ <resume> <--last>.*<check_for_update_on_startup=false>' <<< "$(cxh env)" || true)"
+  is "...CLAUDE_FLEET_CODEX_UPDATE_CHECK=1 keeps codex's check" "0" \
+     "$(grep -c 'check_for_update_on_startup' <<< "$(cxh env CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_CODEX_UPDATE_CHECK=1)" || true)"
+  is "...and the daemon opt-in is not undone by a -c" "0|0" \
+     "$(o="$(cxh env CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_CODEX_DAEMON=1)"; printf '%s|%s' "$(grep -c '<-c>' <<< "$o" || true)" "$(grep -c 'no-daemon' <<< "$o" || true)")"
+  is "...nothing is written to codex's config for it" "0" "$(grep -c 'check_for_update' <<< "$(cat "$CU/cxh/config.toml" 2>/dev/null)" || true)"
+
+  # ── the spawn wait: a real fleet-spawn, a stub launcher that draws a captured frame ──
+  # w-upd stays on the update prompt, w-ok draws a ready composer, w-clear shows the prompt
+  # and then a ready composer, the way a human answering it leaves the pane. Keyed on the
+  # worktree's folder: CLAUDE_FLEET_SLOT in a spawned pane is its dev-stack slot, a number.
+  # The rows without the capture's blank tail, which is taller than the pane: printed whole,
+  # the dialog scrolls into history and the screen the wait reads is empty.
+  cat > "$CU/stub/agent-here" <<STUB
+#!/usr/bin/env bash
+frame() { sed '/^[[:space:]]*\$/d' "\$1"; }
+case "\${PWD##*/}" in
+  w-upd)   frame '$FIX/codex-update-0166-56col.txt' ;;
+  w-ok)    frame '$FIX/codex-idle-0160-56col.txt' ;;
+  w-clear) frame '$FIX/codex-update-0166-56col.txt'; sleep 3; printf '\033[2J\033[H'; frame '$FIX/codex-idle-0160-56col.txt' ;;
+esac
+sleep 120
+STUB
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent"\n' "$CU" > "$CU/stub/fleet-send"
+  chmod +x "$CU/stub/agent-here" "$CU/stub/fleet-send"
+  git init -q -b main "$CU/repo" 2>/dev/null
+  git -C "$CU/repo" config user.email t@t; git -C "$CU/repo" config user.name t
+  : > "$CU/repo/f"; git -C "$CU/repo" add -A; git -C "$CU/repo" commit -qm init 2>/dev/null
+  tmux -L cfcuw kill-server 2>/dev/null
+  cuspawn() { ( cd "$CU/repo" && env -u TMUX -u CLAUDE_FLEET_SLOT HOME="$CU/home" CLAUDE_FLEET_SOCK=cfcuw CLAUDE_FLEET_DIR="$CU/fleet" \
+                  CLAUDE_FLEET_SLOTS="$CU/slots" CLAUDE_FLEET_READY_POLLS=20 CLAUDE_FLEET_READY_EVERY=0.25 \
+                  PATH="$CU/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" "$1" --new --agent codex --prompt "brief for $1" >/dev/null 2>&1 ); }
+  cuspawn w-upd; cuspawn w-ok; cuspawn w-clear
+  for _ in $(seq 1 120); do
+    [ "$(grep -c . <<< "$(grep -E 'w-upd	failed|w-clear	need-you' "$CU/fleet/cfcuw.inbox" 2>/dev/null)")" -ge 2 ] \
+      && grep -q 'w-clear' "$CU/sent" 2>/dev/null && break
+    sleep 0.25
+  done
+  ib="$(cat "$CU/fleet/cfcuw.inbox" 2>/dev/null)"; sent="$(cat "$CU/sent" 2>/dev/null)"
+  is "a brief is not typed into the update prompt"   "0" "$(grep -c 'w-upd' <<< "$sent" || true)"
+  is "...the lead is told it waits on it, once, naming it" "1" \
+     "$(grep -cE '	w-upd	need-you	its initial prompt is waiting on a prompt in its pane.* — menu: Update available · 0\.166\.0 → 0\.167\.0' <<< "$ib" || true)"
+  is "...and then that it was not delivered, and why" "1" \
+     "$(grep -cE '	w-upd	failed	its initial prompt was not delivered — its pane is still on a prompt, and typing into it would answer it: menu: Update available' <<< "$ib" || true)"
+  is "a ready codex gets its brief, as before"       "1" "$(grep -c '^-s cfcuw w-ok brief for w-ok' <<< "$sent" || true)"
+  is "...and no row about it"                         "0" "$(grep -c 'w-ok' <<< "$ib" || true)"
+  is "a prompt that clears: reported, then the brief goes" "1|1" \
+     "$(printf '%s|%s' "$(grep -c '	w-clear	need-you	' <<< "$ib" || true)" "$(grep -c '^-s cfcuw w-clear brief for w-clear' <<< "$sent" || true)")"
+  is "...and no failure for it"                       "0" "$(grep -c '	w-clear	failed' <<< "$ib" || true)"
+  tmux -L cfcuw kill-server 2>/dev/null; rm -rf "${CU:?}"
+else
+  skip "a codex update prompt is skipped at launch and never answered by a spawn" "node, tmux or git missing"
+fi
+
 group "a send held behind a question says so"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   NQ="$(mktemp -d)"; NF="$NQ/fleet"; mkdir -p "$NF/nq-1.handoff"

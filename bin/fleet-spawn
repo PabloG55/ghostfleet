@@ -1053,22 +1053,57 @@ if [ -n "$PROMPT" ]; then
   _inbox="$FLEET_DIR_NOW/$SOCK.inbox"
   case "$PARENT_SESS" in ''|master) ;; *) _inbox="$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.inbox" ;; esac
   _tty=""; [ -t 2 ] && _tty="$(tty <&2 2>/dev/null)"; case "$_tty" in /dev/*) ;; *) _tty="" ;; esac
+  # A PROMPT ON THE PANE IS NOT A PANE THAT IS STARTING. The wait polled for the ready
+  # marker and, when that never came, sent the brief anyway. In front of a menu that is the
+  # worst thing it can do: the paste lands in the menu and the Enter after it picks the
+  # highlighted row. codex-cli 0.166.0 opens on "Update available" with "1. Update now (runs
+  # `brew upgrade --cask codex`)" highlighted when a release is out, and its ready marker is
+  # drawn only once that is gone (test/fixtures/codex-update-0166-*col.txt, 2026-11-10).
+  #   So while the pane is not ready, the one prompt detector (lib/permission-dialog.mjs,
+  # which fleet-answer and the need-you rows already use) is asked whether something on it
+  # is waiting for a human. A prompt that stays three looks is a need-you row naming what it
+  # asks, once. The brief is then sent if the prompt clears in time, and otherwise it is
+  # not sent at all, and a failed row says why. Any agent, not only codex, because none of
+  # them may answer a menu by accident; one whose ready marker shows on its menus (claude's
+  # `❯`) is ready by then, and behaves as before.
+  _rpolls="${CLAUDE_FLEET_READY_POLLS:-90}"; case "$_rpolls" in ''|*[!0-9]*) _rpolls=90 ;; esac
+  _revery="${CLAUDE_FLEET_READY_EVERY:-2}";  case "$_revery" in ''|*[!0-9.]*) _revery=2 ;; esac
   nohup bash -c '
-    sock="$1"; name="$2"; msg="$3"; re="$4"; inbox="$5"; tty="$6"
+    sock="$1"; name="$2"; msg="$3"; re="$4"; inbox="$5"; tty="$6"; pd="$7"; polls="$8"; every="$9"
+    row() {                         # one inbox row, and the terminal fleet-spawn ran in
+      printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$name" "$1" "$2" >> "$inbox" 2>/dev/null
+      [ -n "$tty" ] && printf "\nfleet-spawn: %s: %s\n" "$name" "$3" > "$tty" 2>/dev/null
+    }
+    ask=""
     if [ -n "$re" ]; then
-      for _ in $(seq 1 90); do
-        tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null | grep -qE "$re" && break
-        sleep 2
+      seen=0; told=no
+      for _ in $(seq 1 "$polls"); do
+        pane="$(tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null)"
+        grep -qE "$re" <<< "$pane" && { ask=""; break; }
+        if [ -f "$pd" ] && ask="$(node "$pd" --ask <<< "$pane" 2>/dev/null)" && [ -n "$ask" ]; then
+          seen=$((seen + 1))
+          if [ "$seen" -ge 3 ] && [ "$told" = no ]; then
+            row need-you "its initial prompt is waiting on a prompt in its pane, which the fleet will not answer for you — $ask" \
+                "its initial prompt is waiting on: $ask — answer it in that pane"
+            told=yes
+          fi
+        else ask=""; seen=0; fi
+        sleep "$every"
       done
     else
       sleep 15                      # no ready marker for this agent — best effort
     fi
+    if [ -n "$ask" ]; then
+      row failed "its initial prompt was not delivered — its pane is still on a prompt, and typing into it would answer it: $ask" \
+          "its initial prompt was NOT delivered — its pane is still on: $ask"
+      exit 1
+    fi
     sleep 1
     out="$(fleet-send -s "$sock" "$name" "$msg" 2>&1)" && exit 0
     why="$(printf "%s\n" "$out" | grep -v "^[[:space:]]*$" | tail -1 | tr "\t\r" "  " | cut -c1-300)"
-    printf "%s\t%s\tfailed\t%s\n" "$(date +%s)" "$name" "its initial prompt was not delivered — ${why:-fleet-send failed without a reason}" >> "$inbox" 2>/dev/null
-    [ -n "$tty" ] && printf "\nfleet-spawn: %s: its initial prompt was NOT delivered — %s\n" "$name" "${why:-fleet-send failed without a reason}" > "$tty" 2>/dev/null
+    row failed "its initial prompt was not delivered — ${why:-fleet-send failed without a reason}" \
+        "its initial prompt was NOT delivered — ${why:-fleet-send failed without a reason}"
     exit 1
-  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" "$_inbox" "$_tty" >/dev/null 2>&1 &
+  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" "$_inbox" "$_tty" "${FLEET_ENV%/*}/permission-dialog.mjs" "$_rpolls" "$_revery" >/dev/null 2>&1 &
   echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input (a failure goes to fleet-inbox)"
 fi
