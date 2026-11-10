@@ -10863,6 +10863,111 @@ else
   skip "a send to a busy session is queued" "tmux/jq missing"
 fi
 
+# ── a busy codex queues in codex, not in its input box ───────────────────────
+# A send to a working codex was pasted into the turn that was running, the fold the Claude
+# queue above exists to stop. codex-cli 0.166.0 ships `codex queue --thread <id> --message`,
+# which runs the prompt as a turn of its own after the current one. A stub codex records its
+# argv here, and the pane draws codex's own busy line. What matters is the thread and the
+# CODEX_HOME it is handed, both taken from the pane's conversation and not from this caller:
+# a queue written under another home is a file no TUI reads, and the send would say "queued"
+# for a prompt that never runs.
+group "a send to a busy codex goes through codex queue"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  CQ="$(cd "$(mktemp -d)" && pwd -P)"; CQF="$CQ/fleet"
+  mkdir -p "$CQF" "$CQ/stub" "$CQ/cxh/sessions/2026/11/10" "$CQ/other/sessions/2026/11/10" "$CQ/flat"
+  CXID=01a1c4ab-0000-7000-8000-00000000c0de; CXOLD=01a1c4ab-0000-7000-8000-0000000001d0; CXOTH=01a1c4ab-0000-7000-8000-000000000bad
+  CXRO="$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T09-00-00-$CXID.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CXRO"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T08-00-00-$CXOLD.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/other/sessions/2026/11/10/rollout-2026-11-10T09-30-00-$CXOTH.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/flat/rollout-2026-11-10T09-00-00-$CXOTH.jsonl"
+  cxrec() { jq -nc --arg id "$1" --arg so "$2" --arg sl "$3" --arg t "$4" --argjson ts "$5" \
+              '{session_id:$id,agent:"codex",sock:$so,slot:$sl,transcript:$t,ts:$ts,status:"working"}' > "$CQF/$1.json"; }
+  cxrec "$CXID"  cf-cxq   cx-busy "$CXRO" 200
+  cxrec "$CXOLD" cf-cxq   cx-busy "$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T08-00-00-$CXOLD.jsonl" 100
+  cxrec "$CXOTH" cf-other cx-busy "$CQ/other/sessions/2026/11/10/rollout-2026-11-10T09-30-00-$CXOTH.jsonl" 300
+  jq -nc --arg t "$CQ/flat/rollout-2026-11-10T09-00-00-$CXOTH.jsonl" \
+     '{session_id:"01a1c4ab-0000-7000-8000-00000000f1a7",agent:"codex",sock:"cf-cxq",slot:"cx-flat",transcript:$t,ts:5}' > "$CQF/flat.json"
+  for n in cx-busy cx-idle cx-lost cx-flat; do printf 'codex\n' > "$CQF/cf-cxq.$n.agent"; done
+  cat > "$CQ/stub/codex" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'CODEX_HOME=%s' "${CODEX_HOME:-}"; printf ' <%s>' "$@"; printf '\n'; } >> "$CQ_LOG"
+[ -n "${CQ_FAIL:-}" ] && { echo "Error: no thread with that id" >&2; exit 1; }
+t=""; for a in "$@"; do case "$a" in --thread=*) t="${a#--thread=}" ;; esac; done
+if command -v sqlite3 >/dev/null 2>&1; then
+  sqlite3 "$CODEX_HOME/queue_1.sqlite" "CREATE TABLE IF NOT EXISTS queued_items (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL, queue_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL); INSERT INTO queued_items VALUES (lower(hex(randomblob(8))), '$t', '{}', (SELECT count(*) FROM queued_items), 0, 0);"
+fi
+echo "Queued message m1 for thread $t."
+STUB
+  chmod +x "$CQ/stub/codex"
+  # $1 = log, $2 = the frame it starts on. Any line it is given is logged and turns it busy,
+  # the way a submitted prompt does.
+  cat > "$CQ/pane" <<'PANE'
+#!/usr/bin/env bash
+log="$1"
+frame() { printf '\033[2J\033[H'
+          if [ "$1" = busy ]; then printf '• Working (12s • esc to interrupt)\n\n'; fi
+          printf '› Ask Codex to do anything\n\n  gpt-6.1-sol low · ~/src/acme-api\n'; }
+frame "$2"
+while IFS= read -r line; do printf 'GOT %s\n' "$line" >> "$log"; frame busy; done
+PANE
+  tmux -L cf-cxq kill-server 2>/dev/null
+  tmux -L cf-cxq -f /dev/null new-session -d -x 120 -y 20 -s cx-busy "bash '$CQ/pane' '$CQ/got.busy' busy" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-idle "bash '$CQ/pane' '$CQ/got.idle' idle" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-lost "bash '$CQ/pane' '$CQ/got.lost' busy" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-flat "bash '$CQ/pane' '$CQ/got.flat' busy" 2>/dev/null
+  for _ in $(seq 1 30); do grep -q 'Working' <<< "$(tmux -L cf-cxq capture-pane -p -t cx-busy 2>/dev/null)" && break; sleep 0.1; done
+  CS() { env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CODEX_HOME CLAUDE_FLEET_DIR="$CQF" CQ_LOG="$CQ/codex.log" \
+           CLAUDE_FLEET_SUBMIT_DELAY=0.1 PATH="$CQ/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cf-cxq "$@" 2>&1; }
+  : > "$CQ/codex.log"
+  # the lookup itself: the newest record for THIS socket's slot, and the home its path names
+  is "thread: the newest record for this socket's slot" "$CXID|$CQ/cxh|record" \
+     "$(CLAUDE_FLEET_DIR="$CQF" node "$ROOT/lib/codex-rollout.mjs" thread --pid 0 --sock cf-cxq --slot cx-busy | tr '\037' '|')"
+  is "...and a rollout outside a sessions folder names no home" "1" \
+     "$(CLAUDE_FLEET_DIR="$CQF" node "$ROOT/lib/codex-rollout.mjs" thread --pid 0 --sock cf-cxq --slot cx-flat >/dev/null 2>&1; echo $?)"
+  is "--would-queue: a busy codex is working" "working" "$(CS --would-queue cx-busy | tail -1)"
+  is "...an idle one is idle"                 "idle"    "$(CS --would-queue cx-idle | tail -1)"
+  o="$(CS cx-busy "task-golf")"
+  is "a busy codex is queued"                 "1" "$(grep -c '(queued #[0-9]* — it is mid-turn' <<< "$o" || true)"
+  is "...through codex queue, on its thread, under its own home" \
+     "CODEX_HOME=$CQ/cxh <queue> <--thread=$CXID> <--message=task-golf>" "$(tail -1 "$CQ/codex.log")"
+  is "...and nothing is typed into its pane"  "0" "$(grep -c 'task-golf' <<< "$(cat "$CQ/got.busy" 2>/dev/null)" || true)"
+  is "...nor said to be pasted into the turn" "0" "$(grep -c 'pasted INTO the running turn' <<< "$o" || true)"
+  is "...and the dispatch is logged as queued" "queued" "$(tail -1 "$CQF/cf-cxq.sent" 2>/dev/null | cut -f6)"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    is "...the next one says where it stands" "1" "$(grep -c 'queued #2 ' <<< "$(CS cx-busy "task-hotel")" || true)"
+  else
+    skip "...the next one says where it stands" "sqlite3 missing"
+  fi
+  CS cx-busy "-v is not a flag" >/dev/null
+  is "a prompt that starts with - stays the message" "<--message=-v is not a flag>" "$(tail -1 "$CQ/codex.log" | grep -o '<--message=[^>]*>')"
+  o="$(CS --reply-to cf-cxq/cx-idle cx-busy "task-india")"
+  is "a queued question writes no reply marker" "no" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
+  is "...and carries the preamble to codex"   "1" "$(grep -c '\[fleet\] This request comes from another agent' "$CQ/codex.log" || true)"
+  n0="$(grep -c . "$CQ/codex.log")"
+  o="$(CS cx-idle "task-juliet")"
+  is "an idle codex is not queued"            "$n0" "$(grep -c . "$CQ/codex.log")"
+  for _ in $(seq 1 20); do grep -q juliet "$CQ/got.idle" 2>/dev/null && break; sleep 0.1; done
+  is "...it is typed in, as before"           "GOT task-juliet" "$(grep juliet "$CQ/got.idle" 2>/dev/null)"
+  o="$(CS --now cx-busy "task-kilo")"
+  for _ in $(seq 1 20); do grep -q kilo "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
+  is "--now still folds into the running turn" "GOT task-kilo|$n0" "$(grep kilo "$CQ/got.busy" 2>/dev/null)|$(grep -c . "$CQ/codex.log")"
+  o="$(CQ_FAIL=1 CS --reply-to cf-cxq/cx-idle cx-busy "task-lima")"
+  for _ in $(seq 1 20); do grep -q lima "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
+  is "a queue codex refuses falls back to the paste" "1" "$(grep -c 'lima' "$CQ/got.busy" 2>/dev/null || true)"
+  is "...and says why"                        "1" "$(grep -c 'codex would not queue it (Error: no thread with that id' <<< "$o" || true)"
+  is "...and the pasted question keeps its reply marker" "yes" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
+  o="$(CS cx-lost "task-mike")"
+  for _ in $(seq 1 20); do grep -q mike "$CQ/got.lost" 2>/dev/null && break; sleep 0.1; done
+  is "a busy codex with no thread on record is pasted" "GOT task-mike" "$(grep mike "$CQ/got.lost" 2>/dev/null)"
+  is "...and says it could not be queued"     "1" "$(grep -c "could not tell which codex thread 'cx-lost'" <<< "$o" || true)"
+  o="$(CS cx-flat "task-november")"
+  is "a rollout that names no home is not queued anywhere" "0" "$(grep -c 'november' "$CQ/codex.log" || true)"
+  tmux -L cf-cxq kill-server 2>/dev/null; rm -rf "$CQ"
+else
+  skip "a send to a busy codex goes through codex queue" "tmux, node or jq missing"
+fi
+
 # The reply address rides IN the queue record, and becomes a marker only when the prompt
 # is delivered. Written at enqueue time it would be armed by whichever UserPromptSubmit
 # came next — a prompt that is not this one — and answer the asker with a stranger's work.
