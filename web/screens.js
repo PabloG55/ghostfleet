@@ -1783,6 +1783,128 @@ function Proposal({ a, replaces, onApply }) {
 	});
 }
 //#endregion
+//#region web/ui/keys.js
+var typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || "") || !!t.isContentEditable);
+var SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
+function finePointer() {
+	try {
+		return !!matchMedia("(hover: hover) and (pointer: fine)").matches;
+	} catch {
+		return false;
+	}
+}
+var vvTallest = 0;
+var vvWidth = 0;
+function measuredSoftKeyboard() {
+	try {
+		const vv = globalThis.visualViewport;
+		if (!vv) return false;
+		const h = Number(vv.height) || 0, w = Math.round(Number(vv.width) || 0);
+		if (w !== vvWidth) {
+			vvWidth = w;
+			vvTallest = 0;
+		}
+		vvTallest = Math.max(vvTallest, h, Number(globalThis.innerHeight) || 0);
+		return vvTallest - h > 120;
+	} catch {
+		return false;
+	}
+}
+try {
+	measuredSoftKeyboard();
+	globalThis.visualViewport?.addEventListener("resize", measuredSoftKeyboard);
+} catch {}
+var softProbe = measuredSoftKeyboard;
+function setSoftKeyboardProbe(fn) {
+	softProbe = typeof fn === "function" ? fn : measuredSoftKeyboard;
+}
+var hwKeyboard = false;
+function noteKeyboard(e) {
+	if (hwKeyboard || !e || e.isTrusted !== true) return;
+	if (!typingIn(e.target) || SOFTLESS_KEY.test(e.key || "") || e.ctrlKey || e.metaKey || e.altKey || !softProbe()) hwKeyboard = true;
+}
+function keyboardSeen() {
+	return hwKeyboard;
+}
+function enterSends() {
+	return finePointer() || hwKeyboard;
+}
+function sendsOnEnter(e) {
+	return !!e && e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends();
+}
+function deskKeyInComposer(e, { held = false, stack = false } = {}) {
+	if (held) return true;
+	if (!e || e.metaKey || e.altKey || e.isComposing || e.keyCode === 229) return false;
+	const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
+	const t = e.target, sel = !!t && Number.isInteger(t.selectionStart) && t.selectionStart !== t.selectionEnd;
+	if (e.ctrlKey && lk === "x") return stack && !sel;
+	if (e.ctrlKey) return lk === "s" || lk === "p" || lk === "f" || lk === "a";
+	if (k === "`") return true;
+	return !!e.shiftKey && (k === "ArrowLeft" || k === "ArrowRight");
+}
+function jumpStep(j, key) {
+	const { k, lk, ctrl } = key;
+	const digit = !ctrl && /^[1-9]$/.test(k);
+	if (k === "Escape" || ctrl && (lk === "f" || lk === "c")) return {
+		j: null,
+		go: null
+	};
+	if (j.stage === "first") {
+		if (digit) return {
+			j: {
+				stage: "proj",
+				proj: Number(k)
+			},
+			go: null
+		};
+		if (!ctrl && lk === "s") return {
+			j: { stage: "grid" },
+			go: null
+		};
+		if (!ctrl && lk === "p") return {
+			j: null,
+			go: { to: "projects" }
+		};
+		return {
+			j: null,
+			go: null
+		};
+	}
+	if (j.stage === "grid") return {
+		j: null,
+		go: digit ? {
+			to: "grid",
+			project: Number(k)
+		} : null
+	};
+	if (digit) return {
+		j: null,
+		go: {
+			to: "card",
+			project: j.proj,
+			card: Number(k)
+		}
+	};
+	if (k === "Enter" || !ctrl && lk === "m") return {
+		j: null,
+		go: {
+			to: "master",
+			project: j.proj
+		}
+	};
+	if (!ctrl && lk === "s") return {
+		j: null,
+		go: {
+			to: "grid",
+			project: j.proj
+		}
+	};
+	return {
+		j: null,
+		go: null
+	};
+}
+//#endregion
 //#region web/src/screens.jsx
 var VERB = /^(\S+) (.+)$/;
 function Btn({ label, onClick, cls = "" }) {
@@ -2079,4 +2201,4 @@ function unmount(container) {
 	R(null, container);
 }
 //#endregion
-export { Btn, CardScreen, Header, mount, unmount };
+export { Btn, CardScreen, Header, deskKeyInComposer, enterSends, jumpStep, keyboardSeen, mount, noteKeyboard, sendsOnEnter, setSoftKeyboardProbe, typingIn, unmount };

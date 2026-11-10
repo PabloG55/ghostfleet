@@ -1,0 +1,85 @@
+/* web/ui/terminal.css — a project's Terminal and Editor tabs (terminal.jsx), over web/term.js.
+ *
+ * The terminal surface is the phone client's (web/app.css "the terminal"): the same canvas,
+ * which is the xterm theme's background and so this palette's --bg, a hairline frame, a thin
+ * one on touch where every pixel is a column, and on touch the two-band key row. Only tokens
+ * this folder already uses; no colour of its own. Loaded after ui.css (see ui.css's header). */
+
+/* ── the tabs ─────────────────────────────────────────────────────────────
+ * Links, so a tab is a route and back returns to the page before: drawn as the tab buttons
+ * beside them are. With four of them a phone is narrower than the bar, so the bar scrolls
+ * inside itself rather than push the page sideways. */
+.tabs > a[role="tab"] { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em;
+                        color: var(--dim); font-weight: 500; text-decoration: none; white-space: nowrap; flex: 0 0 auto; }
+.tabs > a[role="tab"]:hover { color: var(--fg); }
+.tabs > a[role="tab"].on { color: var(--white); border-bottom-color: var(--cyan); }
+.tabs:has(> .tool-tab) { overflow-x: auto; scrollbar-width: none; }
+.tabs:has(> .tool-tab)::-webkit-scrollbar { display: none; }
+.tabs:has(> .tool-tab) > button { white-space: nowrap; flex: 0 0 auto; }
+/* The project page's bar sits inside the page's own padding. */
+.page .tabs.page-tabs { padding: 0; margin: 0 0 16px; }
+
+/* ── the panel ────────────────────────────────────────────────────────────
+ * Fills what is left of the column: under the session's tabs, or under the project page's
+ * header. The terminal sizes itself to its own element and must never size the column back. */
+.tool { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px;
+        padding: 12px 22px 16px; outline: none; }
+.tool:focus-visible > .tool-host { border-color: var(--cyan); }
+.main > .page.page-tool { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.page .tool { padding: 0; }
+.page.page-tool .tool { min-height: 320px; }
+
+.tool-bar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.tool-cap { flex: 1 1 18em; min-width: 0; margin: 0; color: var(--dim); font-size: 12.5px; }
+.tool-cap code { color: var(--fg); white-space: nowrap; }
+.tool-acts { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+.tool-leave kbd { font-size: 11.5px; color: var(--dim); margin-left: .35em; }
+/* The phone client's A− A+ and keyboard button: 40px, the thumb's target. The keyboard is a
+ * sprite (icon.jsx), not the phone client's keyboard character, which a phone draws as an
+ * emoji; it reads as on while the keyboard is up, as a latched key does. */
+.tool-tools { display: flex; gap: 4px; }
+.tool-tools > .tt { min-width: 40px; min-height: 40px; padding: 0 .4em; justify-content: center; font-size: 14px;
+                    touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+.tool-tools > .tt.on, .tool-keys button.tk.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+
+/* A closed tab says why, and offers the one thing to do next. Calm: the panel's own surface,
+ * the accent only on the edge, and a red edge for nothing — a takeover or an idle close is
+ * not an error. */
+.tool-note { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; padding: 10px 14px;
+             background: var(--panel); border: 1px solid var(--hair); border-left: 3px solid var(--cyan);
+             border-radius: var(--r); }
+.tool-note.n-failed, .tool-note.n-dropped, .tool-note.n-refused, .tool-note.n-noEditor { border-left-color: var(--yellow); }
+.tool-note-text { flex: 1 1 16em; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tool-note-text b { color: var(--white); font-weight: 600; }
+.tool-note-text span { color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+
+.tool-host { flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg);
+             border: 1px solid var(--hair); border-radius: var(--r); padding: 6px; transition: opacity .15s; }
+.tool-host .xterm { height: 100%; }
+.tool-host.off { opacity: .55; }
+/* iOS zooms the page onto a text box set under 16px when it takes the focus, and xterm's
+ * input is one. It is off-screen and empty, so its size is never seen. */
+.tool-host .xterm .xterm-helper-textarea { font-size: 16px; }
+
+/* TWO BANDS, EACH ONE LINE (term.js keyRow): Esc Ctrl Alt Tab ␣ leader : ⏎ over the arrows
+ * and | ~ / -. A band too wide for the phone scrolls sideways inside itself rather than wrap
+ * into a third line that would take the terminal's rows. */
+.tool-keys { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
+.tool-keys[hidden] { display: none; }
+.tool-keys > .tk-band { display: flex; gap: 3px; overflow-x: auto; overscroll-behavior: contain;
+                        -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.tool-keys > .tk-band::-webkit-scrollbar { display: none; }
+.tool-keys button.tk { flex: 1 0 auto; min-width: 2.6em; min-height: 40px; padding: 0 2px; font: 13px var(--mono);
+                       background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); color: var(--fg);
+                       -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+.tool-keys button.tk.wide { flex-grow: 2; }
+
+/* A FINGER ON THE TERMINAL IS term.js's, WHOLE: no pan, no pinch-zoom of the page, no callout
+ * or magnifier on a long press — each of those is a mouse gesture there (touchAsMouse). */
+@media (pointer: coarse) {
+  .tool-host { padding: 2px; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
+@media (max-width: 900px) {
+  .tool { padding: 10px 16px 12px; }
+  .page .tool { padding: 0; }
+}

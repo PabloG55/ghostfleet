@@ -23,7 +23,7 @@ An unfamiliar provider has a first-site warning. Check the displayed host before
 Both machines need the updated `bin/fleet-serve.mjs` and `lib/logins.mjs` in their staged
 runtime, followed by a restart of each fleet-serve service. Copy the updated `web/` to
 the Linux host serving the phone app (and to the other host if its own app is used).
-The phone must fully close and relaunch its installed app to load cache version v102.
+The phone must fully close and relaunch its installed app to load cache version v103.
 
 The session host also needs the updated `mods/ghostfleet/hooks/` directory, including
 `hooks.json`, `login-shape.js` and `login-capture.mjs`. New Claude Code sessions must load
@@ -133,7 +133,7 @@ and reopen any running grid/Projects screen. `bin/fleet-agent` is an existing
 dependency and is unchanged.
 Stage `web/api.js`, `web/app.js`, `web/app.css`, and `web/sw.js` on the **Linux home
 host** serving the phone, and on the Mac only if its own app is used. Fully close and
-relaunch the installed phone app for cache **v102**. The earlier MCP hook deployment
+relaunch the installed phone app for cache **v103**. The earlier MCP hook deployment
 requirements above still apply; this addition needs no new hook or account login at
 deployment, no new command installation and no new port. Nothing was deployed.
 

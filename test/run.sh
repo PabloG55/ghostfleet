@@ -22982,6 +22982,27 @@ else
   skip "phone client" "web/ not present"
 fi
 
+# ── 6a1b. the brand: the ship, the logo files and the manual agree ────────────
+# THE BRAND IS THREE COPIES OF ONE THING: the grid's ship (bin/fleet-grid.mjs), the SVGs
+# brand/make-logo.mjs draws from it, and the manual, which is published as a single page and
+# so carries its own copy of the ship and of tokens.css. brand/brand.test.mjs fails when one
+# drifts from the others. It came in with the team app and ran only inside ee/team, which no
+# CI job runs; the brand is the core's now, so the core's suite is what has to notice.
+#   TAP, not the default reporter: node 20 (CI) and a newer local node print the spec
+# reporter differently, and a top-level `ok N` line reads the same on both. The floor is
+# there because a file that loads and declares no tests also exits 0.
+#   Watched red: a byte changed in tokens.css (not re-injected into manual.html) fails the
+# drift row; a cell flipped in a logo SVG fails the generated-files row.
+group "the brand: the ship, the logo files and the manual agree"
+if command -v node >/dev/null 2>&1 && [ -f "$ROOT/brand/brand.test.mjs" ]; then
+  BRT="$(cd "$ROOT" && node --test --test-reporter=tap brand/brand.test.mjs 2>&1)"
+  is "brand/brand.test.mjs passes"        "0" "$?"
+  is "...and ran its checks"              "yes" "$(n="$(grep -c '^ok [0-9]' <<< "$BRT")"; [ "$n" -ge 5 ] && echo yes || echo "no: $n top-level oks")"
+  is "...none of them failing"            "" "$(grep '^not ok' <<< "$BRT" | head -3)"
+else
+  skip "the brand" "node or brand/ not present"
+fi
+
 # ── 6a2. no real project, client or employer name in the tree ────────────────
 # The repo is public, and about twenty comments named the projects that produced the fixes
 # they document — the natural way to write "this is where I saw it", and a name that ships
@@ -29484,6 +29505,39 @@ SPEAK
   tgclean "$TG"
 else
   skip "a Telegram chat talks to a fleet session, end to end" "tmux, jq, node or curl missing, or mktemp not available"
+fi
+
+group "tracked paths have no case collisions"
+if command -v git >/dev/null 2>&1; then
+  tracked_case_collisions() {
+    # Include directory prefixes: a tracked file can also collide with a directory.
+    # Deduplicate exact spellings before folding case so shared parents stay valid.
+    awk -F/ '{ p=""; for (i=1; i<=NF; i++) { p=p (i>1 ? "/" : "") $i; print p } }' |
+      LC_ALL=C sort -u | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | uniq -d
+  }
+  CASE_PATHS="$(git -C "$ROOT" ls-files)"
+  is "git lists the paths to check" "0" "$?"
+  is "no tracked file or directory differs only by case" "" "$(tracked_case_collisions <<< "$CASE_PATHS")"
+  is "the check catches two file spellings" "ee/seats/readme.md" \
+    "$(printf '%s\n' ee/seats/README.md ee/seats/readme.md | tracked_case_collisions)"
+  is "the check catches a file against a directory" "ee/notice" \
+    "$(printf '%s\n' ee/NOTICE ee/notice/index.mjs | tracked_case_collisions)"
+  is "shared directory prefixes are allowed" "" \
+    "$(printf '%s\n' ee/LICENSE ee/seats/index.mjs ee/seats/mint.mjs | tracked_case_collisions)"
+else
+  skip "tracked paths have no case collisions" "git missing"
+fi
+
+group "offline Team seats"
+if command -v node >/dev/null 2>&1; then
+  SEATS_OUT="$(mktemp "$TMUX_TMPDIR/seats.XXXXXX")"
+  node --test "$ROOT"/ee/seats/test/*.test.mjs > "$SEATS_OUT" 2>&1
+  seats_rc=$?
+  is "all offline Team seats tests pass" "0" "$seats_rc"
+  [ "$seats_rc" -eq 0 ] || cat "$SEATS_OUT"
+  rm -f "${SEATS_OUT:?}"
+else
+  skip "offline Team seats" "node missing"
 fi
 
 group "messages sent together from Telegram are one turn"
