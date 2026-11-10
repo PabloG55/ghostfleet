@@ -6,6 +6,7 @@ import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
 import { sendsOnEnter } from './keys.js';
+import { ToolTabs, ToolPanel } from './terminal.jsx';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -149,10 +150,12 @@ function ScheduleModal({ name, onClose, onSave }) {
 // Slots (adapter.jsx): `ownerPicker({ project, name, owner, onChanged })` beside the session's
 // tools, and `presence(here)` under the header, where `here` is the pane's list of who else has
 // it open. The adapter's optional `presence(project, session, typing)` is told every 5 s.
-export function SessionView({ project, name, card, onChanged, onGone }) {
+export function SessionView({ project, name, card, onChanged, onGone, tool = null }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
+  // From a Terminal or Editor tab (a route of its own) the session's two tabs go back to its page.
+  const pick = (x) => { setTab(x); if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
   const [extra, setExtra] = useState([]);      // older pages, loaded on demand
   const [before, setBefore] = useState(null);
   const [draft, setDraft] = useState('');
@@ -297,16 +300,18 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
       {prompt ? <PromptCard key={prompt.fingerprint} prompt={prompt} onAnswer={answer} busy={busy} /> : null}
 
       <div class="tabs" role="tablist">
-        <button role="tab" class={tab === 'chat' ? 'on' : ''} onClick={() => setTab('chat')}>{t('sess.chat')}</button>
-        <button role="tab" class={tab === 'term' ? 'on' : ''} onClick={() => setTab('term')}>{t('sess.term')}</button>
+        <button role="tab" class={!tool && tab === 'chat' ? 'on' : ''} onClick={() => pick('chat')}>{t('sess.chat')}</button>
+        <button role="tab" class={!tool && tab === 'term' ? 'on' : ''} title={t('sess.screenHint')} onClick={() => pick('term')}>{t('sess.screen')}</button>
+        <ToolTabs project={project} session={name} tool={tool} />
       </div>
-      {tab === 'chat'
+      {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
         ? (sess.error && !sess.data
             ? <p class="err pad">{t('sess.readFailed', { why: sess.error.message })}</p>
             : <Chat msgs={msgs} queued={sess.data?.queued || []} older={before != null} onOlder={loadOlder} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
-      <form class={`composer${drag ? ' drag' : ''}`} onSubmit={(e) => { e.preventDefault(); sendDraft(); }}
+      {/* The composer is the agent's; a Terminal or Editor tab has the keyboard to itself. */}
+      {!tool && <form class={`composer${drag ? ' drag' : ''}`} onSubmit={(e) => { e.preventDefault(); sendDraft(); }}
             onDragOver={(e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setDrag(true); } }}
             onDragLeave={() => setDrag(false)}
             onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); } }}>
@@ -336,7 +341,7 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
                     }} />
           <Btn kind="primary" type="submit" disabled={busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
         </div>
-      </form>
+      </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}

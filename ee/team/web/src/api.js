@@ -40,6 +40,13 @@ export const api = {
   adminUsage: () => call('GET', '/api/admin/usage'),
   setTokenCap: (user, daily, monthly) => call('POST', '/api/admin/usage/cap', { user, daily, monthly }),
   lead: (project) => call('POST', '/api/lead', { project }),
+  // A project's terminal or editor (server/TERMINAL.md): a 30-second ticket, then the socket.
+  termOpen: (project, kind, size) => call('POST', '/api/term/open', { project, kind, ...(size || {}) }),
+  termSocket: (ticket) => {
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/term/ws?${qs({ ticket })}`);
+    ws.binaryType = 'arraybuffer';
+    return ws;
+  },
   speak: (text, voice) => call('POST', '/api/speak', { text, voice }),
   route: (b) => call('POST', '/api/route', b),
   tasks: () => call('GET', '/api/tasks'),

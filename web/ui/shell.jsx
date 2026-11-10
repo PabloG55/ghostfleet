@@ -21,10 +21,14 @@ import { Icon } from './icon.jsx';
 import { t } from './i18n.js';
 import { DeskKeys } from './keyboard.jsx';
 
-// The routes the shared screens link to. An app adds its own views beside them.
+// The routes the shared screens link to. An app adds its own views beside them. `tool` is a
+// project's Terminal or Editor tab (terminal.jsx), after the project's or a session's address.
 export function sharedRoute(hash) {
   const parts = hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  if (parts[0] === 'p' && parts[1]) return { view: 'project', project: parts[1], session: parts[2] === 's' ? parts[3] : null };
+  if (parts[0] === 'p' && parts[1]) {
+    const session = parts[2] === 's' ? parts[3] : null, tool = parts[session ? 4 : 2];
+    return { view: 'project', project: parts[1], session, tool: tool === 'term' || tool === 'edit' ? tool : null };
+  }
   if (parts[0] === 'map') return { view: 'map' };
   if (!parts[0]) return { view: 'home' };
   return null;

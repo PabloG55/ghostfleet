@@ -30,6 +30,9 @@ import '../../../../web/ui/ui.css';
 import './styles.css';
 import '../../../../web/ui/skin.css';
 import './skin.css';
+// A project's Terminal and Editor tabs (web/ui/terminal.jsx): xterm's own rules, then the panel's.
+import '../../../../web/xterm.css';
+import '../../../../web/ui/terminal.css';
 
 // The tab's name, and the wordmark's.
 const NAME = 'ghostfleet team';
@@ -96,7 +99,7 @@ function Shell({ me, mode, onLogout }) {
   const notices = fresh.length;
 
   let main;
-  if (route.view === 'project') main = <ProjectView key={route.project} project={route.project} session={route.session} />;
+  if (route.view === 'project') main = <ProjectView key={route.project} project={route.project} session={route.session} tool={route.tool} />;
   else if (route.view === 'activity') main = <Activity ctx={ctx} />;
   else if (route.view === 'autos') main = <Automations key={route.id || 'list'} ctx={ctx} projects={projects} id={route.id} />;
   else if (route.view === 'map') main = <FleetMap projects={projects} />;

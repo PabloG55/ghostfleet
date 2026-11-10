@@ -23,7 +23,8 @@ vite, and the root vite that builds `web/screens.js`).
 | `home.jsx` | the first page: the board, and the Projects screen's keys |
 | `board.jsx` | the board by state (needs you, working, ready, quiet) |
 | `project.jsx` | a project's sessions, its tree of worktrees, the new-session dialog |
-| `session.jsx` | one session: chat, terminal, composer, its actions |
+| `session.jsx` | one session: chat, the agent's screen (read only), composer, its actions |
+| `terminal.jsx`, `terminal.css` | a project's Terminal and Editor tabs, over the phone client's `../term.js` |
 | `map.jsx` | the live map |
 | `fleet.jsx`, `sprite.js`, `lights.js`, `icon.jsx` | the ships, the status lights, the icon set |
 | `ui.jsx` | buttons, pills, `Modal`, `Confirm`, toasts, `usePoll`, `Markdown` |
@@ -53,6 +54,9 @@ Phase 2 writes the phone client's, over fleet-serve. An adapter is a plain objec
 | `attachPerMessage` | number | how many files one message may carry |
 | `lead(project)` | → `{ started }` | start the project's lead session if it is not running; `started` says which it was |
 | `presence(project, session, typing)` | optional | say who is looking; a single-user app leaves it out |
+| `canTerm(project)` | optional | whether this person may type into the project; the Terminal and Editor tabs show only when it says so and `termOpen` and `termSocket` are there too |
+| `termOpen(project, kind, size)` | optional, → `{ ticket, session }` | a ticket for the project's shell (`'term'`) or editor (`'edit'`); a refusal throws an `Error` carrying its HTTP `status` |
+| `termSocket(ticket)` | optional, → `WebSocket` | the socket for one ticket, with `binaryType` `'arraybuffer'` |
 | `go(to)` | | navigate to a hash route (`'/p/acme-web'`) |
 | `slots` | object | the app's own pieces (below) |
 
@@ -112,7 +116,8 @@ there, which is exactly what a single-user app is.
 floats over the page, and `settings`, the route `,` opens. The frame also mounts the keyboard.
 
 The shared routes are `#/` (home), `#/map`, `#/p/<project>` and
-`#/p/<project>/s/<session>`, and `sharedRoute(hash)` parses them. An app adds its own beside
+`#/p/<project>/s/<session>`, and `sharedRoute(hash)` parses them. Either of the last two
+followed by `/term` or `/edit` is the project's Terminal or Editor tab. An app adds its own beside
 them: the team app has `#/automations`, `#/activity`, `#/settings` and `#/admin/…`.
 
 ## CSS and words
@@ -124,6 +129,9 @@ Load order matters, because each layer can override the one before it:
 3. the app's own rules
 4. `web/ui/skin.css`, the shared skin
 5. the app's own skin
+
+An app that offers the Terminal and Editor tabs also loads `web/xterm.css` and then
+`web/ui/terminal.css`, after its own skin.
 
 Colours come only from the tokens.
 

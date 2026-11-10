@@ -6,6 +6,7 @@ import { Icon } from './icon.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKeys, moveFocus, dirOf, typeIntoComposer, focusComposer, projectTo } from './keyboard.jsx';
 import { cycleName } from './keys.js';
+import { ProjectTabs, ToolPanel } from './terminal.jsx';
 
 // Grouped by what each one asks of a person, in the order it should be looked at.
 const GROUPS = Object.values(worded({
@@ -46,7 +47,7 @@ export function Card({ c, active, compact, onOpen }) {
 // "of a teammate", "nobody's". The filter is a plain value this view keeps ('all' to start),
 // so an app with no filters shows every card.
 const allCards = (cards) => cards;
-export function ProjectView({ project, session }) {
+export function ProjectView({ project, session, tool = null }) {
   const fleet = useFleet();
   const filterCards = useSlot('filterCards', allCards), filterChips = useSlot('filterChips');
   const { data: g, error, reload } = usePoll(() => fleet.grid(project), 3000, [project]);
@@ -163,16 +164,20 @@ export function ProjectView({ project, session }) {
           </div>
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
-        <SessionView key={`${project}/${session}`} project={project} name={session} card={current}
+        <SessionView key={`${project}/${session}`} project={project} name={session} card={current} tool={tool}
                      onChanged={reload} onGone={() => fleet.go(`/p/${encodeURIComponent(project)}`)} />
         {modals}
       </div>
     );
   }
 
+  // A project's Terminal or Editor tab (terminal.jsx), in place of its sessions.
+  if (tool) return <div class="page page-tool">{header}<ProjectTabs project={project} tool={tool} /><ToolPanel key={tool} project={project} kind={tool} />{modals}</div>;
+
   return (
     <div class="page">
       {header}
+      <ProjectTabs project={project} tool={null} />
       {filters}
       {g && !g.cards.length ? (
         <div class="empty">
