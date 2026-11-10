@@ -9,8 +9,24 @@
 // typed into the linked session by fleet-send, as the owner's words, and THAT turn's final
 // message goes back: the reply address `telegram/<message>` rides fleet-send's queue, the
 // mod's handoff and the Stop relay in hooks/fleet-event.sh exactly like an agent's question,
-// and the relay writes the answer into this daemon's outbox. A busy session queues the
-// message behind its turn, so the reply is the one the message started — never a stranger's.
+// and the relay writes the answer into this daemon's outbox.
+//
+// WHAT THE OWNER SENDS TOGETHER IS ONE TURN. A phone sends a line and the link under it as
+// two messages a second apart, and two turns meant the first asked for a link it already
+// had. So messages are held until the chat is quiet (`config coalesce-ms`, 3 s; an album is
+// always one batch; nothing waits past 30 s) and go to fleet-send as one prompt. The held
+// batch lives in state.json, because polling past an update is what tells Telegram to forget
+// it: a crash inside the window would otherwise lose what the offset rule exists to keep.
+//
+// A SESSION ALREADY WORKING. If its turn is the owner's own from Telegram, a new message is
+// more of the same request and goes INTO it (fleet-send --now). Exactly one answer comes
+// back: fleet-send leaves the turn's address alone and parks the new one beside it, and the
+// Stop relay answers the newest message the turn took in, handing any it never read on to
+// the turn that runs them. Any other turn — the desk's, another session's, the machine's —
+// is never joined, because hooks/fleet-telegram-guard.sh restricts a turn only while it is a
+// Telegram turn, and the phone's words inside a desk turn would have every tool the desk has.
+// The message queues behind it instead, so the reply is the one the message started — never
+// a stranger's — and the owner is told what it waits for.
 //
 // WHAT A TELEGRAM TURN MAY DO is the owner's decision, and the choice was an allowlist over
 // full power: hooks/fleet-telegram-guard.sh holds such a turn to reading, searching, the web and
