@@ -3,7 +3,8 @@
 // temporary password, shown once here and asked to be changed on first login.
 import { useState, useEffect } from 'preact/hooks';
 import { api } from '../api.js';
-import { Avatar, Btn, Modal, Confirm, toast } from '../ui.jsx';
+import { Btn, Modal, Confirm, toast } from '../../../../../web/ui/ui.jsx';
+import { Avatar } from '../avatar.jsx';
 import { t } from '../i18n.js';
 import { words } from '../../../shared/i18n/index.js';
 

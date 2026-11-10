@@ -1,123 +1,49 @@
-/* ghostfleet team — the terminal skin, over styles.css.
- *
- * The brand manual's look (the repo's brand/manual.html, "terminal skin") carried into a tool people
- * work in all day, so with restraint: the panels that hold a whole task are windows with a
- * quiet title bar, corners are square, borders are one hairline, the lights are square LEDs,
- * the pixel grid is only in the background, and the boats move one sprite pixel at a time.
- *
- * Type, as the brand sets it: Silkscreen is a pixel face for page titles and section labels
- * only — never body text, buttons, tables, forms or data, where it would be hard to read and
- * look like a game. Text is Inter; names, branches, numbers and the wordmark are JetBrains
- * Mono. The wordmark is not Silkscreen because Silkscreen has no lowercase: it drew the
- * product's name, which is written in lowercase, as GHOSTFLEET TEAM. */
-
-:root {
-  --grid: rgba(95,215,215,.035);
-  --bar: var(--gf-panel-2);
-  --focus: 0 0 0 1px var(--gf-bg), 0 0 0 2px var(--gf-teal);
-}
-
-/* ── ground ─────────────────────────────────────────── */
-html, body {
-  background-color: var(--gf-bg);
-  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 8px 8px;
-  font-feature-settings: "cv11", "ss01";
-}
-::selection { background: var(--gf-teal-deep); color: var(--gf-white); }
-:focus-visible { outline: none; box-shadow: var(--focus); }
-code, pre, kbd { font-family: var(--mono); }
-code { border-radius: var(--r); }
+/* ghostfleet team — the terminal skin of what only the team app has, over web/ui/skin.css,
+ * whose header says what the skin is. */
 
 /* ── pixel icons (icon.jsx) ─────────────────────────── */
-.px-ico { display: inline-block; flex: none; fill: currentColor; shape-rendering: crispEdges; vertical-align: -1px; }
-.btn .px-ico, .nav .px-ico, .tag .px-ico, .chip-trigger .px-ico, .chip-step .px-ico, .blk .px-ico, .seg .px-ico,
-.menu .px-ico, .toast .px-ico, .node-k .px-ico, .branch .px-ico, .tree-meta .px-ico, .card-label .px-ico, .tag.sched .px-ico,
-.chip-label .px-ico, .chip-sched .px-ico, .ubar-r .px-ico { vertical-align: -1px; }
-.nav .px-ico { color: var(--dim); width: 12px; margin: 0 2px; }
-.nav.on .px-ico, .nav:hover .px-ico { color: var(--cyan); }
-.toast { display: flex; gap: .6em; align-items: baseline; }
-.toast .px-ico { color: var(--cyan); flex: none; position: relative; top: 1px; }
-.branch .px-ico, .tree-meta .px-ico { color: var(--dim); opacity: .8; margin-right: 1px; }
-.icon-btn { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border-radius: var(--r); }
-.icon-btn .px-ico { width: 12px; height: 12px; }
-.modal .x, .as-head .x, .rail-head .x, .help .x { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r); }
-.modal .x:hover, .as-head .x:hover, .rail-head .x:hover, .help .x:hover { color: var(--white); background: var(--panel2); }
+.chip-trigger .px-ico, .chip-step .px-ico, .blk .px-ico, .seg .px-ico, .node-k .px-ico, .ubar-r .px-ico { vertical-align: -1px; }
+.as-head .x, .rail-head .x, .help .x { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r); }
+.as-head .x:hover, .rail-head .x:hover, .help .x:hover { color: var(--white); background: var(--panel2); }
 
 /* ── type ───────────────────────────────────────────── */
-/* Silkscreen is drawn on an 8-pixel em, so its sizes are multiples of 8 where it can afford to be */
-h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(--white); }
-@media (max-width: 900px) { h1, .page-head h1 { font-size: 16px; } }
-/* a title that is a name (a project, a session) is data: mono, like every name */
-.page-head h1.name, .sess-title h1 { font: 600 20px/1.25 var(--mono); letter-spacing: -.01em; }
 .auth-card h1 { font-size: 16px; }
-.page-head p { font-size: 13.5px; }
 /* section labels: the pixel face, small, with the manual's prompt mark */
-.group h2, .side-sec > span, .ticker h2, .palette h3, .ai-panel h3, .runs h2, .templates-title, .home-agent-head h2,
-.admin-users > .row h2 {
+.palette h3, .ai-panel h3, .runs h2, .templates-title, .home-agent-head h2, .admin-users > .row h2 {
   font-family: var(--px); font-weight: 400; letter-spacing: .02em; text-transform: none;
 }
-.group h2, .ticker h2, .runs h2 { font-size: 12px; color: var(--dim); }
-.group h2::before, .ticker h2::before, .runs h2::before { content: '▸'; color: var(--cyan); margin-right: .1em; font-family: var(--mono); }
-.g-need h2, .g-need h2::before, .ticker h2 { color: var(--yellow); }
-.group h2 small, .group h2 .count { font-family: var(--sans); letter-spacing: 0; }
-.group h2 .count { font-family: var(--mono); }
-.side-sec > span { font-size: 11px; color: var(--dim); }
+.runs h2 { font-size: 12px; color: var(--dim); }
+.runs h2::before { content: '▸'; color: var(--cyan); margin-right: .1em; font-family: var(--mono); }
 .palette h3, .ai-panel h3 { font-size: 12px; color: var(--dim); }
 .home-agent-head h2 { font-size: 16px; color: var(--white); }
 .admin-users > .row h2 { font-size: 14px; }
 
-/* ── the wordmark ───────────────────────────────────── */
-.brand b { font: 700 14px/1.2 var(--mono); letter-spacing: var(--gf-tracking-tight); color: var(--white); } /* the manual's lockup face */
-.brand.big b { font-size: 18px; }
-.brand small { font-family: var(--sans); }
-.logo { border-radius: var(--r); background: var(--gf-abyss); box-shadow: inset 0 0 0 1px var(--hair); }
-.logo svg { image-rendering: pixelated; }
-
 /* ── windows ────────────────────────────────────────────
  * A panel that holds a whole task gets a title bar: its own first heading, on a slightly
  * lighter strip, with three square lamps that stay grey — a window, not a toy. */
-.panel, .home-agent, .auth-card, .modal, .ticker, .palette, .ai-panel, .assistant, .rail, .tree, .admin-editor {
+.home-agent, .auth-card, .palette, .ai-panel, .assistant, .rail, .admin-editor {
   border-radius: 0; border: 1px solid var(--line); background: var(--panel); box-shadow: none;
 }
-.panel { padding: 0 18px 16px; gap: 12px; }
-.panel > h2:first-child, .panel > .row:first-child,
-.ticker > h2:first-child, .palette > h3:first-child, .ai-panel > h3:first-child {
+.palette > h3:first-child, .ai-panel > h3:first-child {
   position: relative; margin: 0 -18px 2px; padding: 8px 14px 8px 56px; background: var(--bar); border-bottom: 1px dashed var(--line);
   font: 400 12px/1.3 var(--px); letter-spacing: .02em; color: var(--fg); text-transform: none;
 }
-.panel > h2:first-child::before, .panel > .row:first-child::before,
-.ticker > h2:first-child::after, .palette > h3:first-child::after, .ai-panel > h3:first-child::after {
+.palette > h3:first-child::after, .ai-panel > h3:first-child::after {
   content: ''; position: absolute; left: 14px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
   background: var(--line); box-shadow: 10px 0 0 var(--line), 20px 0 0 var(--line);
 }
-.panel > .row:first-child { display: flex; padding-top: 6px; padding-bottom: 6px; }
-.panel > .row:first-child h2 { font: inherit; color: inherit; }
-.ticker { padding: 0 12px 10px; }
-.ticker > h2:first-child { margin: 0 -12px 6px; padding-left: 52px; color: var(--yellow); }
-.ticker > h2:first-child::before { content: none; }
 .palette, .ai-panel { padding-top: 0; }
 .palette > h3:first-child, .ai-panel > h3:first-child { margin: 0 -12px 6px; padding-left: 52px; flex: 0 0 auto; }
 @media (max-width: 760px) { .palette > h3:first-child { flex-basis: calc(100% + 24px); } }
-.palette > h3:first-child::after, .ai-panel > h3:first-child::after, .ticker > h2:first-child::after { left: 12px; }
-
-/* the modal's header is its title bar */
-.modal { box-shadow: var(--gf-shadow-2); }
-.modal header { padding: 8px 10px 8px 56px; position: relative; background: var(--bar); border-bottom: 1px dashed var(--line); }
-.modal header::before { content: ''; position: absolute; left: 14px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
-  background: var(--line); box-shadow: 10px 0 0 var(--line), 20px 0 0 var(--line); }
-.modal header h2 { font: 400 13px/1.3 var(--px); letter-spacing: .02em; color: var(--white); }
-.modal-body { padding-top: 16px; }
-.modal > .field:first-of-type { padding-top: 14px; }
+.palette > h3:first-child::after, .ai-panel > h3:first-child::after { left: 12px; }
 
 /* the sign-in window: the harbour is its picture, the bar carries the language */
 .auth { background: transparent; }
 .auth-card { padding: 0 28px 26px; gap: 14px; }
-.harbor { margin: 0 -28px 4px; border-bottom: 1px dashed var(--line); border-radius: 0; }
 .lang-toggle { top: 8px; right: 8px; border-radius: 0; border: 1px solid var(--line); background: var(--gf-abyss); }
 .lang-toggle button { font: 600 11px/1 var(--mono); letter-spacing: .02em; padding: 5px 8px; }
 .lang-toggle button.on { background: var(--panel2); color: var(--cyan); }
-@media (max-width: 480px) { .auth-card { padding: 0 18px 20px; } .harbor { margin: 0 -18px 4px; } }
+@media (max-width: 480px) { .auth-card { padding: 0 18px 20px; } }
 
 /* the home console: a window whose bar is the ship and the question */
 .home-agent { padding: 0 20px 18px; gap: 14px; }
@@ -125,33 +51,11 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 .home-agent .as-feed { border-top: 1px dashed var(--line); }
 
 /* ── sidebar ────────────────────────────────────────── */
-.side { background: var(--gf-abyss); border-right: 1px solid var(--line); }
-.side > .brand { border-bottom: 1px dashed var(--line); padding-bottom: 14px; margin-bottom: 8px; }
-.nav { border-radius: 0; padding: .42em .6em; font-size: 13.5px; }
-.nav:hover { background: var(--panel); }
-.nav.on { background: var(--panel); box-shadow: inset 2px 0 0 var(--cyan); }
-.side-sec { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 14px; }
-.side-foot { border-top: 1px dashed var(--line); }
-.search { font-size: 13px; }
-.topbar { background: var(--gf-abyss); border-bottom: 1px solid var(--line); gap: 12px; min-width: 0; }
-.topbar > .icon-btn { flex: none; } /* the menu keeps its 28px target when the bar is tight */
-.topbar .brand b { font-size: 12px; white-space: nowrap; }
-/* The wordmark stays whole or steps out. When it cannot sit beside the ship and keep the bar's
-   gap to the usage chips, it wraps to a second line that this box, the Logo's 22px, clips: the
-   ship alone carries the brand. With two profiles' chips the wordmark touched them at 390px, and
-   at 360 the bar kept the whole page 30px wider than the screen, so it scrolled sideways: as a
-   grid item the bar's floor was its contents' full width until min-width: 0 above, as on .main. */
-.topbar .brand { min-width: 0; flex: 0 1 auto; flex-wrap: wrap; align-content: flex-start; height: 22px; overflow: hidden; }
 .demo-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
   font: 12px var(--mono); }
 
 /* ── controls ───────────────────────────────────────── */
-.btn { font: 500 13.5px/1.2 var(--sans); padding: .55em .95em; gap: .5em; }
-.btn.sm { font-size: 12.5px; padding: .38em .7em; }
-.btn:active:not(:disabled) { transform: none; }
-.btn.primary .px-ico, .mic .px-ico { color: inherit; }
-input, textarea, select { border-radius: var(--r); background: var(--gf-abyss); }
-input:focus, textarea:focus, select:focus { border-color: var(--cyan); box-shadow: none; }
+.mic .px-ico { color: inherit; }
 
 /* ── native controls, in the app's own clothes ─────────
  * A select, a checkbox and a radio were left to the engine: Chromium drew its own chevron and
@@ -163,40 +67,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--cyan); box-shado
  * own rule resets the background with the shorthand. The switch is already drawn by the app,
  * its checkbox an invisible overlay, so it is left out. Date, time and number fields already
  * wear the field tokens; their picker and stepper glyphs stay native, as the affordance. */
-select, .owner-pick select {
+.owner-pick select {
   appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 1.9em;
   background-image: linear-gradient(to bottom left, var(--dim) 50%, transparent 50%), linear-gradient(to bottom right, var(--dim) 50%, transparent 50%);
   background-size: 4px 4px; background-repeat: no-repeat;
   background-position: right calc(.75em + 4px) center, right .75em center;
 }
-select:focus { background-image: linear-gradient(to bottom left, var(--cyan) 50%, transparent 50%), linear-gradient(to bottom right, var(--cyan) 50%, transparent 50%); }
-select:disabled { cursor: not-allowed; opacity: .45; }
-option { background: var(--gf-panel-2); color: var(--fg); }
-input:is([type=checkbox], [type=radio]):not(.switch > input) {
-  appearance: none; -webkit-appearance: none; flex: none; width: 14px; height: 14px; margin: 0; padding: 0;
-  display: inline-grid; place-content: center; vertical-align: -2px; cursor: pointer;
-  background: var(--gf-abyss); border: 1px solid var(--dim); border-radius: var(--r);
-}
-input[type=radio]:not(.switch > input) { border-radius: 50%; }
-input:is([type=checkbox], [type=radio]):not(.switch > input):checked { background: var(--cyan); border-color: var(--cyan); }
-input[type=checkbox]:not(.switch > input):checked::after {
-  content: ''; width: 3px; height: 7px; margin-top: -2px; border: solid var(--gf-teal-ink); border-width: 0 2px 2px 0; transform: rotate(45deg);
-}
-input[type=radio]:not(.switch > input):checked::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--gf-teal-ink); }
-input:is([type=checkbox], [type=radio]):not(.switch > input):focus-visible { box-shadow: var(--focus); }
-input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: not-allowed; opacity: .45; }
-.pill { border-radius: var(--r); font: 600 12px/1.6 var(--sans); padding: 0 .55em; }
-.pill.sm { font-size: 11.5px; }
-.badge { border-radius: var(--r); font-family: var(--mono); }
-.tag { border-radius: var(--r); font-family: var(--mono); }
-.chips button, .pchip, .quiet-toggle, .chip-label, .chip-sched, .lg { border-radius: var(--r); }
-.tabs button, .admin-tabs a { font-weight: 500; }
+.pchip { border-radius: var(--r); }
+.admin-tabs a { font-weight: 500; }
 .mic { border-radius: var(--r); font: 600 15px var(--sans); }
 .mic.on { animation: none; box-shadow: 0 0 0 2px var(--gf-bg), 0 0 0 3px var(--red); }
 .stop-all { border-radius: var(--r); display: inline-flex; align-items: center; gap: .5em; }
-.attach-btn { border-radius: var(--r); display: grid; place-items: center; color: var(--dim); background: var(--gf-abyss); }
-.attach-btn:hover { color: var(--cyan); }
-.att-ico { color: var(--dim); }
 .as-launch { border-radius: var(--r); border-color: var(--line); box-shadow: var(--gf-shadow-2); font: 600 13.5px var(--sans); }
 .as-launch:hover { border-color: var(--cyan); }
 .voicebar, .vb-btn, .vb-stop { border-radius: var(--r); }
@@ -205,97 +86,30 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .switch i, .switch i::after { border-radius: 0; }
 
 /* ── surfaces: flat, hairline, no soft gradients ────── */
-.card, .stat, .row-item, .log-row, .free, .auto-card, .tpl, .notice, .run, .node, .blk, .opt, .island, .fleet, .tk, .buoy, .att, .bubble, .as-row,
-.ask, .help, .picker.asking, .empty, .ocean, .sea, .menu, .toast, .ai-mode, .ai-warn, .ai-note, .tools ul, .md pre, .md .md-code, .ask-cmd, .log-out {
+.log-row, .auto-card, .tpl, .notice, .run, .node, .blk, .tk, .buoy, .as-row, .help, .picker.asking, .sea, .ai-mode, .ai-warn, .ai-note, .log-out {
   border-radius: var(--r);
 }
-.card:hover, .card:focus-visible, .row-item:hover { background: var(--panel2); border-color: #34404c; }
-.card { padding: 11px 14px 11px 15px; }
-.card::before { width: 2px; }
-.card h3, .row-item b, .fleet-name, .island-name, .tree-name, .auto-name, .stat b, .ubar-v { font-family: var(--mono); }
+.auto-name, .ubar-v { font-family: var(--mono); }
 /* ...but a person's name is not something the terminal printed, so it is Inter, as it is in
    Activity, Usage and a session's owner. A row that opens with an avatar is a person; the
    generic rule above had set Settings' team, the admin's people and the AI page's per-person
    profiles in mono, while project and profile names in the same kind of row stay mono. */
 .row-item > .avatar ~ b, .row-item > .avatar ~ .grow > b { font-family: var(--sans); }
-.stat b { font-weight: 600; }
-.ask, .ask.question { background: color-mix(in srgb, var(--yellow) 5%, var(--panel)); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); }
-.ask.limit { background: color-mix(in srgb, var(--red) 5%, var(--panel)); }
-.ask-head b { display: inline-flex; align-items: center; gap: .45em; }
 .help { background: color-mix(in srgb, var(--cyan) 4%, var(--panel)); }
-.empty { border-style: dashed; }
-.fleet { border-radius: var(--r); background: var(--panel); border-color: color-mix(in srgb, var(--c) 28%, var(--line)); }
-.fleet.lk-need { box-shadow: inset 0 2px 0 var(--yellow); }
-.fleet.lk-work { box-shadow: inset 0 2px 0 var(--green); }
-.ocean { background:
-  repeating-linear-gradient(0deg, transparent 0 23px, rgba(95,215,215,.04) 23px 24px),
-  repeating-linear-gradient(90deg, transparent 0 23px, rgba(95,215,215,.025) 23px 24px), var(--gf-sea); border-color: var(--line); }
-.island { background: var(--panel); border-color: var(--line); box-shadow: none; }
-.island.focus { border-color: var(--cyan); box-shadow: none; }
 .sea { background: var(--gf-sea); border-color: var(--line); }
-.bubble { background: var(--panel); }
-.msg.me .bubble { background: var(--gf-teal-deep); border-color: var(--gf-teal-edge); }
-.tabs { border-bottom-color: var(--line); }
-.composer { background: var(--gf-abyss); border-top-color: var(--line); }
-.split-list { background: var(--gf-abyss); border-right-color: var(--line); }
-.sess-head { border-bottom-color: var(--line); }
-.term, .md pre, .md .md-code, .ask-cmd, .log-out { background: var(--gf-abyss); }
+.log-out { background: var(--gf-abyss); }
 .chip-trigger, .chip-step { border-radius: var(--r); display: inline-flex; align-items: center; gap: .4em; }
 .blk-ico { display: inline-grid; place-items: center; width: 14px; }
 .blk { gap: 10px; }
 .node-k { display: inline-flex; align-items: center; gap: .45em; }
-.tree-glyph { display: inline-grid; place-items: center; }
-.menu { box-shadow: var(--gf-shadow-2); }
-.menu button { border-radius: 0; display: flex; align-items: center; gap: .55em; }
-.toast { border-left-width: 2px; box-shadow: var(--gf-shadow-2); animation: none; }
-
-/* ── lights: square LEDs with a hard bezel, as on a terminal ──── */
-.led { border-radius: 0; background: var(--c);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 40%, #000), 0 0 6px color-mix(in srgb, var(--c) 55%, transparent); }
-.led.l-idle { background: #6d7178; box-shadow: 0 0 0 1px #24282e; }
-.led.l-off { background: #1a1e23; box-shadow: inset 0 0 0 1px #2a3038; }
-.qdot, .dot { border-radius: 0; }
-.led.l-work { animation-timing-function: steps(2, jump-none); }
 
 /* ── boats at pixel scale ───────────────────────────────
  * Every boat is a whole multiple of its 32 × 16 sprite (32, 64, 96 px), so a sprite pixel is
  * always whole screen pixels, and it moves one sprite pixel at a time: no rotation, which would
  * smear the pixels, and no easing, which would put them between two. */
-.fship svg, .ship svg { image-rendering: pixelated; shape-rendering: crispEdges; }
-.fship.m-sail .fship-hull { animation: px-sail 1.2s steps(1) infinite; }
-.fship.m-sail .fship-sea { animation: fs-sea .9s steps(7) infinite; }
-.fship-wake { animation: fs-wake .6s steps(5) infinite; }
-.fship.m-signal .fship-hull { animation: px-rock 1.1s steps(1) infinite; }
-.fship.m-list .fship-hull { transform: translateY(2px); animation: px-list 1.7s steps(1) infinite; }
-.fship-z { animation: px-z 3.6s steps(4) infinite; }
-.fship.m-signal::before { border-radius: 0; background: color-mix(in srgb, var(--c) 30%, transparent); width: 6px; height: 6px; top: -10px;
-  left: calc(var(--w) * .5 - 3px); }
-.harbor-ghost { animation: hb-cross 26s steps(155) -9s infinite; }
-.harbor-ghost .fship-hull { animation: px-hover 1.3s steps(1) infinite; }
-.harbor-waves { animation: hb-waves 1.6s steps(10) infinite; }
-.harbor { background:
-    radial-gradient(1px 1px at 12% 22%, #cfe 50%, transparent 51%), radial-gradient(1px 1px at 34% 12%, #9cc 50%, transparent 51%),
-    radial-gradient(1px 1px at 58% 30%, #cfe 50%, transparent 51%), radial-gradient(1px 1px at 81% 16%, #9cc 50%, transparent 51%),
-    radial-gradient(1px 1px at 92% 38%, #cfe 50%, transparent 51%), radial-gradient(1px 1px at 22% 44%, #6aa 50%, transparent 51%),
-    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 8px 8px, linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 8px 8px,
-    linear-gradient(180deg, var(--gf-abyss), var(--gf-sea)); }
-.ship.st-idle svg, .ship.st-off svg { animation: px-up 3.2s steps(1) infinite; }
-.ship.st-listening svg { animation: px-up 1.1s steps(1) infinite; }
-.ship.st-routing svg, .ship.st-sending svg, .ship.st-thinking svg { animation: px-rock 1.4s steps(1) infinite; }
-.ship.st-acting svg { animation: px-sail .9s steps(1) infinite; }
-.ship.st-speaking svg { animation: px-up .6s steps(1) infinite; }
 .ship-track .ship { transition: left 1.1s steps(12), color .3s; }
 .ship-track::after { animation: waves 4s steps(24) infinite; }
-.ghostship { transition: transform 1.6s steps(16); }
-.ghostship .ship svg { animation: px-hover 1.2s steps(1) infinite; }
-.ghost-tag { border-radius: var(--r); font-family: var(--mono); }
-@keyframes px-sail { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(-1px, -1px); } 50% { transform: translate(-2px, 0); } 75% { transform: translate(-1px, -1px); } }
-@keyframes px-rock { 0%, 100% { transform: translateX(-1px); } 50% { transform: translateX(1px); } }
-@keyframes px-list { 0%, 100% { transform: translateY(2px); } 50% { transform: translate(1px, 3px); } }
-@keyframes px-up { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
-@keyframes px-hover { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
-@keyframes px-z { 0% { opacity: 0; transform: translate(0, 4px); } 25% { opacity: 1; } 100% { opacity: 0; transform: translate(6px, -8px); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .fship *, .fship::before, .harbor *, .ship svg, .ghostship, .ghostship .ship svg, .ship-track .ship, .ship-track::after, .led { animation: none !important; transition: none !important; }
+  .ship-track .ship, .ship-track::after { animation: none !important; transition: none !important; }
 }

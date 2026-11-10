@@ -8,7 +8,7 @@
 // everything at once.
 import { useState, useEffect } from 'preact/hooks';
 import { api } from './api.js';
-import { STATUS, statusOf } from './ui.jsx';
+import { STATUS, statusOf } from '../../../../web/ui/ui.jsx';
 import { voiceStatus, listenLocal, listenBrowser, browserCanHear, speak, stopSpeaking, warmVad, PAUSES } from './voice.js';
 import { command } from './resolve.js';
 // `t` is a task or a transcript all through this file, so the words come in as `tr`.

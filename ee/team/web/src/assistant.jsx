@@ -1,23 +1,13 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn } from './ui.jsx';
+import { STATUS, StatusMark, statusOf, Btn } from '../../../../web/ui/ui.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setTarget, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
-import { PIXELS } from './sprite.js';
 import { t } from './i18n.js';
 import { words } from '../../shared/i18n/index.js';
-import { Icon } from './icon.jsx';
-
-// ── the avatar: ghostfleet's own SHIP sprite, the one the app icon is drawn from ─────────
-export function Ship({ size = 64, state = 'idle', title }) {
-  return (
-    <span class={`ship st-${state}`} style={{ width: size, height: size / 2 }} title={title}>
-      <svg viewBox="0 0 32 16" width={size} height={size / 2} shape-rendering="crispEdges" aria-hidden="true">
-        {PIXELS.map(([x, y]) => <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" />)}
-      </svg>
-    </span>
-  );
-}
+import { Icon } from '../../../../web/ui/icon.jsx';
+// The assistant's face: ghostfleet's own SHIP sprite, the one the app icon is drawn from.
+import { GhostShip as Ship } from '../../../../web/ui/fleet.jsx';
 
 const STATE_WORDS = words(['listening', 'hearing', 'routing', 'sending', 'starting', 'thinking', 'acting', 'speaking', 'idle', 'off'], 'ship');
 

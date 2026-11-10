@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
-// The repo's own web/md.js and web/ansi.js (the phone client's), not copies: see vite.config.mjs.
-import { render as renderMd } from '../../../../web/md.js';
+// The phone client's own web/md.js, not a copy: one renderer for a message wherever it is read.
+import { render as renderMd } from '../md.js';
 import { colorOf } from './lights.js';
 import { PIXELS } from './sprite.js';
 import { Led } from './fleet.jsx';
 import { Icon } from './icon.jsx';
-import { t, locale } from './i18n.js';
-import { worded } from '../../shared/i18n/index.js';
+import { t, locale, worded } from './i18n.js';
+import { typingIn } from './keys.js';
 
 // The nine statuses, with the TUI's own glyphs (bin/fleet-grid.mjs's STATUS table) and words a
 // person reads without a legend. Plus the two the cards carry as flags. The colour is the
@@ -38,12 +38,6 @@ export function StatusMark({ status }) {
 export function StatusPill({ status, small }) {
   const s = STATUS[status] || STATUS.unknown;
   return <span class={`pill c-${s.color}${small ? ' sm' : ''}`} title={s.hint}><Led state={status} size={small ? 7 : 8} hidden /> {s.label}</span>;
-}
-
-export function Avatar({ user, size = 26, title }) {
-  if (!user) return <span class="avatar none" style={{ width: size, height: size }} title={title || t('ui.noOwner')}>?</span>;
-  const initials = user.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
-  return <span class={`avatar c-${user.color}`} style={{ width: size, height: size, fontSize: size * 0.42 }} title={title || user.name}>{initials}</span>;
 }
 
 export function Btn({ kind = '', icon, children, ...rest }) {
@@ -136,10 +130,25 @@ export function Modal({ title, onClose, children, wide }) {
 
 // A destructive step names what it destroys and needs a second, deliberate click. When
 // `typed` is set the person types it, for the ones that delete uncommitted work.
+//   `y` is yes, as in the desk's question bar, unless the step wants its name typed: there the
+// typing is the deliberate act, as the desk's refused worktree removal takes `f` and never a
+// second `y`. Esc is no (Modal). Every other key stays the dialog's, so Tab still walks it.
 export function Confirm({ title, body, action, danger, typed, onYes, onClose }) {
   const [busy, setBusy] = useState(false);
   const [txt, setTxt] = useState('');
   const ok = !typed || txt.trim() === typed;
+  const yes = async () => { setBusy(true); try { await onYes(); onClose(); } finally { setBusy(false); } };
+  const live = useRef(); live.current = { yes, busy };
+  useEffect(() => {
+    if (typed) return;
+    const k = (e) => {
+      if ((e.key !== 'y' && e.key !== 'Y') || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || typingIn(e.target)) return;
+      e.preventDefault();
+      if (!live.current.busy) live.current.yes();
+    };
+    addEventListener('keydown', k);
+    return () => removeEventListener('keydown', k);
+  }, [typed]);
   return (
     <Modal title={title} onClose={onClose}>
       <div class="modal-body">{body}</div>
@@ -152,7 +161,7 @@ export function Confirm({ title, body, action, danger, typed, onYes, onClose }) 
       <footer>
         <Btn onClick={onClose}>{t('common.cancel')}</Btn>
         <Btn kind={danger ? 'danger' : 'primary'} disabled={!ok || busy}
-             onClick={async () => { setBusy(true); try { await onYes(); onClose(); } finally { setBusy(false); } }}>
+             onClick={yes}>
           {busy ? t('common.wait') : action}
         </Btn>
       </footer>

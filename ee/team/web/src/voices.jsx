@@ -2,9 +2,9 @@ import { useState, useEffect } from 'preact/hooks';
 import { api } from './api.js';
 import { speak, playSample, stopSpeaking } from './voice.js';
 import { useAgent, setOption } from './agent.js';
-import { Btn } from './ui.jsx';
+import { Btn } from '../../../../web/ui/ui.jsx';
 import { t } from './i18n.js';
-import { Icon } from './icon.jsx';
+import { Icon } from '../../../../web/ui/icon.jsx';
 
 // Who answers out loud. The ones already on this machine, and Piper's from the internet: those
 // are heard from their sample first, and only downloaded if they are liked.

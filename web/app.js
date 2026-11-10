@@ -5250,7 +5250,7 @@ function composer(card, opts = {}) {
   // would ship half a word.
   box.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); try { box.blur(); } catch {} return; }
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends() && mine()) {
+    if (screensUI.sendsOnEnter(e) && mine()) {
       e.preventDefault();
       sendDraft();
     }
@@ -5309,34 +5309,22 @@ function composer(card, opts = {}) {
 // ⏎ SENDS WHEN THERE IS A KEYBOARD, and a page cannot ask whether there is one. Two kinds
 // of evidence, either enough:
 //   - a fine pointer that hovers: a mouse or a trackpad, which is to say a computer;
-//   - a real keydown only a physical keyboard can send (hwKeyboard below). This is the
+//   - a real keydown only a physical keyboard can send (below). This is the
 //     iPhone or iPad with a keyboard attached: a touch screen, and still a keyboard.
 // With only the on-screen keyboard there is neither, and ⏎ stays the new line it has
 // always been on a phone.
-export function enterSends() { return finePointer() || hwKeyboard; }
-// A PHYSICAL KEYBOARD, PROVEN BY WHAT IT SENT. Sticky for the life of the page, and set by
-// any trusted keydown the on-screen keyboard cannot produce:
-//   - one that arrives with no text field focused — the on-screen keyboard only exists
-//     while one is, so a key from nowhere came from a real keyboard;
-//   - a key the on-screen keyboard does not have: Esc, Tab, the arrows, the F-keys, a
-//     modifier pressed on its own, or a Ctrl / ⌘ / Alt chord;
-//   - a key typed into a field while the on-screen keyboard is NOT up. syncViewport() knows
-//     that from the visual viewport: an on-screen keyboard takes a third of the screen,
-//     a connected one leaves at most a shortcut bar (the 120px threshold there).
-// Never by device, model or width — an iPad with a keyboard and an iPad without one are
-// the same device at the same width.
-let hwKeyboard = false;
-const SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
-export function noteKeyboard(e) {
-  // isTrusted TRUE, not merely "not false": only the browser's own input sets it, so a
-  // keydown a script built — or a test harness's plain object, which has no such field —
-  // is never taken for a keyboard someone attached.
-  if (hwKeyboard || !e || e.isTrusted !== true) return;
-  const t = e.target;
-  const field = !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
-  if (!field || SOFTLESS_KEY.test(e.key || '') || e.ctrlKey || e.metaKey || e.altKey || !softKeyboardUp) hwKeyboard = true;
-}
-export function keyboardSeen() { return hwKeyboard; }
+//   A PHYSICAL KEYBOARD IS PROVEN BY WHAT IT SENT: a trusted keydown with no text field
+// focused, a key the on-screen keyboard does not have (Esc, Tab, the arrows, the F-keys, a
+// modifier on its own, a Ctrl / ⌘ / Alt chord), or a key typed into a field while the
+// on-screen keyboard is NOT up. Sticky for the life of the page, and never by device, model
+// or width. The rule is the shared UI's (web/ui/keys.js, through screens.js), which the team
+// app keeps too; what this client adds is its own answer to "is the on-screen keyboard up",
+// because syncViewport() below already measures it.
+//   Declarations, not a destructured const: a function is there from the module's first
+// line, and a render that reached one before this line had run would die in the TDZ.
+export function enterSends() { return screensUI.enterSends(); }
+export function noteKeyboard(e) { return screensUI.noteKeyboard(e); }
+export function keyboardSeen() { return screensUI.keyboardSeen(); }
 // The image files a paste or a drop carries — `files` first, then the item list, which is
 // where some browsers put a screenshot copied to the clipboard.
 function imagesOf(dt) {
@@ -8506,7 +8494,7 @@ async function sheetSettings() {
 //     with metaKey held: ⌘C, ⌘V, ⌘R and the rest keep doing what the OS says.
 // Some Ctrl keys cannot be had at all — Ctrl-n, Ctrl-t and Ctrl-w open, open and close a
 // tab before any page hears them, installed PWA or not — and the README table says which.
-const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+const typingIn = screensUI.typingIn;
 // THE KEYS TMUX TAKES EVEN WHILE YOU TYPE TO THE AGENT. At the desk a session is attached
 // and every key goes to the agent — except the ones tmux/cf.tmux.conf binds with -n, which
 // tmux answers first: ` (back), ⇧← / ⇧→ (the next session), Ctrl-s, Ctrl-p, Ctrl-f, and
@@ -8515,19 +8503,14 @@ const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''
 // be typed into a message (the desk documents the same), and ⇧←/⇧→ move between sessions
 // rather than selecting text. A chord or a prefix already started takes its next key whole.
 // Only the composer, and only a session's: an input in a sheet is never a session.
+// The list is the shared UI's (web/ui/keys.js deskKeyInComposer), with this client's stack:
+// Ctrl-x is the stack at the desk, and cut on Linux and Windows, so it is the stack's only
+// while nothing in the box is selected. The stack screen has no grid for Ctrl-s to go to.
 function deskKeyFromComposer(e) {
   if ((S.screen !== 'session' && S.screen !== 'stack') || !insideComposer(e.target)) return false;
-  if (S.jump || S.prefix) return true;
-  const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
-  if (e.metaKey || e.altKey) return false;
-  // Ctrl-x is the stack at the desk, and cut on Linux and Windows: it is the stack's only
-  // while nothing in the box is selected, so cutting a selection still cuts.
-  const t = e.target, sel = t && Number.isInteger(t.selectionStart) && t.selectionStart !== t.selectionEnd;
-  if (e.ctrlKey && lk === 'x') return !sel;
-  if (e.ctrlKey && S.screen === 'stack') return lk === 'p' || lk === 'f' || lk === 'a';
-  if (e.ctrlKey) return lk === 's' || lk === 'p' || lk === 'f' || lk === 'a';
-  if (k === '`') return true;
-  return !!e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight');
+  const held = !!(S.jump || S.prefix);
+  if (!held && S.screen === 'stack' && e.ctrlKey && !e.metaKey && !e.altKey && String(e.key || '').toLowerCase() === 's') return false;
+  return screensUI.deskKeyInComposer(e, { held, stack: true });
 }
 const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
 function onKey(e) {
@@ -8585,22 +8568,15 @@ function onKey(e) {
 // Ctrl-f s <p> → its grid · Ctrl-f p → Projects. Esc (or Ctrl-f, or Ctrl-c) cancels and
 // any other key aborts. The prompt for each step is jumpSpec()'s. Live on every screen.
 function startJump() { S.jump = { stage: 'first', proj: 0 }; render(); }
+// The chord's steps are the shared UI's (web/ui/keys.js jumpStep), so the team app's Ctrl-f
+// is this one; what each answer opens is this client's.
 function jumpKey(k, lk, ctrl) {
-  const j = S.jump;
-  const digit = !ctrl && /^[1-9]$/.test(k);
-  S.jump = null;
-  if (k === 'Escape' || (ctrl && (lk === 'f' || lk === 'c'))) return render();
-  if (j.stage === 'first') {
-    if (digit) { S.jump = { stage: 'proj', proj: Number(k) }; return render(); }
-    if (!ctrl && lk === 's') { S.jump = { stage: 'grid', proj: 0 }; return render(); }
-    if (!ctrl && lk === 'p') return toProjects();
-    return render();
-  }
-  if (j.stage === 'grid') return digit ? jumpTo(Number(k), 'grid') : render();
-  if (digit) return jumpTo(j.proj, 'card', Number(k));
-  if (k === 'Enter' || (!ctrl && lk === 'm')) return jumpTo(j.proj, 'master');
-  if (!ctrl && lk === 's') return jumpTo(j.proj, 'grid');
-  render();
+  const { j, go } = screensUI.jumpStep(S.jump, { k, lk, ctrl });
+  S.jump = j;
+  if (!go) return render();
+  if (go.to === 'projects') return toProjects();
+  if (go.to === 'card') return jumpTo(go.project, 'card', go.card);
+  jumpTo(go.project, go.to);
 }
 // The Nth project of the whole list — the same count the desk's proj_nth makes and the
 // digits on Projects use, whatever tab the Projects screen is showing.
@@ -8993,6 +8969,9 @@ try {
     visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
+// The shared keyboard rule asks "is the on-screen keyboard up" of whoever measures it best;
+// here that is syncViewport() just above, so its answer replaces the rule's own guess.
+screensUI.setSoftKeyboardProbe(() => softKeyboardUp);
 // CAPTURE, so the keydown that proves a keyboard is counted before the composer decides
 // what its ⏎ means — the first ⏎ from an iPad's keyboard sends.
 addEventListener('keydown', noteKeyboard, true);

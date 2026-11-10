@@ -3,11 +3,12 @@
 // the person sees what will run and saves it; the server runs it (server/automations.mjs).
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { api } from './api.js';
-import { Btn, Confirm, usePoll, clock, toast } from './ui.jsx';
+import { Btn, Confirm, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
 import { ACTIONS, EVENTS, STATES, DAY_NAMES, SCOPES, TEMPLATES, blankTrigger, blankStep, describeTrigger, describeStep, everyWords } from '../../shared/automations.js';
 // `t` is a trigger or a template all through this file, so the words come in as `tr`.
 import { t as tr, locale } from './i18n.js';
-import { Icon } from './icon.jsx';
+import { Icon } from '../../../../web/ui/icon.jsx';
+import { useKeys } from '../../../../web/ui/keyboard.jsx';
 
 const EVERY = [15, 30, 60, 120, 180, 360, 720, 1440];
 const blank = () => ({ id: null, name: '', enabled: true, scope: 'personal', trigger: blankTrigger('schedule'), steps: [] });
@@ -24,6 +25,14 @@ export function Automations({ ctx, projects, id }) {
   const setTab = (t) => { setTabState(t); try { localStorage.setItem(TAB_KEY, t); } catch {} };
   // The editor offers only the projects this person can read (the server says which).
   const mineOnly = data?.me ? (projects || []).filter(p => data.me.projects.includes(p.name)) : projects;
+  // The phone client's Automations keys (web/ui/keyboard.jsx): n a new one, q / ` back to
+  // home from the list, and from one automation back to the list.
+  useKeys((key) => {
+    if (key.ctrl || key.alt) return false;
+    if (key.k === 'q' || key.k === '`') { ctx.go(id ? '/automations' : '/'); return true; }
+    if (key.k === 'n' && !id) { ctx.go('/automations/new'); return true; }
+    return false;
+  });
   if (id) return <Editor ctx={ctx} projects={mineOnly} data={data} id={id} onSaved={reload} />;
   const admin = !!data?.me?.admin;
   const all = data?.automations || [];
