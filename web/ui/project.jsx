@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, StatusPill, Btn, usePoll, ago, toast, Modal, Confirm } from './ui.jsx';
+import { STATUS, StatusMark, statusOf, StatusPill, Btn, usePoll, ago, toast, Modal, Confirm, ProjectName } from './ui.jsx';
 import { SessionView } from './session.jsx';
 import { t, locale, worded } from './i18n.js';
 import { Icon } from './icon.jsx';
@@ -7,7 +7,7 @@ import { Select } from './select.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKeys, moveFocus, dirOf, typeIntoComposer, focusComposer, projectTo } from './keyboard.jsx';
 import { cycleName } from './keys.js';
-import { ProjectTabs, ToolPanel } from './terminal.jsx';
+import { ProjectTabs, ToolPanel, offers as offersTools, toolTo } from './terminal.jsx';
 import { useKept } from './back.jsx';
 import { back } from './history.js';
 
@@ -61,6 +61,15 @@ export function ProjectView({ project, session, tool = null }) {
 
   const cards = useMemo(() => filterCards(g?.cards || [], filter), [g, filter]);
   const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
+  // The phone's swipe across the chat: the next or previous session in the order the list draws
+  // them, stopping at the ends rather than wrapping — a wrap on a list with no visible edge reads
+  // as "it did not move". Replaced, not pushed, so back leaves the project rather than walking
+  // back through every session swiped past.
+  const step = (d) => {
+    const names = (g?.cards || []).map(c => c.name), at = names.indexOf(session), to = at + d;
+    if (at < 0 || to < 0 || to >= names.length) return;
+    fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(names[to])}`, { replace: true });
+  };
   const current = session && g ? g.cards.find(c => c.name === session) : null;
 
   const removeWorktree = (w) => setConfirm({
@@ -93,7 +102,10 @@ export function ProjectView({ project, session, tool = null }) {
     const { k, lk, ctrl } = key;
     const cs = g?.cards || [];
     if (session) {
-      // Ctrl-a, then: g / d back · s the grid · p Projects · f the jump chord · ← / → cycle.
+      // Ctrl-a, then: g / d back · s the grid · p Projects · f the jump chord · ← / → cycle ·
+      // t the terminal · n the editor. The last two are the desk's Ctrl-t and Ctrl-n, which a
+      // browser keeps for a tab and a window before the page hears them; Ctrl-a t and Ctrl-a n are
+      // the desk's other spelling of each, so they are the one a page can have.
       if (layer.prefix) {
         layer.prefix = false;
         if (ctrl) return lk === 'a';           // Ctrl-a Ctrl-a: a literal Ctrl-a, and no terminal to send it to
@@ -103,6 +115,7 @@ export function ProjectView({ project, session, tool = null }) {
         else if (lk === 'f') layer.startJump();
         else if (k === 'ArrowRight') cycle(1);
         else if (k === 'ArrowLeft') cycle(-1);
+        else if ((lk === 't' || lk === 'n') && offersTools(fleet, project)) fleet.go(toolTo(project, session, lk === 't' ? 'term' : 'edit'));
         return true;
       }
       if (ctrl) {
@@ -133,11 +146,14 @@ export function ProjectView({ project, session, tool = null }) {
     catch (e) { toast(t('project.leadFailed', { why: e.message }), 'bad'); }
     finally { setWaking(false); }
   };
+  const termWhy = typeof fleet.termWhy === 'function' ? fleet.termWhy(project) : '';
   const header = (
     <header class="page-head">
       <div>
-        <h1 class="name">{project}</h1>
+        <h1 class="name"><ProjectName name={project} /></h1>
         <p class="muted">{g ? `${t('project.sessions', { n: g.cards.length })} · ${t('project.freeWts', { n: g.free_worktrees?.length || 0 })}` : t('common.loading')}</p>
+        {/* A tab that is missing for a reason says the reason (the phone: another machine's shell) */}
+        {termWhy ? <p class="muted term-why">{termWhy}</p> : null}
       </div>
       <div class="row wrap">
         {g && !leadUp ? (
@@ -166,13 +182,13 @@ export function ProjectView({ project, session, tool = null }) {
         <aside class="split-list">
           <div class="split-head">
             {/* the list's name, not a back: the session's own ← says where back goes */}
-            <a class="link split-name" href={`#${projectTo(project)}`}>{project}</a>
+            <a class="link split-name" href={`#${projectTo(project)}`}><ProjectName name={project} /></a>
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current} tool={tool}
-                     onChanged={reload} onGone={sessionBack} />
+                     onChanged={reload} onGone={sessionBack} onStep={step} />
         {modals}
       </div>
     );
@@ -229,7 +245,7 @@ function Tree({ g, open, onReuse, onRemove }) {
     return (
       <>
         <button class={`tree-row c-${meta.color}`} style={{ '--d': depth }} onClick={() => open(c.name)}>
-          <span class="tree-branch">{depth ? '└─' : ''}</span>
+          <span class="tree-branch" aria-hidden="true">{depth ? '└─' : ''}</span>
           <b class="tree-glyph"><StatusMark status={st} /></b>
           <span class="tree-name">{c.lead ? t('common.lead') : c.name}{c.label ? <em> · {c.label}</em> : null}</span>
           <span class="tree-meta"><Icon name="folder" /> {c.folder || '—'} · <Icon name="branch" /> {c.branch || '—'}</span>
@@ -246,7 +262,7 @@ function Tree({ g, open, onReuse, onRemove }) {
       {top.map(c => <Row key={c.name} c={c} depth={1} />)}
       {(g.free_worktrees || []).map(w => (
         <div class="tree-row free-row" key={w.path} style={{ '--d': 1 }}>
-          <span class="tree-branch">└─</span>
+          <span class="tree-branch" aria-hidden="true">└─</span>
           <b class="tree-glyph">○</b>
           <span class="tree-name">{w.path.split('/').pop()} <em class="muted">{t('project.free')}</em></span>
           <span class="tree-meta"><Icon name="branch" /> {w.branch} · {w.path}</span>

@@ -312,11 +312,11 @@ tr.bad td.s{color:var(--bad);font-weight:700} tr.bad td.u{color:var(--bad)}
 #out textarea{width:100%;min-height:80px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
   padding:7px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:2px}`;
 
-// THE RECORDED-RUN PAGE WEARS THE PHONE CLIENT'S CLOTHES. Its tokens are web/app.css's own
-// — the terminal palette and the monospace face — copied by value, because this page must
-// open over file:// from a copied folder, where a <link> to the client's stylesheet is a
-// page with no styles. The colours are locked there, so they are locked here: change them
-// in app.css first, then here, and test/run.sh compares the two.
+// THE RECORDED-RUN PAGE WEARS THE PRODUCT'S CLOTHES. Its colours are brand/tokens.css's own
+// (the terminal palette both apps bundle) and its face is the terminal's monospace, copied by
+// value, because this page must open over file:// from a copied folder, where a <link> to a
+// stylesheet is a page with no styles. The colours are locked there, so they are locked here:
+// change them in brand/tokens.css first, then here, and test/run.sh compares the two.
 const FLOWSKIN = `
 :root{
   --bg:#0b0d10; --fg:#c9d1d9; --dim:#8a8a8a; --hair:#1c2128;

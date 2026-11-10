@@ -9134,15 +9134,18 @@ is "verdict: text with no flow line is refused"       "1" "$(printf -- '- [note]
 out="$(fs list --dir "$RV/shots")"
 is "list: a rejected recorded run reads as rejected"  "yes" "$(grep -qE '^rejected +run1' <<< "$out" && echo yes || echo no)"
 is "list: ...beside an old per-step run, still read"  "yes" "$(grep -qE 'unreviewed +old1' <<< "$out" && echo yes || echo no)"
-# THE PALETTE IS THE PHONE CLIENT'S. The review page inlines its tokens (it must open over
-# file://), so the copy is compared against web/app.css rather than trusted to stay in step.
+# THE PALETTE IS THE PRODUCT'S. The review page inlines its tokens (it must open over file://),
+# so the copy is compared against brand/tokens.css, which both apps bundle, rather than trusted
+# to stay in step. The brand names them --gf-*, and its teal is the page's --cyan.
 pal() { node -e '
-  const fs=require("fs"), src=fs.readFileSync(process.argv[1],"utf8");
-  const root=(process.argv[2]==="css" ? src : src.slice(src.indexOf("const FLOWSKIN"))).match(/:root\s*\{([^}]*)\}/)[1];
-  const o={}; for (const m of root.matchAll(/--(bg|fg|dim|hair|red|green|cyan|yellow|grey|white)\s*:\s*(#[0-9a-fA-F]{3,8})/g)) o[m[1]]=m[2].toLowerCase();
+  const fs=require("fs"), src=fs.readFileSync(process.argv[1],"utf8"), css=process.argv[2]==="css";
+  const root=(css ? src : src.slice(src.indexOf("const FLOWSKIN"))).match(/:root\s*\{([^}]*)\}/)[1];
+  const re=css ? /--gf-(bg|fg|dim|hair|red|green|teal|yellow|grey|white)\s*:\s*(#[0-9a-fA-F]{3,8})/g
+               : /--(bg|fg|dim|hair|red|green|cyan|yellow|grey|white)\s*:\s*(#[0-9a-fA-F]{3,8})/g;
+  const o={}; for (const m of root.matchAll(re)) o[m[1]==="teal" ? "cyan" : m[1]]=m[2].toLowerCase();
   console.log(Object.keys(o).sort().map(k=>k+"="+o[k]).join(" "));' "$1" "$2" 2>/dev/null; }
-is "the review page's colours are web/app.css's"      "$(pal "$ROOT/web/app.css" css)" "$(pal "$ROOT/bin/fleet-shots.mjs" js)"
-is "...all ten of them"                               "10" "$(pal "$ROOT/web/app.css" css | wc -w | tr -d ' ')"
+is "the review page's colours are the brand's"        "$(pal "$ROOT/brand/tokens.css" css)" "$(pal "$ROOT/bin/fleet-shots.mjs" js)"
+is "...all ten of them"                               "10" "$(pal "$ROOT/brand/tokens.css" css | wc -w | tr -d ' ')"
 rm -rf "$RV"
 
 # ── the recorded-run page, driven ────────────────────────────────────────────
@@ -19891,11 +19894,11 @@ fi
 
 # ── the Mac enrols its own passkey, in a browser, at localhost ─────────────────
 # Headless Chrome with a CDP virtual authenticator standing in for Touch ID, the real
-# enrolment sheet, the real web/passkey.js, and a daemon configured as above
-# (local-enrol-check.mjs says what is and is not synthetic). WATCHED RED on staging's
+# lock's code field (web/src/lock.jsx), the real web/passkey.js, and a daemon configured as
+# above (local-enrol-check.mjs says what is and is not synthetic). WATCHED RED on staging's
 # fleet-serve.mjs: nothing answered at localhost, so the page never loaded. The wording rows
 # were watched red on staging's app.js and passkey.js, where the Mac was offered "enrol this
-# phone".
+# phone", and again on the lock that replaced that client, with devKind() answering 'phone'.
 group "fleet-serve: the Mac enrols a localhost passkey in a real browser"
 # needs: free_port answers in digits
 if [ -z "${SV:-}" ] || [ "$lh_v6" != yes ]; then
@@ -20774,6 +20777,12 @@ fi
 # servers for the other direction.
 group "phone client: served by the daemon means talking to the daemon"
 # needs: free_port answers in digits
+# THE REAL CLIENT, put there by this group. The daemon serves $SV/web, and the static group
+# above leaves a one-line stand-in page in it. The old helper here imported app.js in node and
+# never fetched a file from the daemon, so the stand-in cost nothing. phone-check --served loads
+# the page the daemon serves, and against the stand-in every positive row went red while the
+# negative ones ("does NOT offer the fixture bypass") passed, on a page that had no lock at all.
+rm -rf "${SV:?}/web" && cp -R "$ROOT/web" "$SV/web"
 if sv_start origin; then
   PWO="$(mktemp -d "$TEST_RUNS.$$.pwo.XXXXXX")"
   node "$ROOT/test/helpers/pwa-origin.mjs" "$BASE" > "$PWO/out" 2> "$PWO/err"
@@ -21101,67 +21110,39 @@ else
 fi
 rm -rf "$AW"
 
-# THE CLIENT'S EARS, WITHOUT A PHONE. Two pieces of web/app.js decide what reaches the Mac:
-# the voice-activity detector (when an utterance ENDS) and the WAV encoder (what it sounds
-# like). Both are lifted out of the client exactly as written, the way this file lifts
-# _defer_nudge out of the hook, and driven here. The detector is fed synthetic frames on a
-# fake clock — speech with a pause inside it that must NOT end the utterance, then silence
-# that must, a second later. The encoder is fed real speech at the 48 kHz a phone's mic
-# runs at, and its output goes through the real whisper.cpp when this machine has one.
-group "conversation mode: 3.5 s of quiet ends an utterance, and the WAV is heard"
+# THE ASSISTANT'S EARS, WITHOUT A PHONE. What reaches the Mac when the person talks is the WAV
+# web/ui/voice.js encodes: the mic runs at whatever rate the device picks (48 kHz on a phone) and
+# whisper.cpp wants 16 kHz mono PCM. The encoder is lifted out of the module exactly as written,
+# fed real speech at 48 kHz, and its output goes through the real whisper.cpp when this machine
+# has one. When an utterance ENDS is no longer a loudness meter on a clock: it is Silero's speech
+# model in the page (voice.js, PAUSES), which needs a browser and its model files, and this group
+# does not pretend to test it.
+group "the assistant's recording is 16 kHz mono, and whisper.cpp hears it"
 if command -v node >/dev/null 2>&1; then
   CV="$(cd "$(mktemp -d)" && pwd -P)"
-  # The loop and everything it calls, lifted as written: the turn clock, the quiet setting
-  # it reads, and the barge gate the same loop runs while an answer is read.
-  { grep '^const TALK = {.*};$' "$ROOT/web/app.js"
-    grep '^const LS_QUIET = ' "$ROOT/web/app.js"
-    grep '^export const QUIET = ' "$ROOT/web/app.js" | sed 's/^export //'
-    grep '^export const BARGE = ' "$ROOT/web/app.js" | sed 's/^export //'
-    for f in savedQuiet turnClock bargeDetector; do
-      sed -n "/^export function $f(/,/^}/p" "$ROOT/web/app.js" | sed 's/^export //'
-    done
-    for f in drawTurn talkListenText; do sed -n "/^function $f(/,/^}/p" "$ROOT/web/app.js"; done
-    sed -n '/^const T = {/,/};$/p' "$ROOT/web/app.js"
-    sed -n '/^function onTalkFrame(e) {/,/^}/p' "$ROOT/web/app.js"
-    sed -n '/^export function encodeWav(frames, rate) {/,/^}/p' "$ROOT/web/app.js" | sed 's/^export //'
-  } > "$CV/talk.js"
-  cat > "$CV/vad.cjs" <<'VAD'
+  sed -n '/^function wav16k(chunks, rate) {/,/^}/p' "$ROOT/web/ui/voice.js" > "$CV/wav.js"
+  cat > "$CV/enc.cjs" <<'ENC'
 const fs = require('fs'), vm = require('vm');
-let clock = 0; const events = [];
-const ctx = { S: { talk: { phase: 'listening' } }, Date: { now: () => clock }, Math, Float32Array, ArrayBuffer, DataView,
-  talkStop: (r) => { events.push('stop'); ctx.S.talk.phase = 'off'; }, endUtterance: () => { events.push('end@' + clock); ctx.T.inSpeech = false; ctx.T.frames = []; ctx.T.hot = 0; ctx.T.listenAt = clock; } };
+const ctx = { Float32Array, ArrayBuffer, DataView, Math, Blob };
 vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(process.argv[2], 'utf8') + ';this.onTalkFrame=onTalkFrame;this.T=T;this.encodeWav=encodeWav;', ctx);
-const RATE = 48000, N = 4096, MS = N / RATE * 1000;
-const frame = (amp) => { const d = new Float32Array(N); for (let i = 0; i < N; i++) d[i] = amp ? amp * Math.sin(i / 8) : (Math.random() - 0.5) * 0.002; return d; };
-const feed = (ms, amp) => { for (let t = 0; t < ms; t += MS) { if (ctx.S.talk.phase !== 'listening') return; ctx.onTalkFrame({ inputBuffer: { getChannelData: () => frame(amp) } }); clock += MS; } };
-const mode = process.argv[3];
-ctx.T.listenAt = 0;
-// A breath (450 ms) and a pause to think (2 s) inside one utterance, then silence.
-if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); feed(2000, 0); feed(700, 0.1); const endAt = clock; feed(5000, 0);
-  console.log(JSON.stringify({ events, endAt: Math.round(endAt) })); }
-if (mode === 'silence') { feed(25000, 0); console.log(JSON.stringify({ events })); }
-if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5] = out .wav
-  const raw = fs.readFileSync(process.argv[4]); const all = new Float32Array(raw.length / 2);
-  for (let i = 0; i < all.length; i++) all[i] = raw.readInt16LE(i * 2) / 32768;
-  const frames = []; for (let o = 0; o < all.length; o += N) frames.push(all.slice(o, o + N));
-  fs.writeFileSync(process.argv[5], Buffer.from(ctx.encodeWav(frames, RATE))); console.log('wrote');
-}
-VAD
-  u="$(node "$CV/vad.cjs" "$CV/talk.js" utterance 2>&1)"
-  ends="$(node -e 'const j=JSON.parse(process.argv[1]);console.log(j.events.filter(e=>e.startsWith("end")).length)' "$u" 2>/dev/null)"
-  is "one utterance with a 2 s pause inside it ends ONCE" "1" "$ends"
-  is "...about 3.5 s after the speech stopped" "1" \
-     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=3400&&d<=3800?1:0)' "$u" 2>/dev/null)"
-  s="$(node "$CV/vad.cjs" "$CV/talk.js" silence 2>&1)"
-  is "twenty seconds of nothing ends conversation mode" '{"events":["stop"]}' "$(head -1 <<< "$s")"
-  # The encoder, through the real transcriber when there is one (macOS `say` + whisper.cpp).
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8') + ';this.wav16k=wav16k;', ctx);
+const RATE = 48000;
+let all;
+if (process.argv[3] === 'tone') { all = new Float32Array(RATE); for (let i = 0; i < all.length; i++) all[i] = 0.2 * Math.sin(i / 8); }
+else { const raw = fs.readFileSync(process.argv[3]); all = new Float32Array(raw.length / 2); for (let i = 0; i < all.length; i++) all[i] = raw.readInt16LE(i * 2) / 32768; }
+const chunks = []; for (let o = 0; o < all.length; o += 4096) chunks.push(all.slice(o, o + 4096));
+ctx.wav16k(chunks, RATE).arrayBuffer().then(b => { fs.writeFileSync(process.argv[4], Buffer.from(b)); console.log('wrote'); });
+ENC
+  hdr() { node -e 'const b=require("fs").readFileSync(process.argv[1]);console.log([b.toString("latin1",0,4),b.toString("latin1",8,12),b.readUInt16LE(20),b.readUInt16LE(22),b.readUInt32LE(24),b.readUInt16LE(34),b.readUInt32LE(40)].join(" "))' "$1" 2>/dev/null; }
+  node "$CV/enc.cjs" "$CV/wav.js" tone "$CV/tone.wav" >/dev/null 2>&1
+  # A second of 48 kHz is 16000 samples at 16 kHz, 32000 bytes of 16-bit PCM.
+  is "the encoder writes 16 kHz mono 16-bit PCM, a third as many samples" \
+     "RIFF WAVE 1 1 16000 16 32000" "$(hdr "$CV/tone.wav")"
   WM="$(ls "${CLAUDE_FLEET_WHISPER_MODEL:-/nonexistent}" "$HOME"/.local/share/whisper/ggml-*.bin 2>/dev/null | head -1)"
   if command -v say >/dev/null 2>&1 && command -v afconvert >/dev/null 2>&1 && command -v whisper-cli >/dev/null 2>&1 && [ -n "$WM" ]; then
     say -o "$CV/s.aiff" "how is acme api doing" && afconvert -f WAVE -d LEI16@48000 -c 1 "$CV/s.aiff" "$CV/s48.wav" >/dev/null 2>&1
     tail -c +45 "$CV/s48.wav" > "$CV/s48.raw"          # the PCM, as a phone's mic hands it over
-    node "$CV/vad.cjs" "$CV/talk.js" wav "$CV/s48.raw" "$CV/enc.wav" >/dev/null 2>&1
-    is "the encoder writes 16 kHz mono"             "16000" "$(node -e 'const b=require("fs").readFileSync(process.argv[1]);console.log(b.toString("latin1",0,4)==="RIFF"&&b.readUInt16LE(22)===1?b.readUInt32LE(24):0)' "$CV/enc.wav")"
+    node "$CV/enc.cjs" "$CV/wav.js" "$CV/s48.raw" "$CV/enc.wav" >/dev/null 2>&1
     mkdir -p "$CV/home/.config/ghostfleet"; printf 'acme-api\t%s\twork\n' "$CV" > "$CV/home/.config/ghostfleet/projects"
     heard="$(HOME="$CV/home" CLAUDE_FLEET_WHISPER_MODEL="$WM" "$ROOT/bin/fleet-jarvis" hear "$CV/enc.wav" 2>&1)"
     is "...and whisper.cpp hears the words in it"   "1" "$(grep -ci 'acme' <<< "$heard" || true)"
@@ -21170,7 +21151,7 @@ VAD
   fi
   rm -rf "$CV"
 else
-  skip "conversation mode" "node missing"
+  skip "the assistant's recording" "node missing"
 fi
 
 group "fleet-serve does not fork the dispatch"
@@ -22434,11 +22415,22 @@ else
 fi
 
 # ...and what the phone and the desk DRAW of it, in fixture mode at 390x844 with touch and
-# 1600x900 with a mouse: tabs that carry the machine, a host on every row, the queue merged,
-# a machine that is down as a card saying since when, no terminal for another machine's
-# project (with the line that says why), a photo for a remote session that goes to the upload
-# rather than to a refusal, and unpair from settings. Watched red against
-# staging's client (28 rows), and the one-machine rows against a copy that always prefixes.
+# 1600x900 with a mouse — web/ui's screens since v104: a heading per machine in the project
+# list, a remote project drawn by its name and its machine and never by its address, the queue
+# merged with the machine on the item, the stack picker naming the machine once (a paired project
+# carries its address AND its host, and a heading drawn from both read `acme-api@vm · vm`), a
+# machine that is down keeping its heading and saying so, no terminal for another machine's
+# project (with the line that says why, and the adapter's own gate lifted and called with a
+# server, since fixtures offer no terminal anywhere), a photo for a remote session that goes to
+# the upload, and unpair from settings in two presses. The old client's rows were watched red
+# against staging's client (28 rows); these were watched red with the machine taken off the
+# names (4 rows), the why line taken out (2), the gate opened to every project (1 — the lifted
+# gate, the only row that can see it), and the picker's heading drawn from both fields (4).
+#   A PRESS IN SETTINGS WAITS FOR ITS TARGET TO STOP MOVING. Settings draws its sections as their
+# reads land, so a section above can push the button down between the measure and the press: the
+# press lands on a heading and the row reads as a button that does nothing. Measured at the desk:
+# alone the step passed, and after the queue, photo or machine-down step it was red on all four
+# rows — the press's own log showed the mousedown landing on the section's <h2>.
 group "phone client: one app for every paired machine"
 PDC="$(mktemp -d "$TEST_RUNS.$$.paired.XXXXXX")"
 node "$ROOT/test/helpers/paired-check.mjs" > "$PDC/out" 2> "$PDC/err"
@@ -22448,7 +22440,8 @@ if grep -q 'no chrome' "$PDC/out" 2>/dev/null; then
 else
   is "paired-check ran"               "0" "$pdcrc"
   is "...without complaining"         ""  "$(head -2 "$PDC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
+  # 57 rows when it was written: 27 at each size, and the gate's three lifted from the adapter.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
@@ -22464,16 +22457,17 @@ rm -rf "$PDC"
 # its outside press — which cancels, is eaten, and never confirms. Watched red against
 # staging's client (105 rows); the rows staging passes by never closing anything, against
 # copies of this client broken on purpose (listed in the PR).
-group "phone client: every sheet has an X and closes on a tap beside it, in a real browser"
-SHC="$(mktemp -d "$TEST_RUNS.$$.sheets.XXXXXX")"
-node "$ROOT/test/helpers/sheets-check.mjs" > "$SHC/out" 2> "$SHC/err"
+group "phone client: every dialog has an X and closes on a tap beside it, in a real browser"
+SHC="$(mktemp -d "$TEST_RUNS.$$.dialogs.XXXXXX")"
+node "$ROOT/test/helpers/dialogs-check.mjs" > "$SHC/out" 2> "$SHC/err"
 shcrc=$?
-if grep -q '^#SKIP'"$US"'the sheets' "$SHC/out" 2>/dev/null; then
-  skip "the sheets" "no chrome to tap in"
+if grep -q '^#SKIP'"$US"'the dialogs' "$SHC/out" 2>/dev/null; then
+  skip "the dialogs" "no chrome to tap in"
 else
-  is "sheets-check ran"               "0" "$shcrc"
+  is "dialogs-check ran"              "0" "$shcrc"
   is "...without complaining"         ""  "$(head -2 "$SHC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SHC/out")" -ge 150 ] && echo yes || echo "no: $(wc -l < "$SHC/out") rows")"
+  # Six dialogs at two sizes, the reply's words and two confirms: 108 rows when it was written.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SHC/out")" -ge 100 ] && echo yes || echo "no: $(wc -l < "$SHC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
@@ -22678,8 +22672,9 @@ fi
 
 # ── the Claude accounts reach the phone ──────────────────────────────────────
 # fleet-serve's /api/usage is `fleet-accounts list` as data (lib/accounts.mjs describe(), which
-# the CLI now prints from too), and web/app.js draws a line per profile at the top of Projects
-# with a sheet of every account behind it. Every state list can print is planted in one fake
+# the CLI now prints from too), and web/ui/accounts.jsx draws a line per profile at the top of
+# the first page with a dialog of every account behind it — the phone's adapter has `usage`, the
+# team app's does not, so only the phone draws it. Every state list can print is planted in one fake
 # HOME (test/helpers/usage-fixture.mjs), read at one fixed instant in UTC so a reset prints the
 # same time on every runner, and the payload is held up against what the CLI printed for the
 # SAME state — never against strings typed here, which would pass for a payload that drifted
@@ -23257,14 +23252,16 @@ if [ -d "$ROOT/web" ]; then
   # draft's "cabbage" row was caught proving nothing), the path rule widened, the line
   # number dropped, the URL rule removed and the spoken-slash rule removed.
   # ── waiting on you: the card a held item draws, and the reply the ledger has to read ──
-  # test/helpers/waiting-check.mjs: web/app.js's waitingModel/replyText against
+  # test/helpers/waiting-check.mjs: web/ui/queue.jsx's replyText against
   # mods/ghostfleet/hooks/ledger.js's addPrompt/heldItems — two files that never import each
   # other and must agree on one thing, that a reply quoting an item wakes it. Watched red
-  # with the quote taken out of replyText (the item stayed waiting).
+  # with the quote taken out of replyText (the item stayed waiting). Six rows since the
+  # phone moved onto web/ui: the card's own rows went with the old client's waitingModel(),
+  # and the Queue is web/ui's screen in both apps now.
   node "$ROOT/test/helpers/waiting-check.mjs" > "$PW/waiting" 2> "$PW/waiting.err"
   is "waiting-check ran"              "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/waiting.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 6 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/waiting"
@@ -23272,8 +23269,8 @@ if [ -d "$ROOT/web" ]; then
   node "$ROOT/test/helpers/speak-check.mjs" > "$PW/speak" 2> "$PW/speak.err"
   is "speak-check ran"                "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/speak.err" | tr '\n' ' ' | sed 's/ *$//')"
-  # A floor, for the reason pwa-check documents: this helper `await import`s web/app.js, so
-  # a boot that throws emits no rows at all and a bare "no mismatches" would call it green.
+  # A floor, for the reason pwa-check documents: this helper `await import`s web/ui/speakable.js,
+  # so a module that throws emits no rows at all and a bare "no mismatches" would call it green.
   is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/speak")" -ge 50 ] && echo yes || echo "no: $(wc -l < "$PW/speak") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
@@ -23338,6 +23335,23 @@ if [ -d "$ROOT/web" ]; then
   # needing no dependencies. Watched going red against a copy of web/ with the composer's
   # sticky rule and the lead guard undone: "the lead is offered no stop", "...no rename" and
   # "...so the composer sits above it".
+  #   The old client's own features that were rebuilt in web/ui are checked here too, and each
+  # was broken on purpose and watched going red:
+  #   - Jarvis's proposals on the first page: the list taken out of the home card turned its 4
+  #     rows red; a No that sent a yes turned "what was sent is a no" red — the toast follows the
+  #     button, so only the row that reads what the fixture backend recorded can see that one.
+  #   - a draft per session (web/ui/drafts.js): the draft not read back when the box mounts
+  #     turned 3 rows red, and a send that left the stored draft behind turned 2.
+  #   - a stack's reads: quiet columns reading as often as the focused one turned "...the others
+  #     at most once" red, and every column mounted on a phone turned both phone rows red.
+  #   - the pane: the Screen tab drawing nothing turned "the pane is drawn" red at all three
+  #     widths. That row used to open `…/api-fix?tab=pane`, which the router reads as a session
+  #     NAMED "api-fix?tab=pane", and every row passed on a page about no session at all.
+  #   - the notifications offer's rule (src/push.js offerWanted), asked in the page because demo
+  #     data never draws the bar: "Not now" ignored turned "who is asked" red.
+  #   - empty pages: Pending sign-ins drawn without its empty line turned "says so" red, and the
+  #     held hint drawn with no held item turned "drop the hint" red. The tree's connector span
+  #     without aria-hidden turned the connector row red ("0 of 8 hidden").
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?
@@ -23348,7 +23362,8 @@ if [ -d "$ROOT/web" ]; then
     is "...without complaining"         ""  "$(head -2 "$PHC/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor, for the reason pwa-check documents: a browser that fails to start emits a
     # row or two and a bare "no mismatches" would call that green.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 120 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
+    # 278 rows when the rebuilt features above were added, 283 with the empty pages.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 260 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PHC/out"
@@ -23356,6 +23371,28 @@ if [ -d "$ROOT/web" ]; then
   rm -rf "$PHC"
 else
   skip "phone client" "web/ not present"
+fi
+
+group "one base: the phone and the team app are one app"
+# ee/team/test is the team app's own suite, and CI runs none of it: it needs the team's packages
+# and some of it a browser. These three need neither — they read the source — and they are the
+# ones that hold the two apps to one base: one-base (a page routed in one app and not the other, a
+# screen kept in an app's folder, a link no route answers, a sidebar word that is not the back
+# link's word), and the words of both languages for every key the shared screens ask for. Left to
+# the team's suite they failed only for whoever ran it: an app-folder file one-base did not know
+# sat on this branch red until somebody did.
+if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs" ]; then
+  OB_OUT="$(mktemp "$TMUX_TMPDIR/one-base.XXXXXX")"
+  node --test "$ROOT/ee/team/test/one-base.test.mjs" "$ROOT/ee/team/test/i18n.test.mjs" \
+    "$ROOT/ee/team/test/phone-screen-words.test.mjs" > "$OB_OUT" 2>&1
+  ob_rc=$?
+  is "one-base and both languages' words pass" "0" "$ob_rc"
+  # A floor: a file that fails to import runs no tests and node --test still has to say so.
+  is "...and ran their tests" "yes" "$(n="$(sed -n 's/^ℹ pass //p' "$OB_OUT")"; [ "${n:-0}" -ge 18 ] && echo yes || echo "no: ${n:-0} passed")"
+  [ "$ob_rc" -eq 0 ] || grep -A12 '^✖' "$OB_OUT" | head -40
+  rm -f "${OB_OUT:?}"
+else
+  skip "one base" "node or ee/team missing"
 fi
 
 group "phone client: the suite makes no sound"
@@ -23409,7 +23446,7 @@ if [ -d "$ROOT/web" ]; then
   done
 
   # ── the committed build is what the committed source builds to ────────────
-  # web/screens.js and web/preact.js are vite's output and they are TRACKED — because
+  # web/phone.js, web/preact.js and web/phone.css are vite's output and they are TRACKED — because
   # package.json's `files` ships web/ and `npm pack` reads the working directory, so
   # gitignoring them would put untracked files on the registry, which is the gap
   # test/helpers/pack-sweep.mjs exists to close. Committed output buys a clone that serves
@@ -23417,7 +23454,7 @@ if [ -d "$ROOT/web" ]; then
   # way to be wrong that no other check here can see — edit web/src/, forget to build, and
   # every guard in this file stays green over a screen nobody rebuilt. The pin cannot catch
   # it (the output matches its own bytes), node --check cannot (it parses), and
-  # pwa-render.mjs cannot (it runs the stale file perfectly).
+  # phone-check.mjs cannot (it runs the stale file perfectly).
   #
   # So this rebuilds and compares bytes. Out of tree, into the run's own temp dir: building
   # over web/ mid-suite would change files the groups above and below are reading.
@@ -23426,9 +23463,13 @@ if [ -d "$ROOT/web" ]; then
   # no npm packages (the suite's promise is no dependencies and a couple of seconds), so in
   # CI this says so out loud rather than reporting a check it did not make. The place it
   # actually bites is a dev machine and .githooks/pre-push, which is where the source gets
-  # edited. Watched going red by editing one character of web/src/screens.jsx without
-  # rebuilding: "the committed build matches its source  want=identical  got=screens.js
+  # edited. Watched going red by editing one character of web/src/phone.jsx without
+  # rebuilding: "the committed build matches its source  want=identical  got=phone.js
   # differs".
+  #   THE LIST IS THE BUILD'S, and it went stale once already. When the phone's entry moved
+  # from screens.jsx to phone.jsx this loop went on naming screens.js, and `cmp` against a
+  # file the build no longer emits says only "differs" — a statement about bytes, about a
+  # file that has no bytes. A file the build did not emit now says so in its own words.
   # THE MANAGER THIS REPO ACTUALLY USES, and the one the reader actually has. #4 moved the
   # repo to pnpm and deleted package-lock.json, and three lines here did not follow:
   #   - the gate asked for `npm`, so a machine with only pnpm skipped a check it could run
@@ -23477,12 +23518,13 @@ if [ -d "$ROOT/web" ]; then
       skip "the committed build matches its source" "$stale_install"
     elif ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
       drift=""
-      for f in screens.js preact.js; do
-        cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
+      for f in phone.js preact.js phone.css; do
+        if [ ! -f "$BOUT/$f" ]; then drift="$drift $f was not built"
+        elif ! cmp -s "$BOUT/$f" "$ROOT/web/$f"; then drift="$drift $f differs"; fi
       done
       # Named the other way round too: a build that emitted a file web/ has never heard of
       # is a config change nobody re-pinned, and it would otherwise read as "identical".
-      for f in "$BOUT"/*.js; do
+      for f in "$BOUT"/*.js "$BOUT"/*.css; do
         [ -e "$f" ] || continue
         [ -f "$ROOT/web/$(basename "$f")" ] || drift="$drift $(basename "$f") is not committed"
       done
@@ -25553,24 +25595,38 @@ else
 fi
 
 # ── 4a10c13c. the phone opens a woken session only when it woke ─────────────
-# doVerb answers a verb the daemon refused by toasting the reason and returning NULL, and
-# wakeSession tested `r && r.ok === false` — false for null — so every failed wake went on to
-# open a session that was not there: the reason, then an empty pane. The client's own function,
-# cut out of web/app.js and run against a doVerb that answers each way.
+# The old client's doVerb answered a verb the daemon refused by toasting the reason and returning
+# NULL, and its wakeSession tested `r && r.ok === false` — false for null — so every failed wake
+# went on to open a session that was not there: the reason, then an empty pane. The shared screens
+# open a lead through the adapter's lead() (web/src/lead.js), which every caller opens from only
+# on a resolve; so the question is whether a refused wake RESOLVES. The module is imported as
+# shipped, its verb answering each way: refused the way api.js refuses (a throw), and answered.
 group "the phone opens a woken session only when it woke"
 if command -v node >/dev/null 2>&1; then
   WJ="$(mktemp -d "$TEST_RUNS.$$.wakejs.XXXXXX")"
-  { echo "const S = { project: 'acme-api' }; const opened = [];"
-    echo "const answer = JSON.parse(process.argv[2]);"
-    echo "async function doVerb() { return answer; }"
-    echo "function openSession(n) { opened.push(n); }"
-    sed -n '/^async function wakeSession(name) {/,/^}/p' "$ROOT/web/app.js"
-    echo "await wakeSession('billing-svc'); console.log(opened.length);"
-  } > "$WJ/wake.mjs"
-  is "wakeSession is in the client"             "yes" "$(grep -q 'doVerb(.fleet_wake' "$WJ/wake.mjs" && echo yes || echo no)"
-  is "a wake doVerb refused (null) opens nothing" "0" "$(node "$WJ/wake.mjs" null 2>&1)"
-  is "...nor one answered ok:false"             "0"   "$(node "$WJ/wake.mjs" '{"ok":false}' 2>&1)"
-  is "...and one that woke opens the session"   "1"   "$(node "$WJ/wake.mjs" '{"ok":true,"text":"awake"}' 2>&1)"
+  cat > "$WJ/wake.mjs" <<WAKE
+import { makeLead } from '$ROOT/web/src/lead.js';
+const how = process.argv[2], woke = [];
+let up = false;
+const lead = makeLead({
+  grid: async () => ({ cards: [{ name: 'master', lead: true, asleep: !up, status: up ? 'idle' : 'unknown' }] }),
+  projects: async () => ({ projects: [] }), remote: () => false, wait: async () => {}, noLead: () => new Error('no lead'),
+  act: async (tool) => {
+    woke.push(tool);
+    if (how === 'throws') throw Object.assign(new Error('refused: the account is out'), { body: { ok: false } });
+    if (how === 'null') return null;
+    up = true; return { ok: true, text: 'awake' };
+  },
+});
+// What a caller does: open on a resolve, and only then.
+const opened = [];
+await lead('billing-svc').then((r) => opened.push(r.lead), () => {});
+console.log(woke.join(',') + ' ' + opened.length);
+WAKE
+  is "the shared screens wake a lead through lead()"   "fleet_wake 1" "$(node "$WJ/wake.mjs" ok 2>&1)"
+  is "a wake the daemon refused (a throw) opens nothing" "fleet_wake 0" "$(node "$WJ/wake.mjs" throws 2>&1)"
+  is "...and it is the phone's own: the adapter builds its lead() from this module" "yes" \
+     "$(grep -q 'makeLead(' "$ROOT/web/src/adapter.js" && grep -q "from './lead.js'" "$ROOT/web/src/adapter.js" && echo yes || echo no)"
   rm -rf "$WJ"
 else
   skip "the phone opens a woken session only when it woke" "node missing"
@@ -25925,7 +25981,7 @@ if command -v jq >/dev/null 2>&1; then
     else verdict=silent; fi
     is "$1" "$2" "$verdict"
   }
-  OBS_W='{"file_path":"/repo/web/app.js"}'      # a renderable surface, the way this repo ships one
+  OBS_W='{"file_path":"/repo/web/api.js"}'      # a renderable surface: a plain script under web/, as this repo ships them
   OBS_H='{"file_path":"/repo/report.html"}'     # renderable anywhere, by extension
   OBS_N='{"file_path":"/repo/bin/fleet-send"}'  # nothing fleet-look could render
   OBS_TEST='{"command":"./test/run.sh"}'
@@ -26718,6 +26774,14 @@ fi
 # where it was (within 2px), one page in flight, a "start of conversation" marker and no fetch
 # past it, and the button back only after a failed fetch. Red before: nothing loaded without
 # the press, and the button was there whether or not anything had failed.
+#   SINCE v104 IT ASKS web/ui's CHAT, the one both apps draw (web/ui/transcript.js and
+# session.jsx), and every row above came with it. Each mechanism was taken out of it in turn
+# and its rows watched red: reads allowed to overlap (slow, stale), no resume on a return
+# (resume), no ETag (normal), the held prefix dropped when a page slid (history — whose offset
+# row stayed green while the message moved 600px, so it asks where the MESSAGE is now), the
+# markdown filled after the anchor was measured (older-auto), no skeleton (open), and no give-up
+# on a read that never answers (open-hang). 74 rows; the floor is below that only so a scenario
+# added or retired is a number to change rather than a silent pass.
 group "phone client: an open chat converges to the transcript without reopening"
 if command -v node >/dev/null 2>&1; then
   CLC="$(mktemp -d "$TEST_RUNS.$$.chatlands.XXXXXX")"
@@ -26728,7 +26792,7 @@ if command -v node >/dev/null 2>&1; then
   else
     is "chat-lands-check ran"           "0" "$clcrc"
     is "...without complaining"         ""  "$(head -2 "$CLC/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CLC/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$CLC/out") rows")"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CLC/out")" -ge 70 ] && echo yes || echo "no: $(wc -l < "$CLC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
       is "$name" "$want" "$got"

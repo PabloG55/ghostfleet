@@ -30,6 +30,12 @@ function blockedReason(tr) {
 	if (permission() === "denied") return tr("push.denied");
 	return "";
 }
+var LATER_KEY = "gf.push.later";
+function offerWanted({ server, token, blocked, laterAt = 0, now = Date.now(), on }) {
+	if (!server || !token || blocked) return false;
+	if (now - (Number(laterAt) || 0) < 2592e5) return false;
+	return !on;
+}
 var b64uToBytes = (s) => {
 	const pad = s.replace(/-/g, "+").replace(/_/g, "/");
 	const raw = atob(pad + "=".repeat((4 - pad.length % 4) % 4));
@@ -449,6 +455,7 @@ var en_default = {
 	"ago.min": "{n} min ago",
 	"ago.h": "{n} h ago",
 	"ago.d": "{n} d ago",
+	"common.ok": "OK",
 	"common.close": "Close",
 	"common.cancel": "Cancel",
 	"common.wait": "One moment…",
@@ -583,6 +590,8 @@ var en_default = {
 	"sess.maxFiles": "Up to {n} files per message.",
 	"sess.pasted": "pasted image",
 	"sess.attaching": "Here are some files for you.",
+	"sess.filesLost": "{n} files attached to this draft did not survive the reload. Attach them again.",
+	"sess.filesLost.one": "A file attached to this draft did not survive the reload. Attach it again.",
 	"sess.attached": "Attached files (open them from these paths)",
 	"sess.stopRmTitle": "Stop and delete the worktree",
 	"sess.stopTitle": "Stop the session",
@@ -654,7 +663,40 @@ var en_default = {
 	"term.signedOutWhy": "The sign-in on this browser ended.",
 	"term.signIn": "Sign in",
 	"term.refused": "The server refused the connection",
+	"term.off": "The terminal is off for this device",
+	"term.offWhy": "Settings turns it on. It asks for the passkey, and the server records which device did it.",
+	"term.openSettings": "Settings",
 	"sess.readFailed": "Could not read the conversation: {why}",
+	"chat.slowDown": "the server asked this device to slow down",
+	"chat.offline": "the server is not answering",
+	"chat.noAnswer": "the server has not answered yet",
+	"chat.loadFailed": "Could not load the conversation — {why} · retrying",
+	"chat.olderLoading": "Loading earlier messages…",
+	"chat.olderFailed": "Earlier messages did not load — {why}",
+	"chat.start": "Start of conversation",
+	"acct.workers.paused": "workers paused",
+	"acct.workers.running": "workers keep running (budget ignored)",
+	"acct.workers.mixed": "workers paused, except where the budget is ignored",
+	"acct.until": " until {at}",
+	"acct.resets": "{label} {pct}% (resets {at}, read {read})",
+	"acct.off": "accounts are off",
+	"acct.none": "accounts: no profile has an account yet",
+	"acct.exhausted": "all accounts exhausted{until} — {workers}",
+	"acct.unsaved": "on a login that is not saved — failover paused",
+	"acct.noActive": "no account is active",
+	"acct.read": "read {when}",
+	"acct.never": "never",
+	"acct.open": "Claude accounts: open every account",
+	"acct.title": "Claude accounts",
+	"acct.threshold": "switch at {pct}% of the 5h or 7d limit, spending the week that ends first",
+	"acct.noProfile": "no profile has an account yet — fleet-accounts add <profile> <name>",
+	"acct.profUnsaved": " — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)",
+	"acct.profExhausted": " — ALL EXHAUSTED{until}, {workers}",
+	"acct.noAccounts": "(no accounts)",
+	"acct.one": "one account: nothing to fail over to yet — add another",
+	"acct.pin": "on '{account}' by hand until {at} — the planner leaves it there unless it runs out",
+	"acct.readOnly": "read only — an account is switched at the desk: fleet-accounts use <profile> <name>",
+	"acct.activeTag": " (active)",
 	"sess.uploading": "uploading…",
 	"sess.notUploaded": "not uploaded",
 	"sess.remove": "Remove {name}",
@@ -776,6 +818,13 @@ var en_default = {
 	"as.leadOf": "{project} lead",
 	"as.leadLater": "{project} lead (not open yet)",
 	"as.today": "What are we doing today?",
+	"as.proposals": "Waiting on your yes",
+	"as.proposal": "Jarvis asks: {summary}?",
+	"as.proposalGranted": "Yes given: {summary}",
+	"as.proposalYes": "Yes",
+	"as.proposalNo": "No",
+	"as.proposalYesDone": "Yes. Jarvis will {summary}.",
+	"as.proposalNoDone": "No. Jarvis will not {summary}.",
 	"as.conversing": "in conversation",
 	"as.done": "I'm done",
 	"pause.normal": "Wait for a 2.5 s pause and send",
@@ -869,6 +918,7 @@ var en_default = {
 	"lock.lookAgain": "Look for the server again",
 	"lock.where": "Which server?",
 	"phone.noLead": "{project} has no lead to start from this phone.",
+	"phone.noTermRemote": "No terminal or editor here: this project is on {host}, another machine.",
 	"phone.termFixtures": "Demo data has no terminal.",
 	"phone.termOn": "On: opening one still asks for the passkey.",
 	"phone.termOld": "This server is older than the terminal.",
@@ -908,6 +958,10 @@ var en_default = {
 	"push.notAllowed": "Notifications were not allowed.",
 	"push.noKey": "The server has no notification key.",
 	"push.noWorker": "The app is not installed far enough to receive notifications: reopen it from the icon.",
+	"push.offer": "Turn on notifications, so a session that needs you reaches this phone when the app is closed.",
+	"push.turnOn": "Turn on notifications",
+	"push.notNow": "Not now",
+	"push.onNow": "Notifications are on for this device.",
 	"push.unknownThere": "This device is subscribed, but the server does not know it: turn it off and on again.",
 	"task.why.page": "the page you are on",
 	"task.why.jarvis": "the assistant’s own project",
@@ -1152,6 +1206,7 @@ var en_default = {
 	"phone.heldHint": "A wake is waiting for an empty input box. Open the session to send or clear its text.",
 	"phone.nothingWaiting": "Nothing is waiting on you",
 	"phone.signIns": "Pending sign-ins",
+	"phone.noSignIns": "No sign-in is waiting for you",
 	"phone.loginStarted": "Sign-in ready",
 	"phone.loginStartFailed": "Could not start sign-in",
 	"phone.loginDone": "Sign-in complete",
@@ -1252,6 +1307,7 @@ var es_default = {
 	"ago.min": "hace {n} min",
 	"ago.h": "hace {n} h",
 	"ago.d": "hace {n} d",
+	"common.ok": "Listo",
 	"common.close": "Cerrar",
 	"common.cancel": "Cancelar",
 	"common.wait": "Un momento…",
@@ -1386,6 +1442,8 @@ var es_default = {
 	"sess.maxFiles": "Hasta {n} archivos por mensaje.",
 	"sess.pasted": "imagen pegada",
 	"sess.attaching": "Te adjunto estos archivos.",
+	"sess.filesLost": "{n} archivos de este borrador no sobrevivieron a la recarga. Vuelve a adjuntarlos.",
+	"sess.filesLost.one": "Un archivo de este borrador no sobrevivió a la recarga. Vuelve a adjuntarlo.",
 	"sess.attached": "Archivos adjuntos (ábrelos desde estas rutas)",
 	"sess.stopRmTitle": "Detener y borrar el worktree",
 	"sess.stopTitle": "Detener la sesión",
@@ -1457,7 +1515,40 @@ var es_default = {
 	"term.signedOutWhy": "El inicio de sesión en este navegador terminó.",
 	"term.signIn": "Iniciar sesión",
 	"term.refused": "El servidor rechazó la conexión",
+	"term.off": "La terminal está desactivada en este dispositivo",
+	"term.offWhy": "Se activa en Ajustes. Pide la llave de acceso, y el servidor registra qué dispositivo lo hizo.",
+	"term.openSettings": "Ajustes",
 	"sess.readFailed": "No se pudo leer la conversación: {why}",
+	"chat.slowDown": "el servidor pidió a este dispositivo que espere",
+	"chat.offline": "el servidor no responde",
+	"chat.noAnswer": "el servidor todavía no responde",
+	"chat.loadFailed": "No se pudo cargar la conversación — {why} · reintentando",
+	"chat.olderLoading": "Cargando mensajes anteriores…",
+	"chat.olderFailed": "Los mensajes anteriores no se cargaron — {why}",
+	"chat.start": "Inicio de la conversación",
+	"acct.workers.paused": "trabajadores en pausa",
+	"acct.workers.running": "los trabajadores siguen (sin tope de presupuesto)",
+	"acct.workers.mixed": "trabajadores en pausa, salvo donde no hay tope de presupuesto",
+	"acct.until": " hasta {at}",
+	"acct.resets": "{label} {pct}% (se renueva {at}, leído {read})",
+	"acct.off": "las cuentas están desactivadas",
+	"acct.none": "cuentas: ningún perfil tiene cuenta todavía",
+	"acct.exhausted": "todas las cuentas agotadas{until} — {workers}",
+	"acct.unsaved": "con un inicio de sesión no guardado — cambio automático en pausa",
+	"acct.noActive": "ninguna cuenta está activa",
+	"acct.read": "leído {when}",
+	"acct.never": "nunca",
+	"acct.open": "Cuentas de Claude: ver todas las cuentas",
+	"acct.title": "Cuentas de Claude",
+	"acct.threshold": "cambia al {pct}% del límite de 5h o de 7d, gastando primero la semana que termina antes",
+	"acct.noProfile": "ningún perfil tiene cuenta todavía — fleet-accounts add <perfil> <nombre>",
+	"acct.profUnsaved": " — CON UN INICIO DE SESIÓN NO GUARDADO, cambio automático en pausa (fleet-accounts add para manejarlo)",
+	"acct.profExhausted": " — TODAS AGOTADAS{until}, {workers}",
+	"acct.noAccounts": "(sin cuentas)",
+	"acct.one": "una sola cuenta: todavía no hay a cuál cambiar — agrega otra",
+	"acct.pin": "en '{account}' a mano hasta {at} — el planificador la deja ahí salvo que se agote",
+	"acct.readOnly": "solo lectura — la cuenta se cambia en la computadora: fleet-accounts use <perfil> <nombre>",
+	"acct.activeTag": " (activa)",
 	"sess.uploading": "subiendo…",
 	"sess.notUploaded": "no se subió",
 	"sess.remove": "Quitar {name}",
@@ -1579,6 +1670,13 @@ var es_default = {
 	"as.leadOf": "líder de {project}",
 	"as.leadLater": "líder de {project} (aún sin abrir)",
 	"as.today": "¿Qué hacemos hoy?",
+	"as.proposals": "Esperan tu sí",
+	"as.proposal": "Jarvis pregunta: {summary}?",
+	"as.proposalGranted": "Sí dado: {summary}",
+	"as.proposalYes": "Sí",
+	"as.proposalNo": "No",
+	"as.proposalYesDone": "Sí. Jarvis va a: {summary}.",
+	"as.proposalNoDone": "No. Jarvis no va a: {summary}.",
 	"as.conversing": "en conversación",
 	"as.done": "Ya terminé",
 	"pause.normal": "Espero una pausa de 2,5 s y envío",
@@ -1672,6 +1770,7 @@ var es_default = {
 	"lock.lookAgain": "Buscar el servidor otra vez",
 	"lock.where": "¿Qué servidor?",
 	"phone.noLead": "{project} no tiene un líder que se pueda iniciar desde este teléfono.",
+	"phone.noTermRemote": "Sin terminal ni editor aquí: este proyecto está en {host}, otra máquina.",
 	"phone.termFixtures": "Los datos de demostración no tienen terminal.",
 	"phone.termOn": "Activado: abrir uno igual pide la llave de acceso.",
 	"phone.termOld": "Este servidor es anterior a la terminal.",
@@ -1711,6 +1810,10 @@ var es_default = {
 	"push.notAllowed": "No se permitieron los avisos.",
 	"push.noKey": "El servidor no tiene clave para avisos.",
 	"push.noWorker": "La app no está instalada del todo para recibir avisos: ábrela otra vez desde el ícono.",
+	"push.offer": "Activa las notificaciones, para que una sesión que te necesita llegue a este teléfono con la app cerrada.",
+	"push.turnOn": "Activar notificaciones",
+	"push.notNow": "Ahora no",
+	"push.onNow": "Las notificaciones están activas en este dispositivo.",
 	"push.unknownThere": "Este dispositivo está suscrito, pero el servidor no lo conoce: apágalo y vuelve a prenderlo.",
 	"task.why.page": "la página en la que estás",
 	"task.why.jarvis": "el proyecto del asistente",
@@ -1955,6 +2058,7 @@ var es_default = {
 	"phone.heldHint": "Una activación espera a que el cuadro de entrada esté vacío. Abre la sesión para enviar o borrar el texto.",
 	"phone.nothingWaiting": "No tienes nada pendiente",
 	"phone.signIns": "Inicios de sesión pendientes",
+	"phone.noSignIns": "No hay inicios de sesión pendientes",
 	"phone.loginStarted": "Inicio de sesión listo",
 	"phone.loginStartFailed": "No se pudo iniciar sesión",
 	"phone.loginDone": "Inicio de sesión completado",
@@ -2963,8 +3067,10 @@ function usePoll(fn, ms, deps) {
 	const [error, setError] = d(null);
 	const [loading, setLoading] = d(true);
 	const live = A(0);
+	const out = A(0);
 	const run = q(async () => {
 		const id = live.current;
+		out.current++;
 		try {
 			const d = await fn();
 			if (id === live.current) {
@@ -2974,6 +3080,7 @@ function usePoll(fn, ms, deps) {
 		} catch (e) {
 			if (id === live.current) setError(e);
 		} finally {
+			out.current--;
 			if (id === live.current) setLoading(false);
 		}
 	}, deps);
@@ -2984,7 +3091,7 @@ function usePoll(fn, ms, deps) {
 		run();
 		if (!ms) return void 0;
 		const iv = setInterval(() => {
-			if (!document.hidden) run();
+			if (!document.hidden && !out.current) run();
 		}, ms);
 		return () => clearInterval(iv);
 	}, [run]);
@@ -2997,7 +3104,7 @@ function usePoll(fn, ms, deps) {
 }
 function Markdown({ text }) {
 	const ref = A(null);
-	h(() => {
+	_(() => {
 		const n = ref.current;
 		if (!n) return;
 		n.replaceChildren();
@@ -3032,6 +3139,17 @@ function Toasts() {
 			children: [m.icon ? /* @__PURE__ */ u(Icon, { name: m.icon }) : null, m.text]
 		}, m.id))
 	});
+}
+var splitAddr = (n) => {
+	const m = /^(.+)@([^@]+)$/.exec(String(n || ""));
+	return m ? [m[1], m[2]] : [String(n || ""), ""];
+};
+function ProjectName({ name }) {
+	const [bare, host] = splitAddr(name);
+	return host ? /* @__PURE__ */ u(S$1, { children: [bare, /* @__PURE__ */ u("small", {
+		class: "at",
+		children: [" · ", host]
+	})] }) : bare;
 }
 function Modal({ title, onClose, children, wide }) {
 	h(() => {
@@ -3474,7 +3592,7 @@ function back(parent) {
 	if ((stampOf() || cur$1)?.from != null) history.back();
 	else go$1(parent, { replace: true });
 }
-function kept$1(key, initial) {
+function kept$2(key, initial) {
 	const v = cur$1 ? store$1.get(cur$1.id)?.state?.[key] : void 0;
 	return v === void 0 ? initial : v;
 }
@@ -3743,8 +3861,8 @@ function useEntry() {
 	h(() => onEntry(() => tick((n) => n + 1)), []);
 }
 function useKept(key, initial) {
-	const [v, setV] = d(() => kept$1(key, initial));
-	h(() => onEntry(() => setV(kept$1(key, initial))), [key]);
+	const [v, setV] = d(() => kept$2(key, initial));
+	h(() => onEntry(() => setV(kept$2(key, initial))), [key]);
 	const set = (x) => setV((prev) => {
 		const n = typeof x === "function" ? x(prev) : x;
 		setKept(key, n);
@@ -3863,7 +3981,7 @@ function useFollow(open, place, inside) {
 		};
 	}, [open]);
 }
-var EDGE = 8;
+var EDGE$1 = 8;
 var GAP = 4;
 function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW = Infinity, prefer = "down" } = {}) {
 	const r = anchor.getBoundingClientRect();
@@ -3873,14 +3991,14 @@ function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW 
 	box.style.minWidth = `${Math.min(minWidth, vw - 16)}px`;
 	box.style.maxHeight = "none";
 	const full = box.offsetHeight;
-	const below = vh - r.bottom - GAP - EDGE, above = r.top - GAP - EDGE;
+	const below = vh - r.bottom - GAP - EDGE$1, above = r.top - GAP - EDGE$1;
 	const up = prefer === "up" ? !(full > above && below > above) : full > below && above > below;
 	const h = Math.min(full, maxH, Math.max(0, up ? above : below));
 	box.style.maxHeight = `${h}px`;
 	box.style.top = `${up ? r.top - GAP - h : r.bottom + GAP}px`;
 	const w = box.offsetWidth;
 	let left = align === "end" ? r.right - w : align === "center" ? r.left + (r.width - w) / 2 : r.left;
-	left = Math.max(EDGE, Math.min(left, vw - EDGE - w));
+	left = Math.max(EDGE$1, Math.min(left, vw - EDGE$1 - w));
 	box.style.left = `${left}px`;
 	box.scrollTop = keep;
 	return up ? "up" : "down";
@@ -4501,7 +4619,7 @@ function Board({ projects }) {
 						class: "fleet-name",
 						href: projectHref(f.name),
 						title: t("board.open", { name: f.name }),
-						children: f.name
+						children: /* @__PURE__ */ u(ProjectName, { name: f.name })
 					}), /* @__PURE__ */ u("div", {
 						class: "fleet-sea",
 						children: f.boats.map((b) => {
@@ -4557,7 +4675,7 @@ function Board({ projects }) {
 				}), showQuiet ? quiet.map((f) => /* @__PURE__ */ u("a", {
 					class: "qchip",
 					href: projectHref(f.name),
-					children: f.name
+					children: /* @__PURE__ */ u(ProjectName, { name: f.name })
 				}, f.name)) : null]
 			}) : null
 		]
@@ -4732,7 +4850,8 @@ function Notice({ n, kind, onAgain, fleet }) {
 		noEditor: t("term.noEditor"),
 		password: t("term.password"),
 		signedOut: t("term.signedOut"),
-		refused: t("term.refused")
+		refused: t("term.refused"),
+		off: t("term.off")
 	}[n.kind] || t("term.failed");
 	const why = {
 		idle: t("term.idleWhy"),
@@ -4741,7 +4860,8 @@ function Notice({ n, kind, onAgain, fleet }) {
 		signedOut: t("term.signedOutWhy"),
 		failed: t("term.failedWhy"),
 		dropped: t("term.droppedWhy"),
-		ended: t("term.endedWhy")
+		ended: t("term.endedWhy"),
+		off: t("term.offWhy")
 	}[n.kind] || n.why || "";
 	let act = /* @__PURE__ */ u(Btn, {
 		kind: "primary sm",
@@ -4758,6 +4878,11 @@ function Notice({ n, kind, onAgain, fleet }) {
 		onClick: () => fleet.signIn(),
 		children: t("term.signIn")
 	}) : null;
+	if (n.kind === "off") act = /* @__PURE__ */ u(Btn, {
+		kind: "primary sm",
+		onClick: () => fleet.go("/settings"),
+		children: t("term.openSettings")
+	});
 	return /* @__PURE__ */ u("div", {
 		class: `tool-note n-${n.kind}`,
 		role: "status",
@@ -4830,6 +4955,7 @@ function Panel({ project, session, kind }) {
 			return;
 		}
 		if (s === 401) return say("signedOut");
+		if (s === 403 && e.needs === "enable") return say("off");
 		if (s === 403) {
 			let who;
 			try {
@@ -5008,6 +5134,301 @@ function Panel({ project, session, kind }) {
 	});
 }
 //#endregion
+//#region web/ui/transcript.js
+var LIVE_MS = 2e3;
+var IDLE_MS = 5e3;
+var FIRST_GIVEUP_MS = 8e3;
+var GIVEUP_MS = 3e4;
+var RETRY_MAX_MS = 15e3;
+var pageKey = (m) => `${m && m.role}|${m && m.ts}|${String(m && m.text || "").slice(0, 200)}`;
+function mergeNewest(cur, fresh) {
+	const ms = fresh && fresh.messages || [];
+	if (!cur || !ms.length) return {
+		...fresh,
+		pages: 1
+	};
+	const old = cur.messages || [], k = pageKey(ms[0]);
+	let at = -1;
+	for (let i = old.length - 1; i >= 0; i--) if (pageKey(old[i]) === k) {
+		at = i;
+		break;
+	}
+	if (at < 0) return {
+		...fresh,
+		pages: 1
+	};
+	return {
+		...fresh,
+		messages: [...old.slice(0, at), ...ms],
+		next_before: cur.next_before,
+		pages: cur.pages || 1
+	};
+}
+var why = (e) => e && e.status === 429 ? t("chat.slowDown") : e && e.name === "OfflineError" ? t("chat.offline") : String(e && e.message || e);
+var quiet = (e) => e && (e.status === 429 || e.name === "OfflineError" || e.name === "AuthError");
+function useTranscript(fleet, project, name, live) {
+	const [page, setPage] = d(null);
+	const [load, setLoad] = d({
+		tries: 0,
+		why: ""
+	});
+	const [older, setOlder] = d({
+		busy: false,
+		err: ""
+	});
+	const r = A(null);
+	const liveRef = A(live);
+	liveRef.current = live;
+	h(() => {
+		const st = {
+			seq: 0,
+			drawn: 0,
+			read: null,
+			timer: null,
+			cur: null,
+			tries: 0,
+			hiddenAt: 0,
+			gone: false,
+			err: "",
+			olderBusy: false
+		};
+		r.current = st;
+		setPage(null);
+		setLoad({
+			tries: 0,
+			why: ""
+		});
+		setOlder({
+			busy: false,
+			err: ""
+		});
+		const held = () => typeof fleet.heldFor === "function" ? fleet.heldFor() : 0;
+		const period = () => !st.cur ? Math.min(1e3 * 2 ** Math.max(0, st.tries - 1), RETRY_MAX_MS) : liveRef.current && liveRef.current() ? LIVE_MS : IDLE_MS;
+		const failed = (w) => {
+			if (st.cur) return false;
+			st.tries++;
+			setLoad({
+				tries: st.tries,
+				why: w
+			});
+			return true;
+		};
+		const read = ({ fresh = false } = {}) => {
+			if (st.read) {
+				const age = Date.now() - st.read.at;
+				const stale = st.read.at < st.hiddenAt || age > 3e3;
+				const dead = age > (st.cur ? GIVEUP_MS : FIRST_GIVEUP_MS);
+				if (!dead && (!fresh || !stale)) return st.read.p;
+				if (dead) failed(t("chat.noAnswer"));
+				try {
+					st.read.ctl && st.read.ctl.abort();
+				} catch {}
+			}
+			const ctl = typeof AbortController === "function" ? new AbortController() : null;
+			const me = {
+				seq: ++st.seq,
+				ctl,
+				at: Date.now(),
+				p: null
+			};
+			st.read = me;
+			me.p = (async () => {
+				try {
+					const got = await fleet.session(project, name, null, {
+						etag: st.cur && st.cur.etag || "",
+						signal: ctl ? ctl.signal : void 0
+					});
+					if (st.gone || ctl && ctl.signal.aborted) return;
+					if (st.cur && st.drawn > me.seq) return;
+					if (st.tries) {
+						st.tries = 0;
+						setLoad({
+							tries: 0,
+							why: ""
+						});
+					}
+					st.err = "";
+					if (got && got.notModified) {
+						if (st.cur) st.drawn = me.seq;
+						return;
+					}
+					st.cur = mergeNewest(st.cur, got);
+					st.drawn = me.seq;
+					setPage(st.cur);
+				} catch (e) {
+					if (st.gone || ctl && ctl.signal.aborted) return;
+					const w = why(e);
+					if (failed(w) || quiet(e)) return;
+					if (w !== st.err) {
+						st.err = w;
+						toast(w, "bad");
+					}
+				} finally {
+					if (st.read === me) st.read = null;
+				}
+			})();
+			return me.p;
+		};
+		const arm = (ms = period()) => {
+			clearTimeout(st.timer);
+			st.timer = null;
+			if (st.gone || document.hidden) return;
+			st.timer = setTimeout(() => {
+				st.timer = null;
+				if (st.gone || document.hidden) return;
+				read();
+				arm();
+			}, Math.max(ms, held()));
+		};
+		const resume = () => {
+			if (st.gone || document.hidden) return;
+			read({ fresh: true }).finally(() => arm());
+		};
+		const vis = () => {
+			if (document.hidden) {
+				st.hiddenAt = Date.now();
+				clearTimeout(st.timer);
+				st.timer = null;
+			} else resume();
+		};
+		const shown = (e) => {
+			if (e && e.persisted) resume();
+		};
+		st.read$ = read;
+		st.arm = arm;
+		read();
+		arm();
+		document.addEventListener("visibilitychange", vis);
+		addEventListener("pageshow", shown);
+		addEventListener("focus", resume);
+		return () => {
+			st.gone = true;
+			clearTimeout(st.timer);
+			try {
+				st.read && st.read.ctl && st.read.ctl.abort();
+			} catch {}
+			document.removeEventListener("visibilitychange", vis);
+			removeEventListener("pageshow", shown);
+			removeEventListener("focus", resume);
+		};
+	}, [
+		fleet,
+		project,
+		name
+	]);
+	const reload = () => {
+		const st = r.current;
+		if (st && st.read$) st.read$({ fresh: true }).finally(() => st.arm());
+	};
+	const loadOlder = async (before) => {
+		const st = r.current, s = st && st.cur;
+		if (!s || !s.next_before || st.olderBusy) return;
+		st.olderBusy = true;
+		setOlder({
+			busy: true,
+			err: ""
+		});
+		try {
+			const got = await fleet.session(project, name, s.next_before);
+			if (st.gone) return;
+			const cur = st.cur || s;
+			st.cur = mergeNewest({
+				...cur,
+				messages: [...got.messages || [], ...s.messages || []],
+				next_before: got.next_before ?? null,
+				pages: (s.pages || 1) + 1
+			}, cur);
+			if (before) before();
+			setPage(st.cur);
+			setOlder({
+				busy: false,
+				err: ""
+			});
+		} catch (e) {
+			if (!st.gone) setOlder({
+				busy: false,
+				err: why(e)
+			});
+		} finally {
+			st.olderBusy = false;
+		}
+	};
+	const retryOlder = (before) => {
+		setOlder({
+			busy: false,
+			err: ""
+		});
+		if (r.current) r.current.olderBusy = false;
+		return loadOlder(before);
+	};
+	return {
+		page,
+		load,
+		older,
+		loadOlder,
+		retryOlder,
+		reload
+	};
+}
+//#endregion
+//#region web/ui/drafts.js
+var LS = "gfw.drafts";
+var DAYS = 30;
+var drafts = null;
+var lost = /* @__PURE__ */ new Map();
+var kept$1 = /* @__PURE__ */ new Map();
+var draftKey = (project, session) => `${project || ""}\x1f${session || ""}`;
+function load$1() {
+	if (drafts) return drafts;
+	drafts = /* @__PURE__ */ new Map();
+	try {
+		const o = JSON.parse(localStorage.getItem(LS) || "{}") || {};
+		const old = Date.now() / 1e3 - DAYS * 86400;
+		for (const [k, v] of Object.entries(o)) {
+			if (!v || typeof v.text !== "string" || (v.at || 0) < old) continue;
+			drafts.set(k, v);
+			if (v.files > 0) lost.set(k, v.files);
+		}
+	} catch {}
+	return drafts;
+}
+function persist() {
+	try {
+		localStorage.setItem(LS, JSON.stringify(Object.fromEntries(drafts)));
+	} catch {}
+}
+function draftText(key) {
+	const d = load$1().get(key);
+	return d ? d.text : "";
+}
+function draftFiles(key) {
+	return kept$1.get(key) || [];
+}
+function lostFiles(key) {
+	load$1();
+	return lost.get(key) || 0;
+}
+function keepDraft(key, text, files = draftFiles(key)) {
+	const m = load$1();
+	if (files.length) kept$1.set(key, files);
+	else kept$1.delete(key);
+	const n = files.filter((f) => f.state !== "err").length;
+	if (!text && !n) m.delete(key);
+	else m.set(key, {
+		text: String(text || ""),
+		files: n,
+		at: Math.floor(Date.now() / 1e3)
+	});
+	persist();
+}
+function seenLost(key) {
+	lost.delete(key);
+}
+function sentDraft(key) {
+	seenLost(key);
+	keepDraft(key, "", []);
+}
+//#endregion
 //#region web/ui/session.jsx
 function optionText(label) {
 	const l = String(label || "");
@@ -5147,38 +5568,142 @@ function Terminal({ pane }) {
 		})
 	});
 }
-function Chat({ msgs, queued, older, onOlder }) {
+function keyed(msgs) {
+	const seen = /* @__PURE__ */ new Map();
+	return msgs.map((m) => {
+		const k = `${m.ts}:${m.role}`;
+		const n = seen.get(k) || 0;
+		seen.set(k, n + 1);
+		return [`${k}:${n}`, m];
+	});
+}
+function ChatLoading({ load }) {
+	return /* @__PURE__ */ u("div", {
+		class: "chat",
+		"aria-busy": "true",
+		children: [load.tries ? /* @__PURE__ */ u("p", {
+			class: "loading err center",
+			role: "status",
+			children: t("chat.loadFailed", { why: load.why })
+		}) : null, [
+			0,
+			1,
+			2
+		].map((i) => /* @__PURE__ */ u("div", {
+			class: `msg ${i === 1 ? "me" : "ai"} skel`,
+			"aria-hidden": "true",
+			children: /* @__PURE__ */ u("div", { class: "bubble skel" })
+		}, i))]
+	});
+}
+var OLDER_NEAR_PX = 240;
+var SWIPE_NEXT = 60;
+var EDGE = 24;
+function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const author = useSlot("author");
 	const ref = A(null);
 	const stick = A(true);
-	const last = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].ts}` : "";
+	const anchor = A(null);
+	const swipe = A(null);
+	const msgs = page.messages || [];
+	const rows = keyed(msgs);
+	const last = rows.length ? rows[rows.length - 1][0] : "";
 	h(() => {
 		const n = ref.current;
 		if (n && stick.current) n.scrollTop = n.scrollHeight;
 	}, [last, queued.length]);
+	const measure = () => {
+		const box = ref.current;
+		if (!box) return;
+		const top = box.getBoundingClientRect().top;
+		const n = [...box.children].find((c) => c.dataset.k && c.getBoundingClientRect().bottom > top);
+		anchor.current = n ? {
+			k: n.dataset.k,
+			top: n.getBoundingClientRect().top
+		} : null;
+	};
+	const held = () => {
+		const box = ref.current, a = anchor.current;
+		return a && box ? [...box.children].find((c) => c.dataset.k === a.k) : null;
+	};
+	_(() => {
+		const box = ref.current, a = anchor.current;
+		if (a && box) {
+			const n = held();
+			const d = n ? n.getBoundingClientRect().top - a.top : 0;
+			if (d) box.scrollTop += d;
+			if (!older.busy) anchor.current = null;
+		}
+		if (box && page.next_before && !older.busy && !older.err && box.scrollHeight <= box.clientHeight + 1) onOlder();
+	});
+	const nearTop = (box) => {
+		const n = held();
+		if (n) anchor.current.top = n.getBoundingClientRect().top;
+		if (!page.next_before || older.busy || older.err) return;
+		if (box.scrollHeight <= box.clientHeight || box.scrollTop > OLDER_NEAR_PX) return;
+		measure();
+		onOlder();
+	};
+	const down = (e) => {
+		swipe.current = e.pointerType !== "mouse" && e.clientX > EDGE ? {
+			x: e.clientX,
+			y: e.clientY
+		} : null;
+	};
+	const up = (e) => {
+		const s0 = swipe.current;
+		swipe.current = null;
+		if (!s0 || !onStep) return;
+		const dx = e.clientX - s0.x, dy = e.clientY - s0.y;
+		if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
+		onStep(dx < 0 ? 1 : -1);
+	};
 	return /* @__PURE__ */ u("div", {
 		class: "chat",
 		ref,
 		"data-keep-scroll": "chat",
+		onPointerDown: down,
+		onPointerUp: up,
+		onPointerCancel: () => {
+			swipe.current = null;
+		},
 		onScroll: (e) => {
 			const n = e.currentTarget;
 			stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+			nearTop(n);
 		},
 		children: [
-			older ? /* @__PURE__ */ u("button", {
-				class: "link center",
-				onClick: onOlder,
-				children: t("sess.older")
+			page.next_before ? older.busy ? /* @__PURE__ */ u("p", {
+				class: "older muted center",
+				role: "status",
+				children: t("chat.olderLoading")
+			}) : older.err ? /* @__PURE__ */ u("div", {
+				class: "older center",
+				children: [/* @__PURE__ */ u("span", {
+					class: "muted",
+					children: t("chat.olderFailed", { why: older.err })
+				}), /* @__PURE__ */ u("button", {
+					class: "link",
+					onClick: () => {
+						measure();
+						onRetryOlder();
+					},
+					children: t("sess.older")
+				})]
+			}) : null : msgs.length ? /* @__PURE__ */ u("p", {
+				class: "start muted center",
+				children: t("chat.start")
 			}) : null,
 			!msgs.length ? /* @__PURE__ */ u("p", {
 				class: "muted center",
 				children: t("sess.noMsgs")
 			}) : null,
-			msgs.map((m, i) => {
+			rows.map(([k, m]) => {
 				if (m.role === "tools") {
 					const tools = m.tools || [];
 					const names = [...new Set(tools.map((x) => x.name))];
 					return /* @__PURE__ */ u("details", {
+						"data-k": k,
 						class: "tools",
 						children: [/* @__PURE__ */ u("summary", { children: [
 							/* @__PURE__ */ u(Icon, { name: "gear" }),
@@ -5196,9 +5721,10 @@ function Chat({ msgs, queued, older, onOlder }) {
 							" ",
 							/* @__PURE__ */ u("span", { children: x.detail })
 						] }, j)) })]
-					}, `${m.ts}-${i}`);
+					}, k);
 				}
 				return /* @__PURE__ */ u("div", {
+					"data-k": k,
 					class: `msg ${m.role === "user" ? "me" : "ai"}`,
 					children: [/* @__PURE__ */ u("div", {
 						class: "who",
@@ -5213,7 +5739,7 @@ function Chat({ msgs, queued, older, onOlder }) {
 							children: m.text
 						}) : /* @__PURE__ */ u(Markdown, { text: m.text })
 					})]
-				}, `${m.ts}-${i}`);
+				}, k);
 			}),
 			queued.map((q, i) => /* @__PURE__ */ u("div", {
 				class: "msg me pending",
@@ -5309,7 +5835,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, tool = null, embedded = false }) {
+function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
@@ -5317,9 +5843,13 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 		setTab(x);
 		if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
 	};
-	const [extra, setExtra] = d([]);
-	const [before, setBefore] = d(null);
-	const [draft, setDraft] = d("");
+	const dkey = draftKey(project, name);
+	const [draft, setDraftState] = d(() => draftText(dkey));
+	const setDraft = (v) => {
+		setDraftState(v);
+		keepDraft(dkey, v);
+	};
+	const [lost, setLost] = d(() => lostFiles(dkey));
 	const [busy, setBusy] = d(false);
 	const [confirm, setConfirm] = d(null);
 	const [rename, setRename] = d(null);
@@ -5332,18 +5862,38 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 	});
 	const [labelEdit, setLabelEdit] = d(null);
 	const [schedOpen, setSchedOpen] = d(false);
-	const [files, setFiles] = d([]);
+	const [files, setFilesState] = d(() => draftFiles(dkey));
+	const mounted = A(true);
+	h(() => () => {
+		mounted.current = false;
+	}, []);
+	const setFiles = (fn) => {
+		const next = fn(draftFiles(dkey));
+		keepDraft(dkey, draftText(dkey), next);
+		if (mounted.current) setFilesState(next);
+	};
 	const [drag, setDrag] = d(false);
 	const picker = A(null);
-	const typing = A(false);
-	h(() => {
-		setFiles([]);
-	}, [project, name]);
-	const sess = usePoll(() => fleet.session(project, name), 3e3, [project, name]);
-	const pane = usePoll(() => fleet.pane(project, name), 2500, [project, name]);
-	h(() => {
-		setBefore(sess.data?.next_before ?? null);
-	}, [sess.data?.next_before]);
+	const typing = A(!!draft);
+	const sentAt = A(0);
+	const statusNow = A("unknown");
+	const quietRef = A(quiet);
+	quietRef.current = quiet;
+	const tr = useTranscript(fleet, project, name, () => !quietRef.current && (statusNow.current === "working" || statusNow.current === "starting" || Date.now() - sentAt.current < 12e4));
+	const lastPane = A({
+		at: 0,
+		data: null
+	});
+	const pane = usePoll(async () => {
+		const was = lastPane.current;
+		if (quietRef.current && was.data && Date.now() - was.at < 15e3) return was.data;
+		const data = await fleet.pane(project, name);
+		lastPane.current = {
+			at: Date.now(),
+			data
+		};
+		return data;
+	}, 2500, [project, name]);
 	h(() => {
 		if (!fleet.presence) return void 0;
 		const iv = setInterval(() => {
@@ -5351,8 +5901,9 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 		}, 5e3);
 		return () => clearInterval(iv);
 	}, [project, name]);
-	const st = card ? statusOf(card) : sess.data?.status || "unknown";
-	const owner = card?.owner || sess.data?.owner || null;
+	const st = card ? statusOf(card) : tr.page?.status || "unknown";
+	statusNow.current = st;
+	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
 	const act = async (tool, args = {}, opts = {}) => {
 		setBusy(true);
@@ -5365,7 +5916,7 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 			if (r.queued === "question") toast(t("sess.queuedQ"), "");
 			else if (r.queued) toast(t("sess.queuedTurn"), "");
 			onChanged();
-			sess.reload();
+			tr.reload();
 			pane.reload();
 			return r;
 		} catch (e) {
@@ -5420,19 +5971,13 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
 		const prompt = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
 		if (await act("fleet_send", { prompt })) {
-			setDraft("");
+			sentAt.current = Date.now();
 			typing.current = false;
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
-			setFiles([]);
-		}
-	};
-	const loadOlder = async () => {
-		try {
-			const r = await fleet.session(project, name, before);
-			setExtra((x) => [...r.messages || [], ...x]);
-			setBefore(r.next_before ?? null);
-		} catch (e) {
-			toast(e.message, "bad");
+			sentDraft(dkey);
+			setDraftState("");
+			setLost(0);
+			if (mounted.current) setFilesState([]);
 		}
 	};
 	const stop = (reclaim) => setConfirm({
@@ -5457,7 +6002,6 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 			}
 		}
 	});
-	const msgs = [...extra, ...sess.data?.messages || []];
 	const parked = st === "parked";
 	return /* @__PURE__ */ u("section", {
 		class: "session",
@@ -5531,7 +6075,7 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 								owner,
 								onChanged: () => {
 									onChanged();
-									sess.reload();
+									tr.reload();
 								}
 							}),
 							st === "working" ? /* @__PURE__ */ u(Btn, {
@@ -5697,14 +6241,13 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 				project,
 				session: name,
 				kind: tool
-			}, tool) : tab === "chat" ? sess.error && !sess.data ? /* @__PURE__ */ u("p", {
-				class: "err pad",
-				children: t("sess.readFailed", { why: sess.error.message })
-			}) : /* @__PURE__ */ u(Chat, {
-				msgs,
-				queued: sess.data?.queued || [],
-				older: before != null,
-				onOlder: loadOlder
+			}, tool) : tab === "chat" ? !tr.page ? /* @__PURE__ */ u(ChatLoading, { load: tr.load }) : /* @__PURE__ */ u(Chat, {
+				page: tr.page,
+				queued: tr.page.queued || [],
+				older: tr.older,
+				onOlder: tr.loadOlder,
+				onRetryOlder: tr.retryOlder,
+				onStep
 			}) : /* @__PURE__ */ u(Terminal, { pane: pane.data?.pane ?? null }),
 			!tool && /* @__PURE__ */ u("form", {
 				class: `composer${drag ? " drag" : ""}`,
@@ -5726,93 +6269,113 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null, embe
 						addFiles(e.dataTransfer.files);
 					}
 				},
-				children: [files.length ? /* @__PURE__ */ u("div", {
-					class: "att-list",
-					children: files.map((f) => /* @__PURE__ */ u("span", {
-						class: `att att-${f.state}`,
-						title: f.why || f.path || f.name,
+				children: [
+					lost ? /* @__PURE__ */ u("p", {
+						class: "att-lost",
+						role: "status",
 						children: [
-							f.preview ? /* @__PURE__ */ u("img", {
-								src: f.preview,
-								alt: ""
-							}) : /* @__PURE__ */ u("i", {
-								class: "att-ico",
+							t("sess.filesLost", { n: lost }),
+							" ",
+							/* @__PURE__ */ u("button", {
+								type: "button",
+								class: "link-btn",
+								onClick: () => {
+									seenLost(dkey);
+									setLost(0);
+								},
+								children: t("common.ok")
+							})
+						]
+					}) : null,
+					files.length ? /* @__PURE__ */ u("div", {
+						class: "att-list",
+						children: files.map((f) => /* @__PURE__ */ u("span", {
+							class: `att att-${f.state}`,
+							title: f.why || f.path || f.name,
+							children: [
+								f.preview ? /* @__PURE__ */ u("img", {
+									src: f.preview,
+									alt: ""
+								}) : /* @__PURE__ */ u("i", {
+									class: "att-ico",
+									children: /* @__PURE__ */ u(Icon, {
+										name: "file",
+										size: 24
+									})
+								}),
+								/* @__PURE__ */ u("span", {
+									class: "att-name",
+									children: f.name
+								}),
+								/* @__PURE__ */ u("small", { children: f.state === "up" ? t("sess.uploading") : f.state === "err" ? t("sess.notUploaded") : `${Math.max(1, Math.round(f.size / 1024))} KB` }),
+								/* @__PURE__ */ u("button", {
+									type: "button",
+									class: "att-x",
+									"aria-label": t("sess.remove", { name: f.name }),
+									onClick: () => dropFile(f.id),
+									children: /* @__PURE__ */ u(Icon, { name: "close" })
+								})
+							]
+						}, f.id))
+					}) : null,
+					/* @__PURE__ */ u("div", {
+						class: "composer-row",
+						children: [
+							/* @__PURE__ */ u("button", {
+								type: "button",
+								class: "attach-btn",
+								onClick: () => picker.current?.click(),
+								title: t("sess.attach"),
+								"aria-label": t("sess.attach"),
 								children: /* @__PURE__ */ u(Icon, {
-									name: "file",
+									name: "clip",
 									size: 24
 								})
 							}),
-							/* @__PURE__ */ u("span", {
-								class: "att-name",
-								children: f.name
+							/* @__PURE__ */ u("input", {
+								ref: picker,
+								type: "file",
+								multiple: true,
+								hidden: true,
+								onChange: (e) => {
+									addFiles(e.currentTarget.files);
+									e.currentTarget.value = "";
+								}
 							}),
-							/* @__PURE__ */ u("small", { children: f.state === "up" ? t("sess.uploading") : f.state === "err" ? t("sess.notUploaded") : `${Math.max(1, Math.round(f.size / 1024))} KB` }),
-							/* @__PURE__ */ u("button", {
-								type: "button",
-								class: "att-x",
-								"aria-label": t("sess.remove", { name: f.name }),
-								onClick: () => dropFile(f.id),
-								children: /* @__PURE__ */ u(Icon, { name: "close" })
+							/* @__PURE__ */ u("textarea", {
+								rows: 2,
+								value: draft,
+								placeholder: drag ? t("sess.drop") : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
+								onInput: (e) => {
+									setDraft(e.currentTarget.value);
+									typing.current = !!e.currentTarget.value;
+								},
+								onPaste: (e) => {
+									const fs = [...e.clipboardData?.files || []];
+									if (fs.length) {
+										e.preventDefault();
+										addFiles(fs);
+									}
+								},
+								onKeyDown: (e) => {
+									if (e.key === "Escape" && !e.isComposing) {
+										e.preventDefault();
+										e.currentTarget.blur();
+									} else if (sendsOnEnter(e)) {
+										e.preventDefault();
+										sendDraft();
+									}
+								}
+							}),
+							/* @__PURE__ */ u(Btn, {
+								kind: "primary",
+								type: "submit",
+								disabled: busy || uploading || !draft.trim() && !ready.length,
+								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]
-					}, f.id))
-				}) : null, /* @__PURE__ */ u("div", {
-					class: "composer-row",
-					children: [
-						/* @__PURE__ */ u("button", {
-							type: "button",
-							class: "attach-btn",
-							onClick: () => picker.current?.click(),
-							title: t("sess.attach"),
-							"aria-label": t("sess.attach"),
-							children: /* @__PURE__ */ u(Icon, {
-								name: "clip",
-								size: 24
-							})
-						}),
-						/* @__PURE__ */ u("input", {
-							ref: picker,
-							type: "file",
-							multiple: true,
-							hidden: true,
-							onChange: (e) => {
-								addFiles(e.currentTarget.files);
-								e.currentTarget.value = "";
-							}
-						}),
-						/* @__PURE__ */ u("textarea", {
-							rows: 2,
-							value: draft,
-							placeholder: drag ? t("sess.drop") : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
-							onInput: (e) => {
-								setDraft(e.currentTarget.value);
-								typing.current = !!e.currentTarget.value;
-							},
-							onPaste: (e) => {
-								const fs = [...e.clipboardData?.files || []];
-								if (fs.length) {
-									e.preventDefault();
-									addFiles(fs);
-								}
-							},
-							onKeyDown: (e) => {
-								if (e.key === "Escape" && !e.isComposing) {
-									e.preventDefault();
-									e.currentTarget.blur();
-								} else if (sendsOnEnter(e)) {
-									e.preventDefault();
-									sendDraft();
-								}
-							}
-						}),
-						/* @__PURE__ */ u(Btn, {
-							kind: "primary",
-							type: "submit",
-							disabled: busy || uploading || !draft.trim() && !ready.length,
-							children: uploading ? t("sess.uploadingBtn") : t("common.send")
-						})
-					]
-				})]
+					})
+				]
 			}),
 			confirm ? /* @__PURE__ */ u(Confirm, {
 				...confirm,
@@ -6004,6 +6567,11 @@ function ProjectView({ project, session, tool = null }) {
 	const [confirm, setConfirm] = d(null);
 	const cards = T(() => filterCards(g?.cards || [], filter), [g, filter]);
 	const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
+	const step = (d) => {
+		const names = (g?.cards || []).map((c) => c.name), at = names.indexOf(session), to = at + d;
+		if (at < 0 || to < 0 || to >= names.length) return;
+		fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(names[to])}`, { replace: true });
+	};
 	const current = session && g ? g.cards.find((c) => c.name === session) : null;
 	const removeWorktree = (w) => setConfirm({
 		title: t("project.rmTitle"),
@@ -6056,6 +6624,7 @@ function ProjectView({ project, session, tool = null }) {
 				else if (lk === "f") layer.startJump();
 				else if (k === "ArrowRight") cycle(1);
 				else if (k === "ArrowLeft") cycle(-1);
+				else if ((lk === "t" || lk === "n") && offers(fleet, project)) fleet.go(toolTo(project, session, lk === "t" ? "term" : "edit"));
 				return true;
 			}
 			if (ctrl) {
@@ -6112,15 +6681,23 @@ function ProjectView({ project, session, tool = null }) {
 			setWaking(false);
 		}
 	};
+	const termWhy = typeof fleet.termWhy === "function" ? fleet.termWhy(project) : "";
 	const header = /* @__PURE__ */ u("header", {
 		class: "page-head",
-		children: [/* @__PURE__ */ u("div", { children: [/* @__PURE__ */ u("h1", {
-			class: "name",
-			children: project
-		}), /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: g ? `${t("project.sessions", { n: g.cards.length })} · ${t("project.freeWts", { n: g.free_worktrees?.length || 0 })}` : t("common.loading")
-		})] }), /* @__PURE__ */ u("div", {
+		children: [/* @__PURE__ */ u("div", { children: [
+			/* @__PURE__ */ u("h1", {
+				class: "name",
+				children: /* @__PURE__ */ u(ProjectName, { name: project })
+			}),
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: g ? `${t("project.sessions", { n: g.cards.length })} · ${t("project.freeWts", { n: g.free_worktrees?.length || 0 })}` : t("common.loading")
+			}),
+			termWhy ? /* @__PURE__ */ u("p", {
+				class: "muted term-why",
+				children: termWhy
+			}) : null
+		] }), /* @__PURE__ */ u("div", {
 			class: "row wrap",
 			children: [g && !leadUp ? /* @__PURE__ */ u(Btn, {
 				kind: "ghost",
@@ -6191,7 +6768,7 @@ function ProjectView({ project, session, tool = null }) {
 					children: [/* @__PURE__ */ u("a", {
 						class: "link split-name",
 						href: `#${projectTo(project)}`,
-						children: project
+						children: /* @__PURE__ */ u(ProjectName, { name: project })
 					}), /* @__PURE__ */ u(Btn, {
 						kind: "ghost sm",
 						icon: "plus",
@@ -6211,7 +6788,8 @@ function ProjectView({ project, session, tool = null }) {
 				card: current,
 				tool,
 				onChanged: reload,
-				onGone: sessionBack
+				onGone: sessionBack,
+				onStep: step
 			}, `${project}/${session}`),
 			modals
 		]
@@ -6311,6 +6889,7 @@ function Tree({ g, open, onReuse, onRemove }) {
 			children: [
 				/* @__PURE__ */ u("span", {
 					class: "tree-branch",
+					"aria-hidden": "true",
 					children: depth ? "└─" : ""
 				}),
 				/* @__PURE__ */ u("b", {
@@ -6367,6 +6946,7 @@ function Tree({ g, open, onReuse, onRemove }) {
 				children: [
 					/* @__PURE__ */ u("span", {
 						class: "tree-branch",
+						"aria-hidden": "true",
 						children: "└─"
 					}),
 					/* @__PURE__ */ u("b", {
@@ -6917,7 +7497,7 @@ function Activity() {
 										target ? /* @__PURE__ */ u("b", { children: target }) : null,
 										r.project ? /* @__PURE__ */ u("span", {
 											class: "muted",
-											children: [" · ", r.project]
+											children: [" · ", /* @__PURE__ */ u(ProjectName, { name: r.project })]
 										}) : null,
 										r.via ? /* @__PURE__ */ u("span", {
 											class: "tag",
@@ -9010,6 +9590,7 @@ function Review({ host = "", profile, run: id }) {
 }
 //#endregion
 //#region web/ui/stacks.jsx
+var memberName = (m) => joinMeta(...splitAddr(m.project), m.session);
 var keyOf = (m) => JSON.stringify([m.project, m.session]);
 function StackPicker({ members = [], onOpen }) {
 	const fleet = useFleet();
@@ -9061,7 +9642,7 @@ function StackPicker({ members = [], onOpen }) {
 			}),
 			(data || []).map((p) => {
 				const cards = (p.cards || []).filter((c) => !c.lost && `${p.name} ${c.name} ${c.branch || ""} ${c.msg || ""}`.toLowerCase().includes(query.toLowerCase()));
-				return cards.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(p.name, p.host) }), /* @__PURE__ */ u("div", {
+				return cards.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(splitAddr(p.name)[0], p.host) }), /* @__PURE__ */ u("div", {
 					class: "extra-grid",
 					children: cards.map((c) => {
 						const m = {
@@ -9098,8 +9679,31 @@ function StackPicker({ members = [], onOpen }) {
 		]
 	});
 }
+var NARROW = "(max-width: 760px)";
+function useNarrow() {
+	const q = () => {
+		try {
+			return matchMedia(NARROW).matches;
+		} catch {
+			return false;
+		}
+	};
+	const [narrow, setNarrow] = d(q);
+	h(() => {
+		let m;
+		try {
+			m = matchMedia(NARROW);
+		} catch {
+			return;
+		}
+		const f = () => setNarrow(m.matches);
+		m.addEventListener("change", f);
+		return () => m.removeEventListener("change", f);
+	}, []);
+	return narrow;
+}
 function StackView({ members = [] }) {
-	const fleet = useFleet(), [active, setActive] = d(0);
+	const fleet = useFleet(), [active, setActive] = d(0), narrow = useNarrow();
 	return /* @__PURE__ */ u(PhoneScreen, {
 		title: t("phone.stacks"),
 		parent: "/stack-picker",
@@ -9118,7 +9722,7 @@ function StackView({ members = [] }) {
 				"aria-selected": active === i,
 				class: active === i ? "on" : "",
 				onClick: () => setActive(i),
-				children: joinMeta(m.project, m.session)
+				children: memberName(m)
 			}))
 		}), /* @__PURE__ */ u("div", {
 			class: "stack-columns",
@@ -9127,12 +9731,13 @@ function StackView({ members = [] }) {
 				onFocusIn: () => setActive(i),
 				children: [/* @__PURE__ */ u("header", {
 					class: "row wrap",
-					children: [/* @__PURE__ */ u("h2", { children: joinMeta(m.project, m.session) }), /* @__PURE__ */ u(Btn, {
+					children: [/* @__PURE__ */ u("h2", { children: memberName(m) }), /* @__PURE__ */ u(Btn, {
 						onClick: () => fleet.go(sessionRoute(m.project, m.session)),
 						children: t("phone.openSession")
 					})]
-				}), /* @__PURE__ */ u(SessionView, {
+				}), narrow && i !== active ? null : /* @__PURE__ */ u(SessionView, {
 					embedded: true,
+					quiet: i !== active,
 					project: m.project,
 					name: m.session,
 					onChanged: () => {},
@@ -9203,7 +9808,10 @@ function SignInCard({ row, onChanged = () => {} }) {
 			}),
 			/* @__PURE__ */ u("h3", { children: row.provider }),
 			/* @__PURE__ */ u("p", { children: joinMeta(row.server, row.session, row.host || t("phone.thisHost"), row.project) }),
-			account ? /* @__PURE__ */ u("p", { children: row.profile }) : null,
+			account ? /* @__PURE__ */ u("p", {
+				class: "login-profile",
+				children: row.profile
+			}) : null,
 			row.first_site ? /* @__PURE__ */ u("p", {
 				class: "err",
 				children: t("phone.firstSite")
@@ -9251,25 +9859,33 @@ function SignInCard({ row, onChanged = () => {} }) {
 		]
 	});
 }
-function PendingSignIns() {
+function PendingSignIns({ empty = false }) {
 	const fleet = useFleet();
 	const { data, error, reload } = usePoll(() => fleet.pendingSignIns(), 5e3, []);
-	return /* @__PURE__ */ u(S$1, { children: [error ? /* @__PURE__ */ u("p", {
-		class: "err",
-		role: "alert",
-		children: t("phone.loginReadFailed")
-	}) : null, /* @__PURE__ */ u("div", {
-		class: "extra-grid",
-		children: (data?.items || []).map((r) => /* @__PURE__ */ u(SignInCard, {
-			row: r,
-			onChanged: reload
-		}, r.id))
-	})] });
+	const items = data?.items || [];
+	return /* @__PURE__ */ u(S$1, { children: [
+		error ? /* @__PURE__ */ u("p", {
+			class: "err",
+			role: "alert",
+			children: t("phone.loginReadFailed")
+		}) : null,
+		/* @__PURE__ */ u("div", {
+			class: "extra-grid",
+			children: items.map((r) => /* @__PURE__ */ u(SignInCard, {
+				row: r,
+				onChanged: reload
+			}, r.id))
+		}),
+		empty && data && !items.length ? /* @__PURE__ */ u("p", {
+			class: "empty",
+			children: t("phone.noSignIns")
+		}) : null
+	] });
 }
 function SignIns() {
 	return /* @__PURE__ */ u(PhoneScreen, {
 		title: t("phone.signIns"),
-		children: /* @__PURE__ */ u(PendingSignIns, {})
+		children: /* @__PURE__ */ u(PendingSignIns, { empty: true })
 	});
 }
 //#endregion
@@ -9283,7 +9899,7 @@ function HeldCard({ row }) {
 				status: "need-you",
 				label: t("phone.cardHeld")
 			}),
-			/* @__PURE__ */ u("h3", { children: joinMeta(row.project, row.session || "master") }),
+			/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(row.project)[0], row.session || "master") }),
 			/* @__PURE__ */ u("p", { children: row.text }),
 			/* @__PURE__ */ u("p", {
 				class: "muted",
@@ -9310,10 +9926,10 @@ function Held({ row, project, id }) {
 		error,
 		loading,
 		children: [
-			/* @__PURE__ */ u("p", {
+			rows.length ? /* @__PURE__ */ u("p", {
 				class: "muted",
 				children: t("phone.heldHint")
-			}),
+			}) : null,
 			/* @__PURE__ */ u("div", {
 				class: "extra-grid",
 				children: rows.map((r) => /* @__PURE__ */ u(HeldCard, { row: r }, `${r.project}/${r.id}`))
@@ -9331,11 +9947,21 @@ var replyText = (row, text) => `Re your ledger item ${row.id}: "${row.text}"\n\n
 function Queue() {
 	const fleet = useFleet();
 	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, []);
-	const [row, setRow] = d(null), [text, setText] = d(""), [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const [row, setRow] = d(null), [drafts, setDrafts] = d({}), [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const keyOf = (r) => `${r.project}/${r.id}`;
+	const text = row ? drafts[keyOf(row)] || "" : "";
+	const setText = (v) => {
+		const k = keyOf(row);
+		setDrafts((d) => ({
+			...d,
+			[k]: v
+		}));
+	};
 	const send = async () => {
 		if (!text.trim() || busy) return;
 		setBusy(true);
 		setFailure("");
+		const k = keyOf(row);
 		try {
 			await fleet.act("fleet_send", {
 				project: row.project,
@@ -9343,7 +9969,11 @@ function Queue() {
 				prompt: replyText(row, text)
 			});
 			setRow(null);
-			setText("");
+			setDrafts((d) => {
+				const n = { ...d };
+				delete n[k];
+				return n;
+			});
 			reload();
 		} catch (e) {
 			setFailure(e.message);
@@ -9366,7 +9996,7 @@ function Queue() {
 							class: "pill c-yellow",
 							children: ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state
 						}),
-						/* @__PURE__ */ u("h3", { children: joinMeta(r.project, r.id == null ? null : `#${r.id}`) }),
+						/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`) }),
 						/* @__PURE__ */ u("p", { children: r.text }),
 						/* @__PURE__ */ u("p", {
 							class: "muted",
@@ -9375,7 +10005,7 @@ function Queue() {
 						/* @__PURE__ */ u(Btn, {
 							onClick: () => {
 								setRow(r);
-								setText("");
+								setFailure("");
 							},
 							children: t("phone.reply")
 						})
@@ -9509,7 +10139,7 @@ function Search({ query = "" }) {
 				children: projects.map((p) => /* @__PURE__ */ u("button", {
 					class: "card extra-card",
 					onClick: () => openProject(p),
-					children: [/* @__PURE__ */ u("h3", { children: p.name }), /* @__PURE__ */ u("p", {
+					children: [/* @__PURE__ */ u("h3", { children: splitAddr(p.name)[0] }), /* @__PURE__ */ u("p", {
 						class: "muted",
 						children: p.host || p.path
 					})]
@@ -11209,6 +11839,7 @@ function Assistant({ projects, onClose, chip }) {
 				})]
 			}),
 			/* @__PURE__ */ u(TalkTo, { projects }),
+			/* @__PURE__ */ u(Proposals, {}),
 			choosing && voices ? /* @__PURE__ */ u("div", {
 				class: "as-voices",
 				children: /* @__PURE__ */ u(VoicePicker, {})
@@ -11218,6 +11849,57 @@ function Assistant({ projects, onClose, chip }) {
 				children: /* @__PURE__ */ u(Console, { projects })
 			})
 		]
+	});
+}
+function Proposals() {
+	const fleet = useFleet();
+	const has = typeof fleet.proposals === "function";
+	const { data, reload } = usePoll(() => has ? fleet.proposals() : Promise.resolve([]), has ? 15e3 : 0, [has]);
+	const [busyId, setBusyId] = d("");
+	const list = Array.isArray(data) ? data : [];
+	if (!has || !list.length) return null;
+	const answer = async (p, yes) => {
+		setBusyId(p.id);
+		try {
+			await fleet.answerProposal(p, yes);
+			toast(t(yes ? "as.proposalYesDone" : "as.proposalNoDone", { summary: p.summary }), "good");
+		} catch (e) {
+			toast(String(e && e.message || e), "bad");
+		} finally {
+			setBusyId("");
+			reload();
+		}
+	};
+	return /* @__PURE__ */ u("ul", {
+		class: "as-asks",
+		"aria-label": t("as.proposals"),
+		children: list.map((p) => /* @__PURE__ */ u("li", {
+			class: "as-ask",
+			children: [/* @__PURE__ */ u("span", {
+				class: "grow",
+				children: [
+					t(p.granted ? "as.proposalGranted" : "as.proposal", { summary: p.summary }),
+					" ",
+					/* @__PURE__ */ u("small", {
+						class: "muted",
+						children: p.id
+					})
+				]
+			}), p.granted ? null : /* @__PURE__ */ u("span", {
+				class: "as-ask-btns",
+				children: [/* @__PURE__ */ u(Btn, {
+					kind: "primary sm",
+					disabled: busyId === p.id,
+					onClick: () => answer(p, true),
+					children: t("as.proposalYes")
+				}), /* @__PURE__ */ u(Btn, {
+					kind: "sm",
+					disabled: busyId === p.id,
+					onClick: () => answer(p, false),
+					children: t("as.proposalNo")
+				})]
+			})]
+		}, p.id))
 	});
 }
 function HomeAgent({ projects }) {
@@ -11237,6 +11919,7 @@ function HomeAgent({ projects }) {
 					children: working(state) ? stateWord(S, state) : ""
 				})] })]
 			}),
+			/* @__PURE__ */ u(Proposals, {}),
 			/* @__PURE__ */ u(Console, {
 				projects,
 				big: true,
@@ -11299,6 +11982,211 @@ function Launcher({ onOpen }) {
 				]
 			})
 		]
+	});
+}
+//#endregion
+//#region web/ui/accounts.jsx
+var POLL_MS = 45e3;
+var FLOOR_MS = 1e4;
+var TICK_MS = 5e3;
+var RED = /* @__PURE__ */ new Set([
+	"out",
+	"exhausted",
+	"needs-login",
+	"blocked"
+]);
+var workers = (x) => t(`acct.workers.${[
+	"paused",
+	"running",
+	"mixed"
+].includes(x && x.workers) ? x.workers : "paused"}`);
+var until = (at) => at ? t("acct.until", { at }) : "";
+var hue = (a) => RED.has(a.kind) ? "red" : a.kind === "stale" ? "yellow" : a.active ? a.stale ? "yellow" : "green" : "grey";
+function win(w, label, short = false) {
+	if (!w) return `${label} —`;
+	return short ? `${label} ${w.pct}% (${label === "5h" ? w.left : w.day})` : t("acct.resets", {
+		label,
+		pct: w.pct,
+		at: w.resets_at,
+		read: w.read
+	});
+}
+function usageLines(u) {
+	if (!u) return [];
+	if (!u.enabled) return [{
+		profile: "",
+		text: u.off || t("acct.off"),
+		color: "grey"
+	}];
+	const ps = u.profiles || [];
+	if (!ps.length) return [{
+		profile: "",
+		text: t("acct.none"),
+		color: "grey"
+	}];
+	return ps.map((p) => {
+		const profile = ps.length > 1 ? p.profile : "";
+		if (p.exhausted) return {
+			profile,
+			text: t("acct.exhausted", {
+				until: until(p.exhausted.until_at),
+				workers: workers(p.exhausted)
+			}),
+			color: "red"
+		};
+		if (p.unsaved) return {
+			profile,
+			text: t("acct.unsaved"),
+			color: "yellow"
+		};
+		const a = (p.accounts || []).find((x) => x.active);
+		if (!a) return {
+			profile,
+			text: t("acct.noActive"),
+			color: "grey"
+		};
+		if (a.kind !== "active") return {
+			profile,
+			text: `${a.name} · ${a.state}`,
+			color: hue(a)
+		};
+		const read = a.stale ? ` · ${t("acct.read", { when: (a.seven_day || a.five_hour || {}).read || t("acct.never") })}` : "";
+		return {
+			profile,
+			text: `${a.name} · ${win(a.five_hour, "5h", true)} · ${win(a.seven_day, "7d", true)}${read}`,
+			color: hue(a)
+		};
+	});
+}
+function useUsage(fleet) {
+	const [u, setU] = d(null);
+	h(() => {
+		if (!fleet.usage) return void 0;
+		let live = true, busy = false, wanted = false, at = 0;
+		const read = () => {
+			busy = true;
+			wanted = false;
+			Promise.resolve().then(() => fleet.usage()).then((j) => {
+				if (live) setU(j);
+			}, () => {}).finally(() => {
+				busy = false;
+				at = Date.now();
+			});
+		};
+		const tick = () => {
+			if (busy || document.hidden) return;
+			const since = Date.now() - at;
+			if (since >= POLL_MS || wanted && since >= FLOOR_MS) read();
+		};
+		const soon = () => {
+			wanted = true;
+		};
+		const shown = () => {
+			if (!document.hidden) soon();
+		};
+		read();
+		const iv = setInterval(tick, TICK_MS);
+		addEventListener("focus", soon);
+		document.addEventListener("visibilitychange", shown);
+		return () => {
+			live = false;
+			clearInterval(iv);
+			removeEventListener("focus", soon);
+			document.removeEventListener("visibilitychange", shown);
+		};
+	}, [fleet]);
+	return u;
+}
+function AccountsLine() {
+	const u$1 = useUsage(useFleet());
+	const [open, setOpen] = d(false);
+	const lines = usageLines(u$1);
+	if (!lines.length) return null;
+	const kids = lines.map((l, i) => /* @__PURE__ */ u("div", {
+		class: `u-line u-${l.color}`,
+		children: [l.profile ? /* @__PURE__ */ u("span", {
+			class: "u-prof",
+			children: l.profile
+		}) : null, /* @__PURE__ */ u("span", {
+			class: "u-text",
+			children: l.text
+		})]
+	}, i));
+	if (!u$1.enabled) return /* @__PURE__ */ u("div", {
+		class: "usage",
+		children: kids
+	});
+	return /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("button", {
+		type: "button",
+		class: "usage",
+		"aria-haspopup": "dialog",
+		title: t("acct.open"),
+		onClick: () => setOpen(true),
+		children: kids
+	}), open ? /* @__PURE__ */ u(AccountsDialog, {
+		u: u$1,
+		onClose: () => setOpen(false)
+	}) : null] });
+}
+function AccountsDialog({ u: u$2, onClose }) {
+	const ps = u$2.profiles || [];
+	return /* @__PURE__ */ u(Modal, {
+		title: t("acct.title"),
+		onClose,
+		children: /* @__PURE__ */ u("div", {
+			class: "modal-body usage-list",
+			children: [
+				/* @__PURE__ */ u("p", { children: t("acct.threshold", { pct: u$2.threshold }) }),
+				!ps.length ? /* @__PURE__ */ u("p", { children: t("acct.noProfile") }) : null,
+				ps.map((p) => /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h3", {
+					class: "u-prof",
+					children: [p.profile, p.unsaved ? t("acct.profUnsaved") : p.exhausted ? t("acct.profExhausted", {
+						until: until(p.exhausted.until_at),
+						workers: workers(p.exhausted)
+					}) : ""]
+				}), !(p.accounts || []).length ? /* @__PURE__ */ u("p", { children: t("acct.noAccounts") }) : /* @__PURE__ */ u(S$1, { children: [
+					p.accounts.length < 2 ? /* @__PURE__ */ u("p", { children: t("acct.one") }) : null,
+					p.pin ? /* @__PURE__ */ u("p", {
+						class: "u-pin",
+						children: t("acct.pin", {
+							account: p.pin.account,
+							at: p.pin.until_at
+						})
+					}) : null,
+					p.accounts.map((a) => /* @__PURE__ */ u("div", {
+						class: `u-acct u-${hue(a)}`,
+						children: [
+							/* @__PURE__ */ u("div", {
+								class: "u-head",
+								children: [/* @__PURE__ */ u("span", {
+									class: "u-name",
+									children: [a.active ? "* " : "", a.name]
+								}), /* @__PURE__ */ u("span", {
+									class: "u-state",
+									children: [a.state, a.active && a.state !== "active" ? t("acct.activeTag") : ""]
+								})]
+							}),
+							/* @__PURE__ */ u("div", {
+								class: "u-win",
+								children: win(a.five_hour, "5h")
+							}),
+							/* @__PURE__ */ u("div", {
+								class: "u-win",
+								children: win(a.seven_day, "7d")
+							}),
+							a.fix ? /* @__PURE__ */ u("p", {
+								class: "u-fix",
+								children: a.fix
+							}) : null
+						]
+					}, a.name))
+				] })] }, p.profile)),
+				/* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("acct.readOnly")
+				})
+			]
+		})
 	});
 }
 //#endregion
@@ -11668,7 +12556,7 @@ function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = 
 	if (own) main = own(route);
 	else if (home) main = /* @__PURE__ */ u(Home, {
 		projects,
-		children: /* @__PURE__ */ u(HomeAgent, { projects })
+		children: [/* @__PURE__ */ u(AccountsLine, {}), /* @__PURE__ */ u(HomeAgent, { projects })]
 	});
 	else if (SHARED.includes(route.view) && !offers(route.view)) main = /* @__PURE__ */ u(NotHere, { view: route.view });
 	else main = SCREENS[route.view](route, { projects });
@@ -12137,6 +13025,63 @@ var adapterExtras = {
 	automationsSeen: api$1.automationsSeen
 };
 //#endregion
+//#region web/src/lead.js
+function makeLead({ grid, projects, act, remote, wait, noLead, tries = 20, every = 1500 }) {
+	return async function lead(project) {
+		const find = async () => ((await grid(project)).cards || []).find((c) => c.lead);
+		const m = await find();
+		let did = null;
+		if (!m) {
+			const p = ((await projects()).projects || []).find((x) => x.name === project);
+			if (!p || remote(project)) throw noLead(project);
+			did = "start";
+			await act("fleet_project_add", {
+				path: p.path,
+				name: p.name,
+				profile: p.profile,
+				start: true
+			});
+		} else if (m.lost || m.exited) {
+			did = "reopen";
+			await act("fleet_reopen", {
+				project,
+				session: m.name
+			});
+		} else if (m.asleep) {
+			did = "wake";
+			await act("fleet_wake", {
+				project,
+				session: m.name
+			});
+		} else if (m.status === "parked") {
+			did = "resume";
+			await act("fleet_resume", {
+				project,
+				session: m.name
+			});
+		}
+		if (!did) return {
+			ok: true,
+			started: null,
+			lead: m.name
+		};
+		for (let i = 0; i < tries; i++) {
+			await wait(every);
+			const n = await find().catch(() => null);
+			if (n && !n.lost && !n.asleep && !["starting", "unknown"].includes(n.status)) return {
+				ok: true,
+				started: did,
+				lead: n.name
+			};
+		}
+		return {
+			ok: true,
+			started: did,
+			lead: m ? m.name : "master"
+		};
+	};
+}
+//#endregion
 //#region web/src/adapter.js
 var PASSKEY = /* @__PURE__ */ new Set([
 	"fleet_spawn",
@@ -12195,6 +13140,26 @@ function phoneAdapter({ lock, go, place }) {
 		throw e;
 	};
 	api$1.getAutomations().catch(noted("automations")).catch(() => {});
+	let termOn = null, termAsked = false, termReading = null;
+	const readTerm = () => {
+		termAsked = true;
+		return termReading ||= api$1.getTerm().then((j) => {
+			termOn = !!j.enabled;
+		}, () => {}).finally(() => {
+			termReading = null;
+		});
+	};
+	const termOff = () => Object.assign(new Error(t("term.off")), {
+		status: 403,
+		needs: "enable"
+	});
+	const openTerm = (project, kind, size) => {
+		const asking = passkey.available() && passkey.registered() ? passkey.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
+		return guard(asking.then((a) => api$1.termOpen(project, size, a, kind))).catch((e) => {
+			if (e && e.needs === "enable") termOn = false;
+			throw e;
+		});
+	};
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -12238,15 +13203,20 @@ function phoneAdapter({ lock, go, place }) {
 			hosts: j.hosts || []
 		};
 	}
-	let jarvisAt = 0, jarvis = null;
+	let jarvisAt = 0, jarvis = null, jarvisOff = false;
+	const noteJarvis = (j) => {
+		jarvisAt = Date.now();
+		jarvis = j && j.present !== false && j.project ? j.project : null;
+		return j;
+	};
 	async function jarvisProject() {
-		if (Date.now() - jarvisAt < 6e4) return jarvis;
+		if (jarvisOff || Date.now() - jarvisAt < 6e4) return jarvis;
 		jarvisAt = Date.now();
 		try {
-			const j = await api$1.getJarvis();
-			jarvis = j && j.present !== false && j.project ? j.project : null;
-		} catch {
+			noteJarvis(await api$1.getJarvis());
+		} catch (e) {
 			jarvis = null;
+			if (e?.status === 404) jarvisOff = true;
 		}
 		return jarvis;
 	}
@@ -12255,59 +13225,14 @@ function phoneAdapter({ lock, go, place }) {
 		const assertion = PASSKEY.has(tool) ? await assertFor(`${tool} ${args.session || args.name || args.path || ""}`.trim()) : null;
 		return guard(api$1.verb(tool, args, assertion));
 	}
-	async function lead(project) {
-		const find = async () => ((await guard(api$1.getGrid(project))).cards || []).find((c) => c.lead);
-		const m = await find();
-		let did = null;
-		if (!m) {
-			const p = ((await api$1.getProjects()).projects || []).find((x) => x.name === project);
-			if (!p || remote(project)) throw new Error(t("phone.noLead", { project }));
-			did = "start";
-			await act("fleet_project_add", {
-				path: p.path,
-				name: p.name,
-				profile: p.profile,
-				start: true
-			});
-		} else if (m.lost || m.exited) {
-			did = "reopen";
-			await act("fleet_reopen", {
-				project,
-				session: m.name
-			});
-		} else if (m.asleep) {
-			did = "wake";
-			await act("fleet_wake", {
-				project,
-				session: m.name
-			});
-		} else if (m.status === "parked") {
-			did = "resume";
-			await act("fleet_resume", {
-				project,
-				session: m.name
-			});
-		}
-		if (!did) return {
-			ok: true,
-			started: null,
-			lead: m.name
-		};
-		for (let i = 0; i < 20; i++) {
-			await new Promise((r) => setTimeout(r, 1500));
-			const n = await find().catch(() => null);
-			if (n && !n.lost && !n.asleep && !["starting", "unknown"].includes(n.status)) return {
-				ok: true,
-				started: did,
-				lead: n.name
-			};
-		}
-		return {
-			ok: true,
-			started: did,
-			lead: m ? m.name : "master"
-		};
-	}
+	const lead = makeLead({
+		grid: (project) => guard(api$1.getGrid(project)),
+		projects: () => api$1.getProjects(),
+		act,
+		remote,
+		wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+		noLead: (project) => new Error(t("phone.noLead", { project }))
+	});
 	const tasks = createTasks({
 		projects: async () => ((await api$1.getProjects()).projects || []).map((p) => p.name),
 		jarvis: jarvisProject,
@@ -12331,22 +13256,46 @@ function phoneAdapter({ lock, go, place }) {
 		})) : v])),
 		projects,
 		grid: (project) => guard(api$1.getGrid(project)),
-		session: async (project, name, before) => {
-			const r = await guard(api$1.getSession(project, name, before));
-			return {
+		session: async (project, name, before, opts) => {
+			const r = await guard(api$1.getSession(project, name, before, opts || {}));
+			return r && r.notModified ? r : {
 				...r,
 				queued: r.queue || r.queued || []
 			};
 		},
+		heldFor: api$1.heldFor,
+		usage: () => guard(api$1.getUsage()),
 		pane: (project, name) => guard(api$1.getPane(project, name)),
 		act,
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,
 		lead,
-		canTerm: (project) => server() && !remote(project),
+		canTerm: (project) => {
+			if (server() && !termAsked) readTerm();
+			return server() && !remote(project);
+		},
+		termWhy: (project) => remote(project) ? t("phone.noTermRemote", { host: String(project).split("@").pop() }) : "",
+		proposals: async () => {
+			if (jarvisOff) return [];
+			try {
+				const j = noteJarvis(await guard(api$1.getJarvis()));
+				return j && j.present !== false && j.pending || [];
+			} catch (e) {
+				if (e?.status === 404) {
+					jarvisOff = true;
+					return [];
+				}
+				throw e;
+			}
+		},
+		answerProposal: async (p, yes) => guard(api$1.jarvisConfirm(p.id, yes ? "yes" : "no", yes ? await assertFor(`jarvis yes ${p.id}`) : null)),
 		termOpen: (project, kind, size) => {
-			const asking = passkey.available() && passkey.registered() ? passkey.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
-			return guard(asking.then((a) => api$1.termOpen(project, size, a, kind)));
+			if (termReading) return termReading.then(() => termOn === false ? Promise.reject(termOff()) : openTerm(project, kind, size));
+			if (termOn === false) {
+				readTerm();
+				return Promise.reject(termOff());
+			}
+			return openTerm(project, kind, size);
 		},
 		termSocket: api$1.termSocket,
 		go,
@@ -12389,11 +13338,11 @@ function phoneAdapter({ lock, go, place }) {
 						why: t("phone.termFixtures")
 					};
 					try {
-						const j = await guard(api$1.getTerm());
+						termOn = !!(await guard(api$1.getTerm())).enabled;
 						return {
 							ready: true,
-							on: !!j.enabled,
-							why: j.enabled ? t("phone.termOn") : ""
+							on: termOn,
+							why: termOn ? t("phone.termOn") : ""
 						};
 					} catch (e) {
 						return {
@@ -12405,6 +13354,7 @@ function phoneAdapter({ lock, go, place }) {
 				set: async (on) => {
 					const a = on && passkey.registered() ? await passkey.fresh("terminal on") : null;
 					await guard(api$1.termEnable(on, a));
+					termOn = !!on;
 				}
 			},
 			hosts: {
@@ -12704,6 +13654,82 @@ function Bar({ error, okAt }) {
 		children: okAt ? t("phone.offline", { ago: ago((Date.now() - okAt) / 1e3) }) : t("phone.offlineNever")
 	});
 }
+var atHome = () => /^#?\/?$/.test(location.hash || "");
+function PushOffer() {
+	const [want, setWant] = d(false);
+	const [home, setHome] = d(atHome);
+	h(() => {
+		const f = () => setHome(atHome());
+		addEventListener("hashchange", f);
+		return () => removeEventListener("hashchange", f);
+	}, []);
+	h(() => {
+		let live = true;
+		(async () => {
+			let laterAt = 0;
+			try {
+				laterAt = Number(localStorage.getItem("gf.push.later")) || 0;
+			} catch {}
+			const base = {
+				server: api$1.mode() === "server",
+				token: api$1.haveToken(),
+				blocked: blockedReason(t),
+				laterAt
+			};
+			if (!offerWanted({
+				...base,
+				on: false
+			})) return;
+			let on = true;
+			try {
+				on = !!(await state(t)).on;
+			} catch {}
+			if (live) setWant(offerWanted({
+				...base,
+				on
+			}));
+		})();
+		return () => {
+			live = false;
+		};
+	}, []);
+	if (!want || !home) return null;
+	const turnOn = async () => {
+		try {
+			await enable(t);
+			setWant(false);
+			toast(t("push.onNow"), "good");
+		} catch (e) {
+			if (permission() === "denied") setWant(false);
+			toast(String(e && e.message || e), "bad");
+		}
+	};
+	const later = () => {
+		try {
+			localStorage.setItem(LATER_KEY, String(Date.now()));
+		} catch {}
+		setWant(false);
+	};
+	return /* @__PURE__ */ u("div", {
+		class: "notify-bar",
+		role: "status",
+		children: [/* @__PURE__ */ u("span", {
+			class: "grow",
+			children: t("push.offer")
+		}), /* @__PURE__ */ u("span", {
+			class: "notify-btns",
+			children: [/* @__PURE__ */ u(Btn, {
+				kind: "primary sm",
+				onClick: turnOn,
+				children: t("push.turnOn")
+			}), /* @__PURE__ */ u(Btn, {
+				kind: "ghost sm",
+				onClick: later,
+				children: t("push.notNow")
+			})]
+		})]
+	});
+}
 function Phone() {
 	const fleet = useFleet();
 	const { data, error } = usePoll(() => fleet.projects(), 5e3, []);
@@ -12719,10 +13745,10 @@ function Phone() {
 		sub: t("lock.tagline"),
 		projects: data?.projects,
 		hosts: data?.hosts,
-		frame: { banner: /* @__PURE__ */ u(Bar, {
+		frame: { banner: /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Bar, {
 			error,
 			okAt: okAt.current
-		}) }
+		}), /* @__PURE__ */ u(PushOffer, {})] }) }
 	});
 }
 function Root() {

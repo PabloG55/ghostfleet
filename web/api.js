@@ -582,7 +582,7 @@ export async function postShotsVerdict(body) {
 }
 // lib/shots.mjs runState, for the FIXTURE backend only: on a server the state always comes
 // from the Mac. A second spelling of one rule is a rule that drifts, so
-// test/helpers/reviews-check.mjs gives both the same verdicts and compares what they say.
+// test/helpers/phone-check.mjs gives both the same verdicts and compares what they say.
 export function shotsState(m, v) {
   v = v || {};
   const note = (n) => String(((v.chapters || {})[String(n)]) || '').trim();

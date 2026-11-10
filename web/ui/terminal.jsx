@@ -45,7 +45,7 @@ export const toolTo = (project, session, kind) => `${baseTo(project, session)}/$
 // read at sign-in can be older than the grant (an admin took it away since), and the server is
 // the one that knows. A tab it refused is hidden rather than offered again.
 const refused = new Set();
-const offers = (fleet, project) => typeof fleet.canTerm === 'function' && typeof fleet.termOpen === 'function'
+export const offers = (fleet, project) => typeof fleet.canTerm === 'function' && typeof fleet.termOpen === 'function'
   && typeof fleet.termSocket === 'function' && !refused.has(project) && !!fleet.canTerm(project);
 
 // The two tabs, for a tab bar that already exists (the session's). Nothing for a person who
@@ -101,14 +101,15 @@ function Notice({ n, kind, onAgain, fleet }) {
   const title = {
     idle: t('term.idle', { min: n.min }), takeover: t(`term.takeover.${kind}`), failed: t('term.failed'),
     dropped: t('term.dropped'), ended: t(`term.ended.${kind}`), noEditor: t('term.noEditor'),
-    password: t('term.password'), signedOut: t('term.signedOut'), refused: t('term.refused'),
+    password: t('term.password'), signedOut: t('term.signedOut'), refused: t('term.refused'), off: t('term.off'),
   }[n.kind] || t('term.failed');
   const why = { idle: t('term.idleWhy'), takeover: t('term.takeoverWhy'), password: t('term.passwordWhy'),
                 signedOut: t('term.signedOutWhy'), failed: t('term.failedWhy'), dropped: t('term.droppedWhy'),
-                ended: t('term.endedWhy') }[n.kind] || n.why || '';
+                ended: t('term.endedWhy'), off: t('term.offWhy') }[n.kind] || n.why || '';
   let act = <Btn kind="primary sm" onClick={onAgain}>{t(n.kind === 'idle' || n.kind === 'takeover' ? 'term.reconnect' : 'term.openAgain')}</Btn>;
   if (n.kind === 'password') act = fleet.changePassword ? <Btn kind="primary sm" onClick={() => fleet.changePassword()}>{t('term.changePassword')}</Btn> : null;
   if (n.kind === 'signedOut') act = fleet.signIn ? <Btn kind="primary sm" onClick={() => fleet.signIn()}>{t('term.signIn')}</Btn> : null;
+  if (n.kind === 'off') act = <Btn kind="primary sm" onClick={() => fleet.go('/settings')}>{t('term.openSettings')}</Btn>;
   return (
     <div class={`tool-note n-${n.kind}`} role="status">
       <div class="tool-note-text"><b>{title}</b>{why ? <span>{why}</span> : null}</div>
@@ -174,6 +175,9 @@ function Panel({ project, session, kind }) {
     const s = e && e.status;
     if (s === 404) { refused.add(project); away(back); return; }
     if (s === 401) return say('signedOut');
+    // A phone's own switch for the terminal (fleet-serve /api/term/enable), which only this device
+    // can turn on: not a refusal to show, a setting to point at.
+    if (s === 403 && e.needs === 'enable') return say('off');
     if (s === 403) {
       // The temporary-password gate answers before the terminal is reached; anything else
       // forbidden here is an origin or a header, which the person cannot fix from this page.

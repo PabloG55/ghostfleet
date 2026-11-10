@@ -6,8 +6,10 @@ the desk's keys, the words and the brand's pieces. Preact, MIT.
 
 Two apps are built on it. The team app (`ee/team/`, under the Team License) wraps these
 screens with its people: sign-in, roles, owners, the company AI account, usage caps and
-admin. The phone client (`web/app.js`) takes the keyboard rules today and, in phase 2, the
-screens too, over fleet-serve's API. Neither the screens nor anything else in this folder
+admin. The phone (`web/src/phone.jsx`, built to `web/phone.js`) is these screens over
+fleet-serve's API, behind its passkey lock. Both apps mount every shared page from one route
+table (`app.jsx`), and `ee/team/test/one-base.test.mjs` fails when they drift apart. Neither the
+screens nor anything else in this folder
 may import from `ee/`: core never depends on the licensed half, and the licensed half
 imports core by relative path.
 
@@ -30,9 +32,20 @@ vite, and the root vite that builds `web/screens.js`).
 | `ui.jsx` | buttons, pills, `Modal`, `Confirm`, toasts, `usePoll`, `Markdown` |
 | `history.js` | one history for every way back, framework-free: `go`, `back`, each entry's scroll and state |
 | `back.jsx` | `BackLink` (names where it goes), `useKept` (a screen's state, kept per history entry) |
-| `keys.js` | the keyboard's rules, framework-free (the phone client imports these) |
+| `keys.js` | the keyboard's rules, framework-free |
 | `keyboard.jsx` | the keyboard for the Preact screens: one listener, each screen's keys |
-| `i18n.js`, `words/` | the words in English and Spanish, and `t()` |
+| `transcript.js` | an open chat's reads: one at a time, the newest answer wins, and it converges without being reopened |
+| `drafts.js` | a draft per session, kept through leaving it, a reload and a relaunch, until a send of it succeeds |
+| `agent.js`, `assistant.jsx`, `tasks.jsx`, `resolve.js` | the one assistant: the home card, the panel, what it was asked and where it stands, and Jarvis's calls waiting on a yes |
+| `voice.js`, `voices.jsx`, `speakable.js` | hearing and speaking, the voices to choose from, and what a reply sounds like |
+| `accounts.jsx` | which Claude login each profile is spending, read only, at the top of the first page (an adapter with `usage`) |
+| `queue.jsx`, `held.jsx`, `sign-ins.jsx` | what the leads hold for the person, a held wake, and the sign-ins waiting on someone |
+| `reviews.jsx`, `stacks.jsx`, `search.jsx`, `automations.jsx` | recorded runs and their verdicts, several sessions at once, finding a project or a session, and automations |
+| `phone-screen.jsx`, `phone-places.js` | the frame those screens share, and their names for the back link |
+| `views.jsx` | Activity and Settings |
+| `gate.jsx` | the card in front of the app: the team's sign-in and the phone's passkey lock look like one product |
+| `select.jsx` | the app's own select and popover. No screen draws a native `<select>`: phone-check counts them on every page at both widths, and the team's `select.test.mjs` reads the source and the built bundle |
+| `i18n.js`, `lang.js`, `words/` | the words in English and Spanish, `t()`, and which one the page shows |
 | `ui.css`, `skin.css` | the shared rules, and the shared skin over them |
 
 ## The adapter
@@ -43,8 +56,8 @@ A shared screen never calls an `/api` of its own. An app wraps them once:
 <FleetProvider adapter={myAdapter}>…</FleetProvider>
 ```
 
-and every screen reads `useFleet()`. The team app's adapter is `ee/team/web/src/adapter.js`.
-Phase 2 writes the phone client's, over fleet-serve. An adapter is a plain object:
+and every screen reads `useFleet()`. The team app's adapter is `ee/team/web/src/adapter.js`;
+the phone's is `web/src/adapter.js`, over fleet-serve. An adapter is a plain object:
 
 | Member | Shape | What the screens use it for |
 | --- | --- | --- |
@@ -60,6 +73,10 @@ Phase 2 writes the phone client's, over fleet-serve. An adapter is a plain objec
 | `termOpen(project, kind, size)` | optional, → `{ ticket, session }` | a ticket for the project's shell (`'term'`) or editor (`'edit'`); a refusal throws an `Error` carrying its HTTP `status` |
 | `termSocket(ticket)` | optional, → `WebSocket` | the socket for one ticket, with `binaryType` `'arraybuffer'` |
 | `termAccount()` | optional, → `{ mustChange }` or `null` | who is signed in now, to tell a temporary password from another refusal |
+| `termWhy(project)` | optional, → string | why a project has no Terminal or Editor tab here, in one line under its header (the phone: another machine's project); `''` when it has them |
+| `usage()` | optional, → `/api/usage` | which Claude login each profile is spending, for the accounts line on the first page; read only |
+| `proposals()` | optional, → `[{ id, summary, granted? }]` | Jarvis's calls waiting on a yes, listed under the assistant; `[]` when Jarvis is off |
+| `answerProposal(p, yes)` | optional | answer one; the phone asks for a fresh passkey before a yes, never before a no |
 | `signIn()`, `changePassword()` | optional | the app's own sign-in and password screens, offered by a closed tab's notice |
 | `go(to, { replace? })` | | navigate to a hash route (`'/p/acme-web'`); pass `history.js`'s `go`, which never pushes the screen you are on and keeps `from` on a replace |
 | `place(route)` | optional | what an app's own route is called on a back link (`'/activity'` → "Activity"); the shared routes are named already |
@@ -120,10 +137,13 @@ there, which is exactly what a single-user app is.
 (`shell.jsx` lists them): the wordmark, the tab title, extra nav links, a banner, what
 floats over the page, and `settings`, the route `,` opens. The frame also mounts the keyboard.
 
-The shared routes are `#/` (home), `#/map`, `#/p/<project>` and
-`#/p/<project>/s/<session>`, and `sharedRoute(hash)` parses them. Either of the last two
-followed by `/term` or `/edit` is the project's Terminal or Editor tab. An app adds its own beside
-them: the team app has `#/automations`, `#/activity`, `#/settings` and `#/admin/…`.
+The routes are `#/` (home), `#/map`, `#/p/<project>` and `#/p/<project>/s/<session>`, and
+`sharedRoute(hash)` parses them. Either of the last two followed by `/term` or `/edit` is the
+project's Terminal or Editor tab. Beside them every app mounts the same pages from `app.jsx`'s
+table: `#/automations`, `#/reviews`, `#/stack-picker` and `#/stack/…`, `#/queue`, `#/held`,
+`#/sign-ins`, `#/search?q=…`, `#/activity` and `#/settings`. A page the server behind an app does
+not have (`offers(view)` false) has no link, and its address says so. The team app adds its own:
+`#/admin/…`.
 
 ## Back and the history
 
@@ -221,15 +241,18 @@ Digits count in the fleet's own order (the desk's), not the board's order of urg
 
 What the desk has and these screens do not, and why:
 
+Two more on a session, where the app offers the tools (`canTerm`): **Ctrl-a t** opens the
+project's Terminal tab and **Ctrl-a n** its Editor, the desk's other spelling of Ctrl-t and Ctrl-n,
+which the browser keeps for a tab and a window. The search page takes `/` to its field, a review
+takes space, ←/→ and `a`, and the stack picker opens on ⏎.
+
 | Desk key | Why not here |
 | --- | --- |
 | H/J/K/L (reorder) | there is no order to change here, and fleet-serve does not serve a reorder yet (`fleet_order` and `fleet_project_order` are in its `NOT_YET` list) |
 | s, p/P, x on a card | scheduling, pausing and stopping are the session page's buttons; a card carries no verbs |
-| t, Ctrl-x, Ctrl-a x (the stack) | there is no stack on these screens yet |
+| t, Ctrl-x, Ctrl-a x (the stack) | the stack is a page (Stacks in the sidebar), not a key yet |
 | w (new worktree) | worktrees are made by a new session, not on their own |
-| Ctrl-a t, Ctrl-a n (terminal, editor) | the terminal here is read-only; the terminal and editor come in a later phase |
-| / on a project's sessions; search n/N/⌫ | there is no search over sessions |
-| the queue and reviews keys | there is no queue or reviews screen |
+| / on a project's sessions; search n/N/⌫ | finding is the Search page, which looks through every project and machine at once |
 | ⏎ on Projects = its master | ⏎ is the focused link's own (it opens the project); the digit is the master |
 | any other key cancels a question | Tab has to walk the dialog |
 | c, Ctrl-c Ctrl-c, Ctrl-a Ctrl-a, Ctrl-t/n/w | no meaning here, or the browser's own |
@@ -237,29 +260,17 @@ What the desk has and these screens do not, and why:
 A screen adds its keys with `useKeys((key, event, layer) => took)`. The screen mounted last
 is asked first. What no screen takes falls to the keys every screen shares.
 
-## Not here yet
+## The screens the phone brought
 
-The **assistant** and **automations** are still in `ee/team/web/src/`:
+There is one assistant and one set of automations, here, for both apps. The assistant reaches
+each app's server through the adapter; installing or deleting a voice is the team app's alone,
+for admins, through an optional member, and an adapter without it draws no such button.
 
-- The assistant talks through the team's company AI account and installs voices on the team
-  server.
-- Automations read and write the team server's store in five places, and only an admin may
-  edit them.
-- The phone client already has an automations screen of its own (`web/src/automations.jsx`),
-  over fleet-serve.
-
-Moving either means growing the adapter by those calls, and that is phase 2's to define
-against fleet-serve, where the two automations screens become one.
-
-### The phone-only screens' members
-
-These phase 2 screens are shared by both apps despite the heading: `Automations`,
-`Reviews` / `Review`, `StackPicker` / `StackView`, `Queue`, `Held`, `Search` /
-`SearchInput`, and `SignIns` / `PendingSignIns` / `SignInCard`. Each file suggests its
-hash routes. The phone spreads `web/src/adapter-extras.js`'s `adapterExtras` into its
-adapter; the team adapter includes `teamScreenExtras(ctx)`. Neither app's routes are
-mounted by these components. This supersedes the earlier “Not here yet” notes for
-these screens; the assistant remains app-owned.
+`Automations`, `Reviews` / `Review`, `StackPicker` / `StackView`, `Queue`, `Held`, `Search` /
+`SearchInput`, and `SignIns` / `PendingSignIns` / `SignInCard` were the phone's own screens and
+are both apps' now, mounted from `app.jsx`'s route table. The phone spreads
+`web/src/adapter-extras.js`'s `adapterExtras` into its adapter; the team adapter includes
+`teamScreenExtras(ctx)`.
 
 `phone-places.js` exports `SCREEN_PLACES`, a route-to-name map whose getters read
 English or Spanish through the shared i18n source, and `screenPlace(route)` for
@@ -267,8 +278,8 @@ nested routes, hashes and queries. Both apps can compose their adapter's naming:
 `place: route => screenPlace(route) || appPlace(route)`. For example,
 `/stack-picker` names “Stacks” / “Grupos de sesiones”, `/queue` names “Queue” /
 “Cola”, and `/reviews` names “Reviews” / “Revisiones”. Route and sidebar wiring
-remains with the apps. The fixture uses this helper so its back links show the same
-names that integration will use.
+is `app.jsx`'s, for both apps, and the fixture uses this helper so its back links show the
+same names the apps show.
 
 | Member | Shape | What it is for | fleet-serve endpoint |
 | --- | --- | --- | --- |
@@ -298,7 +309,7 @@ members retain the existing team endpoints (AI uses `/api/automations/ai`).
 
 `StackView` takes `members: [{ project, session }]`; the picker navigates to
 `/stack/<URI-encoded JSON members>`, or calls its `onOpen(members)` prop. `Review`
-takes `{ host, profile, run }`; its suggested route uses `-` for an empty host.
+takes `{ host, profile, run }`; its route uses `-` for an empty host.
 `Search` takes an optional initial `query`, preserving it per history entry.
 `SearchInput` takes `{ value, onChange, onOpen? }`. Stack conversations reuse
 `SessionView` and the existing adapter members, including `session`, `pane`, `act`

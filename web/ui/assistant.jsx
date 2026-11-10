@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn } from './ui.jsx';
+import { STATUS, StatusMark, statusOf, Btn, usePoll, toast } from './ui.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -168,9 +168,43 @@ export function Assistant({ projects, onClose, chip }) {
         <span class="as-head-end">{chip}{voices ? <Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn> : null}<button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
       </header>
       <TalkTo projects={projects} />
+      <Proposals />
       {choosing && voices ? <div class="as-voices"><VoicePicker /></div> : <><Sea /><Feed empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>
+  );
+}
+
+// WHAT JARVIS WANTS TO DO AND IS WAITING ON A YES FOR (docs/jarvis.md): each is a call it tried that
+// the tool refused until the owner says yes — spoken, typed at the desk, or here. It was the old
+// phone's Jarvis screen; with one assistant it is drawn wherever the assistant is, the home card
+// and the panel. A server with no Jarvis gives the adapter no `proposals`, and nothing is drawn.
+export function Proposals() {
+  const fleet = useFleet();
+  const has = typeof fleet.proposals === 'function';
+  const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has]);
+  const [busyId, setBusyId] = useState('');
+  const list = Array.isArray(data) ? data : [];
+  if (!has || !list.length) return null;
+  const answer = async (p, yes) => {
+    setBusyId(p.id);
+    try {
+      await fleet.answerProposal(p, yes);
+      toast(t(yes ? 'as.proposalYesDone' : 'as.proposalNoDone', { summary: p.summary }), 'good');
+    } catch (e) { toast(String((e && e.message) || e), 'bad'); }
+    finally { setBusyId(''); reload(); }
+  };
+  return (
+    <ul class="as-asks" aria-label={t('as.proposals')}>
+      {list.map(p => (
+        <li key={p.id} class="as-ask">
+          <span class="grow">{t(p.granted ? 'as.proposalGranted' : 'as.proposal', { summary: p.summary })} <small class="muted">{p.id}</small></span>
+          {p.granted ? null : <span class="as-ask-btns">
+            <Btn kind="primary sm" disabled={busyId === p.id} onClick={() => answer(p, true)}>{t('as.proposalYes')}</Btn>
+            <Btn kind="sm" disabled={busyId === p.id} onClick={() => answer(p, false)}>{t('as.proposalNo')}</Btn>
+          </span>}
+        </li>))}
+    </ul>
   );
 }
 
@@ -190,6 +224,7 @@ export function HomeAgent({ projects }) {
           <p class="home-say" aria-live="polite">{working(state) ? stateWord(S, state) : ''}</p>
         </div>
       </div>
+      <Proposals />
       <Console projects={projects} big foot={<TalkTo projects={projects} compact />} />
       {S.feed.length || S.interim ? <Feed limit={8} /> : null}
     </section>

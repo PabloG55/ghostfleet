@@ -39,7 +39,10 @@ const A = await import(new URL('../../web/ansi.js', import.meta.url).href);
 const G = await import(new URL('../../web/grid.js', import.meta.url).href);
 // The phone's stylesheet as built (web/ui's, with brand/tokens.css inside it): the box a cell
 // lands in and the colours the pane is painted on are whatever THIS file says.
-const CSS = fs.readFileSync(path.join(ROOT, 'web', 'phone.css'), 'utf8');
+// COMMENTS OUT FIRST. The bundle carries every screen's stylesheet with its comments, and one
+// of them reads `... is --fg: --dim on the --line fill ...`. That is the first `--fg:` in the
+// file, so the default fg was read out of a sentence about contrast, not the declaration.
+const CSS = fs.readFileSync(path.join(ROOT, 'web', 'phone.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 // A token's value, followed through var() to the colour it ends at: `--fg: var(--gf-fg)` is the
 // app's text colour only by way of brand/tokens.css.
 const token = (name, seen = 0) => {

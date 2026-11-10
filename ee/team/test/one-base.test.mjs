@@ -106,6 +106,7 @@ const APP_FILES = {
     'adapter-extras.js': 'the phone adapter\'s members for the queue, reviews, sign-ins and automations',
     'push.js': 'web push, which only an installed phone app has',
     'tasks.js': 'the assistant\'s task list, which fleet-serve does not keep',
+    'lead.js': 'a project\'s lead started if it is not running: the team server\'s /api/lead, which fleet-serve does not have',
   },
 };
 test('an app folder holds only what that app has and web/ui does not', () => {

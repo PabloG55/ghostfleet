@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // test/helpers/local-enrol-check.mjs — the Mac enrols its own passkey at http://localhost,
-// in a real browser, through the real enrolment sheet.
+// in a real browser, through the lock's own enrolment field (web/src/lock.jsx).
 //
 //     node test/helpers/local-enrol-check.mjs <fleet-serve.mjs> <port> <client-id>
 //
@@ -51,16 +51,21 @@ async function until(cond, ms = 10000) {
 // Buttons are matched by their label, as somebody looking at the screen would find them.
 const click = (label) => b.evaluate((l) => {
   const x = [...document.querySelectorAll('button')].find(e => e.textContent.trim() === l);
-  if (!x) return false;
+  if (!x || x.disabled) return false;
   x.click(); return true;
 }, label);
+// LOCKED IS THE LOCK CARD, and IN is the app's sidebar. Both are asked: between a reload and
+// the first paint neither is drawn, and "no lock card" alone read that blank moment as a way in.
 const page = () => b.evaluate(() => ({
-  locked: !!document.querySelector('.lock'),
+  locked: !!document.querySelector('.auth-card'),
+  in: !document.querySelector('.auth-card') && !!document.querySelector('nav.side'),
   buttons: [...document.querySelectorAll('button')].map(e => e.textContent.trim()).filter(Boolean),
-  err: ((document.querySelector('#sheet .err') || {}).textContent || '').trim(),
+  card: ((document.querySelector('.auth-card') || {}).textContent || '').trim(),
+  err: ((document.querySelector('.auth-card .err') || {}).textContent || '').trim(),
   secure: window.isSecureContext,
   origin: location.origin,
 }));
+const CODE_FIELD = '.auth-card input[autocomplete="one-time-code"]';
 
 try {
   await b.call('WebAuthn.enable', { enableUI: false });
@@ -77,33 +82,38 @@ try {
     await b.call('Emulation.setUserAgentOverride', { userAgent: ua, platform });
     await b.call('Emulation.setTouchEmulationEnabled', touch ? { enabled: true, maxTouchPoints: 5 } : { enabled: false });
     await b.call('Page.navigate', { url: URL_ });
-    await until(async () => (await page()).buttons.some(x => /^enrol /.test(x)));
-    return (await page()).buttons.find(x => /^enrol /.test(x)) || '(no enrol button)';
+    await until(async () => (await page()).buttons.some(x => /^enrol /i.test(x)));
+    return (await page()).buttons.find(x => /^enrol /i.test(x)) || '(no enrol button)';
   };
-  is('a phone is offered "enrol this phone"', 'enrol this phone', await as('iPhone', true));
-  is('an iPad is not mistaken for a Mac', 'enrol this phone', await as('MacIntel', true));
+  is('a phone is offered "Enrol this phone"', 'Enrol this phone', await as('iPhone', true));
+  is('an iPad is not mistaken for a Mac', 'Enrol this phone', await as('MacIntel', true));
   const enrolLabel = await as('MacIntel', false);
   const p0 = await page();
   is('the page at localhost is a secure context', true, p0.secure);
   is('...whose origin is http://localhost:<port>', `http://localhost:${port}`, p0.origin);
-  is('a Mac with no passkey is offered "enrol this Mac"', 'enrol this Mac', enrolLabel);
+  is('a Mac with no passkey is offered "Enrol this Mac"', 'Enrol this Mac', enrolLabel);
+  // With no window open, the card says where to open one. It asks the server before anything
+  // is typed, so the sentence arrives a moment after the button does.
+  is('...and the card says where to run the command', true,
+     !!(await until(async () => /In a terminal on this Mac: fleet-serve enroll mac/.test((await page()).card))));
 
   const code = (execFileSync(process.execPath, [serveJs, 'enroll', clientId], { encoding: 'utf8' })
     .match(/[A-Z0-9]{5}-[A-Z0-9]{5}/) || [''])[0];
   is('fleet-serve opened an enrolment window', true, !!code);
-  await click('enrol this Mac');
-  await until(() => b.evaluate(() => !!document.querySelector('#sheet input')));
-  is('...and its sheet says where to run the command', true, await b.evaluate(() =>
-    /In a terminal on this Mac: fleet-serve enroll mac/.test((document.querySelector('#sheet') || {}).textContent || '')));
-  // Typed the way a person types it: into the field the sheet drew, then its button.
-  await b.evaluate((c) => {
-    const i = document.querySelector('#sheet input');
+  // The card asks once per open, so the window it can see is the one open when it was drawn.
+  await b.call('Page.reload', {});
+  is('...and a card drawn after it says the window is open', true,
+     !!(await until(async () => /An enrolment window is open for mac/.test((await page()).card))));
+  // Typed the way a person types it: into the card's code field, then its button.
+  await until(() => b.evaluate((s) => !!document.querySelector(s), CODE_FIELD));
+  await b.evaluate((c, s) => {
+    const i = document.querySelector(s);
     i.value = c; i.dispatchEvent(new Event('input', { bubbles: true }));
-  }, code);
-  await click('enrol');
-  const unlocked = await until(async () => !(await page()).locked);
+  }, code, CODE_FIELD);
+  await until(() => click('Enrol this Mac'));
+  const unlocked = await until(async () => (await page()).in);
   const p1 = await page();
-  is('the enrolment sheet enrols the Mac and unlocks it', true, unlocked || p1.err || p1.buttons.join(', '));
+  is('the code field enrols the Mac and unlocks it', true, unlocked || p1.err || p1.buttons.join(', '));
 
   // What the server stored: a localhost passkey, on the client the window was opened for.
   const cfg = JSON.parse(fs.readFileSync(process.env.GHOSTFLEET_SERVE_CONFIG, 'utf8'));
@@ -128,12 +138,12 @@ try {
   await b.evaluate(() => { sessionStorage.clear(); });
   await b.call('Page.reload', {});
   // The app may make its one automatic attempt on open; otherwise the button is the way.
-  let in2 = await until(async () => !(await page()).locked && (await tokens()) !== '', 3000);
+  let in2 = await until(async () => (await page()).in && (await tokens()) !== '', 3000);
   if (!in2) {
     const p = await page();
-    const unlockLabel = p.buttons.find(x => /^unlock with /.test(x));
+    const unlockLabel = p.buttons.find(x => /^unlock with /i.test(x));
     if (unlockLabel) await click(unlockLabel);
-    in2 = await until(async () => !(await page()).locked && (await tokens()) !== '');
+    in2 = await until(async () => (await page()).in && (await tokens()) !== '');
   }
   const p2 = await page();
   is('a cold open asks the passkey again', true, (await signs()) > before.signs || `signCount ${before.signs} -> ${await signs()}`);

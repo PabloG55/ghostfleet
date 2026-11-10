@@ -142,17 +142,26 @@ try {
     // ── every screen, at two widths ───────────────────────────────────────────
     const STACK = JSON.stringify([{ project: 'acme-api', session: 'api-fix' }, { project: 'acme-api', session: 'docs-pass' }]);
     const ROUTES = [['home', '#/'], ['map', '#/map'], ['project', '#/p/acme-api'], ['lead session', '#/p/acme-api/s/master'],
-      ['session', '#/p/acme-api/s/api-fix'], ['pane', '#/p/acme-api/s/api-fix?tab=pane'], ['settings', '#/settings'], ['activity', '#/activity'],
+      ['session', '#/p/acme-api/s/api-fix'], ['pane', '#/p/acme-api/s/api-fix', "Agent's screen"], ['settings', '#/settings'], ['activity', '#/activity'],
       ['queue', '#/queue'], ['held', '#/held'], ['reviews', '#/reviews'], ['one review', '#/reviews/-/work/2026-03-05_14-02-11'],
       ['stack picker', '#/stack-picker'], ['stack', `#/stack/${encodeURIComponent(STACK)}`], ['automations', '#/automations'],
       ['sign-ins', '#/sign-ins'], ['search', '#/search?q=api']];
     // A phone, a narrow phone, and a desk: the same screens at 1280 draw the sidebar beside them.
     for (const [w, h] of [[390, 844], [320, 700], [1280, 900]]) {
       await b.viewport(w, h);
-      for (const [name, hash] of ROUTES) {
+      for (const [name, hash, tab] of ROUTES) {
         const before = errors.length;
         await b.evaluate((x) => { location.hash = x; }, hash);
         await sleep(900);
+        // The pane has no address of its own: it is the session's Screen tab. This row was once
+        // `…/api-fix?tab=pane`, which the router reads as a session NAMED "api-fix?tab=pane", and
+        // every row passed on a page about a session that does not exist.
+        if (tab) {
+          await b.evaluate((x) => [...document.querySelectorAll('.tabs [role=tab]')].find(e => e.textContent.trim() === x)?.click(), tab);
+          await sleep(900);
+          is(`${w} ${name}: the pane is drawn, from the session's own capture`, true,
+             await b.evaluate(() => (document.querySelector('pre.pane')?.textContent || '').trim().length > 40));
+        }
         const m = await b.evaluate(() => {
           const main = document.querySelector('.main');
           const doc = document.scrollingElement;
@@ -163,6 +172,7 @@ try {
         is(`${w} ${name}: no page error`, '', errors.slice(before).join(' | '));
         is(`${w} ${name}: no native <select>`, 0, m.selects);
         is(`${w} ${name}: the page does not scroll sideways`, true, m.docX <= 1 && m.mainX <= 1);
+        if (tab) { await b.evaluate(() => [...document.querySelectorAll('.tabs [role=tab]')].find(e => e.textContent.trim() === 'Conversation')?.click()); await sleep(300); }
       }
     }
     // A session in a stack column sits under the column's own header (stacks.jsx), so it does not
@@ -174,6 +184,62 @@ try {
       [document.querySelectorAll('.stack-column .sess-head .back-link').length,
        document.querySelectorAll('.stack-column .sess-head h1').length,
        document.querySelectorAll('.stack-column .sess-head.embedded').length].join(' ')));
+    // ── an empty page says it is empty, once ─────────────────────────────────
+    // The demo data has no pending sign-in and no held wake. Pending sign-ins drew its title and
+    // nothing under it, and Held items drew its hint about a held wake above "Nothing is waiting".
+    const mainText = () => b.evaluate(() => document.querySelector('.main')?.textContent || '');
+    await b.evaluate((x) => { location.hash = x; }, '#/sign-ins');
+    await sleep(900);
+    is('pending sign-ins, with none, says so', 'No sign-in is waiting for you',
+       await b.evaluate(() => document.querySelector('.main .empty')?.textContent.trim() || '(nothing under the title)'));
+    await b.evaluate((x) => { location.hash = x; }, '#/queue');
+    await sleep(900);
+    is('...and above Queue that line is not drawn', false, /No sign-in is waiting/.test(await mainText()));
+    await b.evaluate((x) => { location.hash = x; }, '#/held');
+    await sleep(900);
+    is('held items, with none, drop the hint about a held one', false, /A wake is waiting for an empty input box/.test(await mainText()));
+    is('...and say nothing is waiting', true, /Nothing is waiting on you/.test(await mainText()));
+    // The tree's "└─" is drawing, not words: read aloud, every row began "box drawings light up".
+    await b.evaluate((x) => { location.hash = x; }, '#/p/acme-api');
+    await sleep(900);
+    is("the project tree's connectors are hidden from a screen reader", 'all hidden', await b.evaluate(() => {
+      const all = document.querySelectorAll('.tree-branch'), hid = document.querySelectorAll('.tree-branch[aria-hidden="true"]');
+      return all.length && hid.length === all.length ? 'all hidden' : `${hid.length} of ${all.length} hidden`;
+    }));
+    // ── a stack's reads (SessionView `quiet`, stacks.jsx) ─────────────────────
+    // Every read in fixture mode is a fetch of a fixture file, so counting fetches per session over
+    // a few seconds is the read rate. At a desk the focused column reads its pane every 2.5 s and the
+    // others every 15 s; on a phone only the column on screen is mounted, so it is the only one read.
+    const STACK3 = JSON.stringify([{ project: 'acme-api', session: 'api-fix' }, { project: 'acme-api', session: 'docs-pass' }, { project: 'acme-api', session: 'master' }]);
+    const reads = async (ms) => {
+      await b.evaluate(() => {
+        if (!window.__fetch0) { window.__fetch0 = window.fetch; window.fetch = (u, o) => { (window.__reads ||= []).push(String(u?.url || u)); return window.__fetch0(u, o); }; }
+        window.__reads = [];
+      });
+      await sleep(ms);
+      return b.evaluate(() => {
+        const n = {};
+        for (const u of window.__reads) { const m = /fixtures\/(pane|session)-acme-api-([\w-]+)\.json/.exec(u); if (m) n[`${m[1]} ${m[2]}`] = (n[`${m[1]} ${m[2]}`] || 0) + 1; }
+        return n;
+      });
+    };
+    await b.evaluate((x) => { location.hash = x; }, `#/stack/${encodeURIComponent(STACK3)}`);
+    await until(() => document.querySelectorAll('.stack-column .sess-head').length === 3);
+    await sleep(1500);
+    const desk = await reads(8000);
+    is('at a desk a stack reads the focused column\'s pane as a session does', true, (desk['pane api-fix'] || 0) >= 3);
+    is('...and the others at most once in that time', '0,0', `${Math.max(0, (desk['pane docs-pass'] || 0) - 1)},${Math.max(0, (desk['pane master'] || 0) - 1)}`);
+    await b.viewport(390, 844);
+    await b.evaluate(() => { location.hash = '#/'; });
+    await sleep(300);
+    await b.evaluate((x) => { location.hash = x; }, `#/stack/${encodeURIComponent(STACK3)}`);
+    await until(() => !!document.querySelector('.stack-column.stack-active .sess-head'));
+    await sleep(1500);
+    is('on a phone a stack mounts only the column on screen', 1, await b.evaluate(() => document.querySelectorAll('.stack-column .sess-head').length));
+    const phone = await reads(6000);
+    is('...and reads only that session', 'api-fix', [...new Set(Object.keys(phone).map(k => k.split(' ')[1]))].sort().join(','));
+    await b.viewport(1280, 900);
+    await sleep(300);
     is('at a desk the projects are beside the page, not in a drawer', true,
        await b.evaluate(() => { const s = document.querySelector('.side'); return !!s && s.getBoundingClientRect().left >= 0 && s.getBoundingClientRect().width > 200; }));
     // Automations are a switch on the daemon, and fixture mode answers like one with it off (a 404):
@@ -226,6 +292,38 @@ try {
     is('...and a rename', true, worker.menu.some(x => /^Rename/.test(x)));
     is('...and not the label or the schedule, which this server refuses', '', worker.menu.filter(x => /label|Schedule/i.test(x)).join(','));
 
+    // ── what Jarvis is waiting on a yes for, answered from the assistant ─────
+    // The old Jarvis screen's list, which the one assistant draws now (assistant.jsx Proposals).
+    // The fixture holds one proposal. A No costs no passkey, so it can be pressed here; the Yes is
+    // the adapter's assertFor, the same path as every passkey verb.
+    await b.evaluate(() => { location.hash = '#/'; });
+    const ask = await until(() => { const r = document.querySelector('.home-agent .as-ask'); return r && [r.querySelector('.grow'), ...r.querySelectorAll('button')].map(n => n.textContent.replace(/\s+/g, ' ').trim()).join(' | '); });
+    is('the home card lists what Jarvis waits on a yes for', 'Jarvis asks: stop acme-api/docs-pass and remove its worktree? K7Q2 | Yes | No', ask);
+    is('...above the place to talk', true, await b.evaluate(() => {
+      const a = document.querySelector('.home-agent .as-asks'), c = document.querySelector('.home-agent .console');
+      return !!(a && c && (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }));
+    await clickText('.home-agent .as-ask button', '^No$');
+    is('...a No answers it, and it leaves the list', true, !!(await until(() => !document.querySelector('.home-agent .as-ask'))));
+    is('...saying what will not happen', true, !!(await until(() => /Jarvis will not stop acme-api\/docs-pass/.test(document.querySelector('.toasts')?.textContent || ''))));
+    // The toast follows the button; what was SENT is the fixture's own record of the call, read
+    // from the module instance the app runs (the same URL, so the same module).
+    is('...and what was sent is a no, for that proposal', '[{"id":"K7Q2","answer":"no"}]', await b.evaluate(async () =>
+      JSON.stringify((await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'jarvis_confirm').map(r => r.args))));
+
+    // ── "Turn on notifications", offered after an unlock (src/push.js offerWanted) ──
+    // Demo data cannot subscribe, so the bar is never drawn here; the rule that decides it is
+    // asked directly, from the same module instance the app runs (the source is served as written).
+    is('demo data is offered no notifications', false, await b.evaluate(() => !!document.querySelector('.notify-bar')));
+    is('the offer: who is asked', 'yes no no no no yes no', await b.evaluate(async () => {
+      const { offerWanted } = await import('./src/push.js');
+      const now = 1e12, day = 86400e3, base = { server: true, token: true, blocked: '', laterAt: 0, now, on: false };
+      return [base, { ...base, server: false }, { ...base, token: false }, { ...base, blocked: 'iOS only allows…' },
+              { ...base, laterAt: now - day }, { ...base, laterAt: now - 4 * day }, { ...base, on: true }]
+        .map(c => offerWanted(c) ? 'yes' : 'no').join(' ');
+    }));
+    await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+
     // ── a poll does not take the keyboard away ────────────────────────────────
     await until(() => !!document.querySelector('.composer textarea'));
     await b.evaluate(() => { const ta = document.querySelector('.composer textarea'); ta.__mark = 1; ta.focus(); });
@@ -262,6 +360,37 @@ try {
 
     // ── the owner's music ─────────────────────────────────────────────────────
     is('nothing on the way through claimed the audio session', '', (await b.evaluate(() => window.__audio)).join(','));
+
+    // ── a draft per session (web/ui/drafts.js) ────────────────────────────────
+    // api-fix's box holds "half a sentence" from above. Each session's box is its own, and the
+    // words come back after leaving, after a reload, and go only when a send of them succeeds.
+    const boxOf = async (hash) => {
+      await b.evaluate((x) => { location.hash = x; }, hash);
+      await until((x) => location.hash === x && !!document.querySelector('.composer textarea'), hash);
+      await sleep(300);
+      return b.evaluate(() => document.querySelector('.composer textarea').value);
+    };
+    is('another session\'s box is its own', '', await boxOf('#/p/acme-api/s/docs-pass'));
+    is('...and the draft is there on coming back', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    // The files a draft had cannot survive a reload; the draft remembers how many, and says so.
+    await b.evaluate(() => {
+      const o = JSON.parse(localStorage.getItem('gfw.drafts') || '{}');
+      o['acme-api\x1fapi-fix'] = { ...o['acme-api\x1fapi-fix'], files: 2 };
+      localStorage.setItem('gfw.drafts', JSON.stringify(o));
+      location.reload();
+    });
+    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+    await clickText('.auth-card button', 'without a passkey');
+    await until(() => !!document.querySelector('.app'));
+    is('...and after a reload', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    is('...saying how many of its files the reload dropped', '2 files attached to this draft did not survive the reload. Attach them again. OK',
+       (await texts('.composer .att-lost')).join(' ').replace(/\s+/g, ' '));
+    await clickText('.composer .att-lost button', '^OK$');
+    is('...until that has been read', 0, (await texts('.composer .att-lost')).length);
+    await clickText('.composer button[type=submit]', 'Send');
+    is('a send that succeeds empties the box', true, !!(await until(() => document.querySelector('.composer textarea')?.value === '')));
+    is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/docs-pass') + await boxOf('#/p/acme-api/s/api-fix'));
+    is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fapi-fix' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));
 
     // ── a reload keeps its place ──────────────────────────────────────────────
     // The place is the address (web/ui/history.js): a reload, a link opened or a desk tab whose
@@ -317,6 +446,29 @@ try {
         is('offline: the peer keeps its heading and says it is not answering', true, /:not answering$/.test(hosts[1] || ''));
       }
     }
+
+    // ── one answer to "is this run done": the client's state against the server's ──
+    // The phone works a recorded run's state out the moment a verdict is tapped (and fixture mode
+    // never asks a server at all), so web/api.js's copy must say what lib/shots.mjs says, which is
+    // what `fleet-shots --check` and the list are built from. Compared case by case: two spellings
+    // of one rule are a rule that drifts, and the drift would read as a review that will not close.
+    const { runState } = await import(new URL('../../lib/shots.mjs', import.meta.url).href);
+    const rec = { video: 'flow.mp4', steps: [{ n: 1 }, { n: 2 }, { n: 3, notes: ['GET /x answered 404'] }] };
+    const still = { steps: [{ n: 1 }, { n: 2 }, { n: 3, notes: ['expected text not on the page: Ok'] }] };
+    const CASES = [
+      [rec, {}], [rec, { flow: { v: 'approve' } }], [rec, { flow: { v: 'approve' }, chapters: { 3: 'fine' } }],
+      [rec, { flow: { v: 'reject', note: 'no' } }], [rec, { flow: { v: 'approve' }, chapters: { 3: '  ' } }],
+      [still, {}], [still, { 1: { v: 'ok' } }], [still, { 1: { v: 'ok' }, 2: { v: 'ok' }, 3: { v: 'ok' } }],
+      [still, { 1: { v: 'ok' }, 2: { v: 'ok' }, 3: { v: 'ok', note: 'why' } }], [still, { 2: { v: 'problem' } }],
+      [still, { 1: { v: 'skip' }, 2: { v: 'ok' }, 3: { v: 'skip', note: 'later' } }],
+    ];
+    const client = await b.evaluate(async (cases) => {
+      const api = await import(location.origin + '/api.js');
+      return cases.map(([m, v]) => api.shotsState(m, v));
+    }, CASES);
+    const server = CASES.map(([m, v]) => runState(m, v));
+    is('the phone\'s run state matches the server\'s, case by case', JSON.stringify(server), JSON.stringify(client));
+    is('...and the cases are not all one answer', true, new Set(server.map(s => JSON.stringify(s))).size >= 3);
     is('no page error, anywhere on the way', '', errors.join(' | '));
   }
 } catch (e) {

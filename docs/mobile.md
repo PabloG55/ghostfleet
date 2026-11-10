@@ -15,6 +15,13 @@ Every number below was measured on this machine before the design was written, a
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
 
+**Since v104 the phone draws the team app's screens** (`web/ui/`), and the hand-written
+client this document was first built to (`web/app.js`) is gone. The server half (§4, §5,
+§8, §9), the guardrails (§7) and the decisions (§11) stand as written. Where §6, §7 and §7a
+describe that client's layout, its cards, sheets and gestures, they are the reasoning the
+current screens inherited, not a description of them: [`web/README.md`](../web/README.md)
+is what the phone draws now, and what of the old client was rebuilt or left behind.
+
 The fleet is invisible away from the desk. A worker that needs a permission at 9pm waits
 until someone opens a terminal, and the thing you actually want to know from a couch or a
 café — *is anything blocked on me* — costs a laptop. This is the design for **running**
@@ -917,7 +924,7 @@ so the design does not pretend otherwise:
 
 ### The two rules the cards already paid for
 
-Both are in `web/app.css` for the cards and both matter **more** here, because a pane is
+Both were in the old client's `app.css` for the cards, are in `web/ansi.js` now, and both matter **more** here, because a pane is
 hundreds of columns of exactly the characters that break:
 
 1. **Bold is never `font-weight`.** The bold face has no box-drawing glyphs, so `─ ╭ ╮ ╰ ╯`

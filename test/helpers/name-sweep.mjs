@@ -626,13 +626,13 @@ is('...and the sweep read them', true, scanned > 50);
 const BINARY_REVIEWED = new Set([
   '2c785a8e51bcab64',   // docs/img/pane-fit.png
   '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
-  '242a6f9c498399a1',   // docs/mobile/confirm.png
-  '8b962f74b4b387eb',   // docs/mobile/grid.gif
-  '391976337517eac8',   // docs/mobile/pane.gif
-  '57f0372775587188',   // docs/mobile/phone-demo.gif
-  'd6ea272da209deef',   // docs/mobile/projects.png
-  'a8580058a434195a',   // docs/mobile/session.gif
-  '4f2218f03a99a458',   // docs/mobile/statuses.png
+  // The phone on the shared UI, shot on fixtures at 1x: every frame opened and read, every
+  // name in it one of web/fixtures/'s (acme-api, toolbox, acme-web, billing-svc, scratch).
+  'dfafb9b9bee4fba8',   // docs/mobile/desk.png
+  '8b439848e76966bd',   // docs/mobile/drawer.png
+  'ec0411437fc28508',   // docs/mobile/home.png
+  'e188bb5e8c81b439',   // docs/mobile/phone-demo.gif
+  '45584c485b8bf293',   // docs/mobile/session.png
   '07b65ab7235ca1d3',   // docs/stack-demo.gif
   'ef987172757ffd8c',   // docs/stack-demo.mp4
   '23ec45657a6e9e92',   // docs/worktree-demo.gif
@@ -665,9 +665,9 @@ const BINARY_REVIEWED = new Set([
 
 const BINARY_EXPECTED = [
   'docs/img/pane-fit.png', 'docs/img/pane-permission-dialog.png',
-  'docs/mobile/confirm.png', 'docs/mobile/grid.gif', 'docs/mobile/pane.gif',
-  'docs/mobile/phone-demo.gif', 'docs/mobile/projects.png', 'docs/mobile/session.gif',
-  'docs/mobile/statuses.png', 'docs/stack-demo.gif', 'docs/stack-demo.mp4',
+  'docs/mobile/desk.png', 'docs/mobile/drawer.png', 'docs/mobile/home.png',
+  'docs/mobile/phone-demo.gif', 'docs/mobile/session.png',
+  'docs/stack-demo.gif', 'docs/stack-demo.mp4',
   'docs/worktree-demo.gif', 'docs/worktree-demo.mp4',
   'web/icons/apple-touch-icon.png', 'web/icons/icon-192.png', 'web/icons/icon-512.png',
   // The team app's copies of the three above, byte for byte (the same digests in

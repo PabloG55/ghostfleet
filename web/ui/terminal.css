@@ -82,4 +82,8 @@
 @media (max-width: 900px) {
   .tool { padding: 10px 16px 12px; }
   .page .tool { padding: 0; }
+  /* INTO THE GUTTER, to 4px from each edge. term.js's phone font (floor(short side / 42)) is
+   * sized for the terminal spanning the screen; inside the page's 16px gutters and its own
+   * border a 390pt phone came out at 63 columns, under the 64 the suite holds the editor to. */
+  .tool-host { margin-inline: -12px; }
 }

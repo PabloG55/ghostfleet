@@ -37,6 +37,22 @@ export function blockedReason(tr) {
   return '';
 }
 
+// "TURN ON NOTIFICATIONS", OFFERED AFTER THE UNLOCK (phone.jsx PushOffer). Push had never been
+// turned on, and nothing said so: the switch lived in settings, so a phone could be enrolled,
+// installed and used every day while no notification left the Mac — the daemon's log showed no
+// /api/push/key request at all. So the app asks in the one moment iOS allows asking: after an
+// unlock, with a button, because the permission prompt appears only in answer to a TAP (one raised
+// from a timer or on load is silently refused). "Not now" is honoured for three days.
+//   Pure, so the rule can be asked without a server: `blocked` is blockedReason(), `laterAt` when
+// "not now" was last pressed, `on` whether this device is subscribed here AND known there.
+export const LATER_KEY = 'gf.push.later';
+export const LATER_MS = 3 * 86400 * 1000;
+export function offerWanted({ server, token, blocked, laterAt = 0, now = Date.now(), on }) {
+  if (!server || !token || blocked) return false;     // nothing to offer where it cannot be turned on
+  if (now - (Number(laterAt) || 0) < LATER_MS) return false;
+  return !on;                                         // either half missing is worth one tap
+}
+
 const b64uToBytes = (s) => {
   const pad = s.replace(/-/g, '+').replace(/_/g, '/');
   const raw = atob(pad + '='.repeat((4 - pad.length % 4) % 4));

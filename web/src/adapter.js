@@ -22,6 +22,7 @@ import { createTasks } from './tasks.js';
 import { t } from '../ui/i18n.js';
 import { screenPlace } from '../ui/phone-places.js';
 import { adapterExtras } from './adapter-extras.js';
+import { makeLead } from './lead.js';
 
 // fleet-serve's TOOLS_ALLOWED entries marked `passkey: true`.
 export const PASSKEY = new Set(['fleet_spawn', 'fleet_stop', 'fleet_rename', 'fleet_worktree_remove', 'fleet_project_add']);
@@ -79,6 +80,25 @@ export function phoneAdapter({ lock, go, place }) {
   const noted = (view) => (e) => { if (e?.status === 404) off.add(view); throw e; };
   api.getAutomations().catch(noted('automations')).catch(() => {});
 
+  // WHETHER THIS DEVICE MAY OPEN A TERMINAL AT ALL (fleet-serve /api/term), known before the tap.
+  // The server checks it before the assertion, so that a device with it off is told to switch it
+  // on rather than asked for a fingerprint it cannot use. An adapter that asked for the assertion
+  // first threw that order away: every open from a device with the terminal off spent a Face ID
+  // on a refusal. Read once the terminal is offered, kept by settings when it switches, and taken
+  // from the server's own refusal when it changed somewhere else. Unknown (null) asks as before.
+  // Asked once by the first screen that offers the terminal (a failed read is not asked again on
+  // every render), and again after a refusal, in case the switch has moved since.
+  let termOn = null, termAsked = false, termReading = null;
+  const readTerm = () => { termAsked = true; return (termReading ||= api.getTerm()
+    .then((j) => { termOn = !!j.enabled; }, () => {}).finally(() => { termReading = null; })); };
+  const termOff = () => Object.assign(new Error(t('term.off')), { status: 403, needs: 'enable' });
+  const openTerm = (project, kind, size) => {
+    const asking = pk.available() && pk.registered()
+      ? pk.freshNow(`${kind === 'edit' ? 'editor' : 'terminal'} ${project}`) : Promise.resolve(null);
+    return guard(asking.then((a) => api.termOpen(project, size, a, kind)))
+      .catch((e) => { if (e && e.needs === 'enable') termOn = false; throw e; });
+  };
+
   // A paired host's grid is read only for its boats, and it is the most expensive read there is
   // (one fleet-grid run on the other machine, through this one): kept for 15 s.
   const peerGrids = new Map();
@@ -108,12 +128,13 @@ export function phoneAdapter({ lock, go, place }) {
   }
 
   // Jarvis's project on this machine, if it runs one: where a request with no page goes.
-  let jarvisAt = 0, jarvis = null;
+  let jarvisAt = 0, jarvis = null, jarvisOff = false;
+  const noteJarvis = (j) => { jarvisAt = Date.now(); jarvis = j && j.present !== false && j.project ? j.project : null; return j; };
   async function jarvisProject() {
-    if (Date.now() - jarvisAt < 60000) return jarvis;
+    if (jarvisOff || Date.now() - jarvisAt < 60000) return jarvis;
     jarvisAt = Date.now();
-    try { const j = await api.getJarvis(); jarvis = j && j.present !== false && j.project ? j.project : null; }
-    catch { jarvis = null; }
+    try { noteJarvis(await api.getJarvis()); }
+    catch (e) { jarvis = null; if (e?.status === 404) jarvisOff = true; }
     return jarvis;
   }
 
@@ -124,27 +145,15 @@ export function phoneAdapter({ lock, go, place }) {
     return guard(api.verb(tool, args, assertion));
   }
 
-  // The lead, started if it is not running: the team server's /api/lead, done from here.
-  async function lead(project) {
-    const find = async () => ((await guard(api.getGrid(project))).cards || []).find(c => c.lead);
-    const m = await find();
-    let did = null;
-    if (!m) {
-      const p = ((await api.getProjects()).projects || []).find(x => x.name === project);
-      if (!p || remote(project)) throw new Error(t('phone.noLead', { project }));
-      did = 'start';
-      await act('fleet_project_add', { path: p.path, name: p.name, profile: p.profile, start: true });
-    } else if (m.lost || m.exited) { did = 'reopen'; await act('fleet_reopen', { project, session: m.name }); }
-    else if (m.asleep) { did = 'wake'; await act('fleet_wake', { project, session: m.name }); }
-    else if (m.status === 'parked') { did = 'resume'; await act('fleet_resume', { project, session: m.name }); }
-    if (!did) return { ok: true, started: null, lead: m.name };
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 1500));
-      const n = await find().catch(() => null);
-      if (n && !n.lost && !n.asleep && !['starting', 'unknown'].includes(n.status)) return { ok: true, started: did, lead: n.name };
-    }
-    return { ok: true, started: did, lead: m ? m.name : 'master' };
-  }
+  // The lead, started if it is not running: the team server's /api/lead, done from here (lead.js,
+  // where the suite runs it against a daemon that refuses the wake).
+  const lead = makeLead({
+    grid: (project) => guard(api.getGrid(project)),
+    projects: () => api.getProjects(),
+    act, remote,
+    wait: (ms) => new Promise(r => setTimeout(r, ms)),
+    noLead: (project) => new Error(t('phone.noLead', { project })),
+  });
 
   const tasks = createTasks({
     projects: async () => ((await api.getProjects()).projects || []).map(p => p.name),
@@ -176,10 +185,18 @@ export function phoneAdapter({ lock, go, place }) {
         .catch(k === 'automations' ? noted('automations') : (e) => { throw e; })) : v])),
     projects,
     grid: (project) => guard(api.getGrid(project)),
-    session: async (project, name, before) => {
-      const r = await guard(api.getSession(project, name, before));
-      return { ...r, queued: r.queue || r.queued || [] };
+    // Conditional when web/ui's transcript poll asks (`etag`), and abortable (`signal`): a 304 comes
+    // back as { notModified } and the chat keeps what it holds.
+    session: async (project, name, before, opts) => {
+      const r = await guard(api.getSession(project, name, before, opts || {}));
+      return r && r.notModified ? r : { ...r, queued: r.queue || r.queued || [] };
     },
+    // The daemon's Retry-After, still running: the transcript's next read waits it out rather than
+    // being refused locally on every tick.
+    heldFor: api.heldFor,
+    // The Claude accounts line at the top of Projects (web/ui/accounts.jsx): fleet-accounts' own
+    // figures, read only. The team app has no such member, so it draws nothing there.
+    usage: () => guard(api.getUsage()),
     pane: (project, name) => guard(api.getPane(project, name)),
     act,
     attach: (project, session, file) => guard(api.attach(project, session, file)),
@@ -187,14 +204,32 @@ export function phoneAdapter({ lock, go, place }) {
     lead,
     // The terminal and the editor: this machine's projects only (a paired host's shell is not
     // reachable from here, by decision), and only against a server — fixtures have no tmux.
-    canTerm: (project) => server() && !remote(project),
+    canTerm: (project) => { if (server() && !termAsked) readTerm(); return server() && !remote(project); },
+    // ...and the reason, where the reason is the machine: a remote project's page says why it has
+    // no Terminal tab, rather than drawing the same page as a viewer's with the tabs quietly gone.
+    termWhy: (project) => (remote(project) ? t('phone.noTermRemote', { host: String(project).split('@').pop() }) : ''),
+    // THE CALLS JARVIS TRIED THAT A TOOL REFUSED UNTIL THE OWNER SAYS YES (docs/jarvis.md): the old
+    // Jarvis screen's list, which the one assistant draws now (assistant.jsx Proposals). The same
+    // read tells routing where Jarvis is, so the list adds no second /api/jarvis poll. Switched off,
+    // every /api/jarvis* is a 404: no list, and it is not asked again until the next unlock.
+    proposals: async () => {
+      if (jarvisOff) return [];
+      try { const j = noteJarvis(await guard(api.getJarvis())); return (j && j.present !== false && j.pending) || []; }
+      catch (e) { if (e?.status === 404) { jarvisOff = true; return []; } throw e; }
+    },
+    // A yes lets the call run, so it costs a fresh passkey like the verb itself would; a no costs
+    // nothing. The ceremony starts before anything is awaited, inside the tap (assertFor).
+    answerProposal: async (p, yes) => guard(api.jarvisConfirm(p.id, yes ? 'yes' : 'no', yes ? await assertFor(`jarvis yes ${p.id}`) : null)),
     // Each open takes a fresh assertion, made inside the tap when one is prepared (passkey.js
     // freshNow). The first open after a tab is drawn may come too late for WebKit to count the
     // tap; the screen then offers "open again", and that tap reaches the sensor itself.
+    // A device whose terminal is off is told so WITHOUT the sensor (see termOn).
+    // A read still in flight is waited for: the tab opens after it mounts, not inside the tap, so
+    // waiting costs no activation the open still had.
     termOpen: (project, kind, size) => {
-      const asking = pk.available() && pk.registered()
-        ? pk.freshNow(`${kind === 'edit' ? 'editor' : 'terminal'} ${project}`) : Promise.resolve(null);
-      return guard(asking.then((a) => api.termOpen(project, size, a, kind)));
+      if (termReading) return termReading.then(() => (termOn === false ? Promise.reject(termOff()) : openTerm(project, kind, size)));
+      if (termOn === false) { readTerm(); return Promise.reject(termOff()); }
+      return openTerm(project, kind, size);
     },
     termSocket: api.termSocket,
     go,
@@ -226,11 +261,11 @@ export function phoneAdapter({ lock, go, place }) {
       terminal: {
         state: async () => {
           if (!server()) return { ready: false, why: t('phone.termFixtures') };
-          try { const j = await guard(api.getTerm()); return { ready: true, on: !!j.enabled, why: j.enabled ? t('phone.termOn') : '' }; }
+          try { const j = await guard(api.getTerm()); termOn = !!j.enabled; return { ready: true, on: termOn, why: termOn ? t('phone.termOn') : '' }; }
           catch (e) { return { ready: false, why: e.status === 404 ? t('phone.termOld') : e.message }; }
         },
         // ON is a grant and takes a fresh passkey (fleet-serve /api/term/enable); OFF takes one away.
-        set: async (on) => { const a = on && pk.registered() ? await pk.fresh('terminal on') : null; await guard(api.termEnable(on, a)); },
+        set: async (on) => { const a = on && pk.registered() ? await pk.fresh('terminal on') : null; await guard(api.termEnable(on, a)); termOn = !!on; },
       },
       hosts: {
         list: async () => ((await guard(api.getProjects())).hosts || []),

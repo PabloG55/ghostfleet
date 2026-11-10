@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
 import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
@@ -9,6 +9,8 @@ import { sendsOnEnter } from './keys.js';
 import { ToolTabs, ToolPanel } from './terminal.jsx';
 import { useLayer } from './select.jsx';
 import { BackLink } from './back.jsx';
+import { useTranscript } from './transcript.js';
+import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -78,30 +80,103 @@ function Terminal({ pane }) {
   );
 }
 
+// A message's key: when it was said, by whom, and which of that pair it is. Not its index — a page
+// prepended above shifts every index, and a key that moves rebuilds the bubble, which throws a table
+// scrolled sideways back to its first column and drops a selection in it.
+function keyed(msgs) {
+  const seen = new Map();
+  return msgs.map((m) => { const k = `${m.ts}:${m.role}`; const n = seen.get(k) || 0; seen.set(k, n + 1); return [`${k}:${n}`, m]; });
+}
+
+// Waiting is drawn as the shape of a conversation, without words — the phone's rule. A read that
+// FAILED says so in one line, why and that it is being asked again, because a skeleton that never
+// resolves is exactly the "it does not load until I send" this was reported as.
+function ChatLoading({ load }) {
+  return (
+    <div class="chat" aria-busy="true">
+      {load.tries ? <p class="loading err center" role="status">{t('chat.loadFailed', { why: load.why })}</p> : null}
+      {[0, 1, 2].map(i => <div key={i} class={`msg ${i === 1 ? 'me' : 'ai'} skel`} aria-hidden="true"><div class="bubble skel" /></div>)}
+    </div>
+  );
+}
+
+// OLDER MESSAGES LOAD BY SCROLLING UP: within OLDER_NEAR_PX of the top is the press. The message the
+// reader is on stays exactly where it was: measured when the page above is ASKED for, and held there
+// on every paint until it lands — through the "loading" line going in above it as well as the page,
+// either of which alone would push it down. A scroll while it is out moves the hold with the reader,
+// so it never fights a thumb. A list that does not fill its box asks by itself: it has no top to
+// scroll to.
+const OLDER_NEAR_PX = 240;
+// THE SWIPE to the next or previous session, on the chat and not the screen: the Screen tab is a
+// terminal that scrolls sideways on purpose. A finger only (a mouse drag there is selecting text),
+// never from the left edge (iOS's own back gesture starts there), and more across than down.
+const SWIPE_NEXT = 60, EDGE = 24;
+
 // `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
-function Chat({ msgs, queued, older, onOlder }) {
+function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   const author = useSlot('author');
   const ref = useRef(null);
   const stick = useRef(true);
-  const last = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].ts}` : '';
+  const anchor = useRef(null);
+  const swipe = useRef(null);
+  const msgs = page.messages || [];
+  const rows = keyed(msgs);
+  const last = rows.length ? rows[rows.length - 1][0] : '';
   useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [last, queued.length]);
+  const measure = () => {
+    const box = ref.current; if (!box) return;
+    const top = box.getBoundingClientRect().top;
+    const n = [...box.children].find(c => c.dataset.k && c.getBoundingClientRect().bottom > top);
+    anchor.current = n ? { k: n.dataset.k, top: n.getBoundingClientRect().top } : null;
+  };
+  const held = () => { const box = ref.current, a = anchor.current; return a && box ? [...box.children].find(c => c.dataset.k === a.k) : null; };
+  useLayoutEffect(() => {
+    const box = ref.current, a = anchor.current;
+    if (a && box) {
+      const n = held();
+      const d = n ? n.getBoundingClientRect().top - a.top : 0;
+      if (d) box.scrollTop += d;
+      if (!older.busy) anchor.current = null;
+    }
+    if (box && page.next_before && !older.busy && !older.err && box.scrollHeight <= box.clientHeight + 1) onOlder();
+  });
+  const nearTop = (box) => {
+    const n = held(); if (n) anchor.current.top = n.getBoundingClientRect().top;
+    if (!page.next_before || older.busy || older.err) return;
+    if (box.scrollHeight <= box.clientHeight || box.scrollTop > OLDER_NEAR_PX) return;
+    measure(); onOlder();
+  };
+  const down = (e) => { swipe.current = e.pointerType !== 'mouse' && e.clientX > EDGE ? { x: e.clientX, y: e.clientY } : null; };
+  const up = (e) => {
+    const s0 = swipe.current; swipe.current = null;
+    if (!s0 || !onStep) return;
+    const dx = e.clientX - s0.x, dy = e.clientY - s0.y;
+    if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
+    onStep(dx < 0 ? 1 : -1);
+  };
   return (
-    <div class="chat" ref={ref} data-keep-scroll="chat" onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }}>
-      {older ? <button class="link center" onClick={onOlder}>{t('sess.older')}</button> : null}
+    <div class="chat" ref={ref} data-keep-scroll="chat" onPointerDown={down} onPointerUp={up} onPointerCancel={() => { swipe.current = null; }}
+         onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; nearTop(n); }}>
+      {page.next_before
+        ? (older.busy ? <p class="older muted center" role="status">{t('chat.olderLoading')}</p>
+          : older.err ? <div class="older center"><span class="muted">{t('chat.olderFailed', { why: older.err })}</span>
+                          <button class="link" onClick={() => { measure(); onRetryOlder(); }}>{t('sess.older')}</button></div>
+          : null)
+        : msgs.length ? <p class="start muted center">{t('chat.start')}</p> : null}
       {!msgs.length ? <p class="muted center">{t('sess.noMsgs')}</p> : null}
-      {msgs.map((m, i) => {
+      {rows.map(([k, m]) => {
         if (m.role === 'tools') {
           const tools = m.tools || [];
           const names = [...new Set(tools.map(x => x.name))];
           return (
-            <details key={`${m.ts}-${i}`} class="tools">
+            <details key={k} data-k={k} class="tools">
               <summary><Icon name="gear" /> {t('sess.actions', { n: tools.length })} · {names.slice(0, 4).join(', ')}{names.length > 4 ? '…' : ''}<span class="when">{sinceTs(m.ts)}</span></summary>
               <ul>{tools.map((x, j) => <li key={j}><b>{x.name}</b> <span>{x.detail}</span></li>)}</ul>
             </details>
           );
         }
         return (
-          <div key={`${m.ts}-${i}`} class={`msg ${m.role === 'user' ? 'me' : 'ai'}`}>
+          <div key={k} data-k={k} class={`msg ${m.role === 'user' ? 'me' : 'ai'}`}>
             <div class="who">
               {m.role === 'user'
                 ? <>{author(m) || t('sess.instruction')}</>
@@ -156,15 +231,28 @@ function ScheduleModal({ name, onClose, onSave }) {
 // `embedded`: the session is a column inside another page (a stack, stacks.jsx), under a header
 // that already names it and links to it. Its own back link and title would say both again, so they
 // are left out; its state, branch and tools stay.
-export function SessionView({ project, name, card, onChanged, onGone, tool = null, embedded = false }) {
+//
+// `quiet`: a column that does not have the focus. A STACK IS SEVERAL OF THESE READING AT ONCE, and
+// the daemon allows one device 240 reads a minute. A focused session reads its transcript every
+// 2 s while an answer is owed and its pane every 2.5 s, up to 54 a minute; four of those is most of
+// the budget, and the old phone client was told by a burst of 429s what that costs: replies that
+// did not land until the chat was reopened. So a quiet column reads its transcript at the idle
+// pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
+// of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
+export const QUIET_PANE_MS = 15000;
+export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
   // From a Terminal or Editor tab (a route of its own) the session's two tabs go back to its page.
   const pick = (x) => { setTab(x); if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
-  const [extra, setExtra] = useState([]);      // older pages, loaded on demand
-  const [before, setBefore] = useState(null);
-  const [draft, setDraft] = useState('');
+  // The box is this session's draft (drafts.js): its words and files are back when the session is
+  // opened again, after a reload and after a relaunch, until a send of them succeeds. The view is
+  // mounted per session (keyed by its parent), so the draft is read once, here.
+  const dkey = draftKey(project, name);
+  const [draft, setDraftState] = useState(() => draftText(dkey));
+  const setDraft = (v) => { setDraftState(v); keepDraft(dkey, v); };
+  const [lost, setLost] = useState(() => lostFiles(dkey));
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [rename, setRename] = useState(null);
@@ -185,23 +273,44 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
   });
   const [labelEdit, setLabelEdit] = useState(null);
   const [schedOpen, setSchedOpen] = useState(false);
-  const [files, setFiles] = useState([]);       // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
+  const [files, setFilesState] = useState(() => draftFiles(dkey));   // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
+  // An upload answers seconds after it was picked, perhaps once the person has moved on: it lands in
+  // THIS session's draft, and on the screen only while the screen is still this session's.
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const setFiles = (fn) => {
+    const next = fn(draftFiles(dkey));
+    keepDraft(dkey, draftText(dkey), next);
+    if (mounted.current) setFilesState(next);
+  };
   const [drag, setDrag] = useState(false);
   const picker = useRef(null);
-  const typing = useRef(false);
-  useEffect(() => { setFiles([]); }, [project, name]);
+  const typing = useRef(!!draft);
 
-  const sess = usePoll(() => fleet.session(project, name), 3000, [project, name]);
-  const pane = usePoll(() => fleet.pane(project, name), 2500, [project, name]);
-  useEffect(() => { setBefore(sess.data?.next_before ?? null); }, [sess.data?.next_before]);
+  // The transcript on its own poll (transcript.js), LIVE while an answer is owed: the session
+  // working, or a message sent in the last two minutes.
+  const sentAt = useRef(0);
+  const statusNow = useRef('unknown');
+  const quietRef = useRef(quiet); quietRef.current = quiet;
+  const tr = useTranscript(fleet, project, name, () => !quietRef.current &&
+    (statusNow.current === 'working' || statusNow.current === 'starting' || Date.now() - sentAt.current < 120000));
+  const lastPane = useRef({ at: 0, data: null });
+  const pane = usePoll(async () => {
+    const was = lastPane.current;
+    if (quietRef.current && was.data && Date.now() - was.at < QUIET_PANE_MS) return was.data;
+    const data = await fleet.pane(project, name);
+    lastPane.current = { at: Date.now(), data };
+    return data;
+  }, 2500, [project, name]);
   useEffect(() => {
     if (!fleet.presence) return undefined;
     const iv = setInterval(() => { if (!document.hidden) fleet.presence(project, name, typing.current).catch(() => {}); }, 5000);
     return () => clearInterval(iv);
   }, [project, name]);
 
-  const st = card ? statusOf(card) : (sess.data?.status || 'unknown');
-  const owner = card?.owner || sess.data?.owner || null;
+  const st = card ? statusOf(card) : (tr.page?.status || 'unknown');
+  statusNow.current = st;
+  const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
 
   const act = async (tool, args = {}, opts = {}) => {
@@ -210,7 +319,7 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
       const r = await fleet.act(tool, { project, session: name, ...args }, opts);
       if (r.queued === 'question') toast(t('sess.queuedQ'), '');
       else if (r.queued) toast(t('sess.queuedTurn'), '');
-      onChanged(); sess.reload(); pane.reload();
+      onChanged(); tr.reload(); pane.reload();
       return r;
     } catch (e) {
       if (e.body?.changed) { toast(t('sess.changed'), 'bad'); pane.reload(); }
@@ -243,13 +352,12 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
     const prompt = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
     const r = await act('fleet_send', { prompt });
-    if (r) { setDraft(''); typing.current = false; for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview); setFiles([]); }
-  };
-  const loadOlder = async () => {
-    try {
-      const r = await fleet.session(project, name, before);
-      setExtra(x => [...(r.messages || []), ...x]); setBefore(r.next_before ?? null);
-    } catch (e) { toast(e.message, 'bad'); }
+    if (r) {
+      sentAt.current = Date.now(); typing.current = false;
+      for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
+      sentDraft(dkey); setDraftState(''); setLost(0);
+      if (mounted.current) setFilesState([]);
+    }
   };
 
   const stop = (reclaim) => setConfirm({
@@ -262,7 +370,6 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
     onYes: async () => { const r = await act('fleet_stop', reclaim ? { reclaim: true } : {}, { confirm: true }); if (r) { toast(r.text?.split('\n')[0] || t('sess.stopped'), 'good'); onGone(); } },
   });
 
-  const msgs = [...extra, ...(sess.data?.messages || [])];
   const parked = st === 'parked';
   return (
     <section class="session">
@@ -283,7 +390,7 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
           ) : null}
         </div>
         <div class="sess-tools">
-          {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); sess.reload(); } })}
+          {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
           {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
           {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
@@ -328,9 +435,9 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
         <ToolTabs project={project} session={name} tool={tool} />
       </div>
       {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
-        ? (sess.error && !sess.data
-            ? <p class="err pad">{t('sess.readFailed', { why: sess.error.message })}</p>
-            : <Chat msgs={msgs} queued={sess.data?.queued || []} older={before != null} onOlder={loadOlder} />)
+        ? (!tr.page ? <ChatLoading load={tr.load} />
+            : <Chat page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
+                    onRetryOlder={tr.retryOlder} onStep={onStep} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
       {/* The composer is the agent's; a Terminal or Editor tab has the keyboard to itself. */}
@@ -338,6 +445,10 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
             onDragOver={(e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setDrag(true); } }}
             onDragLeave={() => setDrag(false)}
             onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); } }}>
+        {lost ? (
+          <p class="att-lost" role="status">{t('sess.filesLost', { n: lost })}{' '}
+            <button type="button" class="link-btn" onClick={() => { seenLost(dkey); setLost(0); }}>{t('common.ok')}</button></p>
+        ) : null}
         {files.length ? (
           <div class="att-list">
             {files.map(f => (

@@ -4,6 +4,9 @@
 .fleet-extra .extra-card { display:flex; flex-direction:column; align-items:flex-start; text-align:left; gap:10px; padding:16px; min-width:0; color:var(--fg); font:inherit; overflow-wrap:anywhere; }
 .fleet-extra .extra-card h3,.fleet-extra .extra-card p { margin:0; }
 .fleet-extra .extra-card .field { width:100%; }
+/* WHICH ACCOUNT is the question an account sign-in asks, so its profile is set like the card's
+ * title, not like the line of where it runs. */
+.fleet-extra .login-profile { color:var(--white); font:600 15.5px var(--mono); }
 .fleet-extra h2 { margin:20px 0 10px; font-size:14px; color:var(--dim); }
 .extra-search { display:flex; gap:8px; margin:12px 0 20px; }
 .extra-search input { min-width:0; flex:1; }

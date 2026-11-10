@@ -32,6 +32,7 @@ import { Held } from './held.jsx';
 import { SignIns } from './sign-ins.jsx';
 import { Search } from './search.jsx';
 import { Assistant, HomeAgent, Launcher } from './assistant.jsx';
+import { AccountsLine } from './accounts.jsx';
 import { TaskRail, TaskChip } from './tasks.jsx';
 import { bind, unbind, useAgent } from './agent.js';
 import { go } from './history.js';
@@ -145,7 +146,7 @@ export function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, ba
   const own = extra?.screens?.[route.view];
   let main;
   if (own) main = own(route);
-  else if (home) main = <Home projects={projects}><HomeAgent projects={projects} /></Home>;
+  else if (home) main = <Home projects={projects}><AccountsLine /><HomeAgent projects={projects} /></Home>;
   else if (SHARED.includes(route.view) && !offers(route.view)) main = <NotHere view={route.view} />;
   else main = SCREENS[route.view](route, { projects });
 

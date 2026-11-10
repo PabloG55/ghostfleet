@@ -1,4 +1,4 @@
-// Suggested hash routes: #/automations and #/automations/:id.
+// Mounted at #/automations and #/automations/:id (app.jsx's route table), in both apps.
 // Automations: a trigger and steps, built with blocks you drag (or tap, on a phone), or by
 // asking the AI tab beside the editor, which writes the draft into the same blocks. Either way
 // the person sees what will run and saves it; the server runs it (server/automations.mjs).

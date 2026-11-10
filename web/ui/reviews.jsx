@@ -1,4 +1,4 @@
-// Suggested hash routes: #/reviews and #/reviews/:host/:profile/:run (encode each segment).
+// Mounted at #/reviews and #/reviews/:host/:profile/:run, each segment encoded (app.jsx's route table), in both apps.
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { useKept } from './back.jsx';

@@ -542,7 +542,8 @@ is('empty is not a time', null, at(''));
 // every page: the question this app answers is "is anything blocked on me", and the answer from
 // ten minutes ago with its age beside it is worth more than a blank page.
 is('a fleet that stopped answering stays on screen, dated', true,
-   /t\('phone\.offline', \{ ago: ago\(/.test(SRC.phone) && /banner: <Bar error=\{error\} okAt=/.test(SRC.phone));
+   /t\('phone\.offline', \{ ago: ago\(/.test(SRC.phone) && /banner: (?:<>)?<Bar error=\{error\} okAt=/.test(SRC.phone));
+// (A fragment, when the banner holds more than the bar: the notifications offer sits under it.)
 // §5's rule about the token, checked as CODE and not as prose. It is kept for the life of the
 // PAGE PROCESS: sessionStorage, which a kill from the iOS app switcher empties and the app's own
 // reload keeps. ONE write, under a key scoped to the daemon's origin, and every 401 the client

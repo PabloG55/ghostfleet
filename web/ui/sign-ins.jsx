@@ -1,4 +1,4 @@
-// Suggested hash route: #/sign-ins. PendingSignIns also mounts above Queue's ledger items.
+// Mounted at #/sign-ins (app.jsx's route table), in both apps. PendingSignIns also mounts above Queue's ledger items.
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { usePoll, Btn, STATUS } from './ui.jsx';
@@ -37,7 +37,7 @@ export function SignInCard({ row, onChanged = () => {} }) {
   };
   return <article class={`card extra-card s-${STATUS[status].color} login-card`} data-login={row.id}>
     <CardStatePill status={status} label={stateLabel} /><h3>{row.provider}</h3><p>{joinMeta(row.server, row.session, row.host || t('phone.thisHost'), row.project)}</p>
-    {account ? <p>{row.profile}</p> : null}{row.first_site ? <p class="err">{t('phone.firstSite')}</p> : null}
+    {account ? <p class="login-profile">{row.profile}</p> : null}{row.first_site ? <p class="err">{t('phone.firstSite')}</p> : null}
     {row.kind === 'connector' ? <p>{joinMeta('claude.ai', row.connector)}</p> : null}
     {account && row.status === 'needs-login' ? <Btn disabled={busy} onClick={start}>{t('phone.signIn')}</Btn> : null}
     {(pending || row.kind === 'connector') && /^https?:\/\//.test(row.authorize || '') ? <a class="btn" href={row.authorize} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{t(row.kind === 'connector' ? 'phone.openConnector' : 'phone.open')}</a> : null}
@@ -45,9 +45,12 @@ export function SignInCard({ row, onChanged = () => {} }) {
     {!pending && row.kind !== 'connector' && row.status === 'pending' && !done ? <p>{t('phone.expired')}</p> : null}<p role="status">{result || (done ? t('phone.loginDone') : '')}</p>
   </article>;
 }
-export function PendingSignIns() {
+// `empty` says so when there is none. Its own page asks for that; above Queue's items it stays
+// silent, since Queue has its own empty line and two would say the same thing twice.
+export function PendingSignIns({ empty = false }) {
   const fleet = useFleet();
   const { data, error, reload } = usePoll(() => fleet.pendingSignIns(), 5000, []);
-  return <>{error ? <p class="err" role="alert">{t('phone.loginReadFailed')}</p> : null}<div class="extra-grid">{(data?.items || []).map(r => <SignInCard key={r.id} row={r} onChanged={reload} />)}</div></>;
+  const items = data?.items || [];
+  return <>{error ? <p class="err" role="alert">{t('phone.loginReadFailed')}</p> : null}<div class="extra-grid">{items.map(r => <SignInCard key={r.id} row={r} onChanged={reload} />)}</div>{empty && data && !items.length ? <p class="empty">{t('phone.noSignIns')}</p> : null}</>;
 }
-export function SignIns() { return <PhoneScreen title={t('phone.signIns')}><PendingSignIns /></PhoneScreen>; }
+export function SignIns() { return <PhoneScreen title={t('phone.signIns')}><PendingSignIns empty /></PhoneScreen>; }

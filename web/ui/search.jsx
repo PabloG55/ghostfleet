@@ -1,9 +1,9 @@
-// Suggested hash route: #/search. SearchInput can also be mounted in either sidebar.
+// Mounted at #/search?q=… (app.jsx's route table), in both apps. SearchInput is its field.
 import { useRef, useEffect, useState } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { useKept } from './back.jsx';
 import { useKeys } from './keyboard.jsx';
-import { usePoll, Btn, StatusPill } from './ui.jsx';
+import { usePoll, Btn, StatusPill, splitAddr } from './ui.jsx';
 import { t } from './i18n.js';
 import { PhoneScreen, joinMeta, sessionRoute } from './phone-screen.jsx';
 export function SearchInput({ value, onChange, onOpen, inputRef }) {
@@ -33,7 +33,7 @@ export function Search({ query = '' }) {
   useKeys(key => { if (!key.ctrl && !key.alt && key.k === '/') { field.current?.focus(); return true; } return false; });
   return <PhoneScreen title={t('phone.search')} error={openError || error || gridError || grids?.find(g => g.error)?.error} loading={loading}>
     <SearchInput value={q} onChange={setQ} onOpen={first} inputRef={field} />
-    {projects.length ? <section><h2>{t('phone.projects')}</h2><div class="extra-grid">{projects.map(p => <button class="card extra-card" key={p.name} onClick={() => openProject(p)}><h3>{p.name}</h3><p class="muted">{p.host || p.path}</p></button>)}</div></section> : null}
+    {projects.length ? <section><h2>{t('phone.projects')}</h2><div class="extra-grid">{projects.map(p => <button class="card extra-card" key={p.name} onClick={() => openProject(p)}><h3>{splitAddr(p.name)[0]}</h3><p class="muted">{p.host || p.path}</p></button>)}</div></section> : null}
     {needle && sessions.length ? <section><h2>{t('phone.sessions')}</h2><div class="extra-grid">{sessions.map(({ project: p, card: c }) => <button class="card extra-card" key={`${p.name}/${c.name}`} onClick={() => fleet.go(sessionRoute(p.name, c.name))}><StatusPill status={c.status} small /><h3>{c.name}</h3><p>{joinMeta(p.name, p.host)}</p><p class="muted">{c.branch} {c.pr} {c.label}</p><p>{c.msg}</p></button>)}</div></section> : null}
     {!loading && (!needle || !gridLoading) && !sessions.length && !projects.length ? <p class="empty">{t('phone.noMatches')}</p> : null}
   </PhoneScreen>;

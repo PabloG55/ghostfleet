@@ -156,7 +156,7 @@ IFS=$'\x1f' read -r TOUCHED OBSERVED SURFACES < <(
       # warning about a turn that changed a shell script or a TUI would be a warning nothing
       # could satisfy. Two halves: extensions that are always a rendering layer, and a plain
       # script UNDER a client directory, which is how this repo ships its own screens
-      # (web/app.js). A bare .js outside those directories is a KNOWN blind spot, left blind
+      # (web/api.js, web/grid.js). A bare .js outside those directories is a KNOWN blind spot, left blind
       # deliberately: widen it when the meter shows cases being missed, not on a guess.
       test("[.](html?|css|scss|sass|less|svg|jsx|tsx|vue|svelte)$"; "i")
       or test("(^|/)(web|public|client|www)/.*[.](js|mjs|ts)$"; "i");

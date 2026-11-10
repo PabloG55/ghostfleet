@@ -11,7 +11,7 @@ import * as pk from '../passkey.js';
 import * as push from './push.js';
 import { FleetProvider, useFleet } from '../ui/adapter.jsx';
 import { FleetApp } from '../ui/app.jsx';
-import { Toasts, usePoll, ago } from '../ui/ui.jsx';
+import { Toasts, usePoll, ago, Btn, toast } from '../ui/ui.jsx';
 import { go } from '../ui/history.js';
 import { useLang } from '../ui/lang.js';
 import { unbind } from '../ui/agent.js';
@@ -48,6 +48,41 @@ function Bar({ error, okAt }) {
   return <div class="demo-bar off" role="status">{okAt ? t('phone.offline', { ago: ago((Date.now() - okAt) / 1000) }) : t('phone.offlineNever')}</div>;
 }
 
+// The one-tap offer of notifications (push.js offerWanted says when), on the first page, as it was
+// on the old Projects screen. Called from the tap: push.enable()'s first await is the permission
+// request itself, so the gesture is still live when iOS asks whether it counts as one.
+const atHome = () => /^#?\/?$/.test(location.hash || '');
+function PushOffer() {
+  const [want, setWant] = useState(false);
+  const [home, setHome] = useState(atHome);
+  useEffect(() => { const f = () => setHome(atHome()); addEventListener('hashchange', f); return () => removeEventListener('hashchange', f); }, []);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      let laterAt = 0;
+      try { laterAt = Number(localStorage.getItem(push.LATER_KEY)) || 0; } catch {}
+      const base = { server: api.mode() === 'server', token: api.haveToken(), blocked: push.blockedReason(t), laterAt };
+      if (!push.offerWanted({ ...base, on: false })) return;            // decided without asking anything
+      let on = true;
+      try { on = !!(await push.state(t)).on; } catch {}
+      if (live) setWant(push.offerWanted({ ...base, on }));
+    })();
+    return () => { live = false; };
+  }, []);
+  if (!want || !home) return null;
+  const turnOn = async () => {
+    try { await push.enable(t); setWant(false); toast(t('push.onNow'), 'good'); }
+    catch (e) { if (push.permission() === 'denied') setWant(false); toast(String((e && e.message) || e), 'bad'); }
+  };
+  const later = () => { try { localStorage.setItem(push.LATER_KEY, String(Date.now())); } catch {} setWant(false); };
+  return (
+    <div class="notify-bar" role="status">
+      <span class="grow">{t('push.offer')}</span>
+      <span class="notify-btns"><Btn kind="primary sm" onClick={turnOn}>{t('push.turnOn')}</Btn><Btn kind="ghost sm" onClick={later}>{t('push.notNow')}</Btn></span>
+    </div>
+  );
+}
+
 function Phone() {
   const fleet = useFleet();
   const { data, error } = usePoll(() => fleet.projects(), 5000, []);
@@ -56,7 +91,7 @@ function Phone() {
   useEffect(() => { push.sync(); }, []);
   return (
     <FleetApp name="ghostfleet" sub={t('lock.tagline')} projects={data?.projects} hosts={data?.hosts}
-              frame={{ banner: <Bar error={error} okAt={okAt.current} /> }} />
+              frame={{ banner: <><Bar error={error} okAt={okAt.current} /><PushOffer /></> }} />
   );
 }
 

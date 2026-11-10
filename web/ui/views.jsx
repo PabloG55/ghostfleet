@@ -7,7 +7,7 @@
 // slots: the phone has no people, so its slots draw nothing.
 import { useState, useEffect } from 'preact/hooks';
 import { useKept } from './back.jsx';
-import { Btn, usePoll, clock, toast } from './ui.jsx';
+import { Btn, usePoll, clock, toast, ProjectName } from './ui.jsx';
 import { Select } from './select.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, lang, LANGS, LANG_NAMES, words } from './i18n.js';
@@ -45,7 +45,7 @@ export function Activity() {
                 <span class="when">{clock(r.ts)}</span>
                 {face(r)}
                 <span class="grow">{person(r)} {VERBS[r.verb] || r.verb} {target ? <b>{target}</b> : null}
-                  {r.project ? <span class="muted"> · {r.project}</span> : null}
+                  {r.project ? <span class="muted"> · <ProjectName name={r.project} /></span> : null}
                   {r.via ? <span class="tag"><Icon name="bolt" /> {r.via}</span> : null}</span>
                 <span class={`badge ${rk}`}>{rl}</span>
               </summary>
