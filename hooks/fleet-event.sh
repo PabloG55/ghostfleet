@@ -1754,21 +1754,48 @@ fi
 # can't confirm the submit, which closes the common way that happens.
 if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
   rt="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
+  # The arming marker also carries WHERE THIS TURN STARTS in the transcript — the line
+  # count now — so the Stop below can ask "did this turn SendMessage the answer" without
+  # finding the one that answered the previous question to the same asker. An empty or
+  # unparsable marker (one written by older code) means "don't know", and _peer_answered
+  # then declines to suppress: a duplicate, never a silence.
+  _tl=0
+  [ "$EVENT" = "UserPromptSubmit" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+    && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+  case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
+  # A Telegram message FOLDED into a Telegram turn (`.reply-to.fold`, bin/fleet-send) whose
+  # turn ended between fleet-send's look and its write: the prompt typed now is that message
+  # starting a turn of its own, so its address is this turn's.
+  if [ "$EVENT" = "UserPromptSubmit" ] && [ ! -f "$rt" ] && [ -s "$rt.fold" ] \
+     && case "${_prompt:-}" in "[telegram] "*) true ;; *) false ;; esac; then
+    tail -n 1 "$rt.fold" 2>/dev/null | cut -d "$(printf '\037')" -f 1-3 > "$rt" 2>/dev/null
+    printf '%s\n' "$_tl" > "$rt.armed" 2>/dev/null
+    rm -f "$rt.fold" 2>/dev/null
   # An arming the mod wrote names its turn on a second line (`turn <id>`): it was armed by
   # the turn.start of the very prompt that asked, and a prompt typed into that turn must
   # not move its offset past the start of the answer. Only a paste's arming is redone.
-  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ] \
+  elif [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ] \
      && ! grep -q '^turn ' "$rt.armed" 2>/dev/null; then
-    # The arming marker also carries WHERE THIS TURN STARTS in the transcript — the line
-    # count now — so the Stop below can ask "did this turn SendMessage the answer" without
-    # finding the one that answered the previous question to the same asker. An empty or
-    # unparsable marker (one written by older code) means "don't know", and _peer_answered
-    # then declines to suppress: a duplicate, never a silence.
-    _tl=0
-    [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
-      && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
-    case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
-    printf '%s\n' "$_tl" > "$rt.armed" 2>/dev/null
+    if [ -s "$rt.fold" ] && [ -f "$rt.armed" ]; then
+      # Folded follow-ups are pending, and the prompt typed now is one of them (or rides in
+      # with them): the running turn keeps the offset it began at. Moved to now, the answer
+      # it already owes would be cut to whatever came after this prompt.
+      :
+    elif _held="$(sed -n 's/^held //p' "$rt.armed" 2>/dev/null)" && [ -n "$_held" ] \
+         && case "${_prompt:-}" in "[telegram] "*|"<task-notification>"*|"<local-command"*|"") false ;; *) true ;; esac \
+         && ! tail -n "+$(( $(head -n 1 "$rt.armed" 2>/dev/null | tr -dc '0-9') + 1 ))" "$TRANSCRIPT" 2>/dev/null \
+              | jq -e -Rn --arg b "$_held" '($b | @base64d | gsub("\\s"; "")) as $w
+                  | any(inputs | fromjson? // empty | select(.type == "user") | .message.content
+                        | (if type == "string" then . elif type == "array" then map(.text? // "") | join("") else "" end)
+                        | gsub("\\s"; ""); $w != "" and contains($w))' >/dev/null 2>&1; then
+      # A folded message the Stop below handed on to the next turn, which never ran it (the
+      # queue was cleared at the desk): this prompt is somebody else's, and it is not to be
+      # answered to the phone or held to the phone's tools.
+      rm -f "$rt" "$rt.armed" 2>/dev/null
+    else
+      rm -f "$rt.fold" 2>/dev/null   # a fresh address replaced the one it was folded behind
+      printf '%s\n' "$_tl" > "$rt.armed" 2>/dev/null
+    fi
   elif [ -f "$rt" ] && [ -f "$rt.armed" ] \
        && { [ "$EVENT" = "Stop" ] || [ "$status" = "need-you" ]; }; then
     # \x1f, and a sink for the leftover: with fewer variables than fields `read` glues
@@ -1819,6 +1846,50 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
       else
         r_ev="asks"; r_txt="$NEED_DETAIL"
       fi
+      # MESSAGES FOLDED INTO THIS TURN (`.reply-to.fold`, bin/fleet-send): one answer, and to
+      # the right message. The transcript says which of them the turn took in — a prompt typed
+      # mid-turn is recorded as a `queued_command` attachment the moment the turn reads it —
+      # and the answer goes to the NEWEST of those, as a reply to it, because it covers
+      # everything before it. The ones it never took in run as the next turn, which no prompt
+      # hook announces, so their address is handed on to that turn here, armed at this line,
+      # and its Telegram mark with it: answered once, and held to the phone's tools.
+      #   Matched by the prompt's text, whitespace aside, in order: measured on real
+      # transcripts, a queued_command carries the whole prompt, a long paste included, never
+      # a "[Pasted text]" placeholder. A record that matches nothing and has a match after it
+      # is stale and is dropped. Spoken if any message it answers was spoken.
+      r_held=""
+      if [ "$EVENT" = "Stop" ] && [ -s "$rt.fold" ] && mv "$rt.fold" "$rt.fold.$$" 2>/dev/null; then
+        if [ -n "$r_start" ]; then _from="+$(( r_start + 1 ))"; else _from="-400"; fi
+        _fi="$(tail -n "$_from" "$TRANSCRIPT" 2>/dev/null | jq -Rn --rawfile f "$rt.fold.$$" '
+                 def flat: (if type == "string" then . elif type == "array" then map(.text? // "") | join("") else "" end) | gsub("\\s"; "");
+                 [inputs | fromjson? // empty | select(.type == "attachment") | .attachment | objects
+                  | select(.type == "queued_command") | .prompt | flat] as $q
+                 | [$f | split("\n")[] | select(length > 0) | ((split("\u001f")[3] // "") | try @base64d catch "") | gsub("\\s"; "")] as $p
+                 | reduce range(0; $p | length) as $i ({at: 0, last: -1};
+                     . as $s
+                     | (first(range($s.at; $q | length) as $k | select($p[$i] != "" and ($q[$k] | contains($p[$i]))) | $k) // -1) as $k
+                     | if $k < 0 then $s else {at: ($k + 1), last: $i} end)
+                 | .last' 2>/dev/null)"
+        case "$_fi" in ''|*[!0-9-]*) _fi=-1 ;; esac
+        _fl=0; _fv=0
+        case "$r_sess" in v*) _fv=1 ;; esac
+        while IFS=$'\x1f' read -r f_sock f_sess f_dir f_b64 f_extra; do
+          _fl=$((_fl + 1))
+          [ "${f_sock:-}" = telegram ] && [ -z "${f_extra:-}" ] && [ -n "${f_b64:-}" ] || continue
+          case "${f_sess:-}" in [mv][0-9]*) ;; *) continue ;; esac
+          case "$f_sess" in *[!A-Za-z0-9]*) continue ;; esac
+          case "${f_dir:-}" in /*) [ -d "$f_dir" ] || continue ;; *) continue ;; esac
+          if [ "$_fl" -le $(( _fi + 1 )) ]; then
+            # taken in by this turn: the newest of them is the one answered
+            case "$f_sess" in v*) _fv=1 ;; esac
+            r_sess="$f_sess"; r_dir="$f_dir"
+          else
+            r_held="$f_sock"$'\x1f'"$f_sess"$'\x1f'"$f_dir"; r_hb64="$f_b64"
+          fi
+        done < "$rt.fold.$$"
+        [ "$_fv" = 1 ] && r_sess="v${r_sess#?}"
+        rm -f "$rt.fold.$$" 2>/dev/null
+      fi
       # Only into a real channel dir: fleet-telegram always sends an absolute one, and an
       # empty field would otherwise make this "/outbox".
       _tgo="$r_dir/outbox"
@@ -1832,6 +1903,15 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
       fi
       # One message, one answer; need-you keeps the address, as below.
       [ "$EVENT" = "Stop" ] && rm -f "$rt" "$rt.armed" 2>/dev/null
+      if [ -n "$r_held" ]; then
+        # The next turn is the folded message's own: armed from here, since no prompt hook
+        # will arm it, and marked, since the mark above went with this turn's Stop.
+        _tn="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+        case "$_tn" in ''|*[!0-9]*) _tn=0 ;; esac
+        printf '%s\n' "$r_held" > "$rt" 2>/dev/null
+        printf '%s\nheld %s\n' "$_tn" "$r_hb64" > "$rt.armed" 2>/dev/null
+        printf '%s\n' "${r_held##*$'\x1f'}" > "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.telegram" 2>/dev/null
+      fi
     elif [ "$r_ok" = 1 ]; then
       # Who we would be answering, and where this turn began (see _peer_answered).
       r_peer="${r_sock#cf-}/$r_sess"

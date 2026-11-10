@@ -120,7 +120,7 @@ starts.
 Its files are in `~/.config/ghostfleet/telegram/`:
 
 - `config.json`: the link, the commands, the allowlist;
-- `state.json`: the poll offset and the counts;
+- `state.json`: the poll offset, the counts, and any messages still being held for one turn;
 - `log`: one line per event, redacted;
 - `outbox/`: answers waiting to be sent.
 
@@ -152,6 +152,33 @@ line, cut to 100 characters, and it is never written to the log.
 
 An image sent as a file is treated as a photo when the photo store takes it. Past the photo
 limit of 6 MB, or in a format it does not read (WebP, SVG), it arrives as a file instead.
+
+### Several messages, one turn
+
+A phone sends what you type as separate messages, often a second apart: a line, then the link
+it is about. The daemon holds what you send until the chat has been quiet for 3 seconds, then
+delivers all of it as **one** turn. The prompt has one `[telegram] ` prefix, then each message
+in the order you sent it, with its quote, its words and its file line kept. The answer comes
+back once, as a reply to the last of them, and as a voice note if any of them was one. The
+typing indicator starts with your first message.
+
+- **Nothing waits more than 30 seconds** from its first message, however fast you keep typing.
+- **An album is always one batch.** Telegram delivers it as one message per photo, a few
+  milliseconds apart, with the caption on the first. The turn gets the caption once and a
+  `photo:` line for each picture.
+- **`/start`, `/help` and `/status` are answered at once** and never held. A command first
+  sends whatever you wrote before it, so `/status` sees that work already handed over.
+- **A held message survives a crash.** Telegram forgets a message once the daemon has polled
+  past it, and a batch has to poll to see what comes next, so the batch is written to
+  `state.json` before that poll. A daemon that is stopped or dies inside the window hands the
+  batch over when it starts again. If it dies after handing the batch over but before
+  recording that, you get it twice rather than not at all.
+
+```bash
+fleet-telegram config coalesce-ms 5000   # wait for 5 s of quiet instead (at most 30000)
+fleet-telegram config coalesce-ms 0      # each message is its own turn (an album is still one)
+fleet-telegram config coalesce-ms ''     # back to the default, 3000
+```
 
 ### Voice
 
@@ -209,10 +236,33 @@ fleet-telegram config voice-ack ''      # off
 `fleet-telegram status` shows whether each of the three is set, and `fleet-telegram config` shows
 what it is set to. The daemon reads them on every message, so no restart is needed.
 
-**A busy session queues your message**, exactly as `fleet-send` queues any prompt. The bot
-tells you it is queued and runs next. The answer you get back belongs to **your** message's
-turn, never to the one that was running when you sent it. The relay is armed by the
-`UserPromptSubmit` that actually starts your turn.
+**A message to a session that is already working** goes one of two ways:
+
+- **Into your own Telegram turn.** If the turn running is one you started from the phone,
+  what you send now is more of the same request ("and the pricing page too"). It goes into
+  that turn (`fleet-send --now`), and you get **one** answer that covers both, as a reply to
+  your newest message. A message the turn has not read by the time it ends runs as the next
+  turn instead, and then each turn answers its own message. Either way every message is
+  answered exactly once, and quoting the right message.
+- **After anything else.** A turn started at the desk, by another session or by the machine
+  is never joined. Your message queues behind it, exactly as `fleet-send` queues any prompt.
+  The bot tells you `<session> is working on something else; this runs right after it`. The
+  turn your message starts opens with a line saying it was sent while an earlier turn was
+  running. A session stopped on a question at the desk also queues: `--now` presses Enter,
+  and Enter would answer the question.
+
+The rule is there because of the [allowlist](#the-tool-allowlist-and-why). The guard holds a
+turn to the phone's tools only while it is a **Telegram** turn. A turn started at the desk
+runs with every tool the session has. Folding your words into it would let a message from
+the phone use all of them, which is exactly what the allowlist exists to stop if the phone, or
+the Telegram account, is not in your hands. A Telegram turn already runs under the
+allowlist, so adding to it gives a message nothing it did not have.
+
+Either way, the answer you get back belongs to **your** message, never to a turn that was
+running for somebody else. The relay is armed by the `UserPromptSubmit` that starts your
+turn. A folded message's address waits beside the running turn's own
+(`<socket>.<session>.reply-to.fold`), and that turn's `Stop` reads the transcript to see
+which messages it took in.
 
 ## What comes back
 
@@ -272,7 +322,9 @@ A list may hold several entries for one tool. The call is allowed if any of them
 `[telegram] `. The fleet's `UserPromptSubmit` hook sees that and marks the turn
 (`<fleet dir>/<socket>.<session>.telegram`), and the turn's `Stop` clears the mark. So the
 next prompt, typed at the desk or queued by another session, runs exactly as it always
-did. The guard costs one file check per tool call for every session that is not in a
+did. The one exception is a message you sent into a Telegram turn that did not read it in
+time. That message runs as the next turn, which no prompt hook announces, so the `Stop`
+that hands it on marks that turn too. The guard costs one file check per tool call for every session that is not in a
 Telegram turn.
 
 **What the allowlist is not: a sandbox.** Work you delegate runs in the target session with
@@ -408,6 +460,9 @@ if the phone is lost.
 | `GHOSTFLEET_TELEGRAM_POLL` | `50` | long-poll seconds per `getUpdates` (1–50) |
 | `GHOSTFLEET_TELEGRAM_SPEAK_TIMEOUT` | `180` | seconds `speak-cmd` may run before it is stopped; it holds the outbox while it runs |
 | `GHOSTFLEET_TELEGRAM_SERVICE` | `launchd` on macOS, `systemd` where `systemctl --user` works, else `pidfile` | force a service kind |
+
+The window for [several messages, one turn](#several-messages-one-turn) is a `config` key, not
+an environment variable: `fleet-telegram config coalesce-ms <0-30000>` (3000 by default).
 
 ## When it does not work
 
