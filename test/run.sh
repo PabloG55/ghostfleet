@@ -1291,6 +1291,15 @@ done
 for k in idle busy; do for w in 160 30; do
   is "codex 0.160: a $k pane is NOT need-you at $w cols"  "0" "$(matches "$bre" "$FIX/codex-$k-0160-${w}col.txt")"
 done; done
+# codex 0.166.0's hooks brought a third: "Hooks need review" over "› 1. Review hooks", when a
+# hook in hooks.json has no matching trust record. It comes up after the composer's first
+# frame, so a session stopped on it must read as need-you, not ready. Real captures, a trust
+# record altered on purpose; at 30 columns the prose wraps and the option line does not.
+for w in 120 56 30; do
+  is "codex 0.166: hooks-review dialog is need-you at $w cols" "1" "$(matches "$bre" "$FIX/codex-hooks-review-0166-${w}col.txt")"
+  is "...and is NOT ready at $w cols"                         "0" "$(matches "$cre" "$FIX/codex-hooks-review-0166-${w}col.txt")"
+done
+is "codex 0.166: the hooks-review captures are that dialog" "3" "$(grep -l 'Hooks need review' "$FIX"/codex-hooks-review-0166-*col.txt | grep -c . || true)"
 # ...and the fixtures really are what they are named: the busy ones carry codex's working
 # line, the idle ones its composer, so a "not need-you" above is about the right pane.
 is "codex 0.160: the busy captures are working"  "2" "$(cat "$FIX"/codex-busy-0160-*col.txt | grep -c 'Working (' || true)"
@@ -1298,6 +1307,8 @@ is "codex 0.160: the idle captures have a prompt" "yes" "$(grep -q 'Context [0-9
 # The grid reads the JS spelling. Same fixtures, same answers, or the card disagrees with
 # fleet-agent about the same pane.
 bjs="$("$ROOT/bin/fleet-agent" field codex blocked_re_js)"
+is "codex: blocked_re_js reads the hooks-review dialog too" "1 1 1" "$(for w in 120 56 30; do
+   node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-hooks-review-0166-${w}col.txt"; printf ' '; done | sed 's/ $//')"
 is "codex: blocked_re_js agrees on every capture" "1 1 1 1 1 0 0 0 0" "$(for f in trust-0160-120col trust-0160-30col daemon-0160-30col trust-0160 trust idle-0160-160col idle-0160-30col busy-0160-160col busy-0160-30col; do
    node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-$f.txt"; printf ' '; done | sed 's/ $//')"
 
@@ -2306,9 +2317,10 @@ rm -rf "$IM"
 # these assertions had to move with it — a stale warning is worse than none.
 #
 # WHAT STAYS TRUE, and the three fields keep them apart:
-#   hooks     codex still pushes NO events. MCP is tools; hooks are push events. It can now
-#             drive the fleet and still cannot tell it anything, so its status is read from
-#             its pane and a question it asks may never reach the inbox.
+#   hooks     codex pushes events through its own hooks since 0.166.0 (hooks/codex-fleet-
+#             event.sh), but NOT in a work profile's fleet, by the owner's decision, and
+#             only once codex trusts them. So its caveat says where they do not run
+#             (events_off) instead of saying it has none.
 #   mcp_self  codex starts an MCP server with a scrubbed environment (measured by calling
 #             the tool: fleet_list with no arguments answered "fleet-list: no socket"), so
 #             its sessions must NAME the project. opencode passes its env and does not.
@@ -2353,7 +2365,13 @@ is "cursor gives up only its own fleet" \
 is "opencode: tools, not a warning"   "0" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
 is "codex: tools either"              "0" "$(fa caveat codex | grep -c 'no fleet_\* tools' || true)"
 is "...and it is NOT blind to events" "0" "$(fa caveat opencode | grep -c 'no fleet events' || true)"
-is "codex: no events, still"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
+# codex HAS hooks now, so the blanket clause is gone, and what replaced it names the one
+# place they do not run. Both halves, since the composer prints the new clause from a field
+# only codex declares: a second agent picking it up would be a bug of its own.
+is "codex has hooks now"              "yes" "$(fa field codex hooks)"
+is "codex: not 'no fleet events' outright" "0" "$(fa caveat codex | grep -c 'no fleet events:' || true)"
+is "...only in a work profile's fleet"  "1" "$(fa caveat codex | grep -c 'no fleet events in a work profile' || true)"
+is "...and nobody else says so"       "" "$(for a in $(fa list); do [ "$a" = codex ] && continue; grep -q 'work profile' <<< "$(fa caveat "$a")" && printf '%s ' "$a"; done)"
 # What replaced it, per agent — and the other direction on each, since a composer that
 # printed every clause for everybody would pass all the positives above.
 is "codex must name the project"      "1" "$(fa caveat codex | grep -c 'must name the project' || true)"

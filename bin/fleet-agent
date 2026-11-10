@@ -30,7 +30,8 @@
 #               express the SAME signal.
 #   blocked_re  ERE matching "stopped, waiting on a human" in the pane. Empty = none.
 #   blocked_re_js  the same signal as a JavaScript regex, for fleet-grid.mjs. Declared only
-#               by an agent with no hooks (codex): one with hooks pushes need-you itself.
+#               by an agent that can stop on a dialog BEFORE any of its hooks can fire
+#               (codex: they fire from the first prompt on); the rest push need-you themselves.
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
 #   review      the subcommand that runs a NON-INTERACTIVE code review, or EMPTY when
@@ -43,6 +44,8 @@
 #               (its /review is an interactive slash command, which a pane cannot be
 #               asked for from outside); opencode has `run` and no review.
 #   hooks       yes = pushes need-you/done into the fleet event file by itself
+#   events_off  where an agent with hooks still pushes nothing, as a caveat clause; absent
+#               = nowhere. codex declares one (see its hooks field)
 #   mcp         yes = the ghostfleet MCP server is registered for this CLI, so a session
 #               can CALL fleet_spawn/fleet_inbox/… as a tool instead of shelling out
 #   skill       yes = it also gets skill/ghostfleet-orchestrate, i.e. the INSTRUCTIONS for
@@ -301,11 +304,19 @@ agent_field() {
         # (the prose wraps and is truncated there), and it is not how codex draws a reply.
         # Captured at 30, 56 and 120 columns; idle and working panes at 30 and 160 do not
         # match. The old sentence stays for the builds that still print it.
-        #   READ BY THE GRID AS need-you (blocked_re_js), because codex has no hooks to say so
-        # itself: a codex session stopped on either dialog looked READY, and a switch onto it
-        # rolled it back as "failed to start".
-        blocked_re) printf '%s' 'Do you trust the contents of this directory|^(›| ) 1\. Trust and continue *$|^(›| ) 1\. Run without daemon this( time)? *$' ;;
-        blocked_re_js) printf '%s' 'Do you trust the contents of this directory|^(?:›| ) 1\. Trust and continue *$|^(?:›| ) 1\. Run without daemon this(?: time)? *$' ;;
+        #   READ BY THE GRID AS need-you (blocked_re_js), because no hook can say so: these
+        # dialogs come before the first prompt, and codex fires its first hook (SessionStart)
+        # AT the first prompt. A codex session stopped on either one looked READY, and a switch
+        # onto it rolled it back as "failed to start".
+        #   AND A THIRD, which the hooks themselves brought (codex-cli 0.166.0, captured
+        # 2026-11-10 at 120, 56 and 30 columns): "Hooks need review" over "› 1. Review hooks",
+        # drawn when a hook in hooks.json has no matching trust record. install.sh records the
+        # trust, so this shows when that record goes stale: a codex update that hashes
+        # differently, a hand edit, a runtime that moved. It comes up AFTER the composer's
+        # first frame, so a session stopped on it can have looked ready for a moment. Its prose
+        # wraps at 30 columns and the option line does not.
+        blocked_re) printf '%s' 'Do you trust the contents of this directory|^(›| ) 1\. Trust and continue *$|^(›| ) 1\. Run without daemon this( time)? *$|^(›| ) 1\. Review hooks *$' ;;
+        blocked_re_js) printf '%s' 'Do you trust the contents of this directory|^(?:›| ) 1\. Trust and continue *$|^(?:›| ) 1\. Run without daemon this(?: time)? *$|^(?:›| ) 1\. Review hooks *$' ;;
         # The composer footer ("gpt-5.5 medium · ~/work/repo"). Deliberately NOT the
         # "›" input marker: that also renders on the trust dialog's menu, and a false
         # ready would make fleet-spawn fire its prompt into that dialog and lose it.
@@ -329,16 +340,26 @@ agent_field() {
         # a selection through rather than diffing and pasting. Read off `codex review
         # --help` on the installed build, not assumed from `exec`.
         review)     printf 'review' ;;
-        hooks)      printf 'no'  ;;
+        # YES since codex-cli 0.166.0 (measured 2026-11-10, docs/multi-agent-sessions.md):
+        # $CODEX_HOME/hooks.json runs hooks/codex-fleet-event.sh, which hands fleet-event.sh
+        # the payload it reads from claude: working at UserPromptSubmit, done at Stop with the
+        # turn's last message, need-you at PermissionRequest, the Telegram guard at PreToolUse.
+        # install.sh registers them and records codex's trust for each; without that record
+        # codex runs none of them.
+        #   NOT EVERYWHERE, so it is a field of its own: in a WORK profile's fleet the bridge
+        # does nothing, by the owner's decision, and there codex is what it was before —
+        # status read from the pane. The pane detectors above stay either way: they are the
+        # fallback where no hook runs, and the truth for the dialogs that come before one can.
+        hooks)      printf 'yes' ;;
+        events_off) printf '%s' "no fleet events in a work profile's fleet, where its status is read from its pane; elsewhere only once codex trusts the hooks install.sh wires" ;;
         # YES since 2026-08-27: install.sh runs `codex mcp add ghostfleet -- node <server>`,
         # which writes [mcp_servers.ghostfleet] into ~/.codex/config.toml. Proven by CALLING
         # fleet_list from a real codex session in a scratch fleet, not by reading
         # `codex mcp list` — a registration that lists and cannot be called is a feature
         # that did not ship.
-        #   THIS DOES NOT GIVE IT HOOKS, and the two are easy to conflate: MCP is tools,
-        # hooks are push events. codex still writes no inbox row and wakes no master, so it
-        # remains the most degraded of the three — it can now drive the fleet while the
-        # fleet still cannot be told anything by it. See the `caveat` command.
+        #   MCP is tools and hooks are push events, and the two are easy to conflate: this
+        # is how a codex session drives the fleet, the hooks above are how it tells the fleet
+        # anything. Each arrived on its own, and the caveat names what is still missing.
         mcp)        printf 'yes' ;;
         skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
         # NO, and this is the half of the wiring that did NOT work — found by calling the
@@ -598,6 +619,9 @@ case "$cmd" in
     out=""
     [ "$(agent_field "$a" hooks)" = yes ] || \
       out="no fleet events: status is guessed from its pane, and a question it asks may never reach the inbox"
+    # Hooks that run in some fleets and not others: the agent says where they do not.
+    off="$(agent_field "$a" events_off 2>/dev/null)" || off=""
+    [ -n "$off" ] && out="${out:+$out. }$off"
     # SHRUNK, NOT DELETED, on 2026-08-27. This clause used to read "no fleet_* tools: it
     # cannot spawn or answer siblings from a tool call" for codex and opencode, and that
     # became false the moment install.sh registered the MCP server for both — a warning

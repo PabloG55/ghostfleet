@@ -589,8 +589,10 @@ function paneBusy(sock, name) {
   } catch { return false; }
 }
 
-// STOPPED ON A DIALOG, read off the pane — for an agent with no hooks to push need-you itself
-// (bin/fleet-agent declares blocked_re_js only for those; codex today). Without this a codex
+// STOPPED ON A DIALOG, read off the pane — for an agent that can stop on one before any of its
+// hooks can fire (bin/fleet-agent declares blocked_re_js only for those; codex today, whose
+// first hook fires at the first prompt, after its trust, daemon and hooks-review dialogs).
+// Without this a codex
 // session waiting on its folder-trust or daemon dialog drew as READY: nothing else in the
 // status path ever asked the pane whether a human was being waited on. Per line, like
 // paneBusy, and false whenever the pattern is absent or the pane cannot be read.
@@ -827,8 +829,9 @@ function newestTranscript(cwd) {
 }
 
 // ── codex history ────────────────────────────────────────────────────────────
-// codex is the one agent with NO hooks (bin/fleet-agent: hooks=no), so nothing ever
-// pushes it a status file — and its history lives in a layout newestTranscript() cannot
+// codex was the one agent with NO hooks, and still has none that run in a work profile's
+// fleet or before codex trusts them (bin/fleet-agent events_off), so there nothing pushes
+// it a status file — and its history lives in a layout newestTranscript() cannot
 // reach: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl, keyed by date and
 // uuid rather than by cwd. Both halves of `st?.transcript || newestTranscript(cwd)` came
 // back empty, deriveStatus fell through to its last line, and every codex worker sat on

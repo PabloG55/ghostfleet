@@ -57,9 +57,11 @@ one that works — the repo has been bitten by exactly that before, which is why
 assumed; Codex degrades to nothing, because it could not be run at all.)*
 
 - **Hooks.** OpenCode **does** push events (`permission.asked` → `need-you`, `session.idle`
-  → `done`), so it does not fall back to heuristics — see Q2. Codex is unverified, so it is
-  wired for pane-only detection and its card must not render a confident "ready" it hasn't
-  earned. The grid shows the agent on the card so an unknown state is legible as "we can't
+  → `done`), so it does not fall back to heuristics — see Q2. Codex was unverified then, so
+  it was wired for pane-only detection, and its card must not render a confident "ready" it
+  hasn't earned. *(Superseded 2026-11-10: codex pushes events through its own hooks outside
+  a work profile, see [codex hooks](#codex-hooks). The pane detectors stay as the fallback
+  and as the only witness for the dialogs that come before its first hook.)* The grid shows the agent on the card so an unknown state is legible as "we can't
   tell for this agent" rather than "idle".
 - **No budget signal.** True for both. The governor meters a shared Claude account. It must
   treat non-Claude sessions as unmeterable and skip them — never park them on a reading
@@ -106,7 +108,7 @@ than guessed:
 
 | | claude | opencode | codex | agy | cursor |
 |---|---|---|---|---|---|
-| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ✅ `$CODEX_HOME/hooks.json`, trusted in `config.toml` (working + done + need-you; **not** in a work profile's fleet) | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
 | ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
 | …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ | ❌ **name it every time** |
 | orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
@@ -137,9 +139,10 @@ $ fleet-agent caveat claude     (empty — nothing is given up)
 $ fleet-agent caveat opencode   no orchestrate skill: it has the fleet_* tools but not the
                                 instructions, so it will not drain the inbox or dispatch
                                 siblings unless you tell it to
-$ fleet-agent caveat codex      no fleet events: status is guessed from its pane, and a
-                                question it asks may never reach the inbox. fleet_* tools
-                                must name the project: … . no orchestrate skill: …
+$ fleet-agent caveat codex      no fleet events in a work profile's fleet, where its status
+                                is read from its pane; elsewhere only once codex trusts the
+                                hooks install.sh wires. fleet_* tools must name the
+                                project: … . no orchestrate skill: …
 ```
 
 The codex `no resume` clause was shrunk away on 2026-10-10. Re-measured on codex-cli 0.160.1
@@ -367,7 +370,7 @@ What was established without executing it, and still stands:
   `notify` is not used.)*
 - Its `notify` hook is still **not wired**, which is the `❌ fleet event hooks` row in the
   matrix above: a codex master's status is read from its pane, and a question it asks may
-  never reach the inbox.
+  never reach the inbox. *(Superseded 2026-11-10: that row is ✅ now, through codex's hooks.)*
 - `codex resume <id>` pinning to a cwd remains **untested**, and the matrix records the
   consequence rather than the mechanism: recycling a codex pane loses the conversation.
   *(Superseded 2026-10-10: resume is by recorded id now, which needs no cwd pinning, and
@@ -375,8 +378,8 @@ What was established without executing it, and still stands:
 
 Its busy and idle pane text is no longer unknown — the fixtures are in `test/fixtures/` and
 the detectors run against them in both directions, which is the bar CLAUDE.md sets for
-calling a signal reliable. What is still missing for codex is the event bridge, which the
-matrix above states at the point where the choice is made (resume landed 2026-10-10).
+calling a signal reliable. The event bridge, the piece that was missing, landed 2026-11-10
+(resume landed 2026-10-10). The matrix above states both at the point where the choice is made.
 
 ### Q4 (answered 2026-08-27). MCP registration — wired, with one asymmetry
 
@@ -436,7 +439,8 @@ cannot parse (it may hold comments) is left untouched, with the entry printed fo
 **MCP is tools; hooks are push events.** Wiring MCP gives codex neither hooks nor the
 orchestrate skill: it writes no inbox row, wakes no master, its status is still read from
 its pane, and nothing tells the session the fleet exists. "You can see it, you will not be
-told" is exactly as true for codex after this as before. opencode has both halves and
+told" was exactly as true for codex after this as before, until its hooks arrived on
+2026-11-10 (the matrix row above). opencode has both halves and
 reaches near parity, minus the skill. `skill/ghostfleet-orchestrate` is a Claude Code
 feature and stays Claude-only — both non-Claude agents have the tools without the
 instructions for using them.
@@ -496,7 +500,9 @@ codex runs with, after its cap: raising `Interrupt` from 3 to 30 kept its record
 The screen comes up **after** the first frame of the main one, so a check that reads the
 pane as soon as the composer appears sees no dialog either way. Read it a few seconds later. A
 first pass here made that mistake and passed a changed hook as trusted; the control above is
-what caught it.
+what caught it. A fleet session stopped there reads as need-you: the dialog's first option
+line, `› 1. Review hooks`, is in codex's `blocked_re`, captured at 120, 56 and 30 columns
+(`test/fixtures/codex-hooks-review-0166-*col.txt`), where the prose wraps and that line does not.
 
 `install.sh` writes both halves (`lib/codex-hooks.mjs`, called from `register_codex_hooks`):
 ours after the user's own groups, one record per handler computed as above, and nothing else
