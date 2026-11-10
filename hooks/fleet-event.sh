@@ -311,7 +311,10 @@ _know_brief_on() {
     && grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/know-brief.enabled"
 }
 _is_lead() {
-  [ "$SLOT" = master ] && [ -n "$SOCK" ] && [ -z "${CLAUDE_FLEET_EVENT_AGENT:-}" ] || return 1
+  # A bridged agent is a lead only where its bridge can hand the briefing on: codex's takes
+  # SessionStart context (hooks/codex-fleet-event.sh); agy's and cursor's have nowhere to put it.
+  case "${CLAUDE_FLEET_EVENT_AGENT:-}" in ""|codex) ;; *) return 1 ;; esac
+  [ "$SLOT" = master ] && [ -n "$SOCK" ] || return 1
   local gd gcd
   gd="$(git -C "$CWD" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
   gcd="$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0

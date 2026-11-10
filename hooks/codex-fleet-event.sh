@@ -16,8 +16,8 @@
 # THE MAPPING (measured on codex-cli 0.166.0, 2026-11-10; docs/multi-agent-sessions.md)
 #   SessionStart      -> SessionStart      fires LAZILY, at the first prompt, not at launch
 #   UserPromptSubmit  -> UserPromptSubmit  working; arms a reply-to; marks a Telegram turn;
-#                                          the ledger records the prompt. Its context reaches
-#                                          the model (codex accepts additionalContext here)
+#                                          the ledger records the prompt and notes what is
+#                                          still open; codex accepts additionalContext here
 #   Stop              -> Stop              ready + done; fires ONCE per finished turn, never
 #                                          mid-turn, carrying last_assistant_message
 #   PermissionRequest -> Notification      need-you (codex has NO Notification event: an
@@ -112,9 +112,31 @@ fwd="$(printf '%s' "$input" | jq -c --arg e "$cev" --arg t "$ftr" --arg m "$msg"
 out="$(printf '%s' "$fwd" | CLAUDE_FLEET_SOCK="$sock" CLAUDE_FLEET_EVENT_AGENT=codex \
   CLAUDE_FLEET_EVENT_RECORD="$rec" bash "$here/fleet-event.sh" 2>/dev/null)"
 
+# THE LEDGER (lib/codex-ledger.mjs): the prompt's asks recorded and its open items noted at
+# UserPromptSubmit, the turn settled at Stop and at Interrupt — what the Claude mod does at
+# prompt.submit and turn.complete, through the same pure functions and into the same file.
+note=""
+if command -v node >/dev/null 2>&1 && [ -f "$here/../lib/codex-ledger.mjs" ]; then
+  case "$ev" in
+    UserPromptSubmit)
+      note="$(printf '%s' "$input" | jq -j '.prompt // ""' 2>/dev/null \
+        | node "$here/../lib/codex-ledger.mjs" prompt "$FLEET_DIR" "$conv" "$turn" 2>/dev/null)" ;;
+    Stop)
+      printf '%s' "$input" | jq -j '.last_assistant_message // ""' 2>/dev/null \
+        | node "$here/../lib/codex-ledger.mjs" settle "$FLEET_DIR" "$conv" "$turn" >/dev/null 2>&1 ;;
+    Interrupt)
+      node "$here/../lib/codex-ledger.mjs" interrupt "$FLEET_DIR" "$conv" "$turn" </dev/null >/dev/null 2>&1 ;;
+  esac
+fi
+
+# The context: the briefing at SessionStart, the Telegram rules at UserPromptSubmit (both
+# fleet-event.sh's), and the ledger's note, as ONE object — codex reads one JSON value.
 case "$ev" in
   SessionStart|UserPromptSubmit)
     ctx="$(printf '%s' "$out" | jq -rs '[.[] | objects | .hookSpecificOutput.additionalContext? // empty | strings] | join("\n\n")' 2>/dev/null)"
+    [ -n "$note" ] && ctx="${ctx:+$ctx
+
+}$note"
     [ -n "$ctx" ] && jq -n --arg e "$ev" --arg c "$ctx" '{hookSpecificOutput: {hookEventName: $e, additionalContext: $c}}' ;;
 esac
 exit 0

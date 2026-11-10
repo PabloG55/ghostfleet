@@ -615,8 +615,8 @@ exit 0
 STUB
   chmod +x "$1/codex"
 }
-cx_hooks_json() {    # <file>: hooks.json as install.sh writes it, pointing at this checkout
-  jq -n --arg b "$ROOT/hooks/codex-fleet-event.sh" --arg q "'" '
+cx_hooks_json() {    # <file> [bridge]: hooks.json as install.sh writes it, at this checkout's bridge
+  jq -n --arg b "${2:-$ROOT/hooks/codex-fleet-event.sh}" --arg q "'" '
     { hooks: ( ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","Stop","Interrupt"]
       | map({ key: ., value: [ { hooks: [ { type: "command", command: ($q + $b + $q + " " + .), timeout: 30 } ] } ] })
       | from_entries ) }' > "$1"
@@ -3032,6 +3032,80 @@ else
   # The other direction, from the same tree: a non-work profile WITH a socket does write.
   cxall CLAUDE_CONFIG_DIR="$CX/t/cfg" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1 >/dev/null
   is "...while a non-work profile's fleet does record the session" "yes" "$([ -f "$CX/t/cfg/fleet/$CXID.json" ] && echo yes || echo no)"
+  rm -rf "${CX:?}"
+fi
+
+group "codex: a codex lead is briefed, and every codex prompt carries the ledger's open items"
+# codex takes additionalContext from SessionStart and UserPromptSubmit (measured: a codeword
+# given either way was repeated back), so a codex master gets the lead's briefing and every
+# codex session the ledger's note, as a Claude session does. The briefing's content is
+# fleet-know's business and its own group's; here it is a stub, and the question is only
+# whether the bridge passes it on. So the hooks run from a copy beside a stub
+# bin/fleet-know-event (fleet-event.sh finds the writer next to itself), with lib/ and mods/
+# the checkout's own.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex briefing and ledger" "jq or node is not installed"
+else
+  CX="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$CX/rt/hooks" "$CX/rt/bin" "$CX/codex" "$CX/cfg/fleet" "$CX/x" "$CX/src/acme-api" "$CX/home"
+  cp "$ROOT/hooks/codex-fleet-event.sh" "$ROOT/hooks/fleet-event.sh" "$ROOT/hooks/fleet-telegram-guard.sh" "$CX/rt/hooks/"
+  ln -s "$ROOT/lib" "$CX/rt/lib"; ln -s "$ROOT/mods" "$CX/rt/mods"
+  printf '#!/usr/bin/env bash\n[ "${1:-}" = brief ] || exit 0\nprintf "meta\\nCODEX-BRIEF: the owner decided on quarterly billing\\n"\n' > "$CX/rt/bin/fleet-know-event"
+  chmod +x "$CX/rt/bin/fleet-know-event"
+  cx_stub "$CX/bin"; cx_hooks_json "$CX/codex/hooks.json" "$CX/rt/hooks/codex-fleet-event.sh"
+  CF="$CX/cfg/fleet"; CXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  # One conversation throughout: the interrupt fixture was captured in a different one.
+  cxp() { jq -c --arg c "$CX/src/acme-api" --arg i "$CXID" '.cwd = $c | .session_id = $i' "$FIX/codex-hook-$1.json"; }
+  cxh() { local ev="$1" slot="$2"; shift 2
+          env -u TMUX -u TMUX_PANE HOME="$CX/home" CODEX_HOME="$CX/codex" CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CF" \
+            CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT="$slot" CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_EXPERIMENTAL_DIR="$CX/x" CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS=30000 "$@" \
+            "$CX/bin/codex" hook "$ev" 2>>"$CX/err"; }
+  ctx() { jq -r '.hookSpecificOutput.additionalContext // empty' <<< "$1" 2>/dev/null; }
+  # A prompt of its own: the fixture's, with this text and this turn.
+  cxu() { jq -c --arg p "$1" --arg t "$2" '.prompt = $p | .turn_id = $t' <<< "$(cxp user-prompt-submit)"; }
+  cxs() { jq -c --arg m "$1" --arg t "$2" '.last_assistant_message = $m | .turn_id = $t' <<< "$(cxp stop)"; }
+  items() { jq -r '[.items[] | select(.state == "open") | .id + ":" + .text + (if .inTurn then " (in turn)" else "" end)] | join(" | ")' "$CF/$CXID.ledger" 2>/dev/null; }
+
+  out="$(cxp session-start | cxh SessionStart master)"
+  is "the briefing is off unless switched on: nothing printed" "" "$out"
+  printf 'on\n' > "$CX/x/know-brief.enabled"
+  out="$(cxp session-start | cxh SessionStart master)"
+  is "switched on, a codex master is briefed at SessionStart" "CODEX-BRIEF: the owner decided on quarterly billing" "$(ctx "$out")"
+  is "...as SessionStart context, which codex reads"  "SessionStart" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$out" 2>/dev/null)"
+  out="$(cxp session-start | cxh SessionStart w1)"
+  is "...and a codex worker is not"                   "" "$out"
+
+  out="$(cxu "check the acme-api routes and tell me which one is slow" t1 | cxh UserPromptSubmit w1)"
+  is "a prompt is a ledger item, on the turn codex named" "1:check the acme-api routes and tell me which one is slow (in turn)" "$(items)"
+  is "...in the session's own ledger, by thread id"   "t1" "$(jq -r '.items[0].turnId' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "...and the first prompt has nothing open to note" "" "$out"
+  cxs $'Two candidates:\n1. /orders\n2. /users\nWhich should I profile?' t1 | cxh Stop w1 >/dev/null
+  is "Stop settles the turn: its ask is owed from here" "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  out="$(cxu "2" t2 | cxh UserPromptSubmit w1)"
+  is "a bare answer to a numbered question folds into its item" "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  is "...kept as the item's reply"                    "2" "$(jq -r '.items[0].replies[0].text' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "the next prompt carries the open items as context" "yes" \
+     "$(grep -q '^1 (asked): check the acme-api routes' <<< "$(ctx "$out")" && echo yes || echo no)"
+  is "...with the way to close them from Bash"        "yes" "$(grep -q 'fleet-ledger close <id>' <<< "$(ctx "$out")" && echo yes || echo no)"
+  is "...as UserPromptSubmit context"                 "UserPromptSubmit" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$out" 2>/dev/null)"
+  cxs "Profiled /users." t2 | cxh Stop w1 >/dev/null
+  out="$(cxu "[fleet] w2 finished; run fleet-inbox. No need to reply to this line." t3 | cxh UserPromptSubmit w1)"
+  is "a fleet nudge is no item"                       "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  cxu "also bump the billing-svc timeout to 30s" t4 | cxh UserPromptSubmit w1 >/dev/null
+  cxp interrupt | jq -c '.turn_id = "t4"' | cxh Interrupt w1 >/dev/null
+  is "an Esc marks the turn's ask interrupted"        "true" "$(jq -r '.items[] | select(.turnId == "t4") | .interrupted' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "...and settles it, as a Stop would"             "null" "$(jq -r '.items[] | select(.turnId == "t4") | .inTurn' "$CF/$CXID.ledger" 2>/dev/null)"
+  # fleet-ledger finds the codex session's ledger the way it finds a Claude one: by the slot's
+  # newest record on this socket, whose session_id is codex's thread id.
+  fl="$(env -u TMUX -u TMUX_PANE HOME="$CX/home" CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CF" CLAUDE_FLEET_SOCK=cf-acme-api \
+        CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_KNOW=off "$ROOT/bin/fleet-ledger" close 1 "commit 1234abc" 2>&1)"
+  is "fleet-ledger closes a codex session's item from inside it" "done" "$(jq -r '.items[] | select(.id == "1") | .state' "$CF/$CXID.ledger" 2>/dev/null)"
+  before="$(cx_tree "$CF")"
+  out="$(cxu "rename the acme-web header" t5 | cxh UserPromptSubmit w1 CLAUDE_FLEET_LEDGER=off)"
+  is "CLAUDE_FLEET_LEDGER=off: no item"               "no" "$(grep -q 'acme-web header' "$CF/$CXID.ledger" && echo yes || echo no)"
+  is "...and no note"                                 "" "$out"
+  is "the bridge never wrote to stderr"               "" "$(cat "$CX/err")"
   rm -rf "${CX:?}"
 fi
 
