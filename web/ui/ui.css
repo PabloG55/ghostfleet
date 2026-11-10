@@ -31,6 +31,10 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+/* A tap answers with the control's own states. WebKit's default answer is a translucent black
+   box over whatever was tapped, which on this dark ground reads as a focus box; the phone
+   client turns it off the same way (web/app.css). */
+html { -webkit-tap-highlight-color: transparent; }
 #app { height: 100%; }
 a { color: var(--cyan); }
 code, pre { font-family: var(--mono); }
@@ -42,7 +46,7 @@ input, textarea, .select {
   background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: .55em .7em; width: 100%;
   outline: none; transition: border-color .15s;
 }
-input:focus, textarea:focus, .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
+input:focus, textarea:focus, :where(:root:not(.by-pointer)) .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
 /* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped */
 .select { display: flex; align-items: center; gap: .5em; text-align: left; cursor: pointer; min-width: 0; }
 .select-v { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -155,7 +159,7 @@ textarea { resize: vertical; }
   transition: border-color .15s, transform .1s, background .15s;
 }
 .card::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--c); opacity: .85; }
-.card:hover, .card:focus-visible { border-color: #34404c; background: #131920; }
+.card:hover, :where(:root:not(.by-pointer)) .card:focus-visible { border-color: #34404c; background: #131920; }
 .card.s-red { --c: var(--red); } .card.s-cyan { --c: var(--cyan); } .card.s-green { --c: var(--green); } .card.s-yellow { --c: var(--yellow); }
 .card.s-red { border-color: rgba(255,95,95,.35); }
 .card.active { border-color: var(--cyan); background: #12191f; }

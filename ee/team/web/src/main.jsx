@@ -26,6 +26,7 @@ import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import '@fontsource/silkscreen/400.css';
 import '../../../../brand/tokens.css';
+import '../../../../web/ui/modality.js'; // the focus ring follows the keyboard, not a click
 import '../../../../web/ui/ui.css';
 import './styles.css';
 import '../../../../web/ui/skin.css';
