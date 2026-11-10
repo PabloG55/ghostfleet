@@ -24,6 +24,11 @@ Open <http://127.0.0.1:8790>. The first account (the admin) is created from the 
 `node server/admin-cli.mjs create-admin <name>` (with `--demo` for the demo), which prints a temporary
 password. That admin creates the rest of the team in **Administration → Users**, with their role in each project.
 
+Up to 2 accounts are free. A third needs a subscription key, pasted by an admin in **Administration → License**;
+creating or re-enabling an account beyond the seats is refused with a message that says so, and so is `create-admin`
+on the console. Nobody who already has an account is locked out when a key expires. What the server counts, and the
+one daily request it makes once a key is stored, are in [`docs/LICENSING.md`](../../docs/LICENSING.md). The demo is not limited.
+
 For development with hot reload: `pnpm dev:demo` or `pnpm dev`, and open <http://127.0.0.1:5190>.
 
 | Variable | What for | Default |
@@ -31,7 +36,7 @@ For development with hot reload: `pnpm dev:demo` or `pnpm dev`, and open <http:/
 | `GHOSTFLEET_HOME` | where ghostfleet is installed | `~/.local/libexec/ghostfleet` |
 | `GFW_PORT` / `--port` | port | `8790` |
 | `GFW_BIND` / `--bind` | interface: only `127.0.0.1` or a Tailscale IP | `127.0.0.1` |
-| `GFW_DATA` | accounts, owners and activity | `~/.config/ghostfleet-web/<mode>` |
+| `GFW_DATA` | accounts, owners, activity and the license key | `~/.config/ghostfleet-web/<mode>` |
 
 ## What it has
 
@@ -131,8 +136,8 @@ agent is running commands on this machine.
 Project grants protect the browser and API routes: a viewer can read, a member can prompt,
 and an admin can manage access. They do not isolate code run by a prompted session. A member
 who can prompt runs commands as the session's OS user. If sessions share the server's OS user,
-they can edit `GFW_DATA/real/users.json` (which the server re-reads on change), read `secrets/`,
-and reach other projects' tmux sockets. A project grant is not a boundary against shell access.
+they can edit `GFW_DATA/real/users.json` (which the server re-reads on change), read `secrets/`
+and `license.json`, and reach other projects' tmux sockets. A project grant is not a boundary against shell access.
 
 Run the server as a dedicated OS user and arrange permissions so its sessions cannot read `GFW_DATA`
 (the sessions must run with a separate OS identity or equivalent isolation). Otherwise, give members
@@ -154,5 +159,12 @@ The HTTP controls are:
 - every write lands in the activity log with the name of whoever made it;
 - stopping or deleting worktrees asks for confirmation (and for typing the name, when it deletes);
 - a permission is only answered if the request you saw is still on screen (the request's fingerprint).
+
+**What the server sends out on its own.** One thing: once a license key is stored, a daily `POST` of that key, and
+nothing else, to the license service, to pick up a renewed key (also on **Check now**). A returned key is installed
+only if its signature verifies and it is a later key of the same license; the answer cannot unlock anything else. An
+admin switches it off in **Administration → License**, and a build whose `RENEW_URL` (`ee/seats/public-key.mjs`) is
+empty never makes the request. The license key is stored in `GFW_DATA` with mode 0600 and is never sent back to a
+browser. The seat limit is a licensing check, not a security boundary: it is asked only when an account is added.
 
 To use it from outside this machine: Tailscale and `--bind <tailscale-ip>`.
