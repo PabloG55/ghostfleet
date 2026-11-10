@@ -542,6 +542,8 @@ function pushText(d) {
   const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
   const verb = kind === 'needs-you' ? 'needs you' : kind === 'mixed' ? 'needs you' : 'has an answer';
   if (n === 1) {
+    if (named.length === 1 && named[0].server)
+      return { title: `${named[0].server} needs authorization`, body: `${named[0].project}/${named[0].session} · open the fleet app` };
     // ONE, SO NOT "1 sessions". In anonymous mode there is no name to put in front of the
     // verb, and a count of one printed through the plural branch is the tell that a lock
     // screen line was assembled rather than written — measured by rendering every shape
@@ -554,7 +556,7 @@ function pushText(d) {
   return { title: `${n} sessions ${what}`,
            // No names to list is the POINT of anonymous mode, not a degraded version of
            // the other one, so it says what to do instead of showing an empty list.
-           body: named.length ? named.map(x => `${x.project}/${x.session}`).join(' · ') : 'open ghostfleet to see which' };
+           body: named.length ? named.map(x => `${x.project}/${x.session}${x.server ? ` · ${x.server} needs authorization` : ''}`).join(' · ') : 'open ghostfleet to see which' };
 }
 // A Claude account notice (fleet-accounts): which profile moved to which login, or ran out.
 // Every word is here; the payload carries an event word, names (absent in anonymous mode),

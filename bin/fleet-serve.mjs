@@ -1524,11 +1524,12 @@ export function pushPayload(events, detail) {
   // Jarvis opens the Jarvis screen, anything else opens the app where it was. Present in
   // anonymous mode too — it says which screen, not which project.
   let jm = null; try { jm = jarvis.readMarker(); } catch {}
-  if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
+  if (events.some(e => e.login)) out.open = 'waiting';
+  else if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
   // A push that is only about items a master holds for the owner opens the list of them (the
   // Projects screen), wherever the app was left: the answer is a reply to the item, not
   // whatever session happened to be on screen.
-  else if (events.length && events.every(e => e.kind === 'waiting')) out.open = 'waiting';
+  else if (events.length && events.every(e => e.kind === 'waiting' || e.login)) out.open = 'waiting';
   // AN ACCOUNT NOTICE (fleet-accounts) is the one kind that is not about a session: which
   // profile moved to which login, or ran out until when. Same rule as the rest — every key
   // literal, every name through NAME_OK, numbers as numbers — so web/sw.js composes the
@@ -1555,7 +1556,8 @@ export function pushPayload(events, detail) {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
       const project = safeName(e.project), session = safeName(e.session);
-      if (project && session) sessions.push({ project, session, kind: PUSH_KINDS.has(e.kind) ? e.kind : 'answer' });
+      if (project && session) sessions.push({ project, session, kind: PUSH_KINDS.has(e.kind) ? e.kind : 'answer',
+        ...(e.login && safeName(e.server) ? { server: safeName(e.server) } : {}) });
     }
     if (sessions.length) out.sessions = sessions;
   }
@@ -2010,6 +2012,7 @@ export function keyboardStep(readings, limit) {
 //   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
 // so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
+  if (ev.login) return false;
   // An account notice belongs to no session, so no status can answer it: only the phone
   // polling (readAt) or the hold expiring does.
   if (ev.kind === 'account') return false;
@@ -2050,6 +2053,23 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status, pla
   return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
 }
 let pushHeld = [];
+const loginSeen = new Set();
+async function loginPushEvents() {
+  const items = loginList(shownToPhone());
+  // The subscribed phone may belong only to this Linux host. Read its peer's pending
+  // logins on the same signed, scoped channel the app uses, without a second hop.
+  const fan = await fanOut('/api/logins', { client: { id: 'push' } }, 5000);
+  for (const { peer, r } of fan || []) if (r.status === 200 && Array.isArray(r.json?.items))
+    for (const item of r.json.items) items.push({ ...item, project: addrOf(item.project, peer), sock: `${peer.key}/${item.sock}` });
+  const events = [];
+  for (const item of items) {
+    const key = `${item.sock}/${item.id}`;
+    if (item.used || item.expires <= Date.now() || loginSeen.has(key)) continue;
+    loginSeen.add(key);
+    events.push({ kind: 'needs-you', login: true, server: item.server, project: item.project.split('@')[0], session: item.session, sock: item.sock });
+  }
+  return events;
+}
 
 async function pushTick() {
   let c;
@@ -2064,7 +2084,10 @@ async function pushTick() {
   const rows = scanFleet(), names = sockProjects();
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
   const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
-                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
+                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen), ...await loginPushEvents()];
+  // Keep transition sampling before the peer await, and put authorizations in the bounded
+  // named payload first so an answer in the same burst cannot hide their server names.
+  fresh.sort((a, b) => Number(!!b.login) - Number(!!a.login));
   if (!fresh.length && !pushHeld.length) return;
   // AT THE KEYBOARD: what would have been sent is held instead, and what was held goes when
   // he leaves (see holdStep). Read only when there is something to decide, and once per tick.
@@ -2632,7 +2655,6 @@ async function proxyRemote(req, res, p, url, body, ip) {
     const a = headerAssertion(req, loadConfig());
     if (!a || a.error) { send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' }); return true; }
   }
-
   const v = peers();
   const peer = v.peers.find(x => x.key === addr.key);
   if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
