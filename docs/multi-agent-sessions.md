@@ -14,7 +14,7 @@ What *is* Claude-specific is four things, and they're the whole job:
 |---|----------|-------|------------------------------|
 | 1 | **Launch + resume** — `exec claude --resume <id> --dangerously-skip-permissions --model …`, transcript discovery under `$CLAUDE_CONFIG_DIR/projects/<enc-cwd>/*.jsonl`, `--fork-session`, `claude agents --json` | `bin/claude-here` | No — each CLI has its own resume model |
 | 2 | **Busy detection** — a regex over Claude's spinner: `… (9m 31s · ↓ 34.4k tokens)`, `esc to interrupt` | `bin/fleet-grid.mjs` (`BUSY_RE`), `bin/fleet-send`, `bin/fleet-worktrees`, `bin/fleet-spawn` | No — different UIs, different text |
-| 3 | **`need-you` / `done` events** — Claude Code hooks (`Notification`, `Stop`, `SessionStart`, `UserPromptSubmit`, `SessionEnd`) wired into each config dir by `install.sh` | `hooks/fleet-event.sh` | No — neither has the same hook contract |
+| 3 | **`need-you` / `done` events** — Claude Code hooks (`Notification`, `Stop`, `SessionStart`, `UserPromptSubmit`, `SessionEnd`) wired into each config dir by `install.sh` | `hooks/fleet-event.sh` | Not Claude's contract — opencode has a plugin bus, and codex has had its own hooks since 0.166.0 ([codex hooks](#codex-hooks)), so each needs a bridge |
 | 4 | **Budget metering** — scrapes `NN%(` (the 5h usage figure) out of Claude's status bar to park workers at the ceiling | `bin/fleet-governor` (`pct_of`) | No — no equivalent signal |
 
 The governor's OTHER ceiling is deliberately not on this list. **Machine metering** —
@@ -57,9 +57,11 @@ one that works — the repo has been bitten by exactly that before, which is why
 assumed; Codex degrades to nothing, because it could not be run at all.)*
 
 - **Hooks.** OpenCode **does** push events (`permission.asked` → `need-you`, `session.idle`
-  → `done`), so it does not fall back to heuristics — see Q2. Codex is unverified, so it is
-  wired for pane-only detection and its card must not render a confident "ready" it hasn't
-  earned. The grid shows the agent on the card so an unknown state is legible as "we can't
+  → `done`), so it does not fall back to heuristics — see Q2. Codex was unverified then, so
+  it was wired for pane-only detection, and its card must not render a confident "ready" it
+  hasn't earned. *(Superseded 2026-11-10: codex pushes events through its own hooks outside
+  a work profile, see [codex hooks](#codex-hooks). The pane detectors stay as the fallback
+  and as the only witness for the dialogs that come before its first hook.)* The grid shows the agent on the card so an unknown state is legible as "we can't
   tell for this agent" rather than "idle".
 - **No budget signal.** True for both. The governor meters a shared Claude account. It must
   treat non-Claude sessions as unmeterable and skip them — never park them on a reading
@@ -75,7 +77,7 @@ assumed; Codex degrades to nothing, because it could not be run at all.)*
   fleet through the scrubbed environment codex starts MCP servers with. opencode still has
   the tools without the skill, and cursor must still name the project. See Q4 for the
   measurements. Hooks are unaffected by any of it — MCP is tools, hooks are push events,
-  and codex still supplies none.
+  and codex's arrive separately, through its own `hooks.json` ([codex hooks](#codex-hooks)).
 - **A missing busy regex is not "never busy".** An agent with no validated detector is
   reported as *unknown*, never as idle — the always-idle failure mode is the one this repo
   has been bitten by before.
@@ -108,7 +110,7 @@ than guessed:
 
 | | claude | opencode | codex | agy | cursor |
 |---|---|---|---|---|---|
-| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ✅ `$CODEX_HOME/hooks.json`, trusted in `config.toml` (working + done + need-you + the phone sign-in capture; **not** in a work profile's fleet) | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
 | ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
 | …and a call with no `project` finds its own fleet | ✅ | ✅ | ✅ through `env_vars`, since 0.166.0 | ✅ | ❌ **name it every time** |
 | orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ✅ symlinked into `$CODEX_HOME/skills/`, since 0.166.0 | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
@@ -123,7 +125,9 @@ The MCP row went green for all three on 2026-08-27, and the row under it is what
 *not* buy. **MCP gives tools; hooks give push events**, and one is not a substitute for the
 other: a codex master can now call the fleet — list it, send to it, spawn into it — and
 still cannot tell it anything. No inbox row, no master woken, its status read from its pane
-exactly as before. "You can see it, you will not be told."
+exactly as before. "You can see it, you will not be told." *(Superseded for codex on
+2026-11-10: its own hooks now push those events outside a work profile, see the first row
+and [codex hooks](#codex-hooks). The point stands: they came from hooks, not from MCP.)*
 
 The third row was codex's own behaviour until 2026-11-10, and is now the installer's job.
 codex starts an MCP server with a **scrubbed environment**, so nothing the session exported
@@ -143,15 +147,16 @@ $ fleet-agent caveat claude     (empty — nothing is given up)
 $ fleet-agent caveat opencode   no orchestrate skill: it has the fleet_* tools but not the
                                 instructions, so it will not drain the inbox or dispatch
                                 siblings unless you tell it to
-$ fleet-agent caveat codex      no fleet events: status is guessed from its pane, and a
-                                question it asks may never reach the inbox
+$ fleet-agent caveat codex      no fleet events in a work profile's fleet, where its status
+                                is read from its pane; elsewhere only once codex trusts the
+                                hooks install.sh wires
 ```
 
 The codex `no resume` clause was shrunk away on 2026-10-10. Re-measured on codex-cli 0.160.1
 in a scratch fleet: the rollout is written as the conversation goes, not on a clean exit — a
 codeword survived a kill-server between turns, a kill mid-turn kept that turn's message, and
 `codex resume <id>` reopened it, appending to the same file under the same id. Since codex
-has no hooks to say which rollout is its own, `codex-here` starts `lib/codex-rollout.mjs`
+0.160.1 had no hooks to say which rollout is its own, `codex-here` starts `lib/codex-rollout.mjs`
 beside it, which records the rollout the codex process holds open (lsof, or `/proc` on Linux)
 as `<fleet dir>/<id>.json` in the claude hook's shape — so restart, a lost-session reopen, an agent switch
 and the phone all find a codex conversation by id, never by "newest in this folder".
@@ -367,10 +372,12 @@ What was established without executing it, and still stands:
 - `~/.codex/config.toml` is real TOML and already carries per-directory state
   (`[projects."/path"] trust_level`), so a `notify` key has somewhere to live.
 - Codex's `notify` hook is documented as a program invoked with a JSON argument; it is the
-  plausible `need-you` bridge, but **nothing here was observed firing.**
+  plausible `need-you` bridge, but **nothing here was observed firing.** *(Superseded
+  2026-11-10: codex has real hooks now, measured in [codex hooks](#codex-hooks), and
+  `notify` is not used.)*
 - Its `notify` hook is still **not wired**, which is the `❌ fleet event hooks` row in the
   matrix above: a codex master's status is read from its pane, and a question it asks may
-  never reach the inbox.
+  never reach the inbox. *(Superseded 2026-11-10: that row is ✅ now, through codex's hooks.)*
 - `codex resume <id>` pinning to a cwd remains **untested**, and the matrix records the
   consequence rather than the mechanism: recycling a codex pane loses the conversation.
   *(Superseded 2026-10-10: resume is by recorded id now, which needs no cwd pinning, and
@@ -378,8 +385,8 @@ What was established without executing it, and still stands:
 
 Its busy and idle pane text is no longer unknown — the fixtures are in `test/fixtures/` and
 the detectors run against them in both directions, which is the bar CLAUDE.md sets for
-calling a signal reliable. What is still missing for codex is the event bridge, which the
-matrix above states at the point where the choice is made (resume landed 2026-10-10).
+calling a signal reliable. The event bridge, the piece that was missing, landed 2026-11-10
+(resume landed 2026-10-10). The matrix above states both at the point where the choice is made.
 
 ### Q4 (answered 2026-08-27). MCP registration — wired; its one asymmetry closed 2026-11-10
 
@@ -455,17 +462,154 @@ cannot parse (it may hold comments) is left untouched, with the entry printed fo
 
 **MCP is tools; hooks are push events.** Wiring MCP gives codex no hooks: it writes no
 inbox row, wakes no master, its status is still read from its pane, and nothing tells the
-session the fleet exists. "You can see it, you will not be told" is exactly as true for
-codex after this as before. opencode has both halves and reaches near parity, minus the
-skill. The skill was Claude-only when this was written. agy and cursor read the same
-`SKILL.md`, and so does codex since 2026-11-10 (codex-cli 0.166.0: its `$` picker lists it,
-and `$ghostfleet-orchestrate` puts it into the turn), so opencode is the one left with the tools and without
-the instructions for using them.
+session the fleet exists. "You can see it, you will not be told" was exactly as true for
+codex after this as before, until its hooks arrived on 2026-11-10 (the matrix row above).
+opencode has both halves and reaches near parity, minus the skill. The skill was
+Claude-only when this was written. agy and cursor read the same `SKILL.md`, and so does
+codex since 2026-11-10 (codex-cli 0.166.0: its `$` picker lists it, and
+`$ghostfleet-orchestrate` puts it into the turn), so opencode is the one left with the tools
+and without the instructions for using them.
 
 **Already-running sessions do not gain the tools.** An MCP server is spawned once per
 session and lives as long as it, so a session open when the installer ran keeps the server
 it started with. `install.sh` says this in its own output, because the person who needs it
 has usually just re-run the installer to fix exactly this.
+
+## codex hooks
+
+Measured 2026-11-10 against **codex-cli 0.166.0** on macOS, in a scratch `CODEX_HOME` with a
+recording hook registered for every event, over five short real turns in a tmux pane: two under
+`--dangerously-bypass-approvals-and-sandbox`, one with a hook made to hang, one sandboxed
+`read-only` with `--ask-for-approval on-request` so that a command outside the workspace had
+to ask, and one interrupted with Esc. The payloads are kept as `test/fixtures/codex-hook-*.json`,
+re-pointed at placeholder paths and otherwise verbatim. A claim read in codex's source rather
+than seen from the binary says so.
+
+Everything above that says codex "supplies no hooks" was true of 0.160.1 and is not of 0.166.0.
+
+**Where.** `$CODEX_HOME/hooks.json` (`~/.codex` by default), or `[hooks]` tables in
+`config.toml`; codex warns when one layer has both, and merges them. `codex features list`
+prints `hooks  stable  true`. The shape:
+
+```json
+{ "hooks": { "Stop": [ { "matcher": "(optional)", "hooks": [
+    { "type": "command", "command": "'/path/to/hook' Stop", "timeout": 30 } ] } ] } }
+```
+
+Fourteen events: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`,
+`PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`,
+`SubagentStop`, `Stop`, `Interrupt`, `PreModelRequest`, `PostModelRequest`. **There is no
+`Notification`**, and a name codex does not know is ignored without a word, so a handler filed
+under Claude's name for it would never run and nothing would say so.
+
+**Trust, or nothing runs.** A hook codex has not been told to trust does not run. The TUI opens
+on a "Hooks need review" screen before the composer, and "Continue without trusting" starts the
+session with its hooks off: no error, the session just tells the fleet nothing. Trust lives in
+`config.toml`, one table per handler:
+
+```toml
+[hooks.state."/Users/you/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:…"
+```
+
+The key is the file, the event in snake case, the group's index and the handler's index. The
+hash is sha256 over the handler group as compact JSON with sorted keys: `event_name`, `matcher`
+when there is one, and `hooks`, each with `type`, `command`, `timeout` and `async`. A hash
+computed that way by hand was accepted: the session opened straight onto the composer and the
+hook ran. It covers the **command string, not the script's bytes**, so editing the script needs
+no new trust and moving it does. And it is keyed by **position**: a group inserted ahead of
+another moves the other's key, and that one asks again. The `timeout` in the hash is the one
+codex runs with, after its cap: raising `Interrupt` from 3 to 30 kept its record, while moving
+`Stop` from 30 to 31 brought the review screen back.
+
+The screen comes up **after** the first frame of the main one, so a check that reads the
+pane as soon as the composer appears sees no dialog either way. Read it a few seconds later. A
+first pass here made that mistake and passed a changed hook as trusted; the control above is
+what caught it. A fleet session stopped there reads as need-you: the dialog's first option
+line, `› 1. Review hooks`, is in codex's `blocked_re`, captured at 120, 56 and 30 columns
+(`test/fixtures/codex-hooks-review-0166-*col.txt`), where the prose wraps and that line does not.
+
+`install.sh` writes both halves (`lib/codex-hooks.mjs`, called from `register_codex_hooks`):
+ours after the user's own groups, one record per handler computed as above, and nothing else
+in either file. Seven records codex wrote from its own dialog are in
+`test/fixtures/codex-hook-trust.json`, and the suite holds the computation to them. The
+seventh is `PostToolUse`, registered with Claude's matcher `mcp__.*__authenticate` so that
+the phone sign-in's capture (`docs/MCP-LOGIN.md`) starts no process for any other tool. It
+was taken alone in a second scratch home, the same way. The hash computed with the matcher
+was the one codex wrote; the same handler without it hashes differently, so a matcher is part
+of the record, and changing one is a re-trust. Whether codex's matcher is a full or a partial
+regex match was not measured, because no turn called an MCP tool. Either reading lets an
+`…__authenticate` call through and keeps every other tool name out. The capture checks the
+whole name again, anchored, before it writes anything. On a
+scratch `CODEX_HOME` with a user hook already trusted, codex started with no review screen
+after the install, brought it up when one record was altered, and started with none after
+`node lib/codex-hooks.mjs uninstall`, which left `hooks.json` byte-identical and
+`config.toml` different only by the counter codex had bumped itself. A `config.toml` that
+defines a table twice stops codex from starting at all (`duplicate key`), so codex re-reads it
+after every write, and a write it cannot read is undone.
+
+**How it runs.** `$SHELL -lc '<command>'`, a login shell, with the payload as JSON on stdin.
+codex ignores a broken pipe, so a hook may exit without reading it. The hook's parent is
+codex. On unix the session's environment passes through: `CLAUDE_FLEET_SOCK`,
+`CLAUDE_FLEET_SLOT`, `CLAUDE_CONFIG_DIR`, `$TMUX` and `$TMUX_PANE` all arrived (the source
+clears it on other platforms). Handlers for one event run in order; the recording hook took
+40–50 ms each. `timeout` is in seconds, 600 when unset, and `SessionEnd` and `Interrupt` are
+clamped to 3 (source).
+
+**Payloads.** Every event carries `session_id`, `transcript_path`, `cwd`, `hook_event_name`,
+`model` and `permission_mode` (`bypassPermissions` under yolo, `default` otherwise).
+`session_id` is the thread id, the one `codex resume` takes, and `transcript_path` is that
+thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`.
+
+| event | adds |
+|---|---|
+| `SessionStart` | `source` (`startup`) |
+| `UserPromptSubmit` | `turn_id`, `prompt` |
+| `PreToolUse` | `turn_id`, `tool_name`, `tool_input`, `tool_use_id` |
+| `PermissionRequest` | `turn_id`, `tool_name`, `tool_input` (`command`, `description`) |
+| `PostToolUse` | what `PreToolUse` has, plus `tool_response` (a string) |
+| `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message` |
+| `Interrupt` | `turn_id` |
+| `PreModelRequest`, `PostModelRequest` | `turn_id`; `Post` adds `status`, `error`, `token_usage` |
+
+A shell command's `tool_name` is `Bash`, with `tool_input.command`. An edit is `apply_patch`,
+with the whole patch in `tool_input.command` and no file path. An MCP tool is
+`mcp__<server>__<tool>`. Typing into a command that is already running (`write_stdin`) fires no
+`PreToolUse` (source).
+
+**The model calls its tools from JavaScript.** On 0.166.0 with its default model, every shell
+command in these turns arrived as a custom `exec` tool whose input is a script:
+`text(await tools.exec_command({cmd: "echo probe-one"}))`. The `exec` call itself fires no
+`PreToolUse`, since codex fires one only for function-shaped calls (`registry.rs`,
+`pre_tool_use_payload`). Each tool the script calls fires its own `PreToolUse`, and that is
+the `Bash` above. Asked to list its globals, the script had no `fetch`, `require`, `process`,
+`Deno`, `XMLHttpRequest` or `WebSocket`. It had the standard library plus codex's `tools`,
+`ALL_TOOLS`, `text`, `image`, `audio`, `load`, `store`, `notify`, `exit` and timers. So it reaches
+outside only through `tools.*`, and every such call is checked. What `image` and `audio` will
+read was not probed.
+
+**When.** `SessionStart` is lazy: it fires at the first prompt, not at launch, so a codex pane
+nobody has spoken to has fired nothing. `Stop` fires once per finished turn and never mid-turn:
+22 samples of a turn running a 12-second command saw none until it ended. Esc fires
+`Interrupt` and **no** `Stop`. `PermissionRequest` fires after `PreToolUse` when the sandbox
+would ask; a handler that decides nothing leaves codex to draw its own dialog.
+
+**What a hook can say back.**
+
+- `SessionStart` and `UserPromptSubmit`: `{"hookSpecificOutput": {"hookEventName": …,
+  "additionalContext": "…"}}` reaches the model. A codeword given as SessionStart context and
+  another given as UserPromptSubmit context were each repeated back. The rollout files the
+  context as a `developer` message.
+- `PreToolUse`: `"permissionDecision": "deny"` blocks the tool, even under
+  `--dangerously-bypass-approvals-and-sandbox` (observed: "The command did not run; it was
+  blocked by the recording hook"). Exit 2 with a reason on stderr also blocks, observed with
+  the Telegram guard. The script's `exec_command` came back as `Script failed … Command blocked
+  by PreToolUse hook: [fleet] This turn came from the owner on Telegram, and Bash is not on
+  the channel's allowlist…`, the command did not run, and the model told the owner so. But exit 2 with **empty** stderr, any other status, or a hook that times out is a
+  *failed* hook, and **the tool runs**: a `PreToolUse` made to sleep past a 5-second timeout
+  showed "hook timed out after 5s" and the command ran. A guard there fails open on a crash or
+  a hang, as Claude's does.
+- `Stop` can tell codex to keep the turn going, so a bridge must print nothing there.
 
 ## agy (Antigravity CLI)
 

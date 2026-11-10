@@ -311,7 +311,10 @@ _know_brief_on() {
     && grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/know-brief.enabled"
 }
 _is_lead() {
-  [ "$SLOT" = master ] && [ -n "$SOCK" ] && [ -z "${CLAUDE_FLEET_EVENT_AGENT:-}" ] || return 1
+  # A bridged agent is a lead only where its bridge can hand the briefing on: codex's takes
+  # SessionStart context (hooks/codex-fleet-event.sh); agy's and cursor's have nowhere to put it.
+  case "${CLAUDE_FLEET_EVENT_AGENT:-}" in ""|codex) ;; *) return 1 ;; esac
+  [ "$SLOT" = master ] && [ -n "$SOCK" ] || return 1
   local gd gcd
   gd="$(git -C "$CWD" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
   gcd="$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
@@ -761,6 +764,17 @@ if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$FLEET_DIR/$SESSION.json" ]; then
   fi
 fi
 case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
+# A BRIDGE'S OWN FIELDS, merged last. The codex bridge (hooks/codex-fleet-event.sh) hands this
+# hook a fleet-side transcript in Claude's shape, because the relay below reads one — while
+# the record has always named codex's ROLLOUT, with `agent: codex`, since lib/codex-rollout.mjs
+# wrote it: fleet-restart's reopen, slot-claim and an agent switch dispatch on those two
+# fields. Without this, the first hook event rewrote a codex record as a claude one pointing
+# at a file no codex reader can open. An object or nothing: anything else is dropped, so a
+# bad value costs the fields and never the record.
+_rec='{}'
+[ -n "${CLAUDE_FLEET_EVENT_RECORD:-}" ] \
+  && _rec="$(printf '%s' "$CLAUDE_FLEET_EVENT_RECORD" | jq -c 'if type == "object" then . else {} end' 2>/dev/null)"
+case "$_rec" in '{'*) ;; *) _rec='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if [ -n "$_WFIRE" ]; then
   :                                   # the watcher's DONE: the record is the session's, not ours
@@ -770,13 +784,14 @@ elif jq -n \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
   --argjson mod "$_mod" --arg failure "$FAILURE" --arg fmsg "$FAILURE_MSG" --arg turn "$TURN" \
-  --arg nested "$NESTED" \
+  --arg nested "$NESTED" --argjson rec "$_rec" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
    + (if $from != "" then {continued_from:$from} else {} end)
    + (if $turn != "" then {turn:$turn} else {} end) + $mod
    + (if $nested != "" then {nested_under:($nested | tonumber)} else {} end)
-   + (if $failure != "" then {failure:({error:$failure, at:$ts} + (if $fmsg != "" then {message:$fmsg} else {} end))} else {} end)' \
+   + (if $failure != "" then {failure:({error:$failure, at:$ts} + (if $fmsg != "" then {message:$fmsg} else {} end))} else {} end)
+   + $rec' \
   >"$tmp" 2>/dev/null
 then
   mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"

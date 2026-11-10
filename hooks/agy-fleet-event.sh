@@ -24,7 +24,8 @@
 # test below is case-blind rather than trusting either spelling.
 # agy has no permission-asked event, so a tool prompt is NOT pushed: the fleet runs agy
 # with --dangerously-skip-permissions, and with CLAUDE_FLEET_YOLO=0 a prompt is visible
-# only on the pane (lib/permission-dialog.mjs), the same as codex.
+# only on the pane (lib/permission-dialog.mjs). codex is the other way round: it has a
+# PermissionRequest event, and hooks/codex-fleet-event.sh pushes it as need-you.
 #
 # The stdout contract is agy's, not Claude's: every handler must print a JSON object, and
 # a Stop handler that printed {"decision":"continue"} would keep the agent running. So

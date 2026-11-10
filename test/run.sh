@@ -588,6 +588,70 @@ cx_rollout() {       # <file> <id> <cwd> <seconds-ago> <last turn event> [codewo
   } > "$1"
 }
 
+# ── codex: its own hooks, through the one bridge ─────────────────────────────
+# codex-cli 0.166.0 runs a command per event from $CODEX_HOME/hooks.json, JSON on stdin
+# (docs/multi-agent-sessions.md has the measurements). hooks/codex-fleet-event.sh maps those
+# onto the events fleet-event.sh already handles. The payloads are the ones a recording hook
+# captured from a real codex (test/fixtures/codex-hook-*.json), re-pointed at this run's
+# folders; the STUB codex below runs whatever hooks.json registers for an event the way codex
+# does — the command through a shell, the payload on stdin, stdout and the status back.
+#   (`sh -c`, where codex uses `$SHELL -lc`: a login shell would run this machine's profile.)
+cx_stub() {          # <dir>: writes <dir>/codex
+  mkdir -p "$1"
+  cat > "$1/codex" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  features)
+    # codex loads config.toml here, and a table defined twice stops it: "duplicate key". The
+    # same check, on table headers with their spacing taken out, as TOML takes it out.
+    if [ -f "${CODEX_HOME:?}/config.toml" ] && ! awk '/^[ \t]*\[/ { h = $0; gsub(/[ \t]/, "", h); if (seen[h]++) bad = 1 } END { exit bad }' "$CODEX_HOME/config.toml"; then
+      echo "Error: failed to load bootstrap configuration: duplicate key" >&2; exit 1
+    fi
+    [ "${CX_STUB_HOOKS:-true}" = none ] || printf '%-40s %-18s %s\n' hooks stable "${CX_STUB_HOOKS:-true}"
+    exit 0 ;;
+  mcp) exit 0 ;;
+  hook)
+    # A group's matcher is a regex on the tool's name, tried unanchored (the looser reading:
+    # a row that says a tool did NOT reach a hook holds under either). CX_STUB_LOG, when set,
+    # gets each command it runs, so a row can tell "the hook ran and did nothing" from "codex
+    # never ran it".
+    payload="$(cat)"; rc=0
+    tool="$(jq -r '.tool_name // ""' <<< "$payload" 2>/dev/null)"
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      [ -n "${CX_STUB_LOG:-}" ] && printf '%s\n' "$c" >> "$CX_STUB_LOG"
+      printf '%s' "$payload" | sh -c "$c"; r=$?; [ "$r" = 0 ] || rc=$r
+    done < <(jq -r --arg e "$2" --arg t "$tool" '(.hooks[$e] // [])[]
+               | select((.matcher // "") as $m | $m == "" or ($t | test($m)))
+               | (.hooks // [])[] | select(.type == "command") | .command' "${CODEX_HOME:?}/hooks.json" 2>/dev/null)
+    exit "$rc" ;;
+esac
+exit 0
+STUB
+  chmod +x "$1/codex"
+}
+cx_hooks_json() {    # <file> [bridge]: hooks.json as install.sh writes it, at this checkout's bridge
+  jq -n --arg b "${2:-$ROOT/hooks/codex-fleet-event.sh}" --arg q "'" '
+    { hooks: ( ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","Stop","Interrupt","PostToolUse"]
+      | map({ key: ., value: [ (if . == "PostToolUse" then { matcher: "mcp__.*__authenticate" } else {} end)
+                               + { hooks: [ { type: "command", command: ($q + $b + $q + " " + .),
+                                             timeout: (if . == "Interrupt" then 3 else 30 end) } ] } ] })
+      | from_entries ) }' > "$1"
+}
+cx_login_payload() { # <cwd> [as-object]: codex's measured PostToolUse, as an MCP authenticate result
+  # The tool and its response are put into the payload codex sent for a Bash call; the rest
+  # (session_id, turn_id, transcript_path, the keys themselves) is what codex sent. codex gave
+  # a Bash result as a string; an MCP one was not measured, so the second shape is the content
+  # blocks Claude's test feeds the same capture (test/helpers/mcp-login-check.mjs).
+  local u='https://auth.example.com/oauth/authorize?response_type=code&client_id=placeholder&redirect_uri=http%3A%2F%2Flocalhost%3A47123%2Fcallback&state=issued-state&scope=tools'
+  jq -c --arg c "$1" --arg u "$u" --arg obj "${2:-}" '.cwd = $c | .tool_name = "mcp__example__authenticate" | .tool_input = {}
+    | ("Ask the user to open this URL in their browser to authorize the example MCP server:\n\n" + $u) as $t
+    | .tool_response = (if $obj != "" then {content: [{type: "text", text: $t}]} else $t end)' "$FIX/codex-hook-post-tool-use.json"
+}
+cx_tree() {          # <dir> -> one digest of every path and every byte under it
+  ( cd "$1" && find . | LC_ALL=C sort && find . -type f | LC_ALL=C sort | while IFS= read -r f; do cksum < "$f"; done ) | cksum
+}
+
 group "socket namespace (this run's own)"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L nsprobe kill-server 2>/dev/null
@@ -1246,6 +1310,15 @@ done
 for k in idle busy; do for w in 160 30; do
   is "codex 0.160: a $k pane is NOT need-you at $w cols"  "0" "$(matches "$bre" "$FIX/codex-$k-0160-${w}col.txt")"
 done; done
+# codex 0.166.0's hooks brought a third: "Hooks need review" over "› 1. Review hooks", when a
+# hook in hooks.json has no matching trust record. It comes up after the composer's first
+# frame, so a session stopped on it must read as need-you, not ready. Real captures, a trust
+# record altered on purpose; at 30 columns the prose wraps and the option line does not.
+for w in 120 56 30; do
+  is "codex 0.166: hooks-review dialog is need-you at $w cols" "1" "$(matches "$bre" "$FIX/codex-hooks-review-0166-${w}col.txt")"
+  is "...and is NOT ready at $w cols"                         "0" "$(matches "$cre" "$FIX/codex-hooks-review-0166-${w}col.txt")"
+done
+is "codex 0.166: the hooks-review captures are that dialog" "3" "$(grep -l 'Hooks need review' "$FIX"/codex-hooks-review-0166-*col.txt | grep -c . || true)"
 # ...and the fixtures really are what they are named: the busy ones carry codex's working
 # line, the idle ones its composer, so a "not need-you" above is about the right pane.
 is "codex 0.160: the busy captures are working"  "2" "$(cat "$FIX"/codex-busy-0160-*col.txt | grep -c 'Working (' || true)"
@@ -1253,6 +1326,8 @@ is "codex 0.160: the idle captures have a prompt" "yes" "$(grep -q 'Context [0-9
 # The grid reads the JS spelling. Same fixtures, same answers, or the card disagrees with
 # fleet-agent about the same pane.
 bjs="$("$ROOT/bin/fleet-agent" field codex blocked_re_js)"
+is "codex: blocked_re_js reads the hooks-review dialog too" "1 1 1" "$(for w in 120 56 30; do
+   node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-hooks-review-0166-${w}col.txt"; printf ' '; done | sed 's/ $//')"
 is "codex: blocked_re_js agrees on every capture" "1 1 1 1 1 0 0 0 0" "$(for f in trust-0160-120col trust-0160-30col daemon-0160-30col trust-0160 trust idle-0160-160col idle-0160-30col busy-0160-160col busy-0160-30col; do
    node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-$f.txt"; printf ' '; done | sed 's/ $//')"
 
@@ -2261,9 +2336,10 @@ rm -rf "$IM"
 # these assertions had to move with it — a stale warning is worse than none.
 #
 # WHAT STAYS TRUE, and the three fields keep them apart:
-#   hooks     codex still pushes NO events. MCP is tools; hooks are push events. It can now
-#             drive the fleet and still cannot tell it anything, so its status is read from
-#             its pane and a question it asks may never reach the inbox.
+#   hooks     codex pushes events through its own hooks since 0.166.0 (hooks/codex-fleet-
+#             event.sh), but NOT in a work profile's fleet, by the owner's decision, and
+#             only once codex trusts them. So its caveat says where they do not run
+#             (events_off) instead of saying it has none.
 #   mcp_self  codex starts an MCP server with a scrubbed environment (measured by calling
 #             the tool: fleet_list with no arguments answered "fleet-list: no socket"), and
 #             since 2026-11-10 install.sh lists the session's fleet variables in the table's
@@ -2311,7 +2387,13 @@ is "cursor gives up only its own fleet" \
 is "opencode: tools, not a warning"   "0" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
 is "codex: tools either"              "0" "$(fa caveat codex | grep -c 'no fleet_\* tools' || true)"
 is "...and it is NOT blind to events" "0" "$(fa caveat opencode | grep -c 'no fleet events' || true)"
-is "codex: no events, still"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
+# codex HAS hooks now, so the blanket clause is gone, and what replaced it names the one
+# place they do not run. Both halves, since the composer prints the new clause from a field
+# only codex declares: a second agent picking it up would be a bug of its own.
+is "codex has hooks now"              "yes" "$(fa field codex hooks)"
+is "codex: not 'no fleet events' outright" "0" "$(fa caveat codex | grep -c 'no fleet events:' || true)"
+is "...only in a work profile's fleet"  "1" "$(fa caveat codex | grep -c 'no fleet events in a work profile' || true)"
+is "...and nobody else says so"       "" "$(for a in $(fa list); do [ "$a" = codex ] && continue; grep -q 'work profile' <<< "$(fa caveat "$a")" && printf '%s ' "$a"; done)"
 # What replaced it, per agent — and the other direction on each, since a composer that
 # printed every clause for everybody would pass all the positives above.
 is "cursor must name the project"     "1" "$(fa caveat cursor | grep -c 'must name the project' || true)"
@@ -3063,6 +3145,486 @@ else
   rm -rf "$CU"
 fi
 
+group "codex: the event bridge files done, need-you and replies the way claude's does"
+if ! command -v jq >/dev/null 2>&1; then
+  skip "codex event bridge" "jq is not installed"
+else
+  CX="$(cd "$(mktemp -d)" && pwd -P)"
+  cx_stub "$CX/bin"; mkdir -p "$CX/codex" "$CX/cfg/fleet" "$CX/ask/fleet" "$CX/src/acme-api"
+  cx_hooks_json "$CX/codex/hooks.json"
+  CF="$CX/cfg/fleet"; CXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  CXRO="$CX/codex/sessions/rollout-$CXID.jsonl"
+  cxp() { jq -c --arg c "$CX/src/acme-api" --arg t "$CXRO" '.cwd = $c | .transcript_path = $t | .session_id = "'"$CXID"'"' \
+            "$FIX/codex-hook-$1.json"; }
+  # A non-work profile's fleet (its own config dir), no tmux: the slot comes from the env.
+  cxh() { local ev="$1"; shift
+          env -u TMUX -u TMUX_PANE HOME="$CX/home" CODEX_HOME="$CX/codex" CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CF" \
+            CLAUDE_FLEET_SOCK=cf-cxtest CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_KNOW=off "$@" \
+            "$CX/bin/codex" hook "$ev" 2>"$CX/err"; }
+  cxrows() { local n; n="$(grep -c "	$1	" "$CF/cf-cxtest.inbox" 2>/dev/null)"; echo "${n:-0}"; }
+  mkdir -p "$CX/home"
+
+  out="$(cxp user-prompt-submit | cxh UserPromptSubmit)"
+  is "UserPromptSubmit: the session reads working"     "working" "$(jq -r .status "$CF/$CXID.json" 2>/dev/null)"
+  is "...on its fleet and slot"                        "cf-cxtest/w1" "$(jq -r '.sock + "/" + .slot' "$CF/$CXID.json" 2>/dev/null)"
+  is "...a codex record, by codex's own thread id"     "codex|$CXID" "$(jq -r '.agent + "|" + .session_id' "$CF/$CXID.json" 2>/dev/null)"
+  is "...naming the rollout codex handed it"           "$CXRO" "$(jq -r .transcript "$CF/$CXID.json" 2>/dev/null)"
+  is "...and marked as the hooks' (the watcher steps aside)" "hooks" "$(jq -r .events "$CF/$CXID.json" 2>/dev/null)"
+  is "...a desk prompt adds no context"                "" "$out"
+  cxp pre-tool-use | cxh PreToolUse >/dev/null
+  is "a turn still running has filed no done"          "0" "$(cxrows done)"
+  out="$(cxp stop | cxh Stop)"
+  is "Stop: exactly one done in the lead's inbox"      "1" "$(cxrows done)"
+  is "...naming the folder"                            "w1 done acme-api" "$(awk -F'\t' '$3 == "done" {print $2, $3, $4}' "$CF/cf-cxtest.inbox" 2>/dev/null)"
+  is "...the session reads ready"                      "ready" "$(jq -r .status "$CF/$CXID.json" 2>/dev/null)"
+  is "...the last message is where fleet-event.sh reads it" "probe-three" \
+     "$(jq -r 'select(.type == "assistant") | .message.content[0].text' "$CF/cf-cxtest.w1.codex.jsonl" 2>/dev/null | tail -1)"
+  is "...and Stop prints nothing (a block would continue the turn)" "" "$out"
+  out="$(cxp permission-request | cxh PermissionRequest)"
+  is "PermissionRequest: the session reads need-you"   "need-you" "$(jq -r .status "$CF/$CXID.json" 2>/dev/null)"
+  is "...with a need-you in the inbox, saying for what" "1" "$(grep -c '	need-you	codex needs your permission to use Bash$' "$CF/cf-cxtest.inbox" 2>/dev/null || true)"
+  is "...and prints nothing, so codex shows its own dialog" "" "$out"
+  cxp interrupt | cxh Interrupt >/dev/null
+  is "Interrupt (an Esc, no Stop): ready again"        "ready" "$(jq -r .status "$CF/$CXID.json" 2>/dev/null)"
+  is "...and it is not a done"                         "1" "$(cxrows done)"
+
+  # --reply-to: the asker is another fleet, in another config dir. fleet-send writes the
+  # address before it pastes; the prompt's UserPromptSubmit arms it at the fleet-side
+  # transcript's current line, a need-you is an ASKS and the Stop is the ANSWERED, both in
+  # the ASKER's inbox, and the Stop consumes the address.
+  printf 'cf-asker\037master\037%s\n' "$CX/ask/fleet" > "$CF/cf-cxtest.w1.reply-to"
+  cxp user-prompt-submit | cxh UserPromptSubmit >/dev/null
+  is "reply-to: the prompt arms the address"           "yes" "$([ -f "$CF/cf-cxtest.w1.reply-to.armed" ] && echo yes || echo no)"
+  cxp permission-request | cxh PermissionRequest >/dev/null
+  is "...a need-you is an ASKS in the asker's inbox"   "cxtest/w1 asks codex needs your permission to use Bash" \
+     "$(awk -F'\t' '{print $2, $3, $4}' "$CX/ask/fleet/cf-asker.inbox" 2>/dev/null | tail -1)"
+  jq -c '.last_assistant_message = "the schema lives in db/schema.sql"' <<< "$(cxp stop)" | cxh Stop >/dev/null
+  is "...the Stop is the ANSWERED, with this turn's answer" "cxtest/w1 answered the schema lives in db/schema.sql" \
+     "$(awk -F'\t' '{sub(/ +$/, "", $4); print $2, $3, $4}' "$CX/ask/fleet/cf-asker.inbox" 2>/dev/null | tail -1)"
+  is "...ASKS then ANSWERED, nothing else"             "asks answered" "$(cut -f3 "$CX/ask/fleet/cf-asker.inbox" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  is "...nothing of it in this fleet's own inbox"      "0" "$(grep -c 'answered' "$CF/cf-cxtest.inbox" 2>/dev/null || true)"
+  is "...and the address is consumed"                  "no" "$([ -e "$CF/cf-cxtest.w1.reply-to" ] && echo yes || echo no)"
+  is "the bridge never wrote to stderr"                "" "$(cat "$CX/err")"
+  rm -rf "${CX:?}"
+fi
+
+group "codex: the bridge does nothing in a work profile's fleet, or outside any fleet"
+# The hooks are written into the one codex config every codex on the machine reads, so they
+# run for a codex in a WORK profile's fleet too, and for one started in a plain terminal. In
+# both the bridge must leave no trace: no record, no inbox row, no briefing, no ledger, and
+# — PreToolUse included — no guard. The work profile is the one whose config is ~/.claude
+# (CLAUDE_CONFIG_DIR unset, or pointing there). Every event, every case, one digest of the
+# whole tree before and after — PostToolUse as an MCP authenticate result, so the login
+# capture is asked too and writes no pending login there.
+if ! command -v jq >/dev/null 2>&1; then
+  skip "codex bridge inert cases" "jq is not installed"
+else
+  CX="$(cd "$(mktemp -d)" && pwd -P)"
+  cx_stub "$CX/bin"; mkdir -p "$CX/t/codex" "$CX/t/home/.claude/fleet" "$CX/t/cfg/fleet" "$CX/t/src/acme-api"
+  cx_hooks_json "$CX/t/codex/hooks.json"
+  CXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  # PostToolUse as an MCP authenticate result: the measured Bash one is kept from the bridge by
+  # its matcher, and a row about the bridge that the bridge never saw would prove nothing.
+  cxp() { case "$1" in login) cx_login_payload "$CX/t/src/acme-api" ;;
+                       *) jq -c --arg c "$CX/t/src/acme-api" '.cwd = $c' "$FIX/codex-hook-$1.json" ;; esac; }
+  cxall() {   # <env assignments...>: every registered event, as codex would run them
+    local ev f; for ev in SessionStart:session-start UserPromptSubmit:user-prompt-submit PreToolUse:pre-tool-use \
+                          PermissionRequest:permission-request Stop:stop Interrupt:interrupt PostToolUse:login; do
+      f="${ev#*:}"; cxp "$f" | env -u TMUX -u TMUX_PANE -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_SOCK \
+        HOME="$CX/t/home" CODEX_HOME="$CX/t/codex" CLAUDE_FLEET_NOTIFIER=off "$@" "$CX/bin/codex" hook "${ev%%:*}"
+      printf 'rc=%s ' "$?"
+    done 2>>"$CX/err"; }
+  before="$(cx_tree "$CX/t")"
+  out="$(cxall CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1)"
+  is "work profile (no CLAUDE_CONFIG_DIR): nothing written" "$before" "$(cx_tree "$CX/t")"
+  is "...nothing printed, every event exits 0"         "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/home/.claude" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1)"
+  is "work profile (CLAUDE_CONFIG_DIR=~/.claude): nothing written" "$before" "$(cx_tree "$CX/t")"
+  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/home/.claude/" TMUX="/tmp/tmux-501/cf-acme-api,1,0" TMUX_PANE=%1)"
+  is "...and from inside a work fleet's tmux, by its socket" "$before" "$(cx_tree "$CX/t")"
+  out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/cfg")"
+  is "no fleet socket: nothing written"                "$before" "$(cx_tree "$CX/t")"
+  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/cfg" TMUX="/tmp/tmux-501/default,1,0" TMUX_PANE=%1)"
+  is "...nor in a tmux that is not a fleet's"          "$before" "$(cx_tree "$CX/t")"
+  is "the inert runs never wrote to stderr"            "" "$(cat "$CX/err")"
+  # The other direction, from the same tree: a non-work profile WITH a socket does write.
+  cxall CLAUDE_CONFIG_DIR="$CX/t/cfg" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1 >/dev/null
+  is "...while a non-work profile's fleet does record the session" "yes" "$([ -f "$CX/t/cfg/fleet/$CXID.json" ] && echo yes || echo no)"
+  is "...and captures the login the work profile did not" "1" "$(find "$CX/t/cfg/fleet/logins" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  rm -rf "${CX:?}"
+fi
+
+group "codex: a codex lead is briefed, and every codex prompt carries the ledger's open items"
+# codex takes additionalContext from SessionStart and UserPromptSubmit (measured: a codeword
+# given either way was repeated back), so a codex master gets the lead's briefing and every
+# codex session the ledger's note, as a Claude session does. The briefing's content is
+# fleet-know's business and its own group's; here it is a stub, and the question is only
+# whether the bridge passes it on. So the hooks run from a copy beside a stub
+# bin/fleet-know-event (fleet-event.sh finds the writer next to itself), with lib/ and mods/
+# the checkout's own.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex briefing and ledger" "jq or node is not installed"
+else
+  CX="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$CX/rt/hooks" "$CX/rt/bin" "$CX/codex" "$CX/cfg/fleet" "$CX/x" "$CX/src/acme-api" "$CX/home"
+  cp "$ROOT/hooks/codex-fleet-event.sh" "$ROOT/hooks/fleet-event.sh" "$ROOT/hooks/fleet-telegram-guard.sh" "$CX/rt/hooks/"
+  ln -s "$ROOT/lib" "$CX/rt/lib"; ln -s "$ROOT/mods" "$CX/rt/mods"
+  printf '#!/usr/bin/env bash\n[ "${1:-}" = brief ] || exit 0\nprintf "meta\\nCODEX-BRIEF: the owner decided on quarterly billing\\n"\n' > "$CX/rt/bin/fleet-know-event"
+  chmod +x "$CX/rt/bin/fleet-know-event"
+  cx_stub "$CX/bin"; cx_hooks_json "$CX/codex/hooks.json" "$CX/rt/hooks/codex-fleet-event.sh"
+  CF="$CX/cfg/fleet"; CXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  # One conversation throughout: the interrupt fixture was captured in a different one.
+  cxp() { jq -c --arg c "$CX/src/acme-api" --arg i "$CXID" '.cwd = $c | .session_id = $i' "$FIX/codex-hook-$1.json"; }
+  cxh() { local ev="$1" slot="$2"; shift 2
+          env -u TMUX -u TMUX_PANE HOME="$CX/home" CODEX_HOME="$CX/codex" CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CF" \
+            CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT="$slot" CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_EXPERIMENTAL_DIR="$CX/x" CLAUDE_FLEET_KNOW_BRIEF_BUDGET_MS=30000 "$@" \
+            "$CX/bin/codex" hook "$ev" 2>>"$CX/err"; }
+  ctx() { jq -r '.hookSpecificOutput.additionalContext // empty' <<< "$1" 2>/dev/null; }
+  # A prompt of its own: the fixture's, with this text and this turn.
+  cxu() { jq -c --arg p "$1" --arg t "$2" '.prompt = $p | .turn_id = $t' <<< "$(cxp user-prompt-submit)"; }
+  cxs() { jq -c --arg m "$1" --arg t "$2" '.last_assistant_message = $m | .turn_id = $t' <<< "$(cxp stop)"; }
+  items() { jq -r '[.items[] | select(.state == "open") | .id + ":" + .text + (if .inTurn then " (in turn)" else "" end)] | join(" | ")' "$CF/$CXID.ledger" 2>/dev/null; }
+
+  out="$(cxp session-start | cxh SessionStart master)"
+  is "the briefing is off unless switched on: nothing printed" "" "$out"
+  printf 'on\n' > "$CX/x/know-brief.enabled"
+  out="$(cxp session-start | cxh SessionStart master)"
+  is "switched on, a codex master is briefed at SessionStart" "CODEX-BRIEF: the owner decided on quarterly billing" "$(ctx "$out")"
+  is "...as SessionStart context, which codex reads"  "SessionStart" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$out" 2>/dev/null)"
+  out="$(cxp session-start | cxh SessionStart w1)"
+  is "...and a codex worker is not"                   "" "$out"
+
+  out="$(cxu "check the acme-api routes and tell me which one is slow" t1 | cxh UserPromptSubmit w1)"
+  is "a prompt is a ledger item, on the turn codex named" "1:check the acme-api routes and tell me which one is slow (in turn)" "$(items)"
+  is "...in the session's own ledger, by thread id"   "t1" "$(jq -r '.items[0].turnId' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "...and the first prompt has nothing open to note" "" "$out"
+  cxs $'Two candidates:\n1. /orders\n2. /users\nWhich should I profile?' t1 | cxh Stop w1 >/dev/null
+  is "Stop settles the turn: its ask is owed from here" "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  out="$(cxu "2" t2 | cxh UserPromptSubmit w1)"
+  is "a bare answer to a numbered question folds into its item" "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  is "...kept as the item's reply"                    "2" "$(jq -r '.items[0].replies[0].text' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "the next prompt carries the open items as context" "yes" \
+     "$(grep -q '^1 (asked): check the acme-api routes' <<< "$(ctx "$out")" && echo yes || echo no)"
+  is "...with the way to close them from Bash"        "yes" "$(grep -q 'fleet-ledger close <id>' <<< "$(ctx "$out")" && echo yes || echo no)"
+  is "...as UserPromptSubmit context"                 "UserPromptSubmit" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$out" 2>/dev/null)"
+  cxs "Profiled /users." t2 | cxh Stop w1 >/dev/null
+  out="$(cxu "[fleet] w2 finished; run fleet-inbox. No need to reply to this line." t3 | cxh UserPromptSubmit w1)"
+  is "a fleet nudge is no item"                       "1:check the acme-api routes and tell me which one is slow" "$(items)"
+  cxu "also bump the billing-svc timeout to 30s" t4 | cxh UserPromptSubmit w1 >/dev/null
+  cxp interrupt | jq -c '.turn_id = "t4"' | cxh Interrupt w1 >/dev/null
+  is "an Esc marks the turn's ask interrupted"        "true" "$(jq -r '.items[] | select(.turnId == "t4") | .interrupted' "$CF/$CXID.ledger" 2>/dev/null)"
+  is "...and settles it, as a Stop would"             "null" "$(jq -r '.items[] | select(.turnId == "t4") | .inTurn' "$CF/$CXID.ledger" 2>/dev/null)"
+  # fleet-ledger finds the codex session's ledger the way it finds a Claude one: by the slot's
+  # newest record on this socket, whose session_id is codex's thread id.
+  fl="$(env -u TMUX -u TMUX_PANE HOME="$CX/home" CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CF" CLAUDE_FLEET_SOCK=cf-acme-api \
+        CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_KNOW=off "$ROOT/bin/fleet-ledger" close 1 "commit 1234abc" 2>&1)"
+  is "fleet-ledger closes a codex session's item from inside it" "done" "$(jq -r '.items[] | select(.id == "1") | .state' "$CF/$CXID.ledger" 2>/dev/null)"
+  before="$(cx_tree "$CF")"
+  out="$(cxu "rename the acme-web header" t5 | cxh UserPromptSubmit w1 CLAUDE_FLEET_LEDGER=off)"
+  is "CLAUDE_FLEET_LEDGER=off: no item"               "no" "$(grep -q 'acme-web header' "$CF/$CXID.ledger" && echo yes || echo no)"
+  is "...and no note"                                 "" "$out"
+  is "the bridge never wrote to stderr"               "" "$(cat "$CX/err")"
+  rm -rf "${CX:?}"
+fi
+
+group "install.sh wires codex's hooks once, trusted, after the user's own, and takes them out again"
+# register_codex_hooks lifted out of the installer, lib/codex-hooks.mjs under it, the stub
+# codex standing in for the user's. The questions are the user's: is my own hook still there
+# and still first, did a second run change a byte, is what uninstall leaves the file I had.
+# And the trust record, because a hook codex has not been told to trust does not run — its
+# hash is held to seven that codex wrote itself (test/fixtures/codex-hook-trust.json), one of
+# them for a group with a matcher.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex hook install" "jq or node is not installed"
+else
+  CI="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$CI/rt" "$CI/codex"
+  ln -s "$ROOT/lib" "$CI/rt/lib"; ln -s "$ROOT/hooks" "$CI/rt/hooks"
+  { sed -n '/^register_codex_hooks() {/,/^}/p' "$ROOT/install.sh"; sed -n '/^vsay() {/p' "$ROOT/install.sh"; } > "$CI/lib.sh"
+  is "the codex hook registrar was extracted, and parses" "yes ok" \
+     "$(grep -q '^register_codex_hooks() {' "$CI/lib.sh" && echo yes || echo no) $(bash -n "$CI/lib.sh" 2>&1 && echo ok)"
+  cx_stub "$CI/bin"
+  H="$CI/codex/hooks.json"; C="$CI/codex/config.toml"; B="$CI/rt/hooks/codex-fleet-event.sh"
+  rch() { ( env FLEET_HOME="$CI/rt" CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" VERBOSE=1 "$@" \
+              bash -c 'set -uo pipefail; source "$0"; register_codex_hooks' "$CI/lib.sh" 2>&1 ); }
+  st() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" status "$B" 2>&1; }
+  un() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" uninstall 2>&1; }
+  has() { grep -q "$1" <<< "$2" && echo yes || echo no; }
+  ours() { local e n=""; for e in SessionStart UserPromptSubmit PreToolUse PermissionRequest Stop Interrupt PostToolUse; do
+             n="$n $(jq -r --arg e "$e" '[(.hooks[$e] // [])[] | .hooks[] | select(.command | test("codex-fleet-event\\.sh.? " + $e + "$"))] | length' "$H" 2>/dev/null)"
+           done; echo "${n# }"; }
+  # The user's own: a Stop hook in their formatting, and a config with their keys and the
+  # record codex wrote when they trusted that hook.
+  printf '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify-me", "timeout": 10}]}]}}\n' > "$H"
+  printf 'model = "gpt-6.1-sol"\n\n[projects."/Users/you/src/acme-api"]\ntrust_level = "trusted"\n\n[hooks.state]\n\n[hooks.state."%s:stop:0:0"]\ntrusted_hash = "sha256:the-users-own"\n' "$H" > "$C"
+  chmod 600 "$C"; cp -p "$H" "$CI/h0"; cp -p "$C" "$CI/c0"
+
+  out="$(rch)"
+  is "install wires the seven, and says so"           "yes" "$(has 'wired codex event hooks' "$out")"
+  is "...each registered once"                        "1 1 1 1 1 1 1" "$(ours)"
+  is "...the login capture behind Claude's own matcher" "mcp__.*__authenticate mcp__.*__authenticate" \
+     "$(jq -r '.hooks.PostToolUse[-1].matcher' "$H") $(jq -r '.hooks.PostToolUse[0].matcher' "$ROOT/mods/ghostfleet/hooks/hooks.json")"
+  is "...after the user's Stop hook, which runs first" "notify-me" "$(jq -r '.hooks.Stop[0].hooks[0].command' "$H")"
+  is "every one is trusted the way codex checks it"   "0" "$(st >/dev/null; echo $?)"
+  is "...the user's own record untouched"             "yes" "$(has 'sha256:the-users-own' "$(cat "$C")")"
+  is "...and config.toml keeps its mode"              "-rw-------" "$(ls -l "$C" | cut -c1-10)"
+  d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a second install changes no byte"               "$d1" "$(cx_tree "$CI/codex")"
+  is "...and says it was already wired"               "yes" "$(has 'already wired' "$out")"
+  # Each hash, recomputed for the command install writes for a user called "you", against
+  # the one codex wrote for that command from its own trust dialog.
+  # Every one of EVENTS, so a new event cannot pass by being left out of the fixture.
+  is "the trust record is the hash codex itself writes" "7 of 7" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       const b = "/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh";
+       console.log(K.EVENTS.filter(e => K.hookHash(e, K.MATCHERS[e] ?? null, K.handlerFor(b, e)) === f.trusted[e]
+         && (K.MATCHERS[e] ?? null) === (f.matchers?.[e] ?? null)
+         && JSON.stringify(K.handlerFor(b, e)) === JSON.stringify(f.handlers[e])).length, "of", K.EVENTS.length)' 2>&1)"
+  is "...and a group's matcher is in it (codex hashed it)" "differs" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       console.log(K.hookHash("PostToolUse", null, f.handlers.PostToolUse) === f.trusted.PostToolUse ? "same" : "differs")' 2>&1)"
+
+  # ...and with the timeout as codex normalizes it before hashing, which codex showed by not
+  # asking again: Interrupt raised past its 3s cap kept its record, Stop moved by a second did not.
+  is "a timeout is hashed as codex caps it, and only then" "same new" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       const at = (e, t) => K.hookHash(e, null, { ...f.handlers[e], timeout: t });
+       console.log(at("Interrupt", f.timeouts.sameRecord.Interrupt) === f.trusted.Interrupt ? "same" : "new",
+                   at("Stop", f.timeouts.newRecord.Stop) === f.trusted.Stop ? "same" : "new")' 2>&1)"
+
+  out="$(un)"
+  is "uninstall gives back the user's hooks.json byte for byte" "same" "$(cmp -s "$CI/h0" "$H" && echo same || echo differs)"
+  is "...and their config.toml"                       "same" "$(cmp -s "$CI/c0" "$C" && echo same || echo differs)"
+  is "...and leaves no backup behind"                 "no" "$([ -e "$H.pre-ghostfleet" ] && echo yes || echo no)"
+  d1="$(cx_tree "$CI/codex")"; out="$(un)"
+  is "a second uninstall touches nothing"             "$d1" "$(cx_tree "$CI/codex")"
+  # The user edits their own hook between install and uninstall: the edit is theirs to keep.
+  rch >/dev/null
+  jq '.hooks.Stop[0].hooks[0].timeout = 20' "$H" > "$CI/edit" && cat "$CI/edit" > "$H"
+  un >/dev/null
+  is "a hook the user changed meanwhile keeps the change" "notify-me 20 1" \
+     "$(jq -r '[.hooks.Stop[0].hooks[0].command, .hooks.Stop[0].hooks[0].timeout, (.hooks | length)] | map(tostring) | join(" ")' "$H")"
+
+  # Positions. A record codex already wrote for the key ours lands on is updated in place —
+  # two tables of one name is a TOML error, and codex then will not start at all.
+  cat "$CI/h0" > "$H"
+  printf '\n[hooks.state."%s:stop:1:0"]\ntrusted_hash = "sha256:a-hook-that-was-here"\n' "$H" >> "$C"
+  rch >/dev/null
+  is "a record already at our key is updated, not written twice" "1 0" \
+     "$(grep -cF "[hooks.state.\"$H:stop:1:0\"]" "$C") $(st >/dev/null; echo $?)"
+  # The user puts a hook of their own in front of ours: ours moves, and its record with it.
+  jq '.hooks.PreToolUse = [{hooks: [{type: "command", command: "audit-me", timeout: 5}]}] + .hooks.PreToolUse' "$H" > "$CI/edit" && cat "$CI/edit" > "$H"
+  rch >/dev/null
+  is "a hook put before ours moves ours, record and all" "0 audit-me" \
+     "$(st >/dev/null; echo $?) $(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$H")"
+  is "...leaving the user's new hook for codex to ask about" "no" "$(has ":pre_tool_use:0:0\"]" "$(cat "$C")")"
+  un >/dev/null
+
+  # What it refuses. Each leaves every byte where it was.
+  printf 'not json\n' > "$H"; d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a hooks.json that is not JSON is left alone"    "$d1" "$(cx_tree "$CI/codex")"
+  is "...and named"                                   "yes" "$(has 'is not JSON' "$out")"
+  cat "$CI/h0" > "$H"; printf '[a]\nx = 1\n[a]\ny = 2\n' > "$C"; d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a config codex cannot read already is not touched" "$d1" "$(cx_tree "$CI/codex")"
+  is "...and it says why"                             "yes" "$(has 'cannot read its config as it is' "$out")"
+  # A table of ours written in a spelling this does not recognise (TOML allows spaces in the
+  # brackets): the record it adds is a second table of that name, and codex refuses the file.
+  printf '[ hooks.state."%s:pre_tool_use:0:0" ]\ntrusted_hash = "sha256:spaced"\n' "$H" > "$C"
+  d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a write codex cannot read is put back, both files" "$d1" "$(cx_tree "$CI/codex")"
+  is "...and it says so"                              "yes" "$(has 'back as they were' "$out")"
+  rm -f "$H" "$C"; d1="$(cx_tree "$CI/codex")"
+  out="$(rch CX_STUB_HOOKS=none)"
+  is "a codex with no hooks gets nothing written"     "$d1" "$(cx_tree "$CI/codex")"
+  out="$(rch CLAUDE_FLEET_CODEX_HOOKS=off)"
+  is "CLAUDE_FLEET_CODEX_HOOKS=off writes nothing"    "$d1" "$(cx_tree "$CI/codex")"
+  is "...and names the way to remove ones wired before" "yes" "$(has 'codex-hooks.mjs uninstall' "$out")"
+  rch >/dev/null
+  is "with no files at all, install writes both"      "yes yes" "$([ -f "$H" ] && echo yes) $([ -f "$C" ] && echo yes)"
+  # cx_hooks_json is what every other codex group runs on, matcher and all: held to this.
+  cx_hooks_json "$CI/as-suite.json" "$B"
+  is "...and the hooks.json is the one the other groups run on" "same" \
+     "$([ "$(jq -S . "$H")" = "$(jq -S . "$CI/as-suite.json")" ] && echo same || echo differs)"
+  un >/dev/null
+  is "...and uninstall takes both away again"         "no no" "$([ -e "$H" ] && echo yes || echo no) $([ -e "$C" ] && echo yes || echo no)"
+  rm -rf "${CI:?}"
+fi
+
+group "codex: a Telegram turn is held by the guard codex runs, and only a codex that runs it gets one"
+# The allowlist is a PreToolUse hook, and codex runs it: the bridge hands every PreToolUse to
+# hooks/fleet-telegram-guard.sh, whose refusal is exit 2 with the reason on stderr, which is
+# what codex blocks on. So the calls go through the command install.sh registers, the way the
+# stub codex runs it, in a desk turn and in a Telegram one. And fleet-telegram delivers to a
+# codex session only when everything that makes that true is there, checked in the codex home
+# the session itself runs under — each missing piece refused on its own.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex Telegram guard" "jq or node is not installed"
+elif ! TX="$(mktemp -d)" || [ ! -d "$TX" ]; then
+  skip "codex Telegram guard" "no temp dir"
+else
+  TX="$(cd "$TX" && pwd -P)"
+  TH="$TX/home"; TC="$TH/.claude-personal"; TF="$TC/fleet"; TK="$TX/codex"
+  mkdir -p "$TX/rt" "$TK" "$TF" "$TH/.config/ghostfleet" "$TX/x" "$TX/src/acme-api" "$TX/empty"
+  ln -s "$ROOT/lib" "$TX/rt/lib"; ln -s "$ROOT/hooks" "$TX/rt/hooks"; ln -s "$ROOT/mods" "$TX/rt/mods"
+  cx_stub "$TX/bin"
+  printf 'acme-api\t%s\tpersonal\n' "$TX/src/acme-api" > "$TH/.config/ghostfleet/projects"
+  printf 'codex\n' > "$TF/cf-personal-acme-api.w1.agent"
+  env CODEX_HOME="$TK" PATH="$TX/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" install "$TX/rt/hooks/codex-fleet-event.sh" >/dev/null 2>&1
+  TXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  ROLL="$TK/sessions/2026/11/10/rollout-2026-11-10T04-00-58-$TXID.jsonl"
+  txp() { jq -c --arg c "$TX/src/acme-api" --arg i "$TXID" --arg r "$ROLL" \
+            '.cwd = $c | .session_id = $i | .transcript_path = $r' "$FIX/codex-hook-$1.json"; }
+  # One event through the INSTALLED hooks, as codex runs them. TOUT/TERR/TRC are its stdout,
+  # stderr and status.
+  txh() { local ev="$1" pl="$2"; shift 2
+          printf '%s' "$pl" | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR HOME="$TH" CODEX_HOME="$TK" \
+            CLAUDE_CONFIG_DIR="$TC" CLAUDE_FLEET_SOCK=cf-personal-acme-api CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_EXPERIMENTAL_DIR="$TX/x" "$@" "$TX/bin/codex" hook "$ev" >"$TX/out" 2>"$TX/err"
+          TRC=$?; TOUT="$(cat "$TX/out")"; TERR="$(cat "$TX/err")"; }
+  ups() { txh UserPromptSubmit "$(jq -c --arg p "$1" --arg t "$2" '.prompt = $p | .turn_id = $t' <<< "$(txp user-prompt-submit)")"; }
+  stp() { txh Stop "$(jq -c --arg t "$1" '.last_assistant_message = "done" | .turn_id = $t' <<< "$(txp stop)")"; }
+  tool() { txh PreToolUse "$(jq -c --arg n "$1" --argjson i "$2" '.tool_name = $n | .tool_input = $i' <<< "$(txp pre-tool-use)")"; }
+  TGX() { env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u GHOSTFLEET_LAUNCH_AGENTS -u GHOSTFLEET_TELEGRAM_DIR \
+              -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CODEX_HOME HOME="$TH" PATH="$TX/bin:$PATH" \
+              GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 GHOSTFLEET_TELEGRAM_SERVICE=pidfile "$@" "$ROOT/bin/fleet-telegram" status 2>&1 \
+          | sed -n 's/^guard: *//p'; }
+  has() { grep -q -- "$1" <<< "$2" && echo yes || echo no; }
+  # Telegram to codex is off until the owner accepts the write_stdin gap; the rows below are
+  # about everything checked AFTER that yes, so they run with it, and the end of the group
+  # takes it away again.
+  mkdir -p "$TH/.config/ghostfleet/telegram"; printf '{"allow_codex": true}\n' > "$TH/.config/ghostfleet/telegram/config.json"
+
+  out="$(env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR HOME="$TH" PATH="$TX/bin:$PATH" GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 \
+           "$ROOT/bin/fleet-telegram" link acme-api/w1 2>&1)"
+  is "linking a codex session whose hooks never reported warns" "yes" "$(has 'have not reported from this session' "$out")"
+  is "...and status says it is not wired"            "yes" "$(has '^NOT WIRED.*have not reported' "$(TGX)")"
+
+  ups "list the files here" turn-desk-1
+  is "a desk prompt through the installed hooks writes the codex record" "codex hooks" \
+     "$(jq -r '"\(.agent) \(.events)"' "$TF/$TXID.json" 2>/dev/null)"
+  is "...and fleet-telegram counts the session wired" "yes" "$(has "^wired ($TK/hooks.json)" "$(TGX)")"
+  tool Bash '{"command":"ls"}'
+  is "a desk turn's shell call runs"                 "0 " "$TRC $TERR"
+  stp turn-desk-1
+
+  ups "[telegram] what is in this folder" turn-tg-1
+  is "a Telegram prompt marks the turn"              "yes" "$([ -f "$TF/cf-personal-acme-api.w1.telegram" ] && echo yes || echo no)"
+  tool Bash '{"command":"ls"}'
+  is "...whose shell call is refused, by exit 2"     "2" "$TRC"
+  is "...with the reason on stderr, which codex shows the model" "yes" "$(has 'This turn came from the owner on Telegram' "$TERR")"
+  is "...and nothing on stdout, which codex would parse" "" "$TOUT"
+  tool apply_patch '{"command":"*** Begin Patch\n*** Add File: notes.md\n+x\n*** End Patch"}'
+  is "...so is a patch (codex's only file write)"     "2" "$TRC"
+  tool mcp__ghostfleet__fleet_send '{"session":"w2","prompt":"list the files in acme-api"}'
+  is "...while the fleet's own tools run"            "0" "$TRC"
+  stp turn-tg-1
+  is "the Stop ends the Telegram turn"               "no" "$([ -f "$TF/cf-personal-acme-api.w1.telegram" ] && echo yes || echo no)"
+  tool Bash '{"command":"ls"}'
+  is "...and the next desk turn's shell runs again"  "0" "$TRC"
+
+  # What fleet-telegram refuses, one piece at a time, each put back after.
+  is "a daemon with no CODEX_HOME reads the session's own home" "yes" "$(has '^wired' "$(TGX CODEX_HOME="$TX/empty")")"
+  cp -p "$TF/$TXID.json" "$TX/rec"
+  jq -c --arg r "$TX/empty/sessions/2026/11/10/rollout-x.jsonl" '.transcript = $r' "$TX/rec" > "$TF/$TXID.json"
+  is "...so a session under a home without the hooks is refused" "yes" "$(has "UserPromptSubmit hook is missing in $TX/empty/hooks.json" "$(TGX CODEX_HOME="$TK")")"
+  jq -c 'del(.events)' "$TX/rec" > "$TF/$TXID.json"
+  is "a record the hooks did not write is refused"   "yes" "$(has 'have not reported' "$(TGX)")"
+  cat "$TX/rec" > "$TF/$TXID.json"
+  cp -p "$TK/config.toml" "$TX/ct"
+  perl -0pi -e 's/\[hooks\.state\."[^"\n]*:pre_tool_use:[^"\n]*"\]\ntrusted_hash = "[^"\n]*"\n//' "$TK/config.toml"
+  is "an untrusted PreToolUse hook is refused (codex would not run it)" "yes" "$(has 'PreToolUse hook is untrusted' "$(TGX)")"
+  cat "$TX/ct" > "$TK/config.toml"
+  is "codex with hooks turned off is refused"        "yes" "$(has 'hooks turned off (features.hooks)' "$(TGX CX_STUB_HOOKS=false)")"
+  printf 'opencode\n' > "$TF/cf-personal-acme-api.w1.agent"
+  is "opencode, which never calls the guard, is still refused" "yes" "$(has 'it runs opencode' "$(TGX)")"
+  printf 'codex\n' > "$TF/cf-personal-acme-api.w1.agent"
+  is "...and with all of it back, wired again"       "yes" "$(has '^wired' "$(TGX)")"
+  # The same fully wired session, without the owner's yes: refused, naming write_stdin.
+  TCJ="$TH/.config/ghostfleet/telegram/config.json"; cp -p "$TCJ" "$TX/tcj"
+  jq -c 'del(.allow_codex)' "$TX/tcj" > "$TCJ"
+  is "without allow_codex a wired codex is refused"  "yes" "$(has '^NOT WIRED.*write_stdin' "$(TGX)")"
+  jq -c '.allow_codex = "yes"' "$TX/tcj" > "$TCJ"
+  is "...and only a literal true counts as the yes"  "yes" "$(has '^NOT WIRED.*write_stdin' "$(TGX)")"
+  cat "$TX/tcj" > "$TCJ"
+  is "...and with it back, wired again"              "yes" "$(has '^wired' "$(TGX)")"
+  # The same session in a WORK profile's fleet (socket cf-acme-api), where the bridge does
+  # nothing at all, with a record that says its hooks reported, as a stale one would.
+  mkdir -p "$TH/.claude/fleet"; printf 'codex\n' > "$TH/.claude/fleet/cf-acme-api.w1.agent"
+  jq -c '.sock = "cf-acme-api"' "$TX/rec" > "$TH/.claude/fleet/$TXID.json"
+  printf 'acme-api\t%s\twork\n' "$TX/src/acme-api" > "$TH/.config/ghostfleet/projects"
+  is "a codex session in a work profile's fleet is refused" "yes" "$(has "work profile's fleet" "$(TGX)")"
+  rm -rf "${TX:?}"
+fi
+
+group "codex: an MCP authenticate result becomes a pending login the phone can finish"
+# The PostToolUse half of the phone sign-in (docs/MCP-LOGIN.md), for codex: install.sh's
+# hooks.json, the stub codex applying its matcher, the bridge, and the capture Claude's mod
+# runs, unchanged. What a phone needs is a private pending login that names this session,
+# its project and the loopback port and state the URL carries, and it gets it only where
+# the session's record is — the one the bridge writes, keyed by codex's thread id.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex login capture" "jq or node is not installed"
+else
+  CL="$(cd "$(mktemp -d)" && pwd -P)"
+  cx_stub "$CL/bin"; mkdir -p "$CL/codex" "$CL/cfg/fleet" "$CL/home/.claude/fleet" "$CL/src/acme-api" "$CL/rt"
+  cx_hooks_json "$CL/codex/hooks.json"
+  CLF="$CL/cfg/fleet"; CLID="$(jq -r .session_id "$FIX/codex-hook-post-tool-use.json")"
+  clh() { local ev="$1"; shift
+          env -u TMUX -u TMUX_PANE HOME="$CL/home" CODEX_HOME="$CL/codex" CLAUDE_CONFIG_DIR="$CL/cfg" \
+            CLAUDE_FLEET_SOCK=cf-personal-acme-api CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_KNOW=off \
+            GHOSTFLEET_TELEGRAM_DIR="$CL/tg" CX_STUB_LOG="$CL/ran" "$@" "$CL/bin/codex" hook "$ev" 2>>"$CL/err"; }
+  logins() { find "$1/logins" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
+  ran() { grep -c "PostToolUse\$" "$CL/ran" 2>/dev/null || true; }
+  newest() { find "$CLF/logins" -name '*.json' 2>/dev/null | while IFS= read -r f; do printf '%s %s\n' "$(jq -r .created "$f")" "$f"; done | sort -n | tail -1 | cut -d' ' -f2-; }
+  # The session the capture looks for: its first prompt, through the bridge, as in a pane.
+  jq -c --arg c "$CL/src/acme-api" --arg id "$CLID" '.cwd = $c | .session_id = $id' "$FIX/codex-hook-user-prompt-submit.json" | clh UserPromptSubmit >/dev/null
+  is "the session has a record under codex's thread id" "w1 cf-personal-acme-api" "$(jq -r '.slot + " " + .sock' "$CLF/$CLID.json" 2>/dev/null)"
+
+  : > "$CL/ran"; out="$(cx_login_payload "$CL/src/acme-api" | clh PostToolUse; echo "rc=$?")"
+  is "an authenticate result is a pending login"       "1" "$(logins "$CLF")"
+  is "...that only this user can read"                 "600" "$(node -e 'console.log((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$(newest)" 2>/dev/null)"
+  is "...naming the session, its thread, fleet and project" "w1 $CLID cf-personal-acme-api $CL/src/acme-api" \
+     "$(jq -r '[.session, .session_id, .sock, .project] | join(" ")' "$(newest)" 2>/dev/null)"
+  is "...for the loopback port and state the URL carries" "loopback example 47123 /callback issued-state" \
+     "$(jq -r '[.kind, .server, .port, .path, .state] | map(tostring) | join(" ")' "$(newest)" 2>/dev/null)"
+  is "...and codex is told nothing, and its call is not failed" "rc=0" "$out"
+  cx_login_payload "$CL/src/acme-api" object | clh PostToolUse >/dev/null
+  is "the same result as MCP content blocks is one too" "2" "$(logins "$CLF")"
+
+  # The matcher: a tool that is not an authenticate does not start the bridge at all, even
+  # with a sign-in URL in its output, because codex never runs the hook for it.
+  : > "$CL/ran"
+  jq -c '.tool_name = "Bash"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "a Bash call with that URL in it runs no hook"    "0 2" "$(ran) $(logins "$CLF")"
+  jq -c '.tool_name = "mcp__example__search"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "...nor does another tool of the same MCP server" "0 2" "$(ran) $(logins "$CLF")"
+
+  # Where the bridge stays out of it (decision: none of this in a work profile's fleet). The
+  # work fleet HAS a record for the thread — lib/codex-rollout.mjs writes one where the hooks
+  # do not run — so only the bridge's own check stands between this call and a login.
+  jq '.sock = "cf-acme-api"' "$CLF/$CLID.json" > "$CL/home/.claude/fleet/$CLID.json"
+  cx_login_payload "$CL/src/acme-api" | clh PostToolUse CLAUDE_CONFIG_DIR="$CL/home/.claude" CLAUDE_FLEET_SOCK=cf-acme-api >/dev/null
+  is "a work profile's fleet gets no pending login"    "0 2" "$(logins "$CL/home/.claude/fleet") $(logins "$CLF")"
+  cx_login_payload "$CL/src/acme-api" | clh PostToolUse CLAUDE_FLEET_SOCK= >/dev/null
+  is "...and neither does a codex outside any fleet"   "2" "$(logins "$CLF")"
+  jq -c '.session_id = "01a1c4ae-0000-7000-8000-000000000000"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "...nor a thread the fleet has no record of"      "2" "$(logins "$CLF")"
+  # A runtime without the capture (the mod not staged): the hook runs, finds nothing to run,
+  # and the tool call still succeeds.
+  mkdir -p "$CL/rt/hooks"; for f in codex-fleet-event.sh fleet-event.sh fleet-telegram-guard.sh; do ln -s "$ROOT/hooks/$f" "$CL/rt/hooks/$f"; done
+  cx_hooks_json "$CL/codex/hooks.json" "$CL/rt/hooks/codex-fleet-event.sh"
+  : > "$CL/ran"; out="$(cx_login_payload "$CL/src/acme-api" | clh PostToolUse; echo "rc=$?")"
+  is "a runtime with no capture to run still exits 0"  "1 rc=0 2" "$(ran) $out $(logins "$CLF")"
+  is "the bridge never wrote to stderr"                "" "$(cat "$CL/err" 2>/dev/null)"
+  rm -rf "${CL:?}"
+fi
+
 group "codex-here runs without the shared daemon, when codex has the flag"
 # A stub codex that echoes its argv and answers --help like the build named by CXHELP:
 # 0.160.1's help lists --no-daemon, 0.146.0's does not, and passing it there would stop
@@ -3140,6 +3702,17 @@ if command -v node >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || [ -d 
   is "...and is now the newest for that slot"      "$CD" \
      "$(jq -r 'select(.sock=="cf-acme-api" and .slot=="w1") | [.ts, .session_id] | @tsv' "$CR/fleet"/*.json | sort -n | tail -1 | cut -f2)"
   is "...mid-turn, as working"                     "working" "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)"
+  # ONCE THE HOOKS HAVE WRITTEN IT, THE RECORD IS THEIRS (hooks/codex-fleet-event.sh). Both
+  # ways, with the watcher still running: a record somebody else wrote is repainted from the
+  # rollout at the next change, and one the hooks wrote (`events: "hooks"`) keeps its need-you.
+  cxev() { printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"%s","turn_id":"t%s"}}\n' "$(cx_iso 0)" "$1" "$2" >> "$CRD/rollout-d-$CD.jsonl"; }
+  jq -c '.status = "need-you"' "$CR/fleet/$CD.json" > "$CR/rec.tmp" && mv "$CR/rec.tmp" "$CR/fleet/$CD.json"
+  cxev task_complete 1
+  i=0; while [ "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)" != ready ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+  is "a record the hooks did not write is repainted from the rollout" "ready" "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)"
+  jq -c '.status = "need-you" | .events = "hooks"' "$CR/fleet/$CD.json" > "$CR/rec.tmp" && mv "$CR/rec.tmp" "$CR/fleet/$CD.json"
+  cxev task_started 2; sleep 1.2
+  is "...and one the hooks wrote keeps its need-you" "need-you" "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)"
   kill "$CRP" "$CRN" 2>/dev/null; wait "$CRP" "$CRN" 2>/dev/null
   i=0; while kill -0 "$CRW" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
   is "the watcher ends with its process"           "gone" "$(kill -0 "$CRW" 2>/dev/null && echo alive || echo gone)"
@@ -29439,8 +30012,9 @@ AGENT
   is "a message while the guard is unwired is refused"  "1" "$(tgsent | grep -c 'not wired' || true)"
   is "...and runs no turn"                              "0" "$(ls "$TG/s" | grep -c '^prompt\.' || true)"
   tgwire 1
-  # Wired, but the session runs another agent, which never calls a Claude Code hook: the
-  # allowlist would not exist there, so the daemon delivers nothing to it.
+  # Wired, but the session runs codex in a WORK profile's fleet (this one is ~/.claude), where
+  # the codex bridge does nothing by decision: the allowlist would not run there, so the
+  # daemon delivers nothing to it. A wired codex in another profile is the codex group's.
   printf 'codex\n' > "$FF/cf-acme-api.master.agent"
   tgpost _push "$(tgmsg 7 4242 'are you there now')"
   until_ok 60 sent_has 'it runs codex'

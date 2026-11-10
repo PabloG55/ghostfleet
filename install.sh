@@ -903,11 +903,10 @@ echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED
 # per CLI to put it.
 #
 # WHAT THIS DOES NOT GIVE THEM, said here because the two are easy to conflate: MCP is
-# TOOLS, hooks are PUSH EVENTS. A codex session can now CALL the fleet; it still tells the
-# fleet nothing. It writes no inbox row, wakes no master, and its status is still read from
-# its pane by fleet-agent's busy_re. "You can see it, you will not be told" is exactly as
-# true after this as before. opencode has both halves (hooks/opencode-fleet-event.js), so
-# opencode reaches near parity; codex does not.
+# TOOLS, hooks are PUSH EVENTS. This lets a codex session CALL the fleet; telling the fleet
+# what it did — the inbox row, the lead's wake, the need-you — is register_codex_hooks
+# below, a separate registration in a separate file, which can fail or be switched off on
+# its own. opencode has both halves too (hooks/opencode-fleet-event.js).
 #   The INSTRUCTIONS for those tools are skill/ghostfleet-orchestrate, and codex gets them
 # too since 2026-11-10 (register_codex_skill, below). opencode still has the tools without
 # them — see the note in bin/fleet-agent's `skill` field.
@@ -993,6 +992,34 @@ register_codex_skill() {
     vsay "✓ linked the ghostfleet-orchestrate skill -> $dest (codex, global)"
   else
     echo "! could not link $dest — codex sessions get the fleet_* tools without the skill"
+  fi
+}
+
+# --- codex's event hooks: the same bridge, registered and TRUSTED -------------------
+# codex 0.166.0 runs a command per lifecycle event from $CODEX_HOME/hooks.json, and
+# hooks/codex-fleet-event.sh turns seven of them into what hooks/fleet-event.sh already does
+# for claude: working, done with the last message, need-you, replies, the briefing, the
+# ledger, the Telegram guard, and the phone sign-in's login capture. Like the MCP entry it is ONE registration for every
+# profile, because codex has one config; the bridge decides per session, at run time, that a
+# work profile's fleet hears nothing.
+#   Registering is not enough on its own: codex runs a hook only once config.toml records it
+# as trusted, and asks at startup otherwise — where "Continue without trusting" runs none of
+# them. lib/codex-hooks.mjs writes both halves, keeps the user's own hooks (ours go after
+# theirs), changes no byte on a second run, and has codex re-read its config after the
+# write, putting both files back if it cannot. CLAUDE_FLEET_CODEX_HOOKS=off skips it here;
+# `node <runtime>/lib/codex-hooks.mjs uninstall` takes ours out again and leaves the user's
+# file as it was, and `… status` says what codex will run.
+register_codex_hooks() {
+  command -v codex >/dev/null 2>&1 || return 0   # register_codex_mcp has said so already
+  local helper="$FLEET_HOME/lib/codex-hooks.mjs" out
+  case "${CLAUDE_FLEET_CODEX_HOOKS:-}" in off|0|no)
+    vsay "· codex event hooks not wired (CLAUDE_FLEET_CODEX_HOOKS=off); to remove ones wired before: node $helper uninstall"
+    return 0 ;;
+  esac
+  if out="$(node "$helper" install "$FLEET_HOME/hooks/codex-fleet-event.sh" 2>&1)"; then
+    vsay "$out"
+  else
+    echo "! codex event hooks not wired — codex workers fall back to pane-only detection: ${out#codex-hooks: }"
   fi
 }
 
@@ -1143,6 +1170,7 @@ register_cursor() {
     "wrote ghostfleet MCP" "cursor gets no fleet_* tools"
 }
 register_codex_mcp
+register_codex_hooks
 register_codex_skill
 register_opencode_mcp
 register_agy

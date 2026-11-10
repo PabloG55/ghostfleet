@@ -1,0 +1,63 @@
+{
+  "codex": "codex-cli 0.166.0",
+  "captured": "2026-11-10",
+  "how": "hooks.json held these handlers; codex opened Hooks need review at startup, Trust all and continue was chosen, and no prompt was sent. trusted is what codex then wrote to config.toml for each, at group 0 handler 0. The first six were one home; PostToolUse was a second (same codex, same day), alone in its hooks.json with the matcher in matchers, so its record also shows that codex hashes a group's matcher.",
+  "handlers": {
+    "SessionStart": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' SessionStart",
+      "timeout": 30
+    },
+    "UserPromptSubmit": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' UserPromptSubmit",
+      "timeout": 30
+    },
+    "PreToolUse": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' PreToolUse",
+      "timeout": 30
+    },
+    "PermissionRequest": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' PermissionRequest",
+      "timeout": 30
+    },
+    "Stop": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' Stop",
+      "timeout": 30
+    },
+    "Interrupt": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' Interrupt",
+      "timeout": 3
+    },
+    "PostToolUse": {
+      "type": "command",
+      "command": "'/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh' PostToolUse",
+      "timeout": 30
+    }
+  },
+  "matchers": {
+    "PostToolUse": "mcp__.*__authenticate"
+  },
+  "trusted": {
+    "SessionStart": "sha256:8f280f05b7cfe2c7d176ef45f53338c0afc73735327552c7b38dfb430cb01c96",
+    "UserPromptSubmit": "sha256:46c2ad21bd3501113bdbc8ed15392b96163d8e2273b3dccea8c1629f8d4638d0",
+    "PreToolUse": "sha256:153dc9f5dd82fbd4c5707f011bd549cdaae53703a530d44d958d82ee62a03400",
+    "PermissionRequest": "sha256:718f4c151557b2fe1978c276583edcf1072a90518f5f7112b49e52280d94a3a1",
+    "Stop": "sha256:99dcf4100a5edbd4d90b2fddea167e0ac65a314eb617896cb1058cce9ca9f6e1",
+    "Interrupt": "sha256:1fd8ad6bf94a8cda47f59d23ee0ea5822a9fbd3afe89a2d051a8878213c14e22",
+    "PostToolUse": "sha256:5b03f248ed90702cdfafeaaf4de228a3560443085b38b78b7f88ec93fd34d367"
+  },
+  "timeouts": {
+    "how": "the same home, one timeout changed in hooks.json, codex started, and the screen read 4s past its first frame (the review dialog comes up after it). Interrupt at 30 against the record codex wrote at 3: no dialog, so codex clamps Interrupt to 3s before it hashes. Stop at 31 against its record at 30: the dialog, so a changed timeout is a changed hook.",
+    "sameRecord": {
+      "Interrupt": 30
+    },
+    "newRecord": {
+      "Stop": 31
+    }
+  }
+}

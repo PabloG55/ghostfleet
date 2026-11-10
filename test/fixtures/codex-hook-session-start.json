@@ -1,0 +1,9 @@
+{
+  "cwd": "/Users/you/src/acme-api",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "bypassPermissions",
+  "session_id": "01a1c4ae-6ea4-76c1-b051-26182342fb6e",
+  "source": "startup",
+  "transcript_path": "/Users/you/.codex/sessions/2026/11/10/rollout-2026-11-10T03-58-48-01a1c4ae-6ea4-76c1-b051-26182342fb6e.jsonl"
+}

@@ -97,10 +97,47 @@ not have that hook, nothing is delivered: `link` warns you, `start` refuses, and
 sent anyway gets a reply saying it was not delivered and why. Re-run `./install.sh` after
 updating ghostfleet.
 
-**Link a session that runs `claude`.** The guard is a Claude Code hook, and codex,
-opencode, agy and cursor never call it. A Telegram turn in one of them would have every
-tool, so the daemon treats a session running another agent as unwired and delivers nothing.
-It checks on every message, so a session switched with `fleet-agent` is covered both ways.
+**Link a session that runs `claude`, or `codex` outside the work profile.** The guard is a
+PreToolUse hook. Claude Code calls it from `settings.json`. codex calls it through its own
+hooks: `hooks/codex-fleet-event.sh` hands every PreToolUse to the same guard, and codex blocks
+the call on the guard's refusal. opencode, agy and cursor never call it. A Telegram turn
+in one of those would have every tool, so the daemon treats such a session as unwired and
+delivers nothing. It checks on every message, so a session switched with `fleet-agent` is
+covered both ways.
+
+**codex is off until you allow it.** One tool, `write_stdin`, never reaches the guard (see
+the last item below), so a codex Telegram turn is held a little less tightly than a Claude
+one. The daemon refuses codex sessions until you accept that, by adding
+`"allow_codex": true` to `~/.config/ghostfleet/telegram/config.json`. Only a literal `true`
+counts.
+
+Once you allow it, the daemon checks each thing the guard needs for a codex session,
+because nothing else holds the turn:
+- the fleet is not a work profile's, where the codex bridge does nothing;
+- the prompt, tool and stop hooks are in `$CODEX_HOME/hooks.json`, and their scripts exist;
+- codex has them **trusted** in `config.toml`, since codex runs no hook it was not told to
+  trust (`install.sh` records the trust; `node lib/codex-hooks.mjs status` shows it);
+- codex has hooks turned on;
+- the session's newest status record was written by those hooks. A codex session loads
+  its hooks when it starts, so one started before `install.sh` wired them has none. Restart
+  it, or give it one prompt at the desk.
+
+Two things are different under codex:
+- **Reading files.** codex reads files with its shell, and the default list has no shell, so
+  a codex Telegram turn answers from what it knows and delegates the rest. A `Bash(…)` entry
+  you add opens that command to it, as it would to Claude.
+- **The model calls tools from a script.** codex's model runs its tools from a JavaScript
+  `exec` tool. Each tool the script calls goes through the guard on its own, and a refused
+  one fails the script with the guard's reason. The script has no network or filesystem of
+  its own.
+- **The Telegram rules outlive their turn in the model's memory.** The Telegram turn ends at
+  its Stop, and the next desk turn has every tool again. But codex keeps the Telegram turn's
+  context in the conversation, and after one Telegram turn the model declined a desk
+  turn's shell command as "not permitted". Say it is a desk turn, or start a new session.
+- **`write_stdin` is not checked.** It types into a process that an earlier turn left
+  running, and codex sends no PreToolUse for it. A Telegram turn cannot start a shell, but it
+  could type into one that a desk turn left open. This is why codex needs `allow_codex`; if
+  it matters to you, leave it off and link a Claude session.
 
 ### 4. Run it
 
@@ -471,8 +508,17 @@ an environment variable: `fleet-telegram config coalesce-ms <0-30000>` (3000 by 
   error, and the outbox.
 - **The bot says "Not delivered — … not wired".** The linked profile's `settings.json` is
   missing the guard. Run `./install.sh`.
-- **"Not delivered — … it runs codex".** The linked session is not running `claude` (see
-  step 3). Link a Claude session, or switch this one back.
+- **"Not delivered — … it runs opencode"** (or agy, or cursor). The guard cannot run there
+  (see step 3). Link a Claude or codex session, or switch this one back.
+- **"Not delivered — … it runs codex, whose write_stdin … never reaches the guard"**. Telegram
+  to codex is off (see step 3). Link a Claude session, or add `"allow_codex": true` to the
+  config.
+- **"Not delivered — … codex's PreToolUse hook is untrusted"** (or missing, or "have not
+  reported from this session").
+  - Run `./install.sh` and read `node <runtime>/lib/codex-hooks.mjs status`.
+  - Restart a codex session that was already running when you installed.
+  - If codex asked "Hooks need review" and you chose to continue without trusting, the hooks
+    are off for that session.
 - **Nothing at all comes back, and `status` counts drops.** The chat id you stored is not the
   one you are writing from. Read the `dropped from` line in the log.
 - **`secrets: …`.** Run your secret command by hand with `token` or `chat` as `$1`. It must

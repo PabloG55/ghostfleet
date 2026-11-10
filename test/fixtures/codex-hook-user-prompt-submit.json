@@ -1,0 +1,10 @@
+{
+  "cwd": "/Users/you/src/acme-api",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Reply with the second codeword if you were given one. Then run `sleep 12; echo probe-three` once.",
+  "session_id": "01a1c4ae-6ea4-76c1-b051-26182342fb6e",
+  "transcript_path": "/Users/you/.codex/sessions/2026/11/10/rollout-2026-11-10T03-58-48-01a1c4ae-6ea4-76c1-b051-26182342fb6e.jsonl",
+  "turn_id": "01a1c4ae-b1b4-7dd3-8d8d-4677996b42a6"
+}

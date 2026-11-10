@@ -56,6 +56,7 @@ import { fileURLToPath } from 'node:url';
 import { projects } from '../lib/projects.mjs';
 import { storePhoto, storeAudio, storeFile, sniffImage, ATTACH_MAX_BYTES, ATTACH_FILE_MAX_BYTES } from '../lib/attach.mjs';
 import { telegramChunks } from '../lib/telegram-format.mjs';
+import { state as codexHookState } from '../lib/codex-hooks.mjs';
 
 const SELF = fs.realpathSync(fileURLToPath(import.meta.url));
 const BIN = path.dirname(SELF);
@@ -228,12 +229,14 @@ const envFor = (t) => ({ ...process.env, TMUX: '', CLAUDE_FLEET_SOCK: t.sock, CL
 // run with every tool the session has, which is the one thing the owner decided against —
 // so a message is not delivered at all until it is (and the fix is named). The event hook
 // is checked too: it is what marks the turn as Telegram's.
-// The allowlist is a Claude Code PreToolUse hook. Under codex, opencode, agy or cursor it
-// would not run at all, and a Telegram turn there would have every tool. So a session
-// running another agent counts as unwired, and nothing reaches it until it runs claude
-// again. Read on every message: fleet-agent can switch a live session, and its marker
-// (`<sock>.<session>.agent`, absent for claude) is what changes. With no marker, the
-// project's default agent decides, so the check fails closed.
+// The allowlist is a PreToolUse hook. Claude Code runs it from settings.json, and codex runs
+// it through its own hooks (hooks/codex-fleet-event.sh hands every PreToolUse to the same
+// guard; see codexWiring below). Under opencode, agy or cursor it would not run at all, and
+// a Telegram turn there would have every tool, so a session running one of those counts as
+// unwired, and nothing reaches it until it runs claude or codex. Read on every message:
+// fleet-agent can switch a live session, and its marker (`<sock>.<session>.agent`, absent
+// for claude) is what changes. With no marker, the project's default agent decides, so the
+// check fails closed.
 function agentOfLink(t) {
   try {
     const a = fs.readFileSync(path.join(t.cfg, 'fleet', `${t.sock}.${t.session}.agent`), 'utf8').trim();
@@ -241,12 +244,74 @@ function agentOfLink(t) {
   } catch {}
   return t.agent || 'claude';
 }
+// A CODEX SESSION IS WIRED WHEN EVERYTHING THE GUARD NEEDS TO RUN IN IT IS THERE, and each
+// is checked rather than assumed, because a turn this lets through is held by nothing else:
+//   - not a work profile's fleet: the codex bridge does nothing there, by the owner's
+//     decision, and decides it from the profile's config dir, as this does;
+//   - the prompt, tool and stop hooks registered, their script there, and TRUSTED: codex runs
+//     no hook it has not been told to trust (lib/codex-hooks.mjs reads the record the way
+//     codex does), and an untrusted guard is no guard;
+//   - codex's hooks feature on (`codex features list`, about 20 ms);
+//   - and this session's newest record written BY those hooks (`events: "hooks"`). codex
+//     loads its hooks when a session starts, so one started before install.sh wired them has
+//     none, whatever the files say now; the rollout watcher's records do not carry the mark.
+//     That record also names the codex home the session runs under, which is the one read.
+// What it cannot see: codex's write_stdin, which types into a process an EARLIER turn left
+// running, sends no PreToolUse (codex-rs tools write_stdin.rs: it counts the original
+// command's check as the check). A Telegram turn cannot start a shell, but it could type into
+// one a desk turn left open. docs/TELEGRAM.md says so.
+function codexWiring(t) {
+  const who = `${t.name}/${t.session}`;
+  const no = (why, fix) => ({ ok: false, file: '', why: `the Telegram tool guard is not wired for ${who}: ${why}`, fix });
+  if (path.resolve(t.cfg) === path.join(os.homedir(), '.claude')) {
+    return no('it runs codex in a work profile\'s fleet, where the codex event bridge does nothing, so the guard would never run',
+              'link a session that runs claude, or one in another profile');
+  }
+  let newest = null;
+  try {
+    for (const n of fs.readdirSync(t.fleetDir)) {
+      if (!n.endsWith('.json')) continue;
+      const r = readJson(path.join(t.fleetDir, n), null);
+      if (!r || r.slot !== t.session || (r.sock || '') !== t.sock || !r.session_id) continue;
+      if (!newest || (Number(r.ts) || 0) > (Number(newest.ts) || 0)) newest = r;
+    }
+  } catch {}
+  if (!newest || newest.agent !== 'codex' || newest.events !== 'hooks') {
+    return no('its codex hooks have not reported from this session (it started before they were wired, or has had no turn yet)',
+              'restart it, or give it one prompt at the desk, then send again');
+  }
+  // The hooks that count are the ones in the codex home THIS session runs under, and its
+  // record says which: codex writes the rollout it names at <home>/sessions/YYYY/MM/DD/. This
+  // daemon's own CODEX_HOME (launchd and systemd start it with none) would be a guess.
+  const m = /^(.+)\/sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[^/]+\.jsonl$/.exec(String(newest.transcript || ''));
+  const env = m ? { ...process.env, CODEX_HOME: m[1] } : process.env;
+  let s;
+  try { s = codexHookState({ env, withFeatures: true }); } catch (e) { return no(`codex\'s hooks could not be read (${e.message})`, 'run ./install.sh'); }
+  const bad = ['UserPromptSubmit', 'PreToolUse', 'Stop'].find((ev) => s.events[ev] !== 'ok');
+  if (bad) return no(`codex\'s ${bad} hook is ${s.events[bad]} in ${s.hooksFile}`, 'run ./install.sh, which registers and trusts them');
+  if (s.error) return no(`codex could not be asked about its hooks (${s.error})`, 'check that codex runs');
+  if (s.hooks !== true) return no(`codex has hooks turned ${s.hooks === false ? 'off (features.hooks)' : 'off or unknown'}`, 'turn them on: codex features enable hooks');
+  return { ok: true, file: s.hooksFile, fix: '', why: '' };
+}
+// AND ONLY WHEN THE OWNER HAS SAID YES TO THAT GAP. The guard holds every tool codex asks
+// about, and write_stdin is the one it is never asked about, so a codex Telegram turn is held
+// to the allowlist EXCEPT through a process a desk turn left open. That is less than a Claude
+// Telegram turn is held to, and the fleet does not decide on the owner's behalf that it is
+// enough: until config.json says "allow_codex": true, a codex session is refused, with the
+// reason, exactly as before codex had hooks. Everything codexWiring checks still applies on top.
 function wiring(t) {
   const f = path.join(t.cfg, 'settings.json');
   const agent = agentOfLink(t);
+  if (agent === 'codex') {
+    if (config().allow_codex !== true) {
+      return { ok: false, file: '', fix: `link a session that runs claude, or accept the gap with "allow_codex": true in ${CONFIG}`,
+               why: `the Telegram tool guard is not wired for ${t.name}/${t.session}: it runs codex, whose write_stdin (typing into a process an earlier turn left running) never reaches the guard, and Telegram to codex is off until the owner allows it` };
+    }
+    return codexWiring(t);
+  }
   if (agent !== 'claude') {
-    return { ok: false, file: f, fix: `link a session that runs claude, or switch this one back (fleet-agent)`,
-             why: `the Telegram tool guard is not wired for ${t.name}/${t.session}: it runs ${agent}, and the guard is a Claude Code hook that ${agent} never calls, so a Telegram turn there would be unrestricted` };
+    return { ok: false, file: f, fix: `link a session that runs claude or codex, or switch this one back (fleet-agent)`,
+             why: `the Telegram tool guard is not wired for ${t.name}/${t.session}: it runs ${agent}, and the guard is a PreToolUse hook that ${agent} never calls, so a Telegram turn there would be unrestricted` };
   }
   const s = readJson(f, null);
   const cmds = (ev) => ((s?.hooks?.[ev]) || []).flatMap((x) => (x.hooks || []).map((h) => String(h.command || '')));

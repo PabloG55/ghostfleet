@@ -23,16 +23,18 @@
 # kill landed MID-TURN and still left that turn's message on disk, and `codex resume
 # <id>` reopened the conversation — appending to the same file, under the same id.
 #
-# AND THE FLEET NOW KNOWS WHICH CONVERSATION THAT IS. codex has no hooks, so nothing
-# recorded a codex pane's conversation id, and `resume --last` is "the newest in this
+# AND THE FLEET NOW KNOWS WHICH CONVERSATION THAT IS. codex had no hooks before 0.166.0
+# (and its hooks do not run in a work profile's fleet), so nothing recorded a codex pane's
+# conversation id, and `resume --last` is "the newest in this
 # folder" — --continue by another name, wrong in a checkout with two sessions. The
 # watcher started below (lib/codex-rollout.mjs) reads the rollout the codex process
 # holds open and writes <fleet-dir>/<id>.json in the shape the claude hook writes, so
 # a lost-session reopen (fleet-restart --reopen, fleet_reopen, fleet-open) and the
 # phone resume and read it BY ID.
 #
-# Also still true: codex pushes no need-you/done events (hooks=no), so its blocked_re
-# is what reads the trust dialog and the daemon dialog (see --no-daemon below) as need-you.
+# Also still true: codex's dialogs come before its first hook fires (SessionStart fires at
+# the first prompt), so its blocked_re is what reads the trust dialog, the daemon dialog
+# (see --no-daemon below) and the hooks-review dialog as need-you.
 set -uo pipefail
 
 slot=""
