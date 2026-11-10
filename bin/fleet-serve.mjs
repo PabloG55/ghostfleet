@@ -57,6 +57,7 @@ import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
+import { loginList } from '../lib/logins.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -2371,7 +2372,7 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //                     a time, so the other side's fleet-know can answer about this machine's
 //                     projects. Never a private or excluded project's (eventsForPeer), and
 //                     never a third host's: what this host fetched from ITS peers stays here
-const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
+const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
@@ -3092,6 +3093,18 @@ function agentCatalogue() {
       text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
       ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
+  }
+
+  if (p === '/api/logins' && req.method === 'GET') {
+    const fan = fanOut('/api/logins', req, 5000);
+    const project = url.searchParams.get('project');
+    const shown = shownTo(req).filter(t => !project || t.name === project);
+    const items = loginList(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
+    for (const { peer, r } of await fan || [])
+      if (r.status === 200 && Array.isArray(r.json?.items))
+        for (const item of r.json.items) if (!project || project === `${item.project}@${peer.key}`)
+          items.push({ ...item, project: addrOf(item.project, peer), host: peer.label, host_key: peer.key });
+    return send(res, 200, { ok: true, items });
   }
 
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
