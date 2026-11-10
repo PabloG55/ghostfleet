@@ -6,6 +6,16 @@ the detail, and every entry here names the PR that carries the argument.
 
 ## Unreleased
 
+**A project can be kept from paired machines, one project or one profile at a time.**
+`fleet-project set <name> pair hide`, or `fleet-project set --profile <p> pair hide` for a
+profile's default, with a project's own value beating its profile's. A hidden project is absent
+from everything a paired machine reads (projects, grid, conversation, pane, settings, queue,
+reviews, the fleet's memory), and a send, wake, park, resume, photo or verdict aimed at it is
+answered as a project that does not exist. This machine's own phone, client, leads and commands
+are unaffected. `share` is the default, so nothing changes until a project is set.
+`fleet-project pair` shows every project's value, where it comes from and whether a paired
+machine sees it. The memory now crosses only when a project is `include` **and** `share`.
+
 **`fleet-restart` no longer loses a session whose old process is slow to exit, and no longer says
 it restarted one it lost** (#157). In one restart 22 of 42 sessions vanished, with every fleet reporting
 them as relaunched and exiting 0: on a swapping machine the old processes took 20-60 s to exit,

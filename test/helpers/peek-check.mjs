@@ -125,6 +125,73 @@ if (cmd === 'mode') {
   const headless = P.previewMode({ platform: 'macos', env: {}, isInteractive: false })[0]
   console.log(letters, headless, P.platformOf('Darwin\n'), P.platformOf('Linux'), P.platformOf('FreeBSD'),
     P.openArgv('macos', '/x/1.png').join(' '), P.openArgv('linux', '/x/1.png').join(' '))
+} else if (cmd === 'through') {
+  // Inside tmux, by the terminal tmux says is looking (its XTVERSION answer), one letter a case.
+  const TMUX = '/tmp/tmux-1000/cf-acme-api,1,0', SSH = '10.0.0.2 51000 10.0.0.1 22'
+  const SSH_TMUX = { TERM_PROGRAM: 'tmux', TERM: 'tmux-256color', TMUX, SSH_CONNECTION: SSH }
+  const as = (termtype, termname = 'xterm-256color') => ({ termtype, termname })
+  const rows = [
+    ['linux', SSH_TMUX, as('ghostty 1.1.3')],                                   // Ghostty over SSH into tmux
+    ['linux', SSH_TMUX, as('kitty(0.35.2)', 'xterm-kitty')],
+    ['linux', SSH_TMUX, as('iTerm2 3.5.0')],
+    ['linux', SSH_TMUX, as('XTerm(390)')],                                      // a plain terminal: cells
+    ['linux', SSH_TMUX, as('')],                                                // no answer (tmux < 3.3)
+    ['linux', SSH_TMUX, as('tmux 3.4', 'tmux-256color')],                       // through the stack
+    ['linux', SSH_TMUX, as('iTerm2 3.4.23')],
+    ['linux', SSH_TMUX, as('kitty(0.27.1)', 'xterm-kitty')],
+    ['linux', SSH_TMUX, null],                                                  // nobody attached
+    ['linux', { TERM: 'tmux-256color', TMUX }, as('ghostty 1.1.3')],            // a Linux desktop, in tmux
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX }, as('ghostty 1.1.3')],             // a Mac, here: window first
+    ['macos', { ...SSH_TMUX }, as('ghostty 1.1.3')],                            // a Mac reached over SSH
+    ['linux', { ...SSH_TMUX, CLAUDE_FLEET_PEEK: 'kitty' }, null],               // the person says so
+    ['linux', { ...SSH_TMUX, CLAUDE_FLEET_PEEK: 'cells' }, as('ghostty 1.1.3')],
+    ['macos', { TERM_PROGRAM: 'tmux', TMUX, CLAUDE_FLEET_PEEK: 'kitty' }, null],
+    ['linux', { TERM: 'xterm-ghostty', SSH_CONNECTION: SSH }, null],            // Ghostty over SSH, no tmux
+  ]
+  const letters = rows.map(([platform, env, client]) => P.previewMode({ platform, env, client })[0]).join('')
+  // The engine drew one as its alt: no Image draws in this process, whoever looks or asks.
+  const refused = [
+    P.previewMode({ platform: 'linux', env: SSH_TMUX, client: as('ghostty 1.1.3'), refused: true }),
+    P.previewMode({ platform: 'linux', env: { ...SSH_TMUX, CLAUDE_FLEET_PEEK: 'kitty' }, refused: true }),
+    P.previewMode({ platform: 'macos', env: { TERM_PROGRAM: 'ghostty' }, refused: true }),
+  ].map(m => m[0]).join('')
+  // Whom tmux is asked about: the clients showing this pane's window, the latest input first.
+  const F = (at, win, type) => `${at}\t${win}\t${type}\txterm-256color`
+  const list = [F(1700000005, '@1', 'XTerm(390)'), F(1700000009, '@2', 'kitty(0.35.2)'), F(1700000007, '@1', 'ghostty 1.1.3')].join('\n')
+  const looking = [P.lookingClient(list, '@1'), P.lookingClient(list, ''), P.lookingClient(list, '@9'), P.lookingClient('', '@1')]
+    .map(c => (c ? c.termtype : 'none')).join(',')
+  // Asked only where the answer changes the mode: inside tmux, not where a Mac's window or an
+  // override settles it, never outside tmux.
+  const asks = [
+    { platform: 'linux', env: SSH_TMUX }, { platform: 'macos', env: { TERM_PROGRAM: 'tmux', TMUX } },
+    { platform: 'linux', env: { ...SSH_TMUX, CLAUDE_FLEET_PEEK: 'cells' } }, { platform: 'linux', env: { TERM: 'xterm-ghostty' } },
+  ].map(o => (P.asksClient(o) ? 'y' : 'n')).join('')
+  // What the engine answers for a picture it draws as its alt, and what it answers otherwise.
+  const alt = [
+    { deny: 'the Image draws its alt here: the terminal draws neither kitty placeholder images (probe: tmux passthrough on, but tmux does not know which terminal is outside) nor iTerm2 inline images' },
+    { deny: 'tmux holds back images', fix: 'tmux-passthrough' },
+    { deny: 'nothing of this plugin is mounted at above-prompt/image-3' }, {}, null,
+  ].map(r => (P.drawsAlt(r) ? 'y' : 'n')).join('')
+  console.log(letters, refused, looking, asks, alt, JSON.stringify(P.CLIENT_FORMAT))
+} else if (cmd === 'source') {
+  // What an Image is handed: bytes inside tmux and over SSH, never a file name there; the file
+  // only where the terminal Claude Code writes to is on this machine and reads it itself.
+  const TMUX = '/tmp/tmux-1000/cf-acme-api,1,0', SSH = '10.0.0.2 51000 10.0.0.1 22'
+  const b64 = Buffer.alloc(300).toString('base64')
+  const envs = [{ TMUX }, { SSH_CONNECTION: SSH }, { SSH_TTY: '/dev/pts/3' }, { TMUX, SSH_CONNECTION: SSH }, { TERM: 'xterm-ghostty' }]
+  const kinds = envs.map(env => {
+    const s = P.imageSource(env, '/tmp/claude-1000/x/images/3.png', b64)
+    const none = P.imageSource(env, '/tmp/claude-1000/x/images/3.png', '')
+    return `${s ? Object.keys(s)[0] : 'none'}/${none ? Object.keys(none)[0] : 'none'}`
+  }).join(',')
+  // The engine's bound: 2 MiB decoded. One byte over is no source, never a file instead.
+  const at = n => Buffer.alloc(n).toString('base64')
+  const bound = [P.PNG_MAX, P.PNG_MAX + 1].map(n => (P.imageSource({ TMUX }, '/x.png', at(n)) ? 'ok' : 'none')).join(',')
+  const sizes = [0, 1, 2, 3, 300, P.PNG_MAX].every(n => P.decodedSize(at(n)) === n)
+  // The sides tried for the bytes: never larger than the picture, the card's widest first.
+  const sides = [[4000, 3000], [1600, 900], [1200, 800], [300, 200], [0, 0]]
+    .map(([w, h]) => P.kittySides(w, h).map(s => s ?? 'as-is').join('>')).join(' ')
+  console.log(kinds, bound, sizes, sides, P.PNG_MAX, P.KITTY_SIDE)
 } else if (cmd === 'targets') {
   const has = n => n !== 7
   const t = P.tokenTargets('look at [Image #1] and [Image #2] [Image #1] [Image #7]\nthen [Image #9]', 120, has)

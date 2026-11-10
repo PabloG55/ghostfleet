@@ -57,6 +57,8 @@ import {
   pastesIn, sameIds, sessionDirs, storedImage, EXT, pairPastes, pastesFromApi, fromBase64, sniff, decodePng, thumb,
   ffmpegFileArgv, NO_FFMPEG, parsePam, fitCells, rasterOf, caption, WHY, platformOf, previewMode, WINDOW, openArgv,
   SHRINKERS, shrinkArgv, tokenTargets, listedTargets, chipOf,
+  asksClient, CLIENT_FORMAT, lookingClient, drawsAlt, refusalNote, sendsBytes, imageSource, decodedSize, PNG_MAX,
+  KITTY_SIDE, kittySides,
 } from './peek-shape.js'
 import { PEEK_WINDOW } from './peek-window.js'
 import {
@@ -1812,11 +1814,15 @@ async function onLedgerCommand($, e) {
 // A chip posts when the pointer comes onto it, moves on it and leaves it, and when it is
 // clicked; `ui.message` opens the preview, closes it, or opens the picture in the viewer.
 //
-// WHAT THE PREVIEW IS, decided once a session (peek-shape.js previewMode): on macOS a panel by
-// the pointer (./peek-window.js), in Ghostty or kitty outside tmux the terminal's own picture,
-// anywhere else a card of cells. Both of those are a card drawn above the prompt, over the
-// chips, whatever target opened it: the one place in the terminal a card lays out whole. A
-// window program that ends without showing hands the rest of the session to cells.
+// WHAT THE PREVIEW IS (peek-shape.js previewMode): on macOS a panel by the pointer
+// (./peek-window.js); where the terminal draws pictures, its own picture, inside tmux and over
+// SSH too; anywhere else a card of cells. Both of those are a card drawn above the prompt, over
+// the chips, whatever target opened it: the one place in the terminal a card lays out whole.
+// Outside tmux it is decided once a session. Inside tmux the terminal is whichever one a person
+// attached through, so tmux is asked again as each preview opens (peekDecide). A window program
+// that ends without showing hands the rest of the session to cells, and so does the engine
+// drawing one of these pictures as its alt (peekVerify): it decided when it started that the
+// terminal draws none, and does not ask again.
 //
 // WHAT IT MAY OPEN. Only a paste of this session: Claude Code's own copy in the session's temp
 // folder, or the bytes the prompt carried (at submit, or from the transcript) written into
@@ -1838,10 +1844,14 @@ const PEEK_API_MS = 8_000         // the transcript's image blocks: the one larg
 const PEEK_READ_MAX = 4 * 1024 * 1024
 const PEEK_CELL_SIDE = 800        // the side a picture is shrunk to before it is sampled into cells
 const PEEK_DIR = 'ghostfleet-peek'
+const PEEK_SITE = 'above-prompt'  // the requestId the band's slot is drawn under (measured), where the card is
 
 let peekOn = false
 let peekInteractive = false
-let peekMode = 'cells'       // 'window' | 'kitty' | 'cells' (peek-shape.js previewMode)
+let peekMode = 'cells'       // 'window' | 'kitty' | 'cells' (peek-shape.js previewMode): the latest decided
+let peekEnv = {}             // the variables previewMode reads, as the session started
+let peekRefused = ''         // why the engine drew a picture of ours as its alt: no Image draws here
+let peekNoWindow = false     // the window program ended without showing: none opens here
 let peekPlatform = ''
 let peekTool = ''            // the shrinker that worked here
 let peekSid = ''             // whose pictures these are: /clear starts the numbers again
@@ -1852,6 +1862,7 @@ let peekDraftIds = []
 let peekWin = null           // { target, isOpen }: the window program running now
 let peekChanging = Promise.resolve()
 const peekPixels = new Map() // N -> picture, kept small (thumb), for cells
+const peekPngs = new Map()   // N -> base64 PNG of at most PNG_MAX, for a terminal through tmux or SSH
 const peekLoading = new Set()
 const peekPastes = new Map() // N -> { mediaType, base64 }: bytes a prompt handed over
 
@@ -1881,13 +1892,14 @@ async function peekSync($) {
     const uname = await soon($, $.process.run(['uname', '-s'], { timeoutMs: IO_MS }), null)
     peekPlatform = platformOf(uname && uname.exitCode === 0 ? uname.stdout : '')
     // Each name written out: `claude plugin validate` lists what a module reads from literals.
-    const env = {
+    peekEnv = {
       TERM_PROGRAM: await $.env.get('TERM_PROGRAM'), TERM: await $.env.get('TERM'),
       KITTY_WINDOW_ID: await $.env.get('KITTY_WINDOW_ID'), TMUX: await $.env.get('TMUX'),
+      TMUX_PANE: await $.env.get('TMUX_PANE'),
       SSH_CONNECTION: await $.env.get('SSH_CONNECTION'), SSH_TTY: await $.env.get('SSH_TTY'),
       CLAUDE_FLEET_PEEK: await $.env.get('CLAUDE_FLEET_PEEK'),
     }
-    peekMode = previewMode({ platform: peekPlatform, env, isInteractive: peekInteractive })
+    await peekDecide($)
     if (peekInteractive) {
       if (peekPoll) peekPoll.cancel()
       // A look that fails (the module unloading under it) waits for the next one.
@@ -1900,6 +1912,28 @@ async function peekSync($) {
   }
   if (!on && was) await peekForget($)
   return on
+}
+
+// How the next preview shows (peekMode). Outside tmux the session's variables settle it. Inside,
+// tmux names the terminal looking at this pane's window (peek-shape.js lookingClient): asked
+// here, as a preview opens, because the session most likely started with no terminal attached
+// and the one attached now may not be the one attached at the last hover. One client running
+// two commands, so the window and the clients are read in the same breath. A tmux that does
+// not answer is no terminal named: cells, where a Mac's window does not come first.
+async function peekDecide($) {
+  const opts = { platform: peekPlatform, env: peekEnv, isInteractive: peekInteractive && !peekNoWindow, refused: Boolean(peekRefused) }
+  let client = null
+  if (asksClient(opts)) {
+    const sock = String(peekEnv.TMUX).split(',')[0]
+    const pane = String(peekEnv.TMUX_PANE || '')
+    const argv = ['tmux', '-u', '-S', sock, ...(pane ? ['display-message', '-p', '-t', pane, '#{window_id}', ';'] : []), 'list-clients', '-F', CLIENT_FORMAT]
+    const r = await soon($, $.process.run(argv, { timeoutMs: IO_MS }), null)
+    const out = r && r.exitCode === 0 ? String(r.stdout) : ''
+    const cut = pane ? out.indexOf('\n') : -1
+    client = lookingClient(out.slice(cut + 1), cut >= 0 ? out.slice(0, cut).trim() : '')
+  }
+  peekMode = previewMode({ ...opts, client })
+  return peekMode
 }
 
 // A RELOAD KEEPS $.state AND STARTS THE MODULE OVER, and the pictures were in both. PEEK_PICS
@@ -1926,7 +1960,7 @@ async function peekBegin($, interactive) {
 async function peekForget($) {
   if (peekPoll) { peekPoll.cancel(); peekPoll = null }
   peekCloseWindow()
-  peekPixels.clear(); peekPastes.clear(); peekDraftIds = []; peekFolder = ''
+  peekPixels.clear(); peekPngs.clear(); peekPastes.clear(); peekDraftIds = []; peekFolder = ''
   await soon($, $.state.set(PEEK_DRAFT, []), null)
   await soon($, $.state.set(PEEK_PICS, {}), null)
   await soon($, $.state.set(PEEK_SHOWN, null), null)
@@ -1939,7 +1973,7 @@ async function peekFollow($) {
   const had = peekSid !== ''
   peekSid = sid
   peekFolder = ''
-  peekPixels.clear(); peekPastes.clear()
+  peekPixels.clear(); peekPngs.clear(); peekPastes.clear()
   if (had) {
     await soon($, $.state.set(PEEK_PICS, {}), null)
     await peekChange($, () => null)
@@ -2016,15 +2050,27 @@ async function peekShrink($, file, out, side) {
   return false
 }
 
-// Reads paste N once into PEEK_PICS: its file, kind and size, and for the terminal what it
-// draws (a PNG for kitty, pixels for cells). A window needs only the file.
+// Whether paste N is ready to show the way `mode` shows it: a window needs only the file; the
+// terminal its PNG (as bytes, where it goes as bytes) or, where none could be had, the cells it
+// fell back to; cells their pixels.
+function peekHas(pic, n, mode) {
+  if (!pic || !pic.ready) return false
+  if (mode === 'window') return true
+  if (mode === 'cells') return peekPixels.has(n)
+  return pic.png ? !sendsBytes(peekEnv) || peekPngs.has(n) : pic.drawn === 'kitty' && peekPixels.has(n)
+}
+
+// Reads paste N into PEEK_PICS: its file, kind and size, and for the terminal what it draws (a
+// PNG for kitty, pixels for cells). A window needs only the file. Once for each way it is shown:
+// inside tmux the next preview can be another terminal's, or cells after the engine refused.
 async function peekLoad($, n) {
   if (!peekOn || peekLoading.has(n)) return
   const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
   const had = pics[n]
-  if (had && (had.ready || !had.retry)) return
+  if (had && (had.why ? !had.retry : peekHas(had, n, peekMode))) return
   peekLoading.add(n)
   const sid = peekSid
+  const mode = peekMode
   let pic
   try {
     let got = await peekFile($, n)
@@ -2032,7 +2078,7 @@ async function peekLoad($, n) {
       await $.clock.sleep(PEEK_WAIT_MS)
       got = await peekFile($, n)
     }
-    pic = got.why ? { label: `[Image #${n}]`, why: got.why, retry: got.why === WHY.noBytes } : await peekRead($, n, got.file, got.size)
+    pic = got.why ? { label: `[Image #${n}]`, why: got.why, retry: got.why === WHY.noBytes } : await peekRead($, n, got.file, got.size, mode)
   } catch {
     pic = { label: `[Image #${n}]`, why: WHY.failed, retry: true }
   } finally {
@@ -2041,25 +2087,50 @@ async function peekLoad($, n) {
   if (!peekOn || sid !== peekSid) return
   const now = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
   await soon($, $.state.set(PEEK_PICS, { ...now, [n]: pic }), null)
+  // The way it shows changed while this one read it (a hover through another terminal, or the
+  // engine refusing): read it again for that. Each read settles peekHas for its own mode, so
+  // this ends when the mode stops changing.
+  if (peekMode !== mode && !pic.why && !peekHas(pic, n, peekMode)) void peekLoad($, n)
 }
 
-async function peekRead($, n, file, size) {
+// Paste N as PNG bytes for a terminal that draws through tmux or SSH: at most PNG_MAX decoded
+// (the engine refuses more) and at most KITTY_SIDE on its long side, a PNG already that small
+// as it is. A larger one is shrunk, side by side, till it fits. { png, base64 } or null.
+async function peekKittyBytes($, n, file, kind, size, b64, cache) {
+  const long = Math.max(kind.width || 0, kind.height || 0)
+  if (kind.format === 'png' && b64 && size <= PNG_MAX && long && long <= KITTY_SIDE) return { png: file, base64: b64 }
+  const out = `${cache}/${n}.kitty.png`
+  for (const side of kittySides(kind.width, kind.height)) {
+    if (!(await peekShrink($, file, out, side))) return null
+    const got = await soon($, $.fs.read(out, { as: 'bytes' }), null)
+    if (got && got.base64 && decodedSize(got.base64) <= PNG_MAX) return { png: out, base64: got.base64 }
+  }
+  return null
+}
+
+async function peekRead($, n, file, size, mode) {
   const label = `[Image #${n}]`
-  let bytes = null
+  let bytes = null, b64 = ''
   if (size <= PEEK_READ_MAX) {
     const got = await soon($, $.fs.read(file, { as: 'bytes' }), null)
-    bytes = got && got.base64 ? fromBase64(got.base64) : null
+    b64 = got && got.base64 ? got.base64 : ''
+    bytes = b64 ? fromBase64(b64) : null
   } else {
     const head = await soon($, $.process.run(['/bin/sh', '-c', 'head -c 65536 "$1" | base64', 'peek', file], { timeoutMs: IO_MS }), null)
     bytes = head && head.exitCode === 0 ? fromBase64(head.stdout) : null
   }
   const kind = bytes && sniff(bytes)
   if (!kind) return { label, why: bytes ? WHY.notImage : WHY.missing, retry: !bytes }
-  const base = { label, file, format: kind.format, bytes: size, width: kind.width, height: kind.height }
-  if (peekMode === 'window') return { ...base, ready: true }
+  const base = { label, file, format: kind.format, bytes: size, width: kind.width, height: kind.height, drawn: mode }
+  if (mode === 'window') return { ...base, ready: true }
   const larger = !kind.width || Math.max(kind.width, kind.height) > PEEK_CELL_SIDE
   const cache = `${file.slice(0, file.lastIndexOf('/images/') >= 0 ? file.lastIndexOf('/images/') : file.lastIndexOf('/'))}/${PEEK_DIR}`
-  if (peekMode === 'kitty') {
+  if (mode === 'kitty' && sendsBytes(peekEnv)) {
+    // Bytes, or cells where none fit: never a file name the terminal over there cannot open.
+    const got = await peekKittyBytes($, n, file, kind, size, b64, cache)
+    if (got) { peekPngs.set(n, got.base64); return { ...base, png: got.png, ready: true } }
+  } else if (mode === 'kitty') {
+    // The terminal Claude Code writes to directly, on this machine: it reads the file itself.
     if (kind.format === 'png') return { ...base, png: file, ready: true }
     const out = `${cache}/${n}.view.png`
     return (await peekShrink($, file, out)) ? { ...base, png: out, ready: true } : { ...base, why: WHY.noDecoder }
@@ -2108,7 +2179,7 @@ function peekChange($, next) {
   const run = peekChanging.then(async () => {
     const last = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
     const to = next(last)
-    if (last === to || (last && to && last.n === to.n && last.target === to.target && last.edge === to.edge)) return
+    if (last === to || (last && to && last.n === to.n && last.target === to.target && last.edge === to.edge && last.mode === to.mode)) return
     await soon($, $.state.set(PEEK_SHOWN, to), null)
     if (to && to.edge === 'window') void peekOpenWindow($, to.n, to.target)
     else peekCloseWindow()
@@ -2117,7 +2188,7 @@ function peekChange($, next) {
   return run
 }
 
-const peekPlace = (n, target) => ({ n, target, edge: peekMode === 'window' ? 'window' : 'card' })
+const peekPlace = (n, target) => ({ n, target, edge: peekMode === 'window' ? 'window' : 'card', mode: peekMode })
 
 // The window by the pointer, till peekCloseWindow. The program ticks ten times a second, so
 // the loop wakes to find it closed, and leaving the loop ends the program (./peek-window.js).
@@ -2144,8 +2215,9 @@ async function peekOpenWindow($, n, target) {
   }
   if (peekWin === me) peekWin = null
   if (shown || !me.isOpen) return
-  void $.ui.log(`ghostfleet peek: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'osascript did not start'}); cells from now on`, { to: 'debug' })
-  peekMode = 'cells'
+  void $.ui.log(`ghostfleet peek: no window (${said.replace(/\.\n/g, '').trim().slice(0, 300) || 'osascript did not start'}); a card from now on`, { to: 'debug' })
+  peekNoWindow = true
+  await peekDecide($)
   peekPixels.delete(n)
   const pics = await peekVal(await soon($, $.state.get(PEEK_PICS), null), {})
   const { [n]: _gone, ...rest } = pics
@@ -2233,10 +2305,54 @@ async function onPeekMessage($, e, next) {
     return result
   }
   const isOver = data.isOver === true
+  const was = isOver ? await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null) : null
   if (isOver) void peekLoad($, chip.n)
   await peekChange($, now => (!isOver ? (now && now.target === target ? null : now)
     : now && now.target === target ? now : peekPlace(chip.n, target)))
+  // A pointer moving on a chip posts on every cell: a new preview is asked about, a moved one
+  // not. Off this hook, so a leave that comes while tmux answers is not put behind the enter.
+  // One the module unloading under it aborts is no answer: the next preview asks again.
+  if (isOver && (!was || was.target !== target)) void peekAsk($, chip.n, target).catch(() => {})
   return result
+}
+
+// The preview just opened at `target` shows the way the terminal looking now draws it: opened the
+// way the last one was (peekMode), and changed if tmux names another terminal now.
+async function peekAsk($, n, target) {
+  const before = peekMode
+  await peekDecide($)
+  if (peekMode !== before) {
+    void peekLoad($, n)
+    await peekChange($, cur => (cur && cur.target === target ? peekPlace(cur.n, cur.target) : cur))
+  }
+  if (peekMode === 'kitty') await peekVerify($, n, target)
+}
+
+// Whether the engine drew the picture a card holds, or its alt. It answers that only for an
+// Image it has mounted, so the card is looked for for a second after it opens; a blit of the
+// source it already has sends nothing to the terminal. Its alt is drawn where it decided, when
+// it started, that the terminal draws no pictures, and it does not ask again (measured on
+// 2.1.319: nor when a terminal attaches later, nor on a focus-in), so from then on this session
+// shows cells, and says why under them. Never the alt alone where cells would draw.
+async function peekVerify($, n, target) {
+  for (let i = 0; i < 20; i++) {
+    await $.clock.sleep(50)
+    const now = await peekVal(await soon($, $.state.get(PEEK_SHOWN), null), null)
+    if (!now || now.target !== target || now.mode !== 'kitty') return
+    const pic = (await peekVal(await soon($, $.state.get(PEEK_PICS), null), {}))[n]
+    if (!pic || !pic.ready) continue
+    const source = pic.png && imageSource(peekEnv, pic.png, peekPngs.get(n))
+    if (!source) return // cells already: no PNG could be had
+    const r = await soon($, $.ui.blit({ requestId: PEEK_SITE, key: `image-${n}`, source }), null)
+    if (!r || !r.deny) return
+    if (!drawsAlt(r)) continue // not mounted yet
+    peekRefused = refusalNote(r)
+    void $.ui.log(`ghostfleet peek: the engine draws pictures as their alt here (${r.deny.slice(0, 300)}); cells from now on`, { to: 'debug' })
+    await peekDecide($)
+    void peekLoad($, n)
+    await peekChange($, cur => (cur && cur.mode === 'kitty' ? peekPlace(cur.n, cur.target) : cur))
+    return
+  }
 }
 
 // The fullscreen layout is the one that reports the pointer.
@@ -2244,7 +2360,7 @@ const peekPointer = e => e.surface === 'terminal' && !(e.viewport && e.viewport.
 
 // The card, in the terminal: the picture in a round border, its caption under it, every line
 // written to the card's full width so the transcript under it does not show through.
-function peekCard(ui, pic, n, cols, rows) {
+function peekCard(ui, pic, n, cols, rows, mode) {
   const { Box, Text, Raster, Image } = ui
   const label = `[Image #${n}]`
   const line = (t, w) => h(Text, { dimColor: true, wrap: 'truncate-end' }, t.padEnd(w))
@@ -2257,19 +2373,25 @@ function peekCard(ui, pic, n, cols, rows) {
   let inner = null, w = 0, hgt = 0
   // Shrunk to fit, never enlarged: a picture smaller than the room is drawn at its own size.
   if (pic.width && pic.height) { cols = Math.min(cols, pic.width); rows = Math.min(rows, Math.ceil(pic.height / 2)) }
-  if (pic.png && Image) {
+  // The terminal's own picture only while this preview is one (`mode`), and only from a source
+  // it can draw: bytes through tmux or SSH, never a file name there (peek-shape.js imageSource).
+  const source = mode === 'kitty' && pic.png ? imageSource(peekEnv, pic.png, peekPngs.get(n)) : null
+  if (source && Image) {
     const fit = fitCells(pic.width || 1, pic.height || 1, cols, rows)
     w = fit.cols; hgt = fit.rows
-    inner = h(Image, { key: `image-${n}`, source: { file: pic.png, format: 'png' }, columns: w, rows: hgt, alt: label })
+    inner = h(Image, { key: `image-${n}`, source, columns: w, rows: hgt, alt: label })
   } else if (peekPixels.has(n) && Raster) {
     const r = rasterOf(peekPixels.get(n), cols, rows)
     if (r) { w = r.cols; hgt = r.rows; inner = h(Raster, { key: `image-${n}`, columns: w, rows: hgt, cells: r.cells }) }
   }
   if (!inner) return frame(cols, 1, line(`${label} loading…`, cols))
-  const width = Math.max(w, Math.min(cap.length, cols))
+  // Cells where the terminal would have drawn it, had the engine let it: said under the caption.
+  const why = source || !peekRefused ? '' : `cells: ${peekRefused}`
+  const width = Math.max(w, Math.min(Math.max(cap.length, why.length), cols))
   const left = Math.floor((width - w) / 2), right = width - w - left
   const side = (k, m) => m > 0 ? [h(Text, { key: k }, Array.from({ length: hgt }, () => ' '.repeat(m)).join('\n'))] : []
-  return frame(width, hgt + 1, h(Box, { key: 'pic', flexDirection: 'row' }, ...side('l', left), inner, ...side('r', right)), line(cap, width))
+  return frame(width, hgt + 1 + (why ? 1 : 0), h(Box, { key: 'pic', flexDirection: 'row' }, ...side('l', left), inner, ...side('r', right)), line(cap, width),
+    ...(why ? [h(Text, { key: 'why', dimColor: true, wrap: 'truncate-end' }, why.padEnd(width))] : []))
 }
 
 // Above the prompt: the card a hover opened, over a chip each for the draft's pastes. The card
@@ -2293,7 +2415,7 @@ async function onPeekBand($, e, next) {
   const rows = Math.max(3, Math.min(24, (e.props.maxRows || 12) - 8))
   const pics = showing ? peekVal(await soon($, $.state.get(PEEK_PICS), null), {}) : {}
   return h(Box, { flexDirection: 'column' },
-    ...(showing ? [peekCard(ui, pics[now.n], now.n, cols, rows).card] : []),
+    ...(showing ? [peekCard(ui, pics[now.n], now.n, cols, rows, now.mode || peekMode).card] : []),
     ...(ids.length ? [h(Box, { key: 'peek-chips', flexDirection: 'row', columnGap: 1 },
       ...ids.map(n => h(Client, { key: `chip:${n}`, module: './peek-chip.js', props: { label: `[Image #${n}]` } })),
       h(Text, { key: 'hint', dimColor: true }, 'hover to preview · click to open'))] : []),
