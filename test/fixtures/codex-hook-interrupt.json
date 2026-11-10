@@ -1,0 +1,9 @@
+{
+  "cwd": "/Users/you/src/acme-api",
+  "hook_event_name": "Interrupt",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "default",
+  "session_id": "01a1c4b0-6b06-7230-83fe-f03f11abaa4c",
+  "transcript_path": "/Users/you/.codex/sessions/2026/11/10/rollout-2026-11-10T04-00-58-01a1c4b0-6b06-7230-83fe-f03f11abaa4c.jsonl",
+  "turn_id": "01a1c4b0-9373-7052-bc28-125f6b5883d3"
+}
