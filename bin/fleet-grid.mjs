@@ -32,6 +32,8 @@ import * as X from '../lib/experimental.mjs';
 import { keyReader } from '../lib/keys.mjs';
 import { budgetFile, budgetIgnored } from '../lib/projects.mjs';
 import { matchIndices, stepMatch, matchSpan } from '../lib/grid-search.mjs';
+import { accountLoginReason } from '../lib/account-login-shape.mjs';
+import { accountPane, accountPanePrivate } from '../lib/account-logins.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -1100,7 +1102,7 @@ function gather({ lead = false, sub = '' } = {}) {
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
   return nestRows(sessions.map(s => {
-    const gone = !!(s.asleepAt || s.lostAt);      // no process, so no pane to ask anything
+    const gone = !!(s.asleepAt || s.lostAt || accountPanePrivate(FLEET_DIR, SOCK, s.name));
     const st = fleet.get(s.name) || (gone ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
@@ -1154,6 +1156,11 @@ function gather({ lead = false, sub = '' } = {}) {
       // comes back, where "interrupted" only says it stopped.
       else if (!ms && paneInterrupted(SOCK, s.name)) status = 'interrupted';
     }
+    let loginReason = null;
+    if (!gone && !busy && agent === 'claude') {
+      try { loginReason = accountLoginReason(accountPane(SOCK, s.name, FLEET_DIR)); } catch {}
+      if (loginReason) status = 'need-you';
+    }
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
@@ -1163,7 +1170,7 @@ function gather({ lead = false, sub = '' } = {}) {
     // still claude?" is the question the card is asked meanwhile. One field, so the phone's
     // --json gets it from the same producer.
     const switchingTo = pendingSwitch(s.name);
-    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age,
+    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, loginReason,
              msg: switchingTo ? `switching to ${switchingTo}…` : lastAssistant(transcript), switchingTo,
              // Where `status` came from: `mod` when the session's own plugin wrote it,
              // `pane` when it was read off the screen. --json only; the card looks the same.
@@ -3345,6 +3352,7 @@ if (JSON_OUT) {
       // a marker that predates the field rather than a case the fleet can produce.
       sched:    c.sched ? { at: c.sched.at, msg: c.sched.msg ?? null } : null,
       limit_at: c.limitAt || null,   // "10:20pm" — when the usage window rolls over
+      login_reason: c.loginReason || null,
       // THE ONE FIELD THE TUI'S CARD DOES NOT DRAW, and it is here because the TUI has no
       // lead card to draw it on. Without it a client can only tell the lead apart by
       // comparing the string "master" itself — in the card list, on the session screen,

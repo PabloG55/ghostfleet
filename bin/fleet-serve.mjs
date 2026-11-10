@@ -2064,7 +2064,7 @@ async function loginPushEvents() {
   const events = [];
   for (const item of items) {
     const key = `${item.sock}/${item.id}`;
-    if (item.used || item.expires <= Date.now() || loginSeen.has(key)) continue;
+    if (item.used || (item.status !== 'needs-login' && item.expires <= Date.now()) || loginSeen.has(key)) continue;
     loginSeen.add(key);
     events.push({ kind: 'needs-you', login: true, server: item.server, project: item.project.split('@')[0], session: item.session, sock: item.sock });
   }

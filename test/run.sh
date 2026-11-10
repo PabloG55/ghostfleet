@@ -21322,6 +21322,12 @@ else
 fi
 
 # ── MCP authorization from the phone, including the paired host ─────────────
+group "Claude account login detector: captures, both directions, both locales"
+for locale in C en_US.UTF-8; do
+  out="$(LC_ALL="$locale" node "$ROOT/test/helpers/account-login-detector-check.mjs" 2>&1)"; rc=$?
+  is "$locale: real login and idle/busy captures; synthetic expired widths" "0" "$rc"
+done
+
 group "MCP phone login: two hosts, replay refusals, secret hygiene and cards"
 if command -v node >/dev/null 2>&1; then
   MPL="$(mktemp -d "$TEST_RUNS.$$.login.XXXXXX")"
