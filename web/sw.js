@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: a9133a66f56c
+// CLIENT-HASH: 12439c856333
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -445,7 +445,8 @@
 // v100 adds Automations (experimental): a menu entry on Projects while the Mac's switch is
 // on, and their screen. A phone on v99 has neither, and the Mac runs them all the same.
 // v101 adds pending MCP authorizations, including sessions reached through a paired host.
-const VERSION = 'ghostfleet-v101';
+// v102 lets the same card finish Claude Code's own account sign-in on a paired host.
+const VERSION = 'ghostfleet-v102';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js', './grid-search.js', './place.js',

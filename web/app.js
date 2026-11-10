@@ -1418,29 +1418,49 @@ export function loginCard(row) {
   const left = Math.max(0, Math.ceil((row.expires - Date.now()) / 1000));
   const status = loginResults.get(row.id) || row.status;
   const pending = status === 'pending' && left > 0;
-  const card = cardEl({ kind: 'waiting', title: row.provider, color: pending ? 'red' : '', selected: false,
+  const card = cardEl({ kind: 'waiting', title: row.provider, color: pending || status === 'needs-login' ? 'red' : '', selected: false,
     statusLabel: row.server, where: `${row.session} · ${row.host || 'this host'} · ${row.project}`,
-    msg: row.kind === 'connector' ? `claude.ai ${row.connector}` : pending ? 'authorization needs you' : status === 'pending' ? 'expired' : status,
+    msg: row.kind === 'connector' ? `claude.ai ${row.connector}` : status === 'needs-login' ? 'account sign-in needs you' : pending ? 'authorization needs you' : status === 'pending' ? 'expired' : status,
     need: row.first_site ? 'first time for this site — check the provider before opening' : '',
   }, {}, -1);
   card.classList.add('login-card');
   if (row.first_site) card.querySelector('.c-need')?.classList.add('warn');
   card.dataset.login = row.id;
+  if (row.kind === 'account') {
+    card.append(el('div', { class: 'c-name account-profile', text: row.profile }));
+    if (status === 'needs-login') {
+      const result = el('div', { class: 'c-need', role: 'status' });
+      const start = btn('Sign in', async () => {
+        start.disabled = true;
+        try {
+          const r = await api.startAccountLogin(row.project, row.session);
+          result.textContent = r.text;
+          if (r.ok) {
+            const j = await api.getLogins(); S.logins = j.items || []; render();
+          }
+        } catch { result.textContent = 'could not start sign-in'; }
+        finally { start.disabled = false; }
+      });
+      card.append(el('div', { class: 'row' }, [start]), result);
+    }
+  }
   if (pending || row.kind === 'connector') {
     const actions = el('div', { class: 'row' });
     actions.append(el('a', { class: 'b', text: row.kind === 'connector' ? 'Open connector settings' : 'Open',
       href: row.authorize, target: '_blank', rel: 'noopener noreferrer', referrerpolicy: 'no-referrer' }));
     card.append(actions);
-    if (row.kind === 'loopback') {
-      const input = el('input', { type: 'text', placeholder: 'Paste the full redirect URL',
-        'aria-label': 'Full redirect URL', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+    if (row.kind === 'loopback' || row.kind === 'account') {
+      const account = row.kind === 'account';
+      const input = el('input', { type: account ? 'password' : 'text', placeholder: account ? 'Paste the sign-in code' : 'Paste the full redirect URL',
+        'aria-label': account ? 'Claude sign-in code' : 'Full redirect URL', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
       const result = el('div', { class: 'c-need', role: 'status' });
       const finish = btn('Finish — passkey', async () => {
         // Start WebAuthn on the tap. Never store the paste in S, storage, or a toast.
         let callback = input.value; input.value = ''; finish.disabled = true;
         try {
           const assertion = await assertFor('finish login');
-          const r = await api.finishLogin(row.project, row.id, callback, assertion);
+          const r = account ? await api.finishAccountLogin(row.project, row.id, callback, assertion)
+            : await api.finishLogin(row.project, row.id, callback, assertion);
           callback = '';
           result.textContent = r.text;
           if (r.ok) { loginResults.set(row.id, 'done'); input.remove(); finish.remove(); }

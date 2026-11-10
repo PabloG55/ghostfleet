@@ -21353,6 +21353,11 @@ is "account login rig ran" "0" "$rc"
 while IFS=$'\x1f' read -r label want got; do
   [ -z "$label" ] || is "$label" "$want" "$got"
 done < "$ACL/out"
+node "$ROOT/test/helpers/login-card-check.mjs" "$ROOT/web" "" account > "$ACL/cards" 2> "$ACL/cards.err"; rc=$?
+is "account cards ran headlessly" "0" "$rc"
+while IFS=$'\x1f' read -r label want got; do
+  [ -z "$label" ] || is "$label" "$want" "$got"
+done < "$ACL/cards"
 
 # ── one web client, several machines: two fleet-serves, paired ───────────────
 # The owner runs a fleet on a laptop and on an always-on VM, and each was an app of its own

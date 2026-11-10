@@ -1878,3 +1878,4 @@ details[open] > summary.autos-run-head::after { transform: rotate(90deg); }
 .autos-compose { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
 .autos-compose textarea { flex: 1 1 auto; min-width: 0; resize: none; }
 .autos-compose button { flex: none; min-height: 44px; }
+.login-card .account-profile { font-size: 24px; line-height: 1.25; margin: 12px 0; }

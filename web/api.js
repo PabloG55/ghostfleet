@@ -450,11 +450,20 @@ export async function getLogins() {
 // Deliberately outside verb(): that path records arguments in the client history.
 // The pasted callback lives only in this request body, never in history or a transcript.
 export async function finishLogin(project, id, callback, assertion) {
+  return loginRequest('fleet_login_finish', { project, id, callback }, assertion);
+}
+export async function startAccountLogin(project, session) {
+  return loginRequest('fleet_account_login_start', { project, session });
+}
+export async function finishAccountLogin(project, id, code, assertion) {
+  return loginRequest('fleet_account_login_finish', { project, id, code }, assertion);
+}
+async function loginRequest(tool, args, assertion) {
   try {
     const r = await fetch(baseUrl() + '/api/verb', { method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
-        'X-Fleet-Assertion': JSON.stringify(assertion) },
-      body: JSON.stringify({ tool: 'fleet_login_finish', args: { project, id, callback } }) });
+        ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+      body: JSON.stringify({ tool, args }) });
     slid(r);
     return await r.json();
   } catch { return { ok: false, text: 'could not reach the login host' }; }
