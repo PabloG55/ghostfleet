@@ -601,7 +601,14 @@ cx_stub() {          # <dir>: writes <dir>/codex
   cat > "$1/codex" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in
-  features) printf '%-40s %-18s %s\n' hooks stable "${CX_STUB_HOOKS:-true}"; exit 0 ;;
+  features)
+    # codex loads config.toml here, and a table defined twice stops it: "duplicate key". The
+    # same check, on table headers with their spacing taken out, as TOML takes it out.
+    if [ -f "${CODEX_HOME:?}/config.toml" ] && ! awk '/^[ \t]*\[/ { h = $0; gsub(/[ \t]/, "", h); if (seen[h]++) bad = 1 } END { exit bad }' "$CODEX_HOME/config.toml"; then
+      echo "Error: failed to load bootstrap configuration: duplicate key" >&2; exit 1
+    fi
+    [ "${CX_STUB_HOOKS:-true}" = none ] || printf '%-40s %-18s %s\n' hooks stable "${CX_STUB_HOOKS:-true}"
+    exit 0 ;;
   mcp) exit 0 ;;
   hook)
     payload="$(cat)"; rc=0
@@ -618,7 +625,8 @@ STUB
 cx_hooks_json() {    # <file> [bridge]: hooks.json as install.sh writes it, at this checkout's bridge
   jq -n --arg b "${2:-$ROOT/hooks/codex-fleet-event.sh}" --arg q "'" '
     { hooks: ( ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","Stop","Interrupt"]
-      | map({ key: ., value: [ { hooks: [ { type: "command", command: ($q + $b + $q + " " + .), timeout: 30 } ] } ] })
+      | map({ key: ., value: [ { hooks: [ { type: "command", command: ($q + $b + $q + " " + .),
+                                             timeout: (if . == "Interrupt" then 3 else 30 end) } ] } ] })
       | from_entries ) }' > "$1"
 }
 cx_tree() {          # <dir> -> one digest of every path and every byte under it
@@ -3107,6 +3115,118 @@ else
   is "...and no note"                                 "" "$out"
   is "the bridge never wrote to stderr"               "" "$(cat "$CX/err")"
   rm -rf "${CX:?}"
+fi
+
+group "install.sh wires codex's hooks once, trusted, after the user's own, and takes them out again"
+# register_codex_hooks lifted out of the installer, lib/codex-hooks.mjs under it, the stub
+# codex standing in for the user's. The questions are the user's: is my own hook still there
+# and still first, did a second run change a byte, is what uninstall leaves the file I had.
+# And the trust record, because a hook codex has not been told to trust does not run — its
+# hash is held to six that codex wrote itself (test/fixtures/codex-hook-trust.json).
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex hook install" "jq or node is not installed"
+else
+  CI="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$CI/rt" "$CI/codex"
+  ln -s "$ROOT/lib" "$CI/rt/lib"; ln -s "$ROOT/hooks" "$CI/rt/hooks"
+  { sed -n '/^register_codex_hooks() {/,/^}/p' "$ROOT/install.sh"; sed -n '/^vsay() {/p' "$ROOT/install.sh"; } > "$CI/lib.sh"
+  is "the codex hook registrar was extracted, and parses" "yes ok" \
+     "$(grep -q '^register_codex_hooks() {' "$CI/lib.sh" && echo yes || echo no) $(bash -n "$CI/lib.sh" 2>&1 && echo ok)"
+  cx_stub "$CI/bin"
+  H="$CI/codex/hooks.json"; C="$CI/codex/config.toml"; B="$CI/rt/hooks/codex-fleet-event.sh"
+  rch() { ( env FLEET_HOME="$CI/rt" CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" VERBOSE=1 "$@" \
+              bash -c 'set -uo pipefail; source "$0"; register_codex_hooks' "$CI/lib.sh" 2>&1 ); }
+  st() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" status "$B" 2>&1; }
+  un() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" uninstall 2>&1; }
+  has() { grep -q "$1" <<< "$2" && echo yes || echo no; }
+  ours() { local e n=""; for e in SessionStart UserPromptSubmit PreToolUse PermissionRequest Stop Interrupt; do
+             n="$n $(jq -r --arg e "$e" '[(.hooks[$e] // [])[] | .hooks[] | select(.command | test("codex-fleet-event\\.sh.? " + $e + "$"))] | length' "$H" 2>/dev/null)"
+           done; echo "${n# }"; }
+  # The user's own: a Stop hook in their formatting, and a config with their keys and the
+  # record codex wrote when they trusted that hook.
+  printf '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify-me", "timeout": 10}]}]}}\n' > "$H"
+  printf 'model = "gpt-6.1-sol"\n\n[projects."/Users/you/src/acme-api"]\ntrust_level = "trusted"\n\n[hooks.state]\n\n[hooks.state."%s:stop:0:0"]\ntrusted_hash = "sha256:the-users-own"\n' "$H" > "$C"
+  chmod 600 "$C"; cp -p "$H" "$CI/h0"; cp -p "$C" "$CI/c0"
+
+  out="$(rch)"
+  is "install wires the six, and says so"             "yes" "$(has 'wired codex event hooks' "$out")"
+  is "...each registered once"                        "1 1 1 1 1 1" "$(ours)"
+  is "...after the user's Stop hook, which runs first" "notify-me" "$(jq -r '.hooks.Stop[0].hooks[0].command' "$H")"
+  is "every one is trusted the way codex checks it"   "0" "$(st >/dev/null; echo $?)"
+  is "...the user's own record untouched"             "yes" "$(has 'sha256:the-users-own' "$(cat "$C")")"
+  is "...and config.toml keeps its mode"              "-rw-------" "$(ls -l "$C" | cut -c1-10)"
+  d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a second install changes no byte"               "$d1" "$(cx_tree "$CI/codex")"
+  is "...and says it was already wired"               "yes" "$(has 'already wired' "$out")"
+  # Each hash, recomputed for the command install writes for a user called "you", against
+  # the one codex wrote for that command from its own trust dialog.
+  is "the trust record is the hash codex itself writes" "6" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       console.log(K.EVENTS.filter(e => K.hookHash(e, null, K.handlerFor("/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh", e)) === f.trusted[e]
+         && JSON.stringify(K.handlerFor("/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh", e)) === JSON.stringify(f.handlers[e])).length)' 2>&1)"
+
+  # ...and with the timeout as codex normalizes it before hashing, which codex showed by not
+  # asking again: Interrupt raised past its 3s cap kept its record, Stop moved by a second did not.
+  is "a timeout is hashed as codex caps it, and only then" "same new" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       const at = (e, t) => K.hookHash(e, null, { ...f.handlers[e], timeout: t });
+       console.log(at("Interrupt", f.timeouts.sameRecord.Interrupt) === f.trusted.Interrupt ? "same" : "new",
+                   at("Stop", f.timeouts.newRecord.Stop) === f.trusted.Stop ? "same" : "new")' 2>&1)"
+
+  out="$(un)"
+  is "uninstall gives back the user's hooks.json byte for byte" "same" "$(cmp -s "$CI/h0" "$H" && echo same || echo differs)"
+  is "...and their config.toml"                       "same" "$(cmp -s "$CI/c0" "$C" && echo same || echo differs)"
+  is "...and leaves no backup behind"                 "no" "$([ -e "$H.pre-ghostfleet" ] && echo yes || echo no)"
+  d1="$(cx_tree "$CI/codex")"; out="$(un)"
+  is "a second uninstall touches nothing"             "$d1" "$(cx_tree "$CI/codex")"
+  # The user edits their own hook between install and uninstall: the edit is theirs to keep.
+  rch >/dev/null
+  jq '.hooks.Stop[0].hooks[0].timeout = 20' "$H" > "$CI/edit" && cat "$CI/edit" > "$H"
+  un >/dev/null
+  is "a hook the user changed meanwhile keeps the change" "notify-me 20 1" \
+     "$(jq -r '[.hooks.Stop[0].hooks[0].command, .hooks.Stop[0].hooks[0].timeout, (.hooks | length)] | map(tostring) | join(" ")' "$H")"
+
+  # Positions. A record codex already wrote for the key ours lands on is updated in place —
+  # two tables of one name is a TOML error, and codex then will not start at all.
+  cat "$CI/h0" > "$H"
+  printf '\n[hooks.state."%s:stop:1:0"]\ntrusted_hash = "sha256:a-hook-that-was-here"\n' "$H" >> "$C"
+  rch >/dev/null
+  is "a record already at our key is updated, not written twice" "1 0" \
+     "$(grep -cF "[hooks.state.\"$H:stop:1:0\"]" "$C") $(st >/dev/null; echo $?)"
+  # The user puts a hook of their own in front of ours: ours moves, and its record with it.
+  jq '.hooks.PreToolUse = [{hooks: [{type: "command", command: "audit-me", timeout: 5}]}] + .hooks.PreToolUse' "$H" > "$CI/edit" && cat "$CI/edit" > "$H"
+  rch >/dev/null
+  is "a hook put before ours moves ours, record and all" "0 audit-me" \
+     "$(st >/dev/null; echo $?) $(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$H")"
+  is "...leaving the user's new hook for codex to ask about" "no" "$(has ":pre_tool_use:0:0\"]" "$(cat "$C")")"
+  un >/dev/null
+
+  # What it refuses. Each leaves every byte where it was.
+  printf 'not json\n' > "$H"; d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a hooks.json that is not JSON is left alone"    "$d1" "$(cx_tree "$CI/codex")"
+  is "...and named"                                   "yes" "$(has 'is not JSON' "$out")"
+  cat "$CI/h0" > "$H"; printf '[a]\nx = 1\n[a]\ny = 2\n' > "$C"; d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a config codex cannot read already is not touched" "$d1" "$(cx_tree "$CI/codex")"
+  is "...and it says why"                             "yes" "$(has 'cannot read its config as it is' "$out")"
+  # A table of ours written in a spelling this does not recognise (TOML allows spaces in the
+  # brackets): the record it adds is a second table of that name, and codex refuses the file.
+  printf '[ hooks.state."%s:pre_tool_use:0:0" ]\ntrusted_hash = "sha256:spaced"\n' "$H" > "$C"
+  d1="$(cx_tree "$CI/codex")"; out="$(rch)"
+  is "a write codex cannot read is put back, both files" "$d1" "$(cx_tree "$CI/codex")"
+  is "...and it says so"                              "yes" "$(has 'back as they were' "$out")"
+  rm -f "$H" "$C"; d1="$(cx_tree "$CI/codex")"
+  out="$(rch CX_STUB_HOOKS=none)"
+  is "a codex with no hooks gets nothing written"     "$d1" "$(cx_tree "$CI/codex")"
+  out="$(rch CLAUDE_FLEET_CODEX_HOOKS=off)"
+  is "CLAUDE_FLEET_CODEX_HOOKS=off writes nothing"    "$d1" "$(cx_tree "$CI/codex")"
+  is "...and names the way to remove ones wired before" "yes" "$(has 'codex-hooks.mjs uninstall' "$out")"
+  rch >/dev/null
+  is "with no files at all, install writes both"      "yes yes" "$([ -f "$H" ] && echo yes) $([ -f "$C" ] && echo yes)"
+  un >/dev/null
+  is "...and uninstall takes both away again"         "no no" "$([ -e "$H" ] && echo yes || echo no) $([ -e "$C" ] && echo yes || echo no)"
+  rm -rf "${CI:?}"
 fi
 
 group "codex-here runs without the shared daemon, when codex has the flag"

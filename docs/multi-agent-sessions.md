@@ -489,7 +489,25 @@ when there is one, and `hooks`, each with `type`, `command`, `timeout` and `asyn
 computed that way by hand was accepted: the session opened straight onto the composer and the
 hook ran. It covers the **command string, not the script's bytes**, so editing the script needs
 no new trust and moving it does. And it is keyed by **position**: a group inserted ahead of
-another moves the other's key, and that one asks again.
+another moves the other's key, and that one asks again. The `timeout` in the hash is the one
+codex runs with, after its cap: raising `Interrupt` from 3 to 30 kept its record, while moving
+`Stop` from 30 to 31 brought the review screen back.
+
+The screen comes up **after** the first frame of the main one, so a check that reads the
+pane as soon as the composer appears sees no dialog either way. Read it a few seconds later. A
+first pass here made that mistake and passed a changed hook as trusted; the control above is
+what caught it.
+
+`install.sh` writes both halves (`lib/codex-hooks.mjs`, called from `register_codex_hooks`):
+ours after the user's own groups, one record per handler computed as above, and nothing else
+in either file. Six records codex wrote from its own dialog are in
+`test/fixtures/codex-hook-trust.json`, and the suite holds the computation to them. On a
+scratch `CODEX_HOME` with a user hook already trusted, codex started with no review screen
+after the install, brought it up when one record was altered, and started with none after
+`node lib/codex-hooks.mjs uninstall`, which left `hooks.json` byte-identical and
+`config.toml` different only by the counter codex had bumped itself. A `config.toml` that
+defines a table twice stops codex from starting at all (`duplicate key`), so codex re-reads it
+after every write, and a write it cannot read is undone.
 
 **How it runs.** `$SHELL -lc '<command>'`, a login shell, with the payload as JSON on stdin.
 codex ignores a broken pipe, so a hook may exit without reading it. The hook's parent is
