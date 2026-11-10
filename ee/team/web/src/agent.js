@@ -20,7 +20,8 @@ const store = {
 };
 
 export const S = {
-  target: store.get('target', ''),      // the project whose lead is being talked to
+  pin: store.get('pin', ''),            // who the person chose to talk to: a project's lead, or '' for auto
+  target: store.get('pin', '') || store.get('target', ''),   // the project whose lead is being talked to
   targetAt: 0,                          // when it was last chosen, explicitly
   feed: [],
   phase: 'idle',                        // listening | hearing | routing | sending | starting | speaking | idle
@@ -72,6 +73,16 @@ export function setOption(k, v) {
   set({ [k]: v });
   if (k === 'handsFree' && !v) set({ conversing: false });
   if (k === 'voiceOut' && !v) { stopSpeaking(); if (S.phase === 'speaking') set({ phase: 'idle' }); }
+}
+// Auto ('') lets the router place each request from what was said, as it always has. A project
+// is that project's lead: the choice holds until it is changed, and a request made with no project
+// page open is placed as if that page were (decide()). It used to be a pick the router never saw:
+// the panel said "You're talking to the lead of acme-web" while the router placed each request
+// from the words alone.
+export function setPin(project) {
+  store.set('pin', project || '');
+  set({ pin: project || '' });
+  if (project) setTarget(project);
 }
 export function setTarget(project, explicit = true) {
   if (!project) return;
@@ -130,8 +141,9 @@ function say(text, then) {
 }
 
 // ── understanding ───────────────────────────────────────────────────────────────────────
-// The project in front of the person, or the one they picked in the last quarter hour.
-const context = () => ctx?.route?.project || (S.target && Date.now() - S.targetAt < 15 * 60e3 ? S.target : null);
+// The project in front of the person, the lead they chose, or the one last talked to in the
+// last quarter hour.
+const context = () => ctx?.route?.project || S.pin || (S.target && Date.now() - S.targetAt < 15 * 60e3 ? S.target : null);
 
 export function submit(text, voice = false) {
   const t = String(text || '').trim();
@@ -180,7 +192,7 @@ const inWords = (l) => (l.length < 2 ? l.join('') : `${l.slice(0, -1).join(', ')
 async function decide(text, voice) {
   const my = gen;
   set({ phase: 'routing' });
-  const page = { project: ctx?.route?.project || '', session: ctx?.route?.session || '' };
+  const page = ctx?.route?.project ? { project: ctx.route.project, session: ctx.route.session || '' } : { project: S.pin, session: '' };
   const feed = S.feed.slice(0, -1).map(({ kind, text: t }) => ({ kind, text: unframe(t) }));
   let r;
   try { r = await api.route({ text, feed, page, voice }); }

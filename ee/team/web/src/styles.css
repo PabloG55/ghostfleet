@@ -105,16 +105,24 @@
 /* The floating launcher's height above the bottom edge, which the page lifts over a composer;
    the task chip and the toasts stack above it from the same number. */
 .app { --launch-b: 20px; }
-.as-launch { position: fixed; right: 20px; bottom: var(--launch-b); z-index: 40; display: flex; align-items: center; gap: .55em; cursor: pointer;
+/* The dock holds the button's place; while a conversation is live, Done and Stop sit to its left
+   (assistant.jsx Launcher), in the colours the bar they came from had. */
+.as-dock { position: fixed; right: 20px; bottom: var(--launch-b); z-index: 40; display: flex; align-items: center; gap: 8px;
+  max-width: calc(100vw - 40px); }
+.as-launch { display: flex; align-items: center; gap: .55em; cursor: pointer; min-width: 0;
   background: var(--panel2); color: var(--white); border: 1px solid #2c5560; border-radius: var(--r); padding: .55em 1.1em .55em .8em;
   font-weight: 600; box-shadow: 0 10px 30px rgba(0,0,0,.45), 0 0 0 1px rgba(95,215,215,.15); }
 .as-launch:hover { border-color: var(--cyan); }
+.as-say { min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-launch.busy { border-color: rgba(95,215,215,.45); }
+.as-dock.st-listening .as-launch { border-color: rgba(255,95,95,.6); }
 @media (max-width: 1200px) { .app.with-as { grid-template-columns: 220px 1fr 360px; } }
 @media (max-width: 900px) {
   .app.with-as { grid-template-columns: 1fr; }
   .assistant { position: fixed; inset: 0; z-index: 70; }
   .app { --launch-b: 14px; }
-  .as-launch { right: 14px; }
+  .as-dock { right: 14px; max-width: calc(100vw - 28px); }
+  .as-say { max-width: 16ch; }
 }
 
 .help { position: relative; background: linear-gradient(180deg, rgba(95,215,215,.07), rgba(95,215,215,.02)); border: 1px solid rgba(95,215,215,.3);
@@ -138,6 +146,9 @@
    as it showed; it stacks above the launcher and the chip instead. */
 .app:has(.as-launch) .toasts { bottom: calc(var(--launch-b) + 56px); }
 .app:has(.as-launch):has(.tk-chip.floating) .toasts { bottom: calc(var(--launch-b) + 104px); }
+/* The home page has no button (main.jsx): the chip takes its corner, and a toast stacks over it. */
+.app:not(:has(.as-launch)) .tk-chip.floating { bottom: var(--launch-b); }
+.app:not(:has(.as-launch)):has(.tk-chip.floating) .toasts { bottom: calc(var(--launch-b) + 48px); }
 /* A page clears the floating button with its bottom padding; the chat scrolls on its own, so it
    needs the same, or its newest message ends under the button even scrolled to the end. */
 .app:has(.as-launch) .chat { padding-bottom: 60px; }
@@ -173,17 +184,11 @@
 @media (max-width: 900px) {
   .tree-row .avatar { display: none; }
 }
-.voicebar { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 45; display: flex; align-items: center; gap: 10px;
-  background: #0f1a20; border: 1px solid rgba(95,215,215,.45); border-radius: var(--r); padding: 8px 10px 8px 16px;
-  box-shadow: 0 14px 40px rgba(0,0,0,.55), 0 0 0 4px rgba(95,215,215,.06); max-width: calc(100vw - 32px); }
-.voicebar.st-listening { border-color: rgba(255,95,95,.6); }
-.vb-text { color: var(--white); font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
-.vb-text em { color: var(--dim); font-weight: 400; font-style: normal; }
 .vb-meter { width: 60px; height: 5px; background: var(--line); border-radius: var(--r); overflow: hidden; }
 .vb-meter i { display: block; height: 100%; background: var(--cyan); transition: width .08s linear; }
 .vb-btn { background: var(--panel2); border: 1px solid var(--line); color: var(--fg); border-radius: var(--r); padding: .4em .9em; cursor: pointer; font-weight: 600; }
 .vb-stop { background: var(--red); color: var(--gf-red-ink); border: 0; border-radius: var(--r); padding: .45em 1.1em; cursor: pointer; font-weight: 800; }
-@media (max-width: 900px) { .voicebar { bottom: 76px; } .vb-text { max-width: 30vw; } }
+.as-dock .vb-btn, .as-dock .vb-stop { flex: none; align-self: stretch; box-shadow: 0 10px 30px rgba(0,0,0,.45); }
 
 /* ── home: the fleet as a picture ─────────────────────────────────────────────────────── */
 
@@ -191,6 +196,13 @@
 .voice-opts-btn { background: none; border: 0; padding: 0; cursor: pointer; color: var(--dim); font-size: 12.5px; display: inline-flex; align-items: center; gap: .35em; }
 .voice-opts-btn:hover, .voice-opts-btn[aria-expanded="true"] { color: var(--white); }
 .voice-opts { font-size: 12.5px; }
+/* The card's "talking to", the panel's picker on one line beside Voice options, as the pause
+   picker sits inside them */
+.home-say { margin: .2em 0 0; color: var(--cyan); font-size: 13px; font-weight: 600; min-height: 1.3em; }
+.home-say:empty { display: none; }
+.console-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.talk-to { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; color: var(--dim); min-width: 0; }
+.talk-to .select { width: auto; max-width: 100%; font-size: 12.5px; }
 
 /* ── usage: what is left of each Claude account, always on screen ─────────────────────── */
 .usage { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--hair); padding: 10px 6px 4px; margin-top: 6px; }

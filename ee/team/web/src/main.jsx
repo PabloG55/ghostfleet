@@ -7,7 +7,7 @@ import { Admin } from './admin/index.jsx';
 import { Activity, Settings } from './views.jsx';
 import { Avatar } from './avatar.jsx';
 import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
-import { Assistant, HomeAgent, VoiceBar } from './assistant.jsx';
+import { Assistant, HomeAgent, Launcher } from './assistant.jsx';
 import { bind, unbind, useAgent } from './agent.js';
 import { TaskRail, TaskChip } from './tasks.jsx';
 import { Automations, noticesSeen } from './automations.jsx';
@@ -19,7 +19,6 @@ import { go } from '../../../../web/ui/history.js';
 import { Home } from '../../../../web/ui/home.jsx';
 import { ProjectView } from '../../../../web/ui/project.jsx';
 import { FleetMap } from '../../../../web/ui/map.jsx';
-import { GhostShip } from '../../../../web/ui/fleet.jsx';
 import { Logo, Toasts, usePoll, toast } from '../../../../web/ui/ui.jsx';
 import { Icon } from '../../../../web/ui/icon.jsx';
 // Shared rules first at each layer, the app's own after them: see web/ui/ui.css.
@@ -70,6 +69,13 @@ function Shell({ me, mode, onLogout }) {
   const asked = S.tasks.some(t => !t.hidden) || S.deciding.length > 0;
   const rail = asked && railOpen;
   useEffect(() => { try { localStorage.setItem('gfw.asOpen', asOpen ? '1' : '0'); } catch {} }, [asOpen]);
+  // On the home page the card is the assistant, so neither the panel nor its button is there:
+  // a card that talks and a button that opens a second place to talk read as two assistants.
+  // Going home closes the panel, and the card goes on with the same conversation (agent.js).
+  // The panel is not a page: opening and closing it never adds a history entry.
+  const home = route.view === 'home';
+  const panel = asOpen && !home;
+  useEffect(() => { if (home) setAsOpen(false); }, [home]);
   const loadUsers = useCallback(() => api.users().then(r => setUsers(r.users)).catch(() => {}), []);
   useEffect(() => { loadUsers(); }, []);
   const { data: pj } = usePoll(() => api.projects(), 4000, []);
@@ -109,7 +115,7 @@ function Shell({ me, mode, onLogout }) {
   return (
     <FleetProvider adapter={fleet}>
       <Frame name={NAME} sub={mode === 'demo' ? t('nav.demo') : t('nav.fleet')} route={route} projects={projects} settings="/settings"
-             class={`${mode === 'demo' ? ' is-demo' : ''}${asOpen ? ' with-as' : ''}${rail ? ' with-rail' : ''}`}
+             class={`${mode === 'demo' ? ' is-demo' : ''}${panel ? ' with-as' : ''}${rail ? ' with-rail' : ''}`}
              nav={(close) => <>
                <NavLink to="/automations" active={route.view === 'autos'} onClick={close}><Icon name="bolt" /> {t('nav.automations')} {notices ? <span class="badge warn" title={t('nav.unseen')}>{notices}</span> : null}</NavLink>
                <NavLink to="/activity" active={route.view === 'activity'} onClick={close}><Icon name="list" /> {t('nav.activity')}</NavLink>
@@ -128,10 +134,10 @@ function Shell({ me, mode, onLogout }) {
              banner={mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div> : null}
              after={<>
                {rail ? <TaskRail ctx={ctx} projects={projects} onClose={() => setRailOpen(false)} /> : null}
-               {asOpen
+               {panel
                  ? <Assistant ctx={ctx} route={route} projects={projects} onClose={() => setAsOpen(false)} chip={asked && !rail ? <TaskChip onClick={() => setRailOpen(true)} /> : null} />
-                 : <>{asked && !rail ? <TaskChip floating onClick={() => setRailOpen(true)} /> : null}<VoiceBar onOpen={() => setAsOpen(true)} />
-                     <button class="as-launch" onClick={() => setAsOpen(true)} aria-label={t('as.open')}><GhostShip size={32} /> <span>{t('as.name')}</span></button></>}
+                 : <>{asked && !rail ? <TaskChip floating onClick={() => setRailOpen(true)} /> : null}
+                     {home ? null : <Launcher onOpen={() => setAsOpen(true)} />}</>}
              </>}>
         {main}
       </Frame>

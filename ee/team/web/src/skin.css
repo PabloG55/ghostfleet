@@ -77,9 +77,9 @@
 .stop-all { border-radius: var(--r); display: inline-flex; align-items: center; gap: .5em; }
 .as-launch { border-radius: var(--r); border-color: var(--line); box-shadow: var(--gf-shadow-2); font: 600 13.5px var(--sans); }
 .as-launch:hover { border-color: var(--cyan); }
-.voicebar, .vb-btn, .vb-stop { border-radius: var(--r); }
+.vb-btn, .vb-stop { border-radius: var(--r); }
 .vb-btn, .vb-stop { display: inline-flex; align-items: center; gap: .45em; }
-.voicebar { background: var(--gf-abyss); border-color: var(--teal-edge, var(--gf-teal-edge)); }
+.as-launch.busy { border-color: var(--teal-edge, var(--gf-teal-edge)); }
 .switch i, .switch i::after { border-radius: 0; }
 
 /* ── surfaces: flat, hairline, no soft gradients ────── */

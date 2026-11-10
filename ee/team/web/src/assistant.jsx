@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, Btn } from '../../../../web/ui/ui.jsx';
 import { Select, Popover } from '../../../../web/ui/select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
-import { useAgent, talk, stop, submit, setTarget, setOption, canHear, busy, unframe } from './agent.js';
+import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
 import { t } from './i18n.js';
 import { words } from '../../shared/i18n/index.js';
@@ -11,9 +11,12 @@ import { Icon } from '../../../../web/ui/icon.jsx';
 import { GhostShip as Ship } from '../../../../web/ui/fleet.jsx';
 
 const STATE_WORDS = words(['listening', 'hearing', 'routing', 'sending', 'starting', 'thinking', 'acting', 'speaking', 'idle', 'off'], 'ship');
+const LIVE = ['listening', 'hearing', 'routing', 'sending', 'starting', 'speaking'];
+const stateWord = (S, state) => `${STATE_WORDS[state]}${state === 'acting' && S.focus ? ` ${t('as.in', { where: S.focus })}` : ''}`;
+const working = (state) => !['idle', 'off'].includes(state);
 
 export function shipStateOf(S) {
-  if (['listening', 'hearing', 'routing', 'sending', 'starting', 'speaking'].includes(S.phase)) return S.phase;
+  if (LIVE.includes(S.phase)) return S.phase;
   const master = S.cards.find(c => c.lead);
   if (!master) return 'off';
   const st = statusOf(master);
@@ -27,11 +30,27 @@ export function rankedProjects(projects) {
   return [...(projects || [])].sort((a, b) => (b.counts.need_you - a.counts.need_you) || (last(b) - last(a)) || a.name.localeCompare(b.name));
 }
 
-export function Console({ projects, big }) {
+// Who the person is talking to: auto, or a project's lead (agent.js setPin). One control for the
+// panel and the home card, which are the same assistant.
+export function TalkTo({ projects, compact }) {
+  const S = useAgent();
+  const list = useMemo(() => rankedProjects(projects), [projects]);
+  const has = (name) => list.some(p => p.name === name);
+  const options = [{ value: '', label: t('as.auto') },
+    ...(projects == null && S.pin ? [{ value: S.pin, label: t('as.leadOf', { project: S.pin }) }] : []),
+    // A lead that is not open yet is still a choice: the first request starts it.
+    ...list.map(p => ({ value: p.name, label: t(p.sessions.some(s => s.lead) ? 'as.leadOf' : 'as.leadLater', { project: p.name }) }))];
+  return <Select field={compact ? 'talk-to small' : 'field as-target'} label={t('as.talkingTo')}
+                 value={projects == null || has(S.pin) ? S.pin : ''} onChange={setPin} options={options} />;
+}
+
+export function Console({ projects, big, foot }) {
   const S = useAgent();
   const [typed, setTyped] = useState('');
   const listening = S.phase === 'listening' || S.phase === 'hearing';
-  const active = busy() || listening;
+  // Stop while anything is under way, routing too: on the home page the card is the only place
+  // left to stop it from, now that the bar that also had a Stop is gone (Launcher).
+  const active = busy() || listening || LIVE.includes(S.phase);
   const local = !!S.vs?.hear?.ready;
   return (
     <div class={`console${big ? ' big' : ''}`}>
@@ -49,6 +68,14 @@ export function Console({ projects, big }) {
                placeholder={big ? t('as.typeBig') : t('as.type')} />
         <Btn kind="primary" type="submit" disabled={!typed.trim()}>{t('common.send')}</Btn>
       </form>
+      {foot ? <div class="console-foot">{foot}{voiceOpts(S, local)}</div> : voiceOpts(S, local)}
+    </div>
+  );
+}
+
+// Voice options, the popover from the More menu's surface, in the panel and on the card alike.
+function voiceOpts(S, local) {
+  return (
       <Popover class="voice-opts-btn" boxClass="voice-opts" icon="gear" label={t('as.voiceOpts')} title={t('as.voiceOpts')}>
       <p class="voice-src muted small">
         {S.vs == null ? t('as.vsChecking')
@@ -68,7 +95,6 @@ export function Console({ projects, big }) {
         <label><input type="checkbox" checked={S.follow} onChange={(e) => setOption('follow', e.currentTarget.checked)} /> {t('as.follow')}</label>
       </div>
       </Popover>
-    </div>
   );
 }
 
@@ -102,7 +128,7 @@ function Sea({ ctx }) {
     <div class={`sea st-${state}`}>
       <div class="ship-track" style={{ '--i': at, '--n': Math.max(lane.length, 1) }}>
         <Ship size={64} state={state} />
-        <span class="ship-say">{STATE_WORDS[state]}{state === 'acting' && S.focus ? ` ${t('as.in', { where: S.focus })}` : ''}</span>
+        <span class="ship-say">{stateWord(S, state)}</span>
       </div>
       <div class="lane" style={{ '--n': Math.max(lane.length, 1) }}>
         {!lane.length ? <span class="muted small lane-empty">{t('as.laneEmpty')}</span> : null}
@@ -130,8 +156,6 @@ const Hint = () => (
 );
 
 export function Assistant({ ctx, projects, onClose, chip }) {
-  const S = useAgent();
-  const list = useMemo(() => rankedProjects(projects), [projects]);
   const [choosing, setChoosing] = useState(false);
   return (
     <aside class="assistant" aria-label={t('as.name')}>
@@ -139,51 +163,57 @@ export function Assistant({ ctx, projects, onClose, chip }) {
         <div><b>{t('as.name')}</b><small>{t('as.sub')}</small></div>
         <span class="as-head-end">{chip}<Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn><button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
       </header>
-      <Select field="field as-target" label={t('as.talkingTo')} value={S.target} onChange={setTarget}
-              options={[...(!S.target ? [{ value: '', label: t('as.pickProject') }] : []),
-                ...list.map(p => ({ value: p.name, label: p.sessions.some(s => s.lead) ? p.name : `${p.name} (${t('ship.off').toLowerCase()})` }))]} />
+      <TalkTo projects={projects} />
       {choosing ? <div class="as-voices"><VoicePicker admin={ctx.admin} /></div> : <><Sea ctx={ctx} /><Feed ctx={ctx} empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>
   );
 }
 
-// The first thing on the home page: talk or type, right away.
+// The first thing on the home page: talk or type, right away. On the home page this card is the
+// assistant, with the panel's controls (who it talks to, Voice options), and the floating button
+// is not there: the two read as two assistants (main.jsx).
 export function HomeAgent({ ctx, projects }) {
   const S = useAgent();
+  const state = shipStateOf(S);
   return (
     <section class="home-agent">
       <div class="home-agent-head">
-        <Ship size={64} state={shipStateOf(S)} />
+        <Ship size={64} state={state} />
         <div>
           <h2>{t('as.today')}</h2>
+          {/* what the floating button says everywhere else, said here: the bar that said it went */}
+          <p class="home-say" aria-live="polite">{working(state) ? stateWord(S, state) : ''}</p>
         </div>
       </div>
-      <Console projects={projects} big />
+      <Console projects={projects} big foot={<TalkTo projects={projects} compact />} />
       {S.feed.length || S.interim ? <Feed ctx={ctx} limit={8} /> : null}
     </section>
   );
 }
 
-// Wherever the person is, a conversation in progress can be seen and stopped. Without this,
-// one started on the home page went on listening after the page moved to a project, with
-// no Stop on screen.
-export function VoiceBar({ onOpen }) {
+// Away from the home page the assistant is one floating button, and it says what the assistant is
+// doing ("Working out where it goes…", "Speaking", the ship moving with it), so a request is seen
+// to go on without opening the panel. A conversation in progress can be finished and stopped from
+// beside it wherever the person is: one started on the home page used to go on listening after
+// the page moved to a project, with no Stop on screen. That used to be a bar of its own in the
+// middle of the page, with its own Open; with the button beside it, it read as a second assistant.
+export function Launcher({ onOpen }) {
   const S = useAgent();
   const state = shipStateOf(S);
-  const live = ['listening', 'hearing', 'routing', 'sending', 'starting', 'speaking'].includes(S.phase) || S.conversing;
-  if (!live) return null;
+  const live = LIVE.includes(S.phase) || S.conversing;
+  const doing = working(state);
+  const word = doing ? stateWord(S, state)
+    : S.conversing ? `${t('as.name')} · ${t('as.conversing')}` : t('as.name');
   return (
-    <div class={`voicebar st-${state}`} role="status">
-      <Ship size={32} state={state} />
-      <span class="vb-text">
-        {STATE_WORDS[state] || t('ship.idle')}{S.conversing && state === 'idle' ? ` · ${t('as.conversing')}` : ''}
-        {S.interim ? <em> “{S.interim}”</em> : null}
-      </span>
+    <div class={`as-dock st-${state}`}>
       {S.phase === 'listening' && S.vs?.hear?.ready ? <span class="vb-meter"><i style={{ width: `${Math.round(S.level * 100)}%` }} /></span> : null}
       {S.phase === 'listening' ? <button class="vb-btn" onClick={talk}><Icon name="check" /> {t('as.done')}</button> : null}
-      <button class="vb-btn" onClick={onOpen}>{t('as.openBtn')}</button>
-      <button class="vb-stop" onClick={stop}><Icon name="stop" /> {t('sess.stop')}</button>
+      {live ? <button class="vb-stop" onClick={stop}><Icon name="stop" /> {t('sess.stop')}</button> : null}
+      <button class={`as-launch${doing || live ? ' busy' : ''}`} onClick={onOpen} title={t('as.open')}
+              aria-label={doing || S.conversing ? `${t('as.open')} · ${word}` : t('as.open')}>
+        <Ship size={32} state={doing ? state : 'idle'} /> <span class="as-say" aria-live="polite">{word}</span>
+      </button>
     </div>
   );
 }

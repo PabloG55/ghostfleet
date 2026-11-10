@@ -106,4 +106,26 @@ test('a toast stacks above the Assistant button and the task chip, and the chip 
   await chip();
   await schedule();
   assert.deepEqual(await overlaps(), [], 'a session page, 390 wide');
+  await gone();
+
+  // The home page has no button, its card is the assistant: the chip takes the button's corner
+  // and a toast still stacks above it. Nothing on the home page makes a toast, so the toast is
+  // the app's own markup put where Toasts puts it, as the chip is.
+  await go('/', '.home-agent');
+  await chip();
+  const home = await b.evaluate(() => {
+    const box = (el) => el.getBoundingClientRect();
+    const hit = (a, z) => a.left < z.right && z.left < a.right && a.top < z.bottom && z.top < a.bottom;
+    const tk = document.querySelector('.tk-chip.floating');
+    const toast = Object.assign(document.createElement('div'), { className: 'toast', textContent: 'Saved' });
+    document.querySelector('.toasts').append(toast);
+    const out = [];
+    if (document.querySelector('.as-launch')) out.push('a floating button on the home page');
+    if (hit(box(toast), box(tk))) out.push('toast on the chip');
+    const lift = Math.round(innerHeight - box(tk).bottom);
+    if (lift > 40) out.push(`the chip is ${lift}px off the corner, over an empty button's place`);
+    toast.remove();
+    return out;
+  });
+  assert.deepEqual(home, [], 'the home page, 390 wide');
 });
