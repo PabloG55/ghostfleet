@@ -1,6 +1,7 @@
 // A project's Terminal and Editor tabs, in a real (headless) browser against the demo server:
-// who is offered them, that a key typed comes back and a resize is sent, and that back returns
-// to the page before. The server half is terminal.test.mjs; this is the screen
+// who is offered them, that a key typed comes back and a resize is sent, that every key stays
+// in the terminal while it has the focus and the two ways out work, and that back returns to
+// the page before. The server half is terminal.test.mjs; this is the screen
 // (web/ui/terminal.jsx over web/term.js).
 //
 // Skipped, saying why, where there is no Chrome or no build (`pnpm build` first): the page it
@@ -74,6 +75,20 @@ async function click(p, sel) {
   await p.call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
   await p.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
 }
+const KEYS = {
+  Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
+  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
+  q: { key: 'q', code: 'KeyQ', windowsVirtualKeyCode: 81, text: 'q' },
+  Q: { key: 'Q', code: 'KeyQ', windowsVirtualKeyCode: 81, text: 'Q', modifiers: 8 },
+  '`': { key: '`', code: 'Backquote', windowsVirtualKeyCode: 192, text: '`' },
+  'Ctrl-f': { key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 2 },
+  'Shift-Escape': { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, modifiers: 8 },
+};
+async function press(p, name) {
+  const k = KEYS[name];
+  await p.call('Input.dispatchKeyEvent', { type: k.text ? 'keyDown' : 'rawKeyDown', ...k });
+  await p.call('Input.dispatchKeyEvent', { type: 'keyUp', ...k, text: undefined });
+}
 
 const sent = (p) => p.evaluate(() => (window.__ws.at(-1) || { sent: [] }).sent);
 // What the panel shows, for a wait that timed out to say what it found instead.
@@ -89,6 +104,7 @@ const opened = (p, kind = null) => until(p, (kind) => {
   return !!document.querySelector(`.tool${kind ? `.k-${kind}` : ''} .tool-host:not(.off)`) && !!ws && ws.got.some(m => m.includes('"ready"'))
     && !document.querySelector('.tool-note');
 }, `the ${kind || ''} tab to be open`, 10000, kind).catch(explain(p));
+const inTerminal = (p) => p.evaluate(() => !!document.activeElement?.classList.contains('xterm-helper-textarea'));
 const hash = (p) => p.evaluate(() => location.hash);
 const toHash = async (p, h) => { await p.evaluate((h) => { location.hash = h; }, h); await sleep(50); };
 
@@ -112,7 +128,7 @@ async function signIn(p, cookie) {
   await p.call('Network.clearBrowserCookies');     // whoever was signed in before is gone
   await p.call('Network.setCookie', { name: cookie.slice(0, at), value: cookie.slice(at + 1), url: p.origin, httpOnly: true });
 }
-test('a desk: who sees the tabs, typing, and back', { skip, timeout: 240000 }, async (t) => {
+test('a desk: who sees the tabs, typing, keys, and back', { skip, timeout: 240000 }, async (t) => {
   const r = await rig(t);
   const b = await launch({ width: 1440, height: 900, scale: 1, args: [MOUSE] });
   t.after(() => b.close());
@@ -175,6 +191,37 @@ test('a desk: who sees the tabs, typing, and back', { skip, timeout: 240000 }, a
     await b.viewport(1440, 900);
     await until(p, (n) => (window.__ws.at(-1).sent.filter(s => s.startsWith('{"t":"resize"')).map(s => JSON.parse(s).cols).at(-1)) === n,
       'the width back', 10000, before);
+  });
+
+  await t.test('every key goes to the editor while it has the focus; ⇧Esc, the button and ⏎ move it', async () => {
+    await click(p, '.tool-tab[href$="/edit"]');
+    await opened(p, 'edit');
+    await until(p, () => document.activeElement?.classList.contains('xterm-helper-textarea'), 'the editor to take the keyboard');
+    await until(p, () => (document.querySelector('.tool-host .xterm-rows')?.textContent || '').includes('scratch.js'), 'the demo file');
+    const at = await hash(p);
+    for (const [k, byte] of [['Escape', '\x1b'], ['q', 'q'], ['`', '`'], ['Q', 'Q'], ['Ctrl-f', '\x06']]) {
+      const n = (await sent(p)).length;
+      await press(p, k);
+      await until(p, (n) => window.__ws.at(-1).sent.length > n, `${k} to be sent`, 5000, n);
+      assert.equal((await sent(p)).slice(n).join(''), byte, `${k} sent the wrong bytes`);
+      assert.equal(await hash(p), at, `${k} moved the page`);
+      assert.equal(await p.evaluate(() => !!document.querySelector('.keyprompt')), false, `${k} started an app chord`);
+      assert.ok(await inTerminal(p), `${k} took the focus out of the editor`);
+    }
+    const n = (await sent(p)).length;
+    await press(p, 'Shift-Escape');
+    await until(p, () => document.activeElement === document.querySelector('.tool'), '⇧Esc to leave');
+    assert.equal((await sent(p)).length, n, '⇧Esc was sent to the editor');
+    assert.equal(await hash(p), at);
+    assert.match(await p.evaluate(() => document.querySelector('.tool-leave').textContent), /Type in editor/);
+    await press(p, 'Enter');
+    await until(p, () => document.activeElement?.classList.contains('xterm-helper-textarea'), '⏎ to go back in');
+    assert.equal(await hash(p), at, '⏎ on the panel moved the page');
+    assert.match(await p.evaluate(() => document.querySelector('.tool-leave').textContent), /Leave editor/);
+    await click(p, '.tool-leave');
+    await until(p, () => document.activeElement === document.querySelector('.tool'), 'the button to leave');
+    await click(p, '.tool-leave');
+    await until(p, () => document.activeElement?.classList.contains('xterm-helper-textarea'), 'the button to go back in');
   });
 
   await t.test('a tab is a page: back returns to the one before', async () => {

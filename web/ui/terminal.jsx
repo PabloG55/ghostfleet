@@ -16,6 +16,12 @@
 // tabs are links, so back returns to the page before and a link pasted to a teammate opens the
 // same tab.
 //
+// THE KEYBOARD. While the terminal has the focus every key is the terminal's: its input is a
+// textarea, and a text box owns the keyboard (keys.js), so Esc, q, ` and the desk's chords reach
+// the shell and nvim, not the app. ⇧Esc leaves (term.js isLeaveKey: a terminal cannot tell it
+// from Esc, so taking it costs the shell nothing), and so does the button beside the caption;
+// either puts the focus on the panel, where ⏎ goes back in.
+//
 // WHAT AN ADAPTER GIVES IT, every one optional — an app without them shows no tab at all:
 //   canTerm(project)                → true when this person may type into the project
 //   termOpen(project, kind, size)   → { ticket, session }; throws an Error carrying .status
@@ -23,7 +29,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { sessionTo, projectTo } from './keyboard.jsx';
-import { toast } from './ui.jsx';
+import { Btn, toast } from './ui.jsx';
 import { t } from './i18n.js';
 
 export const TOOL_KINDS = ['term', 'edit'];
@@ -57,6 +63,10 @@ export function ProjectTabs({ project, tool }) {
   );
 }
 
+// A key or a tap that must not move the focus: the terminal keeps it, and on a phone the
+// on-screen keyboard stays up. The press acts on its click.
+const keepFocus = (e) => e.preventDefault();
+
 // Away from a tab that is not this person's, to the page it hangs from. REPLACING the entry,
 // not adding one: a pushed redirect would put the refused address back under the back button,
 // and back would land on it and be sent forward again, every time.
@@ -66,9 +76,9 @@ function Away({ to }) {
   return null;
 }
 
-// The open tab: a bar saying what it is, and the terminal. Mounted with a key per project and
-// kind, so switching tabs is a new terminal and a new ticket. An address typed or pasted by
-// someone who may not open it (a viewer) goes to its page instead.
+// The open tab: a bar (what it is, and how to leave) and the terminal. Mounted with a key per
+// project and kind, so switching tabs is a new terminal and a new ticket. An address typed or
+// pasted by someone who may not open it (a viewer) goes to its page instead.
 export function ToolPanel(props) {
   const fleet = useFleet();
   if (!offers(fleet, props.project)) return <Away to={baseTo(props.project, props.session)} />;
@@ -76,11 +86,12 @@ export function ToolPanel(props) {
 }
 function Panel({ project, session, kind }) {
   const fleet = useFleet();
-  const host = useRef(null);
+  const panel = useRef(null), host = useRef(null);
   const h = useRef(null);
   // What the callbacks term.js holds need to read now, not at the render they were made in.
   const live = useRef({ alive: true });
   const [phase, setPhase] = useState('loading');           // loading → opening → open | closed
+  const [focused, setFocused] = useState(false);
   const [tab, setTab] = useState(`_${kind}-${project}`);
 
   // A ticket asked for and handed to the socket.
@@ -99,6 +110,8 @@ function Panel({ project, session, kind }) {
     if (!live.current.alive) return;
     setPhase(state === 'open' ? 'open' : state === 'opening' ? 'opening' : 'closed');
   };
+  const leave = () => { if (h.current) h.current.blur(); if (panel.current) panel.current.focus({ preventScroll: true }); };
+  const enter = () => { if (h.current) h.current.focus(); };
 
   useEffect(() => {
     const L = live.current;
@@ -112,6 +125,8 @@ function Panel({ project, session, kind }) {
         socket: fleet.termSocket,
         onState,
         onMessage: (o) => { if (o.t === 'hello' && o.session) setTab(o.session); },
+        onLeave: leave,
+        onFocus: (up) => { if (L.alive) setFocused(up); },
         onCopy: () => toast(t('term.copied'), 'good'),
         fontSize: 13,
       });
@@ -122,13 +137,28 @@ function Panel({ project, session, kind }) {
     return () => { L.alive = false; const x = h.current; h.current = null; if (x) try { x.dispose(); } catch {} };
   }, []);
 
+  // On the panel itself (after leaving), ⏎ goes back in. Keys inside the terminal are not
+  // this element's: they are the terminal's.
+  const onKeyDown = (e) => {
+    if (e.target !== panel.current) return;
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing) {
+      e.preventDefault(); e.stopPropagation(); enter();
+    }
+  };
   const ready = phase === 'open';
   return (
-    <section class={`tool k-${kind}`}
+    <section class={`tool k-${kind}`} ref={panel} tabIndex={-1} onKeyDown={onKeyDown}
              aria-label={t(`term.tab.${kind}`)}>
       <div class="tool-bar">
         <p class="tool-cap">{t(`term.cap.${kind}`, { project })} <code>{tab}</code>
           {phase === 'opening' || phase === 'loading' ? <span class="tool-st"> · {t('term.opening')}</span> : null}</p>
+        <div class="tool-acts">
+          <Btn kind="ghost sm tool-leave" disabled={!ready} onPointerDown={keepFocus} onMouseDown={keepFocus}
+               onClick={() => (focused ? leave() : enter())}>
+            {t(`term.${focused ? 'leave' : 'enter'}.${kind}`)}
+            <kbd>{focused ? '⇧Esc' : '⏎'}</kbd>
+          </Btn>
+        </div>
       </div>
       <div class={`tool-host${ready ? '' : ' off'}`} ref={host} />
     </section>
