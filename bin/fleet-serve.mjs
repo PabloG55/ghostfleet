@@ -2333,7 +2333,7 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //
 //   THE SIGNATURE       is this request from the host we paired with, made just now, once
 //   THE SCOPE           is this something a paired host may ask for at all (PAIR_READS,
-//                       PAIR_VERBS): never a passkey verb (a passkey is bound to the host it
+//                       PAIR_VERBS): normally no passkey verb (a passkey is bound to the host it
 //                       was made on, so the remote could not check one), never the terminal,
 //                       never another hop onwards. A photo crosses wherever a send does
 //                       (pairAllows below)
@@ -2372,9 +2372,15 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //                     a time, so the other side's fleet-know can answer about this machine's
 //                     projects. Never a private or excluded project's (eventsForPeer), and
 //                     never a third host's: what this host fetched from ITS peers stays here
+// LOGIN EXCEPTION: the home host checks the fresh passkey where it was made; the remote
+// checks the pair signature and its OWN pending record, including state and loopback target.
+// A paired host can already fleet_send arbitrary prompts to remote sessions, strictly more
+// power than completing an authorization the remote started with state it issued. Residual
+// risk: a compromised paired host could finish a pending login with a code for an account
+// it controls. That grants no wider power than fleet_send already grants to that host.
 const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
-const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
 // has to land where the run and its --check are. It is safe to expose because it is no more
@@ -2384,7 +2390,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
 const PAIR_POSTS = new Set(['/api/shots/verdict']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -2621,6 +2627,12 @@ async function proxyRemote(req, res, p, url, body, ip) {
     : (p === '/api/attach' || p.startsWith('/api/term')) ? body?.project : undefined);
   const addr = P.splitAddr(named || '');
   if (!addr) return false;
+  const login = p === '/api/verb' && body?.tool === 'fleet_login_finish';
+  if (login) {
+    const a = headerAssertion(req, loadConfig());
+    if (!a || a.error) { send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' }); return true; }
+  }
+
   const v = peers();
   const peer = v.peers.find(x => x.key === addr.key);
   if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
@@ -2649,8 +2661,9 @@ async function proxyRemote(req, res, p, url, body, ip) {
                                    timeout: p === '/api/verb' ? 15 * 60 * 1000
                                      : p === '/api/attach' ? attachForwardTimeout(String(body.data || '').length) : 15000 });
   if (p === '/api/verb') {
-    const args = Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
+    const args = login ? { project: addr.project, id: out.args.id } : Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
     auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
+                  ...(login ? { confirmed: 'passkey' } : {}),
                   via: 'proxy', host: peer.label, args: { ...args, project: named },
                   result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
                   output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
@@ -3405,6 +3418,7 @@ function agentCatalogue() {
         catch { result = { status: 500, json: { ok: false, text: 'could not finish login' } }; }
         auditAppend({ ts: now(), client: req.client.id, ip, verb: 'fleet_login_finish',
           project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
+          subject: /^[a-f0-9]{32}$/.test(String(body.args?.id || '')) ? body.args.id : '-',
           ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: 'passkey' }),
           result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
         return result;
