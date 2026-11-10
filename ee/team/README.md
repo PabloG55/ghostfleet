@@ -42,7 +42,7 @@ For development with hot reload: `pnpm dev:demo` or `pnpm dev`, and open <http:/
   permissions as buttons (*Yes, allow / No*), and pause, interrupt, rename and stop.
 - **Attach files or images** in any session's chat: the paperclip button, drag or paste (up to 10 per
   message, 25 MB each). They are stored where ghostfleet stores the phone's photos
-  (`$CLAUDE_FLEET_DIR/attach/<socket>.<session>/`, with a per-session quota) and the message passes their paths.
+  (`$CLAUDE_FLEET_DIR/attach/<socket>.<session>/`, limited to 200 MB per session) and the message passes their paths.
 - **Automations** (n8n-style, in the menu): a trigger and actions in order, assembled by dragging
   blocks (or tapping them, on a phone) or by asking for one in a sentence in the AI tab, which fills in the
   same blocks for you to review before saving.

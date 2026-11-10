@@ -183,6 +183,8 @@ export default {
   'err.mustChange': 'cambia tu contraseña temporal antes de continuar',
   'err.loginLimited': 'demasiados intentos fallidos; vuelve a intentar después de 15 minutos',
   'err.missingHost': 'se necesita la cabecera Host',
+  'err.fileLimit': 'cada archivo adjunto tiene un límite de 25 MB',
+  'err.attachmentQuota': 'la carpeta de adjuntos de esta sesión tiene un límite de 200 MB',
   'demo.voicesReadOnly': 'Demo: instalar y borrar voces es una simulación; no se cambió ningún archivo.',
   'demo.router': 'Demo: el asistente es una simulación. Abre acme-web para explorar las sesiones de ejemplo.',
   'demo.automationAI': 'Demo: los borradores con IA son una simulación. Elige una plantilla para explorar automatizaciones.',

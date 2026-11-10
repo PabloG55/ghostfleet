@@ -183,6 +183,8 @@ export default {
   'err.mustChange': 'change your temporary password before continuing',
   'err.loginLimited': 'too many failed logins; try again after 15 minutes',
   'err.missingHost': 'a Host header is required',
+  'err.fileLimit': 'each attachment is limited to 25 MB',
+  'err.attachmentQuota': "this session's attachment folder is limited to 200 MB",
   'demo.voicesReadOnly': 'Demo: voice installation and deletion are simulated; no files were changed.',
   'demo.router': 'Demo: the assistant is simulated. Open acme-web to explore the sample sessions.',
   'demo.automationAI': 'Demo: AI drafting is simulated. Choose a template to explore automations.',

@@ -14,7 +14,7 @@ import { t as tr } from '../shared/i18n/index.js';
 
 export const ATTACH_MAX_BYTES = 25 * 1024 * 1024;     // per file; web/src/api.js says the same
 export const ATTACH_PER_MESSAGE = 10;
-const QUOTA = 250 * 1024 * 1024;                      // per session, oldest deleted first
+const QUOTA = 200 * 1024 * 1024;
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
 
 // The person's own file name, kept readable (Claude is told it) but unable to leave the folder.
@@ -24,29 +24,22 @@ export function safeName(name) {
   return base || 'archivo';
 }
 
-// Oldest first, to a fixed ceiling, never the file just written.
-function enforceQuota(dir, keep) {
-  let files = [];
-  try {
-    files = fs.readdirSync(dir).map(f => {
-      const full = path.join(dir, f);
-      try { const st = fs.statSync(full); return st.isFile() ? { full, size: st.size, at: st.mtimeMs } : null; } catch { return null; }
-    }).filter(Boolean).sort((a, b) => a.at - b.at);
-  } catch { return; }
-  let total = files.reduce((n, f) => n + f.size, 0);
-  for (const f of files) {
-    if (total <= QUOTA) break;
-    if (f.full === keep) continue;
-    try { fs.unlinkSync(f.full); total -= f.size; } catch {}
-  }
+function folderBytes(dir) {
+  return fs.readdirSync(dir).reduce((total, name) => {
+    const full = path.join(dir, name), st = fs.lstatSync(full);
+    return total + (st.isDirectory() ? folderBytes(full) : st.size);
+  }, 0);
 }
 
 export function save(dir, name, buf) {
   if (!buf?.length) throw Object.assign(new Error(tr('err.emptyFile')), { status: 400 });
+  if (buf.length > ATTACH_MAX_BYTES) throw Object.assign(new Error(tr('err.fileLimit')), { status: 413 });
   const clean = safeName(name);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Check before writing, synchronously with the write: concurrent HTTP uploads cannot
+  // both reserve the same remaining space, and a refusal never erases earlier attachments.
+  if (folderBytes(dir) + buf.length > QUOTA) throw Object.assign(new Error(tr('err.attachmentQuota')), { status: 413 });
   const file = path.join(dir, `${crypto.randomBytes(3).toString('hex')}-${clean}`);
   fs.writeFileSync(file, buf, { mode: 0o600, flag: 'wx' });   // a fresh name, never through an existing file
-  enforceQuota(dir, file);
   return { ok: true, path: file, name: clean, size: buf.length, image: IMAGE.test(clean) };
 }
