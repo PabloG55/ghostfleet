@@ -203,8 +203,11 @@ export default {
   'sess.continueMsg': 'carry on with the task where you left it',
   'sess.resumeOnQuota': 'Pick up on its own when the quota is back',
   'sess.otherTime': 'Pick another time…',
-  'sess.chat': 'Conversation',
-  'sess.screen': 'Agent\'s screen',
+  // One word each: these two and Terminal and Editor share one row, and at 390 px "Conversation"
+  // and "Agent's screen" pushed Editor off its edge. At 320 only four single words fit. What
+  // "Screen" means is in its hint.
+  'sess.chat': 'Chat',
+  'sess.screen': 'Screen',
   'sess.screenHint': 'Read only: what the agent\'s own terminal shows right now',
   // A project's Terminal and Editor tabs (terminal.jsx): one shell and one editor per project.
   'term.tab.term': 'Terminal',

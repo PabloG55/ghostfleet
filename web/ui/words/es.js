@@ -203,8 +203,9 @@ export default {
   'sess.continueMsg': 'continúa con la tarea donde la dejaste',
   'sess.resumeOnQuota': 'Retomar solo cuando vuelva el cupo',
   'sess.otherTime': 'Elegir otra hora…',
-  'sess.chat': 'Conversación',
-  'sess.screen': 'Pantalla del agente',
+  // Una palabra cada una: comparten fila con Terminal y Editor, y a 320 px solo caben cuatro.
+  'sess.chat': 'Chat',
+  'sess.screen': 'Pantalla',
   'sess.screenHint': 'Solo lectura: lo que muestra ahora la terminal del propio agente',
   // Las pestañas Terminal y Editor de un proyecto (terminal.jsx): una shell y un editor por proyecto.
   'term.tab.term': 'Terminal',

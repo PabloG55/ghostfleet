@@ -20804,12 +20804,19 @@ if sv_start origin; then
   # proved it, offers enrolment with its code field — and never the fixture bypass, which on
   # a page the daemon served would be a way past the passkey that §5 says does not exist.
   node "$ROOT/test/helpers/phone-check.mjs" --served "$BASE" > "$PWO/render" 2> "$PWO/render.err"
-  is "phone-check (served) ran"       "0" "$?"
-  is "...without complaining"         ""  "$(head -2 "$PWO/render.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/render")" -ge 7 ] && echo yes || echo "no: $(wc -l < "$PWO/render") rows")"
-  while IFS=$'\x1f' read -r name want got; do
-    is "$name" "$want" "$got"
-  done < "$PWO/render"
+  pcs_rc=$?
+  # No browser is a machine without one, not a client that failed: phone-check's one row is then
+  # "ran to the end" carrying launch()'s `no chrome`, the reason SKIP_ENV already knows.
+  if grep -q "^phone-check ran to the end$US.*no chrome" "$PWO/render" 2>/dev/null; then
+    skip "the lock served by the daemon, in a browser" "no chrome to look in"
+  else
+    is "phone-check (served) ran"       "0" "$pcs_rc"
+    is "...without complaining"         ""  "$(head -2 "$PWO/render.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/render")" -ge 7 ] && echo yes || echo "no: $(wc -l < "$PWO/render") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PWO/render"
+  fi
 
   # ── and once it IS talking to the daemon, it has to be able to get in ──────
   # The other half of the same seam, found on the same phone: fleet-serve will not enrol a
@@ -23352,6 +23359,10 @@ if [ -d "$ROOT/web" ]; then
   #   - empty pages: Pending sign-ins drawn without its empty line turned "says so" red, and the
   #     held hint drawn with no held item turned "drop the hint" red. The tree's connector span
   #     without aria-hidden turned the connector row red ("0 of 8 hidden").
+  #   - the session's four tabs (Chat, Screen, Terminal, Editor) fitting their row: the old words
+  #     "Conversation" and "Agent's screen" turned it red at 390 and 320 ("36 px past the edge",
+  #     "106 px"); the narrow padding taken out turned 320 red ("es: 0 px of room"); and the bar's
+  #     no-shrink rule taken out turned all three widths red ("squashed to 12 of 37 px" at 390).
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?
@@ -23362,7 +23373,8 @@ if [ -d "$ROOT/web" ]; then
     is "...without complaining"         ""  "$(head -2 "$PHC/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor, for the reason pwa-check documents: a browser that fails to start emits a
     # row or two and a bare "no mismatches" would call that green.
-    # 278 rows when the rebuilt features above were added, 283 with the empty pages.
+    # 278 rows when the rebuilt features above were added, 283 with the empty pages, 286 with
+    # the session's tab row.
     is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 260 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
@@ -23383,7 +23395,11 @@ group "one base: the phone and the team app are one app"
 # sat on this branch red until somebody did.
 if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs" ]; then
   OB_OUT="$(mktemp "$TMUX_TMPDIR/one-base.XXXXXX")"
-  node --test "$ROOT/ee/team/test/one-base.test.mjs" "$ROOT/ee/team/test/i18n.test.mjs" \
+  # THE REPORTER IS NAMED because the count below is read from its summary line. Node 20 picks
+  # TAP when its output is not a terminal, which is how CI runs it, and TAP says `# pass 18`
+  # where spec says `ℹ pass 18`; a newer Node prints spec either way. Unnamed, the floor read
+  # 0 on CI's Node 20 while every test passed, and passed on every machine it was written on.
+  node --test --test-reporter=spec "$ROOT/ee/team/test/one-base.test.mjs" "$ROOT/ee/team/test/i18n.test.mjs" \
     "$ROOT/ee/team/test/phone-screen-words.test.mjs" > "$OB_OUT" 2>&1
   ob_rc=$?
   is "one-base and both languages' words pass" "0" "$ob_rc"

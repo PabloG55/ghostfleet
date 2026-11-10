@@ -142,7 +142,7 @@ try {
     // ── every screen, at two widths ───────────────────────────────────────────
     const STACK = JSON.stringify([{ project: 'acme-api', session: 'api-fix' }, { project: 'acme-api', session: 'docs-pass' }]);
     const ROUTES = [['home', '#/'], ['map', '#/map'], ['project', '#/p/acme-api'], ['lead session', '#/p/acme-api/s/master'],
-      ['session', '#/p/acme-api/s/api-fix'], ['pane', '#/p/acme-api/s/api-fix', "Agent's screen"], ['settings', '#/settings'], ['activity', '#/activity'],
+      ['session', '#/p/acme-api/s/api-fix'], ['pane', '#/p/acme-api/s/api-fix', 'Screen'], ['settings', '#/settings'], ['activity', '#/activity'],
       ['queue', '#/queue'], ['held', '#/held'], ['reviews', '#/reviews'], ['one review', '#/reviews/-/work/2026-03-05_14-02-11'],
       ['stack picker', '#/stack-picker'], ['stack', `#/stack/${encodeURIComponent(STACK)}`], ['automations', '#/automations'],
       ['sign-ins', '#/sign-ins'], ['search', '#/search?q=api']];
@@ -172,7 +172,38 @@ try {
         is(`${w} ${name}: no page error`, '', errors.slice(before).join(' | '));
         is(`${w} ${name}: no native <select>`, 0, m.selects);
         is(`${w} ${name}: the page does not scroll sideways`, true, m.docX <= 1 && m.mainX <= 1);
-        if (tab) { await b.evaluate(() => [...document.querySelectorAll('.tabs [role=tab]')].find(e => e.textContent.trim() === 'Conversation')?.click()); await sleep(300); }
+        // THE SESSION'S TAB ROW FITS, Editor included. A served phone adds Terminal and Editor
+        // beside Chat and Screen for a project on this machine, and demo data has no machine, so
+        // the row is copied with the two added, in the page's own CSS and each language's words,
+        // and every tab has to end at least 8 px inside it. Its first words, "Conversation" and
+        // "Agent's screen", ran 36 px past the edge at 390 and 106 px at 320; the one-word Spanish
+        // four ended 0 px inside at 320 until the narrow padding (terminal.css), a fit only on paper.
+        // And the copy is as tall as its tabs: with Terminal and Editor in it the bar is a scroll
+        // container, and under this route's permission card it was squashed to 12 px of 47.
+        if (name === 'session') {
+          const over = await b.evaluate(async () => {
+            const row = document.querySelector('.tabs[role=tablist]');
+            if (!row) return 'no tab row';
+            const bad = [];
+            for (const l of ['en', 'es']) {
+              const w = (await import(location.origin + '/ui/words/' + l + '.js')).default;
+              const probe = row.cloneNode(false);
+              for (const k of ['sess.chat', 'sess.screen']) { const x = document.createElement('button'); x.setAttribute('role', 'tab'); x.textContent = w[k]; probe.append(x); }
+              for (const k of ['term.tab.term', 'term.tab.edit']) { const x = document.createElement('a'); x.setAttribute('role', 'tab'); x.className = 'tool-tab'; x.textContent = w[k]; probe.append(x); }
+              row.after(probe);
+              const r = probe.getBoundingClientRect(), end = r.right - parseFloat(getComputedStyle(probe).paddingRight);
+              const past = Math.round(Math.max(...[...probe.children].map(e => e.getBoundingClientRect().right)) - end);
+              if (past > -8 || probe.scrollWidth > probe.clientWidth) bad.push(`${l}: ${past > 0 ? `${past} px past the edge` : `${-past} px of room`}`);
+              // ...and at its full height: the copy sits in the session's column as the bar does.
+              const tall = Math.round(probe.getBoundingClientRect().height);
+              if (tall + 1 < probe.scrollHeight) bad.push(`${l}: squashed to ${tall} of ${probe.scrollHeight} px`);
+              probe.remove();
+            }
+            return bad.join(', ') || 'fits';
+          });
+          is(`${w} session: its four tabs fit the row with 8 px to spare and at full height, in both languages`, 'fits', over);
+        }
+        if (tab) { await b.evaluate(() => [...document.querySelectorAll('.tabs [role=tab]')].find(e => e.textContent.trim() === 'Chat')?.click()); await sleep(300); }
       }
     }
     // A session in a stack column sits under the column's own header (stacks.jsx), so it does not

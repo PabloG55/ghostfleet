@@ -215,7 +215,7 @@ test('a desk: who sees the tabs, typing, keys, back, and every way a tab closes'
         const xs = [...document.querySelectorAll('.session .tabs [role="tab"]')].map(e => e.textContent.trim());
         return xs.length === 4 && xs;
       }, `${who}'s four tabs`);
-      assert.deepEqual(tabs, ['Conversation', 'Agent\'s screen', 'Terminal', 'Editor'], who);
+      assert.deepEqual(tabs, ['Chat', 'Screen', 'Terminal', 'Editor'], who);
       await toHash(p, PROJECT);
       const bar = await until(p, () => {
         const xs = [...document.querySelectorAll('.page-tabs [role="tab"]')].map(e => e.textContent.trim());
@@ -286,7 +286,7 @@ test('a desk: who sees the tabs, typing, keys, back, and every way a tab closes'
     await until(p, (h) => location.hash === h, 'the terminal route', 5000, `${SESSION}/term`);
     await p.evaluate(() => history.back());
     await until(p, (h) => location.hash === h && !document.querySelector('.tool'), 'back on the session', 5000, SESSION);
-    assert.equal(await p.evaluate(() => document.querySelector('.session .tabs .on')?.textContent), 'Conversation');
+    assert.equal(await p.evaluate(() => document.querySelector('.session .tabs .on')?.textContent), 'Chat');
     await toHash(p, PROJECT);
     await click(p, '.page-tabs a[href$="/edit"]');
     await until(p, (h) => location.hash === h, 'the editor route', 5000, `${PROJECT}/edit`);
@@ -462,6 +462,26 @@ test('a phone: the key row, the keyboard button, no zoom and no sideways page', 
       assert.ok(hit.launcher, 'no launcher to clear: the check proves nothing');
       assert.deepEqual(hit, { launcher: true, keys: false, host: false, inBar: true }, route);
     }
+  });
+
+  // The session's four tabs end inside their row: "Conversation" and "Agent's screen" put Editor
+  // 36 px past the edge at 390 and 106 px at 320, where the row scrolled with nothing to say so.
+  // And the row keeps its height: scrolling sideways made it shrinkable (terminal.css).
+  await t.test('the session\'s four tabs fit its row, at 390 and at 320', async () => {
+    for (const [w, h] of [[390, 844], [320, 700]]) {
+      await b.viewport(w, h);
+      await p.open(SESSION);
+      const fit = await until(p, () => {
+        const row = document.querySelector('.session .tabs[role="tablist"]');
+        const tabs = row ? [...row.querySelectorAll('[role="tab"]')] : [];
+        if (tabs.length !== 4) return null;
+        const end = row.getBoundingClientRect().right - parseFloat(getComputedStyle(row).paddingRight);
+        return { scrolls: row.scrollWidth > row.clientWidth, past: tabs.filter(e => e.getBoundingClientRect().right > end + 1).map(e => e.textContent.trim()),
+                 fullHeight: row.getBoundingClientRect().height + 1 >= row.scrollHeight };
+      }, `the four tabs at ${w}`);
+      assert.deepEqual(fit, { scrolls: false, past: [], fullHeight: true }, `at ${w}`);
+    }
+    await b.viewport(390, 844);
   });
 
   if (SHOTS) await t.test('screenshots', () => shootAll(b, p, r, 'phone', admin, (ms) => r.advance(ms)));
