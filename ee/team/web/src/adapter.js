@@ -45,6 +45,7 @@ export function teamAdapter(ctx) {
     lead: api.lead,
     presence: api.presence,
     canTerm: (project) => canTerm(ctx.me, project),
+    canAnswer: (project) => canTerm(ctx.me, project),
     termOpen: api.termOpen,
     termSocket: api.termSocket,
     termAccount: () => api.health().then(r => r.user || null),

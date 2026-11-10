@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createUsers, hashPw } from '../../server/users.mjs';
 
 export const password = 'demo-password-123';
 export async function rig(t) {
-  const scratch = new URL('../../../../scratch.tmp/', import.meta.url).pathname;
-  fs.mkdirSync(scratch, { recursive: true });
+  const scratch = os.tmpdir();
   const root = fs.mkdtempSync(path.join(scratch, 'gfw-security-'));
   const dir = path.join(root, 'demo'); fs.mkdirSync(dir);
   const users = createUsers(dir);
