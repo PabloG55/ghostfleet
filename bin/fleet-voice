@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -uo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+exec node "$BIN_DIR/fleet-voice.mjs" "$@"
