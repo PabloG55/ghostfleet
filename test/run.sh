@@ -29448,6 +29448,39 @@ else
   skip "a Telegram chat talks to a fleet session, end to end" "tmux, jq, node or curl missing, or mktemp not available"
 fi
 
+group "tracked paths have no case collisions"
+if command -v git >/dev/null 2>&1; then
+  tracked_case_collisions() {
+    # Include directory prefixes: a tracked file can also collide with a directory.
+    # Deduplicate exact spellings before folding case so shared parents stay valid.
+    awk -F/ '{ p=""; for (i=1; i<=NF; i++) { p=p (i>1 ? "/" : "") $i; print p } }' |
+      LC_ALL=C sort -u | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | uniq -d
+  }
+  CASE_PATHS="$(git -C "$ROOT" ls-files)"
+  is "git lists the paths to check" "0" "$?"
+  is "no tracked file or directory differs only by case" "" "$(tracked_case_collisions <<< "$CASE_PATHS")"
+  is "the check catches two file spellings" "ee/seats/readme.md" \
+    "$(printf '%s\n' ee/seats/README.md ee/seats/readme.md | tracked_case_collisions)"
+  is "the check catches a file against a directory" "ee/notice" \
+    "$(printf '%s\n' ee/NOTICE ee/notice/index.mjs | tracked_case_collisions)"
+  is "shared directory prefixes are allowed" "" \
+    "$(printf '%s\n' ee/LICENSE ee/seats/index.mjs ee/seats/mint.mjs | tracked_case_collisions)"
+else
+  skip "tracked paths have no case collisions" "git missing"
+fi
+
+group "offline Team seats"
+if command -v node >/dev/null 2>&1; then
+  SEATS_OUT="$(mktemp "$TMUX_TMPDIR/seats.XXXXXX")"
+  node --test "$ROOT"/ee/seats/test/*.test.mjs > "$SEATS_OUT" 2>&1
+  seats_rc=$?
+  is "all offline Team seats tests pass" "0" "$seats_rc"
+  [ "$seats_rc" -eq 0 ] || cat "$SEATS_OUT"
+  rm -f "${SEATS_OUT:?}"
+else
+  skip "offline Team seats" "node missing"
+fi
+
 group "messages sent together from Telegram are one turn"
 # The bug this group exists for: a line, then the link it was about a second later, ran as two
 # turns, and the first asked for the link the owner had already sent. Its own stub API, home and
