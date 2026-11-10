@@ -17,6 +17,17 @@
 .palette h3, .ai-panel h3 { font-size: 12px; color: var(--dim); }
 .home-agent-head h2 { font-size: 16px; color: var(--white); }
 .admin-users > .row h2 { font-size: 14px; }
+/* The product's name is a title here, so it takes the titles' pixel face, against the shared
+   skin's mono wordmark. Silkscreen has no lowercase and draws the name as its capitals; the
+   text stays lowercase, which is what a reader copies and a screen reader says. Sizes are the
+   face's 8-pixel em: 16 fits the sidebar's 239px brand box with 50px to spare. The phone bar's
+   name is 8 because at 390 the bar has 111px left beside the usage chips and 8 is what fits
+   (81px); at 360 it still steps out and the ship carries the brand alone, as the shared rule
+   arranges. On the sign-in card 24 wrapped onto a second line at 360, hence the step. */
+.brand b { font: 400 16px/1.2 var(--px); letter-spacing: 0; }
+.brand.big b { font-size: 24px; }
+.topbar .brand b { font-size: 8px; line-height: 22px; }
+@media (max-width: 380px) { .brand.big b { font-size: 16px; } }
 
 /* ── windows ────────────────────────────────────────────
  * A panel that holds a whole task gets a title bar: its own first heading, on a slightly
@@ -57,22 +68,8 @@
 /* ── controls ───────────────────────────────────────── */
 .mic .px-ico { color: inherit; }
 
-/* ── native controls, in the app's own clothes ─────────
- * A select, a checkbox and a radio were left to the engine: Chromium drew its own chevron and
- * grey rounded box, WebKit its own up-and-down pop-up button, and neither was the app's. They
- * are still the native elements, so the keyboard, the native option list and what a screen
- * reader announces are the browser's as before; only the drawing is ours. The select's mark is
- * the ▾ the session header's "More" button already prints, drawn as two halves of a triangle
- * so that it takes a token colour. The longhands also restate it for the owner picker, whose
- * own rule resets the background with the shorthand. The switch is already drawn by the app,
- * its checkbox an invisible overlay, so it is left out. Date, time and number fields already
- * wear the field tokens; their picker and stepper glyphs stay native, as the affordance. */
-.owner-pick select {
-  appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 1.9em;
-  background-image: linear-gradient(to bottom left, var(--dim) 50%, transparent 50%), linear-gradient(to bottom right, var(--dim) 50%, transparent 50%);
-  background-size: 4px 4px; background-repeat: no-repeat;
-  background-position: right calc(.75em + 4px) center, right .75em center;
-}
+/* the owner picker's box keeps the raised fill it had around its native select */
+.select.owner-pick { background-color: var(--panel2); }
 .pchip { border-radius: var(--r); }
 .admin-tabs a { font-weight: 500; }
 .mic { border-radius: var(--r); font: 600 15px var(--sans); }
@@ -80,9 +77,9 @@
 .stop-all { border-radius: var(--r); display: inline-flex; align-items: center; gap: .5em; }
 .as-launch { border-radius: var(--r); border-color: var(--line); box-shadow: var(--gf-shadow-2); font: 600 13.5px var(--sans); }
 .as-launch:hover { border-color: var(--cyan); }
-.voicebar, .vb-btn, .vb-stop { border-radius: var(--r); }
+.vb-btn, .vb-stop { border-radius: var(--r); }
 .vb-btn, .vb-stop { display: inline-flex; align-items: center; gap: .45em; }
-.voicebar { background: var(--gf-abyss); border-color: var(--teal-edge, var(--gf-teal-edge)); }
+.as-launch.busy { border-color: var(--teal-edge, var(--gf-teal-edge)); }
 .switch i, .switch i::after { border-radius: 0; }
 
 /* ── surfaces: flat, hairline, no soft gradients ────── */

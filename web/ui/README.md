@@ -28,6 +28,8 @@ vite, and the root vite that builds `web/screens.js`).
 | `map.jsx` | the live map |
 | `fleet.jsx`, `sprite.js`, `lights.js`, `icon.jsx` | the ships, the status lights, the icon set |
 | `ui.jsx` | buttons, pills, `Modal`, `Confirm`, toasts, `usePoll`, `Markdown` |
+| `history.js` | one history for every way back, framework-free: `go`, `back`, each entry's scroll and state |
+| `back.jsx` | `BackLink` (names where it goes), `useKept` (a screen's state, kept per history entry) |
 | `keys.js` | the keyboard's rules, framework-free (the phone client imports these) |
 | `keyboard.jsx` | the keyboard for the Preact screens: one listener, each screen's keys |
 | `i18n.js`, `words/` | the words in English and Spanish, and `t()` |
@@ -59,7 +61,8 @@ Phase 2 writes the phone client's, over fleet-serve. An adapter is a plain objec
 | `termSocket(ticket)` | optional, → `WebSocket` | the socket for one ticket, with `binaryType` `'arraybuffer'` |
 | `termAccount()` | optional, → `{ mustChange }` or `null` | who is signed in now, to tell a temporary password from another refusal |
 | `signIn()`, `changePassword()` | optional | the app's own sign-in and password screens, offered by a closed tab's notice |
-| `go(to)` | | navigate to a hash route (`'/p/acme-web'`) |
+| `go(to, { replace? })` | | navigate to a hash route (`'/p/acme-web'`); pass `history.js`'s `go`, which never pushes the screen you are on and keeps `from` on a replace |
+| `place(route)` | optional | what an app's own route is called on a back link (`'/activity'` → "Activity"); the shared routes are named already |
 | `slots` | object | the app's own pieces (below) |
 
 A failed call throws an `Error` whose `message` is shown to the person as it is. If the
@@ -122,6 +125,42 @@ The shared routes are `#/` (home), `#/map`, `#/p/<project>` and
 followed by `/term` or `/edit` is the project's Terminal or Editor tab. An app adds its own beside
 them: the team app has `#/automations`, `#/activity`, `#/settings` and `#/admin/…`.
 
+## Back and the history
+
+Back goes to the screen the person came from, as it was. A session opened from the live map
+goes back to the map, scrolled where it was and with "Show projects with no sessions" still
+ticked. It used to go to a fixed parent, the session's project page, while the browser's back
+went to the map: two backs, two answers. Now there is one history, the browser's, and every way
+back walks it: the back link, the browser's button, a phone's back swipe, and the keys
+(`` ` `` and Ctrl-a g/d on a session, q and `` ` `` on an automation).
+
+- **What an entry knows.** `history.js` stamps each entry in `history.state.gfEntry` with
+  `{ id, from }`, where `from` is the route before it. The phone client keeps its own depth in
+  `history.state.gf`, a different key, so neither reads the other's.
+- **`back(parent)`** steps back one entry when there is one to step back to, which is exactly
+  what the browser's back does. Opened by a link in a new tab or a pasted address, there is
+  none, and back *replaces* the entry with `parent`, the screen's logical parent: a session's
+  is its project's sessions. Replaced, not pushed, so the browser's back from there leaves the
+  app instead of landing on the session again. A reload keeps `from`, because
+  `history.state` survives one.
+- **`go(to)`** pushes an entry, and does nothing when `to` is the screen already showing, so
+  back never takes two presses. `{ replace: true }` is for a screen that is gone or was only a
+  step on the way (a renamed session; the project page Ctrl-f passes through to reach a card),
+  and it keeps the entry's `from`.
+- **As it was.** Each entry keeps the scroll of `.main` and of every element marked
+  `data-keep-scroll="<name>"` (the chat, the map's ticker), in memory and in sessionStorage
+  for a reload. A screen keeps its own state with `useKept(key, initial)` in place of
+  `useState`: the map's boxes, a project's filter chip, the board's quiet list, the team app's
+  Activity filter. A new entry starts at the top with `initial`; an entry gone back to gets
+  what it had. A screen that stays mounted from one entry to the next takes the new entry's
+  value when it changes. The sidebar's search term keeps itself, because the sidebar never
+  unmounts.
+- **The link says where.** `<BackLink parent=… />` reads "← Live map", "← acme-web" or
+  "← api-fix", from `placeName(route)`, with the app's `place(route)` for its own routes
+  ("← Automations"). Its aria-label is "Back to …". It is a real link, so a middle click opens
+  the destination in a new tab, and a plain click is `back()`. On a phone it carries a
+  thumb-sized box round its small words, without moving anything.
+
 ## CSS and words
 
 Load order matters, because each layer can override the one before it:
@@ -171,10 +210,11 @@ Digits count in the fleet's own order (the desk's), not the board's order of urg
 | a project's sessions | 1–9 | open card N |
 | a project's sessions | n, N | new session |
 | a project's sessions | q, `` ` ``, Ctrl-c | the project's lead |
-| a session | `` ` `` | back: a worker to its project's sessions, the lead home |
+| a session | `` ` `` | back to the screen it was opened from, as it was; opened by a link, its project's sessions (the lead's too) |
 | a session | ⇧← / ⇧→ | the previous / next session, the lead first, wrapping |
 | a session | Ctrl-s | its project's sessions |
 | a session | Ctrl-a then g, d, s, p, f, ←, → | the desk's prefix table: back, back, sessions, home, jump, previous, next |
+| an automation, the automations list | q, `` ` `` | back: the list it was opened from, as it was; home from the list (team app) |
 | a session | any letter, ⏎ | goes to the composer, as every unbound key goes to the agent at the desk |
 | the composer | ⏎, ⇧⏎, Esc | send (with a keyboard), new line, leave the box |
 | a question | y | yes, unless it asks you to type a name |

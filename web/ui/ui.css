@@ -31,18 +31,51 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+/* A tap answers with the control's own states. WebKit's default answer is a translucent black
+   box over whatever was tapped, which on this dark ground reads as a focus box; the phone
+   client turns it off the same way (web/app.css). */
+html { -webkit-tap-highlight-color: transparent; }
+/* The cursor says what a press does, and the chrome selects nothing. The browser's `cursor: auto`
+   is an I-beam over any text, so the sidebar's usage meters, the person's own name at its foot
+   and every heading and label said they could be typed in, and a double-click selected them.
+   Set once at the root, so what is drawn outside the shell has it too: a list, a popover or a
+   toast goes to the end of <body> (select.jsx Portal), and the sign-in page has no shell. Then
+   the pointer on everything that takes a press, the I-beam and selection where text is typed,
+   and selection again on text people copy from (below, and the app's own in its layout).
+   `:where` adds no specificity, so a screen's own rule wins: a drag handle's grab, a static
+   row's arrow. */
+html { cursor: default; -webkit-user-select: none; user-select: none; }
+:where(a[href], button, select, summary, label:has(input:is([type=checkbox], [type=radio])), [role=button], [role=tab], [role=option],
+  [role=menuitem], [role=menuitemradio], [role=switch], input:is([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit])) { cursor: pointer; }
+:where(input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit]), textarea, [contenteditable]:not([contenteditable=false])) {
+  cursor: text; -webkit-user-select: text; user-select: text; }
+/* Disabled is never the pointer, whatever the control's own rule says: `.chips button` and its
+   kind outrank any plain :disabled rule this early in the file. */
+:is(button, select, input, textarea, summary, [role=button], [role=tab], [role=option], [role=menuitem]):is(:disabled, [aria-disabled=true]) { cursor: not-allowed !important; }
+/* Read and copied from: a message, rendered markdown, code, an error, the last thing a session
+   said on its ship's card (which the pointer can cross onto). Not a session card's last message:
+   the card opens the session on a press, and a drag to select it ended in that press. */
+:where(:is(.msg .bubble, .md, pre, code, .err, .notice, .ask-cmd, .tip-said):not(:is(a[href], button, summary, [role=button], [role=option], [role=menuitem], .card) *)) {
+  cursor: auto; -webkit-user-select: text; user-select: text; }
 #app { height: 100%; }
 a { color: var(--cyan); }
 code, pre { font-family: var(--mono); }
 code { background: var(--panel2); border: 1px solid var(--hair); border-radius: var(--r); padding: 0 .3em; font-size: .92em; }
 h1, h2, h3 { color: var(--white); margin: 0; }
 h1 { font-size: 22px; letter-spacing: -.01em; }
-input, textarea, select, button { font: inherit; color: inherit; }
-input, textarea, select {
+input, textarea, button { font: inherit; color: inherit; }
+input, textarea, .select {
   background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: .55em .7em; width: 100%;
   outline: none; transition: border-color .15s;
 }
-input:focus, textarea:focus, select:focus { border-color: var(--cyan); }
+input:focus, textarea:focus, :where(:root:not(.by-pointer)) .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
+/* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped.
+   Its label presses it, as a <label> presses the button it is for. */
+.select-label { cursor: pointer; }
+.select-label:has(~ .select:disabled) { cursor: not-allowed; }
+.select { display: flex; align-items: center; gap: .5em; text-align: left; cursor: pointer; min-width: 0; }
+.select-v { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select:disabled { cursor: not-allowed; opacity: .45; }
 textarea { resize: vertical; }
 .muted { color: var(--dim); }
 .small { font-size: 12px; }
@@ -68,7 +101,7 @@ textarea { resize: vertical; }
 }
 .btn:hover:not(:disabled) { border-color: #3a4450; background: #1b212a; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
-.btn:disabled { opacity: .45; cursor: default; }
+.btn:disabled { opacity: .45; }
 .btn.primary { background: var(--cyan); border-color: var(--cyan); color: var(--gf-teal-ink); font-weight: 600; }
 .btn.primary:hover:not(:disabled) { background: var(--gf-teal-hover); border-color: var(--gf-teal-hover); }
 .btn.danger { background: transparent; border-color: rgba(255,95,95,.5); color: var(--red); }
@@ -151,7 +184,7 @@ textarea { resize: vertical; }
   transition: border-color .15s, transform .1s, background .15s;
 }
 .card::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--c); opacity: .85; }
-.card:hover, .card:focus-visible { border-color: #34404c; background: #131920; }
+.card:hover, :where(:root:not(.by-pointer)) .card:focus-visible { border-color: #34404c; background: #131920; }
 .card.s-red { --c: var(--red); } .card.s-cyan { --c: var(--cyan); } .card.s-green { --c: var(--green); } .card.s-yellow { --c: var(--yellow); }
 .card.s-red { border-color: rgba(255,95,95,.35); }
 .card.active { border-color: var(--cyan); background: #12191f; }
@@ -189,13 +222,47 @@ textarea { resize: vertical; }
 .sess-head { padding: 14px 22px 10px; border-bottom: 1px solid var(--hair); display: flex; flex-direction: column; gap: 10px; }
 .sess-title { display: flex; align-items: center; gap: .7em; flex-wrap: wrap; }
 .sess-title h1 { font-family: var(--mono); font-size: 19px; }
-.back { font-size: 18px; display: none; }
+/* Back names where it goes ("← Live map"), on its own line over the title at every width: it
+   used to be a bare arrow on a phone and nothing on a desk, where the list's "← project" was the
+   only way out and went to the project whatever had opened the session. */
+.back-link { align-self: flex-start; display: inline-block; max-width: 100%;
+  color: var(--dim); font-size: 12.5px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.back-link:hover { color: var(--cyan); }
+.sess-head > .back-link { margin-bottom: -4px; }
+.split-name { font-family: var(--mono); font-size: 13px; text-decoration: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
-.menu button { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
-.menu button:hover { background: #222a33; }
-.menu button.danger { color: var(--red); }
+.menu > button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
+.menu > button:hover, .select-opt.on { background: #222a33; }
+.menu > button.danger { color: var(--red); }
+/* The menu's actions are its own children: a popover is this surface too, and the buttons of the
+   controls it holds (a select's) keep their own look.
+   A select's open list is this menu: the rules above are its rules, not a copy. Only where it
+   sits differs: select.jsx places it from its button, over everything but the toasts, and
+   a long one scrolls inside itself. An option's words wrap there rather than being cut. */
+.select-list { position: fixed; right: auto; top: 0; z-index: 76; min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.select-list .select-v { white-space: normal; overflow-wrap: anywhere; }
+.select-opt .px-ico { flex: none; margin-left: auto; color: var(--cyan); }
+/* A popover (select.jsx) is the same surface holding controls instead of actions, placed from
+   its button like a list. Its layer is under the lists, so a select inside one opens over it,
+   and over the phone's full-screen assistant (70); the toasts (80) stay on top of both. */
+.popover { position: fixed; right: auto; top: 0; z-index: 72; width: 340px; min-width: 0; padding: 12px 14px; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
+.popover p { margin: 0; }
+/* A ship's card (shiptip.jsx): the same surface, sized to what it says, above the toasts' layer
+   only where a list is (76), so a list opened over it stays on top. It never covers its ship,
+   and the pointer may cross onto it. */
+.ship-tip { width: max-content; z-index: 74; padding: 10px 12px; gap: 6px; font-size: 12.5px; }
+.tip-who { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+.tip-who b { color: var(--white); font-size: 13.5px; overflow-wrap: anywhere; }
+.tip-who span { color: var(--dim); }
+.tip-state { display: flex; align-items: center; gap: .5em; color: var(--white); }
+.tip-rows { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 2px 0 0; padding-top: 7px; border-top: 1px solid var(--line); }
+.tip-rows dt { color: var(--dim); }
+.tip-rows dd { margin: 0; display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; color: var(--fg); }
+.tip-said { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; color: var(--dim); }
+/* A ship is pressed and held for its card on a phone: no text selection, and no link preview. */
+.fboat, .boat { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 
 .ask { margin: 14px 22px 0; border-radius: var(--r); padding: 14px 16px; border: 1px solid rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); display: flex; flex-direction: column; gap: 10px; }
 .ask.question { border-color: rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); }
@@ -213,7 +280,7 @@ textarea { resize: vertical; }
 .opt.yes:hover:not(:disabled) { background: rgba(135,215,135,.1); }
 .opt.no b { color: var(--red); } .opt.no:hover:not(:disabled) { background: rgba(255,95,95,.08); }
 .opt.chosen { border-color: var(--cyan); }
-.opt:disabled { opacity: .5; cursor: default; }
+.opt:disabled { opacity: .5; }
 
 .tabs { display: flex; gap: 2px; padding: 12px 22px 0; border-bottom: 1px solid var(--hair); }
 .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em; cursor: pointer; color: var(--dim); font-weight: 500; }
@@ -294,6 +361,10 @@ textarea { resize: vertical; }
 
 /* ── phone ───────────────────────────────────────────── */
 @media (max-width: 900px) {
+  /* a thumb's target round the small words, and the layout does not move: the margins take the
+     padding back, and the link sits over the title's top edge so the box is all its own */
+  .back-link { position: relative; padding: 13px 24px 13px 0; margin-block: -13px; }
+  .sess-head > .back-link { margin-bottom: -17px; }
   .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--hair); background: var(--panel); }
   .side { position: fixed; z-index: 60; inset: 0 auto 0 0; width: 280px; transform: translateX(-100%); transition: transform .2s; }
@@ -307,7 +378,6 @@ textarea { resize: vertical; }
   .keyprompt { left: 16px; right: 16px; bottom: 16px; transform: none; max-width: none; text-wrap: balance; }
   .split { grid-template-columns: 1fr; }
   .split-list { display: none; }
-  .back { display: inline; }
   .sess-head, .chat, .composer { padding-left: 16px; padding-right: 16px; }
   .ask { margin: 12px 16px 0; }
   .tabs { padding: 10px 16px 0; }

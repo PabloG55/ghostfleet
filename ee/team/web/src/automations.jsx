@@ -4,11 +4,14 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { api } from './api.js';
 import { Btn, Confirm, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
+import { Select } from '../../../../web/ui/select.jsx';
 import { ACTIONS, EVENTS, STATES, DAY_NAMES, SCOPES, TEMPLATES, blankTrigger, blankStep, describeTrigger, describeStep, everyWords } from '../../shared/automations.js';
 // `t` is a trigger or a template all through this file, so the words come in as `tr`.
 import { t as tr, locale } from './i18n.js';
 import { Icon } from '../../../../web/ui/icon.jsx';
 import { useKeys } from '../../../../web/ui/keyboard.jsx';
+import { BackLink } from '../../../../web/ui/back.jsx';
+import { back } from '../../../../web/ui/history.js';
 
 const EVERY = [15, 30, 60, 120, 180, 360, 720, 1440];
 const blank = () => ({ id: null, name: '', enabled: true, scope: 'personal', trigger: blankTrigger('schedule'), steps: [] });
@@ -25,11 +28,12 @@ export function Automations({ ctx, projects, id }) {
   const setTab = (t) => { setTabState(t); try { localStorage.setItem(TAB_KEY, t); } catch {} };
   // The editor offers only the projects this person can read (the server says which).
   const mineOnly = data?.me ? (projects || []).filter(p => data.me.projects.includes(p.name)) : projects;
-  // The phone client's Automations keys (web/ui/keyboard.jsx): n a new one, q / ` back to
-  // home from the list, and from one automation back to the list.
+  // The phone client's Automations keys (web/ui/keyboard.jsx): n a new one, q / ` back
+  // (web/ui/history.js): to the screen this was opened from, or, opened by a link, from one
+  // automation to the list and from the list home.
   useKeys((key) => {
     if (key.ctrl || key.alt) return false;
-    if (key.k === 'q' || key.k === '`') { ctx.go(id ? '/automations' : '/'); return true; }
+    if (key.k === 'q' || key.k === '`') { back(id ? '/automations' : '/'); return true; }
     if (key.k === 'n' && !id) { ctx.go('/automations/new'); return true; }
     return false;
   });
@@ -179,7 +183,8 @@ function Editor({ ctx, projects, data, id, onSaved }) {
     try {
       const r = await api.saveAutomation(draft);
       toast(tr(r.automation.enabled ? 'autos.saved' : 'autos.savedOff', { name: r.automation.name }), 'good');
-      onSaved(); ctx.go('/automations');
+      // back, not a push: the list it came from, with its scroll, and no second list to step over
+      onSaved(); back('/automations');
     } catch (e) { toast(e.message, 'bad'); }
     finally { setSaving(false); }
   };
@@ -188,17 +193,15 @@ function Editor({ ctx, projects, data, id, onSaved }) {
     <div class="page autos-edit">
       <header class="page-head">
         <div class="grow">
-          <a class="muted small" href="#/automations">← {tr('nav.automations')}</a>
+          <BackLink parent="/automations" />
           <input class="auto-title" placeholder={tr('autos.namePh')} value={draft.name}
                  onInput={(e) => set({ name: e.currentTarget.value })} aria-label={tr('auth.name')} />
         </div>
         <div class="row wrap">
           {/* A member makes personal ones only, so there is nothing to choose: no company option at all. */}
           {admin && !readOnly ? (
-            <select class="scope-pick" value={draft.scope} onChange={(e) => set({ scope: e.currentTarget.value })} aria-label={tr('autos.scope')}>
-              <option value="personal">{tr('autos.scopePersonal')}</option>
-              <option value="company">{tr('autos.scopeCompany')}</option>
-            </select>
+            <Select class="scope-pick" value={draft.scope} onChange={(v) => set({ scope: v })} aria-label={tr('autos.scope')}
+                    options={[{ value: 'personal', label: tr('autos.scopePersonal') }, { value: 'company', label: tr('autos.scopeCompany') }]} />
           ) : <span class={`tag${draft.scope === 'company' ? ' team' : ''}`} aria-label={tr('autos.scope')}>{SCOPES[draft.scope]}</span>}
           <label class="switch-l"><span class="switch"><input type="checkbox" checked={draft.enabled} onChange={(e) => set({ enabled: e.currentTarget.checked })} /><i /></span> {tr('autos.on')}</label>
           <Btn kind="primary" disabled={saving || readOnly} onClick={save}>{saving ? tr('common.saving') : tr('common.save')}</Btn>
@@ -294,33 +297,20 @@ function TriggerBlock({ t, projects, onChange, onType }) {
           ) : null}
           {t.mode === 'once' ? <label class="field"><span>{tr('autos.date')}</span><input type="date" value={t.date} onInput={(e) => onChange({ date: e.currentTarget.value })} /></label> : null}
           {t.mode !== 'every' ? <label class="field"><span>{tr('autos.time')}</span><input type="time" value={t.at} onInput={(e) => onChange({ at: e.currentTarget.value })} /></label> : (
-            <label class="field"><span>{tr('autos.every')}</span>
-              <select value={t.minutes} onChange={(e) => onChange({ minutes: Number(e.currentTarget.value) })}>
-                {EVERY.map(m => <option key={m} value={m}>{everyWords(m)}</option>)}
-              </select>
-            </label>
+            <Select label={tr('autos.every')} value={t.minutes} onChange={(v) => onChange({ minutes: Number(v) })}
+                    options={EVERY.map(m => ({ value: m, label: everyWords(m) }))} />
           )}
         </div>
       ) : (
         <div class="node-body">
-          <label class="field"><span>{tr('autos.whenSession')}</span>
-            <select value={t.event} onChange={(e) => onChange({ event: e.currentTarget.value })}>
-              {Object.entries(EVENTS).map(([k, d]) => <option key={k} value={k}>{d.label} ({d.hint})</option>)}
-            </select>
-          </label>
+          <Select label={tr('autos.whenSession')} value={t.event} onChange={(v) => onChange({ event: v })}
+                  options={Object.entries(EVENTS).map(([k, d]) => ({ value: k, label: `${d.label} (${d.hint})` }))} />
           <div class="row wrap">
-            <label class="field grow"><span>{tr('autos.whichProject')}</span>
-              <select value={t.project} onChange={(e) => onChange({ project: e.currentTarget.value, session: '*' })}>
-                <option value="*">{tr('autos.anyProject')}</option>
-                {(projects || []).map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-              </select>
-            </label>
-            <label class="field grow"><span>{tr('autos.whichSession')}</span>
-              <select value={t.session} onChange={(e) => onChange({ session: e.currentTarget.value })} disabled={t.project === '*'}>
-                <option value="*">{tr('autos.any')}</option>
-                {sessions.map(s => <option key={s.name} value={s.name}>{s.lead ? `${s.name} (${tr('common.lead')})` : s.name}</option>)}
-              </select>
-            </label>
+            <Select field="field grow" label={tr('autos.whichProject')} value={t.project} onChange={(v) => onChange({ project: v, session: '*' })}
+                    options={[{ value: '*', label: tr('autos.anyProject') }, ...(projects || []).map(p => ({ value: p.name, label: p.name }))]} />
+            <Select field="field grow" label={tr('autos.whichSession')} value={t.session} onChange={(v) => onChange({ session: v })}
+                    disabled={t.project === '*'}
+                    options={[{ value: '*', label: tr('autos.any') }, ...sessions.map(s => ({ value: s.name, label: s.lead ? `${s.name} (${tr('common.lead')})` : s.name }))]} />
           </div>
           <label class="field"><span>{tr('autos.cooldown')}</span>
             <input type="number" min="1" max="1440" value={t.cooldown} onInput={(e) => onChange({ cooldown: Number(e.currentTarget.value) })} />
@@ -353,26 +343,20 @@ function StepBlock({ s, i, n, isEvent, projects, onChange, onRemove, onMove }) {
       <div class="node-body">
         {has('project') ? (
           <div class="row wrap">
-            <label class="field grow"><span>{tr('autos.project')}</span>
-              <select value={s.project} onChange={(e) => {
-                const v = e.currentTarget.value;
-                // A session of the same name there (a template's 'master') stays chosen.
-                const keep = (projects || []).find(p => p.name === v)?.sessions.some(x => x.name === s.session);
-                onChange(v === '{proyecto}' ? { project: v, session: '{sesion}' } : { project: v, session: keep ? s.session : '' });
-              }}>
-                <option value="">{tr('autos.choose')}</option>
-                {isEvent ? <option value="{proyecto}">{tr('autos.eventProject')}</option> : null}
-                {(projects || []).map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-              </select>
-            </label>
+            <Select field="field grow" label={tr('autos.project')} value={s.project} onChange={(v) => {
+                      // A session of the same name there (a template's 'master') stays chosen.
+                      const keep = (projects || []).find(p => p.name === v)?.sessions.some(x => x.name === s.session);
+                      onChange(v === '{proyecto}' ? { project: v, session: '{sesion}' } : { project: v, session: keep ? s.session : '' });
+                    }}
+                    options={[{ value: '', label: tr('autos.choose') },
+                      ...(isEvent ? [{ value: '{proyecto}', label: tr('autos.eventProject') }] : []),
+                      ...(projects || []).map(p => ({ value: p.name, label: p.name }))]} />
             {has('session') ? (
-              <label class="field grow"><span>{tr('autos.session')}</span>
-                <select value={s.session} onChange={(e) => onChange({ session: e.currentTarget.value })} disabled={!s.project}>
-                  <option value="">{tr('autos.choose')}</option>
-                  {isEvent ? <option value="{sesion}">{tr('auto.step.eventSession')}</option> : null}
-                  {!fromEvent ? sessions.map(x => <option key={x.name} value={x.name}>{x.lead ? `${x.name} (${tr('common.lead')})` : x.name}</option>) : null}
-                </select>
-              </label>
+              <Select field="field grow" label={tr('autos.session')} value={s.session} onChange={(v) => onChange({ session: v })}
+                      disabled={!s.project}
+                      options={[{ value: '', label: tr('autos.choose') },
+                        ...(isEvent ? [{ value: '{sesion}', label: tr('auto.step.eventSession') }] : []),
+                        ...(!fromEvent ? sessions.map(x => ({ value: x.name, label: x.lead ? `${x.name} (${tr('common.lead')})` : x.name })) : [])]} />
             ) : null}
             {has('name') ? (
               <label class="field grow"><span>{tr('autos.newName')}</span>

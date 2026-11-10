@@ -20,6 +20,7 @@ import { topLight } from './lights.js';
 import { Icon } from './icon.jsx';
 import { t } from './i18n.js';
 import { DeskKeys } from './keyboard.jsx';
+import { startHistory, arrive, go } from './history.js';
 
 // The routes the shared screens link to. An app adds its own views beside them. `tool` is a
 // project's Terminal or Editor tab (terminal.jsx), after the project's or a session's address.
@@ -34,15 +35,18 @@ export function sharedRoute(hash) {
   return null;
 }
 
-// The route as a value that follows the hash. `canonical` may rewrite an old link in place.
+// The route as a value that follows the hash. `canonical` may rewrite an old link in place,
+// keeping the entry's stamp (history.js): it is the same entry, under its new name.
+// history.js hears of the change first, so the screen that mounts reads its own entry.
 export function useHashRoute(parse, canonical = (h) => h) {
   const read = () => {
     const h = canonical(location.hash || '#/');
-    if (location.hash && h !== location.hash) history.replaceState(null, '', h);
+    if (location.hash && h !== location.hash) history.replaceState(history.state, '', h);
+    startHistory();
     return parse(h);
   };
   const [r, setR] = useState(read);
-  useEffect(() => { const f = () => setR(read()); addEventListener('hashchange', f); return () => removeEventListener('hashchange', f); }, []);
+  useEffect(() => { const f = () => { const v = read(); arrive(); setR(v); }; addEventListener('hashchange', f); return () => removeEventListener('hashchange', f); }, []);
   return r;
 }
 
@@ -72,7 +76,7 @@ export function Sidebar({ name, sub, route, projects, open, onClose, nav, below,
                onKeyDown={(e) => {
                  if (e.isComposing || e.keyCode === 229) return;
                  if (e.key === 'Escape') { e.preventDefault(); setQ(''); e.currentTarget.blur(); if (open) onClose(); }
-                 else if (e.key === 'Enter' && list[0]) { e.preventDefault(); location.hash = `#/p/${encodeURIComponent(list[0].name)}`; e.currentTarget.blur(); if (open) onClose(); }
+                 else if (e.key === 'Enter' && list[0]) { e.preventDefault(); go(`/p/${encodeURIComponent(list[0].name)}`); e.currentTarget.blur(); if (open) onClose(); }
                }} />
       </div>
       <div class="side-list">

@@ -25,7 +25,9 @@ html, body {
   font-feature-settings: "cv11", "ss01";
 }
 ::selection { background: var(--gf-teal-deep); color: var(--gf-white); }
-:focus-visible { outline: none; box-shadow: var(--focus); }
+:focus-visible { outline: none; }
+/* the ring is the keyboard's: a pointer's press puts it away until the next key (modality.js) */
+:where(:root:not(.by-pointer)) :focus-visible { box-shadow: var(--focus); }
 code, pre, kbd { font-family: var(--mono); }
 code { border-radius: var(--r); }
 
@@ -125,28 +127,26 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 .btn.sm { font-size: 12.5px; padding: .38em .7em; }
 .btn:active:not(:disabled) { transform: none; }
 .btn.primary .px-ico { color: inherit; }
-input, textarea, select { border-radius: var(--r); background: var(--gf-abyss); }
-input:focus, textarea:focus, select:focus { border-color: var(--cyan); box-shadow: none; }
+input, textarea, .select { border-radius: var(--r); background: var(--gf-abyss); }
+input:focus, textarea:focus, :where(:root:not(.by-pointer)) .select:focus-visible { border-color: var(--cyan); box-shadow: none; }
 
 /* ── native controls, in the app's own clothes ─────────
- * A select, a checkbox and a radio were left to the engine: Chromium drew its own chevron and
- * grey rounded box, WebKit its own up-and-down pop-up button, and neither was the app's. They
- * are still the native elements, so the keyboard, the native option list and what a screen
- * reader announces are the browser's as before; only the drawing is ours. The select's mark is
- * the ▾ the session header's "More" button already prints, drawn as two halves of a triangle
- * so that it takes a token colour. The longhands also restate it for the owner picker, whose
- * own rule resets the background with the shorthand. The switch is already drawn by the app,
- * its checkbox an invisible overlay, so it is left out. Date, time and number fields already
- * wear the field tokens; their picker and stepper glyphs stay native, as the affordance. */
-select {
-  appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 1.9em;
+ * A checkbox and a radio were left to the engine: Chromium drew its own grey rounded box, and
+ * it was not the app's. They are still the native elements, so the keyboard and what a screen
+ * reader announces are the browser's as before; only the drawing is ours. The select is not
+ * native at all any more (select.jsx): restyling its closed box here left the open one, the
+ * engine's list and a phone's wheel, as foreign as before. Its button keeps the mark it had,
+ * the ▾ the session header's "More" button prints, drawn as two halves of a triangle so that
+ * it takes a token colour. The switch is already drawn by the app, its checkbox an invisible
+ * overlay, so it is left out. Date, time and number fields already wear the field tokens;
+ * their picker and stepper glyphs stay native, as the affordance. */
+.select {
+  padding-right: 1.9em;
   background-image: linear-gradient(to bottom left, var(--dim) 50%, transparent 50%), linear-gradient(to bottom right, var(--dim) 50%, transparent 50%);
   background-size: 4px 4px; background-repeat: no-repeat;
   background-position: right calc(.75em + 4px) center, right .75em center;
 }
-select:focus { background-image: linear-gradient(to bottom left, var(--cyan) 50%, transparent 50%), linear-gradient(to bottom right, var(--cyan) 50%, transparent 50%); }
-select:disabled { cursor: not-allowed; opacity: .45; }
-option { background: var(--gf-panel-2); color: var(--fg); }
+:where(:root:not(.by-pointer)) .select:focus-visible, .select[aria-expanded="true"] { background-image: linear-gradient(to bottom left, var(--cyan) 50%, transparent 50%), linear-gradient(to bottom right, var(--cyan) 50%, transparent 50%); }
 input:is([type=checkbox], [type=radio]):not(.switch > input) {
   appearance: none; -webkit-appearance: none; flex: none; width: 14px; height: 14px; margin: 0; padding: 0;
   display: inline-grid; place-content: center; vertical-align: -2px; cursor: pointer;
@@ -158,7 +158,7 @@ input[type=checkbox]:not(.switch > input):checked::after {
   content: ''; width: 3px; height: 7px; margin-top: -2px; border: solid var(--gf-teal-ink); border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
 input[type=radio]:not(.switch > input):checked::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--gf-teal-ink); }
-input:is([type=checkbox], [type=radio]):not(.switch > input):focus-visible { box-shadow: var(--focus); }
+:where(:root:not(.by-pointer)) input:is([type=checkbox], [type=radio]):not(.switch > input):focus-visible { box-shadow: var(--focus); }
 input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: not-allowed; opacity: .45; }
 .pill { border-radius: var(--r); font: 600 12px/1.6 var(--sans); padding: 0 .55em; }
 .pill.sm { font-size: 11.5px; }
@@ -174,7 +174,7 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .card, .stat, .row-item, .free, .opt, .island, .fleet, .att, .bubble, .ask, .empty, .ocean, .menu, .toast, .tools ul, .md pre, .md .md-code, .ask-cmd {
   border-radius: var(--r);
 }
-.card:hover, .card:focus-visible, .row-item:hover { background: var(--panel2); border-color: #34404c; }
+.card:hover, :where(:root:not(.by-pointer)) .card:focus-visible, .row-item:hover { background: var(--panel2); border-color: #34404c; }
 .card { padding: 11px 14px 11px 15px; }
 .card::before { width: 2px; }
 .card h3, .row-item b, .fleet-name, .island-name, .tree-name, .stat b { font-family: var(--mono); }
@@ -200,7 +200,7 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .term, .md pre, .md .md-code, .ask-cmd { background: var(--gf-abyss); }
 .tree-glyph { display: inline-grid; place-items: center; }
 .menu { box-shadow: var(--gf-shadow-2); }
-.menu button { border-radius: 0; display: flex; align-items: center; gap: .55em; }
+.menu > button, .select-opt { border-radius: 0; display: flex; align-items: center; gap: .55em; }
 .toast { border-left-width: 2px; box-shadow: var(--gf-shadow-2); animation: none; }
 
 /* ── lights: square LEDs with a hard bezel, as on a terminal ──── */

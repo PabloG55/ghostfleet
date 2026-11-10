@@ -3,7 +3,8 @@
 // Codex/Gemini as tools inside Claude. Everything here is server/ai-account.mjs's view.
 import { useState, useEffect } from 'preact/hooks';
 import { api } from '../api.js';
-import { Btn, toast } from '../../../../../web/ui/ui.jsx';
+import { Btn, Confirm, toast } from '../../../../../web/ui/ui.jsx';
+import { Select } from '../../../../../web/ui/select.jsx';
 import { Avatar } from '../avatar.jsx';
 import { t, locale } from '../i18n.js';
 import { worded } from '../../../shared/i18n/index.js';
@@ -20,6 +21,7 @@ export function AiAccount({ ctx }) {
   const [agree, setAgree] = useState(false);
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
+  const [delKey, setDelKey] = useState(false);
   useEffect(() => { api.aiAccount().then(setV).catch(e => setErr(e.message)); }, []);
   const act = async (b, ok) => {
     setBusy(true);
@@ -103,8 +105,13 @@ export function AiAccount({ ctx }) {
           <input type="password" autocomplete="off" spellcheck={false} placeholder={v.key.set ? t('ai.keyReplace') : 'sk-ant-…'}
                  value={key} onInput={(e) => setKey(e.currentTarget.value)} aria-label={t('aimode.api-key.name')} />
           <Btn kind="ghost" type="submit" disabled={!key || busy}>{t('common.save')}</Btn>
-          {v.key.set ? <Btn kind="danger" disabled={busy} onClick={() => confirm(t('ai.keyDelAsk')) && act({ action: 'clear-key' }, t('ai.keyDeleted'))}>{t('common.delete')}</Btn> : null}
+          {v.key.set ? <Btn kind="danger" disabled={busy} onClick={() => setDelKey(true)}>{t('common.delete')}</Btn> : null}
         </form>
+        {/* the app's own confirm, not the browser's grey system box, which is titled with the
+            server's address */}
+        {delKey ? <Confirm title={t('ai.keyDelAsk')} danger action={t('common.delete')}
+                           body={<p>{t('ai.keySaved')} <code>{v.key.hint}</code></p>}
+                           onYes={() => act({ action: 'clear-key' }, t('ai.keyDeleted'))} onClose={() => setDelKey(false)} /> : null}
         <p class="muted small">{t('ai.keyHow1')} <code>apiKeyHelper</code>{t('ai.keyHow2')}</p>
       </section>
 
@@ -115,11 +122,10 @@ export function AiAccount({ ctx }) {
           {ctx.users.map(u => (
             <div class="row-item static" key={u.id}>
               <Avatar user={u} /> <b class="grow">{u.name}</b>
-              <select aria-label={t('ai.profileOf', { name: u.name })} value={v.perUser[u.id] || ''} disabled={busy}
-                      onChange={(e) => act({ action: 'per-user', user: u.id, profile: e.currentTarget.value }, t('ai.profileSaved'))}>
-                <option value="">— {t('ai.noProfile')} —</option>
-                {[...new Set([...profiles, ...(v.perUser[u.id] ? [v.perUser[u.id]] : [])])].map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
+              <Select class="ai-profile" aria-label={t('ai.profileOf', { name: u.name })} value={v.perUser[u.id] || ''} disabled={busy}
+                      onChange={(p) => act({ action: 'per-user', user: u.id, profile: p }, t('ai.profileSaved'))}
+                      options={[{ value: '', label: `— ${t('ai.noProfile')} —` },
+                        ...[...new Set([...profiles, ...(v.perUser[u.id] ? [v.perUser[u.id]] : [])])].map(p => ({ value: p, label: p }))]} />
             </div>
           ))}
         </div>

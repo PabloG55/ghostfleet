@@ -3,10 +3,13 @@ import { STATUS, StatusMark, statusOf, StatusPill, Btn, usePoll, ago, toast, Mod
 import { SessionView } from './session.jsx';
 import { t, locale, worded } from './i18n.js';
 import { Icon } from './icon.jsx';
+import { Select } from './select.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKeys, moveFocus, dirOf, typeIntoComposer, focusComposer, projectTo } from './keyboard.jsx';
 import { cycleName } from './keys.js';
 import { ProjectTabs, ToolPanel } from './terminal.jsx';
+import { useKept } from './back.jsx';
+import { back } from './history.js';
 
 // Grouped by what each one asks of a person, in the order it should be looked at.
 const GROUPS = Object.values(worded({
@@ -44,14 +47,15 @@ export function Card({ c, active, compact, onOpen }) {
 
 // Slots (adapter.jsx): `filterChips({ cards, filter, setFilter })` draws a row of filters over
 // the groups and `filterCards(cards, filter)` applies the one picked — the team app's "mine",
-// "of a teammate", "nobody's". The filter is a plain value this view keeps ('all' to start),
-// so an app with no filters shows every card.
+// "of a teammate", "nobody's". The filter is a value this view keeps per history entry ('all'
+// to start), so a page gone back to has the chip that was picked; an app with no filters shows
+// every card.
 const allCards = (cards) => cards;
 export function ProjectView({ project, session, tool = null }) {
   const fleet = useFleet();
   const filterCards = useSlot('filterCards', allCards), filterChips = useSlot('filterChips');
   const { data: g, error, reload } = usePoll(() => fleet.grid(project), 3000, [project]);
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useKept('project.filter', 'all');
   const [spawn, setSpawn] = useState(null);
   const [confirm, setConfirm] = useState(null);
 
@@ -75,8 +79,10 @@ export function ProjectView({ project, session, tool = null }) {
   // The desk's keys, the grid's or an attached session's (keyboard.jsx; README "The keys").
   // Digits count the cards in the fleet's own order, the desk's numbering, not the groups'.
   const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
-  // ` from a session is tmux's detach: a worker goes back to its grid, the master to Projects.
-  const sessionBack = () => fleet.go(current?.lead ? '/' : projectTo(project));
+  // ` from a session is tmux's detach, and here it is back (history.js): to the screen the
+  // session was opened from, the same step as the browser's back and the session's ← link. A
+  // session opened by a link has no such screen and goes to its project's sessions.
+  const sessionBack = () => back(projectTo(project));
   const cycle = (d) => {
     const cs = g?.cards || [];
     const names = [...cs.filter(c => c.lead), ...cs.filter(c => !c.lead)].map(c => c.name);
@@ -159,13 +165,14 @@ export function ProjectView({ project, session, tool = null }) {
       <div class="split">
         <aside class="split-list">
           <div class="split-head">
-            <button class="link" onClick={() => fleet.go(`/p/${encodeURIComponent(project)}`)}>← {project}</button>
+            {/* the list's name, not a back: the session's own ← says where back goes */}
+            <a class="link split-name" href={`#${projectTo(project)}`}>{project}</a>
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current} tool={tool}
-                     onChanged={reload} onGone={() => fleet.go(`/p/${encodeURIComponent(project)}`)} />
+                     onChanged={reload} onGone={sessionBack} />
         {modals}
       </div>
     );
@@ -290,21 +297,18 @@ function NewSession({ project, free, preset, onClose, onDone }) {
                     placeholder={t('project.whatPh')} /></label>
         <div class="grid2">
           {spawnOwner({ value: owner, onChange: setOwner })}
-          <label class="field"><span>{t('project.where')}</span>
-            <select value={where} onChange={(e) => setWhere(e.currentTarget.value)}>
-              <option value="new">{t('project.newWt')}</option>
-              {free.map(w => <option key={w.path} value={w.path}>{t('project.reuse', { name: w.path.split('/').pop(), branch: w.branch })}</option>)}
-            </select></label>
+          <Select label={t('project.where')} value={where} onChange={setWhere}
+                  options={[{ value: 'new', label: t('project.newWt') },
+                    ...free.map(w => ({ value: w.path, label: t('project.reuse', { name: w.path.split('/').pop(), branch: w.branch }) }))]} />
         </div>
         <details class="advanced">
           <summary>{t('project.advanced')}</summary>
           <div class="grid3">
             <label class="field"><span>{t('project.branch')}</span><input value={branch} onInput={(e) => setBranch(e.currentTarget.value)} placeholder={n || t('project.sameAsName')} /></label>
             <label class="field"><span>{t('project.from')}</span><input value={from} onInput={(e) => setFrom(e.currentTarget.value)} placeholder={t('project.fromPh')} /></label>
-            <label class="field"><span>{t('project.model')}</span>
-              <select value={model} onChange={(e) => setModel(e.currentTarget.value)}>
-                <option value="">{t('project.accountModel')}</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option>
-              </select></label>
+            <Select label={t('project.model')} value={model} onChange={setModel}
+                    options={[{ value: '', label: t('project.accountModel') }, { value: 'opus', label: 'Opus' },
+                      { value: 'sonnet', label: 'Sonnet' }, { value: 'haiku', label: 'Haiku' }]} />
           </div>
         </details>
         {err ? <p class="err">{err}</p> : null}

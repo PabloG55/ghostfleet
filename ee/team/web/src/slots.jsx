@@ -4,6 +4,7 @@
 // closed over the signed-in context, so the shared screens draw them without knowing what a user is.
 import { api } from './api.js';
 import { toast } from '../../../../web/ui/ui.jsx';
+import { Select } from '../../../../web/ui/select.jsx';
 import { Avatar } from './avatar.jsx';
 import { t } from './i18n.js';
 
@@ -12,7 +13,9 @@ export function teamSlots(ctx) {
   const others = (here) => (here || []).filter(h => h.user !== ctx.me.id);
   return {
     ownerName: (s) => user(s.owner)?.name || null,
-    ownerBadge: (s, size) => { const u = user(s.owner); return u ? <Avatar user={u} size={size} /> : null; },
+    // On a ship, and in the ship's card beside the name (web/ui/shiptip.jsx): the card says who it
+    // is, so the badge draws no native tooltip of its own over it.
+    ownerBadge: (s, size) => { const u = user(s.owner); return u ? <Avatar user={u} size={size} title={null} /> : null; },
 
     cardFoot: (c) => {
       const owner = user(c.owner), o = others(c.here);
@@ -47,23 +50,19 @@ export function teamSlots(ctx) {
     },
     // A new session is the asker's unless they pick someone else; undefined means the asker.
     spawnOwner: ({ value, onChange }) => (
-      <label class="field"><span>{t('project.owner')}</span>
-        <select value={value ?? ctx.me.id} onChange={(e) => onChange(e.currentTarget.value)}>
-          {ctx.users.map(u => <option key={u.id} value={u.id}>{u.id === ctx.me.id ? `${u.name} (${t('project.me')})` : u.name}</option>)}
-        </select></label>
+      <Select label={t('project.owner')} value={value ?? ctx.me.id} onChange={onChange}
+              options={ctx.users.map(u => ({ value: u.id, label: u.id === ctx.me.id ? `${u.name} (${t('project.me')})` : u.name }))} />
     ),
 
     ownerPicker: ({ project, name, owner, onChanged }) => (
-      <label class="owner-pick" title={t('sess.ownerOf')}>
-        <Avatar user={user(owner)} size={24} />
-        <select value={owner || ''} onChange={async (e) => {
-          try { await api.assign(project, name, e.currentTarget.value || null); onChanged(); }
-          catch (x) { toast(x.message, 'bad'); }
-        }}>
-          <option value="">{t('ui.noOwner')}</option>
-          {ctx.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-        </select>
-      </label>
+      <Select class="owner-pick" aria-label={t('sess.ownerOf')} title={t('sess.ownerOf')} value={owner || ''}
+              placeholder={t('ui.noOwner')}
+              options={[{ value: '', label: t('ui.noOwner'), icon: <Avatar user={null} size={22} /> },
+                ...ctx.users.map(u => ({ value: u.id, label: u.name, icon: <Avatar user={u} size={22} /> }))]}
+              onChange={async (v) => {
+                try { await api.assign(project, name, v || null); onChanged(); }
+                catch (x) { toast(x.message, 'bad'); }
+              }} />
     ),
     presence: (here) => {
       const o = others(here);

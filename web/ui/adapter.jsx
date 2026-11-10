@@ -14,7 +14,8 @@
 //   attachPerMessage                  number                           how many files one message takes
 //   lead(project)                     → { session, … }                 open the lead (master) session
 //   presence(project, session, typing)  optional: say who is looking
-//   go(to)                            navigate to a hash route
+//   go(to, { replace? })              navigate to a hash route; history.js's go() is the one to pass
+//   place(route)                      optional: what an app's own route is called on a back link
 //   slots                             an app's own pieces (below)
 //
 // Slots are how an app puts something of its own into a shared screen without the screen
