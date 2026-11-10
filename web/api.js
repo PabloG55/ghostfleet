@@ -15,7 +15,9 @@
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 //   GET  /api/usage                             -> { enabled, off?, threshold, profiles: [ accounts.mjs describe() ] }
+//   GET  /api/logins                            -> { items: pending authorizations, each with its session and host }
 //   POST /api/verb   { tool, args }             -> { ok, text }        (Bearer token required)
+//     fleet_login_finish uses finishLogin() below: its callback must bypass verb history.
 //   GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 //   POST /api/auth/register { code, … }         -> { token, expires_at }
 //   POST /api/auth/assert                       -> { token, expires_at }
@@ -435,6 +437,27 @@ export async function getWaiting() {
     return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
   });
   return { ...j, items };
+}
+
+export async function getLogins() {
+  if ((await ready()).mode !== 'server') {
+    try { return await fixture('logins.json'); } catch { return { items: [] }; }
+  }
+  try { return await get('/api/logins'); }
+  catch (e) { if (e?.status === 404) return { items: [] }; throw e; }
+}
+
+// Deliberately outside verb(): that path records arguments in the client history.
+// The pasted callback lives only in this request body, never in history or a transcript.
+export async function finishLogin(project, id, callback, assertion) {
+  try {
+    const r = await fetch(baseUrl() + '/api/verb', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
+        'X-Fleet-Assertion': JSON.stringify(assertion) },
+      body: JSON.stringify({ tool: 'fleet_login_finish', args: { project, id, callback } }) });
+    slid(r);
+    return await r.json();
+  } catch { return { ok: false, text: 'could not reach the login host' }; }
 }
 
 // ── reviews: the runs fleet-shots recorded ──────────────────────────────────

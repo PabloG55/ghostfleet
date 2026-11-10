@@ -21321,6 +21321,25 @@ else
   skip "Jarvis experimental switch" "tmux or node missing"
 fi
 
+# ── MCP authorization from the phone, including the paired host ─────────────
+group "MCP phone login: two hosts, replay refusals, secret hygiene and cards"
+if command -v node >/dev/null 2>&1; then
+  MPL="$(mktemp -d "$TEST_RUNS.$$.login.XXXXXX")"
+  node "$ROOT/test/helpers/mcp-login-check.mjs" > "$MPL/hosts" 2> "$MPL/hosts.err"
+  is "MCP two-host helper ran" "0" "$?"
+  is "...without complaining" "" "$(cat "$MPL/hosts.err")"
+  is "...and produced its host checks" "yes" "$([ "$(wc -l < "$MPL/hosts")" -ge 75 ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$MPL/hosts"
+  node "$ROOT/test/helpers/login-card-check.mjs" > "$MPL/cards" 2> "$MPL/cards.err"
+  is "MCP card helper ran" "0" "$?"
+  is "...without browser errors" "" "$(cat "$MPL/cards.err")"
+  is "...and produced its card checks" "yes" "$([ "$(wc -l < "$MPL/cards")" -ge 60 ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$MPL/cards"
+  rm -rf "${MPL:?}"
+else
+  skip "MCP phone login" "node missing"
+fi
+
 # ── one web client, several machines: two fleet-serves, paired ───────────────
 # The owner runs a fleet on a laptop and on an always-on VM, and each was an app of its own
 # with a passkey of its own. Now `fleet-serve pair` joins two daemons once, and the one the

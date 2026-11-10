@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 89055f618579
+// CLIENT-HASH: a9133a66f56c
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -444,9 +444,10 @@
 // query and reopens whatever the last tab stored.
 // v100 adds Automations (experimental): a menu entry on Projects while the Mac's switch is
 // on, and their screen. A phone on v99 has neither, and the Mac runs them all the same.
-const VERSION = 'ghostfleet-v100';
+// v101 adds pending MCP authorizations, including sessions reached through a paired host.
+const VERSION = 'ghostfleet-v101';
 const SHELL = [
-  './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
+  './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js', './grid-search.js', './place.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,

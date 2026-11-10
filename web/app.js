@@ -75,6 +75,7 @@ const S = {
   pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
   talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
   waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
+  logins: [],           // callback drafts stay in their input element, never application state
   usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
   wantWaiting: false,   // a "waiting on you" notification was tapped; open the queue once unlocked
   qsel: 0,              // the queue's cursor, for the desk's keys (index into S.waiting)
@@ -273,6 +274,7 @@ async function refreshOnce() {
         S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
         api.getWaiting().then((j) => { S.waiting = j && Array.isArray(j.items) ? j.items : null; },
                               (e) => { if (e instanceof api.AuthError) throw e; }),
+        api.getLogins().then(j => { S.logins = j?.items || []; }, e => { if (e instanceof api.AuthError) throw e; }),
         // THE REVIEWS ROW: null is the switch off (or a daemon older than Reviews), and no row.
         api.getShots().then((j) => { S.shots = j; }, (e) => { if (e instanceof api.AuthError) throw e; }),
         // THE ACCOUNTS LINE, on its own slower clock (readUsage), and allowed to fail like the rest.
@@ -1111,6 +1113,7 @@ function projectsProps() {
     // answered yet and gets the wait.
     cards: S.projects == null ? skeletonCards(4) : [
       ...usageCards(),
+      ...loginCards(),
       ...queueRow(),
       ...reviewsRow(),
       ...visibleProjects().map(({ p, i }) =>
@@ -1400,12 +1403,66 @@ function queueProps() {
     confirm: null,
     // The same cards, in the same order, with the same tap as on Projects before: the
     // answer sheet. Null is "not read yet" and gets the wait, as on Projects.
-    cards: S.waiting == null ? skeletonCards(2)
+    cards: [...loginCards(), ...(S.waiting == null ? skeletonCards(2)
       : rows.length ? rows.map((r, i) => cardEl({ ...waitingModel(r), selected: i === S.qsel }, { tap: () => (r.state === 'held' ? openHeld(r) : sheetReply(r)) }, -1))
-      : [el('div', { class: 'sect', text: 'nothing is waiting on you' })],
+      : [el('div', { class: 'sect', text: 'nothing is waiting on you' })])],
     listRef: (list) => { if (list) watchScroll('queue', list); },
     toast: S.toast,
   };
+}
+
+// The same needs-you card, fields and button row as the permission sheets. A poll never
+// keeps a callback draft: the DOM owns it and Finish clears it before its first await.
+const loginResults = new Map();
+export function loginCard(row) {
+  const left = Math.max(0, Math.ceil((row.expires - Date.now()) / 1000));
+  const status = loginResults.get(row.id) || row.status;
+  const pending = status === 'pending' && left > 0;
+  const card = cardEl({ kind: 'waiting', title: row.provider, color: pending ? 'red' : '', selected: false,
+    statusLabel: row.server, where: `${row.session} · ${row.host || 'this host'} · ${row.project}`,
+    msg: row.kind === 'connector' ? `claude.ai ${row.connector}` : pending ? 'authorization needs you' : status === 'pending' ? 'expired' : status,
+    need: row.first_site ? 'first time for this site — check the provider before opening' : '',
+  }, {}, -1);
+  card.classList.add('login-card');
+  if (row.first_site) card.querySelector('.c-need')?.classList.add('warn');
+  card.dataset.login = row.id;
+  if (pending || row.kind === 'connector') {
+    const actions = el('div', { class: 'row' });
+    actions.append(el('a', { class: 'b', text: row.kind === 'connector' ? 'Open connector settings' : 'Open',
+      href: row.authorize, target: '_blank', rel: 'noopener noreferrer', referrerpolicy: 'no-referrer' }));
+    card.append(actions);
+    if (row.kind === 'loopback') {
+      const input = el('input', { type: 'text', placeholder: 'Paste the full redirect URL',
+        'aria-label': 'Full redirect URL', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+      const result = el('div', { class: 'c-need', role: 'status' });
+      const finish = btn('Finish — passkey', async () => {
+        // Start WebAuthn on the tap. Never store the paste in S, storage, or a toast.
+        let callback = input.value; input.value = ''; finish.disabled = true;
+        try {
+          const assertion = await assertFor('finish login');
+          const r = await api.finishLogin(row.project, row.id, callback, assertion);
+          callback = '';
+          result.textContent = r.text;
+          if (r.ok) { loginResults.set(row.id, 'done'); input.remove(); finish.remove(); }
+        } catch { result.textContent = 'passkey confirmation failed'; }
+        finally { callback = ''; input.value = ''; finish.disabled = false; }
+      });
+      card.append(el('div', { class: 'field' }, [input]), el('div', { class: 'row' }, [finish]), result);
+      const countdown = el('div', { class: 'c-need', 'data-login-expires': String(row.expires),
+        text: `expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` });
+      card.append(countdown);
+    }
+  }
+  return card;
+}
+function loginCards() { return (S.logins || []).map(loginCard); }
+// Update text in place, keeping a pasted field intact between app refreshes.
+function tickLoginCountdown() {
+  for (const node of document.querySelectorAll('[data-login-expires]')) {
+    const left = Math.max(0, Math.ceil((Number(node.dataset.loginExpires) - Date.now()) / 1000));
+    node.textContent = left ? `expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'expired';
+    if (!left) for (const control of node.closest('.login-card').querySelectorAll('input, button')) control.disabled = true;
+  }
 }
 // ── reviews: what fleet-shots recorded, and the verdict on it ─────────────────
 // THE REVIEW PAGE MOVED HERE FROM `fleet-shots serve`, which listened on loopback and so
@@ -6308,6 +6365,7 @@ export function pollPaused() {
 // them is which other states they add to it, and that difference is the bug this split
 // exists to fix.
 export function typingNow() {
+  if (document.activeElement?.closest?.('.login-card') && document.activeElement?.tagName === 'INPUT') return true;
   // Typing counts. refresh() ends in a render, render() empties #app and rebuilds it, so
   // a poll that lands while the composer has focus destroys the element the keyboard is
   // attached to. Reported as "it hides the keyboard every time, I cannot type for more
@@ -9117,6 +9175,7 @@ pk.resume().then((r) => {
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new
 // machinery. Paused while a form or a confirmation is open — a redraw under a
 // half-typed prompt is how you lose it.
+setInterval(tickLoginCountdown, 1000);
 setInterval(() => {
   if (pollPaused()) return;
   if (takeNewClientIfIdle()) return;       // a newer client was waiting for you to stop typing
