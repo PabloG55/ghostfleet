@@ -7,7 +7,7 @@
 // Skipped, saying why, where there is no Chrome or no build (`pnpm build` first): the page it
 // drives is the built one, served by the server as it is in production.
 //
-// GFW_TERM_SHOTS=<folder> also writes a screenshot of each state, at 1440×900, in
+// GFW_TERM_SHOTS=<folder> also writes a screenshot of each state, at 1440×900 and 390×844, in
 // English and Spanish, for a person to look at. Nothing asserts on pixels.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,6 +87,11 @@ async function click(p, sel) {
   await p.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
   await p.call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
   await p.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+}
+async function tap(p, sel, text = null) {
+  const { x, y } = await center(p, sel, text);
+  await p.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+  await p.call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 }
 const KEYS = {
   Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
@@ -388,6 +393,80 @@ test('a desk: who sees the tabs, typing, keys, back, and every way a tab closes'
   if (SHOTS) await t.test('screenshots', () => shootAll(b, p, r, 'desk', cookie.admin, (ms) => r.advance(clock + ms)));
 });
 
+// The phone: the same terminal, with the phone client's key row, A− A+ and the keyboard
+// button, and no zoom or sideways scroll. Then the screenshots, in both languages and both widths.
+test('a phone: the key row, the keyboard button, no zoom and no sideways page', { skip, timeout: 240000 }, async (t) => {
+  const r = await rig(t);
+  const b = await launch({ width: 390, height: 844, scale: 2, mobile: true });
+  t.after(() => b.close());
+  await b.call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const member = await r.login('member');
+  const admin = SHOTS ? await r.login('admin') : null;
+  const p = await page(b, r);
+  await signIn(p, member);
+
+  await t.test('the terminal opens with the key row, and waits for its button to raise the keyboard', async () => {
+    await p.open(SESSION);
+    await tap(p, '.tool-tab[href$="/term"]');
+    await opened(p);
+    assert.equal(await p.evaluate(() => document.querySelectorAll('.tool-keys:not([hidden]) .tk-band').length), 2);
+    const labels = await p.evaluate(() => [...document.querySelectorAll('.tool-keys .tk')].map(e => e.textContent));
+    for (const k of ['Esc', 'Tab', 'Ctrl', '↑', '↓', '←', '→']) assert.ok(labels.includes(k), `no ${k} key: ${labels}`);
+    // The keyboard is a sprite, not the phone client's keyboard character (no-emoji.test.mjs).
+    assert.deepEqual(await p.evaluate(() => [...document.querySelectorAll('.tool-tools .tt')]
+      .map(e => `${e.getAttribute('aria-label')}: ${e.querySelector('svg.px-ico path') ? 'sprite' : e.textContent}`)),
+      ['Smaller text: A−', 'Larger text: A+', 'Keyboard: sprite']);
+    assert.equal(await inTerminal(p), false, 'the keyboard came up by itself');
+    await tap(p, '.tool-tools .tt.kbd');
+    await until(p, () => document.activeElement?.classList.contains('xterm-helper-textarea'), 'the keyboard button to raise the keyboard');
+  });
+
+  await t.test('the key row sends its keys and keeps the keyboard up', async () => {
+    for (const [label, byte] of [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A']]) {
+      const n = (await sent(p)).length;
+      await tap(p, '.tool-keys .tk', label);
+      await until(p, (n) => window.__ws.at(-1).sent.length > n, `${label} to be sent`, 5000, n);
+      assert.equal((await sent(p)).slice(n).join(''), byte, label);
+      assert.ok(await inTerminal(p), `${label} took the focus away`);
+    }
+    const n = (await sent(p)).length;
+    await tap(p, '.tool-keys .tk', 'Ctrl');           // latched for the next key
+    await p.call('Input.insertText', { text: 'c' });
+    await until(p, (n) => window.__ws.at(-1).sent.length > n, 'Ctrl-c to be sent', 5000, n);
+    assert.equal((await sent(p)).slice(n).join(''), '\x03');
+  });
+
+  await t.test('focusing it never zooms the page, and nothing scrolls the page sideways', async () => {
+    assert.ok(await p.evaluate(() => parseFloat(getComputedStyle(document.activeElement).fontSize) >= 16), 'a text box under 16px zooms iOS');
+    const wide = await p.evaluate(() => ({ doc: document.documentElement.scrollWidth, main: document.querySelector('.main').scrollWidth,
+                                           mainW: document.querySelector('.main').clientWidth, w: innerWidth }));
+    assert.ok(wide.doc <= wide.w && wide.main <= wide.mainW, JSON.stringify(wide));
+    const px = await p.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.tool-host .xterm-rows')).fontSize));
+    await tap(p, '.tool-tools .tt[aria-label="Larger text"]');
+    await until(p, (px) => parseFloat(getComputedStyle(document.querySelector('.tool-host .xterm-rows')).fontSize) > px, 'A+ to grow the text', 5000, px);
+    assert.equal(await p.evaluate(() => localStorage.getItem('gfw.termFont')), String(px + 1));
+  });
+
+  await t.test('nothing floats over the key row, and the open tab is in its bar', async () => {
+    // The assistant's button is fixed to the corner, and the panel runs to the column's foot.
+    for (const route of [`${SESSION}/term`, `${PROJECT}/edit`, `${SESSION}/edit`]) {
+      await p.open(route);
+      await opened(p, route.slice(-4));
+      const hit = await p.evaluate(() => {
+        const box = (s) => document.querySelector(s)?.getBoundingClientRect();
+        const k = box('.tool-keys'), h = box('.tool-host'), a = box('.as-launch');
+        const over = (x) => !!a && !!x && x.left < a.right && a.left < x.right && x.top < a.bottom && a.top < x.bottom;
+        const tab = box('.tool-tab.on'), bar = document.querySelector('.tool-tab.on')?.parentElement.getBoundingClientRect();
+        return { launcher: !!a, keys: over(k), host: over(h), inBar: !!tab && tab.left >= bar.left - 1 && tab.right <= bar.right + 1 };
+      });
+      assert.ok(hit.launcher, 'no launcher to clear: the check proves nothing');
+      assert.deepEqual(hit, { launcher: true, keys: false, host: false, inBar: true }, route);
+    }
+  });
+
+  if (SHOTS) await t.test('screenshots', () => shootAll(b, p, r, 'phone', admin, (ms) => r.advance(ms)));
+});
+
 // Every state a person can see, for a person to look at: the terminal and the editor open, on
 // the session page and on the project page, and each notice. In English and in Spanish. The
 // notices whose cause cannot be made on demand in the demo (no editor, a temporary password,
@@ -397,7 +476,7 @@ test('a desk: who sees the tabs, typing, keys, back, and every way a tab closes'
 async function shootAll(b, p, r, dev, cookie, advance) {
   let clock = 0;
   const later = (ms) => { clock += ms; advance(clock); };
-  const hit = click;
+  const hit = dev === 'phone' ? tap : click;
   const only = (path, answer) => async (n, q) => (q.request.url.includes(path) ? answer() : null);
   await p.evaluate(() => { try { localStorage.removeItem('gfw.termFont'); } catch {} });   // the size a person starts at
   for (const lang of ['en', 'es']) {

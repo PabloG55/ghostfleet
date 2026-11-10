@@ -137,6 +137,11 @@
    needs the same, or its newest message ends under the button even scrolled to the end. */
 .app:has(.as-launch) .chat { padding-bottom: 60px; }
 @media (max-width: 900px) { .app:has(.as-launch) .chat { padding-bottom: 50px; } }
+/* A Terminal or Editor tab (web/ui/terminal.css) fills the column to its foot, so the button
+   sat over its last row and, on a phone, over half the key row. Cleared the way the chat is:
+   the button's bottom offset plus its height, and a gap. */
+.app:has(.as-launch) .tool { padding-bottom: 62px; }
+@media (max-width: 900px) { .app:has(.as-launch) .tool { padding-bottom: 56px; } }
 
 /* ── phase 3: home agent, console, picker, tree ──────── */
 .home-agent { background: linear-gradient(180deg, rgba(95,215,215,.07), rgba(95,215,215,.015)); border: 1px solid rgba(95,215,215,.28);

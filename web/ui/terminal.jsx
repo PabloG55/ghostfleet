@@ -2,9 +2,10 @@
 // half of the server's terminal contract (ee/team/server/TERMINAL.md).
 //
 // ONE ENGINE. The terminal itself is web/term.js, the phone client's, over the same vendored
-// xterm.js: the same bytes for every key. This file lays it out, gets it a ticket and says what
-// each way of closing means. It is imported on demand, so xterm.js is a chunk of its own and
-// nobody who never opens a shell downloads it.
+// xterm.js: the same bytes for a key, the same key row, the same pinch and the same opening
+// font. This file lays it out, gets it a ticket and says what each way of closing means. It is
+// imported on demand, so xterm.js is a chunk of its own and nobody who never opens a shell
+// downloads it.
 //
 // PROJECT-LEVEL. The server keeps one shell tab and one editor tab per PROJECT
 // (`_term-<project>`, `_edit-<project>`), not one per session, so the Terminal opened from a
@@ -33,6 +34,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { sessionTo, projectTo } from './keyboard.jsx';
 import { Btn, toast } from './ui.jsx';
+import { Icon } from './icon.jsx';
 import { t } from './i18n.js';
 
 export const TOOL_KINDS = ['term', 'edit'];
@@ -50,9 +52,19 @@ const offers = (fleet, project) => typeof fleet.canTerm === 'function' && typeof
 // may not type into the project: a viewer never sees them.
 export function ToolTabs({ project, session, tool }) {
   const fleet = useFleet();
+  const on = useRef(null);
+  // A phone's bar is narrower than four tabs and scrolls inside itself (terminal.css): the open
+  // one is brought into it, or the Editor tab reads as cut in half while it is the one showing.
+  useEffect(() => {
+    const a = on.current, bar = a && a.parentElement;
+    if (!bar) return;
+    const x = a.getBoundingClientRect(), y = bar.getBoundingClientRect();
+    if (x.right > y.right) bar.scrollLeft += x.right - y.right + 16;
+    else if (x.left < y.left) bar.scrollLeft -= y.left - x.left + 16;
+  }, [tool]);
   if (!offers(fleet, project)) return null;
   return TOOL_KINDS.map(k => (
-    <a key={k} role="tab" class={`tool-tab${tool === k ? ' on' : ''}`} aria-selected={tool === k}
+    <a key={k} ref={tool === k ? on : null} role="tab" class={`tool-tab${tool === k ? ' on' : ''}`} aria-selected={tool === k}
        href={`#${toolTo(project, session, k)}`}>{t(`term.tab.${k}`)}</a>
   ));
 }
@@ -70,6 +82,13 @@ export function ProjectTabs({ project, tool }) {
   );
 }
 
+const FONT_KEY = 'gfw.termFont';
+function startFont(T) {
+  if (!T.isTouch()) return 13;
+  let v = 0;
+  try { v = Number(localStorage.getItem(FONT_KEY)) || 0; } catch {}
+  return v >= T.FONT_MIN && v <= T.FONT_MAX ? v : T.defaultFont();
+}
 // A key or a tap that must not move the focus: the terminal keeps it, and on a phone the
 // on-screen keyboard stays up. The press acts on its click.
 const keepFocus = (e) => e.preventDefault();
@@ -107,10 +126,10 @@ function Away({ to }) {
   return null;
 }
 
-// The open tab: a bar (what it is, and how to leave), a notice when it is not connected, and
-// the terminal. Mounted with a key per project and kind, so switching tabs is a new terminal and
-// a new ticket. An address typed or pasted by someone who may not open it (a viewer) goes to its
-// page instead.
+// The open tab: a bar (what it is, how to leave, and on touch the A− A+ and keyboard of the phone
+// client), a notice when it is not connected, the terminal, and on touch the key row. Mounted
+// with a key per project and kind, so switching tabs is a new terminal and a new ticket. An
+// address typed or pasted by someone who may not open it (a viewer) goes to its page instead.
 export function ToolPanel(props) {
   const fleet = useFleet();
   if (!offers(fleet, props.project)) return <Away to={baseTo(props.project, props.session)} />;
@@ -118,13 +137,14 @@ export function ToolPanel(props) {
 }
 function Panel({ project, session, kind }) {
   const fleet = useFleet();
-  const panel = useRef(null), host = useRef(null);
+  const panel = useRef(null), host = useRef(null), row = useRef(null);
   const h = useRef(null);
   // What the callbacks term.js holds need to read now, not at the render they were made in.
-  const live = useRef({ alive: true, hello: false, retried: false, idle: 1800 });
+  const live = useRef({ alive: true, hello: false, retried: false, idle: 1800, touch: false });
   const [phase, setPhase] = useState('loading');           // loading → opening → open | closed
   const [notice, setNotice] = useState(null);
   const [focused, setFocused] = useState(false);
+  const [touch, setTouch] = useState(false);
   const [tab, setTab] = useState(`_${kind}-${project}`);
   const back = baseTo(project, session);
 
@@ -196,6 +216,8 @@ function Panel({ project, session, kind }) {
       try { T = await import('../term.js'); }
       catch (e) { say('failed', e && e.message); return; }
       if (!L.alive || !host.current) return;
+      L.touch = T.isTouch();
+      setTouch(L.touch);
       h.current = T.mount(host.current, {
         socket: fleet.termSocket,
         onState,
@@ -203,10 +225,13 @@ function Panel({ project, session, kind }) {
         onLeave: leave,
         onFocus: (up) => { if (L.alive) setFocused(up); },
         onCopy: () => toast(t('term.copied'), 'good'),
-        fontSize: 13,
+        fontSize: startFont(T),
+        onFont: (px) => { if (L.touch) try { localStorage.setItem(FONT_KEY, String(px)); } catch {} },
       });
-      // The terminal takes the keyboard at once, as the phone client's does.
-      h.current.focus();
+      if (L.touch && row.current && !row.current.firstChild) T.keyRow(row.current, () => h.current);
+      // At a desk the terminal takes the keyboard at once, as the phone client's does. On a
+      // phone the keyboard waits for its button: raised by itself it would cover half the screen.
+      if (!L.touch) h.current.focus();
       open();
     })();
     return () => { L.alive = false; const x = h.current; h.current = null; if (x) try { x.dispose(); } catch {} };
@@ -220,23 +245,35 @@ function Panel({ project, session, kind }) {
       e.preventDefault(); e.stopPropagation(); enter();
     }
   };
+  const tool = (label, aria, act, cls = '') => (
+    <button type="button" class={`btn ghost tt${cls}`} aria-label={aria} title={aria}
+            onPointerDown={keepFocus} onMouseDown={keepFocus} onClick={() => h.current && act(h.current)}>{label}</button>
+  );
   const ready = phase === 'open';
   return (
-    <section class={`tool k-${kind}`} ref={panel} tabIndex={-1} onKeyDown={onKeyDown}
+    <section class={`tool k-${kind}${touch ? ' touch' : ''}`} ref={panel} tabIndex={-1} onKeyDown={onKeyDown}
              aria-label={t(`term.tab.${kind}`)}>
       <div class="tool-bar">
         <p class="tool-cap">{t(`term.cap.${kind}`, { project })} <code>{tab}</code>
           {phase === 'opening' || phase === 'loading' ? <span class="tool-st"> · {t('term.opening')}</span> : null}</p>
         <div class="tool-acts">
+          {touch ? (
+            <span class="tool-tools">
+              {tool('A−', t('term.smaller'), (x) => x.zoom(-1))}
+              {tool('A+', t('term.larger'), (x) => x.zoom(1))}
+              {tool(<Icon name="keyboard" size={24} />, t('term.keyboard'), (x) => x.keyboard(), ` kbd${focused ? ' on' : ''}`)}
+            </span>
+          ) : null}
           <Btn kind="ghost sm tool-leave" disabled={!ready} onPointerDown={keepFocus} onMouseDown={keepFocus}
                onClick={() => (focused ? leave() : enter())}>
             {t(`term.${focused ? 'leave' : 'enter'}.${kind}`)}
-            <kbd>{focused ? '⇧Esc' : '⏎'}</kbd>
+            {touch ? null : <kbd>{focused ? '⇧Esc' : '⏎'}</kbd>}
           </Btn>
         </div>
       </div>
-      {notice ? <Notice n={notice} kind={kind} fleet={fleet} onAgain={() => { open(); enter(); }} /> : null}
+      {notice ? <Notice n={notice} kind={kind} fleet={fleet} onAgain={() => { open(); if (!live.current.touch) enter(); }} /> : null}
       <div class={`tool-host${ready ? '' : ' off'}`} ref={host} />
+      <div class="tool-keys" ref={row} hidden={!touch} />
     </section>
   );
 }
