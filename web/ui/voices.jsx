@@ -1,16 +1,20 @@
 import { useState, useEffect } from 'preact/hooks';
-import { api } from './api.js';
+import { useFleet } from './adapter.jsx';
 import { speak, playSample, stopSpeaking } from './voice.js';
 import { useAgent, setOption } from './agent.js';
-import { Btn } from '../../../../web/ui/ui.jsx';
+import { Btn } from './ui.jsx';
 import { t } from './i18n.js';
-import { Icon } from '../../../../web/ui/icon.jsx';
+import { Icon } from './icon.jsx';
 
 // Who answers out loud. The ones already on this machine, and Piper's from the internet: those
 // are heard from their sample first, and only downloaded if they are liked.
 const hello = () => t('vp.hello');
 
-export function VoicePicker({ admin = false }) {
+// Installing and deleting are optional members (`installVoice`, `deleteVoice`): the team app
+// offers them to an admin only, and an app without them shows the list to pick from.
+export function VoicePicker() {
+  const api = useFleet();
+  const admin = !!(api.installVoice && api.deleteVoice);
   const S = useAgent();
   const [v, setV] = useState(null);
   const [playing, setPlaying] = useState('');

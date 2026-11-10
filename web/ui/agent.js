@@ -6,10 +6,14 @@
 // one in progress — so it went on listening, or started talking again. Now every re-arm
 // asks `S.conversing` first, and stop() clears it, cancels every timer and silences
 // everything at once.
+//
+// WHICH SERVER IT TALKS TO is the app's (web/ui/adapter.jsx): bind() is handed the adapter, and
+// every call below goes through it — `route`, `tasks`, `taskSent`, `taskPlace`, `taskDone`,
+// `lead`, `act`, `grid`, and `assign` where sessions have owners. The team app answers them from
+// its server; the phone from fleet-serve, with the dispatcher and the list kept on the phone.
 import { useState, useEffect } from 'preact/hooks';
-import { api } from './api.js';
-import { STATUS, statusOf } from '../../../../web/ui/ui.jsx';
-import { voiceStatus, listenLocal, listenBrowser, browserCanHear, speak, stopSpeaking, warmVad, PAUSES } from './voice.js';
+import { STATUS, statusOf } from './ui.jsx';
+import { voiceStatus, voiceBackend, listenLocal, listenBrowser, browserCanHear, speak, stopSpeaking, warmVad, PAUSES } from './voice.js';
 import { command } from './resolve.js';
 // `t` is a task or a transcript all through this file, so the words come in as `tr`.
 import { t as tr } from './i18n.js';
@@ -45,7 +49,7 @@ export function useAgent() {
   return S;
 }
 
-let ctx = null;              // { go, me, projects, route }
+let ctx = null;              // { go, me, projects, route, fleet, app }
 let mic = null;
 // Bumped by stop(). Anything started before it — a transcript still on its way back from
 // whisper, a sentence Kokoro is still making, a re-arm on a timer — checks it and drops itself,
@@ -56,6 +60,8 @@ const later = (ms, fn) => { const t = setTimeout(() => { timers.delete(t); fn();
 const push = (e) => set({ feed: [...S.feed.slice(-60), { id: Math.random(), at: Date.now(), ...e }] });
 const projects = () => ctx?.projects || [];
 const go = (to) => ctx?.go(to);
+// The adapter, or nothing yet: a call made before bind() fails like any call to a server that is down.
+const api = new Proxy({}, { get: (_, k) => ctx?.fleet?.[k] || (() => Promise.reject(new Error(tr('agent.noServer')))) });
 
 // What the lead is told along with the words, so it answers in a way that reads aloud well, in
 // the person's language, and treats a big ask as work to hand out rather than to do in its own turn.
@@ -63,7 +69,7 @@ const go = (to) => ctx?.go(to);
 // emoji, which a transcript written then still carries, so those are matched too (escaped: the
 // source itself stays free of them, test/no-emoji.test.mjs).
 const frame = (text, voice) =>
-  `${voice ? '[voice]' : '[typed]'} ${tr(voice ? 'agent.frame.voice' : 'agent.frame.typed', { name: ctx.me.name })} ${tr('agent.frame.ask')}\n\n${text}`;
+  `${voice ? '[voice]' : '[typed]'} ${tr(voice ? 'agent.frame.voice' : 'agent.frame.typed', { name: ctx?.me?.name || tr('agent.you'), app: ctx?.app || 'ghostfleet' })} ${tr('agent.frame.ask')}\n\n${text}`;
 const FRAME_RE = /^(?:\[(?:voice|typed)\]|\u{1F399}\uFE0F?|\u{1F4AC})[^\n]*\n\n/u;
 export const unframe = (t) => String(t || '').replace(FRAME_RE, '');
 
@@ -323,7 +329,7 @@ async function tick() {
       push({ kind: 'event', text: was == null ? tr('agent.opened', { name: c.name }) : c.lead ? tr('agent.leadIs', { word }) : `${c.name}: ${word}`, session: c.name, project });
       set({ focus: c.name });
       // A session the lead opened because of what this person asked is that person's.
-      if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1000 - sentAt < 900) api.assign(project, c.name, ctx.me.id).catch(() => {});
+      if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1000 - sentAt < 900 && ctx?.fleet?.assign && ctx.me?.id) ctx.fleet.assign(project, c.name, ctx.me.id).catch(() => {});
       const worth = was == null || now === 'need-you' || (now === 'working' && !c.lead);
       if (S.follow && worth && !c.lead && Date.now() - lastGo > 3000) { lastGo = Date.now(); go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(c.name)}`); }
     }
@@ -331,6 +337,7 @@ async function tick() {
 }
 
 export function bind(next) {
+  if (next.fleet !== ctx?.fleet) voiceBackend(next.fleet);
   ctx = next;
   if (!loop) {
     loop = setInterval(tick, 2500);

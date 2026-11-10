@@ -4,6 +4,11 @@ import { api, ATTACH_PER_MESSAGE } from './api.js';
 import { teamSlots } from './slots.jsx';
 import { t } from './i18n.js';
 
+// The shared pages this server has (web/ui/app.jsx VIEWS). The rest — code reviews, dev stacks,
+// the queue, held items, sign-ins, search — are fleet-serve's, and a team server has no route
+// for them yet: their links are hidden and their addresses say so.
+const OFFERS = new Set(['home', 'map', 'project', 'automations', 'activity', 'settings']);
+
 // What this app's own routes are called on a back button (web/ui/back.jsx names the shared ones).
 const PLACES = { activity: 'nav.activity', automations: 'nav.automations', settings: 'nav.settings', admin: 'nav.admin' };
 export const place = (to) => { const k = PLACES[String(to).replace(/^#?\/?/, '').split('/')[0]]; return k ? t(k) : null; };
@@ -40,6 +45,34 @@ export function teamAdapter(ctx) {
     changePassword: ctx.changePassword,
     go: ctx.go,
     place,
+    offers: (view) => OFFERS.has(view),
+    // An assignment's row names the new owner, which only this app can put a name to.
+    activity: () => api.activity().then(r => ({ ...r, rows: (r.rows || []).map(x => (x.args?.owner !== undefined
+      ? { ...x, detail: ctx.usersById[x.args.owner]?.name || t('activity.nobody') } : x)) })),
+    saveLang: api.setLang,
+    // The assistant (web/ui/agent.js): the dispatcher and the list of what was asked are this
+    // server's (server/router.mjs, server/tasks.mjs), and so is the voice.
+    route: api.route,
+    tasks: api.tasks,
+    taskSent: api.taskSent,
+    taskPlace: api.taskPlace,
+    taskDone: api.taskDone,
+    assign: api.assign,
+    voice: api.voice,
+    hear: api.hear,
+    speak: api.speak,
+    speakAudio: (id) => `/api/speak/${encodeURIComponent(id)}`,
+    voices: api.voices,
+    // Only an admin installs or deletes a voice; the server answers anyone else with 404.
+    ...(ctx.admin ? { installVoice: api.installVoice, deleteVoice: api.deleteVoice } : {}),
+    // The speech detector ships with this app (scripts/copy-vad.mjs puts its files beside it).
+    vad: () => import('@ricky0123/vad-web'),
+    settings: {
+      connection: {
+        state: () => ({ text: ctx.mode === 'demo' ? t('settings.demo') : t('settings.real') }),
+        ...(ctx.mode === 'demo' && ctx.admin ? { reset: api.resetDemo } : {}),
+      },
+    },
     slots: teamSlots(ctx),
   };
 }

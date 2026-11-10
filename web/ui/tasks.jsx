@@ -1,8 +1,9 @@
 import { useState } from 'preact/hooks';
 import { useAgent, place, tickOff } from './agent.js';
 import { plainText } from './voice.js';
+import { go } from './history.js';
 import { t, locale } from './i18n.js';
-import { worded } from '../../shared/i18n/index.js';
+import { worded } from './i18n.js';
 
 // Everything asked of the assistant and where it stands. It is beside whatever page is open, so
 // that hopping between projects while talking does not lose anything along the way.
@@ -30,13 +31,13 @@ function Places({ task, projects }) {
   );
 }
 
-function Task({ ctx, task, projects }) {
+function Task({ task, projects }) {
   const [open, setOpen] = useState(false);
   const st = STATES[task.status];
   const last = task.replies[task.replies.length - 1];
   const where = task.session || t('common.lead');
   const waiting = task.status === 'ask' || task.status === 'failed';
-  const goTo = () => ctx.go(`/p/${encodeURIComponent(task.project)}${task.session ? `/s/${encodeURIComponent(task.session)}` : ''}`);
+  const goTo = () => go(`/p/${encodeURIComponent(task.project)}${task.session ? `/s/${encodeURIComponent(task.session)}` : ''}`);
   return (
     <li class={`tk c-${st.color}`}>
       <div class="tk-top">
@@ -58,7 +59,7 @@ function Task({ ctx, task, projects }) {
   );
 }
 
-export function TaskRail({ ctx, projects, onClose }) {
+export function TaskRail({ projects, onClose }) {
   const S = useAgent();
   const list = shown(S);
   const replied = list.filter(x => x.status === 'replied').length;
@@ -71,7 +72,7 @@ export function TaskRail({ ctx, projects, onClose }) {
         <button class="x" aria-label={t('task.hide')} onClick={onClose}>✕</button>
       </header>
       <ul class="tk-list">
-        {list.map(x => <Task key={x.id} ctx={ctx} task={x} projects={projects} />)}
+        {list.map(x => <Task key={x.id} task={x} projects={projects} />)}
         {S.deciding.map(d => <li key={d.id} class="tk c-grey deciding"><span class="tk-state">{t('task.deciding')}</span><p class="tk-said">“{d.text}”</p></li>)}
       </ul>
     </aside>

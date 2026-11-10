@@ -2,7 +2,7 @@
 // nothing: the map, the home page, the activity, a session by name. Everything else goes to the
 // dispatcher (server/router.mjs). Pure, so it is tested in node (scripts/test-resolve.mjs).
 // It hears both languages whichever one the page shows: people mix them when they talk.
-import { t as tr } from '../../shared/i18n/index.js';
+import { t as tr } from './i18n.js';
 
 export const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
   .replace(/[^a-z0-9]+/g, ' ').trim();

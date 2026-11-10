@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn } from '../../../../web/ui/ui.jsx';
-import { Select, Popover } from '../../../../web/ui/select.jsx';
+import { STATUS, StatusMark, statusOf, Btn } from './ui.jsx';
+import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
+import { go } from './history.js';
 import { t } from './i18n.js';
-import { words } from '../../shared/i18n/index.js';
-import { Icon } from '../../../../web/ui/icon.jsx';
+import { words } from './i18n.js';
+import { Icon } from './icon.jsx';
 // The assistant's face: ghostfleet's own SHIP sprite, the one the app icon is drawn from.
-import { GhostShip as Ship } from '../../../../web/ui/fleet.jsx';
+import { GhostShip as Ship } from './fleet.jsx';
 
 const STATE_WORDS = words(['listening', 'hearing', 'routing', 'sending', 'starting', 'thinking', 'acting', 'speaking', 'idle', 'off'], 'ship');
 const LIVE = ['listening', 'hearing', 'routing', 'sending', 'starting', 'speaking'];
@@ -98,7 +99,7 @@ function voiceOpts(S, local) {
   );
 }
 
-export function Feed({ ctx, limit, empty }) {
+export function Feed({ limit, empty }) {
   const S = useAgent();
   const ref = useRef(null);
   const rows = limit ? S.feed.slice(-limit) : S.feed;
@@ -108,7 +109,7 @@ export function Feed({ ctx, limit, empty }) {
       {!rows.length && !S.interim ? empty : null}
       {rows.map(e => (
         <div key={e.id} class={`as-row ${e.kind}${e.bad ? ' bad' : ''}${e.ask ? ' ask-row' : ''}${e.session && e.project ? ' go' : ''}`}
-             onClick={e.session && e.project ? () => ctx.go(`/p/${encodeURIComponent(e.project)}/s/${encodeURIComponent(e.session)}`) : undefined}>
+             onClick={e.session && e.project ? () => go(`/p/${encodeURIComponent(e.project)}/s/${encodeURIComponent(e.session)}`) : undefined}>
           {e.kind === 'me' ? <><span class="tag-me">{e.voice ? <><Icon name="mic" /> {t('settings.you')}</> : t('settings.you')}</span> {unframe(e.text)}</>
             : e.kind === 'ai' ? <><span class="tag-ai">{e.project || t('common.lead')}</span>{e.title ? <em class="tag-about"> {e.title}</em> : null} {plainText(e.text)}</>
             : <><span class="tag-ev">{e.ask ? t('as.question') : t('as.live')}</span> {e.text}</>}
@@ -119,7 +120,7 @@ export function Feed({ ctx, limit, empty }) {
   );
 }
 
-function Sea({ ctx }) {
+function Sea({}) {
   const S = useAgent();
   const state = shipStateOf(S);
   const lane = [...S.cards].sort((a, b) => Number(b.lead) - Number(a.lead));
@@ -137,7 +138,7 @@ function Sea({ ctx }) {
           return (
             <button key={c.name} class={`buoy c-${(STATUS[s] || STATUS.unknown).color}${c.name === S.focus ? ' on' : ''}`}
                     title={`${c.label || c.name} · ${(STATUS[s] || STATUS.unknown).label}`}
-                    onClick={() => ctx.go(`/p/${encodeURIComponent(S.target)}/s/${encodeURIComponent(c.name)}`)}>
+                    onClick={() => go(`/p/${encodeURIComponent(S.target)}/s/${encodeURIComponent(c.name)}`)}>
               <b><StatusMark status={s} /></b><span>{c.lead ? t('common.lead') : c.name}</span>
             </button>
           );
@@ -155,7 +156,7 @@ const Hint = () => (
   </div>
 );
 
-export function Assistant({ ctx, projects, onClose, chip }) {
+export function Assistant({ projects, onClose, chip }) {
   const [choosing, setChoosing] = useState(false);
   return (
     <aside class="assistant" aria-label={t('as.name')}>
@@ -164,7 +165,7 @@ export function Assistant({ ctx, projects, onClose, chip }) {
         <span class="as-head-end">{chip}<Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn><button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
       </header>
       <TalkTo projects={projects} />
-      {choosing ? <div class="as-voices"><VoicePicker admin={ctx.admin} /></div> : <><Sea ctx={ctx} /><Feed ctx={ctx} empty={<Hint />} /></>}
+      {choosing ? <div class="as-voices"><VoicePicker /></div> : <><Sea /><Feed empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>
   );
@@ -173,7 +174,7 @@ export function Assistant({ ctx, projects, onClose, chip }) {
 // The first thing on the home page: talk or type, right away. On the home page this card is the
 // assistant, with the panel's controls (who it talks to, Voice options), and the floating button
 // is not there: the two read as two assistants (main.jsx).
-export function HomeAgent({ ctx, projects }) {
+export function HomeAgent({ projects }) {
   const S = useAgent();
   const state = shipStateOf(S);
   return (
@@ -187,7 +188,7 @@ export function HomeAgent({ ctx, projects }) {
         </div>
       </div>
       <Console projects={projects} big foot={<TalkTo projects={projects} compact />} />
-      {S.feed.length || S.interim ? <Feed ctx={ctx} limit={8} /> : null}
+      {S.feed.length || S.interim ? <Feed limit={8} /> : null}
     </section>
   );
 }

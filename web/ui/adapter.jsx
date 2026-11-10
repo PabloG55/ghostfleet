@@ -2,8 +2,8 @@
 //
 // The screens in this folder never call an `/api` of their own. An app wraps them once in
 // <FleetProvider adapter={…}> and every screen reads `useFleet()`. The team app's adapter is
-// ee/team/web/src/adapter.js, over its multi-user server; the phone client's (phase 2) will be
-// over fleet-serve. What a screen needs, and so what an adapter implements, is in README.md
+// ee/team/web/src/adapter.js, over its multi-user server; the phone's is web/src/adapter.js, over
+// fleet-serve. What a screen needs, and so what an adapter implements, is in README.md
 // ("The adapter"). In short:
 //
 //   grid(project)                     → { cards, worktrees, … }        the project's sessions
@@ -16,6 +16,11 @@
 //   presence(project, session, typing)  optional: say who is looking
 //   go(to, { replace? })              navigate to a hash route; history.js's go() is the one to pass
 //   place(route)                      optional: what an app's own route is called on a back link
+//   offers(view)                      optional: false hides a page this server does not have
+//   activity()                        → { rows }                       what was done, newest first
+//   settings, saveLang                optional: Settings' sections (views.jsx), and where a language is kept
+//   route, tasks, taskSent, taskPlace, taskDone    the assistant's dispatcher and list (agent.js)
+//   voice, hear, speak, speakAudio, voices, vad?, installVoice?, deleteVoice?   its voice (voice.js)
 //   slots                             an app's own pieces (below)
 //
 // Slots are how an app puts something of its own into a shared screen without the screen

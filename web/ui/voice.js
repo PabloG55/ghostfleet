@@ -1,13 +1,19 @@
 // Voice, both ways. Local first (whisper.cpp to hear, Kokoro to speak, on the machine running
 // the server), the browser's own as the fallback. The rest of the app only sees listen()/speak().
-import { api } from './api.js';
-import { t, lang } from './i18n.js';
-import { worded } from '../../shared/i18n/index.js';
+//   WHICH SERVER is the adapter's business (web/ui/adapter.jsx): `voice()`, `hear(wav)`,
+// `speak(text, voice)` and `speakAudio(id)`, plus `vad()` when the app ships the speech detector.
+// agent.js hands the adapter over in bind(); until then every call answers "not ready" and the
+// browser's own voice does the work, so nothing here assumes which app it is running in.
+import { t, lang, worded } from './i18n.js';
+
+let B = {};
+export function voiceBackend(adapter) { B = adapter || {}; status = null; }
 
 let status = null;
 export async function voiceStatus(force = false) {
   if (status && !force) return status;
-  try { status = await api.voice(); } catch { status = { hear: { ready: false }, speak: { ready: false } }; }
+  try { status = B.voice ? await B.voice() : null; } catch { status = null; }
+  status ||= { hear: { ready: false }, speak: { ready: false } };
   return status;
 }
 
@@ -41,10 +47,9 @@ export const PAUSES = worded({
 }, 'pause');
 const AUDIO = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 const transcribe = async (blob) => {
-  const res = await fetch('/api/hear', { method: 'POST', headers: { 'X-GFW': '1', 'X-GFW-Lang': lang(), 'Content-Type': 'audio/wav' }, body: blob });
-  const j = await res.json();
-  if (!res.ok || !j.ok) throw new Error(j.text || `error ${res.status}`);
-  return String(j.text || '').trim();
+  if (!B.hear) throw new Error(t('voice.noHear'));
+  const j = await B.hear(blob);
+  return String(j?.text || '').trim();
 };
 const rmsOf = (d) => { let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i]; return Math.sqrt(s / d.length); };
 const micDenied = () => t('voice.micDenied');
@@ -59,7 +64,9 @@ export const VAD_DIR = '/vad-0.0.31/';
 let vad = null, vadLoad = null, vadBroken = false, turn = null;
 export function warmVad() {
   if (vad || vadBroken) return Promise.resolve(vad);
-  vadLoad ||= import('@ricky0123/vad-web').then(({ MicVAD }) => MicVAD.new({
+  // The detector is the app's to ship (the team app bundles it; an app without it has no `vad`),
+  // so web/ui itself depends on nothing it would have to install.
+  vadLoad ||= (B.vad ? B.vad() : Promise.reject(new Error('this app ships no speech detector'))).then(({ MicVAD }) => MicVAD.new({
     model: 'v5', baseAssetPath: VAD_DIR, onnxWASMBasePath: VAD_DIR, startOnLoad: false,
     ortConfig: (ort) => { ort.env.logLevel = 'error'; ort.env.wasm.numThreads = 1; },
     getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
@@ -252,12 +259,16 @@ export async function speak(md, onEnd, voice = '') {
   const job = { cancelled: false, audio: null };
   playing = job;
   try {
-    const r = await api.speak(text, voice);
+    const r = await B.speak(text, voice);
     if (job.cancelled) return;
     for (const s of r.sentences) {
       if (job.cancelled) return;
+      // A URL the page can play: the team's is the route itself (its cookie rides along), the
+      // phone's is the sentence fetched with its bearer token and handed back as a blob URL.
+      const url = await B.speakAudio(s.id);
+      if (job.cancelled) return;
       await new Promise((resolve) => {
-        const a = new Audio(`/api/speak/${s.id}`);
+        const a = new Audio(url);
         job.audio = a;
         a.onended = resolve; a.onerror = resolve;
         a.play().catch(resolve);
