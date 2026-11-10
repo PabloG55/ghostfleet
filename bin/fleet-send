@@ -2,6 +2,8 @@
 # fleet-send [-s SOCKET] [--now] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
 #            [--anyway] <session> <prompt...>
 # fleet-send [-s SOCKET] --dequeue <session>        (what the Stop hook runs)
+# fleet-send [-s SOCKET] --would-queue <session>    (what a plain send would meet right now:
+#                                                   working | need-you | backlog | idle)
 # fleet-send [-s SOCKET] --stranded | --requeue <session> <id> | --discard <session> <id>
 #                                                   (a prompt a dead drain left out of the queue)
 #
@@ -85,6 +87,8 @@ while [ $# -gt 0 ]; do
     --nudge)     KIND=nudge;         shift ;;
     --owner)     KIND=owner;         shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
+    # Sends nothing: says what a plain send would meet (see "what a send would meet" below).
+    --would-queue) MODE=probe;       shift ;;
     # What the phone reads and edits: the prompts still WAITING in the queue, and taking one
     # back out before it is delivered (see "reading and editing the queue" below).
     --list-queue) MODE=list;         shift ;;
@@ -113,7 +117,7 @@ MSG="$*"
 [ "$MODE" = queued ] && [ -n "${CLAUDE_FLEET_QUEUE_JOURNAL:-}" ] \
   && printf 'child %s\n' $$ >> "$CLAUDE_FLEET_QUEUE_JOURNAL" 2>/dev/null
 [ -n "$SESSION" ] || [ "$MODE" = stranded ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
-[ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || [ "$MODE" = stranded ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
+[ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || [ "$MODE" = stranded ] || [ "$MODE" = probe ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
 # A stranded prompt outlives its session often enough: listing and discarding need none.
 [ "$MODE" = stranded ] || [ "$MODE" = discard ] || tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
@@ -380,7 +384,7 @@ fi
 # already ran when the prompt was queued, against a worker that was mid-turn on the task
 # the prompt was sent about. That turn may well ship before it ends — refusing the queued
 # follow-up then would drop it, popped and undelivered, for having waited its turn.
-if [ "$ANYWAY" != 1 ] && [ "$MODE" != dequeue ] && [ -z "$REPLY_TO" ] \
+if [ "$ANYWAY" != 1 ] && [ "$MODE" != dequeue ] && [ "$MODE" != probe ] && [ -z "$REPLY_TO" ] \
    && why="$("$(dirname "$0")/fleet-shipped" -s "$SOCK" "$SESSION" 2>/dev/null)"; then
   echo "fleet-send: '$SESSION' already finished a task that shipped ($why) — a new task is a new session: fleet-stop --reclaim $SESSION, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway" >&2
   exit 1
@@ -477,6 +481,22 @@ _mod_backlog() {
 
 QUEUEABLE=0; { [ -z "$_a" ] || [ "$_a" = claude ]; } && QUEUEABLE=1
 SELF="${BASH_SOURCE[0]}"
+
+# --- what a send would meet -------------------------------------------------------
+# --would-queue <session>: one word, and nothing sent. `working` (a turn is running),
+# `need-you` (it is stopped on a question or a permission prompt), `backlog` (idle, but
+# prompts are waiting ahead of anything new) or `idle`. bin/fleet-telegram asks before it
+# delivers, to decide whether a message joins the turn that is running or waits behind it,
+# and to tell the owner which. The answer is the same three tests the queue gate below
+# applies, so the two cannot disagree; a session that is not Claude has no queue and says idle.
+if [ "$MODE" = probe ]; then
+  if [ "$QUEUEABLE" = 1 ] && busy; then
+    if [ "$MOD_STATE" = need-you ]; then echo need-you; else echo working; fi
+  elif [ "$QUEUEABLE" = 1 ] && { [ -s "$QUEUE" ] || _mod_backlog; }; then echo backlog
+  else echo idle
+  fi
+  exit 0
+fi
 
 # --dequeue: deliver the NEXT queued prompt, if the session can take it. Exit 3 means
 # "still busy, try again" — the Stop hook runs while the turn is technically still
@@ -653,9 +673,26 @@ if [ -n "$RSESS" ]; then
   #   NOT for a prompt the mod delivers: that address rides in the handoff and the mod
   # writes and arms it at the turn.start of THIS prompt's turn, so nothing here can be
   # armed by somebody else's. A handoff that falls back to the paste writes it then.
+  #   A TELEGRAM MESSAGE FOLDED INTO A TELEGRAM TURN does not take the address over. The
+  # running turn already owes the phone an answer, and the folded prompt may never surface
+  # in it: a prompt typed mid-turn is read at the turn's next step, and one that is still
+  # waiting when the turn ends runs as a turn of its own, with no UserPromptSubmit to arm
+  # it. Overwriting the address answered the running turn to the NEW message (quoting the
+  # wrong one, and leaving the first with no answer) and left the turn after it with no
+  # address and no Telegram mark — unanswered, and outside the tool guard. So the new
+  # address and its prompt are appended to `.reply-to.fold`, the running turn keeps its own,
+  # and the Stop hook decides by the transcript which of them its answer is: the newest one
+  # the turn took in, or the first if it took in none — with what is left handed on to the
+  # turn that runs next. The prompt is base64, because it can hold any byte, \x1f included.
   _paste_reply_marker() {
+    local rt="$FLEET_DIR/$SOCK.$SESSION.reply-to" cur=""
+    if [ "$MODE" = now ] && [ "$RSOCK" = telegram ] && [ -f "$rt.armed" ] \
+       && IFS= read -r cur < "$rt" 2>/dev/null && [ "${cur%%$'\x1f'*}" = telegram ] && busy; then
+      printf '%s\x1f%s\x1f%s\x1f%s\n' "$RSOCK" "$RSESS" "$rdir" "$(_b64 "$MSG")" >> "$rt.fold" 2>/dev/null
+      return 0
+    fi
     printf '%s\x1f%s\x1f%s\n' "$RSOCK" "$RSESS" "$rdir" \
-      > "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
+      > "$rt" 2>/dev/null
     # Clear any arming left by an earlier request, or this brand-new address would look
     # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
     rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
