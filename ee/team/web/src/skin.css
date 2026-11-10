@@ -5,7 +5,6 @@
 .chip-trigger .px-ico, .chip-step .px-ico, .blk .px-ico, .seg .px-ico, .node-k .px-ico, .ubar-r .px-ico { vertical-align: -1px; }
 
 /* ── type ───────────────────────────────────────────── */
-.auth-card h1 { font-size: 16px; }
 /* section labels: the pixel face, small, with the manual's prompt mark */
 .palette h3, .ai-panel h3, .runs h2, .templates-title, .admin-users > .row h2 {
   font-family: var(--px); font-weight: 400; letter-spacing: .02em; text-transform: none;
@@ -18,7 +17,7 @@
 /* ── windows ────────────────────────────────────────────
  * A panel that holds a whole task gets a title bar: its own first heading, on a slightly
  * lighter strip, with three square lamps that stay grey — a window, not a toy. */
-.auth-card, .palette, .ai-panel, .admin-editor {
+.palette, .ai-panel, .admin-editor {
   border-radius: 0; border: 1px solid var(--line); background: var(--panel); box-shadow: none;
 }
 .palette > h3:first-child, .ai-panel > h3:first-child {
@@ -34,18 +33,9 @@
 @media (max-width: 760px) { .palette > h3:first-child { flex-basis: calc(100% + 24px); } }
 .palette > h3:first-child::after, .ai-panel > h3:first-child::after { left: 12px; }
 
-/* the sign-in window: the harbour is its picture, the bar carries the language */
-.auth { background: transparent; }
-.auth-card { padding: 0 28px 26px; gap: 14px; }
-.lang-toggle { top: 8px; right: 8px; border-radius: 0; border: 1px solid var(--line); background: var(--gf-abyss); }
-.lang-toggle button { font: 600 11px/1 var(--mono); letter-spacing: .02em; padding: 5px 8px; }
-.lang-toggle button.on { background: var(--panel2); color: var(--cyan); }
-@media (max-width: 480px) { .auth-card { padding: 0 18px 20px; } }
 
 
 /* ── sidebar ────────────────────────────────────────── */
-.demo-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
-  font: 12px var(--mono); }
 
 /* ── controls ───────────────────────────────────────── */
 

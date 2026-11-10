@@ -7,6 +7,7 @@
 //   name, sub       the wordmark and the line under it
 //   projects        the app polls them (each server has its own route) and passes them down
 //   me              who is talking to the assistant, where an app knows (the team's account)
+//   hosts           the machines the projects come from, when there are several (the phone's pairs)
 //   extra           the app's OWN pages: { parse(parts) -> route | null, screens: { view: (route) => vnode },
 //                   nav(route, close) }. The team's are sign-in and administration; the phone has none.
 //                   test/one-base.test.mjs holds both apps to that list.
@@ -15,6 +16,7 @@
 //   canonical       rewrites an old link in place (useHashRoute)
 // The pages that come from screens still being built elsewhere draw <Pending> until they land.
 import { useState, useEffect } from 'preact/hooks';
+import './viewport.js'; // the on-screen keyboard: the app follows the visible area while it is up
 import { Frame, NavLink, sharedRoute, useHashRoute } from './shell.jsx';
 import { useFleet } from './adapter.jsx';
 import { Home } from './home.jsx';
@@ -88,7 +90,7 @@ const SCREENS = {
 const kept = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v === '1'; } catch { return d; } };
 const keep = (k, on) => { try { localStorage.setItem(k, on ? '1' : '0'); } catch {} };
 
-export function FleetApp({ name, sub, projects, me, extra, frame = {}, badges = {}, canonical, interim = {} }) {
+export function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = {}, canonical, interim = {} }) {
   const fleet = useFleet();
   const route = useHashRoute((h) => parseRoute(h, extra), canonical);
   const [asOpen, setAsOpen] = useState(() => kept('gfw.asOpen', false));
@@ -120,7 +122,7 @@ export function FleetApp({ name, sub, projects, me, extra, frame = {}, badges = 
   else main = <Pending view={route.view} />;
 
   return (
-    <Frame name={name} sub={sub} route={route} projects={projects} settings="/settings"
+    <Frame name={name} sub={sub} route={route} projects={projects} hosts={hosts} settings="/settings"
            class={`${frame.class || ''}${panel ? ' with-as' : ''}${rail ? ' with-rail' : ''}`}
            nav={(close) => <>
              {VIEWS.filter(v => v.nav && offers(v.view)).map(v => (

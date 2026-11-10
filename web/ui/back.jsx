@@ -26,12 +26,16 @@ export function useKept(key, initial) {
 }
 
 // The shared routes are named here; an app names its own with the adapter's `place(route)`.
+// Every page web/ui/app.jsx routes is shared, so each one's name is its sidebar word.
+const SHARED_PLACES = { automations: 'nav.automations', reviews: 'nav.reviews', stacks: 'nav.stacks', queue: 'nav.queue',
+  held: 'nav.held', 'sign-ins': 'nav.signIns', search: 'nav.searchAll', activity: 'nav.activity', settings: 'nav.settings' };
 export function placeName(to, own) {
   let parts;
   try { parts = String(to).replace(/^#?\/?/, '').split('/').map(decodeURIComponent); } catch { parts = []; }
   if (parts[0] === 'p' && parts[1]) return parts[2] === 's' && parts[3] ? parts[3] : parts[1];
   if (parts[0] === 'map') return t('nav.map');
   if (!parts[0]) return t('nav.home');
+  if (SHARED_PLACES[parts[0]]) return t(SHARED_PLACES[parts[0]]);
   return own?.(to) || t('common.back');
 }
 

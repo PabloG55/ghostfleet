@@ -5,6 +5,7 @@
 // agent.js hands the adapter over in bind(); until then every call answers "not ready" and the
 // browser's own voice does the work, so nothing here assumes which app it is running in.
 import { t, lang, worded } from './i18n.js';
+import { speakable, speechChunks, EN as SAY_EN } from './speakable.js';
 
 let B = {};
 export function voiceBackend(adapter) { B = adapter || {}; status = null; }
@@ -228,10 +229,10 @@ export function stopSpeaking() {
   window.speechSynthesis?.cancel();
   if (playing) { playing.cancelled = true; try { playing.audio?.pause(); } catch {} playing = null; }
 }
-function speakBrowser(text, onEnd) {
+function utter(text, onEnd) {
   const s = window.speechSynthesis;
   if (!s) { onEnd?.(); return; }
-  const u = new SpeechSynthesisUtterance(text.slice(0, 900));
+  const u = new SpeechSynthesisUtterance(text);
   const all = s.getVoices();
   const v = lang() === 'es'
     ? all.find(x => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find(x => /^es/i.test(x.lang))
@@ -240,6 +241,14 @@ function speakBrowser(text, onEnd) {
   u.lang = v?.lang || speechLang(); u.rate = 1.05;
   u.onend = () => onEnd?.(); u.onerror = () => onEnd?.();
   s.speak(u);
+}
+// The device's own voice, one utterance per chunk: one long utterance is what WebKit's
+// speechSynthesis is known to drop partway.
+async function speakBrowser(chunks, job) {
+  for (const c of chunks) {
+    if (job.cancelled) return;
+    await new Promise((resolve) => utter(c, resolve));
+  }
 }
 // A voice sample from the internet: one file, played through the same stop as everything else.
 export function playSample(url, onEnd) {
@@ -250,30 +259,43 @@ export function playSample(url, onEnd) {
   job.audio.onended = done; job.audio.onerror = done;
   job.audio.play().catch(done);
 }
+// What a reply sounds like is speakable.js's business: addresses named rather than spelled, and the
+// whole reply read, a chunk per request — the next chunk is planned while this one plays, so there
+// is no gap between them and the Mac never synthesises minutes that a stop throws away.
+const sayWords = () => Object.fromEntries(Object.keys(SAY_EN).map(k => [k, t(`say.${k}`)]));
 export async function speak(md, onEnd, voice = '') {
   stopSpeaking();
-  const text = plainText(md).slice(0, 1500);
-  if (!text) { onEnd?.(); return; }
-  const st = await voiceStatus();
-  if (!st.speak?.ready) { speakBrowser(text, onEnd); return; }
+  const chunks = speechChunks(speakable(md, sayWords()));
+  if (!chunks.length) { onEnd?.(); return; }
   const job = { cancelled: false, audio: null };
   playing = job;
-  try {
-    const r = await B.speak(text, voice);
-    if (job.cancelled) return;
-    for (const s of r.sentences) {
-      if (job.cancelled) return;
-      // A URL the page can play: the team's is the route itself (its cookie rides along), the
-      // phone's is the sentence fetched with its bearer token and handed back as a blob URL.
-      const url = await B.speakAudio(s.id);
-      if (job.cancelled) return;
-      await new Promise((resolve) => {
-        const a = new Audio(url);
-        job.audio = a;
-        a.onended = resolve; a.onerror = resolve;
-        a.play().catch(resolve);
-      });
-    }
-  } catch { if (!job.cancelled) speakBrowser(text, onEnd); return; }
+  const st = await voiceStatus();
+  if (job.cancelled) return;
+  let i = 0;
+  if (st.speak?.ready) {
+    try {
+      let next = B.speak(chunks[0], voice);
+      for (; i < chunks.length; i++) {
+        const r = await next;
+        if (job.cancelled) return;
+        next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
+        next?.catch(() => {});                 // a failure is read where it is awaited
+        for (const s of r.sentences) {
+          if (job.cancelled) return;
+          // A URL the page can play: the team's is the route itself (its cookie rides along), the
+          // phone's is the sentence fetched with its bearer token and handed back as a blob URL.
+          const url = await B.speakAudio(s.id);
+          if (job.cancelled) return;
+          await new Promise((resolve) => {
+            const a = new Audio(url);
+            job.audio = a;
+            a.onended = resolve; a.onerror = resolve;
+            a.play().catch(resolve);
+          });
+        }
+      }
+    } catch { /* the rest goes to the device's own voice, from the chunk that failed */ }
+  }
+  if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
   if (!job.cancelled) { playing = null; onEnd?.(); }
 }

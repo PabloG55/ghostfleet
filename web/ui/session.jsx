@@ -165,6 +165,12 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
   const [confirm, setConfirm] = useState(null);
   const [rename, setRename] = useState(null);
   const [menu, setMenu] = useState(false);
+  // What this server does at all (adapter.jsx `can`): a verb it refuses by name is not offered,
+  // rather than offered and refused on every tap.
+  const can = (verb) => (typeof fleet.can === 'function' ? fleet.can(verb) : true);
+  // Stop, rename and pause wait for the CARD, not just for "not the lead": a deep link draws this
+  // screen before the grid answers, and `!card?.lead` read the lead as a worker for that second —
+  // measured, the lead's menu offered "Stop session…" until its card arrived.
   // More is a layer like every picker and popover: Esc closes it and puts the focus back on its
   // button, a press outside closes it. It used to close only when the mouse left it, so on a
   // touch screen it stayed open until one of its actions was chosen, and Esc did nothing.
@@ -265,10 +271,12 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
           <StatusPill status={st} />
           {card?.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
           {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
-          {card?.label ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button> : null}
+          {card?.label ? (can('gfw_label')
+            ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button>
+            : <span class="chip-label"><Icon name="tag" /> {card.label}</span>) : null}
           {card?.sched ? (
             <span class="chip-sched" title={t('sess.schedMsg', { msg: card.sched.msg || '' })}><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 30)}”
-              <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button></span>
+              {can('gfw_unschedule') ? <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button> : null}</span>
           ) : null}
         </div>
         <div class="sess-tools">
@@ -276,17 +284,17 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
           {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
           {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
-          {!card?.lead && !['asleep', 'lost'].includes(st)
+          {card && !card.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
           <div class="menu-wrap" ref={menuWrap}>
             <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
             {menu ? (
               <div class="menu">
-                <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button>
-                <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button>
-                <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button>
-                {!card?.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
-                {!card?.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}
+                {can('gfw_label') ? <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button> : null}
+                {can('gfw_schedule') ? <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button> : null}
+                {card && !card.lead ? <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button> : null}
+                {card && !card.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
+                {card && !card.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}
               </div>
             ) : null}
           </div>
@@ -300,6 +308,7 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
           <p class="muted small">{t('sess.limitWhy')}</p>
           {card?.sched
             ? <p>{t('sess.alreadySched', { when: hhmm(card.sched.at) })}</p>
+            : !can('gfw_schedule') ? null
             : <div class="row wrap">
                 <Btn kind="primary" disabled={busy} onClick={() => act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') })}>
                   <Icon name="clock" /> {t('sess.resumeOnQuota')}</Btn>

@@ -299,3 +299,19 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 @media (prefers-reduced-motion: reduce) {
   .ship-track .ship, .ship-track::after { animation: none !important; transition: none !important; }
 }
+
+/* ══ the gate: a window whose picture is the harbour and whose bar carries the language ═ */
+.auth-card { border-radius: 0; border: 1px solid var(--line); background: var(--panel); box-shadow: none; }
+.auth-card h1 { font-size: 16px; }
+/* the sign-in window: the harbour is its picture, the bar carries the language */
+.auth { background: transparent; }
+.auth-card { padding: 0 28px 26px; gap: 14px; }
+.lang-toggle { top: 8px; right: 8px; border-radius: 0; border: 1px solid var(--line); background: var(--gf-abyss); }
+.lang-toggle button { font: 600 11px/1 var(--mono); letter-spacing: .02em; padding: 5px 8px; }
+.lang-toggle button.on { background: var(--panel2); color: var(--cyan); }
+@media (max-width: 480px) { .auth-card { padding: 0 18px 20px; } }
+
+/* the bar across the top (ui.css): demo data, or a server that is not answering */
+.demo-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
+  font: 12px var(--mono); }
+.demo-bar.off { background: color-mix(in srgb, var(--red) 8%, var(--gf-abyss)); border-bottom-color: color-mix(in srgb, var(--red) 35%, transparent); }

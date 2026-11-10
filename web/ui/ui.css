@@ -307,6 +307,11 @@ textarea { resize: vertical; }
 .pane .c.w { width: 2ch; }
 .composer { display: flex; flex-direction: column; gap: 8px; padding: 12px 22px 16px; border-top: 1px solid var(--hair); background: var(--bg); }
 .composer.drag { background: rgba(95,215,215,.06); box-shadow: inset 0 0 0 2px rgba(95,215,215,.45); }
+/* The composer stays in sight when the session is taller than the screen. A permission prompt at
+   phone width is ~375px tall, and with the keyboard up head + prompt + tabs + composer measured 649px
+   against 386 visible: .main scrolled, and the box being typed into sat below the fold. Sticky, not
+   fixed — it stays the last child of the column, and where the column fits it changes nothing. */
+.session > .composer { position: sticky; bottom: 0; z-index: 2; }
 .composer-row { display: flex; gap: 10px; align-items: flex-end; }
 .composer textarea { flex: 1 1 auto; min-height: 46px; max-height: 220px; }
 .attach-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; font-size: 20px; cursor: pointer; }
@@ -857,3 +862,64 @@ textarea { resize: vertical; }
 .set-row { display: flex; align-items: center; gap: 12px; cursor: pointer; }
 .set-row .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .set-row small { font-size: 12.5px; }
+
+/* ══ the gate (gate.jsx): the team's sign-in and the phone's lock are one card ══════════ */
+.auth { min-height: 100%; display: grid; place-items: center; padding: 24px 16px;
+  background: radial-gradient(1200px 500px at 50% -10%, rgba(95,215,215,.08), transparent 60%), var(--bg); }
+.auth-card { position: relative; width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); padding: 28px; display: flex; flex-direction: column; gap: 14px; }
+.auth-card h1 { font-size: 20px; }
+/* Above the harbor, top right: the one control a person who cannot read the page still finds. */
+.lang-toggle { position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; background: var(--panel); }
+.lang-toggle button { background: none; border: 0; color: var(--dim); font: 600 11px/1 var(--sans); letter-spacing: .04em; padding: 5px 9px; cursor: pointer; }
+.lang-toggle button.on { background: var(--panel2); color: var(--white); }
+.boot { height: 100%; display: grid; place-items: center; opacity: .6; }
+@media (max-width: 480px) { .auth-card { padding: 22px; } }
+/* What the gate knows before anything is asked (which server, demo data, no sensor): one block,
+   read as one, rather than three paragraphs each with its own margins. */
+.gate-notes { display: flex; flex-direction: column; gap: 6px; }
+.gate-notes p { margin: 0; }
+.auth-card .warn { color: var(--yellow); }
+.auth-card .ok { color: var(--green); }
+/* A way to a rarely needed setting, drawn as words so it does not compete with the door itself. */
+.link-btn { align-self: flex-start; background: none; border: 0; padding: 6px 0; margin: -6px 0; color: var(--dim);
+  font: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.link-btn:hover, .link-btn[aria-expanded="true"] { color: var(--fg); }
+
+/* the sidebar's machine headings (shell.jsx hostGroups): one per paired machine */
+.side-host { display: flex; align-items: center; gap: 8px; padding: 10px 10px 4px; color: var(--dim); font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; }
+.side-host small { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.side-host.down { color: var(--fg); }
+.side-host.down small { color: var(--red); }
+.side-prof { display: flex; align-items: center; gap: 8px; padding: 8px 10px 2px 26px; color: var(--dim); font-size: 11px; letter-spacing: .04em; }
+.side-prof:first-child { padding-top: 2px; }
+
+/* ══ a phone's edges: the home indicator and, sideways, the notch ═══════════════════════════
+   Both apps' pages say viewport-fit=cover, so on an iPhone the page runs under the home
+   indicator and a composer pinned to the bottom sits beneath it. env() reads 0 on everything
+   without one, so none of this moves a desk. The floating pieces take the inset as a MARGIN:
+   each already has a `bottom` that other rules raise (over a composer, over the launcher), and
+   a margin adds to all of them without restating any. */
+:root { --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
+        --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px); }
+.composer { padding-bottom: calc(16px + var(--safe-b)); }
+.as-controls { padding-bottom: calc(14px + var(--safe-b)); }
+.as-dock, .toasts, .tk-chip.floating, .keyprompt { margin-bottom: var(--safe-b); }
+/* ...and while the on-screen keyboard is up (viewport.js), the app is the VISIBLE area and not
+   the screen: pinned to the visual viewport's top and sized to its height, so nothing overflows
+   and iOS has nothing to scroll. The bottom inset is spent on the home indicator, which the
+   keyboard covers. With the keyboard down none of this applies and the layout is the plain one. */
+html.kb, html.kb body { overflow: hidden; }
+html.kb { --safe-b: 0px; }
+html.kb #app { position: fixed; inset: var(--app-top, 0px) 0 auto; height: var(--app-h, 100%); }
+@media (max-width: 900px) {
+  .topbar { padding-top: calc(8px + var(--safe-t)); padding-left: max(12px, var(--safe-l)); padding-right: max(12px, var(--safe-r)); }
+  .side { padding-top: calc(14px + var(--safe-t)); padding-bottom: calc(10px + var(--safe-b)); padding-left: max(10px, var(--safe-l)); }
+  .page { padding-bottom: calc(50px + var(--safe-b)); }
+  .assistant { padding-top: var(--safe-t); }
+}
+
+/* A line across the top of every page, for what is true of all of them: demo data (the team's
+   demo, the phone's fixtures), or a server that stopped answering while the fleet it last sent
+   stays on screen. `.off` is the second: the same bar, in the colour of a thing that is down. */
+.demo-bar { background: rgba(255,215,95,.1); color: var(--yellow); text-align: center; font-size: 12.5px; padding: .35em; border-bottom: 1px solid rgba(255,215,95,.25); }
+.demo-bar.off { background: rgba(255,95,95,.08); color: var(--red); border-bottom-color: rgba(255,95,95,.3); }

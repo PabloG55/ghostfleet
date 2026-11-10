@@ -13,6 +13,7 @@
 //   settings      the route `,` opens, the desk's settings key (keyboard.jsx); none, no key
 // `close` shuts the phone's drawer (a link inside it has been followed); `open` opens it.
 // The frame also mounts the keyboard (keyboard.jsx), so every page has the desk's keys.
+import { Fragment } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { Logo, Toasts } from './ui.jsx';
 import { Led } from './fleet.jsx';
@@ -58,11 +59,31 @@ export function NavLink({ to, active, onClick, children }) {
 
 // The project search answers the desk's `/` keys too: ⏎ opens the first project it shows and
 // Esc clears it and gives the keyboard back to the page.
-export function Sidebar({ name, sub, route, projects, open, onClose, nav, below, foot }) {
+// `hosts` is the machines an app's projects come from, when there is more than one (the phone's
+// paired machines: fleet-serve /api/projects `hosts`, each project carrying its `host_key`). The
+// list is then one group per machine, this one first, and a machine that is not answering keeps
+// its heading with no projects under it — "it is down" is something to see, not an absence.
+export const hostGroups = (list, hosts) => (hosts && hosts.length > 1
+  ? hosts.map(h => ({ h, items: list.filter(p => (p.host_key || '') === (h.self ? '' : h.key)) }))
+  : [{ h: null, items: list }]);
+const hostDown = (h) => !h.self && h.online === false;
+// ...and within a machine, one group per PROFILE when the projects span more than one (the
+// desk's Projects tabs: work, personal, a profile somebody added). In the order the projects file
+// first names them, and a project with no profile is in `work`, where the desk puts it. One
+// profile, which is every team, draws no headings at all.
+const profOf = (p) => p.profile || 'work';
+export const profileGroups = (items, order = []) => {
+  const names = [...new Set([...order, ...items.map(profOf)])].filter(n => items.some(p => profOf(p) === n));
+  return names.length > 1 ? names.map(n => ({ n, items: items.filter(p => profOf(p) === n) })) : [{ n: null, items }];
+};
+
+export function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below, foot }) {
   const [q, setQ] = useState('');
   const list = (projects || [])
     .filter(p => !q || p.name.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => (b.counts.need_you - a.counts.need_you) || (b.counts.total - a.counts.total) || a.name.localeCompare(b.name));
+  const groups = hostGroups(list, hosts);
+  const profOrder = (projects || []).map(profOf);
   const need = needOf(projects);
   return (
     <nav class={`side${open ? ' open' : ''}`} aria-label={t('nav.label')}>
@@ -81,12 +102,33 @@ export function Sidebar({ name, sub, route, projects, open, onClose, nav, below,
       </div>
       <div class="side-list">
         {projects == null ? <p class="muted pad">{t('common.loading')}</p> : null}
-        {list.map(p => (
-          <NavLink key={p.name} to={`/p/${encodeURIComponent(p.name)}`} active={route.view === 'project' && route.project === p.name} onClick={onClose}>
-            <Led state={topLight(p.sessions.map(x => x.status))} size={8} />
-            <span class="grow ellipsis">{p.name}</span>
-            {p.counts.need_you ? <span class="badge need">{p.counts.need_you}</span> : p.counts.total ? <span class="n">{p.counts.total}</span> : null}
-          </NavLink>
+        {groups.map(({ h, items }) => (
+          <Fragment key={h ? `h:${h.key}` : 'all'}>
+            {h ? (
+              <div class={`side-host${hostDown(h) ? ' down' : ''}`}>
+                <Led state={hostDown(h) ? 'off' : 'idle'} size={8} />
+                <span class="grow ellipsis">{h.label || h.key}</span>
+                {hostDown(h) ? <small>{t('settings.hostOffline')}</small> : h.self ? <small>{t('settings.hostThis')}</small> : null}
+              </div>
+            ) : null}
+            {profileGroups(items, profOrder).map(({ n, items: mine }) => (
+              <Fragment key={n || 'one'}>
+                {n ? (
+                  <div class="side-prof">
+                    <span class="grow ellipsis">{n}</span>
+                    {needOf(mine) ? <span class="badge need">{needOf(mine)}</span> : null}
+                  </div>
+                ) : null}
+                {mine.map(p => (
+                  <NavLink key={p.name} to={`/p/${encodeURIComponent(p.name)}`} active={route.view === 'project' && route.project === p.name} onClick={onClose}>
+                    <Led state={topLight(p.sessions.map(x => x.status))} size={8} />
+                    <span class="grow ellipsis">{h ? p.name.replace(/@[^@]+$/, '') : p.name}</span>
+                    {p.counts.need_you ? <span class="badge need">{p.counts.need_you}</span> : p.counts.total ? <span class="n">{p.counts.total}</span> : null}
+                  </NavLink>
+                ))}
+              </Fragment>
+            ))}
+          </Fragment>
         ))}
       </div>
       {below}
@@ -95,7 +137,7 @@ export function Sidebar({ name, sub, route, projects, open, onClose, nav, below,
   );
 }
 
-export function Frame({ name, sub, title = name, route, projects, nav, below, foot, topEnd, banner, after, settings, class: extra = '', children }) {
+export function Frame({ name, sub, title = name, route, projects, hosts, nav, below, foot, topEnd, banner, after, settings, class: extra = '', children }) {
   const [menu, setMenu] = useState(false);
   const need = needOf(projects);
   useEffect(() => { document.title = need ? `(${need}) ${title}` : title; }, [need, title]);
@@ -108,7 +150,7 @@ export function Frame({ name, sub, title = name, route, projects, nav, below, fo
         <span class="topbar-end">{topEnd ? topEnd(open) : null}{need ? <a class="badge need" href="#/">{need}</a> : null}</span>
       </div>
       {menu ? <div class="side-scrim" onClick={close} /> : null}
-      <Sidebar name={name} sub={sub} route={route} projects={projects} open={menu} onClose={close} nav={nav} below={below} foot={foot} />
+      <Sidebar name={name} sub={sub} route={route} projects={projects} hosts={hosts} open={menu} onClose={close} nav={nav} below={below} foot={foot} />
       <main class="main">
         {banner}
         {children}

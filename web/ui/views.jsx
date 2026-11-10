@@ -13,6 +13,7 @@ import { useFleet, useSlot } from './adapter.jsx';
 import { t, lang, LANGS, LANG_NAMES, words } from './i18n.js';
 import { setLang } from './lang.js';
 import { Icon } from './icon.jsx';
+import { Led } from './fleet.jsx';
 
 // "Ana <verb> acme-api": the verb reads right before the subject in either language.
 const VERBS = words(['fleet_send', 'attach', 'fleet_answer', 'fleet_interrupt', 'fleet_pause', 'fleet_resume', 'fleet_wake', 'fleet_reopen',
@@ -106,8 +107,8 @@ function Hosts({ part }) {
       <div class="rows">
         {hosts.map(h => (
           <div class="row-item static" key={h.key}>
-            <span class={`led ${h.self || h.online ? 'l-green' : 'l-grey'}`} aria-hidden="true" />
-            <span class="grow"><b>{h.label || h.key}</b> <small class="muted">{h.self ? t('settings.hostThis') : h.online ? t('settings.hostOnline') : t('settings.hostOffline')}</small></span>
+            <Led state={h.self || h.online !== false ? 'idle' : 'off'} size={8} />
+            <span class="grow"><b>{h.label || h.key}</b> <small class="muted">{h.self ? t('settings.hostThis') : h.online === false ? t('settings.hostOffline') : t('settings.hostOnline')}</small></span>
             {h.self ? null : asking === h.key
               ? <><Btn kind="danger" onClick={async () => { try { await part.unpair(h.key); toast(t('settings.unpaired', { name: h.label || h.key }), 'good'); } catch (e) { toast(e.message, 'bad'); } setAsking(''); reload(); }}>{t('settings.unpair')}</Btn>
                   <Btn kind="ghost" onClick={() => setAsking('')}>{t('common.cancel')}</Btn></>
@@ -121,12 +122,16 @@ function Hosts({ part }) {
 
 // Which server this page talks to, and the choices for it: the team app says whether it is the
 // demo; the phone can be pointed at its fixtures, its own origin or another URL.
-function Connection({ part }) {
+export function Connection({ part, onChange }) {
   const [st, setSt] = useState(() => part.state());
-  const [url, setUrl] = useState('');
-  const pick = async (v) => {
-    try { await part.choose(v, url); setSt(part.state()); } catch (e) { toast(e.message, 'bad'); }
+  const [url, setUrl] = useState(() => st.detail || '');
+  // "Another server" needs its address before it means anything: picking it shows the field,
+  // and the address is what applies it (Enter, or the button beside it).
+  const [choice, setChoice] = useState(st.choice);
+  const apply = async (v, u = url) => {
+    try { await part.choose(v, u); const n = part.state(); setSt(n); setChoice(n.choice); onChange?.(n); } catch (e) { toast(e.message, 'bad'); }
   };
+  const pick = (v) => { setChoice(v); if (v !== 'server') apply(v); };
   return (
     <section class="panel">
       <h2><Icon name="link" /> {t('settings.connection')}</h2>
@@ -134,10 +139,13 @@ function Connection({ part }) {
       {st.detail ? <p class="muted small">{st.detail}</p> : null}
       {part.choices ? (
         <div class="row wrap">
-          <Select label={t('settings.backend')} labelClass="muted" value={st.choice} options={part.choices()} onChange={pick} />
-          {st.choice === 'server' ? <input type="url" inputMode="url" placeholder="https://" value={url}
-                                           onInput={(e) => setUrl(e.currentTarget.value)}
-                                           onKeyDown={(e) => { if (e.key === 'Enter') pick('server'); }} /> : null}
+          <Select label={t('settings.backend')} labelClass="muted" value={choice} options={part.choices()} onChange={pick} />
+          {choice === 'server' ? <>
+            <input type="url" inputMode="url" placeholder="https://" aria-label={t('settings.serverUrl')} value={url}
+                   onInput={(e) => setUrl(e.currentTarget.value)}
+                   onKeyDown={(e) => { if (e.key === 'Enter') apply('server'); }} />
+            <Btn kind="ghost" disabled={!/^https?:\/\/./.test(url)} onClick={() => apply('server')}>{t('settings.useServer')}</Btn>
+          </> : null}
         </div>
       ) : null}
       {part.reset ? <Btn kind="ghost" onClick={async () => { try { await part.reset(); toast(t('settings.demoReset'), 'good'); } catch (e) { toast(e.message, 'bad'); } }}>{t('settings.resetDemo')}</Btn> : null}

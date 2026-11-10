@@ -4,6 +4,7 @@ import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
+import { useFleet } from './adapter.jsx';
 import { go } from './history.js';
 import { t } from './i18n.js';
 import { words } from './i18n.js';
@@ -158,14 +159,16 @@ const Hint = () => (
 
 export function Assistant({ projects, onClose, chip }) {
   const [choosing, setChoosing] = useState(false);
+  // A server that keeps no list of voices (fleet-serve picks its own) has nothing to choose from.
+  const voices = !!useFleet().voices;
   return (
     <aside class="assistant" aria-label={t('as.name')}>
       <header class="as-head">
         <div><b>{t('as.name')}</b><small>{t('as.sub')}</small></div>
-        <span class="as-head-end">{chip}<Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn><button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
+        <span class="as-head-end">{chip}{voices ? <Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn> : null}<button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
       </header>
       <TalkTo projects={projects} />
-      {choosing ? <div class="as-voices"><VoicePicker /></div> : <><Sea /><Feed empty={<Hint />} /></>}
+      {choosing && voices ? <div class="as-voices"><VoicePicker /></div> : <><Sea /><Feed empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>
   );
