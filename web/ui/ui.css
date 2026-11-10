@@ -37,12 +37,16 @@ code, pre { font-family: var(--mono); }
 code { background: var(--panel2); border: 1px solid var(--hair); border-radius: var(--r); padding: 0 .3em; font-size: .92em; }
 h1, h2, h3 { color: var(--white); margin: 0; }
 h1 { font-size: 22px; letter-spacing: -.01em; }
-input, textarea, select, button { font: inherit; color: inherit; }
-input, textarea, select {
+input, textarea, button { font: inherit; color: inherit; }
+input, textarea, .select {
   background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: .55em .7em; width: 100%;
   outline: none; transition: border-color .15s;
 }
-input:focus, textarea:focus, select:focus { border-color: var(--cyan); }
+input:focus, textarea:focus, .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
+/* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped */
+.select { display: flex; align-items: center; gap: .5em; text-align: left; cursor: pointer; min-width: 0; }
+.select-v { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select:disabled { cursor: not-allowed; opacity: .45; }
 textarea { resize: vertical; }
 .muted { color: var(--dim); }
 .small { font-size: 12px; }
@@ -193,9 +197,15 @@ textarea { resize: vertical; }
 .sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
-.menu button { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
-.menu button:hover { background: #222a33; }
+.menu button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
+.menu button:hover, .select-opt.on { background: #222a33; }
 .menu button.danger { color: var(--red); }
+/* A select's open list is this menu: the rules above are its rules, not a copy. Only where it
+   sits differs: select.jsx places it from its button, over everything but the toasts, and
+   a long one scrolls inside itself. An option's words wrap there rather than being cut. */
+.select-list { position: fixed; right: auto; top: 0; z-index: 70; min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.select-list .select-v { white-space: normal; overflow-wrap: anywhere; }
+.select-opt .px-ico { flex: none; margin-left: auto; color: var(--cyan); }
 
 .ask { margin: 14px 22px 0; border-radius: var(--r); padding: 14px 16px; border: 1px solid rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); display: flex; flex-direction: column; gap: 10px; }
 .ask.question { border-color: rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); }

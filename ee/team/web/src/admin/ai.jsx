@@ -4,6 +4,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import { api } from '../api.js';
 import { Btn, toast } from '../../../../../web/ui/ui.jsx';
+import { Select } from '../../../../../web/ui/select.jsx';
 import { Avatar } from '../avatar.jsx';
 import { t, locale } from '../i18n.js';
 import { worded } from '../../../shared/i18n/index.js';
@@ -115,11 +116,10 @@ export function AiAccount({ ctx }) {
           {ctx.users.map(u => (
             <div class="row-item static" key={u.id}>
               <Avatar user={u} /> <b class="grow">{u.name}</b>
-              <select aria-label={t('ai.profileOf', { name: u.name })} value={v.perUser[u.id] || ''} disabled={busy}
-                      onChange={(e) => act({ action: 'per-user', user: u.id, profile: e.currentTarget.value }, t('ai.profileSaved'))}>
-                <option value="">— {t('ai.noProfile')} —</option>
-                {[...new Set([...profiles, ...(v.perUser[u.id] ? [v.perUser[u.id]] : [])])].map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
+              <Select class="ai-profile" aria-label={t('ai.profileOf', { name: u.name })} value={v.perUser[u.id] || ''} disabled={busy}
+                      onChange={(p) => act({ action: 'per-user', user: u.id, profile: p }, t('ai.profileSaved'))}
+                      options={[{ value: '', label: `— ${t('ai.noProfile')} —` },
+                        ...[...new Set([...profiles, ...(v.perUser[u.id] ? [v.perUser[u.id]] : [])])].map(p => ({ value: p, label: p }))]} />
             </div>
           ))}
         </div>

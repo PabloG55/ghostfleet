@@ -3,6 +3,7 @@ import { STATUS, StatusMark, statusOf, StatusPill, Btn, usePoll, ago, toast, Mod
 import { SessionView } from './session.jsx';
 import { t, locale, worded } from './i18n.js';
 import { Icon } from './icon.jsx';
+import { Select } from './select.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKeys, moveFocus, dirOf, typeIntoComposer, focusComposer, projectTo } from './keyboard.jsx';
 import { cycleName } from './keys.js';
@@ -285,21 +286,18 @@ function NewSession({ project, free, preset, onClose, onDone }) {
                     placeholder={t('project.whatPh')} /></label>
         <div class="grid2">
           {spawnOwner({ value: owner, onChange: setOwner })}
-          <label class="field"><span>{t('project.where')}</span>
-            <select value={where} onChange={(e) => setWhere(e.currentTarget.value)}>
-              <option value="new">{t('project.newWt')}</option>
-              {free.map(w => <option key={w.path} value={w.path}>{t('project.reuse', { name: w.path.split('/').pop(), branch: w.branch })}</option>)}
-            </select></label>
+          <Select label={t('project.where')} value={where} onChange={setWhere}
+                  options={[{ value: 'new', label: t('project.newWt') },
+                    ...free.map(w => ({ value: w.path, label: t('project.reuse', { name: w.path.split('/').pop(), branch: w.branch }) }))]} />
         </div>
         <details class="advanced">
           <summary>{t('project.advanced')}</summary>
           <div class="grid3">
             <label class="field"><span>{t('project.branch')}</span><input value={branch} onInput={(e) => setBranch(e.currentTarget.value)} placeholder={n || t('project.sameAsName')} /></label>
             <label class="field"><span>{t('project.from')}</span><input value={from} onInput={(e) => setFrom(e.currentTarget.value)} placeholder={t('project.fromPh')} /></label>
-            <label class="field"><span>{t('project.model')}</span>
-              <select value={model} onChange={(e) => setModel(e.currentTarget.value)}>
-                <option value="">{t('project.accountModel')}</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option>
-              </select></label>
+            <Select label={t('project.model')} value={model} onChange={setModel}
+                    options={[{ value: '', label: t('project.accountModel') }, { value: 'opus', label: 'Opus' },
+                      { value: 'sonnet', label: 'Sonnet' }, { value: 'haiku', label: 'Haiku' }]} />
           </div>
         </details>
         {err ? <p class="err">{err}</p> : null}

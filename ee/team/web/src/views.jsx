@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Btn, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
+import { Select } from '../../../../web/ui/select.jsx';
 import { Avatar } from './avatar.jsx';
 import { t, lang, setLang, LANGS, LANG_NAMES } from './i18n.js';
 import { PASSWORD_MIN } from '../../shared/password.js';
@@ -59,15 +60,9 @@ export function Settings({ ctx }) {
       <header class="page-head"><div><h1>{t('settings.title')}</h1></div></header>
       <section class="panel">
         <h2>{t('settings.language')}</h2>
-        <label class="field"><span class="muted">{t('settings.languageHint')}</span>
-          <select value={lang()} onChange={(e) => {
-            const l = e.currentTarget.value;
-            setLang(l);
-            api.setLang(l).catch(x => toast(x.message, 'bad'));
-          }}>
-            {LANGS.map(l => <option key={l} value={l}>{LANG_NAMES[l]}</option>)}
-          </select>
-        </label>
+        <Select label={t('settings.languageHint')} labelClass="muted" value={lang()}
+                options={LANGS.map(l => ({ value: l, label: LANG_NAMES[l] }))}
+                onChange={(l) => { setLang(l); api.setLang(l).catch(x => toast(x.message, 'bad')); }} />
       </section>
       <section class="panel">
         <h2>{t('settings.team')}</h2>

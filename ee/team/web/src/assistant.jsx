@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, Btn } from '../../../../web/ui/ui.jsx';
+import { Select } from '../../../../web/ui/select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setTarget, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
@@ -59,11 +60,9 @@ export function Console({ projects, big }) {
       {S.phase === 'listening' ? <p class="listen-hint small">{S.pause === 'manual'
         ? t('as.hintManual')
         : t('as.hintAuto', { s: S.pause === 'larga' ? t('as.sLong') : t('as.sShort') })}</p> : null}
-      <label class="pause-pick small">{t('as.whenPause')}
-        <select value={S.pause} onChange={(e) => setOption('pause', e.currentTarget.value)}>
-          {Object.entries(PAUSES).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
-        </select>
-      </label>
+      <Select field="pause-pick small" label={t('as.whenPause')} value={S.pause}
+              options={Object.entries(PAUSES).map(([k, p]) => ({ value: k, label: p.label }))}
+              onChange={(v) => setOption('pause', v)} />
       <div class="toggles">
         <label><input type="checkbox" checked={S.voiceOut} onChange={(e) => setOption('voiceOut', e.currentTarget.checked)} /> {t('as.voiceOut')}</label>
         <label><input type="checkbox" checked={S.handsFree} onChange={(e) => setOption('handsFree', e.currentTarget.checked)} /> {t('as.handsFree')}</label>
@@ -141,12 +140,9 @@ export function Assistant({ ctx, projects, onClose, chip }) {
         <div><b>{t('as.name')}</b><small>{t('as.sub')}</small></div>
         <span class="as-head-end">{chip}<Btn kind="sm" aria-expanded={choosing} onClick={() => setChoosing(!choosing)}>{choosing ? t('common.back') : t('as.pickVoice')}</Btn><button class="x" aria-label={t('as.close')} onClick={onClose}>✕</button></span>
       </header>
-      <label class="field as-target"><span>{t('as.talkingTo')}</span>
-        <select value={S.target} onChange={(e) => setTarget(e.currentTarget.value)}>
-          {!S.target ? <option value="">{t('as.pickProject')}</option> : null}
-          {list.map(p => <option key={p.name} value={p.name}>{p.name}{p.sessions.some(s => s.lead) ? '' : ` (${t('ship.off').toLowerCase()})`}</option>)}
-        </select>
-      </label>
+      <Select field="field as-target" label={t('as.talkingTo')} value={S.target} onChange={setTarget}
+              options={[...(!S.target ? [{ value: '', label: t('as.pickProject') }] : []),
+                ...list.map(p => ({ value: p.name, label: p.sessions.some(s => s.lead) ? p.name : `${p.name} (${t('ship.off').toLowerCase()})` }))]} />
       {choosing ? <div class="as-voices"><VoicePicker admin={ctx.admin} /></div> : <><Sea ctx={ctx} /><Feed ctx={ctx} empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>

@@ -68,22 +68,8 @@
 /* ── controls ───────────────────────────────────────── */
 .mic .px-ico { color: inherit; }
 
-/* ── native controls, in the app's own clothes ─────────
- * A select, a checkbox and a radio were left to the engine: Chromium drew its own chevron and
- * grey rounded box, WebKit its own up-and-down pop-up button, and neither was the app's. They
- * are still the native elements, so the keyboard, the native option list and what a screen
- * reader announces are the browser's as before; only the drawing is ours. The select's mark is
- * the ▾ the session header's "More" button already prints, drawn as two halves of a triangle
- * so that it takes a token colour. The longhands also restate it for the owner picker, whose
- * own rule resets the background with the shorthand. The switch is already drawn by the app,
- * its checkbox an invisible overlay, so it is left out. Date, time and number fields already
- * wear the field tokens; their picker and stepper glyphs stay native, as the affordance. */
-.owner-pick select {
-  appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 1.9em;
-  background-image: linear-gradient(to bottom left, var(--dim) 50%, transparent 50%), linear-gradient(to bottom right, var(--dim) 50%, transparent 50%);
-  background-size: 4px 4px; background-repeat: no-repeat;
-  background-position: right calc(.75em + 4px) center, right .75em center;
-}
+/* the owner picker's box keeps the raised fill it had around its native select */
+.select.owner-pick { background-color: var(--panel2); }
 .pchip { border-radius: var(--r); }
 .admin-tabs a { font-weight: 500; }
 .mic { border-radius: var(--r); font: 600 15px var(--sans); }
