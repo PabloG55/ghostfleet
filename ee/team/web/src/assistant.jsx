@@ -147,7 +147,7 @@ export function Assistant({ ctx, projects, onClose, chip }) {
           {list.map(p => <option key={p.name} value={p.name}>{p.name}{p.sessions.some(s => s.lead) ? '' : ` (${t('ship.off').toLowerCase()})`}</option>)}
         </select>
       </label>
-      {choosing ? <div class="as-voices"><VoicePicker /></div> : <><Sea ctx={ctx} /><Feed ctx={ctx} empty={<Hint />} /></>}
+      {choosing ? <div class="as-voices"><VoicePicker admin={ctx.admin} /></div> : <><Sea ctx={ctx} /><Feed ctx={ctx} empty={<Hint />} /></>}
       <div class="as-controls"><Console projects={projects} /></div>
     </aside>
   );

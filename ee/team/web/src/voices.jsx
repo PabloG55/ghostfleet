@@ -10,11 +10,12 @@ import { Icon } from '../../../../web/ui/icon.jsx';
 // are heard from their sample first, and only downloaded if they are liked.
 const hello = () => t('vp.hello');
 
-export function VoicePicker() {
+export function VoicePicker({ admin = false }) {
   const S = useAgent();
   const [v, setV] = useState(null);
   const [playing, setPlaying] = useState('');
   const [bad, setBad] = useState('');
+  const [note, setNote] = useState('');
   const load = () => api.voices().then(setV).catch((e) => setBad(e.message));
   useEffect(() => { load(); return () => stopSpeaking(); }, []);
 
@@ -41,10 +42,15 @@ export function VoicePicker() {
   };
   const hear = (id) => toggle(id, (end) => speak(hello(), end, id));
   const sample = (x) => toggle(x.key, (end) => playSample(x.sample, end));
-  const download = (key) => api.installVoice(key).then(load).catch((e) => setBad(e.message));
+  // Only an admin installs or deletes (the server answers anyone else with 404). In the demo it
+  // answers 200 with a sentence saying nothing was changed: that is news, not a failure, so it
+  // goes in a notice beside the list rather than in `bad`, which replaces the whole picker.
+  const done = (r) => { setNote(r?.demo ? r.text : ''); return load(); };
+  const download = (key) => api.installVoice(key).then(done).catch((e) => setBad(e.message));
   const erase = async (x) => {
+    const demo = await api.deleteVoice(x.key).catch((e) => { setBad(e.message); return null; });
+    if (demo?.demo) { setNote(demo.text); return; }
     if (S.voice === `piper:${x.key}`) setOption('voice', '');
-    await api.deleteVoice(x.key).catch((e) => setBad(e.message));
     load();
   };
   const current = S.voice && [...v.kokoro.map(k => k.id), ...v.voices.filter(x => x.installed).map(x => `piper:${x.key}`)].includes(S.voice)
@@ -71,19 +77,20 @@ export function VoicePicker() {
         <div key={x.key} class="vp-row">
           <Pick id={`piper:${x.key}`}>{x.name}<small>{x.place}</small></Pick>
           <Listen id={`piper:${x.key}`} label={t('vp.listen', { name: x.name })} onClick={() => hear(`piper:${x.key}`)} />
-          <Btn kind="sm" aria-label={t('vp.delete', { name: x.name })} onClick={() => erase(x)}>✕</Btn>
+          {admin ? <Btn kind="sm" aria-label={t('vp.delete', { name: x.name })} onClick={() => erase(x)}>✕</Btn> : null}
         </div>
       ))}
-      {online.length ? <div class="vp-k small">{t('vp.online')}</div> : null}
+      {online.length ? <div class="vp-k small">{t(admin ? 'vp.online' : 'vp.onlineView')}</div> : null}
       {online.map(x => (
         <div key={x.key} class="vp-row">
           <span class="vp-name grow">{x.name}<small>{x.place} · {t('vp.quality', { q: x.quality })} · {x.mb} MB</small></span>
           <Listen id={x.key} label={t('vp.listen', { name: x.name })} onClick={() => sample(x)} />
           {job?.key === x.key
             ? <span class="muted small">{job.step === 'runtime' ? t('vp.preparing') : `${job.pct}%`}</span>
-            : <Btn kind="sm" disabled={!!job} onClick={() => download(x.key)}>{t('vp.download')}</Btn>}
+            : admin ? <Btn kind="sm" disabled={!!job} onClick={() => download(x.key)}>{t('vp.download')}</Btn> : null}
         </div>
       ))}
+      {note ? <p class="vp-note muted small" role="status">{note}</p> : null}
       {v.job?.error ? <p class="vp-bad small">{t('vp.failed', { name: v.job.name, why: v.job.error })}</p> : null}
     </div>
   );

@@ -509,6 +509,7 @@ export default {
   'vp.listen': 'Escuchar a {name}',
   'vp.delete': 'Borrar a {name}',
   'vp.online': 'De internet: escúchala y, si te gusta, descárgala',
+  'vp.onlineView': 'De internet: escucha una muestra; un admin puede descargarla',
   'vp.quality': 'calidad {q}',
   'vp.preparing': 'Preparando…',
   'vp.download': 'Descargar',
