@@ -376,7 +376,8 @@ async function route(req, res, url) {
   }
   if (p === '/api/presence' && req.method === 'POST') {
     const b = await body(req);
-    if (b.project && b.session && can(me, String(b.project), 'read')) seen(String(b.project), String(b.session), me.id, b.typing);
+    guard(String(b.project || ''), 'read');
+    if (b.session) seen(String(b.project), String(b.session), me.id, b.typing);
     return send(res, 200, { ok: true });
   }
   if (p === '/api/assign' && req.method === 'POST') {
@@ -398,11 +399,16 @@ async function route(req, res, url) {
     return send(res, 200, { rows });
   }
 
-  if (p === '/api/usage') return send(res, 200, fleet.usage());
+  if (p === '/api/usage') {
+    if (!isAdmin(me) && !Object.keys(me.projects || {}).some(p => can(me, p, 'prompt')))
+      throw httpErr(404, t('err.noPath', { path: p }));
+    return send(res, 200, fleet.usage());
+  }
   if (p.startsWith('/api/admin/usage')) return send(res, 200, await usage.route(req, p, me, body));
   if (p === '/api/voice') return send(res, 200, voice.status());
   if (p === '/api/voices') return send(res, 200, voice.voices());
   if ((p === '/api/voices/install' || p === '/api/voices/delete') && req.method === 'POST') {
+    if (!isAdmin(me)) throw httpErr(404, t('err.noPath', { path: p }));
     const b = await body(req);
     const del = p.endsWith('delete');
     const r = del ? piper.remove(String(b.key || '')) : piper.install(String(b.key || ''));
