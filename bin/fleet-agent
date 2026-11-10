@@ -46,16 +46,17 @@
 #   mcp         yes = the ghostfleet MCP server is registered for this CLI, so a session
 #               can CALL fleet_spawn/fleet_inbox/… as a tool instead of shelling out
 #   skill       yes = it also gets skill/ghostfleet-orchestrate, i.e. the INSTRUCTIONS for
-#               using those tools. Separate from `mcp` on purpose: since 2026-08-27 codex
-#               and opencode have the tools and neither has the skill, so a caveat composed
-#               from `mcp` alone would say nothing is missing when something is
+#               using those tools. Separate from `mcp` on purpose: opencode has the tools
+#               and not the skill, so a caveat composed from `mcp` alone would say nothing
+#               is missing when something is
 #   mcp_self    yes = a tool call with NO `project` argument resolves THIS session's own
 #               fleet. That needs the session's CLAUDE_FLEET_SOCK to reach the MCP server,
-#               which is the agent's choice and not ours: measured 2026-08-27, opencode
-#               passes its environment to the server and codex scrubs it. A third field
-#               rather than a footnote on `mcp`, because "can call the tools" and "knows
-#               which fleet it is in" are different capabilities and codex has only the
-#               first — see the caveat
+#               which is the agent's choice before it is ours: opencode passes its
+#               environment to the server, codex scrubs it unless the registration lists
+#               the variables (install.sh does, since 2026-11-10), cursor scrubs it. A
+#               third field rather than a footnote on `mcp`, because "can call the tools"
+#               and "knows which fleet it is in" are different capabilities and cursor has
+#               only the first — see the caveat
 #   limit_re    ERE matching "this account is spent until the window rolls over".
 #               Empty/absent = this agent has no such signal. NEVER sufficient on its
 #               own — the caller must also see the session's own usage figure at 100%+,
@@ -340,19 +341,25 @@ agent_field() {
         # remains the most degraded of the three — it can now drive the fleet while the
         # fleet still cannot be told anything by it. See the `caveat` command.
         mcp)        printf 'yes' ;;
-        skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
-        # NO, and this is the half of the wiring that did NOT work — found by calling the
-        # tool rather than by reading `codex mcp list`, which says "enabled" either way.
-        # codex launches an MCP server with a SCRUBBED environment: a real session with
-        # CLAUDE_FLEET_SOCK=cf-mcptest exported called fleet_list, and the server's child
-        # answered `fleet-list: no socket (run inside a fleet session, or pass -s <socket>)`.
-        # `-c shell_environment_policy.inherit=all` does not change it — that policy governs
-        # its shell tool, not its MCP children.
-        #   So a codex session must NAME the project: fleet_list(project: "ghostfleet")
-        # returned the live fleet in the same test, because fleet-dispatch then builds the
-        # child's env from the projects file instead of inheriting one. Everything except
-        # "my own fleet" works; fleet_send's reply_to needs a self too, so it stays out.
-        mcp_self)   printf 'no'  ;;
+        # YES since 2026-11-10: install.sh links skill/ghostfleet-orchestrate into
+        # $CODEX_HOME/skills, the same source every other agent links. Measured on 0.166.0:
+        # the `$` picker lists it through the link and `$ghostfleet-orchestrate` puts the
+        # whole file into the turn. codex lists only the first ~1024 characters of a
+        # description, so the tail of ours is not part of its implicit matching.
+        skill)      printf 'yes' ;;
+        # YES since 2026-11-10 (codex-cli 0.166.0), and it was NO before that for a reason
+        # that still holds: codex launches an MCP server with a SCRUBBED environment. A real
+        # session with CLAUDE_FLEET_SOCK exported called fleet_list and the server's child
+        # answered `fleet-list: no socket` (2026-08-27); `-c shell_environment_policy.
+        # inherit=all` does not change it, since that policy governs its shell tool.
+        #   What changed is the registration, not codex: a server table may list `env_vars`,
+        # names forwarded from the session, and install.sh now writes that list. Measured by
+        # CALLING the tool from a scratch fleet, two servers side by side: the one with the
+        # list answered fleet_list() with its own fleet, the one without it said "no
+        # socket". So this is yes only for a config the current install.sh wrote — a codex
+        # registered by an older one still needs a re-run of install.sh, and says so the
+        # same way it always did, by answering "no socket".
+        mcp_self)   printf 'yes' ;;
         budget)     printf 'no'  ;;
         # YES since codex-cli 0.160.1, re-measured 2026-10-10 in a scratch fleet. Under
         # 0.146.0 this was NO: the TUI persisted its rollout only on a clean exit, so a
@@ -409,8 +416,8 @@ agent_field() {
         # a tool prompt is seen only on the pane — through blocked_re above.
         hooks)      printf 'yes' ;;
         mcp)        printf 'yes' ;;   # ~/.gemini/config/mcp_config.json
-        # The one non-claude agent that also gets the INSTRUCTIONS: agy discovers skills from
-        # ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
+        # agy gets the INSTRUCTIONS too (so do cursor and, since 2026-11-10, codex): it discovers
+        # skills from ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
         skill)      printf 'yes' ;;
         # YES, measured by CALLING it, the way opencode's was: with the server registered in
         # mcp_config.json and CLAUDE_FLEET_SOCK exported, `agy -p` called fleet_list with NO

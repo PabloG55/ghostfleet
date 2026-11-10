@@ -1264,7 +1264,9 @@ and records which turn it started. The composer is never touched.
 **Which sessions.** A believable mod record for that socket and slot (`lib/mod-status.mjs`),
 whose `<session_id>.handoff/.ready` names the same process (`lib/mod-target.mjs`). A
 phase-one mod that only reports, codex/opencode/agy/cursor, an older Claude, a disabled
-plugin and a machine without node all get the paste, exactly as before.
+plugin and a machine without node all get the paste, exactly as before — except a codex
+that is mid-turn, which `fleet-send` hands to `codex queue` so it runs as a turn of its own
+(since 2026-11-10, codex-cli 0.166.0).
 `CLAUDE_FLEET_MOD_DELIVER=off` forces the paste for one call or one hook.
 
 **The channel** is a spool directory per session, `<fleet dir>/<session_id>.handoff/`,

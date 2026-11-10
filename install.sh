@@ -887,15 +887,20 @@ echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED
 # mcp/fleet-dispatch.mjs — and agent-here exports both when it starts a session in a pane.
 # So one registration is right for every fleet and every profile at once, and a second one
 # would be the same line written twice.
-#   ...WITH ONE MEASURED EXCEPTION, and it is codex's, not ours. That runtime resolution
-# needs the session's CLAUDE_FLEET_SOCK to reach the server, and opencode passes its
-# environment to an MCP child while codex SCRUBS it (2026-08-27: a codex session with the
-# variable exported called fleet_list and the server's child answered "fleet-list: no
-# socket"; `-c shell_environment_policy.inherit=all` changes nothing, since that policy is
-# about its shell tool). A codex session therefore has to name the project —
-# fleet_list(project: "ghostfleet") works, fleet_list() cannot — which is recorded as the
-# `mcp_self` field in bin/fleet-agent and printed in its caveat. It does not change WHERE
-# to register: there is still exactly one place per CLI to put it.
+#   ...BUT ONLY IF THAT ENVIRONMENT REACHES THE SERVER, and for codex it does not by
+# default. That runtime resolution needs the session's CLAUDE_FLEET_SOCK in the server's
+# env, and opencode passes its environment to an MCP child while codex SCRUBS it: the
+# server gets HOME, PATH, LANG, LOGNAME, SHELL, TERM, TMPDIR and USER, plus whatever the
+# table names (2026-08-27: a codex session with the variable exported called fleet_list
+# and the child answered "fleet-list: no socket"; `-c shell_environment_policy.inherit=all`
+# changes nothing, since that policy is about its shell tool). What the table CAN name is
+# `env_vars`, a list of variables forwarded from the session — measured 2026-11-10 on
+# codex-cli 0.166.0 by calling fleet_list with no arguments from a scratch fleet: one
+# server with the list answered with its own fleet, one beside it without it answered
+# "no socket", and a listed variable the session did not have was simply absent. So the
+# registration below adds that list, and a codex session resolves its own fleet the way a
+# Claude one does. It does not change WHERE to register: there is still exactly one place
+# per CLI to put it.
 #
 # WHAT THIS DOES NOT GIVE THEM, said here because the two are easy to conflate: MCP is
 # TOOLS, hooks are PUSH EVENTS. A codex session can now CALL the fleet; it still tells the
@@ -903,11 +908,21 @@ echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED
 # its pane by fleet-agent's busy_re. "You can see it, you will not be told" is exactly as
 # true after this as before. opencode has both halves (hooks/opencode-fleet-event.js), so
 # opencode reaches near parity; codex does not.
-#   Neither gets the orchestrate skill, which is a Claude Code feature — see
-# skill/ghostfleet-orchestrate and the note in bin/fleet-agent's `skill` field. They have
-# the tools without the instructions for using them.
+#   The INSTRUCTIONS for those tools are skill/ghostfleet-orchestrate, and codex gets them
+# too since 2026-11-10 (register_codex_skill, below). opencode still has the tools without
+# them — see the note in bin/fleet-agent's `skill` field.
 register_codex_mcp() {
   local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
+  local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  # WHO THE SESSION IS, and nothing else: the variables agent-here and codex-here export to
+  # say which fleet, profile and pane this is, which are exactly what a Claude session's
+  # server inherits for free. TMUX and TMUX_PANE make self() — and so fleet_send's reply_to
+  # — work; TMUX_TMPDIR is what lets fleet-list find a fleet whose tmux server is not in the
+  # default directory. Knobs (CLAUDE_FLEET_*_WAIT and the rest) stay out on purpose: they
+  # tune one command run, and a server outlives many.
+  local names=(CLAUDE_FLEET_SOCK CLAUDE_CONFIG_DIR CLAUDE_FLEET_DIR CLAUDE_FLEET_SLOT
+               CLAUDE_FLEET_AGENT CLAUDE_FLEET_PROJECTS TMUX TMUX_PANE TMUX_TMPDIR)
+  local list orig t
   if ! command -v codex >/dev/null 2>&1; then
     vsay "· codex not installed — skipping its MCP registration (fleet-spawn --agent codex will refuse until it is)"
     return 0
@@ -916,10 +931,68 @@ register_codex_mcp() {
   # rewrites that one [mcp_servers.ghostfleet] table and leaves every other key in
   # config.toml alone (checked with `model`/`approval_policy` present, codex-cli 0.149.1).
   # So no remove-first dance, and re-running the installer cannot stack up entries.
-  if codex mcp add ghostfleet -- node "$mcp" >/dev/null 2>&1; then
-    vsay "✓ registered ghostfleet MCP -> ${CODEX_HOME:-$HOME/.codex}/config.toml (codex, global)"
-  else
+  if ! codex mcp add ghostfleet -- node "$mcp" >/dev/null 2>&1; then
     echo "! could not 'codex mcp add' — run: codex mcp add ghostfleet -- node $mcp"
+    return 0
+  fi
+  # THE ENVIRONMENT IS WRITTEN BY HAND, because the CLI cannot say it: `codex mcp add` has
+  # --env KEY=VALUE, a STATIC value frozen at install time, which would pin every codex
+  # session to the fleet the installer ran in. env_vars has no flag. And the add above
+  # REWRITES the table — measured on 0.166.0, a hand-added env_vars line is gone after a
+  # second add — so this runs after every add rather than once, and never finds its own
+  # line already there. Edited in place (`>`, not mv) so the file keeps its mode: it holds
+  # the user's settings, and codex writes it 0600.
+  list="env_vars = [$(printf '"%s", ' "${names[@]}")"; list="${list%, }]"
+  orig="$(cat "$cfg" 2>/dev/null)" || orig=""
+  if t="$(awk -v hdr='[mcp_servers.ghostfleet]' -v line="$list" '
+        $0 == hdr { print; print line; intable = 1; found = 1; next }
+        /^[[:space:]]*\[/ { intable = 0 }
+        skipping { if ($0 ~ /\]/) skipping = 0; next }
+        intable && /^[[:space:]]*env_vars[[:space:]]*=/ { if ($0 !~ /\]/) skipping = 1; next }
+        { print }
+        END { exit found ? 0 : 1 }' "$cfg" 2>/dev/null)" && printf '%s\n' "$t" > "$cfg" \
+     && grep -q '"CLAUDE_FLEET_SOCK"' <<< "$(codex mcp get ghostfleet --json 2>/dev/null)"; then
+    vsay "✓ registered ghostfleet MCP -> $cfg (codex, global), passing the session's fleet to it"
+  else
+    # READ BACK THROUGH CODEX, and put back on any doubt: a config.toml codex cannot parse
+    # breaks every codex session, not just this one server, so a write it does not confirm
+    # is undone rather than left for the next launch to find.
+    [ -n "$orig" ] && printf '%s\n' "$orig" > "$cfg"
+    echo "! codex has the ghostfleet MCP but not the session's environment, so its fleet_* calls must name the project — add under [mcp_servers.ghostfleet] in $cfg: $list"
+  fi
+}
+
+# --- codex's skill: the same source file, a second destination ---------------------
+# codex reads skills from $CODEX_HOME/skills/<name>/SKILL.md, the same shape as Claude
+# Code's (`name` + `description` frontmatter, then the body), and FOLLOWS A SYMLINK there.
+# Measured on codex-cli 0.166.0, 2026-11-10, in a scratch CODEX_HOME: a link to the repo's
+# skill/ghostfleet-orchestrate was listed by the `$` picker, `$ghostfleet-orchestrate`
+# injected the whole file into the turn, and the turn answered from its body. So this is
+# a LINK to the one source, like every other agent's, and never a copy: a copy is a fork,
+# and a fork is the version that is out of date the next time the skill changes.
+#   ONE ENTRY OF OURS AND NOTHING ELSE. skills/ also holds codex's own .system/ and
+# whatever the user installed, and this touches neither: it writes one name, and leaves a
+# real directory of that name alone, since a directory there is somebody's own copy and
+# `ln -sfn` would put a link INSIDE it. Uninstalling is `rm -f` of the link (README).
+#   WHAT CODEX DOES WITH A LONG DESCRIPTION: it lists the first ~1024 characters and then
+# "...", so implicit discovery sees the opening of the description and not its tail. Named
+# by `$`, the whole file arrives regardless.
+register_codex_skill() {
+  local dir="${CODEX_HOME:-$HOME/.codex}/skills"
+  local src="$FLEET_HOME/skill/ghostfleet-orchestrate" dest
+  dest="$dir/ghostfleet-orchestrate"
+  if ! command -v codex >/dev/null 2>&1; then
+    vsay "· codex not installed — skipping its skill"
+    return 0
+  fi
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    echo "! $dest is not a link to the fleet's skill, so it was left alone — codex uses that copy instead"
+    return 0
+  fi
+  if mkdir -p "$dir" 2>/dev/null && ln -sfn "$src" "$dest" 2>/dev/null; then
+    vsay "✓ linked the ghostfleet-orchestrate skill -> $dest (codex, global)"
+  else
+    echo "! could not link $dest — codex sessions get the fleet_* tools without the skill"
   fi
 }
 
@@ -1070,6 +1143,7 @@ register_cursor() {
     "wrote ghostfleet MCP" "cursor gets no fleet_* tools"
 }
 register_codex_mcp
+register_codex_skill
 register_opencode_mcp
 register_agy
 register_cursor
