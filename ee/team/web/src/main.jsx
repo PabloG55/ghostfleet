@@ -4,21 +4,18 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'preact/hooks'
 import { api } from './api.js';
 import { Setup, Login, ChangePassword } from './auth.jsx';
 import { Admin } from './admin/index.jsx';
-import { Activity, Settings } from './views.jsx';
 import { Avatar } from './avatar.jsx';
 import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
-import { Assistant, HomeAgent, Launcher } from './assistant.jsx';
-import { bind, unbind, useAgent } from './agent.js';
-import { TaskRail, TaskChip } from './tasks.jsx';
-import { Automations, noticesSeen } from './automations.jsx';
+import { unbind } from '../../../../web/ui/agent.js';
+import { noticesSeen } from '../../../../web/ui/automations.jsx';
 import { teamAdapter } from './adapter.js';
-// The shared screens, from the MIT core (web/ui/README.md); everything else here is the team app's.
+// The one app, from the MIT core (web/ui/app.jsx): every page, the sidebar and the assistant.
+// What is here is only what the team app has and ghostfleet itself does not — signing in, the
+// people, administration and the account's usage (test/one-base.test.mjs holds it to that).
 import { FleetProvider } from '../../../../web/ui/adapter.jsx';
-import { Frame, NavLink, sharedRoute, useHashRoute } from '../../../../web/ui/shell.jsx';
+import { FleetApp } from '../../../../web/ui/app.jsx';
+import { NavLink } from '../../../../web/ui/shell.jsx';
 import { go } from '../../../../web/ui/history.js';
-import { Home } from '../../../../web/ui/home.jsx';
-import { ProjectView } from '../../../../web/ui/project.jsx';
-import { FleetMap } from '../../../../web/ui/map.jsx';
 import { Logo, Toasts, usePoll, toast } from '../../../../web/ui/ui.jsx';
 import { Icon } from '../../../../web/ui/icon.jsx';
 // Shared rules first at each layer, the app's own after them: see web/ui/ui.css.
@@ -49,36 +46,13 @@ export function canonical(hash) {
   if (parts[0] === 'automations' && parts[1]) parts[1] = parts[1].replace(/^nueva$/, 'new').replace(/^plantilla-/, 'template-');
   return '#/' + parts.join('/');
 }
-// Home, the map and a project or session are the shared screens' routes (web/ui/shell.jsx).
-function parse(hash) {
-  const shared = sharedRoute(hash);
-  if (shared) return shared;
-  const parts = hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  if (parts[0] === 'activity') return { view: 'activity' };
-  if (parts[0] === 'automations') return { view: 'autos', id: parts[1] || null };
-  if (parts[0] === 'settings') return { view: 'settings' };
-  if (parts[0] === 'admin') return { view: 'admin', section: parts[1] || null };
-  return { view: 'home' };
-}
+
+// The team app's own pages: administration, and nothing else. Every other page is web/ui's.
+export const TEAM_VIEWS = ['admin'];
 
 function Shell({ me, mode, onLogout, onAccount }) {
   const admin = me.role === 'admin';
-  const route = useHashRoute(parse, canonical);
   const [users, setUsers] = useState([me]);
-  const [asOpen, setAsOpen] = useState(() => { try { return localStorage.getItem('gfw.asOpen') === '1'; } catch { return false; } });
-  const [railOpen, setRailOpen] = useState(() => { try { return (localStorage.getItem('gfw.rail') ?? (innerWidth > 900 ? '1' : '0')) === '1'; } catch { return true; } });
-  useEffect(() => { try { localStorage.setItem('gfw.rail', railOpen ? '1' : '0'); } catch {} }, [railOpen]);
-  const S = useAgent();
-  const asked = S.tasks.some(t => !t.hidden) || S.deciding.length > 0;
-  const rail = asked && railOpen;
-  useEffect(() => { try { localStorage.setItem('gfw.asOpen', asOpen ? '1' : '0'); } catch {} }, [asOpen]);
-  // On the home page the card is the assistant, so neither the panel nor its button is there:
-  // a card that talks and a button that opens a second place to talk read as two assistants.
-  // Going home closes the panel, and the card goes on with the same conversation (agent.js).
-  // The panel is not a page: opening and closing it never adds a history entry.
-  const home = route.view === 'home';
-  const panel = asOpen && !home;
-  useEffect(() => { if (home) setAsOpen(false); }, [home]);
   const loadUsers = useCallback(() => api.users().then(r => setUsers(r.users)).catch(() => {}), []);
   useEffect(() => { loadUsers(); }, []);
   const { data: pj } = usePoll(() => api.projects(), 4000, []);
@@ -104,50 +78,32 @@ function Shell({ me, mode, onLogout, onAccount }) {
     signIn: () => { unbind(); onLogout(); },
     changePassword: () => onAccount({ ...me, mustChange: true }),
   };
-  // The assistant lives above the pages; it needs to know where the person is.
-  bind({ go: ctx.go, me, projects: pj?.projects || [], route });
   const fleet = useMemo(() => teamAdapter(ctx), [users]);
   const projects = pj?.projects ?? null;
-  const notices = fresh.length;
-
-  let main;
-  if (route.view === 'project') main = <ProjectView key={route.project} project={route.project} session={route.session} tool={route.tool} />;
-  else if (route.view === 'activity') main = <Activity ctx={ctx} />;
-  else if (route.view === 'autos') main = <Automations key={route.id || 'list'} ctx={ctx} projects={projects} id={route.id} />;
-  else if (route.view === 'map') main = <FleetMap projects={projects} />;
-  else if (route.view === 'settings') main = <Settings ctx={ctx} />;
-  else if (route.view === 'admin') main = <Admin ctx={ctx} section={route.section} />;
-  else main = <Home projects={projects}><HomeAgent ctx={ctx} projects={projects} /></Home>;
 
   return (
     <FleetProvider adapter={fleet}>
-      <Frame name={NAME} sub={mode === 'demo' ? t('nav.demo') : t('nav.fleet')} route={route} projects={projects} settings="/settings"
-             class={`${mode === 'demo' ? ' is-demo' : ''}${panel ? ' with-as' : ''}${rail ? ' with-rail' : ''}`}
-             nav={(close) => <>
-               <NavLink to="/automations" active={route.view === 'autos'} onClick={close}><Icon name="bolt" /> {t('nav.automations')} {notices ? <span class="badge warn" title={t('nav.unseen')}>{notices}</span> : null}</NavLink>
-               <NavLink to="/activity" active={route.view === 'activity'} onClick={close}><Icon name="list" /> {t('nav.activity')}</NavLink>
-               {admin ? <NavLink to="/admin" active={route.view === 'admin'} onClick={close}><Icon name="key" /> {t('nav.admin')}</NavLink> : null}
-             </>}
-             below={quotas ? <UsageMeter data={usage} /> : null}
-             foot={(close) => (
-               <div class="side-foot">
-                 <Avatar user={me} size={28} />
-                 <span class="grow ellipsis">{me.name}</span>
-                 <a href="#/settings" class="icon-btn" title={t('nav.settings')} aria-label={t('nav.settings')} onClick={close}><Icon name="gear" /></a>
-                 <button class="icon-btn" title={t('nav.logout')} aria-label={t('nav.logout')} onClick={ctx.logout}><Icon name="logout" /></button>
-               </div>
-             )}
-             topEnd={quotas ? (open) => <UsageChips data={usage} onClick={open} /> : undefined}
-             banner={mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div> : null}
-             after={<>
-               {rail ? <TaskRail ctx={ctx} projects={projects} onClose={() => setRailOpen(false)} /> : null}
-               {panel
-                 ? <Assistant ctx={ctx} route={route} projects={projects} onClose={() => setAsOpen(false)} chip={asked && !rail ? <TaskChip onClick={() => setRailOpen(true)} /> : null} />
-                 : <>{asked && !rail ? <TaskChip floating onClick={() => setRailOpen(true)} /> : null}
-                     {home ? null : <Launcher onOpen={() => setAsOpen(true)} />}</>}
-             </>}>
-        {main}
-      </Frame>
+      <FleetApp name={NAME} sub={mode === 'demo' ? t('nav.demo') : t('nav.fleet')} projects={projects} me={me} canonical={canonical}
+                badges={{ automations: fresh.length }}
+                extra={{
+                  parse: (parts) => (parts[0] === 'admin' ? { view: 'admin', section: parts[1] || null } : null),
+                  screens: { admin: (r) => <Admin ctx={ctx} section={r.section} /> },
+                  nav: (route, close) => (admin ? <NavLink to="/admin" active={route.view === 'admin'} onClick={close}><Icon name="lock" /> {t('nav.admin')}</NavLink> : null),
+                }}
+                frame={{
+                  class: mode === 'demo' ? ' is-demo' : '',
+                  below: quotas ? <UsageMeter data={usage} /> : null,
+                  foot: (close) => (
+                    <div class="side-foot">
+                      <Avatar user={me} size={28} />
+                      <span class="grow ellipsis">{me.name}</span>
+                      <a href="#/settings" class="icon-btn" title={t('nav.settings')} aria-label={t('nav.settings')} onClick={close}><Icon name="gear" /></a>
+                      <button class="icon-btn" title={t('nav.logout')} aria-label={t('nav.logout')} onClick={ctx.logout}><Icon name="logout" /></button>
+                    </div>
+                  ),
+                  topEnd: quotas ? (open) => <UsageChips data={usage} onClick={open} /> : undefined,
+                  banner: mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div> : null,
+                }} />
     </FleetProvider>
   );
 }

@@ -1,0 +1,19 @@
+/* The Claude accounts line (accounts.jsx). All colours are the brand's tokens. */
+.usage { display: flex; flex-direction: column; gap: 4px; width: 100%; margin: 0 0 16px; padding: 10px 14px; text-align: left;
+         font: 13px var(--mono); color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+button.usage { cursor: pointer; }
+button.usage:hover { border-color: var(--dim); }
+button.usage:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.usage .u-line { display: flex; gap: 12px; min-width: 0; }
+.usage .u-prof { color: var(--dim); flex: none; font-size: 12px; min-width: 5.5em; line-height: 20px; }
+.usage .u-text { min-width: 0; overflow-wrap: anywhere; line-height: 20px; }
+.u-green .u-text, .u-green .u-state { color: var(--green); }
+.u-yellow .u-text, .u-yellow .u-state { color: var(--yellow); }
+.u-red .u-text, .u-red .u-state { color: var(--red); }
+.u-grey .u-text, .u-grey .u-state { color: var(--grey); }
+.usage-list h3.u-prof { font: 600 14px var(--mono); color: var(--white); margin: 1.2em 0 .3em; overflow-wrap: anywhere; }
+.usage-list .u-acct { padding: .6em 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; font-family: var(--mono); }
+.usage-list .u-head { display: flex; flex-wrap: wrap; gap: .2em .8em; }
+.usage-list .u-name { color: var(--white); }
+.usage-list .u-win { color: var(--fg); font-size: 13px; }
+.usage-list .u-acct p.u-fix { margin: .3em 0 0; font-size: 12px; color: var(--dim); }

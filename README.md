@@ -40,10 +40,9 @@ get one screen that shows what every one of them is doing.
 
 <p align="center">
   <img src="docs/mobile/phone-demo.gif" width="260"
-       alt="On a phone: the projects list and its profile tabs, one project's grid of session
-            cards, the actions sheet behind the header's dots, a session as a chat with
-            bubbles and a composer being typed into, a swipe to the next session, and the
-            live pane showing a permission prompt waiting on an answer.">
+       alt="On a phone: the first page with the Claude accounts, a proposal from Jarvis, the
+            assistant and the fleet as boats; the drawer with the projects; one project's
+            sessions; and a session with a permission prompt answered from the chat.">
 </p>
 <p align="center">
   <b>Unblock one from anywhere.</b> <sub>The same grid as an installable web app. A session is

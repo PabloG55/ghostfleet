@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'preact/hooks';
 // The phone client's own web/md.js, not a copy: one renderer for a message wherever it is read.
 import { render as renderMd } from '../md.js';
 import { colorOf } from './lights.js';
@@ -71,30 +71,40 @@ export const clock = (ts) => new Date(ts * 1000).toLocaleString(locale(), { day:
 
 // Re-run `fn` every `ms` while mounted, and right away when `deps` change. Errors are kept,
 // not thrown, so a flaky poll shows a line instead of blanking the screen.
+//   A TICK THAT FINDS ITS LAST READ STILL OUT SKIPS. An interval does not wait for an answer, so a
+// server slower than the period had a second read started behind the first, then a third — the
+// backlog that came back as a burst of 429s, measured at 399 reads in under three minutes from one
+// phone. An explicit reload() still asks.
 export function usePoll(fn, ms, deps) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const live = useRef(0);
+  const out = useRef(0);
   const run = useCallback(async () => {
     const id = live.current;
+    out.current++;
     try { const d = await fn(); if (id === live.current) { setData(d); setError(null); } }
     catch (e) { if (id === live.current) setError(e); }
-    finally { if (id === live.current) setLoading(false); }
+    finally { out.current--; if (id === live.current) setLoading(false); }
   }, deps);
   useEffect(() => {
     live.current++; setLoading(true); setData(null);
     run();
     if (!ms) return undefined;
-    const iv = setInterval(() => { if (!document.hidden) run(); }, ms);
+    const iv = setInterval(() => { if (!document.hidden && !out.current) run(); }, ms);
     return () => clearInterval(iv);
   }, [run]);
   return { data, error, loading, reload: run };
 }
 
+// Drawn before the paint, not after it: a bubble that is empty for a frame and then fills is a
+// list that grows above the reader after anything that measured it — the chat holding their place
+// while a page of older messages goes in above them measured empty bubbles, and the reader was then
+// pushed down by the height of everything that filled in.
 export function Markdown({ text }) {
   const ref = useRef(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const n = ref.current;
     if (!n) return;
     n.replaceChildren();
@@ -110,6 +120,16 @@ export function Toasts() {
   const [list, setList] = useState([]);
   pushToast = (m) => { setList(l => [...l, m]); setTimeout(() => setList(l => l.filter(x => x.id !== m.id)), m.kind === 'bad' ? 7000 : 3500); };
   return <div class="toasts">{list.map(m => <div key={m.id} class={`toast ${m.kind}`}>{m.icon ? <Icon name={m.icon} /> : null}{m.text}</div>)}</div>;
+}
+
+// ANOTHER MACHINE'S PROJECT is addressed `<name>@<key>` (fleet-serve mergeProjects), the key a slug
+// of that machine's own label (lib/peers.mjs keyFor). The address is the app's: a reader is shown
+// the name and the machine, because this machine has projects of the same names and `acme-api@vm`
+// reads as a typo. One function, so no screen spells it its own way.
+export const splitAddr = (n) => { const m = /^(.+)@([^@]+)$/.exec(String(n || '')); return m ? [m[1], m[2]] : [String(n || ''), '']; };
+export function ProjectName({ name }) {
+  const [bare, host] = splitAddr(name);
+  return host ? <>{bare}<small class="at"> · {host}</small></> : bare;
 }
 
 export function Modal({ title, onClose, children, wide }) {

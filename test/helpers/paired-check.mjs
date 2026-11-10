@@ -4,16 +4,27 @@
 //
 //     node test/helpers/paired-check.mjs [web-dir]     # "name <US> want <US> got" rows
 //
-// `web-dir` defaults to this checkout's web/. Pointed at a `git archive` of staging — which
-// has no idea a project can live on another machine — every row about the host goes red,
-// which is how each was watched before it was trusted. The rows about a machine on its own
-// pass there too, and must: pairing nothing changes nothing.
+// `web-dir` defaults to this checkout's web/. The rows about a machine on its own must pass on a
+// client that knows nothing of pairing — pairing nothing changes nothing — and the rows about the
+// second machine must not.
 //
 // FIXTURE MODE, from this checkout's web/fixtures/paired.json, chosen with the
 // `gf.fixture.paired` key ('online' | 'offline'). The server half — that the daemon really
 // merges, proxies, refuses and audits — is pair-check.mjs's, against two live fleet-serves;
 // this one is only about the screens, at a phone's size with touch and a desk's with a mouse.
+//
+// SINCE v104 THESE ARE web/ui's SCREENS, the ones the team app draws. The old client's answer to
+// "which machine" was a tab per machine and a host on every card; web/ui's is a heading per
+// machine in the project list (the drawer on a phone, the sidebar at a desk), the machine beside
+// a remote project's name wherever the name is drawn, and the machine on every queue item. What
+// each row asked of the old client, it asks of that.
+//
+// ANOTHER MACHINE'S ADDRESS IS `<name>@<key>` (fleet-serve mergeProjects), and the key is a slug
+// of the machine's own label (lib/peers.mjs keyFor). The address is the app's, not the reader's:
+// a remote project is drawn as its name and its machine, never as `acme-api@vm`, and this machine
+// has projects of the same names, which is what the address is for.
 import { launch, sleep, serveDir } from '../../lib/browser.mjs';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +36,25 @@ const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US 
 const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
 const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
 process.on('uncaughtException', (e) => { console.log(rows.join('\n')); console.error(String(e && e.stack || e)); process.exit(1); });
+
+// ── the terminal gate, lifted ──────────────────────────────────────────────────────────────
+// Fixture mode has no tmux, so the phone offers no terminal there for ANY project, and a
+// browser row "a remote project has no terminal" would pass for a client that offered one
+// everywhere a server answers. So the adapter's own two lines are lifted and called with a
+// server: another machine's project has none, this machine's has one.
+{
+  const src = fs.readFileSync(path.join(WEB, 'src', 'adapter.js'), 'utf8');
+  const rem = (/export const remote = (\(project\) => [^\n]*);/.exec(src) || [])[1] || '';
+  const gate = (/canTerm: (\(project\) => \{[^\n]*\}),/.exec(src) || [])[1] || '';
+  let canTerm = null;
+  try {
+    // eslint-disable-next-line no-new-func
+    canTerm = new Function('server', 'termAsked', 'readTerm', `const remote = ${rem}; return ${gate};`)(() => true, true, () => {});
+  } catch {}
+  is('the terminal gate is the adapter\'s own', 'function', typeof canTerm);
+  is('...another machine\'s project has no terminal, with a server answering', false, canTerm ? canTerm('billing-svc@vm') : null);
+  is('...and this machine\'s has one', true, canTerm ? canTerm('billing-svc') : null);
+}
 
 let b = null, srv = null;
 try {
@@ -46,55 +76,61 @@ try {
     while (!v && Date.now() - t0 < ms) { await sleep(80); v = await cond(); }
     return v;
   }
+  // The list is there at every width — the drawer on a phone holds it while shut — so it is
+  // read without opening anything; what a tap does is asked by tapping.
   const look = () => b.evaluate(() => {
-    const t = (q) => ((document.querySelector(q) || {}).textContent || '').trim();
-    const list = document.querySelector('#side .cards') || document.querySelector('#app .cards');
-    const cards = list ? [...list.querySelectorAll('.card')] : [];
-    const meta = (c) => [...c.querySelectorAll('.c-where')].map(n => n.textContent.trim())[0] || '';
+    const t = (q) => ((document.querySelector(q) || {}).textContent || '').replace(/\s+/g, ' ').trim();
+    const side = [...document.querySelectorAll('.side .side-list > *')];
+    const groups = []; let g = null;
+    for (const n of side) {
+      if (n.classList.contains('side-host')) { g = { host: `${(n.querySelector('.grow') || {}).textContent || ''}:${(n.querySelector('small') || {}).textContent || ''}`, items: [] }; groups.push(g); }
+      else if (n.matches('a.nav')) { if (!g) { g = { host: '', items: [] }; groups.push(g); } g.items.push(((n.querySelector('.grow') || {}).textContent || '').trim()); }
+    }
     return {
-      duo: document.documentElement.classList.contains('duo'),
-      main: t('#app > .hdr .scope'),
-      // the list beside it at a desk — Projects, or a project's grid once one is open
-      side: t('#side > .hdr .scope'),
-      // no-break spaces read as spaces: the row is about the words, not how they are kept together
-      tabs: [...document.querySelectorAll('.seg.tabs button')].map(n => n.textContent.replace(/\u00a0/g, ' ').trim()),
-      tabKeys: [...document.querySelectorAll('.seg.tabs button.k')].map(n => n.textContent.trim()),
-      projects: cards.filter(c => c.classList.contains('k-project')).map(c => `${(c.querySelector('.c-name') || {}).textContent.trim()} | ${meta(c)}`),
-      nums: cards.filter(c => c.classList.contains('k-project')).map(c => ((c.querySelector('.c-num') || {}).textContent || '').trim()).join(','),
-      hosts: cards.filter(c => c.classList.contains('k-host')).map(c => `${(c.querySelector('.c-name') || {}).textContent.trim()} | ${((c.querySelector('.chip.st') || {}).textContent || '').trim()}`),
-      usage: t('.usage, .u-line, .accounts'),
-      queue: t('.queue-row'),
-      held: [...document.querySelectorAll('.card.k-waiting')].map(c => `${(c.querySelector('.c-name') || {}).textContent.trim()} | ${meta(c)}`),
-      sheet: t('#sheet h2'),
-      sheetRows: [...document.querySelectorAll('#sheet .rows button')].map(n => n.textContent.trim()),
-      sheetWhy: t('#sheet .term-why'),
-      sheetText: t('#sheet'),
-      toast: t('#app .toast') || t('#side .toast'),
+      hosts: groups.filter(x => x.host).map(x => x.host),
+      groups,
+      names: groups.flatMap(x => x.items),
+      board: [...document.querySelectorAll('.main .fleet-name')].map(n => n.textContent.replace(/\s+/g, ' ').trim()),
+      h1: t('.main h1'),
+      usage: t('.main .usage'),
+      queue: [...document.querySelectorAll('.main .extra-card')].map(c => `${(c.querySelector('h3') || {}).textContent || ''} | ${((c.querySelector('p.muted') || {}).textContent || '').trim()}`),
+      tools: [...document.querySelectorAll('.main .tool-tab')].map(n => n.textContent.trim()),
+      termWhy: t('.main .term-why'),
+      hostsPanel: [...document.querySelectorAll('.main .panel')].filter(p => /Paired machines/.test((p.querySelector('h2') || {}).textContent || ''))
+        .map(p => [...p.querySelectorAll('.row-item')].map(r => r.textContent.replace(/\s+/g, ' ').trim()))[0] || null,
+      toast: t('.toasts'),
     };
   });
   const settle = async (pred, ms = 5000) => { await until(async () => pred(await look()), ms); return look(); };
-  const slid = () => until(() => b.evaluate(() => !document.documentElement.dataset.nav), 3000).then(() => sleep(150));
-  const centre = (q) => b.evaluate((sel) => {
-    const n = document.querySelector(sel);
-    if (!n) return null;
-    n.scrollIntoView({ block: 'center' });
-    const r = n.getBoundingClientRect();
-    return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
-  }, q);
-  // The element a tap should land on, found by its text, tagged so `centre` can find it.
-  const mark = (sel, text) => b.evaluate((s, tx) => {
-    document.querySelectorAll('[data-pq]').forEach(n => n.removeAttribute('data-pq'));
-    const n = [...document.querySelectorAll(s)].find(x => x.textContent.trim().startsWith(tx));
-    if (!n) return false;
-    n.setAttribute('data-pq', '1');
-    return true;
-  }, sel, text);
+  // A real press on the element found by its text: a tap with touch, a click with a mouse.
   let touch = false;
-  const tap = async (sel, text) => {
-    if (!(await mark(sel, text))) return false;
-    const p = await centre('[data-pq]');
+  const press = async (sel, text) => {
+    const p = await b.evaluate((s, tx) => {
+      const n = [...document.querySelectorAll(s)].find(x => x.textContent.replace(/\s+/g, ' ').trim().startsWith(tx));
+      if (!n) return null;
+      n.scrollIntoView({ block: 'center', behavior: 'instant' });
+      n.setAttribute('data-pp', '1');
+      return true;
+    }, sel, text) && await (async () => {
+      // Measured once it has stopped moving: settings draws its sections as their reads land, so
+      // a section above can push this one down between the measure and the press — which then
+      // lands on a heading, and the row reads as a button that does nothing.
+      const at = () => b.evaluate(() => {
+        const n = document.querySelector('[data-pp]'); if (!n) return null;
+        const r = n.getBoundingClientRect();
+        return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      });
+      let was = await at(), now = was;
+      for (let i = 0; i < 20; i++) {
+        await sleep(120); now = await at();
+        if (now && was && now.x === was.x && now.y === was.y) break;
+        await b.evaluate(() => { document.querySelector('[data-pp]')?.scrollIntoView({ block: 'center', behavior: 'instant' }); return null; });
+        was = await at();
+      }
+      await b.evaluate(() => { document.querySelector('[data-pp]')?.removeAttribute('data-pp'); return null; });
+      return now;
+    })();
     if (!p) return false;
-    await slid();
     if (touch) {
       await b.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p.x, y: p.y }] });
       await b.call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
@@ -103,22 +139,38 @@ try {
       await b.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', clickCount: 1 });
       await b.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', clickCount: 1 });
     }
-    await sleep(250);
+    await sleep(300);
     return true;
   };
-  async function fresh({ w, h, touch: tch, paired = '' }) {
+  // A project in the list, by machine: on a phone the drawer is opened first, as a thumb would.
+  const openProject = async (host, name) => {
+    if (touch) { await press('.topbar .icon-btn', ''); await until(() => b.evaluate(() => !!document.querySelector('.side.open'))); await sleep(250); }
+    const ok = await b.evaluate((h, n) => {
+      document.querySelectorAll('[data-pq]').forEach(x => x.removeAttribute('data-pq'));
+      let under = '';
+      for (const x of document.querySelectorAll('.side .side-list > *')) {
+        if (x.classList.contains('side-host')) under = ((x.querySelector('.grow') || {}).textContent || '').trim();
+        else if (x.matches('a.nav') && under === h && ((x.querySelector('.grow') || {}).textContent || '').trim() === n) { x.setAttribute('data-pq', '1'); return true; }
+      }
+      return false;
+    }, host, name);
+    return ok && press('[data-pq]', '');
+  };
+  async function fresh({ w, h, touch: tch, paired = '', hash = '' }) {
     touch = tch;
     await b.call('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: tch });
     await b.call('Emulation.setTouchEmulationEnabled', { enabled: tch, ...(tch ? { maxTouchPoints: 5 } : {}) });
     await goto(base + '/index.html');
     await b.evaluate((pm) => { try { localStorage.clear(); sessionStorage.clear(); if (pm) localStorage.setItem('gf.fixture.paired', pm); } catch {} return null; }, paired);
     await goto(base + '/index.html');
-    await b.evaluate(() => {
-      const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
-      if (e) e.click(); return null;
-    });
-    await until(() => b.evaluate(() => !!document.querySelector('.card .c-name')));
-    await sleep(500);
+    await until(() => b.evaluate(() => {
+      const e = [...document.querySelectorAll('button')].find(x => /^continue without a passkey/i.test(x.textContent.trim()));
+      if (e) e.click();
+      return !!document.querySelector('.app .side .side-list a.nav');
+    }));
+    // The fixture bypass lands on the first page, as a cold open does; a screen is then an address.
+    if (hash) await b.evaluate((h) => { location.hash = h; return null; }, hash);
+    await sleep(400);
   }
   async function step(name, fn) {
     try { await fn(); } catch (e) { is(`${name}: ran to the end`, 'yes', String((e && e.message) || e).slice(0, 160)); }
@@ -130,116 +182,103 @@ try {
     await step(`${at}: one machine`, async () => {
       await fresh({ ...size });
       s = await look();
-      is(`${at}: one machine — the tabs are the profiles, as before`, ['all', 'work', 'personal'], s.tabs.map(x => x.replace(/ ●\d+$/, '')));
-      is(`${at}: ...and no card names a machine`, false, s.projects.some(x => /laptop|vm/.test(x)));
-      is(`${at}: ...and there is no offline card`, [], s.hosts);
+      is(`${at}: one machine — no machine headings in the project list`, [], s.hosts);
+      is(`${at}: ...no project is drawn by an address`, false, [...s.names, ...s.board].some(x => /@/.test(x)));
+      is(`${at}: ...and none names a machine on the board`, false, s.board.some(x => / · (laptop|vm)$/.test(x)));
     });
 
     await step(`${at}: paired, both up`, async () => {
       await fresh({ ...size, paired: 'online' });
-      s = await look();
-      is(`${at}: paired — every tab carries its machine`, ['all', 'laptop · work', 'laptop · personal', 'vm · work'], s.tabs.map(x => x.replace(/ ●\d+$/, '')));
-      is(`${at}: ...and a short machine name is not drawn as a key letter`, [], s.tabKeys);
-      is(`${at}: ...every project row says which machine it is on`, true,
-         s.projects.length === 7 && s.projects.every(x => / \| (laptop|vm) · /.test(x)));
-      is(`${at}: ...the vm's projects by their names, the machine on the line beneath`,
-         ['acme-api | vm · work', 'billing-svc | vm · work · codex'], s.projects.filter(x => / \| vm · /.test(x)));
-      is(`${at}: ...this machine's cards keep their numbers`, '1,2,3,4,5,6,7', s.nums);
-      is(`${at}: ...the queue is merged — the vm's master's item is counted here`, 'queue · 1', s.queue.replace(/\s*›$/, ''));
+      s = await settle(x => x.hosts.length > 1);
+      is(`${at}: paired — a heading per machine, this one first and saying so`, ['laptop:this machine', 'vm:'], s.hosts);
+      is(`${at}: ...the vm's projects under its heading, by their names`, ['acme-api', 'billing-svc'], (s.groups.find(g => /^vm:/.test(g.host)) || {}).items || null);
+      // Both machines have a billing-svc: that is the point of the address.
+      is(`${at}: ...this machine's projects of the same names are still under this one`, true,
+         ['acme-api', 'billing-svc'].every(n => ((s.groups.find(g => /^laptop:/.test(g.host)) || {}).items || []).includes(n)));
+      is(`${at}: ...no project is drawn by its address`, false, [...s.names, ...s.board].some(x => /@/.test(x)));
+      // (the board draws the busy fleets; a quiet one waits behind its own toggle)
+      is(`${at}: ...the board says which machine a remote project is on`, true, s.board.includes('acme-api · vm'));
       is(`${at}: ...and the accounts line says whose each profile is`, true, /laptop · work/.test(s.usage) && /laptop · personal/.test(s.usage));
-      await tap('.seg.tabs button', 'vm\u00a0·\u00a0work');
-      s = await settle(x => x.projects.length === 2);
-      is(`${at}: the vm tab shows the vm's projects and nothing else`, ['acme-api | vm · work', 'billing-svc | vm · work · codex'], s.projects);
     });
 
     await step(`${at}: the queue names the machine`, async () => {
-      await fresh({ ...size, paired: 'online' });
-      await tap('.queue-row', 'queue');
-      s = await settle(x => x.held.length > 0);
-      is(`${at}: the queue row says the machine`, ['billing-svc | vm · master · #4'], s.held);
+      await fresh({ ...size, paired: 'online', hash: '#/queue' });
+      s = await settle(x => x.queue.some(q => /rotate|billing-svc/.test(q)) || x.queue.length > 1);
+      const vm = s.queue.filter(q => /\| vm · /.test(q));
+      is(`${at}: the queue is merged — the vm's master's item is here, saying the machine`, ['billing-svc · #4 | vm · waits on the person: pick now or after'], vm);
     });
 
-    await step(`${at}: a remote project has no terminal`, async () => {
-      await fresh({ ...size, paired: 'online' });
-      // BY INDEX, not by name: this machine has a billing-svc too, which is the point of the
-      // address — the vm's is the seventh card (index 6), after this machine's five and acme-api@vm.
-      await tap('.card.k-project[data-idx="6"] .c-name', 'billing-svc');
-      // A grid is the one column on a phone and the LEFT pane at a desk.
-      const hdr = at === 'desk' ? '#side' : '#app', head = (x) => (at === 'desk' ? x.side : x.main);
-      s = await settle(x => /billing-svc/.test(head(x)));
-      const onVm = /^\[vm · [a-z]*:billing-svc\]/.test(head(s));
-      is(`${at}: the remote grid's header names the machine and the project`, true, onVm);
-      await tap(`${hdr} > .hdr button.more`, '');
-      s = await settle(x => x.sheet);
-      // ...on the vm's grid: a ⋯ with no terminal row anywhere else proves nothing
-      is(`${at}: ...its ⋯ has no terminal row`, [true, true, false], [onVm, s.sheetRows.length > 0, s.sheetRows.includes('terminal')]);
-      // ...nor the editor, which is the terminal's other tab and goes the same way (#99)
-      is(`${at}: ...nor an editor row`, false, s.sheetRows.includes('editor'));
-      is(`${at}: ...and says why in one line`, true, /no terminal or editor for another machine/.test(s.sheetWhy) && !/\n/.test(s.sheetWhy));
-      // ...while this machine's project still has one, so the absence is about the machine
-      await fresh({ ...size, paired: 'online' });
-      await tap('.card.k-project[data-idx="0"] .c-name', 'acme-api');
-      s = await settle(x => /acme-api/.test(head(x)));
-      await tap(`${hdr} > .hdr button.more`, '');
-      s = await settle(x => x.sheet);
-      is(`${at}: this machine's project keeps its terminal`, [true, ''], [s.sheetRows.includes('terminal'), s.sheetWhy]);
-      is(`${at}: ...and its editor, beside it`, [true, s.sheetRows.indexOf('terminal') + 1], [s.sheetRows.includes('editor'), s.sheetRows.indexOf('editor')]);
+    // A paired project carries its address AND its host, so a heading drawn from both said
+    // `acme-api@vm · vm`. The picker's headings are the one place the two meet on one line.
+    await step(`${at}: the stack picker names the machine once`, async () => {
+      await fresh({ ...size, paired: 'online', hash: '#/stack-picker' });
+      await until(() => b.evaluate(() => [...document.querySelectorAll('.main section h2')].some(h => / · vm$/.test(h.textContent.trim()))), 8000);
+      const heads = await b.evaluate(() => [...document.querySelectorAll('.main section h2')].map(h => h.textContent.replace(/\s+/g, ' ').trim()));
+      is(`${at}: the stack picker heads the vm's project with its name and the machine`, true, heads.includes('acme-api · vm'));
+      is(`${at}: ...and no heading is an address`, [], heads.filter(x => /@/.test(x)));
     });
 
-    // A PHOTO FOR ANOTHER MACHINE'S SESSION GOES TO THE UPLOAD, like a local one. The camera
-    // used to refuse at the tap with a toast; now the picker's file reaches api.attach, and in
-    // fixture mode api.attach answers every file with its own sentence — so a tile carrying
-    // that sentence is proof the photo took the local path, and a toast is proof it did not.
+    await step(`${at}: a remote project`, async () => {
+      await fresh({ ...size, paired: 'online' });
+      await openProject('vm', 'billing-svc');
+      s = await settle(x => /billing-svc/.test(x.h1));
+      is(`${at}: the remote project's page is titled with its name and its machine`, 'billing-svc · vm', s.h1);
+      is(`${at}: ...it offers no terminal or editor tab`, [], s.tools);
+      is(`${at}: ...and says why, in one line`, true, /another machine/.test(s.termWhy) && !/\n/.test(s.termWhy));
+      await fresh({ ...size, paired: 'online' });
+      await openProject('laptop', 'billing-svc');
+      s = await settle(x => /billing-svc/.test(x.h1));
+      is(`${at}: this machine's project of the same name is titled with its name alone`, 'billing-svc', s.h1);
+      is(`${at}: ...and has no such line: the absence is about the machine`, '', s.termWhy);
+    });
+
+    // A PHOTO FOR ANOTHER MACHINE'S SESSION GOES TO THE UPLOAD, like a local one. In fixture mode
+    // api.attach answers every file with its own sentence, so a tile carrying that sentence is
+    // proof the photo took the upload path, and anything else is proof it did not.
     await step(`${at}: a photo for a remote session`, async () => {
-      await fresh({ ...size, paired: 'online' });
-      await tap('.card.k-project[data-idx="5"] .c-name', 'acme-api');
-      const head = (x) => (at === 'desk' ? x.side : x.main);
-      s = await settle(x => /^\[vm · /.test(head(x)));
-      const onVm = /^\[vm · [a-z]*:acme-api\]/.test(head(s));
-      await tap('.card .c-name', 'api-fix');
-      await until(() => b.evaluate(() => !!document.querySelector('#app .composer .cam')));
+      await fresh({ ...size, paired: 'online', hash: '#/p/acme-api%40vm/s/api-fix' });
+      await until(() => b.evaluate(() => !!document.querySelector('.main input[type=file]')));
       const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
       await b.evaluate((png) => {
-        document.querySelector('#app .composer .cam')?.click();
-        const pick = document.querySelector('input.pick');
+        const pick = document.querySelector('.main input[type=file]');
         if (!pick) return null;
         const bin = atob(png); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
         const dt = new DataTransfer(); dt.items.add(new File([u8], 'shot.png', { type: 'image/png' }));
         pick.files = dt.files; pick.dispatchEvent(new Event('change', { bubbles: true }));
         return null;
       }, PNG);
-      const tile = () => b.evaluate(() => ((document.querySelector('#app .composer .ph') || {}).title || ''));
-      await until(async () => /failed|ready/.test(await tile()) || /cross/.test((await look()).toast), 5000);
-      s = await look();
-      is(`${at}: a photo for the vm's acme-api goes to the upload, not to a refusal`, [true, true, false],
-         [onVm, /attachments need a real fleet/.test(await tile()), /does not cross/.test(s.toast)]);
+      const tile = () => b.evaluate(() => ((document.querySelector('.main .att') || {}).title || ''));
+      await until(async () => /fleet|fixture/.test(await tile()), 5000);
+      is(`${at}: a photo for the vm's acme-api goes to the upload, as a local one does`, true, /attachments need a real fleet/.test(await tile()));
     });
 
     await step(`${at}: a machine that is down`, async () => {
       await fresh({ ...size, paired: 'offline' });
-      s = await look();
-      is(`${at}: offline — the vm is a card that says so, not a gap`, ['vm | offline · last seen 3h0m ago'], s.hosts);
-      is(`${at}: ...its projects are not drawn as if it answered`, false, s.projects.some(x => / \| vm · /.test(x)));
-      is(`${at}: ...and this machine's tabs still say whose they are`, ['all', 'laptop · work', 'laptop · personal'], s.tabs.map(x => x.replace(/ ●\d+$/, '')));
-      await tap('.card.k-host .c-name', 'vm');
-      s = await settle(x => x.toast);
-      is(`${at}: ...a tap on it says it is offline and since when`, true, /vm is offline · last seen 3h0m ago/.test(s.toast));
+      s = await settle(x => x.hosts.length > 1);
+      is(`${at}: offline — the vm keeps its heading and says it is not answering`, ['laptop:this machine', 'vm:not answering'], s.hosts);
+      is(`${at}: ...its projects are not drawn as if it answered`, [], (s.groups.find(g => /^vm:/.test(g.host)) || {}).items || null);
+      is(`${at}: ...not on the board either`, false, s.board.some(x => / · vm$/.test(x)));
+      is(`${at}: ...while this machine's are`, true, ((s.groups.find(g => /^laptop:/.test(g.host)) || {}).items || []).length >= 2);
     });
 
     await step(`${at}: settings lists the machines, and unpairs`, async () => {
-      await fresh({ ...size, paired: 'online' });
-      const hadVm = (await look()).tabs.some(t => /^vm/.test(t));
-      await tap('#side > .hdr button.more, #app > .hdr button.more', '');
-      await settle(x => x.sheet);
-      await tap('#sheet .rows button', 'settings');
-      s = await settle(x => /machines/.test(x.sheetText));
-      is(`${at}: settings has a machines section with both`, true, /laptop · this machine/.test(s.sheetText) && /vm · online/.test(s.sheetText));
-      await tap('#sheet .hosts button', 'unpair');
+      await fresh({ ...size, paired: 'online', hash: '#/settings' });
+      s = await settle(x => x.hostsPanel && x.hostsPanel.length > 1);
+      is(`${at}: settings has a machines section with both`, true,
+         !!s.hostsPanel && s.hostsPanel.some(r => /laptop this machine/.test(r)) && s.hostsPanel.some(r => /^vm answering/.test(r)));
+      await press('.main .panel .row-item button', 'Unpair…');
       s = await look();
-      is(`${at}: ...unpair asks for a second tap`, true, s.sheetRows.some(x => /unpair vm\? tap again/.test(x)) || /unpair vm\? tap again/.test(s.sheetText));
-      await tap('#sheet .hosts button', 'unpair vm?');
-      s = await settle(x => !x.tabs.some(t => /^vm/.test(t)));
-      is(`${at}: ...and the second one takes the vm off every screen`, [true, false, false], [hadVm, s.tabs.some(t => /^vm/.test(t)), s.projects.some(x => / \| vm · /.test(x))]);
+      is(`${at}: ...unpair asks first, and the vm is still paired while it asks`, [true, true],
+         [!!s.hostsPanel && s.hostsPanel.some(r => /^vm .*Unpair\s*Cancel/.test(r)), s.hosts.includes('vm:')]);
+      await press('.main .panel .row-item button', 'Unpair');
+      s = await settle(x => x.hostsPanel && !x.hostsPanel.some(r => /^vm/.test(r)), 2000);
+      is(`${at}: ...and the second press takes it off the machines section at once`, false, !s.hostsPanel || s.hostsPanel.some(r => /^vm/.test(r)));
+      // The project list is the app's 5 s read, so it follows on that read: one period and some.
+      s = await settle(x => !x.hosts.some(h => /^vm/.test(h)), 8000);
+      is(`${at}: ...off the project list on the next read`, false, s.hosts.some(h => /^vm/.test(h)));
+      await b.evaluate(() => { location.hash = '#/'; return null; });
+      s = await settle(x => x.board.length > 0, 4000);
+      is(`${at}: ...and off the board`, [true, false], [s.board.length > 0, s.board.some(x => / · vm$/.test(x))]);
     });
   }
 } finally {

@@ -48,10 +48,11 @@ try {
     await browser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width === 390 });
     await sleep(400); // let the app's resize repaint settle before placing the card
     for (const state of account ? ['pending', 'expired', 'done', 'needs-login'] : ['pending', 'first-time-site', 'expired', 'done', 'claude.ai']) {
-      await browser.call('Page.navigate', { url: `${srv.base}/?login-state=${encodeURIComponent(state)}` });
+      // The shared Sign-ins screen (web/ui/sign-ins.jsx), past the fixture backend's lock.
+      await browser.call('Page.navigate', { url: `${srv.base}/?login-state=${encodeURIComponent(state)}#/sign-ins` });
       for (let i = 0; i < 80; i++) {
         const ready = await browser.evaluate(expected => {
-          const b = [...document.querySelectorAll('button')].find(b => b.textContent.includes('continue without'));
+          const b = [...document.querySelectorAll('button')].find(b => /continue without/i.test(b.textContent));
           if (b) b.click();
           return document.querySelector('.login-card')?.dataset.login === expected;
         }, `${width}-${state}`);
@@ -59,10 +60,11 @@ try {
       }
       const read = await browser.evaluate(() => {
         const card = document.querySelector('.login-card');
-        return { title: card.querySelector('.c-name').textContent, text: card.textContent, input: !!card.querySelector('input'),
-          first: card.textContent.includes('first time for this site'), link: card.querySelector('a')?.href,
+        const title = card.querySelector('h3'), clock = card.querySelector('small.muted');
+        return { title: title.textContent, text: card.textContent, input: !!card.querySelector('input'),
+          first: /first time for this site/i.test(card.textContent), link: card.querySelector('a')?.href,
           overflow: card.getBoundingClientRect().right > innerWidth + 1,
-          countdown: !!card.querySelector('[data-login-expires]'), font: getComputedStyle(card.querySelector('.c-name')).fontSize };
+          countdown: !!clock && /\d+:\d\d/.test(clock.textContent), font: getComputedStyle(title).fontSize };
       });
       is(`${width} ${state}: provider in title`, account ? 'Claude account sign-in' : state === 'claude.ai' ? 'claude.ai' : 'auth.example.com', read.title);
       is(`${width} ${state}: correct input`, !['expired', 'done', 'claude.ai', 'needs-login'].includes(state), read.input);
@@ -70,9 +72,12 @@ try {
       is(`${width} ${state}: stays inside viewport`, false, read.overflow);
       is(`${width} ${state}: host and session`, true, read.text.includes('laptop') && read.text.includes('api-1'));
       if (account) {
-        is(`${width} ${state}: profile in large type`, true, await browser.evaluate(() => {
-          const profile=[...document.querySelectorAll('.login-card .c-name')].find(n=>n.textContent==='work');
-          return !!profile && parseFloat(getComputedStyle(profile).fontSize)>=20;
+        // Which account is the question an account sign-in asks: its profile is set as the
+        // card's title is, not as the line of where it runs.
+        is(`${width} ${state}: profile in the title's type`, true, await browser.evaluate(() => {
+          const card = document.querySelector('.login-card'), profile = card.querySelector('.login-profile');
+          const a = profile && getComputedStyle(profile), b = getComputedStyle(card.querySelector('h3'));
+          return !!profile && profile.textContent === 'work' && a.fontSize === b.fontSize && a.color === b.color;
         }));
         if (state === 'needs-login') is(`${width}: Sign in addresses one session`, true, read.text.includes('Sign in'));
       }
@@ -83,16 +88,20 @@ try {
         await sleep(500);
         is(`${width} Sign in sends one session to its own host`, { tool: 'fleet_account_login_start', project: 'acme-api@laptop', session: 'api-1', sock: 'cf-acme-api', assertion: false },
           await browser.evaluate(() => window.__loginCalls.at(-1)));
+        for (let i = 0; i < 30 && !(await browser.evaluate(() => !!document.querySelector('.login-card input'))); i++) await sleep(100);
         is(`${width} Sign in replaces the need with a paste card`, true, await browser.evaluate(() => !!document.querySelector('.login-card input')));
       }
       if (state === 'pending') {
         is(`${width} countdown present`, true, read.countdown);
         await browser.evaluate(isAccount => { const input = document.querySelector('.login-card input'); input.focus(); input.value = isAccount ? 'callback-secret-browser#placeholder' : 'http://localhost:12345/callback?code=callback-secret-browser&state=placeholder'; }, account);
-        is(`${width} pasted field prevents destructive repaint`, true, await browser.evaluate(async () => (await import('./app.js')).typingNow()));
-        await browser.evaluate(() => document.querySelector('.login-card button').click());
+        // The card repaints every second for its countdown. The field is the DOM's alone, so a
+        // repaint has nothing to put back over what was pasted.
+        await sleep(1300);
+        is(`${width} pasted field survives the countdown's repaint`, true, await browser.evaluate(() => (document.querySelector('.login-card input')?.value || '').includes('callback-secret-browser')));
+        await browser.evaluate(() => [...document.querySelectorAll('.login-card button')].find(b => /^Finish/.test(b.textContent.trim())).click());
         is(`${width} callback cleared immediately`, true, await browser.evaluate(() => !document.querySelector('.login-card input')?.value));
-        await sleep(100);
-        is(`${width} callback absent from page and storage`, false, await browser.evaluate(() => document.body.textContent.includes('callback-secret-browser') || JSON.stringify(localStorage).includes('callback-secret-browser')));
+        await sleep(400);
+        is(`${width} callback absent from page and storage`, false, await browser.evaluate(() => document.body.textContent.includes('callback-secret-browser') || JSON.stringify(localStorage).includes('callback-secret-browser') || JSON.stringify(sessionStorage).includes('callback-secret-browser')));
         is(`${width} callback absent from client audit`, false, await browser.evaluate(async () => JSON.stringify((await import('./api.js')).auditLog()).includes('callback-secret-browser')));
         is(`${width} finish uses dedicated verb`, account ? 'fleet_account_login_finish' : 'fleet_login_finish', await browser.evaluate(() => window.__loginCalls.at(-1)?.tool));
       }

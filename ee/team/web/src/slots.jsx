@@ -5,8 +5,39 @@
 import { api } from './api.js';
 import { toast } from '../../../../web/ui/ui.jsx';
 import { Select } from '../../../../web/ui/select.jsx';
+import { Btn } from '../../../../web/ui/ui.jsx';
+import { useState } from 'preact/hooks';
 import { Avatar } from './avatar.jsx';
 import { t } from './i18n.js';
+import { PASSWORD_MIN } from '../../shared/password.js';
+
+// Settings' people (web/ui/views.jsx `settingsPeople`): the team, and this account's password.
+// A component of its own because the password form keeps what is typed.
+function People({ ctx }) {
+  const [old, setOld] = useState(''); const [nw, setNw] = useState('');
+  return (
+    <>
+      <section class="panel">
+        <h2>{t('settings.team')}</h2>
+        <div class="rows">{ctx.users.map(u => <div class="row-item static" key={u.id}><Avatar user={u} /> <b class="grow">{u.name}</b>{u.id === ctx.me.id ? <span class="muted">{t('settings.you')}</span> : null}</div>)}</div>
+        {ctx.me.role === 'admin'
+          ? <p class="muted">{t('settings.adminWhere')} <a href="#/admin/users">{t('nav.admin')} → {t('admin.users')}</a>.</p>
+          : <p class="muted">{t('settings.askAdmin')}</p>}
+      </section>
+      <section class="panel">
+        <h2>{t('settings.password')}</h2>
+        <form class="row wrap" onSubmit={async (e) => {
+          e.preventDefault();
+          try { await api.password(old, nw); setOld(''); setNw(''); toast(t('settings.pwChanged'), 'good'); } catch (x) { toast(x.message, 'bad'); }
+        }}>
+          <input type="password" placeholder={t('settings.pwOld')} value={old} onInput={(e) => setOld(e.currentTarget.value)} />
+          <input type="password" placeholder={t('settings.pwNew', { n: PASSWORD_MIN })} value={nw} onInput={(e) => setNw(e.currentTarget.value)} />
+          <Btn kind="ghost" type="submit" disabled={!old || nw.length < PASSWORD_MIN}>{t('settings.change')}</Btn>
+        </form>
+      </section>
+    </>
+  );
+}
 
 export function teamSlots(ctx) {
   const user = (id) => (id ? ctx.usersById[id] : null);
@@ -76,5 +107,16 @@ export function teamSlots(ctx) {
       );
     },
     author: (m) => { const by = user(m.by); return by ? <><Avatar user={by} size={18} /> {by.name}</> : null; },
+
+    // Activity (web/ui/views.jsx): a chip per teammate to narrow the log, and who did each row.
+    activityPeople: ({ who, setWho }) => (
+      <div class="chips">
+        <button class={who === 'all' ? 'on' : ''} onClick={() => setWho('all')}>{t('activity.all')}</button>
+        {ctx.users.map(u => <button key={u.id} class={who === u.id ? 'on' : ''} onClick={() => setWho(u.id)}>{u.name}</button>)}
+      </div>
+    ),
+    activityFace: (r) => <Avatar user={user(r.user)} size={20} />,
+    activityWho: (r) => <b>{user(r.user)?.name || r.user}</b>,
+    settingsPeople: () => <People ctx={ctx} />,
   };
 }

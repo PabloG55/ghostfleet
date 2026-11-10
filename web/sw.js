@@ -7,7 +7,7 @@
 //     paint on a train. Revalidated in the background so the next open is current.
 //
 //   /api/* — NETWORK FIRST, falling back to the last successful response. A stale
-//     grid with a timestamp beside it (app.js draws that) beats an error page: the
+//     grid with a timestamp beside it (the app's top bar draws that) beats an error page: the
 //     question this app answers is "is anything blocked on me", and the answer from
 //     ten minutes ago is still worth something. A stale answer presented as LIVE
 //     would be the lie, and that is the app's job to label, not this file's.
@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 8eb72f182111
+// CLIENT-HASH: cfa470bfaa2b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -452,15 +452,27 @@
 // phone on v101 runs its own copy of the same key row, so nothing a person presses differs.
 // v103 adds pending MCP authorizations, including sessions reached through a paired host,
 // and lets the same card finish Claude Code's own account sign-in on a paired host.
-const VERSION = 'ghostfleet-v103';
+// v104 IS A DIFFERENT APP: the phone draws the team app's screens (web/ui, built into
+// phone.js and phone.css) behind its passkey lock, and app.js, app.css, screens.js, place.js
+// and grid-search.js are gone. A phone still on v103 goes on painting the old app from its
+// cache, and keeps working, until the next real launch: the old files are still in ITS cache
+// and fleet-serve's API did not change under them. That first launch fetches v104 behind the
+// paint (cache-first), and the controllerchange reload swaps it in once nothing is being
+// typed; on an installed iOS app, swipe it away and reopen it to be sure. Its stored screen
+// and tab are not carried over (the new app keeps its place in the address), its passkey is.
+const VERSION = 'ghostfleet-v104';
 const SHELL = [
-  './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
-  './ansi.js', './md.js', './grid-search.js', './place.js',
-  // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
-  // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
-  // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
-  // where that is the whole reason hashing is switched off.
-  './screens.js', './preact.js',
+  './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
+  './ansi.js', './md.js',
+  // Built, not written: web/src/phone.jsx through vite — the whole app, which is why it is
+  // phone.js and was screens.js up to v103. Stable filenames, no content hash, which is what
+  // lets them sit in this hand-written list at all — see vite.config.mjs, where that is the
+  // whole reason hashing is switched off.
+  './phone.js', './phone.css', './preact.js',
+  // The faces the app is drawn in, vendored with their licences (web/fonts): an installed app
+  // that opens offline still has to draw its own name.
+  './fonts/fonts.css', './fonts/inter-latin-wght-normal.woff2',
+  './fonts/jetbrains-mono-latin-wght-normal.woff2', './fonts/silkscreen-latin-400-normal.woff2',
   // The terminal: web/term.js and the xterm.js it drives, vendored from npm with pinned
   // digests (scripts/vendor-xterm.sh). Precached like everything else even though most
   // opens never load them, because "every shipped file is precached" is what keeps an
@@ -608,15 +620,16 @@ self.addEventListener('push', e => {
   }));
 });
 
-// Tapping it opens the app — the grid, not a deep link. The card list is one tap from
-// everywhere and a URL that named a session would be a second route to keep in step with
-// app.js's own navigation for no gain.
-//   ONE EXCEPTION, AND IT IS A SCREEN, NOT A SESSION: an answer from Jarvis opens Jarvis,
-// because that is where the answer is. An open window is told by message; a cold start
-// gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
+// Tapping it opens the app — Home, not a deep link. The fleet is one tap from everywhere and
+// a URL that named a session would be a second route to keep in step with the app's own
+// navigation for no gain.
+//   ONE EXCEPTION, AND IT IS A SCREEN, NOT A SESSION: an answer from Jarvis opens the
+// assistant, because that is where the answer is. An open window is told by message; a cold
+// start gets '#jarvis', which web/src/phone.jsx reads once and clears. Both land AFTER the
+// unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  // ...AND A SECOND: an item a master is waiting on opens the queue, where the list is.
+  // ...AND A SECOND: an item a master is waiting on opens the Queue, where the list is.
   const open = e.notification.data && e.notification.data.open;
   const to = open === 'jarvis' || open === 'waiting' ? open : '';
   e.waitUntil((async () => {
@@ -637,10 +650,10 @@ self.addEventListener('notificationclick', e => {
 // token, and the token deliberately lives in the page's memory rather than in storage, so
 // there is nothing here to authenticate with while the app is closed. So it does the half
 // it can — take out a new subscription with the key the page stashed, and leave it where
-// the page will find it — and web/app.js does the upload on the next open. It also
+// the page will find it — and web/src/push.js does the upload on the next open. It also
 // compares endpoints on EVERY open, which is what covers a rotation this event never
 // fired for.
-const PUSH_KEY_URL = './__push-key';        // stashed by app.js at subscribe time
+const PUSH_KEY_URL = './__push-key';        // stashed by web/src/push.js at subscribe time
 const PUSH_PENDING_URL = './__push-pending';
 self.addEventListener('pushsubscriptionchange', e => {
   e.waitUntil((async () => {
@@ -687,14 +700,15 @@ self.addEventListener('fetch', e => {
       } catch (err) {
         const hit = await c.match(req);
         if (hit) return hit;
-        throw err;                                     // app.js turns this into "offline"
+        throw err;                                     // api.js turns this into an OfflineError
       }
     })());
     return;
   }
 
-  // A PLACE IN THE ADDRESS IS THE PAGE'S, NOT THE SERVER'S. `?screen=session&p=…` is read by
-  // app.js from location; every server answers it with the same index.html. Keyed by the
+  // A PLACE IN THE ADDRESS IS THE PAGE'S, NOT THE SERVER'S. The app keeps its place in the hash
+  // (v103 and before: in the query, `?screen=session&p=…`, which a v103 tab can still reload on);
+  // every server answers any of them with the same index.html. Keyed by the
   // query, each address a tab had ever reloaded on was a cache miss — the cache-first shell
   // became network-first exactly for a reload — and then a copy of the shell of its own.
   // So a navigation is looked up, and kept, without its query.

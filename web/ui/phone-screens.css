@@ -1,0 +1,23 @@
+/* Shared fleet screens; all colours come from the brand tokens. */
+.fleet-extra { min-width: 0; }
+.fleet-extra .extra-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:12px; margin:12px 0 22px; }
+.fleet-extra .extra-card { display:flex; flex-direction:column; align-items:flex-start; text-align:left; gap:10px; padding:16px; min-width:0; color:var(--fg); font:inherit; overflow-wrap:anywhere; }
+.fleet-extra .extra-card h3,.fleet-extra .extra-card p { margin:0; }
+.fleet-extra .extra-card .field { width:100%; }
+/* WHICH ACCOUNT is the question an account sign-in asks, so its profile is set like the card's
+ * title, not like the line of where it runs. */
+.fleet-extra .login-profile { color:var(--white); font:600 15.5px var(--mono); }
+.fleet-extra h2 { margin:20px 0 10px; font-size:14px; color:var(--dim); }
+.extra-search { display:flex; gap:8px; margin:12px 0 20px; }
+.extra-search input { min-width:0; flex:1; }
+.review-media { display:block; width:100%; max-height:65vh; object-fit:contain; background:var(--panel); }
+.review-step { margin:18px 0; padding:14px; border:1px solid var(--line); }
+.review-step textarea { width:100%; }
+.stack-columns { display:flex; gap:12px; overflow:auto; margin-top:16px; }
+.stack-column { flex:1 0 420px; min-width:0; border:1px solid var(--line); }
+.stack-column > header { padding:12px; }
+.stack-column .session { height:70vh; min-height:420px; }
+.stack-choice { cursor:pointer; }
+.stack-choice input { width:auto; }
+@media(max-width:760px) { .stack-columns { display:block; } .stack-column { display:none; } .stack-column.stack-active { display:block; } .fleet-extra .page-head { flex-wrap:wrap; gap:12px; } }
+.fleet-extra button.extra-card { width:100%; }

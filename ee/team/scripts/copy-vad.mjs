@@ -1,7 +1,7 @@
 // Silero VAD runs in the browser, and its model, worklet and onnxruntime's wasm are fetched at
 // run time — so they are served by this app, from web/public/vad-<version>/ (no CDN: the voice
 // stays on this machine). The folder carries the version so the year-long cache never serves
-// an old model to a new client; web/src/voice.js names the same folder.
+// an old model to a new client; web/ui/voice.js (the shared assistant's voice) names the same folder.
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -16,9 +16,9 @@ const ortDir = ortMain.slice(0, ortMain.lastIndexOf(`${path.sep}dist${path.sep}`
 const { version } = JSON.parse(fs.readFileSync(path.join(vadDir, 'package.json'), 'utf8'));
 
 const name = `vad-${version}`;
-const voiceJs = fs.readFileSync(path.join(root, 'web/src/voice.js'), 'utf8');
+const voiceJs = fs.readFileSync(path.join(root, '../../web/ui/voice.js'), 'utf8');
 if (!voiceJs.includes(`'/${name}/'`)) {
-  console.error(`copy-vad: web/src/voice.js does not point at /${name}/ — update VAD_DIR when upgrading @ricky0123/vad-web`);
+  console.error(`copy-vad: web/ui/voice.js does not point at /${name}/ — update VAD_DIR when upgrading @ricky0123/vad-web`);
   process.exit(1);
 }
 const out = path.join(root, 'web/public', name);

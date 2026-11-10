@@ -59,6 +59,7 @@ import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
 import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
 import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
+import * as voice from '../lib/voice.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -2424,7 +2425,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // inside a run dir this host's own runDir() resolves, with a body cleanVerdict() checks
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
-const PAIR_POSTS = new Set(['/api/shots/verdict']);
+const PAIR_POSTS = new Set(['/api/shots/verdict', '/api/voice/ask']);
 const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
@@ -2738,6 +2739,65 @@ async function proxyRemote(req, res, p, url, body, ip) {
   return true;
 }
 
+function voiceText(res, status, text, lang = 'en') {
+  return send(res, status, { text: voice.redact(text), lang });
+}
+
+async function voiceRequest(req, res, url, ip, bearer) {
+  if (req.method !== 'POST') return voiceText(res, 405, 'POST only.');
+  let body, token = bearer;
+  if (req.headers['x-fleet-pair'] !== undefined) {
+    const pa = await pairAuth(req, res, '/api/voice/ask', url, ip);
+    if (!pa) return;
+    body = pa.body;
+    token = body.voice_bearer;
+    if (url.searchParams.has('host')) return voiceText(res, 403, 'A voice request crosses only one pairing.');
+  } else {
+    if (req.headers['x-fleet-on-behalf'] !== undefined) return voiceText(res, 403, 'Unsigned identity header.');
+    if (!/^gfvoice_[A-Za-z0-9_-]{43}$/.test(token)) return voiceText(res, 401, 'Missing or invalid device token.');
+    if (!url.searchParams.get('host') && !voice.checkToken(token)) return voiceText(res, 401, 'Missing or invalid device token.');
+    try { body = await readBody(req, 16384); }
+    catch { req.resume(); return voiceText(res, 400, 'Expected a small JSON request.'); }
+    const host = url.searchParams.get('host');
+    if (host) {
+      const peer = peers().peers.find(p => p.key === host);
+      if (!peer) return voiceText(res, 404, 'Unknown paired host.');
+      // Like phone sign-in, the pairing authenticates the hop. The bearer is in
+      // the signed body so it cannot be substituted independently of the text.
+      // No audit args, command argv, disk file or error includes this envelope.
+      const r = await P.peerRequest(peer, { method: 'POST', pathq: '/api/voice/ask',
+        body: { text: body?.text, lang: body?.lang, voice_bearer: token }, onBehalf: 'voice', timeout: 50000 });
+      return voiceText(res, r.status || 502, r.status ? (r.json?.text || 'The turn host refused the request.') : 'Could not reach the turn host; check Telegram before trying again.', r.json?.lang || 'en');
+    }
+  }
+  // Read hashes afresh on EVERY request, on the machine where the turn runs.
+  if (!voice.checkToken(token)) return voiceText(res, 401, 'Missing or invalid device token.');
+  if (!body || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 8000) return voiceText(res, 400, 'Expected text of 1 to 8000 characters.');
+  if (body.lang !== undefined && !['es', 'en'].includes(body.lang)) return voiceText(res, 400, 'Language must be es or en.');
+  if (req.client?.pair) {
+    const link = voice.settings().link;
+    const target = projects().find(p => p.sock === link?.project || p.name === link?.project);
+    if (!target || !peerScope(req).sees(target)) return voiceText(res, 404, 'The linked project is unavailable to this pairing.');
+  }
+  const pid = Number(voice.read(path.join(voice.telegramDir(), 'daemon.pid'), 0));
+  try { if (!(pid > 1)) throw new Error(); process.kill(pid, 0); }
+  catch { return voiceText(res, 503, 'The Telegram bridge is not running.'); }
+  const lang = body.lang || voice.guessLang(body.text);
+  const deadline = Date.now() + voice.deadlineMs();
+  // Even a token accidentally pasted as dictation must never enter the turn.
+  const id = voice.enqueue(voice.redact(body.text), lang, deadline);
+  const disconnected = () => { if (!res.writableEnded) voice.defer(id, lang); };
+  res.on('close', disconnected);
+  try {
+    let result;
+    while (!(result = voice.decision(id))) {
+      if (Date.now() >= deadline) { result = voice.defer(id, lang); break; }
+      await new Promise(r => setTimeout(r, Math.min(25, Math.max(1, deadline - Date.now()))));
+    }
+    if (!res.destroyed) return voiceText(res, 200, result.text, result.lang);
+  } finally { res.off('close', disconnected); }
+}
+
 async function api(req, res, url, ip) {
   let c;
   try { c = loadConfig(); } catch (e) { return send(res, 500, { ok: false, text: `config unreadable: ${e.message}` }); }
@@ -2760,6 +2820,10 @@ async function api(req, res, url, ip) {
     res.on('finish', () => { if (res.statusCode >= 400) rateBucket('auth', ip).b.n++; });
   } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
+
+  // Siri's device bearer belongs only to this exact route. The phone's existing
+  // /api/voice readiness and /api/voice/hear still pass through passkey auth.
+  if (p === '/api/voice/ask') return voiceRequest(req, res, url, ip, bearer);
 
   let pairBody = null;
   if (!OPEN.has(p) && req.headers['x-fleet-pair'] !== undefined) {
@@ -2788,8 +2852,8 @@ async function api(req, res, url, ip) {
     // when this one does or the client would give up on a token the server still honours.
     res.setHeader('X-Session-Expires', String(s.exp));
     // WHEN DID THIS DEVICE LAST LOOK. A GET from a live token is the phone polling, which
-    // it only does while the app is on screen (web/app.js stops the timer on
-    // document.hidden, and iOS hides a backgrounded PWA). That is the signal the push
+    // it only does while the app is on screen (web/ui's polls stop on document.hidden,
+    // and iOS hides a backgrounded PWA). That is the signal the push
     // sender uses to shut up: a notification for something already on screen is noise,
     // and the decision has to be made HERE rather than in the service worker, because a
     // push the worker declines to show can cost the subscription (iOS).
@@ -3125,7 +3189,7 @@ function agentCatalogue() {
   }
 
   // ── what every master holds for the owner, across every project and profile ─
-  // The owner's list (web/app.js "waiting on you"): each master's waiting items, the ones the
+  // The owner's list (web/ui/queue.jsx, "waiting on you"): each master's waiting items, the ones the
   // owner replied to that it has not closed yet, and requests nobody has touched in hours. Read off
   // the ledger files (heldScan); nothing here changes one. An item leaves when its master
   // closes or drops it — the reply is a message (fleet_send), never a close by hand.

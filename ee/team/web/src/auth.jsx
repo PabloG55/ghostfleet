@@ -1,32 +1,20 @@
 import { useState } from 'preact/hooks';
 import { api } from './api.js';
-import { Btn, Logo } from '../../../../web/ui/ui.jsx';
-import { Harbor } from '../../../../web/ui/fleet.jsx';
+import { Btn } from '../../../../web/ui/ui.jsx';
+import { Gate, LangToggle } from '../../../../web/ui/gate.jsx';
 import { PASSWORD_MIN } from '../../shared/password.js';
-import { t, lang, setLang, LANGS } from './i18n.js';
+import { t, lang } from './i18n.js';
 
 // Set when the person flips the language here, so signing in makes that choice their account's.
 let picked = false;
-function LangToggle() {
-  const cur = lang();
-  return (
-    <div class="lang-toggle" role="group" aria-label={t('settings.language')}>
-      {LANGS.map(l => <button type="button" class={l === cur ? 'on' : ''} aria-pressed={l === cur} onClick={() => { picked = true; setLang(l); }}>{l.toUpperCase()}</button>)}
-    </div>
-  );
-}
 
+// The shared card (web/ui/gate.jsx, the phone's lock is the same one), with the team's name.
 function Shell({ mode, children }) {
   return (
-    <div class="auth">
-      <div class="auth-card">
-        <LangToggle />
-        <Harbor />
-        <div class="brand big"><Logo size={44} /><div><b>ghostfleet team</b><small>{t('auth.tagline')}</small></div></div>
-        {mode === 'demo' ? <p class="demo-note">{t('auth.demoNote')}</p> : null}
-        {children}
-      </div>
-    </div>
+    <Gate name="ghostfleet team" sub={t('auth.tagline')} top={<LangToggle onPick={() => { picked = true; }} />}>
+      {mode === 'demo' ? <p class="demo-note">{t('auth.demoNote')}</p> : null}
+      {children}
+    </Gate>
   );
 }
 
