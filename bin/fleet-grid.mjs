@@ -576,8 +576,7 @@ function paneBusy(sock, name) {
   const re = busyReFor(agentOf(name));
   if (!re) return null;
   try {
-    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const txt = accountPane(sock, name, FLEET_DIR, false);
     // Claude's live spinner: "✽ Working… (9m 31s · ↓ 34.4k tokens)" / "Baking… (27s · …)".
     // Match the elapsed timer "(<n>m|s ·", the "↓ N tokens" counter, or an interrupt
     // hint. The "(" is anchored to a digit (not the idle "(shift+tab to cycle)" or the
@@ -600,8 +599,7 @@ function paneBlocked(sock, name) {
   if (!src) return false;
   let re; try { re = new RegExp(src); } catch { return false; }
   try {
-    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const txt = accountPane(sock, name, FLEET_DIR, false);
     return txt.split('\n').some(line => re.test(line));
   } catch { return false; }
 }
@@ -634,8 +632,7 @@ function paneInterrupted(sock, name) {
   if (!src) return false;
   let re; try { re = new RegExp(src); } catch { return false; }
   try {
-    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const txt = accountPane(sock, name, FLEET_DIR, false);
     return txt.split('\n').some(line => re.test(line));
   } catch { return false; }
 }
@@ -645,8 +642,7 @@ function paneLimit(sock, name) {
   if (!src) return null;                     // this agent has no such signal
   let re; try { re = new RegExp(src); } catch { return null; }
   try {
-    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const txt = accountPane(sock, name, FLEET_DIR, false);
     if (!txt.split('\n').some(line => re.test(line))) return null;
     // the 5h account figure, same field the governor meters (see pct_of in fleet-governor)
     const pcts = [...txt.matchAll(/[^:0-9](\d+)%\(/g)].map(m => Number(m[1]));

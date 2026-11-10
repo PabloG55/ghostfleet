@@ -26,6 +26,10 @@ const port = listener.address().port;
 const sentinel = 'callback-secret-' + Math.random().toString(36).slice(2);
 const rt = path.join(T, 'rt');
 for (const d of ['bin', 'lib', 'mcp', 'mods']) fs.cpSync(path.join(SRC, d), path.join(rt, d), { recursive: true });
+if (process.argv[3] === 'account' && process.argv[4]) {
+  const { mutateAccountLogin } = await import('./account-login-mutations.mjs');
+  mutateAccountLogin(rt, process.argv[4]);
+}
 async function host(id) {
   const dir = path.join(T, id), home = path.join(dir, 'home');
   const cfg = path.join(dir, 'serve.json');

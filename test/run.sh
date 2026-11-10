@@ -21346,6 +21346,14 @@ else
   skip "MCP phone login" "node missing"
 fi
 
+group "Claude account phone login: two hosts, refusals and secret hygiene"
+ACL="$(mktemp -d "$TEST_RUNS.$$.account.XXXXXX")"
+node "$ROOT/test/helpers/mcp-login-check.mjs" "$ROOT" account > "$ACL/out" 2> "$ACL/err"; rc=$?
+is "account login rig ran" "0" "$rc"
+while IFS=$'\x1f' read -r label want got; do
+  [ -z "$label" ] || is "$label" "$want" "$got"
+done < "$ACL/out"
+
 # ── one web client, several machines: two fleet-serves, paired ───────────────
 # The owner runs a fleet on a laptop and on an always-on VM, and each was an app of its own
 # with a passkey of its own. Now `fleet-serve pair` joins two daemons once, and the one the

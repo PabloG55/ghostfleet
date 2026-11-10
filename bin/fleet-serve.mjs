@@ -57,8 +57,8 @@ import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
-import { loginList, finishLogin } from '../lib/logins.mjs';
-import { startAccountLogin } from '../lib/account-logins.mjs';
+import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
+import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1201,6 +1201,9 @@ async function sessionQueue(t, session) {
 // that lies without erroring.
 const PANE_SCROLLBACK_MAX = 2000;
 function paneCapture(t, session, scrollback) {
+  let release;
+  try { release = accountPaneLease(path.join(t.cfg, 'fleet'), t.sock, session); }
+  catch { return Promise.resolve({ error: 'account sign-in is being submitted' }); }
   return new Promise((resolve) => {
     const args = ['-L', t.sock, 'capture-pane', '-p', '-e'];
     // -e is the entire point: it keeps the SGR escapes, and colour and attributes are how
@@ -1213,6 +1216,7 @@ function paneCapture(t, session, scrollback) {
     args.push('-t', session);
     execFile('tmux', args, { encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
+        release();
         if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
           return resolve({ error: 'that pane produced more output than this server will buffer — ask for less scrollback' });
         // tmux says "can't find pane: x" on stderr and exits non-zero for a session that
@@ -3443,15 +3447,17 @@ function agentCatalogue() {
       });
       return send(res, r.status, r.json);
     }
-    if (body.tool === 'fleet_login_finish') {
+    if (body.tool === 'fleet_login_finish' || body.tool === 'fleet_account_login_finish') {
       const a = req.client.pair ? null : headerAssertion(req, c);
       if (!req.client.pair && (!a || a.error))
         return send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' });
       const r = await serialize(async () => {
         let result;
-        try { result = await finishLogin(shownTo(req), body.args || {}); }
+        try { result = body.tool === 'fleet_account_login_finish'
+          ? await finishAccountLogin(shownTo(req), body.args || {}, loginRecords(shownTo(req)))
+          : await finishLogin(shownTo(req), body.args || {}); }
         catch { result = { status: 500, json: { ok: false, text: 'could not finish login' } }; }
-        auditAppend({ ts: now(), client: req.client.id, ip, verb: 'fleet_login_finish',
+        auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool,
           project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
           subject: /^[a-f0-9]{32}$/.test(String(body.args?.id || '')) ? body.args.id : '-',
           ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: 'passkey' }),

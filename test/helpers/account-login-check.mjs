@@ -32,5 +32,31 @@ export async function checkAccountLogin({ home, remote, rt, T, is, read, files, 
       record.session === 'api-1' && record.sock === 'cf-acme-api' && record.profile === 'work'
       && record.expires - record.created === 600000 && /^%\d+$/.test(record.pane));
     is('start does not type a credential', 0, (await state()).count);
+    const finish = async (rec = record, assertion = true, project = 'acme-api') => remote.auth.verb(remote.base, 'fleet_account_login_finish',
+      { project, id: rec.id, code }, assertion ? await remote.auth.fresh(remote.base, 'finish login') : null);
+    r = await finish(record, false);
+    is('local finish requires a fresh assertion', 401, r.status);
+    is('missing assertion types nothing', 0, (await state()).count);
+    await mode('busy'); r = await finish();
+    is('busy finish refuses', true, r.status === 400 && /busy/.test(r.json?.text));
+    is('busy finish types nothing', 0, (await state()).count);
+    await mode('idle'); r = await finish();
+    is('changed prompt refuses', true, r.status === 400 && /prompt/.test(r.json?.text));
+    is('changed prompt types nothing', 0, (await state()).count);
+    await mode('prompt');
+    fs.writeFileSync(file, JSON.stringify({ ...record, expires: Date.now() - 1 })); r = await finish();
+    is('expired record refuses', true, r.status === 400 && /expired/.test(r.json?.text));
+    is('expired record types nothing', 0, (await state()).count);
+    fs.writeFileSync(file, JSON.stringify(record));
+    r = await finish();
+    is('local assertion submits code', [200, true], [r.status, r.json?.ok]);
+    is('stub receives exactly the code plus Enter, once', [1, true], [(await state()).count, (await state()).exact]);
+    const history = tm(remote, 'capture-pane', '-p', '-S', '-', '-t', 'api-1');
+    is('visible pane and history were cleared', false, history.includes(code) || history.includes('phone-sentinel-'));
+    is('consumed record drops authorization URL', false, 'authorize' in read(file));
+    r = await finish();
+    is('second use refuses', true, r.status === 400 && /used/.test(r.json?.text));
+    is('second use types nothing more', 1, (await state()).count);
+    is('sentinel absent from everything both hosts wrote', [], files(T).filter(f => fs.statSync(f).isFile() && fs.readFileSync(f).includes(Buffer.from(code))).map(f => path.relative(T, f)));
   } finally { try { tm(remote, 'kill-server'); } catch {} }
 }
