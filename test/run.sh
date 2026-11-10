@@ -2268,8 +2268,8 @@ rm -rf "$IM"
 #             the tool: fleet_list with no arguments answered "fleet-list: no socket"), and
 #             since 2026-11-10 install.sh lists the session's fleet variables in the table's
 #             env_vars, so it resolves its own fleet. cursor still must NAME the project.
-#   skill     ghostfleet-orchestrate is a Claude Code skill and stays Claude-only, so the
-#             other two have the tools without the instructions for using them.
+#   skill     ghostfleet-orchestrate is linked for claude, agy, cursor and, since
+#             2026-11-10, codex. opencode has the tools without the instructions.
 group "agent capabilities are declared, not hardcoded"
 fa() { "$ROOT/bin/fleet-agent" "$@"; }
 # A NAMED HELPER, not a `case` inside $( ). macOS ships bash 3.2 and this suite runs on
@@ -2286,7 +2286,7 @@ done
 # Every agent has the TOOLS now, which is the change; the fields below are where they differ.
 is "all three have the fleet_* tools" "yes" \
    "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
-is "...and only claude, agy and cursor have the skill" "claudeagycursor" \
+is "...and only opencode lacks the skill" "claudecodexagycursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
 # cursor alone, measured by calling fleet_list from a real cursor worker: the server it
 # starts gets none of the session's environment. codex left this list on 2026-11-10, when
@@ -2318,7 +2318,7 @@ is "cursor must name the project"     "1" "$(fa caveat cursor | grep -c 'must na
 is "...and codex no longer must"      "0" "$(fa caveat codex | grep -c 'must name the project' || true)"
 is "...nor opencode"                  "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
 is "opencode: no orchestrate skill"   "1" "$(fa caveat opencode | grep -c 'no orchestrate skill' || true)"
-is "codex: no skill either"           "1" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
+is "...but codex has it now"          "0" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
 is "...and claude keeps its skill"    "0" "$(fa caveat claude | grep -c 'no orchestrate skill' || true)"
 is "an unknown agent is refused"      "1" "$(fa caveat nosuch >/dev/null 2>&1; echo $?)"
 # `installed` is what the pickers offer from, and it is a SUBSET of `list` — an option
@@ -2566,6 +2566,73 @@ STUB
   is "...and opencode's event bridge"       "1" "$(grep -c 'plugin/ghostfleet-event.js' "$ROOT/README.md" || true)"
   rm -rf "$MR"
 fi
+
+# ── codex gets the orchestrate skill: one source, a second destination ──────
+# codex reads $CODEX_HOME/skills/<name>/SKILL.md and follows a link there (measured on
+# 0.166.0: the `$` picker listed a linked skill, and `$ghostfleet-orchestrate` put the
+# whole file into a turn). What has to hold is everything AROUND our one entry: skills/
+# also holds codex's own .system/ and the user's skills, and the installer is re-run
+# routinely. So the folder is snapshotted — every path and every file's checksum — and
+# after two installs and the README's uninstall line it must be the same snapshot.
+#   The uninstall row runs the line OUT OF README.md rather than a copy of it here, so
+# the documented command is the tested one.
+group "install.sh links the orchestrate skill for codex, and only ours"
+CS="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^register_codex_skill() {/,/^}/p' "$ROOT/install.sh" >  "$CS/lib.sh"
+sed -n '/^vsay() {/p'                       "$ROOT/install.sh" >> "$CS/lib.sh"
+is "the codex skill registrar was extracted" "1" "$(grep -c '^register_codex_skill() {' "$CS/lib.sh")"
+is "install.sh calls it"                     "1" "$([ "$(grep -c '^register_codex_skill$' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+mkdir -p "$CS/bin" "$CS/rt/skill/ghostfleet-orchestrate" "$CS/home" "$CS/cx/skills/.system/skill-creator" "$CS/cx/skills/my-notes"
+printf -- '---\nname: ghostfleet-orchestrate\ndescription: x\n---\n' > "$CS/rt/skill/ghostfleet-orchestrate/SKILL.md"
+printf -- '---\nname: skill-creator\ndescription: codex own\n---\n' > "$CS/cx/skills/.system/skill-creator/SKILL.md"
+printf -- '---\nname: my-notes\ndescription: the user own\n---\nkeep me\n' > "$CS/cx/skills/my-notes/SKILL.md"
+printf '#!/bin/sh\nexit 0\n' > "$CS/bin/codex"; chmod +x "$CS/bin/codex"
+BASH_ABS="$(command -v bash)"
+rcs() {  # $1 = CODEX_HOME -> runs the registrar with the codex stub on PATH
+  ( FLEET_HOME="$CS/rt" HOME="$CS/home" CODEX_HOME="$1" PATH="$CS/bin:$PATH" VERBOSE=1 \
+    "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_skill' "$CS/lib.sh" 2>&1 )
+}
+snap() { ( cd "$1" && find . -print | LC_ALL=C sort && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
+before="$(snap "$CS/cx/skills")"
+out="$(rcs "$CS/cx")"
+is "the skill is linked into CODEX_HOME"     "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/cx/skills/ghostfleet-orchestrate")"
+is "...as a LINK to the one source, not a copy" "yes" "$([ -L "$CS/cx/skills/ghostfleet-orchestrate" ] && echo yes || echo no)"
+is "...and it says where"                    "1" "$(grep -c 'linked the ghostfleet-orchestrate skill' <<< "$out" || true)"
+out="$(rcs "$CS/cx")"
+is "a second run leaves ONE entry of ours"   "1" "$(find "$CS/cx/skills" -maxdepth 1 -name 'ghostfleet-orchestrate*' | wc -l | tr -d ' ')"
+# THE ln TRAP: without -n, a second `ln -sf` into an existing link to a directory follows
+# it and plants a link INSIDE the source — in the runtime, where nobody looks.
+is "...and plants nothing inside the source" "SKILL.md" "$(ls "$CS/rt/skill/ghostfleet-orchestrate")"
+is "the user's skill survives"               "keep me" "$(sed -n 5p "$CS/cx/skills/my-notes/SKILL.md")"
+is "...and codex's own .system too"          "yes" "$([ -f "$CS/cx/skills/.system/skill-creator/SKILL.md" ] && echo yes || echo no)"
+un="$(grep -F "# codex's skill" "$ROOT/README.md" | sed 's/[[:space:]]*#.*$//')"
+is "the README has the uninstall line"       "1" "$([ -n "$un" ] && echo 1 || echo 0)"
+( HOME="$CS/home" CODEX_HOME="$CS/cx" "$BASH_ABS" -c "$un" ) 2>/dev/null
+is "uninstall leaves the folder exactly as it was" "$before" "$(snap "$CS/cx/skills")"
+is "...and the source untouched"             "yes" "$([ -f "$CS/rt/skill/ghostfleet-orchestrate/SKILL.md" ] && echo yes || echo no)"
+# A REAL DIRECTORY OF THAT NAME is somebody's own copy. `ln -sfn` would put a link inside
+# it; the registrar must leave it alone and say so.
+mkdir -p "$CS/cx2/skills/ghostfleet-orchestrate"; printf 'mine\n' > "$CS/cx2/skills/ghostfleet-orchestrate/SKILL.md"
+before2="$(snap "$CS/cx2/skills")"
+out="$(rcs "$CS/cx2")"
+is "a directory of that name is left alone"  "$before2" "$(snap "$CS/cx2/skills")"
+is "...and it says so"                       "1" "$(grep -c 'left alone' <<< "$out" || true)"
+# ...and the README line cannot delete it either: rm -f does not remove a directory.
+( HOME="$CS/home" CODEX_HOME="$CS/cx2" "$BASH_ABS" -c "$un" ) 2>/dev/null
+is "...nor does the uninstall line"          "$before2" "$(snap "$CS/cx2/skills")"
+# A STALE LINK (an old runtime) is ours and is repointed.
+mkdir -p "$CS/cx3/skills"; ln -s "$CS/gone/skill/ghostfleet-orchestrate" "$CS/cx3/skills/ghostfleet-orchestrate"
+out="$(rcs "$CS/cx3")"
+is "a stale link of ours is repointed"       "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/cx3/skills/ghostfleet-orchestrate")"
+# No CODEX_HOME: ~/.codex, where codex looks by default.
+out="$(rcs "")"
+is "without CODEX_HOME it is ~/.codex/skills" "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/home/.codex/skills/ghostfleet-orchestrate")"
+# No codex: nothing is created, and it says so.
+out="$( FLEET_HOME="$CS/rt" HOME="$CS/home" CODEX_HOME="$CS/cx4" PATH="$CS/empty" VERBOSE=1 \
+        "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_skill' "$CS/lib.sh" 2>&1 )"
+is "no codex: it says so"                    "1" "$(grep -c 'codex not installed' <<< "$out" || true)"
+is "...and creates nothing"                  "no" "$([ -e "$CS/cx4" ] && echo yes || echo no)"
+rm -rf "$CS"
 
 # ── Kokoro, the Mac's voice: offered, verified, never assumed ───────────────
 # lib/kokoro-setup.mjs fetches ~350 MB and builds a venv, so NOTHING here touches the

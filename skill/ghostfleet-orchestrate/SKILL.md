@@ -10,7 +10,10 @@ You are running inside a **ghostfleet** session (usually the **master**/lead). T
 env var `CLAUDE_FLEET_SOCK` identifies your fleet — every session shares one hidden
 tmux server. Sibling sessions are other worktrees/tasks in the same fleet (e.g. an
 `api` lead alongside `api-1`, `api-2` workers). You drive them from your Bash tool
-(or the `fleet_*` MCP tools — **prefer the MCP tools when available**).
+(or the `fleet_*` MCP tools — **prefer the MCP tools when available**). A tool call with
+no `project` acts on your own fleet; if one answers `no socket`, the agent you run in
+started the server without your session's environment — pass `project` (a name from
+`fleet_projects`), and re-running `install.sh` fixes it for codex.
 
 ## Read the state BEFORE you act
 

@@ -908,9 +908,9 @@ echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED
 # its pane by fleet-agent's busy_re. "You can see it, you will not be told" is exactly as
 # true after this as before. opencode has both halves (hooks/opencode-fleet-event.js), so
 # opencode reaches near parity; codex does not.
-#   Neither gets the orchestrate skill, which is a Claude Code feature — see
-# skill/ghostfleet-orchestrate and the note in bin/fleet-agent's `skill` field. They have
-# the tools without the instructions for using them.
+#   The INSTRUCTIONS for those tools are skill/ghostfleet-orchestrate, and codex gets them
+# too since 2026-11-10 (register_codex_skill, below). opencode still has the tools without
+# them — see the note in bin/fleet-agent's `skill` field.
 register_codex_mcp() {
   local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
   local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
@@ -959,6 +959,40 @@ register_codex_mcp() {
     # is undone rather than left for the next launch to find.
     [ -n "$orig" ] && printf '%s\n' "$orig" > "$cfg"
     echo "! codex has the ghostfleet MCP but not the session's environment, so its fleet_* calls must name the project — add under [mcp_servers.ghostfleet] in $cfg: $list"
+  fi
+}
+
+# --- codex's skill: the same source file, a second destination ---------------------
+# codex reads skills from $CODEX_HOME/skills/<name>/SKILL.md, the same shape as Claude
+# Code's (`name` + `description` frontmatter, then the body), and FOLLOWS A SYMLINK there.
+# Measured on codex-cli 0.166.0, 2026-11-10, in a scratch CODEX_HOME: a link to the repo's
+# skill/ghostfleet-orchestrate was listed by the `$` picker, `$ghostfleet-orchestrate`
+# injected the whole file into the turn, and the turn answered from its body. So this is
+# a LINK to the one source, like every other agent's, and never a copy: a copy is a fork,
+# and a fork is the version that is out of date the next time the skill changes.
+#   ONE ENTRY OF OURS AND NOTHING ELSE. skills/ also holds codex's own .system/ and
+# whatever the user installed, and this touches neither: it writes one name, and leaves a
+# real directory of that name alone, since a directory there is somebody's own copy and
+# `ln -sfn` would put a link INSIDE it. Uninstalling is `rm -f` of the link (README).
+#   WHAT CODEX DOES WITH A LONG DESCRIPTION: it lists the first ~1024 characters and then
+# "...", so implicit discovery sees the opening of the description and not its tail. Named
+# by `$`, the whole file arrives regardless.
+register_codex_skill() {
+  local dir="${CODEX_HOME:-$HOME/.codex}/skills"
+  local src="$FLEET_HOME/skill/ghostfleet-orchestrate" dest
+  dest="$dir/ghostfleet-orchestrate"
+  if ! command -v codex >/dev/null 2>&1; then
+    vsay "· codex not installed — skipping its skill"
+    return 0
+  fi
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    echo "! $dest is not a link to the fleet's skill, so it was left alone — codex uses that copy instead"
+    return 0
+  fi
+  if mkdir -p "$dir" 2>/dev/null && ln -sfn "$src" "$dest" 2>/dev/null; then
+    vsay "✓ linked the ghostfleet-orchestrate skill -> $dest (codex, global)"
+  else
+    echo "! could not link $dest — codex sessions get the fleet_* tools without the skill"
   fi
 }
 
@@ -1109,6 +1143,7 @@ register_cursor() {
     "wrote ghostfleet MCP" "cursor gets no fleet_* tools"
 }
 register_codex_mcp
+register_codex_skill
 register_opencode_mcp
 register_agy
 register_cursor

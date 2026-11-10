@@ -46,9 +46,9 @@
 #   mcp         yes = the ghostfleet MCP server is registered for this CLI, so a session
 #               can CALL fleet_spawn/fleet_inbox/… as a tool instead of shelling out
 #   skill       yes = it also gets skill/ghostfleet-orchestrate, i.e. the INSTRUCTIONS for
-#               using those tools. Separate from `mcp` on purpose: since 2026-08-27 codex
-#               and opencode have the tools and neither has the skill, so a caveat composed
-#               from `mcp` alone would say nothing is missing when something is
+#               using those tools. Separate from `mcp` on purpose: opencode has the tools
+#               and not the skill, so a caveat composed from `mcp` alone would say nothing
+#               is missing when something is
 #   mcp_self    yes = a tool call with NO `project` argument resolves THIS session's own
 #               fleet. That needs the session's CLAUDE_FLEET_SOCK to reach the MCP server,
 #               which is the agent's choice before it is ours: opencode passes its
@@ -341,7 +341,12 @@ agent_field() {
         # remains the most degraded of the three — it can now drive the fleet while the
         # fleet still cannot be told anything by it. See the `caveat` command.
         mcp)        printf 'yes' ;;
-        skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
+        # YES since 2026-11-10: install.sh links skill/ghostfleet-orchestrate into
+        # $CODEX_HOME/skills, the same source every other agent links. Measured on 0.166.0:
+        # the `$` picker lists it through the link and `$ghostfleet-orchestrate` puts the
+        # whole file into the turn. codex lists only the first ~1024 characters of a
+        # description, so the tail of ours is not part of its implicit matching.
+        skill)      printf 'yes' ;;
         # YES since 2026-11-10 (codex-cli 0.166.0), and it was NO before that for a reason
         # that still holds: codex launches an MCP server with a SCRUBBED environment. A real
         # session with CLAUDE_FLEET_SOCK exported called fleet_list and the server's child
