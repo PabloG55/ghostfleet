@@ -14,6 +14,7 @@ import { Icon } from './icon.jsx';
 import { useKeys } from './keyboard.jsx';
 import { BackLink } from './back.jsx';
 import { back } from './history.js';
+import { joinMeta } from './phone-screen.jsx';
 
 const EVERY = [15, 30, 60, 120, 180, 360, 720, 1440];
 const blank = () => ({ id: null, name: '', enabled: true, scope: 'personal', trigger: blankTrigger('schedule'), steps: [] });
@@ -26,6 +27,7 @@ const short = (ts) => new Date(ts * 1000).toLocaleString(locale(), { weekday: 's
 // ── the list ─────────────────────────────────────────────────────────────────────────
 export function Automations({ ctx, projects, id }) {
   const api = useFleet();
+  const people = api.hasPeople === true;
   ctx = ctx || api;
   const { data, error, reload } = usePoll(() => api.automations(), 10000, []);
   const [tab, setTabState] = useState(() => { try { return localStorage.getItem(TAB_KEY) || 'mine'; } catch { return 'mine'; } });
@@ -43,18 +45,19 @@ export function Automations({ ctx, projects, id }) {
     return false;
   });
   if (id) return <Editor key={id} ctx={ctx} projects={mineOnly} data={data} error={error} id={id} onSaved={reload} />;
-  const admin = !!data?.me?.admin;
+  const admin = people && !!data?.me?.admin;
   const all = data?.automations || [];
   const tabs = [['mine', tr('phone.project.mine'), all.filter(a => a.scope === 'personal' && a.mine)],
                 ...(!data?.capabilities?.scopes || data.capabilities.scopes.includes('company') ? [['company', tr('phone.autos.company'), all.filter(a => a.scope === 'company')]] : []),
                 ...(admin ? [['others', tr('phone.autos.others'), all.filter(a => a.scope === 'personal' && !a.mine)]] : [])];
   const cur = tabs.find(t => t[0] === tab) || tabs[0];
-  const list = cur[2];
+  const list = people ? cur[2] : all;
   const templates = Object.entries(TEMPLATES).filter(([, t]) => (t.scope === 'personal' || admin) && (!data?.capabilities?.actions || t.build().steps.every(s => data.capabilities.actions.includes(s.action))));
   const seenAt = noticesSeen();
   const fresh = (data?.notices || []).filter(n => n.seen === undefined ? n.at > seenAt : !n.seen);
   return (
     <div class="page autos">
+      <BackLink parent="/" />
       <header class="page-head">
         <div><h1>{tr('phone.nav.automations')}</h1><p class="muted">{tr('phone.autos.sub')}</p></div>
         <Btn kind="primary" icon="plus" onClick={() => ctx.go('/automations/new')}>{tr('project.new')}</Btn>
@@ -69,24 +72,24 @@ export function Automations({ ctx, projects, id }) {
       <section class="templates" aria-label={tr('phone.autos.templates')}>
         {templates.map(([k, t]) => (
           <button key={k} class="tpl" onClick={() => ctx.go(`/automations/template-${k}`)}>
-            <b>{t.name}</b> <span class={`tag${t.scope === 'company' ? ' team' : ''}`}>{SCOPES[t.scope]}</span>
+            <b>{t.name}</b> {people ? <span class={`tag${t.scope === 'company' ? ' team' : ''}`}>{SCOPES[t.scope]}</span> : null}
             <span class="muted small">{t.hint}</span>
           </button>
         ))}
       </section>
-      <div class="seg autos-tabs" role="tablist">
+      {people ? <div class="seg autos-tabs" role="tablist">
         {tabs.map(([k, label, items]) => (
           <button key={k} role="tab" aria-selected={cur[0] === k} class={cur[0] === k ? 'on' : ''} onClick={() => setTab(k)}>
             {label} <span class="muted">{items.length}</span>
           </button>
         ))}
-      </div>
+      </div> : null}
       {data && !list.length ? (
         <div class="empty">
-          {cur[0] === 'company' ? <>
+          {people && cur[0] === 'company' ? <>
             <b>{admin ? tr('phone.autos.noCompany') : tr('phone.autos.noCompanyMine')}</b>
             <span class="muted">{admin ? tr('phone.autos.companyWhoAdmin') : tr('phone.autos.companyWho')}</span>
-          </> : cur[0] === 'others' ? <b>{tr('phone.autos.noOthers')}</b> : <>
+          </> : people && cur[0] === 'others' ? <b>{tr('phone.autos.noOthers')}</b> : <>
             <b>{tr('phone.autos.none')}</b>
             <span class="muted">{tr('phone.autos.example')}</span>
             <Btn kind="primary" onClick={() => ctx.go('/automations/new')}>{tr('phone.autos.createFirst')}</Btn>
@@ -94,7 +97,7 @@ export function Automations({ ctx, projects, id }) {
         </div>
       ) : null}
       <div class="auto-list">
-        {list.map(a => <AutoCard key={a.id} a={a} ctx={ctx} onChange={reload} />)}
+        {list.map(a => <AutoCard key={a.id} people={people} a={a} ctx={ctx} onChange={reload} />)}
       </div>
       {(data?.runs || []).length ? (
         <section class="runs">
@@ -116,7 +119,7 @@ export function Automations({ ctx, projects, id }) {
   );
 }
 
-function AutoCard({ a, ctx, onChange }) {
+function AutoCard({ a, ctx, people, onChange }) {
   const api = useFleet();
   const [ask, setAsk] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -137,8 +140,8 @@ function AutoCard({ a, ctx, onChange }) {
           <input type="checkbox" checked={a.enabled} onChange={toggle} disabled={!a.editable && !(a.enabled && a.scope === 'personal')} aria-label={tr(a.enabled ? 'phone.autos.turnOff' : 'phone.autos.turnOn', { name: a.name })} /><i />
         </label>
         <a class="auto-name" href={`#/automations/${a.id}`}>{a.name}</a>
-        <span class={`tag${a.scope === 'company' ? ' team' : ''}`}>{SCOPES[a.scope]}</span>
-        {!a.mine ? <span class="muted small">{tr('phone.autos.ownedBy', { name: a.ownerName })}</span> : null}
+        {people ? <span class={`tag${a.scope === 'company' ? ' team' : ''}`}>{SCOPES[a.scope]}</span> : null}
+        {people && !a.mine ? <span class="muted small">{tr('phone.autos.ownedBy', { name: a.ownerName })}</span> : null}
       </div>
       {a.paused && !a.enabled ? <div class="notice k-warn">{tr('phone.autos.paused', { why: a.paused.why })}</div> : null}
       <div class="auto-flow">
@@ -147,8 +150,10 @@ function AutoCard({ a, ctx, onChange }) {
       </div>
       <div class="auto-foot">
         <span class="muted small">
-          {a.running ? tr('phone.autos.running') : a.nextRun ? tr('phone.autos.next', { when: short(a.nextRun) }) : a.trigger.type === 'event' && a.enabled ? tr('phone.autos.waitingEvent') : a.enabled ? '' : tr('phone.autos.off')}
-          {a.lastRun ? ` · ${tr('phone.autos.last', { when: short(a.lastRun.at) })} ${a.lastRun.ok ? '✓' : '✕'}` : ''}
+          {joinMeta(
+            a.running ? tr('phone.autos.running') : a.nextRun ? tr('phone.autos.next', { when: short(a.nextRun) }) : a.trigger.type === 'event' && a.enabled ? tr('phone.autos.waitingEvent') : a.enabled ? '' : tr('phone.autos.off'),
+            a.lastRun ? `${tr('phone.autos.last', { when: short(a.lastRun.at) })} ${a.lastRun.ok ? '✓' : '✕'}` : '',
+          )}
         </span>
         <span class="grow" />
         {a.editable ? <>
@@ -167,6 +172,7 @@ function AutoCard({ a, ctx, onChange }) {
 // ── the editor ───────────────────────────────────────────────────────────────────────
 function Editor({ ctx, projects, data, error, id, onSaved }) {
   const api = useFleet();
+  const people = api.hasPeople === true;
   const tpl = id.startsWith('template-') ? TEMPLATES[id.slice('template-'.length)] : null;
   const fresh = id === 'new' || !!tpl;
   const existing = !fresh ? data?.automations?.find(a => a.id === id) : null;
@@ -174,7 +180,7 @@ function Editor({ ctx, projects, data, error, id, onSaved }) {
   const [tab, setTab] = useState('edit');             // phones: editor or AI, one at a time
   const [saving, setSaving] = useState(false);
   useEffect(() => { if (!draft && (fresh || existing)) setDraft(existing ? structuredClone(existing) : tpl ? tpl.build() : blank()); }, [existing, id]);
-  const admin = !!data?.me?.admin;
+  const admin = people && !!data?.me?.admin;
   const readOnly = existing && !existing.editable;
   if (error) return <div class="page"><BackLink parent="/automations" /><p class="err" role="alert">{error.message}</p><Btn onClick={onSaved}>{tr('phone.retry')}</Btn></div>;
   if (!draft || !data) return <div class="page"><p class="muted">{data ? tr('phone.autos.notFound') : tr('common.loading')}</p></div>;
@@ -207,15 +213,15 @@ function Editor({ ctx, projects, data, error, id, onSaved }) {
         </div>
         <div class="row wrap">
           {/* A member makes personal ones only, so there is nothing to choose: no company option at all. */}
-          {admin && !readOnly ? (
+          {people ? admin && !readOnly ? (
             <Select class="scope-pick" value={draft.scope} onChange={(v) => set({ scope: v })} aria-label={tr('phone.autos.scope')}
                     options={[{ value: 'personal', label: tr('phone.autos.scopePersonal') }, { value: 'company', label: tr('phone.autos.scopeCompany') }]} />
-          ) : <span class={`tag${draft.scope === 'company' ? ' team' : ''}`} aria-label={tr('phone.autos.scope')}>{SCOPES[draft.scope]}</span>}
+          ) : <span class={`tag${draft.scope === 'company' ? ' team' : ''}`} aria-label={tr('phone.autos.scope')}>{SCOPES[draft.scope]}</span> : null}
           <label class="switch-l"><span class="switch"><input type="checkbox" checked={draft.enabled} onChange={(e) => set({ enabled: e.currentTarget.checked })} /><i /></span> {tr('phone.autos.on')}</label>
           <Btn kind="primary" disabled={saving || readOnly} onClick={save}>{saving ? tr('phone.common.saving') : tr('common.save')}</Btn>
         </div>
       </header>
-      {readOnly ? <p class="notice k-warn">{existing.scope === 'company' ? tr('phone.autos.roCompany') : tr('phone.autos.roPersonal', { name: existing.ownerName })}</p> : null}
+      {readOnly ? <p class="notice k-warn">{!people ? tr('phone.autoReadOnly') : existing.scope === 'company' ? tr('phone.autos.roCompany') : tr('phone.autos.roPersonal', { name: existing.ownerName })}</p> : null}
       {existing?.paused && !existing.enabled ? <p class="notice k-warn">{tr('phone.autos.paused', { why: existing.paused.why })}</p> : null}
       <div class="tabs-m" role="tablist">
         <button class={tab === 'edit' ? 'on' : ''} onClick={() => setTab('edit')}>{tr('phone.autos.editor')}</button>

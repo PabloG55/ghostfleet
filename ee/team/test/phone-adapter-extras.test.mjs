@@ -24,6 +24,7 @@ test('phone automation adapter translates event placeholders and limits the pale
  const calls=[];
  const automation={id:'daily',name:'Daily check',trigger:{type:'event',event:'finished',project:'acme-web',session:'master'},steps:[{action:'send',project:'{project}',session:'{session}',prompt:'Check {date} at {time}'}]};
  t.mock.method(globalThis,'fetch',async(url,opts={})=>{calls.push({url,body:opts.body ? JSON.parse(opts.body) : null});return {status:200,headers:new Headers(),ok:true,json:async()=>opts.method==='POST' ? {ok:true,automation:JSON.parse(opts.body).automation} : {ok:true,automations:[automation],fleet:[]}};});
+ assert.equal(a.hasPeople,false);
  const j=await a.automations();assert.equal(j.automations[0].steps[0].project,'{proyecto}');assert.equal(j.automations[0].editable,true);
  assert.ok(!j.capabilities.actions.includes('summary'));assert.ok(!j.capabilities.events.includes('lost'));assert.deepEqual(j.capabilities.scopes,['personal']);
  await a.saveAutomation(j.automations[0]);assert.equal(calls.at(-1).body.automation.steps[0].prompt,'Check {date} at {time}');

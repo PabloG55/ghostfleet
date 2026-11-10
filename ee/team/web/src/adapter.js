@@ -26,6 +26,7 @@ export function canTerm(me, project) {
 export function teamAdapter(ctx) {
   return {
     ...teamScreenExtras(ctx),
+    hasPeople: true,
     automations: async () => ({ ...await api.automations(), capabilities:{actions:['send','spawn','pause','resume','wake','interrupt','reopen','stop','check','notify','wait','summary'],events:['finished','need-you','started','limit','lost'],states:['need-you','working','ready','idle','parked','limit','interrupted','asleep','lost']} }),
     saveAutomation: api.saveAutomation,
     deleteAutomation: api.deleteAutomation,

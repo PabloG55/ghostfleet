@@ -555,4 +555,13 @@ export default {
   "phone.reasonNeeded": "Los pasos con alertas necesitan una explicación escrita",
   "phone.queueState.waiting": "Esperando",
   "phone.queueState.replied": "Respondido",
+  "phone.cardHeld": "Retenido",
+  "phone.signInFailed": "Falló el inicio de sesión",
+  "phone.stackPlace": "Grupos de sesiones",
+  "phone.autoReadOnly": "Esta automatización es de solo lectura.",
+  "phone.steps.one": "{n} paso",
+  "phone.earlier.one": "{n} ejecución anterior",
+  "phone.requests.one": "Solicitud · {n}",
+  "phone.auto.err.maxSteps.one": "como mucho {n} paso",
+  "phone.auto.notice.loop.one": "Apagué «{name}»: se disparó {n} vez en una hora, parece un bucle. Revísala y vuelve a encenderla.",
 };

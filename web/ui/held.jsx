@@ -2,10 +2,10 @@
 import { useFleet } from './adapter.jsx';
 import { usePoll, Btn, ago } from './ui.jsx';
 import { t } from './i18n.js';
-import { PhoneScreen, sessionRoute } from './phone-screen.jsx';
+import { PhoneScreen, CardStatePill, joinMeta, sessionRoute } from './phone-screen.jsx';
 export function HeldCard({ row }) {
   const fleet = useFleet();
-  return <article class="card extra-card s-yellow"><span class="pill c-yellow">{t('phone.held')}</span><h3>{row.project} · {row.session || 'master'}</h3><p>{row.text}</p><p class="muted">{[row.host, typeof row.reason === 'string' ? row.reason : row.reason?.text, row.since ? ago(Date.now() / 1000 - row.since) : ''].filter(Boolean).join(' · ')}</p><Btn onClick={() => fleet.go(sessionRoute(row.project, row.session))}>{t('phone.openHeld')}</Btn></article>;
+  return <article class="card extra-card s-yellow"><CardStatePill status="need-you" label={t('phone.cardHeld')} /><h3>{joinMeta(row.project, row.session || 'master')}</h3><p>{row.text}</p><p class="muted">{joinMeta(row.host, typeof row.reason === 'string' ? row.reason : row.reason?.text, row.since ? ago(Date.now() / 1000 - row.since) : '')}</p><Btn onClick={() => fleet.go(sessionRoute(row.project, row.session))}>{t('phone.openHeld')}</Btn></article>;
 }
 export function Held({ row, project, id }) {
   const fleet = useFleet();

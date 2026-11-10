@@ -15,6 +15,7 @@ const toPhone = value => JSON.parse(JSON.stringify(value).replace(/\{proyecto\}/
 const toShared = value => JSON.parse(JSON.stringify(value).replace(/\{project\}/g, '{proyecto}').replace(/\{session\}/g, '{sesion}').replace(/\{date\}/g, '{fecha}').replace(/\{time\}/g, '{hora}'));
 let automations = [];
 export const adapterExtras = {
+  hasPeople: false,
   screenProjects: api.getProjects,
   waiting: api.getWaiting,
   reviews: api.getShots,

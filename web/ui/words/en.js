@@ -555,4 +555,13 @@ export default {
   "phone.reasonNeeded": "Flagged steps need a written reason",
   "phone.queueState.waiting": "Waiting",
   "phone.queueState.replied": "Replied",
+  "phone.cardHeld": "Held",
+  "phone.signInFailed": "Sign-in failed",
+  "phone.stackPlace": "Stacks",
+  "phone.autoReadOnly": "This automation is read-only.",
+  "phone.steps.one": "{n} step",
+  "phone.earlier.one": "{n} earlier run",
+  "phone.requests.one": "Request · {n}",
+  "phone.auto.err.maxSteps.one": "{n} step at most",
+  "phone.auto.notice.loop.one": "I switched off “{name}”: it fired {n} time in an hour, which looks like a loop. Check it and switch it back on.",
 };

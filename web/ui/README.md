@@ -261,8 +261,18 @@ adapter; the team adapter includes `teamScreenExtras(ctx)`. Neither app's routes
 mounted by these components. This supersedes the earlier “Not here yet” notes for
 these screens; the assistant remains app-owned.
 
+`phone-places.js` exports `SCREEN_PLACES`, a route-to-name map whose getters read
+English or Spanish through the shared i18n source, and `screenPlace(route)` for
+nested routes, hashes and queries. Both apps can compose their adapter's naming:
+`place: route => screenPlace(route) || appPlace(route)`. For example,
+`/stack-picker` names “Stacks” / “Grupos de sesiones”, `/queue` names “Queue” /
+“Cola”, and `/reviews` names “Reviews” / “Revisiones”. Route and sidebar wiring
+remains with the apps. The fixture uses this helper so its back links show the same
+names that integration will use.
+
 | Member | Shape | What it is for | fleet-serve endpoint |
 | --- | --- | --- | --- |
+| `hasPeople` | boolean, default `false` | Show automation scopes, ownership tags and people tabs only when explicitly `true`; the team adapter sets it, the phone sets `false` | No endpoint (app capability) |
 | `screenProjects()` | → `{ projects: [{ name, path?, host?, sessions?, canPrompt? }] }` | Search and the stack picker; project names retain paired-host addresses | `GET /api/projects` |
 | `waiting()` | → `{ items: [{ id, project, session?, state, text, reason?, since?, host? }] }` | Ledger asks and held wakes; a held wake opens its input box; a reply uses existing `act('fleet_send', …)` quoting the item | `GET /api/waiting` |
 | `reviews()` | → `{ groups, multi?, missing? }` or `null` when disabled; a group has `{ key, project, profile, branch, host_key?, host?, latest, earlier }` | One newest run per branch, with earlier runs folded below it | `GET /api/shots` |
