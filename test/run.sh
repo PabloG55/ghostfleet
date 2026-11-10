@@ -26221,7 +26221,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs fleet-know.mjs fleet-know-event.mjs fleet-telegram.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs fleet-accounts.mjs fleet-know.mjs fleet-know-event.mjs fleet-telegram.mjs fleet-voice.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac
@@ -30890,6 +30890,103 @@ what about the scratch branch" "$P2"
 else
   skip "messages sent together from Telegram are one turn" "tmux, jq, node or curl missing, or mktemp not available"
 fi
+
+group "voice Shortcut: 401 for absent, wrong and revoked tokens"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-auth.out"
+  node "$ROOT/test/helpers/voice-check.mjs" auth > "$VCOUT" 2> "$VCOUT.err"
+  is "voice auth: harness completed" "0" "$?"
+  is "voice auth: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice auth: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice auth" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: revocation takes effect immediately"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-revoke.out"
+  node "$ROOT/test/helpers/voice-check.mjs" revoke > "$VCOUT" 2> "$VCOUT.err"
+  is "voice revoke: harness completed" "0" "$?"
+  is "voice revoke: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice revoke: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice revoke" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: the Telegram guard holds every voice turn"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-guard.out"
+  node "$ROOT/test/helpers/voice-check.mjs" guard > "$VCOUT" 2> "$VCOUT.err"
+  is "voice guard: harness completed" "0" "$?"
+  is "voice guard: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice guard: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice guard" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: a busy desk turn queues voice"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-queue.out"
+  node "$ROOT/test/helpers/voice-check.mjs" queue > "$VCOUT" 2> "$VCOUT.err"
+  is "voice queue: harness completed" "0" "$?"
+  is "voice queue: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice queue: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice queue" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: deadline sends the late final through Telegram once"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-deadline.out"
+  node "$ROOT/test/helpers/voice-check.mjs" deadline > "$VCOUT" 2> "$VCOUT.err"
+  is "voice deadline: harness completed" "0" "$?"
+  is "voice deadline: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice deadline: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice deadline" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: bearers never enter logs, ledgers or prompts"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-leaks.out"
+  node "$ROOT/test/helpers/voice-check.mjs" leaks > "$VCOUT" 2> "$VCOUT.err"
+  is "voice leaks: harness completed" "0" "$?"
+  is "voice leaks: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice leaks: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice leaks" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: completed and stale requests are pruned without losing late answers"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-cleanup.out"
+  node "$ROOT/test/helpers/voice-check.mjs" cleanup > "$VCOUT" 2> "$VCOUT.err"
+  is "voice cleanup: harness completed" "0" "$?"
+  is "voice cleanup: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice cleanup: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice cleanup" "node, tmux or jq missing"
+fi
+
+group "voice Shortcut: the paired host forwards to the turn host"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-pair.out"
+  node "$ROOT/test/helpers/voice-check.mjs" pair > "$VCOUT" 2> "$VCOUT.err"
+  is "voice pair: harness completed" "0" "$?"
+  is "voice pair: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice pair: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice pair" "node, tmux or jq missing"
+fi
+
 
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────
 # A MARKER, NOT THE FIRST SUMMARY printf. cf_only used to take that printf as the end of the

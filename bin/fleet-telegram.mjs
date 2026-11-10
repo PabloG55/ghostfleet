@@ -57,6 +57,7 @@ import { projects } from '../lib/projects.mjs';
 import { storePhoto, storeAudio, storeFile, sniffImage, ATTACH_MAX_BYTES, ATTACH_FILE_MAX_BYTES } from '../lib/attach.mjs';
 import { telegramChunks } from '../lib/telegram-format.mjs';
 import { state as codexHookState } from '../lib/codex-hooks.mjs';
+import * as voice from '../lib/voice.mjs';
 
 const SELF = fs.realpathSync(fileURLToPath(import.meta.url));
 const BIN = path.dirname(SELF);
@@ -82,7 +83,7 @@ const UNIT = 'ghostfleet-telegram.service';
 // through redact(). A URL with the token in its path is the shape that leaks (an error
 // message quoting the request), and this catches it whatever text carried it.
 const SECRETS = new Set();
-const redact = (s) => { let t = String(s ?? ''); for (const v of SECRETS) if (v) t = t.split(v).join('<redacted>'); return t; };
+const redact = (s) => { let t = voice.redact(s); for (const v of SECRETS) if (v) t = t.split(v).join('<redacted>'); return t; };
 const say = (s) => process.stdout.write(redact(s) + '\n');
 const fail = (s, code = 1) => { process.stderr.write(redact(`fleet-telegram: ${s}`) + '\n'); process.exit(code); };
 
@@ -535,12 +536,32 @@ async function flush(sec) {
   saveState();
 }
 
+function turnTarget() {
+  const t = resolveLink();
+  const w = wiring(t);
+  if (!w.ok) throw new Refused(`${w.why}. At the desk: ${w.fix}`);
+  return t;
+}
+
+// Every inbound source enters through the same wiring gate and owner queue. Voice
+// always starts its own turn; neither source may fold into an active voice turn.
+async function submitTurn(t, body, address, isVoice = false) {
+  const probe = (await run('fleet-send', ['-s', t.sock, '--would-queue', t.session], envFor(t), 15000)).out.trim().split('\n').pop();
+  const rt = (() => { try { return fs.readFileSync(path.join(t.fleetDir, `${t.sock}.${t.session}.reply-to`), 'utf8').split('\x1f')[1]; } catch { return ''; } })();
+  const fold = !isVoice && !voice.isVoice(rt) && probe === 'working' && fs.existsSync(path.join(t.fleetDir, `${t.sock}.${t.session}.telegram`));
+  const behind = !fold && ['working', 'need-you', 'backlog'].includes(probe);
+  const prompt = redact(`[telegram] ${behind ? '(sent while an earlier turn was running, and held until it ended)\n' : ''}${body}`);
+  // Check again after the asynchronous probe, immediately before handing off.
+  const w = wiring(t);
+  if (!w.ok) throw new Refused(`${w.why}. At the desk: ${w.fix}`);
+  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${address}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
+  return { r, probe, prompt, fold };
+}
+
 async function deliver(msgs, sec) {
   const last = msgs[msgs.length - 1];
   let t;
-  try { t = resolveLink(); } catch (e) { log(`not delivered: ${e.message}`); return ackFor(sec, Number(last.message_id) || 0)(`Not delivered — ${e.message}.`); }
-  const w = wiring(t);
-  if (!w.ok) { log(`not delivered: ${w.why}`); return ackFor(sec, Number(last.message_id) || 0)(`Not delivered — ${w.why}. At the desk: ${w.fix}.`); }
+  try { t = turnTarget(); } catch (e) { log(`not delivered: ${e.message}`); return ackFor(sec, Number(last.message_id) || 0)(`Not delivered — ${e.message}.`); }
 
   // Each message keeps what it carried — its quote, its words, its file's line — in the order
   // it was sent. One that cannot be delivered is answered on its own and the rest still go.
@@ -591,10 +612,6 @@ async function deliver(msgs, sec) {
   //   Nor into a session stopped on a question (need-you): --now presses Enter, and Enter on
   // a permission dialog answers it. fleet-send --would-queue makes the call the queue gate
   // itself would make, so this and the gate cannot disagree.
-  const probe = (await run('fleet-send', ['-s', t.sock, '--would-queue', t.session], envFor(t), 15000)).out.trim().split('\n').pop();
-  const fold = probe === 'working' && fs.existsSync(path.join(t.fleetDir, `${t.sock}.${t.session}.telegram`));
-  const behind = !fold && ['working', 'need-you', 'backlog'].includes(probe);
-  const prompt = `[telegram] ${behind ? '(sent while an earlier turn was running, and held until it ended)\n' : ''}${body}`;
 
   // fleet-send, as the owner: to a busy session it QUEUES, and the queued turn carries the
   // reply address, so the answer is that turn's — the busy turn's own Stop answers nobody.
@@ -604,7 +621,10 @@ async function deliver(msgs, sec) {
   // when a turn is interrupted and never answers. A batch is answered as a reply to its last
   // message, and spoken if any message in it was a voice note.
   const reply = ackFor(sec, id);
-  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${spoken ? 'v' : 'm'}${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
+  let result;
+  try { result = await submitTurn(t, body, `${spoken ? 'v' : 'm'}${id}`); }
+  catch (e) { return reply(`Not delivered — ${e.message}.`); }
+  const { r, probe, prompt, fold } = result;
   if (r.code !== 0) {
     log(`not delivered to ${t.session}: exit ${r.code}`);
     return reply(`Not delivered to ${t.session} — ${r.out.split('\n').map((l) => l.replace(/^fleet-send:\s*/, '')).filter(Boolean).slice(0, 2).join(' — ') || `fleet-send exited ${r.code}`}`);
@@ -703,6 +723,37 @@ async function speak(text, replyTo, sec) {
 // Telegram turn. Sent oldest first; a file is removed only once every chunk is sent, and
 // records how far it got, so a retry resumes instead of repeating.
 let pumping = false;
+let acceptingVoice = false;
+let voiceSweepAt = 0;
+async function pumpVoice() {
+  if (acceptingVoice || stopping) return;
+  acceptingVoice = true;
+  try {
+    if (Date.now() >= voiceSweepAt) {
+      voice.pruneRequests();
+      voiceSweepAt = Date.now() + 60000;
+    }
+    for (const q of voice.pendingRequests()) {
+      const id = q.id, dir = voice.requestDir(id);
+      if (!q || fs.existsSync(path.join(dir, 'submitted'))) continue;
+      try {
+        const t = turnTarget();
+        if (t.session !== 'master') throw new Refused('Voice requires the Telegram link to the project master.');
+        const { r } = await submitTurn(t, `${voice.voiceTag()} ${voice.answerFormat}\n${q.text}`, id, true);
+        if (r.code !== 0) throw new Refused('The voice turn could not be delivered. Please check the session at the desk.');
+        fs.writeFileSync(path.join(dir, 'submitted'), '', { mode: 0o600 });
+        log('voice: delivered a turn');
+      } catch {
+        // A refusal travels through the same decision/outbox as an answer. Never
+        // expose command output or repeat dictated words in an error or a log.
+        voice.write(path.join(OUTBOX, `${Date.now()}.${id}.json`), { event: 'answered', reply_to: id,
+          text: q.lang === 'es' ? 'No pude entregar la pregunta; revisa el enlace y la protección de Telegram en el ordenador.' : 'I could not deliver the question; check the Telegram link and guard at the desk.' });
+        fs.writeFileSync(path.join(dir, 'submitted'), '', { mode: 0o600 });
+      }
+    }
+  } finally { acceptingVoice = false; }
+}
+
 async function pump() {
   if (pumping || stopping) return;
   pumping = true;
@@ -710,15 +761,26 @@ async function pump() {
     let names = [];
     try { names = fs.readdirSync(OUTBOX).filter((n) => n.endsWith('.json')).sort(); } catch { return; }
     if (!names.length) return;
-    let sec; try { sec = secrets(); } catch (e) { setError(e.message); return; }
     for (const n of names) {
       const f = path.join(OUTBOX, n);
       const rec = readJson(f, null);
       if (!rec) { quarantine(f, 'unreadable'); continue; }
       const who = `${String(rec.sock || '').replace(/^cf-/, '')}/${rec.session || '?'}`;
-      const text = redact(rec.event === 'asks'
+      let text = redact(rec.event === 'asks'
         ? `${rec.session || 'The session'} is waiting on you: ${rec.text || 'it needs an answer at the desk'}`
         : (String(rec.text || '').trim() || `(${rec.session || 'the session'} ended its turn without a message — at the desk: fleet-read -s ${rec.sock} ${rec.session})`));
+      if (voice.isVoice(rec.reply_to) && rec.event !== 'asks') {
+        const q = voice.read(path.join(voice.requestDir(rec.reply_to), 'request.json'));
+        const answer = voice.spokenAnswer(text, q?.lang);
+        text = answer.text;
+        // With no waiter (or after a restart), keep the answer in the Telegram
+        // outbox. The deadline includes every second spent behind a desk turn.
+        const route = q && (Date.now() < q.deadline
+          ? voice.decide(rec.reply_to, { via: 'http', ...answer })
+          : voice.defer(rec.reply_to, q.lang));
+        if (route?.via === 'http') { fs.rmSync(f, { force: true }); continue; }
+      }
+      let sec; try { sec = secrets(); } catch (e) { setError(e.message); return; }
       const replyTo = /^[mv]\d+$/.test(String(rec.reply_to || '')) ? Number(rec.reply_to.slice(1)) : 0;
       // A permission prompt keeps its address, so it can carry a v too: it is never spoken.
       // Nor is the note a turn gets for ending with no message.
@@ -783,7 +845,7 @@ async function daemon() {
   process.on('uncaughtException', (e) => { log(`crashed: ${e.message}`); process.exit(1); });
   log(`started (pid ${process.pid}, polling every ${POLL}s)`);
 
-  const tick = setInterval(() => { pump().catch((e) => log(`outbox: ${e.message}`)); }, 1000);
+  const tick = setInterval(() => { pump().catch((e) => log(`outbox: ${e.message}`)); pumpVoice().catch(() => log('voice: inbox could not be read')); }, 250);
   let watcher = null;
   try { watcher = fs.watch(OUTBOX, () => { pump().catch(() => {}); }); } catch {}
 
@@ -1100,10 +1162,20 @@ async function main(argv) {
         say(`transcribe-cmd: ${c.transcribe_cmd || '(not set)'}`);
         say(`speak-cmd:      ${c.speak_cmd || '(not set)'}`);
         say(`voice-ack:      ${c.voice_ack || '(not set)'}`);
+        say(`voice-tag:      ${voice.voiceTag()}`);
+        say(`voice-deadline-ms: ${voice.deadlineMs()}`);
         say(`coalesce-ms:    ${coalesceMs()}${Number.isInteger(c.coalesce_ms) ? '' : '  (the default)'}`);
         say(`allow:          ${allowList().join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
         say(`link:           ${c.link ? `${c.link.project}/${c.link.session}` : '(not linked)'}`);
         return;
+      }
+      if (what === 'voice-tag') {
+        if (vals.length !== 1 || !vals[0].trim() || vals[0].length > 1000 || /[\r\n\x00-\x1f]/.test(vals[0]) || voice.redact(vals[0]) !== vals[0]) fail('usage: fleet-telegram config voice-tag <one-line spoken-answer instruction>', 2);
+        c.voice_tag = vals[0]; saveConfig(c); return say('voice-tag set');
+      }
+      if (what === 'voice-deadline-ms') {
+        if (vals.length !== 1 || !/^\d+$/.test(vals[0]) || Number(vals[0]) < 100 || Number(vals[0]) > 45000) fail('usage: fleet-telegram config voice-deadline-ms <100-45000>', 2);
+        c.voice_deadline_ms = Number(vals[0]); saveConfig(c); return say('voice-deadline-ms set');
       }
       if (what === 'voice-ack') {
         if (vals.length !== 1) fail("usage: fleet-telegram config voice-ack '<text>'  ('' turns it off)", 2);
@@ -1170,7 +1242,7 @@ async function main(argv) {
         }
         return;
       }
-      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, speak-cmd, voice-ack, coalesce-ms, allow, disallow`, 2);
+      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, speak-cmd, voice-ack, voice-tag, voice-deadline-ms, coalesce-ms, allow, disallow`, 2);
     }
     case undefined: case 'help': case '-h': case '--help':
       return say(`fleet-telegram — a Telegram chat connected to one fleet session
@@ -1183,6 +1255,8 @@ async function main(argv) {
   fleet-telegram config transcribe-cmd '<cmd>'  turns $1 (an audio file) into words on stdout
   fleet-telegram config speak-cmd '<cmd>'     turns stdin into an OGG/Opus voice file at $1
   fleet-telegram config voice-ack '<text>'    sent the moment a voice note arrives ('' turns it off)
+  fleet-telegram config voice-tag '<text>'    one-line instruction for Shortcut answers
+  fleet-telegram config voice-deadline-ms <n>  HTTP wait including queue time (15000; max 45000)
   fleet-telegram config coalesce-ms <n>       messages this close together go as one turn (3000; 0 = off)
   fleet-telegram config allow [--only|--reset] <entry>…   what a Telegram turn may use:
       Read                      a tool, or a glob over tool names

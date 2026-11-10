@@ -1,5 +1,8 @@
 # Telegram: talk to a lead from your phone
 
+For Siri dictation through the paired host's HTTPS endpoint, see [VOICE.md](VOICE.md).
+It uses this bridge's same guarded turn queue and final-message outbox.
+
 `fleet-telegram` connects one Telegram chat to one fleet session, usually a project's
 `master`. Write to the bot and your message lands in that session as **your** words. The
 session answers, or hands the job to a worker with `fleet_send`/`fleet_spawn` and tells you
