@@ -41,6 +41,29 @@ const send = (project, prompt = 'revisa los pendientes') => ({ action: 'send', p
 const daily = { type: 'schedule', mode: 'days', at: '18:00', days: [1, 2, 3, 4, 5] };
 const auto = (scope, steps, extra = {}) => ({ name: `${scope} ${steps[0]?.project || ''}`, scope, enabled: true, trigger: daily, steps, ...extra });
 
+for (const field of ['runs', 'notices']) test(`wildcard company automation ${field} respect each event's project grant`, async t => {
+  const people = [{ id: 'admin', role: 'admin' }, { id: 'member', role: 'member', projects: { 'acme-web': 'member' } }];
+  const disk = {}, lines = {}, clocks = [];
+  const statuses = { 'acme-web': 'ready', 'billing-svc': 'ready' };
+  t.mock.method(globalThis, 'setInterval', fn => { clocks.push(fn); return { unref() {} }; });
+  const engine = createEngine({
+    fleet: { projects: async () => Object.entries(statuses).map(([name, status]) => ({ name, sessions: [{ name: 'master', status }] })) },
+    readJson: (n, d) => structuredClone(disk[n] ?? d), writeJson: (n, v) => { disk[n] = structuredClone(v); },
+    appendLine: (n, row) => { (lines[n] ||= []).push(row); }, readLines: n => (lines[n] || []).slice().reverse(),
+    perform: async () => ({ ok: true }), users: () => people, can,
+  });
+  engine.upsert(people[0], { name: 'Session started', scope: 'company', enabled: true,
+    trigger: { type: 'event', event: 'started', project: '*', session: '*', cooldown: 1 },
+    steps: [{ action: 'notify', text: '{proyecto}/{sesion} started' }] });
+  engine.start(); await new Promise(setImmediate);
+  for (const name of Object.keys(statuses)) { statuses[name] = 'working'; clocks[1](); await new Promise(setImmediate); }
+  const member = (await engine.view(people[1]))[field];
+  assert.equal(member.length, 1, `${field}: only acme-web`);
+  assert.doesNotMatch(JSON.stringify(member), /billing-svc/);
+  assert.match(JSON.stringify(member), /acme-web/);
+  assert.equal((await engine.view(people[0]))[field].length, 2);
+});
+
 test('existing ones become company automations, created by the first admin, exactly once', () => {
   const legacy = [{ id: 'a1', name: 'vieja', owner: 'beto', visibility: 'personal', enabled: true, trigger: daily, steps: [send('acme-api')] },
                   { id: 'a2', name: 'de equipo', owner: 'caro', visibility: 'team', enabled: true, trigger: daily, steps: [send('billing-svc')] }];

@@ -60,9 +60,9 @@ export function createEngine({ fleet, readJson, writeJson, appendLine, readLines
   }
 
   // A notice goes to whoever can see its automation; `to` pins one to a single person.
-  function notice(a, text, kind = 'info', to = null) {
+  function notice(a, text, kind = 'info', to = null, project = null) {
     notices.push({ id: crypto.randomBytes(6).toString('hex'), at: now(), auto: a?.id || null, autoName: a?.name || '',
-                   to, ...(isMsg(text) ? { msg: text } : { text }), kind });
+                   to, project, ...(isMsg(text) ? { msg: text } : { text }), kind });
     saveNotices();
   }
 
@@ -161,20 +161,22 @@ export function createEngine({ fleet, readJson, writeJson, appendLine, readLines
   // In its owner's language: what a run says is written once and read by them first.
   const run = (a, ctx) => orLang(runAs(a)?.lang, () => runIn(a, ctx));
   async function runIn(a, ctx) {
+    const log = row => logRun({ ...row, project: ctx.project || null });
+    const notify = (text, kind) => notice(a, text, kind, null, ctx.project || null);
     if (pauseIfLost(a)) {
       save();
       const text = msg('auto.run.refused', { why: a.paused.why });
-      logRun({ auto: a.id, name: a.name, owner: a.createdBy, status: 'refused', trigger: ctx.why, text });
+      log({ auto: a.id, name: a.name, owner: a.createdBy, status: 'refused', trigger: ctx.why, text });
       return { ok: false, text: render(text) };
     }
     if (running.has(a.id)) {
-      logRun({ auto: a.id, name: a.name, owner: a.createdBy, status: 'skipped', trigger: ctx.why, text: msg('auto.run.stillRunning') });
+      log({ auto: a.id, name: a.name, owner: a.createdBy, status: 'skipped', trigger: ctx.why, text: msg('auto.run.stillRunning') });
       return { ok: false, text: t('auto.run.running') };
     }
     const hour = (recent.get(a.id) || []).filter(x => now() - x < 3600);
     if (hour.length >= MAX_PER_HOUR) {
       a.enabled = false; arm(a); save();
-      notice(a, msg('auto.notice.loop', { name: a.name, n: MAX_PER_HOUR }), 'bad');
+      notify(msg('auto.notice.loop', { name: a.name, n: MAX_PER_HOUR }), 'bad');
       return { ok: false, text: t('auto.run.tooMany') };
     }
     recent.set(a.id, [...hour, now()]);
@@ -193,15 +195,15 @@ export function createEngine({ fleet, readJson, writeJson, appendLine, readLines
     } finally { running.delete(a.id); }
     a.lastRun = { at: now(), ok };
     save();
-    logRun({ auto: a.id, name: a.name, owner: a.createdBy, status: ok ? 'ok' : 'error', trigger: ctx.why, steps });
-    if (!ok) notice(a, msg('auto.notice.failed', { name: a.name, step: steps.at(-1)?.what, text: steps.at(-1)?.text || msg('auto.noDetail') }), 'bad');
+    log({ auto: a.id, name: a.name, owner: a.createdBy, status: ok ? 'ok' : 'error', trigger: ctx.why, steps });
+    if (!ok) notify(msg('auto.notice.failed', { name: a.name, step: steps.at(-1)?.what, text: steps.at(-1)?.text || msg('auto.noDetail') }), 'bad');
     return { ok, steps: steps.map(x => ({ ...x, text: render(x.text) })) };
   }
 
   async function step(a, s, ctx) {
     const v = { at: ctx.at, project: ctx.project, session: ctx.session };
     if (s.action === 'wait') { await new Promise(r => setTimeout(r, s.minutes * 60000)); return { ok: true, text: msg('auto.step.waited', { minutes: s.minutes }) }; }
-    if (s.action === 'notify') { notice(a, fill(s.text, v), 'info'); return { ok: true, text: msg('auto.step.notified') }; }
+    if (s.action === 'notify') { notice(a, fill(s.text, v), 'info', null, ctx.project || null); return { ok: true, text: msg('auto.step.notified') }; }
     const who = runAs(a);
     if (s.action === 'summary') return summary(a, who);
     const project = s.project === '{proyecto}' ? ctx.project : s.project;
@@ -289,8 +291,14 @@ export function createEngine({ fleet, readJson, writeJson, appendLine, readLines
       try { projects = (await fleet.projects()).map(p => p.name).filter(p => can(user, p, 'read')); } catch {}
       const mine = list.filter(a => canSee(a, user));
       const ids = new Set(mine.map(a => a.id));
-      const runs = readLines('automation-runs.jsonl', 400).filter(r => ids.has(r.auto)).slice(0, 60);
-      const visibleNotices = notices.filter(n => (n.to ? n.to === user.id : !n.auto || ids.has(n.auto))).slice(-40).reverse();
+      const canReadEvent = row => {
+        if (row.project) return can(user, row.project, 'read');
+        const a = mine.find(a => a.id === row.auto);
+        // Older wildcard event records lack their project. They cannot prove access.
+        return isAdmin(user) || !(a?.scope === 'company' && a.trigger.type === 'event' && a.trigger.project === '*');
+      };
+      const runs = readLines('automation-runs.jsonl', 400).filter(r => ids.has(r.auto) && canReadEvent(r)).slice(0, 60);
+      const visibleNotices = notices.filter(n => (n.to ? n.to === user.id : !n.auto || ids.has(n.auto)) && canReadEvent(n)).slice(-40).reverse();
       // Put into words now, for the person asking: one notice is read by everyone who can see it.
       return { me: { id: user.id, admin: isAdmin(user), projects },
                automations: mine.map(a => ({ ...a, ownerName: ownerName(a.createdBy), running: running.has(a.id),
