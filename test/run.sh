@@ -23372,6 +23372,12 @@ if [ -d "$ROOT/web" ]; then
   #     "Conversation" and "Agent's screen" turned it red at 390 and 320 ("36 px past the edge",
   #     "106 px"); the narrow padding taken out turned 320 red ("es: 0 px of room"); and the bar's
   #     no-shrink rule taken out turned all three widths red ("squashed to 12 of 37 px" at 390).
+  #   - the chat at its end, clear of the Assistant button: the chat that only went to its end when
+  #     a message arrived turned the cold-opened session red ("29 px short of its end") and the
+  #     keyboard rows at 390 and 1280 ("44 px", "120 px").
+  #   - the project's header keeping its height when the lead's button lands: its phone rule taken
+  #     out turned 390 and 320 red ("49 to 98 px"), and the narrow sides taken out turned 320 red
+  #     ("Despertar al líder": 98 to 138 px).
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?
@@ -23383,7 +23389,7 @@ if [ -d "$ROOT/web" ]; then
     # A floor, for the reason pwa-check documents: a browser that fails to start emits a
     # row or two and a bare "no mismatches" would call that green.
     # 278 rows when the rebuilt features above were added, 283 with the empty pages, 286 with
-    # the session's tab row.
+    # the session's tab row, 296 with the chat's end and the project's header.
     is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 260 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"

@@ -146,6 +146,17 @@ try {
       ['queue', '#/queue'], ['held', '#/held'], ['reviews', '#/reviews'], ['one review', '#/reviews/-/work/2026-03-05_14-02-11'],
       ['stack picker', '#/stack-picker'], ['stack', `#/stack/${encodeURIComponent(STACK)}`], ['automations', '#/automations'],
       ['sign-ins', '#/sign-ins'], ['search', '#/search?q=api']];
+    // Is the newest chat message clear of the Assistant button, with the page at its end? (below)
+    const clear = () => b.evaluate(() => {
+      const c = document.querySelector('.chat'), fab = document.querySelector('.as-launch'), main = document.querySelector('.main');
+      const msgs = c ? c.querySelectorAll('.msg') : [];
+      if (!c || !fab || !msgs.length) return 'no chat, message or button';
+      if (main) main.scrollTop = main.scrollHeight;
+      const L = msgs[msgs.length - 1].getBoundingClientRect(), B = fab.getBoundingClientRect();
+      const short = Math.round(c.scrollHeight - c.clientHeight - c.scrollTop);
+      const hit = L.right > B.left && L.left < B.right && L.bottom > B.top && L.top < B.bottom;
+      return short > 1 ? `${short} px short of its end` : hit ? `under the button by ${Math.round(L.bottom - B.top)} px` : 'clear';
+    });
     // A phone, a narrow phone, and a desk: the same screens at 1280 draw the sidebar beside them.
     for (const [w, h] of [[390, 844], [320, 700], [1280, 900]]) {
       await b.viewport(w, h);
@@ -172,6 +183,54 @@ try {
         is(`${w} ${name}: no page error`, '', errors.slice(before).join(' | '));
         is(`${w} ${name}: no native <select>`, 0, m.selects);
         is(`${w} ${name}: the page does not scroll sideways`, true, m.docX <= 1 && m.mainX <= 1);
+        // A PROJECT'S HEADER IS ONE HEIGHT BEFORE AND AFTER ITS DATA. The lead's button is drawn once
+        // the grid answers, and on a phone it pushed the actions onto a second line: 49 px under a
+        // finger, so term-check's tap on the Terminal tab landed on "Start the lead" one run in six
+        // here and on CI's Mac, asking for a passkey and starting an agent. This route's lead is up,
+        // so a lead button is put in, in each label and each language, beside that language's "New
+        // session", and the header must not change height from loading (no lead button, "Loading…")
+        // to loaded (the button and the counts).
+        if (name === 'project') {
+          const moved = await b.evaluate(async () => {
+            const head = document.querySelector('.proj-head'), row = head && head.querySelector('.row'), sub = head && head.querySelector('p.muted');
+            const add = row && row.lastElementChild;
+            if (!add || !sub) return 'no header, actions or counts';
+            const text = (e) => [...e.childNodes].filter(n => n.nodeType === 3 && n.textContent.trim()).pop();
+            const keep = [text(add).textContent, sub.textContent], bad = [];
+            const lead = add.cloneNode(true); lead.className = 'btn ghost';
+            for (const l of ['en', 'es']) {
+              const x = (await import(location.origin + '/ui/words/' + l + '.js')).default;
+              text(add).textContent = ' ' + x['project.newSession'];
+              for (const k of ['project.leadStart', 'project.leadWake', 'project.leadResume', 'project.leadReopen']) {
+                text(lead).textContent = ' ' + x[k];
+                lead.remove(); sub.textContent = x['common.loading'];
+                const a = head.getBoundingClientRect().height;
+                row.prepend(lead); sub.textContent = `${x['project.sessions'].replace('{n}', 12)} · ${x['project.freeWts'].replace('{n}', 3)}`;
+                const z = head.getBoundingClientRect().height;
+                if (Math.abs(z - a) > 0.5) bad.push(`${l} "${x[k]}": ${Math.round(a)} to ${Math.round(z)} px`);
+              }
+            }
+            lead.remove(); text(add).textContent = keep[0]; sub.textContent = keep[1];
+            return bad.join(', ') || 'one height';
+          });
+          is(`${w} project: the header is one height before and after the lead's button lands, in both languages`, 'one height', moved);
+        }
+        // THE NEWEST MESSAGE CLEARS THE ASSISTANT BUTTON. The chat leaves room under its list for the
+        // floating button (ui.css), and that room is only any use at the list's end: the chat jumped
+        // there when a message arrived and not when its end moved, so under this route's permission
+        // card it sat 29 px short as opened, the newest message's last line under the button. Asked
+        // as opened, with the page scrolled to its end, and again with the screen 120 px shorter, as
+        // a keyboard makes it: that moves the end every time, not only when a font lands late.
+        if (name === 'session') {
+          await b.evaluate(() => document.fonts.ready.then(() => 0));
+          await sleep(300);
+          is(`${w} session: the newest message clears the Assistant button, as opened`, 'clear', await clear());
+          await b.viewport(w, h - 120);
+          await sleep(600);
+          is(`${w} session: ...and with the screen 120 px shorter, as a keyboard makes it`, 'clear', await clear());
+          await b.viewport(w, h);
+          await sleep(400);
+        }
         // THE SESSION'S TAB ROW FITS, Editor included. A served phone adds Terminal and Editor
         // beside Chat and Screen for a project on this machine, and demo data has no machine, so
         // the row is copied with the two added, in the page's own CSS and each language's words,
@@ -477,6 +536,21 @@ try {
         is('offline: the peer keeps its heading and says it is not answering', true, /:not answering$/.test(hosts[1] || ''));
       }
     }
+
+    // ── a session opened cold, from its link ─────────────────────────────────
+    // As a notification opens one: the app loads on the session's address and lands there past the
+    // lock. Reached by its hash the chat was short of its end only some of the time (the picture in
+    // docs/mobile/session.png was one); opened cold it sat 29 px short every time, the newest
+    // message's last line under the Assistant button. After every screen above, because the load
+    // locks the app again.
+    await b.viewport(390, 844);
+    await b.call('Page.navigate', { url: srv.base + '/#/p/acme-api/s/api-fix' });
+    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+    await clickText('.auth-card button', 'without a passkey');
+    await until(() => document.querySelectorAll('.chat .msg').length > 3 && !!document.querySelector('.as-launch'));
+    await b.evaluate(() => document.fonts.ready.then(() => 0));
+    await sleep(300);
+    is('390 session, opened cold from its link: the newest message clears the Assistant button', 'clear', await clear());
 
     // ── one answer to "is this run done": the client's state against the server's ──
     // The phone works a recorded run's state out the moment a verdict is tapped (and fixture mode

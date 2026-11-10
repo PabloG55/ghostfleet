@@ -166,6 +166,14 @@ textarea { resize: vertical; }
 .page.narrow { max-width: 760px; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 .page-head p { margin: 4px 0 0; }
+/* A PROJECT'S HEADER IS ONE HEIGHT BEFORE AND AFTER ITS DATA. The lead's button (start, wake, resume
+ * or reopen it) is drawn once the project's grid answers, and on a phone it pushed the actions onto
+ * a second line: the header grew 49 px under the finger, and a tap aimed at the Terminal tab below
+ * landed on "Start the lead", which asks for the passkey and starts an agent. So on a phone the
+ * actions always have a line of their own, and at 360 and under their sides narrow: the longest
+ * pair, "Despertar al líder" and "Nueva sesión", is 298 px against a 288 px line at 320. */
+@media (max-width: 900px) { .proj-head > .row { flex-basis: 100%; } }
+@media (max-width: 360px) { .proj-head > .row > .btn { padding-left: .6em; padding-right: .6em; } }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; }
 .chips button { background: transparent; border: 1px solid var(--line); border-radius: var(--r); padding: .3em .85em; cursor: pointer; color: var(--dim); font-size: 13px; }
 .chips button b { color: var(--fg); font-weight: 600; margin-left: .25em; }

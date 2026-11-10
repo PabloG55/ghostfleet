@@ -117,12 +117,36 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   const author = useSlot('author');
   const ref = useRef(null);
   const stick = useRef(true);
+  const ours = useRef(-1);            // the scrollTop this chat last set itself (below)
   const anchor = useRef(null);
   const swipe = useRef(null);
   const msgs = page.messages || [];
   const rows = keyed(msgs);
   const last = rows.length ? rows[rows.length - 1][0] : '';
-  useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [last, queued.length]);
+  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; };
+  useEffect(() => { const n = ref.current; if (n && stick.current) toEnd(n); }, [last, queued.length]);
+  // A CHAT AT ITS END STAYS AT ITS END. It jumped there when a message arrived, and its end moves
+  // without one: the box shrinks when a permission card or a keyboard comes up, and a message grows
+  // when its font lands. Under a permission card at 390x844 it sat 29 px short as opened, and the
+  // newest message's last line lay under the Assistant button, the room left for that button being
+  // at the very end. So the box and every row in it are watched, and while the reader is at the end
+  // (`stick`) a change of size takes it back there. Not a tools row, which grows because the reader
+  // opened it, and not while older messages land above (`anchor`).
+  //   `stick` is the READER's: the browser sends the scroll event for a jump the chat made itself a
+  // frame later, measured against whatever the box is by then, and a card drawn in that frame read
+  // as the reader leaving the end, 415 px up, after which nothing took the chat back. A scroll that
+  // lands where the chat put it (`ours`) leaves `stick` as it was.
+  useLayoutEffect(() => {
+    const box = ref.current;
+    if (!box || typeof ResizeObserver === 'undefined') return;
+    const seen = new WeakSet();
+    const ro = new ResizeObserver(() => { if (stick.current && !anchor.current) toEnd(box); });
+    const watch = () => { for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== 'DETAILS') { seen.add(c); ro.observe(c); } };
+    watch();
+    const mo = new MutationObserver(watch);
+    mo.observe(box, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
   const measure = () => {
     const box = ref.current; if (!box) return;
     const top = box.getBoundingClientRect().top;
@@ -156,7 +180,11 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   };
   return (
     <div class="chat" ref={ref} data-keep-scroll="chat" onPointerDown={down} onPointerUp={up} onPointerCancel={() => { swipe.current = null; }}
-         onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; nearTop(n); }}>
+         onScroll={(e) => {
+           const n = e.currentTarget;
+           if (Math.abs(n.scrollTop - ours.current) > 1) { ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }
+           nearTop(n);
+         }}>
       {page.next_before
         ? (older.busy ? <p class="older muted center" role="status">{t('chat.olderLoading')}</p>
           : older.err ? <div class="older center"><span class="muted">{t('chat.olderFailed', { why: older.err })}</span>

@@ -5603,15 +5603,41 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const author = useSlot("author");
 	const ref = A(null);
 	const stick = A(true);
+	const ours = A(-1);
 	const anchor = A(null);
 	const swipe = A(null);
 	const msgs = page.messages || [];
 	const rows = keyed(msgs);
 	const last = rows.length ? rows[rows.length - 1][0] : "";
+	const toEnd = (n) => {
+		n.scrollTop = n.scrollHeight;
+		ours.current = n.scrollTop;
+	};
 	h(() => {
 		const n = ref.current;
-		if (n && stick.current) n.scrollTop = n.scrollHeight;
+		if (n && stick.current) toEnd(n);
 	}, [last, queued.length]);
+	_(() => {
+		const box = ref.current;
+		if (!box || typeof ResizeObserver === "undefined") return;
+		const seen = /* @__PURE__ */ new WeakSet();
+		const ro = new ResizeObserver(() => {
+			if (stick.current && !anchor.current) toEnd(box);
+		});
+		const watch = () => {
+			for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== "DETAILS") {
+				seen.add(c);
+				ro.observe(c);
+			}
+		};
+		watch();
+		const mo = new MutationObserver(watch);
+		mo.observe(box, { childList: true });
+		return () => {
+			ro.disconnect();
+			mo.disconnect();
+		};
+	}, []);
 	const measure = () => {
 		const box = ref.current;
 		if (!box) return;
@@ -5669,7 +5695,10 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 		},
 		onScroll: (e) => {
 			const n = e.currentTarget;
-			stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+			if (Math.abs(n.scrollTop - ours.current) > 1) {
+				ours.current = -1;
+				stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+			}
 			nearTop(n);
 		},
 		children: [
@@ -6683,7 +6712,7 @@ function ProjectView({ project, session, tool = null }) {
 	};
 	const termWhy = typeof fleet.termWhy === "function" ? fleet.termWhy(project) : "";
 	const header = /* @__PURE__ */ u("header", {
-		class: "page-head",
+		class: "page-head proj-head",
 		children: [/* @__PURE__ */ u("div", { children: [
 			/* @__PURE__ */ u("h1", {
 				class: "name",

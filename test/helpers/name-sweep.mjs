@@ -628,11 +628,11 @@ const BINARY_REVIEWED = new Set([
   '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
   // The phone on the shared UI, shot on fixtures at 1x: every frame opened and read, every
   // name in it one of web/fixtures/'s (acme-api, toolbox, acme-web, billing-svc, scratch).
-  'dfafb9b9bee4fba8',   // docs/mobile/desk.png
+  'd662019c5511781e',   // docs/mobile/desk.png
   '8b439848e76966bd',   // docs/mobile/drawer.png
   'ec0411437fc28508',   // docs/mobile/home.png
-  'e188bb5e8c81b439',   // docs/mobile/phone-demo.gif
-  '45584c485b8bf293',   // docs/mobile/session.png
+  '73e3dd7e5010ddc9',   // docs/mobile/phone-demo.gif
+  '828ac58d5d138422',   // docs/mobile/session.png
   '07b65ab7235ca1d3',   // docs/stack-demo.gif
   'ef987172757ffd8c',   // docs/stack-demo.mp4
   '23ec45657a6e9e92',   // docs/worktree-demo.gif

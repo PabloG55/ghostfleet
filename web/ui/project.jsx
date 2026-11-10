@@ -148,7 +148,7 @@ export function ProjectView({ project, session, tool = null }) {
   };
   const termWhy = typeof fleet.termWhy === 'function' ? fleet.termWhy(project) : '';
   const header = (
-    <header class="page-head">
+    <header class="page-head proj-head">
       <div>
         <h1 class="name"><ProjectName name={project} /></h1>
         <p class="muted">{g ? `${t('project.sessions', { n: g.cards.length })} · ${t('project.freeWts', { n: g.free_worktrees?.length || 0 })}` : t('common.loading')}</p>
