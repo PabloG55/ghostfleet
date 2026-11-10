@@ -3,13 +3,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { can, visibleProjects, denial, migrate, TOOL_ACTION, canSeeAutomation } from '../server/access.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SCRATCH = path.resolve(ROOT, '../../scratch.tmp');
+fs.mkdirSync(SCRATCH, { recursive: true });
 
 const admin = { id: 'ana', role: 'admin', projects: {} };
 const member = { id: 'beto', role: 'member', projects: { 'acme-api': 'member', 'acme-web': 'viewer', toolbox: 'admin' } };
@@ -96,14 +98,15 @@ async function boot(dataRoot) {
 }
 
 test('server: a member with one project sees only it, and every other door answers 404', async (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gfw-access-'));
-  t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }));
+  const dataRoot = fs.mkdtempSync(path.join(SCRATCH, 'gfw-access-'));
+  let proc;
+  t.after(async () => { if (proc) { const ended = once(proc, 'exit'); proc.kill(); await ended; } fs.rmSync(dataRoot, { recursive: true, force: true }); });
   const env = { ...process.env, GFW_DATA: dataRoot };
   const printed = execFileSync(process.execPath, [path.join(ROOT, 'server/admin-cli.mjs'), 'create-admin', 'Ana', '--demo'], { env, encoding: 'utf8' });
   const adminPw = /temporary password: (\S+)/.exec(printed)[1];
 
-  const { proc, call } = await boot(dataRoot);
-  t.after(() => proc.kill());
+  const started = await boot(dataRoot); proc = started.proc;
+  const { call } = started;
 
   // No account creation from the web, at all.
   assert.equal((await call('POST', '/api/setup', { users: [{ name: 'Eve', password: 'xxxxxx' }] })).status, 401);
@@ -111,9 +114,11 @@ test('server: a member with one project sees only it, and every other door answe
 
   const A = {}, M = {};
   assert.equal((await call('POST', '/api/login', { name: 'ana', password: adminPw }, A)).status, 200);
+  assert.equal((await call('POST', '/api/password', { old: adminPw, new: 'admin-password-123' }, A)).status, 200);
   const made = await call('POST', '/api/admin/users', { name: 'Beto', role: 'member', projects: { 'toolbox': 'member' } }, A);
   assert.equal(made.status, 200, JSON.stringify(made.body));
   assert.equal((await call('POST', '/api/login', { name: 'beto', password: made.body.password }, M)).status, 200);
+  assert.equal((await call('POST', '/api/password', { old: made.body.password, new: 'member-password-123' }, M)).status, 200);
 
   const mine = (await call('GET', '/api/projects', null, M)).body.projects.map(p => p.name);
   assert.deepEqual(mine, ['toolbox']);
@@ -143,14 +148,14 @@ test('server: a member with one project sees only it, and every other door answe
 });
 
 test('server: an installation from before roles is migrated once at start', async (t) => {
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gfw-migrate-'));
-  t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }));
+  const dataRoot = fs.mkdtempSync(path.join(SCRATCH, 'gfw-migrate-'));
+  let proc;
+  t.after(async () => { if (proc) { const ended = once(proc, 'exit'); proc.kill(); await ended; } fs.rmSync(dataRoot, { recursive: true, force: true }); });
   fs.mkdirSync(path.join(dataRoot, 'demo'));
   const { hashPw } = await import('../server/users.mjs');
   const old = (id) => ({ id, name: id, color: 'cyan', ...hashPw('secreto') });
   fs.writeFileSync(path.join(dataRoot, 'demo', 'users.json'), JSON.stringify({ users: [old('ana'), old('beto')] }));
-  const { proc } = await boot(dataRoot);
-  t.after(() => proc.kill());
+  proc = (await boot(dataRoot)).proc;
   const u = JSON.parse(fs.readFileSync(path.join(dataRoot, 'demo', 'users.json'), 'utf8')).users;
   assert.equal(u[0].role, 'admin');
   assert.equal(u[1].role, 'member');

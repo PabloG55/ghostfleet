@@ -7,16 +7,22 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createAiAccount, hint } from '../server/ai-account.mjs';
 import { createUsers } from '../server/users.mjs';
 
 const KEY = 'sk-ant-api03-FAKEkeyFAKEkeyFAKEkeyFAKE-Ab9Z';
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server', 'index.mjs');
+const SCRATCH = path.resolve(path.dirname(SERVER), '../../../scratch.tmp');
+fs.mkdirSync(SCRATCH, { recursive: true });
+const roots = [];
+test.after(() => { for (const root of roots) fs.rmSync(root, { recursive: true, force: true }); });
 
 // GFW_DATA plus two profile config dirs, all under one temp root.
 function rig({ codexHelp = '  mcp-server  Start Codex as an MCP server (stdio)\n', demo = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gfw-ai-'));
+  roots.push(root);
   const dir = path.join(root, 'data'); fs.mkdirSync(dir);
   const cfg = (p) => path.join(root, `claude-${p}`);
   const readJson = (n, d) => { try { return JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { return d; } };
@@ -181,14 +187,14 @@ test('hint shows only the last four characters', () => {
 
 // Through the real server, in demo mode: what the browser can reach.
 test('over HTTP: only an admin reaches it, and no response ever carries the full key', async (t) => {
-  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'gfw-ai-http-'));
+  const data = fs.mkdtempSync(path.join(SCRATCH, 'gfw-ai-http-'));
   const port = 20000 + Math.floor(Math.random() * 20000);
   // Accounts come from the console (admin-cli), not from the web: write them the same way.
   const store = createUsers(path.join(data, 'demo'));
   store.add('Ana', 'secreto1-long', { role: 'admin' });
   store.add('Beto', 'secreto2-long', { role: 'member', projects: {} });
   const srv = spawn(process.execPath, [SERVER, '--demo'], { env: { ...process.env, GFW_PORT: String(port), GFW_DATA: data }, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => srv.kill());
+  t.after(async () => { const ended = once(srv, 'exit'); srv.kill(); await ended; fs.rmSync(data, { recursive: true, force: true }); });
   let log = '';
   await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error(`server did not start: ${log}`)), 15000);

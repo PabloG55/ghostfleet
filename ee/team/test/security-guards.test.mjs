@@ -1,10 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import net from 'node:net';
-import { createUsers } from '../server/users.mjs';
-import { rig, password } from './helpers/demo-rig.mjs';
+import { rig } from './helpers/demo-rig.mjs';
 
 test('voice mutation routes hide from viewers and members; admins pass the guard', async t => {
   const r = await rig(t);

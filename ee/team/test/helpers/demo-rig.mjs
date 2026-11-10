@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createUsers, hashPw } from '../../server/users.mjs';
