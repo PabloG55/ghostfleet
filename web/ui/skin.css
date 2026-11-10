@@ -198,7 +198,7 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .term, .md pre, .md .md-code, .ask-cmd { background: var(--gf-abyss); }
 .tree-glyph { display: inline-grid; place-items: center; }
 .menu { box-shadow: var(--gf-shadow-2); }
-.menu button, .select-opt { border-radius: 0; display: flex; align-items: center; gap: .55em; }
+.menu > button, .select-opt { border-radius: 0; display: flex; align-items: center; gap: .55em; }
 .toast { border-left-width: 2px; box-shadow: var(--gf-shadow-2); animation: none; }
 
 /* ── lights: square LEDs with a hard bezel, as on a terminal ──── */

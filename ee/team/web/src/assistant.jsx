@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, Btn } from '../../../../web/ui/ui.jsx';
-import { Select } from '../../../../web/ui/select.jsx';
+import { Select, Popover } from '../../../../web/ui/select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setTarget, setOption, canHear, busy, unframe } from './agent.js';
 import { VoicePicker } from './voices.jsx';
@@ -49,8 +49,7 @@ export function Console({ projects, big }) {
                placeholder={big ? t('as.typeBig') : t('as.type')} />
         <Btn kind="primary" type="submit" disabled={!typed.trim()}>{t('common.send')}</Btn>
       </form>
-      <details class="voice-opts">
-      <summary><Icon name="gear" /> {t('as.voiceOpts')}</summary>
+      <Popover class="voice-opts-btn" boxClass="voice-opts" icon="gear" label={t('as.voiceOpts')} title={t('as.voiceOpts')}>
       <p class="voice-src muted small">
         {S.vs == null ? t('as.vsChecking')
           : local ? <><Icon name="lock" /> {t('as.vsLocal')}</>
@@ -68,7 +67,7 @@ export function Console({ projects, big }) {
         <label><input type="checkbox" checked={S.handsFree} onChange={(e) => setOption('handsFree', e.currentTarget.checked)} /> {t('as.handsFree')}</label>
         <label><input type="checkbox" checked={S.follow} onChange={(e) => setOption('follow', e.currentTarget.checked)} /> {t('as.follow')}</label>
       </div>
-      </details>
+      </Popover>
     </div>
   );
 }

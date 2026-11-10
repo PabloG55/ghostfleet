@@ -197,15 +197,22 @@ textarea { resize: vertical; }
 .sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
-.menu button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
-.menu button:hover, .select-opt.on { background: #222a33; }
-.menu button.danger { color: var(--red); }
-/* A select's open list is this menu: the rules above are its rules, not a copy. Only where it
+.menu > button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
+.menu > button:hover, .select-opt.on { background: #222a33; }
+.menu > button.danger { color: var(--red); }
+/* The menu's actions are its own children: a popover is this surface too, and the buttons of the
+   controls it holds (a select's) keep their own look.
+   A select's open list is this menu: the rules above are its rules, not a copy. Only where it
    sits differs: select.jsx places it from its button, over everything but the toasts, and
    a long one scrolls inside itself. An option's words wrap there rather than being cut. */
-.select-list { position: fixed; right: auto; top: 0; z-index: 70; min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.select-list { position: fixed; right: auto; top: 0; z-index: 76; min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
 .select-list .select-v { white-space: normal; overflow-wrap: anywhere; }
 .select-opt .px-ico { flex: none; margin-left: auto; color: var(--cyan); }
+/* A popover (select.jsx) is the same surface holding controls instead of actions, placed from
+   its button like a list. Its layer is under the lists, so a select inside one opens over it,
+   and over the phone's full-screen assistant (70); the toasts (80) stay on top of both. */
+.popover { position: fixed; right: auto; top: 0; z-index: 72; width: 340px; min-width: 0; padding: 12px 14px; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
+.popover p { margin: 0; }
 
 .ask { margin: 14px 22px 0; border-radius: var(--r); padding: 14px 16px; border: 1px solid rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); display: flex; flex-direction: column; gap: 10px; }
 .ask.question { border-color: rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); }

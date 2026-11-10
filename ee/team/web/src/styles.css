@@ -179,11 +179,10 @@
 
 /* ── home: the fleet as a picture ─────────────────────────────────────────────────────── */
 
+/* Voice options: a quiet button that opens the controls in a popover, as More opens its menu */
+.voice-opts-btn { background: none; border: 0; padding: 0; cursor: pointer; color: var(--dim); font-size: 12.5px; display: inline-flex; align-items: center; gap: .35em; }
+.voice-opts-btn:hover, .voice-opts-btn[aria-expanded="true"] { color: var(--white); }
 .voice-opts { font-size: 12.5px; }
-.voice-opts summary { cursor: pointer; color: var(--dim); width: fit-content; list-style: none; }
-.voice-opts summary::-webkit-details-marker { display: none; }
-.voice-opts[open] summary { color: var(--white); margin-bottom: 6px; }
-.voice-opts > * + * { margin-top: 6px; }
 
 /* ── usage: what is left of each Claude account, always on screen ─────────────────────── */
 .usage { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--hair); padding: 10px 6px 4px; margin-top: 6px; }

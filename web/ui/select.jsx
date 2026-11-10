@@ -1,5 +1,5 @@
-// web/ui/select.jsx — the app's own select, with the stack of open layers it and every other
-// overlay that floats over the page share.
+// web/ui/select.jsx — the app's own pickers: a select and an anchored popover, with the stack
+// of open layers they share.
 //
 // A native select element opens the engine's list: a grey wheel on a phone, an OS menu on a desktop,
 // and neither is the app's. Restyling the closed box (skin.css did) changed nothing about the
@@ -251,6 +251,56 @@ export function Select({
     <div class={field}>
       <span id={lid} class={labelClass} onClick={() => btn.current?.focus()}>{label}</span>
       {button}{box}
+    </div>
+  );
+}
+
+// ── the popover ───────────────────────────────────────────────────────────────────────────
+// A button that opens a box of controls anchored to it, in the lists' surface (the More
+// menu's), where a <details> used to open them inline and push the page down under it. It
+// closes on Esc (the focus back on the button), on a press outside it, on the button again,
+// and when the focus walks out of it.
+//   The box is rendered right after its button, not at the end of <body> like a list: it holds
+// controls, and Tab has to reach them from the button and leave them to whatever follows.
+// position: fixed takes it out of the page's flow and out of any box that clips, since no
+// ancestor of the places it is used is transformed. It fits beside its button even on a phone
+// (it flips above one low on the screen, and scrolls inside itself when the room is short), so
+// it is never a sheet.
+export function Popover({ label, icon, class: cls = '', boxClass = '', title, children }) {
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  const btn = useRef(null), box = useRef(null), fromKeys = useRef(false);
+  const close = (focus) => { setOpen(false); if (focus) btn.current?.focus({ preventScroll: true }); };
+  useLayer(open, (n) => btn.current?.contains(n) || box.current?.contains(n), close);
+  useFollow(open, () => {
+    if (btn.current && box.current) placeBy(btn.current, box.current, { maxH: 520 });
+  }, (n) => box.current?.contains(n));
+  // opened from the keyboard, the first control inside takes the focus
+  useEffect(() => {
+    if (open && fromKeys.current) box.current?.querySelector('button, input, [tabindex]:not([tabindex="-1"])')?.focus({ preventScroll: true });
+  }, [open]);
+  const toggle = (e) => {
+    if (open) { close(false); return; }
+    fromKeys.current = e.detail === 0;
+    setOpen(true);
+  };
+  // A focus that went somewhere else closes it; one that went nowhere (a press on the box's own
+  // padding) does not, and a press outside is the layer's to judge.
+  const leave = (e) => {
+    const to = e.relatedTarget;
+    if (open && to && !btn.current?.contains(to) && !box.current?.contains(to)) close(false);
+  };
+  return (
+    <div class="pop" onFocusOut={leave}>
+      <button type="button" ref={btn} class={cls} aria-haspopup="dialog" aria-expanded={open}
+              aria-controls={open ? id : undefined} onClick={toggle}>
+        {icon ? <Icon name={icon} /> : null}{label}
+      </button>
+      {open ? (
+        <div class={`menu popover${boxClass ? ` ${boxClass}` : ''}`} id={id} ref={box} role="dialog" aria-label={title || undefined}>
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }

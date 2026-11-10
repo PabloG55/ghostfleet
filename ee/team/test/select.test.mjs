@@ -5,15 +5,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { rig } from './helpers/demo-rig.mjs';
-import { findChrome, launch, sleep } from '../../../lib/browser.mjs';
+import { browse } from './helpers/browse.mjs';
+import { findChrome, sleep } from '../../../lib/browser.mjs';
 
 const TEAM = new URL('..', import.meta.url).pathname;
 const files = (dir, re) => fs.readdirSync(dir, { recursive: true }).map(f => path.join(dir, f)).filter(f => re.test(f));
 
 // The source of the screens, the team's and the shared ones it imports, and the bundle the
-// server sends. Lowercase only: <Select> is the component that replaced it. A <select> written in JSX is a call with 'select' as the tag once it is built,
-// and one written as markup is the literal. The bundle has to exist; the test command builds
+// server sends. Lowercase only: <Select> is the component that replaced it. A <select> written
+// in JSX is a call with 'select' as the tag once it is built, and one written as markup is the
+// literal. The bundle has to exist; the test command builds
 // it first, and a sweep that skips when there is nothing to sweep proves nothing.
 test('no native <select> is left in the team app, its shared screens, or the built bundle', () => {
   const src = [...files(path.join(TEAM, 'web/src'), /\.(jsx?|html)$/), ...files(path.join(TEAM, '../../web/ui'), /\.(jsx?|html)$/)];
@@ -29,43 +30,12 @@ test('no native <select> is left in the team app, its shared screens, or the bui
 });
 
 // ── the keys, in a browser ─────────────────────────────────────────────────────────────────
-const KEYS = {
-  ArrowDown: ['ArrowDown', 40], ArrowUp: ['ArrowUp', 38], Home: ['Home', 36], End: ['End', 35],
-  Enter: ['Enter', 13, '\r'], ' ': ['Space', 32, ' '], Escape: ['Escape', 27], Tab: ['Tab', 9],
-};
-function keyOf(k) {
-  if (KEYS[k]) { const [code, vk, text] = KEYS[k]; return { key: k, code, vk, text }; }
-  return { key: k, code: `Key${k.toUpperCase()}`, vk: k.toUpperCase().charCodeAt(0), text: k };
-}
-
 test('the select answers the keyboard, and what it chooses is saved', { timeout: 120000 }, async (t) => {
   if (!findChrome()) { t.skip('no Chrome on this machine to press the keys in'); return; }
-  const r = await rig(t);
-  const cookie = await r.login('admin');
-  await r.call('POST', '/api/lang', { lang: 'en' }, cookie);
-  const base = `http://127.0.0.1:${r.port}`;
-  const b = await launch({ width: 1280, height: 800, scale: 1 });
-  t.after(() => b.close());
-  const [name, value] = cookie.split('=');
-  await b.call('Network.setCookie', { name, value, url: base });
-
-  const press = async (k) => {
-    const { key, code, vk, text } = keyOf(k);
-    await b.call('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, text });
-    await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
-    await sleep(60);
-  };
-  const until = async (what, fn, ...args) => {
-    for (let i = 0; i < 150; i++) { const v = await b.evaluate(fn, ...args); if (v) return v; await sleep(100); }
-    throw new Error(`waited 15s for ${what}`);
-  };
-  const go = async (hash, sel) => {
-    await b.call('Page.navigate', { url: `${base}/#${hash}` });
-    await until(sel, (s) => !!document.querySelector(s), sel);
-  };
+  const { r, b, cookie, press, until, go } = await browse(t);
   // What the picker that has the focus says about itself: open or not, the option the keys are
-  // on, the value its button shows (its label, without the owner's avatar initials), whether the focus is still on it, and whether its open
-  // list fits inside the window.
+  // on, the value its button shows (its label, without an owner's avatar initial), whether the
+  // focus is still on it, and whether its open list fits inside the window.
   const state = () => b.evaluate(() => {
     const el = document.activeElement;
     const box = el?.getAttribute('role') === 'combobox' ? el : null;
@@ -148,4 +118,51 @@ test('the select answers the keyboard, and what it chooses is saved', { timeout:
   assert.deepEqual([s.open, s.focused, await dialog()], [false, true, true], 'Esc closed the list and left the dialog open');
   await press('Escape');
   assert.equal(await dialog(), false, 'a second Esc closes the dialog');
+});
+
+// ── the popover ────────────────────────────────────────────────────────────────────────────
+// Voice options used to open inline, a <details> that pushed the console down. Now it is a box
+// anchored to its button, and it closes every way an overlay here closes.
+test('Voice options opens beside its button, and closes on Esc, outside, the button and Tab', { timeout: 120000 }, async (t) => {
+  if (!findChrome()) { t.skip('no Chrome on this machine to press the keys in'); return; }
+  const { b, press, click, until, go } = await browse(t);
+  const BTN = '.home-agent [aria-haspopup=dialog]';
+  await go('/', '.home-agent');
+  await until('the Voice options button', (s) => !!document.querySelector(s), BTN);
+  const pop = () => b.evaluate((s) => {
+    const btn = document.querySelector(s);
+    const box = btn && document.getElementById(btn.getAttribute('aria-controls') || '');
+    const a = btn.getBoundingClientRect(), r = box?.getBoundingClientRect();
+    return {
+      open: btn.getAttribute('aria-expanded') === 'true' && !!box,
+      fits: r ? r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth : null,
+      anchored: r ? (r.top >= a.bottom - 1 || r.bottom <= a.top + 1) && r.left < a.right && r.right > a.left : null,
+      floats: box ? getComputedStyle(box).position === 'fixed' : null,
+      focusIn: box ? box.contains(document.activeElement) : false,
+      focusOnBtn: document.activeElement === btn,
+      controls: box ? box.querySelectorAll('[role=combobox], input[type=checkbox]').length : 0,
+    };
+  }, BTN);
+  const shut = async (what) => { for (let i = 0; i < 30 && (await pop()).open; i++) await sleep(50); assert.equal((await pop()).open, false, what); };
+
+  await click(BTN); let s = await pop();
+  assert.deepEqual([s.open, s.floats, s.anchored, s.fits, s.controls], [true, true, true, true, 4],
+    'a click opens it over the page, next to its button, inside the window, with the pause picker and the three switches');
+  await click(BTN); await shut('the button again closes it');
+
+  await click(BTN); assert.equal((await pop()).open, true);
+  await click('.home-agent-head h2'); await shut('a click outside closes it');
+
+  await click(BTN); assert.equal((await pop()).open, true);
+  await press('Escape'); await shut('Esc closes it');
+  assert.equal((await pop()).focusOnBtn, true, 'and the focus is back on its button');
+
+  await press('Enter'); s = await pop();
+  assert.deepEqual([s.open, s.focusIn], [true, true], 'Enter opens it, and the keyboard is taken inside');
+  await press('ArrowDown');
+  assert.equal(await b.evaluate(() => !!document.querySelector('[role=listbox]')), true, 'the pause picker inside opens');
+  await press('Escape'); s = await pop();
+  assert.deepEqual([await b.evaluate(() => !!document.querySelector('[role=listbox]')), s.open], [false, true], 'Esc closes the list, and only the list');
+  for (let i = 0; i < 8 && (await pop()).open; i++) await press('Tab');
+  await shut('walking out of it with Tab closes it');
 });
