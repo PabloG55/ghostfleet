@@ -409,6 +409,7 @@ async function route(req, res, url) {
   if (p === '/api/voices') return send(res, 200, voice.voices());
   if ((p === '/api/voices/install' || p === '/api/voices/delete') && req.method === 'POST') {
     if (!isAdmin(me)) throw httpErr(404, t('err.noPath', { path: p }));
+    if (MODE === 'demo') return send(res, 200, { ok: true, demo: true, text: t('demo.voicesReadOnly') });
     const b = await body(req);
     const del = p.endsWith('delete');
     const r = del ? piper.remove(String(b.key || '')) : piper.install(String(b.key || ''));
@@ -431,7 +432,9 @@ async function route(req, res, url) {
     if (!text) throw httpErr(400, t('err.nothingToSend'));
     let notes = '';
     try { notes = fs.readFileSync(file('router-notes.md'), 'utf8').slice(0, 4000).trim(); } catch {}
-    const r = await router.route({ text, feed: Array.isArray(b.feed) ? b.feed : [], open: tasks.open(me.id), page: b.page, user: me, projects: await fleet.projects(), notes });
+    const r = MODE === 'demo'
+      ? { action: 'ask', tasks: [], question: t('demo.router'), why: t('demo.router') }
+      : await router.route({ text, feed: Array.isArray(b.feed) ? b.feed : [], open: tasks.open(me.id), page: b.page, user: me, projects: await fleet.projects(), notes });
     if (r.action === 'tasks') r.tasks = r.tasks.map(t => (t.pending && t.project ? tasks.settle(me.id, t.pending, t) : tasks.add(me.id, { ...t, voice: b.voice })) || t);
     for (const t of r.tasks || [{ ...r }])
       audit({ user: me.id, verb: 'route', project: t.project, subject: t.session || (t.project ? 'master' : ''), result: t.project ? r.action : 'ask',
@@ -521,7 +524,8 @@ async function route(req, res, url) {
     let projects = [];
     try { projects = await mine(); } catch {}
     const nowText = new Date().toLocaleString(locale(), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const r = await askAI({ messages, draft: b.draft || null, projects, nowText });
+    const r = MODE === 'demo' ? { ok: true, reply: t('demo.automationAI'), automation: null }
+      : await askAI({ messages, draft: b.draft || null, projects, nowText });
     return send(res, r.ok ? 200 : 502, r);
   }
   if (p === '/api/admin/ai') {

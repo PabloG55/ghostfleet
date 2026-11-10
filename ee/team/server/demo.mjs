@@ -1,8 +1,8 @@
 // server/demo.mjs — a pretend fleet, in memory, so the app can be shown and clicked through
 // without touching a real session. Same interface as fleet.mjs; nothing here runs a process.
-import os from 'node:os';
 import path from 'node:path';
 import * as attachments from './attach.mjs';
+import { dataDir } from './users.mjs';
 import { t as tr } from '../shared/i18n/index.js';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -252,7 +252,7 @@ export function schedule(project, session, at, msg) {
 // Real files, in a throwaway folder: the demo's sessions are pretend, the upload is not.
 export function attach(project, session, name, buf) {
   find(project, session);
-  return attachments.save(path.join(os.tmpdir(), 'ghostfleet-web-demo', 'attach', `${project}.${session}`), name, buf);
+  return attachments.save(path.join(dataDir('demo'), 'attach', `${project}.${session}`), name, buf);
 }
 
 export function usage() {
