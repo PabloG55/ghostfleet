@@ -808,10 +808,15 @@ await section('forget', async () => {
   const pc = kh(X, ['rebuild', '--check']);
   row('...and the graph still matches a rebuild', '0', pc.status);
   // Force the post-rename catch-up past its 1 MiB read boundary, and place a live append
-  // between its writes. Raw chunks used to split one old event and splice the new one
-  // into it: both disappeared from the reader, however many bytes reached the file.
-  const tailRig = newHome('forget-tail');
+  // between its writes. Use an alias on every platform: the purge resolves fleet dirs,
+  // and matching its canonical path against /tmp (macOS: /private/tmp) never armed the hook.
+  const tailHome = newHome('forget-tail');
+  const tailAlias = path.join(tailHome.h, 'fleet-alias');
+  fs.symlinkSync(tailHome.fl, tailAlias, 'dir');
+  const tailRig = { ...tailHome, fl: tailAlias, log: path.join(tailAlias, K.LOG) };
   const zVictim = K.record('prompt', { text: 'the line to purge from the tail fixture' }, onApi(tailRig, t));
+  const tailLog = fs.realpathSync(tailRig.log);
+  const oldLog = fs.openSync(tailLog, 'a');
   const lateEvents = Array.from({ length: 5000 }, (_, n) => ({ ...fillerEvent(n), id: `klate${n}` }));
   function fillerEvent(n) {
     return K.makeEvent({ t: t + n + 1, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: {}, f: { text: 'written across the rename ' + n + ' ' + 'x'.repeat(300) } });
@@ -820,19 +825,25 @@ await section('forget', async () => {
   const rename = fs.renameSync, write = fs.writeSync;
   let catchingUp = false, inserted = false;
   fs.renameSync = (from, to) => {
-    if (to !== tailRig.log) return rename(from, to);
-    fs.appendFileSync(to, lateEvents.map(e => JSON.stringify(e) + '\n').join(''));
-    rename(from, to);
-    catchingUp = true;
+    const result = rename(from, to);
+    if (to === tailLog) {
+      // Hold the purge after rename, before its old-descriptor size check. These bytes
+      // must go through catch-up; they cannot have been included in the pre-rename copy.
+      fs.appendFileSync(oldLog, lateEvents.map(e => JSON.stringify(e) + '\n').join(''));
+      catchingUp = true;
+    }
+    return result;
   };
   fs.writeSync = (...args) => {
     const n = write(...args);
+    // Hold it again between catch-up writes. The live append finishes before the purge
+    // can resume, so neither barrier depends on a second process getting scheduled.
     if (catchingUp && !inserted) { inserted = true; K.append(tailRig.fl, during); }
     return n;
   };
   let purged;
   try { purged = K.forget(zVictim.id, { purge: true, env: { ...base(), CLAUDE_FLEET_DIR: tailRig.fl } }); }
-  finally { fs.renameSync = rename; fs.writeSync = write; }
+  finally { fs.renameSync = rename; fs.writeSync = write; fs.closeSync(oldLog); }
   const tailIds = new Set(); K.scanLog(tailRig.log, 0, e => tailIds.add(e.id));
   row('...a live append between catch-up writes leaves every event whole', 'yes yes 5000 yes',
     `${yes(purged.ok)} ${yes(inserted)} ${lateEvents.filter(e => tailIds.has(e.id)).length} ${yes(tailIds.has(during.id))}`);
