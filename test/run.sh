@@ -23389,7 +23389,8 @@ if [ -d "$ROOT/web" ]; then
     # A floor, for the reason pwa-check documents: a browser that fails to start emits a
     # row or two and a bare "no mismatches" would call that green.
     # 278 rows when the rebuilt features above were added, 283 with the empty pages, 286 with
-    # the session's tab row, 296 with the chat's end and the project's header.
+    # the session's tab row, 296 with the chat's end and the project's header, 297 with the
+    # row that says the cold open is a load of its own.
     is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 260 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"

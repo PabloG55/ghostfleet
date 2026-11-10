@@ -518,15 +518,24 @@ try {
        await b.evaluate(() => document.querySelector('.main h1')?.textContent.trim() || ''));
 
     // ── paired machines: a heading per machine, and one that is down says so ──
+    // A red here once came with the page drawing neither the lock nor the app for over a minute after
+    // the reload, on CI's Mac and in none of fifteen loops of this sequence locally, and the row said
+    // only "0". So a count that is not 2 carries which waits ran out and what the page held then.
     for (const mode of ['online', 'offline']) {
       await b.evaluate((m) => { localStorage.setItem('gf.fixture.paired', m); location.hash = '#/'; location.reload(); }, mode);
-      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      const locked = await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
       await clickText('.auth-card button', 'without a passkey');
-      await until(() => !!document.querySelector('.app'));
+      const drawn = await until(() => !!document.querySelector('.app'));
       await b.evaluate(() => document.querySelector('.topbar .icon-btn')?.click());
       await until(() => document.querySelectorAll('.side.open .side-host').length > 1);
       const hosts = await b.evaluate(() => [...document.querySelectorAll('.side.open .side-host')].map(h => `${h.querySelector('.grow')?.textContent}:${h.querySelector('small')?.textContent || ''}`));
-      is(`${mode}: a heading per machine, this one first`, 2, hosts.length);
+      const page = hosts.length === 2 ? '' : await b.evaluate(() => JSON.stringify({
+        ready: document.readyState, lock: !!document.querySelector('.auth-card'), app: !!document.querySelector('.app'),
+        drawer: !!document.querySelector('.side.open'), nodes: document.body ? document.body.getElementsByTagName('*').length : -1,
+        sw: !!(navigator.serviceWorker && navigator.serviceWorker.controller), hash: location.hash,
+        scripts: performance.getEntriesByType('resource').filter(r => /\.js$/.test(r.name)).map(r => `${r.name.replace(location.origin, '')}:${Math.round(r.duration)}ms`).join(' '),
+      })).catch(e => 'no answer: ' + e.message);
+      is(`${mode}: a heading per machine, this one first`, 2, page ? `${hosts.length}; lock ${locked ? 'came' : 'never came'}, app ${drawn ? 'drawn' : 'never drawn'}; ${page}` : hosts.length);
       is(`${mode}: ...this one says so`, true, /:this machine$/.test(hosts[0] || ''));
       if (mode === 'online') {
         is('online: the peer\'s projects are under it, without their @key', true,
@@ -543,9 +552,20 @@ try {
     // docs/mobile/session.png was one); opened cold it sat 29 px short every time, the newest
     // message's last line under the Assistant button. After every screen above, because the load
     // locks the app again.
+    //   COLD MEANS A NEW DOCUMENT, and a navigate is not one when only the fragment differs. From
+    // `/#/` to `/#/p/acme-api/s/api-fix` Chrome moves within the page it has: no loader, no lock,
+    // the app's own state carried over. This row was written that way first, and measured: a mark
+    // left on the window survived the "load", the wait for the lock ran its whole 15 s on every run,
+    // and the chat it judged was the warm one. So the page goes to about:blank first, and the row
+    // below says the load was a page of its own that came up locked.
     await b.viewport(390, 844);
+    await b.evaluate(() => { window.__warm = 1; });
+    await b.call('Page.navigate', { url: 'about:blank' });
+    await until(() => location.href === 'about:blank');
     await b.call('Page.navigate', { url: srv.base + '/#/p/acme-api/s/api-fix' });
-    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+    const coldLock = await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+    is('390 session, opened cold from its link: a page of its own, come up locked', 'yes yes',
+       `${await b.evaluate(() => (window.__warm ? 'no' : 'yes'))} ${coldLock ? 'yes' : 'no'}`);
     await clickText('.auth-card button', 'without a passkey');
     await until(() => document.querySelectorAll('.chat .msg').length > 3 && !!document.querySelector('.as-launch'));
     await b.evaluate(() => document.fonts.ready.then(() => 0));
