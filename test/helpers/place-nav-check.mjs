@@ -99,8 +99,11 @@ try {
       return { x: r.left + r.width / 2, y: r.top + Math.min(r.height / 2, 24) };
     }, sel, text);
     const tap = async (sel, text) => {
+      // Creating the history fixture's second tab makes this one a background tab.
+      // Native touch input needs the tab in front, even with focus emulation enabled.
+      await t.call('Page.bringToFront');
       await slid();
-      const p = await point(sel, text);
+      const p = await until(() => point(sel, text));
       if (!p) throw new Error(`nothing to tap: ${sel} ${text}`);
       if (touch) {
         await t.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [p] });
@@ -254,6 +257,16 @@ try {
   await step('two tabs', async () => {
     await fresh(A);
     await A.unlock();
+    // The grid's header paints before its cards arrive. Make that gap observable even on a
+    // fast host: the gesture must wait for its target, not for an unrelated navigation paint.
+    await A.t.evaluate(() => {
+      const fetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await fetch(...args);
+        if (String(args[0]).includes('fixtures/grid-acme-api.json')) await new Promise(r => setTimeout(r, 1000));
+        return response;
+      };
+    });
     await A.card('acme-api');
     await A.settle(x => x.where === 'grid:acme-api');
     await A.card('docs-pass');
