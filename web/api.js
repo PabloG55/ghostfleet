@@ -732,6 +732,28 @@ export async function getPane(project, session, scrollback = 0) {
   }
 }
 
+// Every fleet on this machine and its sessions, in ONE read (fleet-serve /api/digest, the
+// fleet_digest tool's json). The shared Board draws a boat per session for every project at
+// once; asking each project's grid instead is one fleet-grid run per project on every poll.
+// Only this machine's fleets: a paired host's projects are not in it, and the caller reads
+// their grids. Fixtures have no digest and answer null, which means "read the grids".
+export async function getDigest() {
+  if ((await ready()).mode !== 'server') return null;
+  try { return await get('/api/digest'); }
+  catch (e) { if (e && (e.status === 404 || e.status === 502)) return null; throw e; }
+}
+
+// What was done to the fleet, newest last (fleet-serve /api/audit, the hash-chained log).
+// Fixtures have no daemon to have logged anything, so they answer with what THIS client did
+// in this page (auditLog), in the daemon's row shape, marked as recorded and not executed.
+export async function getAudit(limit = 100) {
+  if ((await ready()).mode === 'server') return get(`/api/audit?limit=${Math.min(500, Math.max(1, limit))}`);
+  return { ok: true, fixture: true, rows: audit.map(a => ({
+    ts: Math.floor(a.at), client: 'this device', verb: a.tool, project: (a.args && a.args.project) || '',
+    subject: (a.args && (a.args.session || a.args.name || a.args.path || a.args.host)) || '-',
+    result: /^refused/.test(a.result) ? 'refused' : 'ran', output: a.result, args: a.args })) };
+}
+
 // ── auth (the passkey's three requests) ───────────────────────────────────
 // Here rather than in passkey.js so that "only api.js talks to the network" is true
 // without an exception — an exception is how a second base URL gets introduced, and

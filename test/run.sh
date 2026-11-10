@@ -19624,7 +19624,7 @@ LH=""
 # own tmux server, inside this run's namespace), and tmux/ for the config that tab is made with.
 lh_rt() {
   LH="$SV/lh"; mkdir -p "$LH"
-  [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/app.js" ] && return 0
+  [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/phone.js" ] && return 0
   mkdir -p "$LH/rt" "$LH/proj" "$LH/home/.config/ghostfleet" "$LH/home/.claude/fleet"
   printf 'lhterm\t%s\twork\n' "$LH/proj" > "$LH/home/.config/ghostfleet/projects"
   cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$ROOT/tmux" "$LH/rt/"
@@ -20499,7 +20499,7 @@ chmod 700 "$CS/rt2/web" 2>/dev/null || true
 rm -rf "$CS"
 
 # ── cf-sync BUILDS the phone client, and a build it cannot do is not a sync ─────────────
-# web/ holds built output now (screens.js, holding both ported screens, plus its preact.js
+# web/ holds built output now (phone.js and phone.css, the phone's app, plus its preact.js
 # chunk). The output is committed, so a clone serves with no toolchain — but a SYNC is a
 # deploy, and copying the committed bytes after somebody edited web/src/ is the
 # repo-vs-runtime trap in the one disguise it has not worn before: `git status` clean, the
@@ -20522,11 +20522,11 @@ CB="$(mktemp -d)"
 # that a later failure is known to be the build gate and not the setup.
 mkdir -p "$CB/plain/bin" "$CB/plain/web"
 printf '#!/bin/sh\necho hi\n' > "$CB/plain/bin/thing"; chmod +x "$CB/plain/bin/thing"
-printf 'export const x=1;\n' > "$CB/plain/web/screens.js"
+printf 'export const x=1;\n' > "$CB/plain/web/phone.js"
 out_plain="$(CLAUDE_FLEET_HOME="$CB/rt0" "$ROOT/bin/cf-sync" "$CB/plain" 2>&1)"; rc_plain=$?
 is "a source with no build step still syncs"  "0"   "$rc_plain"
 is "...and never mentions a build"            "0"   "$(printf '%s' "$out_plain" | grep -c 'building the phone client' || true)"
-is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/screens.js" ] && echo yes || echo no)"
+is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/phone.js" ] && echo yes || echo no)"
 
 # Now a source that DOES have a build, with no node_modules to do it with. This is the
 # state of a fresh clone, so the message has to name the directory and the one command —
@@ -20535,7 +20535,7 @@ is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/screens
 mkdir -p "$CB/src/bin" "$CB/src/web/src"
 printf '#!/bin/sh\necho hi\n' > "$CB/src/bin/thing"; chmod +x "$CB/src/bin/thing"
 printf 'export default {};\n' > "$CB/src/vite.config.mjs"
-printf 'export const x=1;\n' > "$CB/src/web/src/screens.jsx"
+printf 'export const x=1;\n' > "$CB/src/web/src/phone.jsx"
 out_nm="$(CLAUDE_FLEET_HOME="$CB/rt1" "$ROOT/bin/cf-sync" "$CB/src" 2>&1)"; rc_nm=$?
 is "no node_modules is a refusal"        "yes" "$([ "$rc_nm" -ne 0 ] && echo yes || echo no)"
 is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_nm" | grep -c 'synced runtime' || true)"
@@ -20566,7 +20566,7 @@ cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/good/" 2>/dev/n
 printf '{"name":"x","private":true,"scripts":{"build":"exit 0"}}\n' > "$CB/good/package.json"
 # The committed build output, which a real clone has because this repo commits it — the
 # stub build cannot produce it, and the point of the last row is that cf-sync COPIED it.
-printf 'export const built=1;\n' > "$CB/good/web/screens.js"
+printf 'export const built=1;\n' > "$CB/good/web/phone.js"
 out_ok="$(CLAUDE_FLEET_HOME="$CB/rt3" "$ROOT/bin/cf-sync" "$CB/good" 2>&1)"; rc_ok=$?
 is "a buildable source builds and syncs"  "0"   "$rc_ok"
 is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | grep -c 'building the phone client')" -ge 1 ] && echo 1 || echo 0)"
@@ -20582,7 +20582,7 @@ is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | 
 _unbound=no; case "$out_ok" in *"unbound variable"*) _unbound=yes ;; esac
 is "...with no unbound-variable error"    "no"  "$_unbound"
 is "...and it really claims a sync"       "1"   "$(printf '%s' "$out_ok" | grep -c 'synced runtime' || true)"
-is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/screens.js" ] && echo yes || echo no)"
+is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/phone.js" ] && echo yes || echo no)"
 
 # ...and a build that RUNS and fails. Same refusal, reached down a different branch: this
 # one is npm's exit status rather than a missing directory, and it is the branch a real
@@ -20788,15 +20788,16 @@ if sv_start origin; then
   done < "$PWO/out"
 
   # ── and the client has to RUN, and paint what it decided ──────────────────
-  # `node --check` proves syntax, not that it runs (CLAUDE.md), and app.js has already met
-  # that once: its boot block sat above the `const SHIP` the lock screen draws, so every
-  # screen was blank from a ReferenceError in a file that parses perfectly. pwa-check's
-  # answer is structural — declarations before statements — and this is the other half: a
-  # 60-line DOM, app.js imported for real, and the painted text read back.
-  node "$ROOT/test/helpers/pwa-render.mjs" "$BASE" > "$PWO/render" 2> "$PWO/render.err"
-  is "pwa-render ran"                 "0" "$?"
+  # `node --check` proves syntax, not that it runs (CLAUDE.md), and the old client met that
+  # once: its boot block sat above a `const` the lock screen draws, so every screen was blank
+  # from a ReferenceError in a file that parses perfectly. This is the real app in a real
+  # browser, served BY the daemon: the lock names the origin it found, says the 401 is what
+  # proved it, offers enrolment with its code field — and never the fixture bypass, which on
+  # a page the daemon served would be a way past the passkey that §5 says does not exist.
+  node "$ROOT/test/helpers/phone-check.mjs" --served "$BASE" > "$PWO/render" 2> "$PWO/render.err"
+  is "phone-check (served) ran"       "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PWO/render.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/render")" -ge 28 ] && echo yes || echo "no: $(wc -l < "$PWO/render") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/render")" -ge 7 ] && echo yes || echo "no: $(wc -l < "$PWO/render") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PWO/render"
@@ -23316,422 +23317,43 @@ else
   skip "phone client" "web/ not present"
 fi
 
-group "phone client: the page never scrolls sideways, in a real browser"
+group "phone client: the app, in a real browser"
 if [ -d "$ROOT/web" ]; then
-
-  # ── the page never scrolls sideways, measured in a real engine ─────────────
-  # docs/mobile.md has said since #48 that ONE region scrolls and the page never moves
-  # sideways. It was a rule somebody had to keep, and on an iPhone at v11 it was not being
-  # kept: the send button rendered "senc", the ⋯ sat half off the right edge, and with the
-  # actions sheet open every element was displaced ~40px left. Whether a flex row fits is
-  # the product of font metrics, padding, shrink rules and the real strings — no amount of
-  # reading the stylesheet answers it — so this one drives a headless Chrome and asks
-  # documentElement.scrollWidth <= clientWidth on every screen at 390 and at 320.
-  #   Watched going red on the real pre-fix state (chrome sized in `em`, no clip backstop):
-  # "the header row still fits" and "nothing past the right edge  got=button.@400", which is
-  # the ⋯ 80px past a 320px phone. And the probe proves itself on a deliberately 900px page,
-  # because "no overflow anywhere" is what a blind measurement says too.
-  #   SKIPPED where there is no Chrome. The suite's promise is that it needs no
-  # dependencies, and this is the one check that cannot keep it.
-  VPO="$(mktemp -d "$TEST_RUNS.$$.vp.XXXXXX")"
-  node "$ROOT/test/helpers/viewport-check.mjs" > "$VPO/out" 2> "$VPO/err"
-  vprc=$?
-  if grep -q 'no chrome' "$VPO/out" 2>/dev/null; then
-    skip "the page never scrolls sideways" "no chrome to measure in"
+  # ── web/ui's screens behind the lock, at a phone's width, a narrow one and a desk's ──────
+  # SINCE v104 THE PHONE IS web/ui's APP, the one the team app draws, and this is the one
+  # browser check of it in fixture mode (test/helpers/phone-check.mjs says what each row is
+  # for). It replaced eleven groups that each drove one of the old client's screens — the
+  # sideways-scroll probe, the card grip, the desk, the stack, the login landing, search, the
+  # queue, automations, Reviews, the place codec and the owner's music — and where their
+  # coverage went is accounted for rather than dropped:
+  #   - no sideways scroll at 390 and 320, every screen drawn, no native <select>, a login
+  #     that lands on the main page with no history entry for the back swipe, a reload that
+  #     keeps its place, the owner's music untouched, the keyboard geometry and a composer
+  #     that keeps its focus across a poll: phone-check.mjs, below.
+  #   - the stack, search, queue, held, automations, Reviews and sign-ins: web/ui's screens,
+  #     checked by their own helpers (phone-screen-check.mjs) and the team app's tests.
+  #   - the card grip (dragging a session card to reorder it): not rebuilt. web/ui's project
+  #     page has no manual order; the PR that removed it says so.
+  #   SKIPPED where there is no Chrome, the one check that cannot keep the suite's promise of
+  # needing no dependencies. Watched going red against a copy of web/ with the composer's
+  # sticky rule and the lead guard undone: "the lead is offered no stop", "...no rename" and
+  # "...so the composer sits above it".
+  PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
+  node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
+  phcrc=$?
+  if grep -q 'no chrome' "$PHC/out" 2>/dev/null; then
+    skip "the phone app in a browser" "no chrome to look in"
   else
-    is "viewport-check ran"             "0" "$vprc"
-    is "...without complaining"         ""  "$(head -2 "$VPO/err" | tr '\n' ' ' | sed 's/ *$//')"
-    # A floor, for the reason pwa-check documents: a browser that fails to start emits a
-    # couple of rows and a bare "no mismatches" would call that green.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$VPO/out")" -ge 35 ] && echo yes || echo "no: $(wc -l < "$VPO/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      # A GROUP THE BROWSER CANNOT RUN SAYS SO INSTEAD OF ASSERTING SOMETHING WEAKER — the
-      # same precedent as skipping the whole file where there is no Chrome. Element.focus()
-      # only takes when the page is considered focused, and a headless window is not
-      # activated on every platform: the keyboard checks passed on Linux and collapsed on
-      # macOS for that reason alone.
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
-      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
-      # Something the helper recovered from (a boot the browser dropped and a second
-      # navigation brought up): printed so the rate stays visible, never counted.
-      if [ "$name" = '#NOTE' ]; then printf '  %s· %s%s\n' "$D" "$(vis "$want")" "$N"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$VPO/out"
-  fi
-  rm -rf "$VPO"
-  # ...and the loading text cannot come back, with or without a browser to look in. The
-  # in-engine rows above hold the first answer and look at the skeleton; this one is for the
-  # machine with no Chrome, where they skip: the client must not say it is reading.
-  is "the phone waits in skeletons, never in a 'reading…' line" "" \
-     "$(grep -noE "'(reading the transcript|capturing the pane|asking the Mac about Jarvis)[^']*'" "$ROOT/web/app.js" | paste -sd' ' -)"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the card's title is a tap target, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── the card's title is a tap target, not a dead zone ─────────────────────
-  # wire() set `dragging` on any press of the grip and pointerup then returned without ever
-  # calling h.tap(), so tapping a card's NAME did nothing while tapping anywhere else on it
-  # opened the session. Pre-existing, and invisible while a card was four identical
-  # monospace lines nobody aimed at one of; the surface-card redesign made the name the
-  # biggest thing on the card and turned the one dead target into the one a thumb goes for.
-  #   ITS OWN HELPER, not a section of viewport-check: written there first, it took that
-  # file from 1m45s to over twenty minutes, because six cases each reloading the app
-  # interacted with the state the sections before it leave behind. Standalone it is ~28s.
-  GRP="$(mktemp -d "$TEST_RUNS.$$.grip.XXXXXX")"
-  node "$ROOT/test/helpers/grip-check.mjs" > "$GRP/out" 2> "$GRP/err"
-  grprc=$?
-  if grep -q 'no chrome' "$GRP/out" 2>/dev/null; then
-    skip "the card grip" "no chrome to tap in"
-  else
-    is "grip-check ran"                 "0" "$grprc"
-    is "...without complaining"         ""  "$(head -2 "$GRP/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "phone-check ran"                "0" "$phcrc"
+    is "...without complaining"         ""  "$(head -2 "$PHC/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor, for the reason pwa-check documents: a browser that fails to start emits a
     # row or two and a bare "no mismatches" would call that green.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$GRP/out")" -ge 8 ] && echo yes || echo "no: $(wc -l < "$GRP/out") rows")"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 120 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
-      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
-    done < "$GRP/out"
+    done < "$PHC/out"
   fi
-  rm -rf "$GRP"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the client on a desk, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── the client on a desk: two panes, the Mac grid's keys, Enter, paste and drop ─
-  # A desktop browser got a phone column in the middle of the window, a composer that needed
-  # a click to send, images only through the picker, and keys that were not the desk's. The
-  # helper presses every key in web/README.md's desk-key table through Chrome's own keyboard
-  # path at 1600x900, the composer's Enter again at 390x844 with touch, and pastes and drops
-  # an image File. Watched red two ways: against staging's client (every row about new
-  # behaviour), and against copies of this one broken on purpose for the rows staging
-  # already passed — no key handler, keys while typing, Enter always sending, ⇧⏎ sending,
-  # always two panes, × not removing, a table row with no test, and four chord steps.
-  # The browser's `/` uses the desk's matcher, as a copy under web/ (a browser cannot fetch
-  # lib/, and the desk must not need web/ to start — see lib/grid-search.mjs). Two copies
-  # are only one matcher while they are the same bytes.
-  is "web/grid-search.js is lib/grid-search.mjs, byte for byte" "" \
-     "$(cmp "$ROOT/lib/grid-search.mjs" "$ROOT/web/grid-search.js" 2>&1)"
-  DSK="$(mktemp -d "$TEST_RUNS.$$.desk.XXXXXX")"
-  node "$ROOT/test/helpers/desktop-check.mjs" > "$DSK/out" 2> "$DSK/err"
-  dskrc=$?
-  if grep -q 'no chrome' "$DSK/out" 2>/dev/null; then
-    skip "the desktop client" "no chrome to press keys in"
-  else
-    is "desktop-check ran"              "0" "$dskrc"
-    is "...without complaining"         ""  "$(head -2 "$DSK/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$DSK/out")" -ge 100 ] && echo yes || echo "no: $(wc -l < "$DSK/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
-      if [ "$name" = '#RETRY' ]; then retried "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$DSK/out"
-  fi
-  rm -rf "$DSK"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the stack, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── the desk's stack on the web: several sessions, across projects, at once ──────
-  # The grid's stack screen had no web equivalent: one conversation at a time. The helper
-  # drives the picker (grouped by machine and project, space / click / tap, `/` with the
-  # desk's matcher, kept per device), the columns at 1600x900 (each composer sending to its
-  # own session, drafts and paste per column, the ⇧←/⇧→ ring, Ctrl-a < >, ×, a fifth and
-  # sixth behind chips), a column on a paired machine, the phone's swipe at 390x844 with
-  # touch, and — against a fake fleet-serve that counts — four live chats inside the
-  # daemon's per-device read limit. Watched red against staging's client (every row it
-  # reaches) and against 24 copies of this one broken on purpose, one fault each, until
-  # every row had been red at least once.
-  STK="$(mktemp -d "$TEST_RUNS.$$.stack.XXXXXX")"
-  node "$ROOT/test/helpers/stack-check.mjs" > "$STK/out" 2> "$STK/err"
-  stkrc=$?
-  if grep -q 'no chrome' "$STK/out" 2>/dev/null; then
-    skip "the stack" "no chrome to press keys in"
-  else
-    is "stack-check ran"                "0" "$stkrc"
-    is "...without complaining"         ""  "$(head -2 "$STK/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$STK/out")" -ge 80 ] && echo yes || echo "no: $(wc -l < "$STK/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$STK/out"
-  fi
-  rm -rf "$STK"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: where a login lands, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── a login lands on Projects, and a back swipe never shows the lock screen ────
-  # Two reports from one phone. A login reopened whatever screen the app was left on, so a
-  # face at the lock screen an hour later opened a session nobody asked for. And a back swipe
-  # flashed the lock screen before landing: the restored screen's back trail was pushed at
-  # boot while the lock screen was what was painted, and iOS previews an entry with the
-  # picture it took as the page left it. The helper records what every frame painted beside
-  # every history call and slide the app makes, at 390x844 with touch and 1600x900 with a
-  # mouse, and against a fake daemon for a reload that kept its session and a passkey
-  # unlock (a virtual authenticator) from inside a session. Watched red against staging's
-  # client on every landing and history row, and against four copies of this one broken on
-  # purpose for the rows staging already passed (a deep link, a resume, a reload).
-  LGN="$(mktemp -d "$TEST_RUNS.$$.login.XXXXXX")"
-  node "$ROOT/test/helpers/login-check.mjs" > "$LGN/out" 2> "$LGN/err"
-  lgnrc=$?
-  if grep -q 'no chrome' "$LGN/out" 2>/dev/null; then
-    skip "where a login lands" "no chrome to log in with"
-  else
-    is "login-check ran"                "0" "$lgnrc"
-    is "...without complaining"         ""  "$(head -2 "$LGN/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$LGN/out")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$LGN/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$LGN/out"
-  fi
-  rm -rf "$LGN"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: one search finds projects and sessions, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── the Projects search finds sessions too, and the phone grid has a field ─────────
-  # #94 found projects; a session could only be found inside its own project's grid. The
-  # helper types into Projects at 1600x900 (the `/` keys) and at 390x844 (the field, with
-  # touch): a session found by its name, its label and its branch, listed under the projects
-  # with its project named and no digit; n walking from a project into the sessions; ⏎, a tap,
-  # ` and ‹ into its conversation and back to the search as it was left; a project query
-  # exactly as #94 drew it; the Queue row neither dimmed nor counted; the phone grid's "find a
-  # session" field filtering in place while the desk's grid keeps its `/`; and with a second
-  # machine paired, the same session on each machine, each row naming its machine. Watched
-  # red against staging's client (30 of its 39 rows) and the other nine against seven copies
-  # of this one broken on purpose, one fault each, until every row had been red at least once.
-  FND="$(mktemp -d "$TEST_RUNS.$$.found.XXXXXX")"
-  node "$ROOT/test/helpers/found-check.mjs" > "$FND/out" 2> "$FND/err"
-  fndrc=$?
-  if grep -q 'no chrome' "$FND/out" 2>/dev/null; then
-    skip "the Projects search" "no chrome to press keys in"
-  else
-    is "found-check ran"                "0" "$fndrc"
-    is "...without complaining"         ""  "$(head -2 "$FND/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$FND/out")" -ge 39 ] && echo yes || echo "no: $(wc -l < "$FND/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$FND/out"
-  fi
-  rm -rf "$FND"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the queue page, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── what the masters hold for the owner: its own page, one row on Projects ────
-  # #81 drew every held item at the top of Projects, and on the owner's phone that grew to a
-  # screen and more, pushing the projects below the fold. Projects now keeps one row,
-  # `queue · n ›`, red only while an item waits on the owner, and the list is a page of its
-  # own — the right pane at a desk, one level under Projects on a phone, and where a tapped
-  # notification lands. Driven with touch at 390x844 and a mouse and keys at 1600x900.
-  # Watched red two ways: against staging's client (24 rows: the list still on Projects),
-  # and against copies of this one broken on purpose for the rows staging passes or cannot
-  # reach — a row drawn with nothing held, ⏎ on the row taken as Projects' ⏎, the row's
-  # focus lost to the 5s poll, no way back from the queue, the queue drawn in neither pane,
-  # no cursor keys on it, the row red for any item, and a notification landing on Projects. The rows staging passes unbroken are
-  # #81's own promises (the numbers, the cursor, Projects' keys), which must hold either way.
-  # Finding a project (`/` at the desk, the field on a phone) leaves the row alone: it is not
-  # counted and not dimmed, and it stays above the cards. Watched red against a copy that
-  # dims it with the misses, and one that counts it as a match.
-  QUE="$(mktemp -d "$TEST_RUNS.$$.queue.XXXXXX")"
-  node "$ROOT/test/helpers/queue-check.mjs" > "$QUE/out" 2> "$QUE/err"
-  querc=$?
-  if grep -q 'no chrome' "$QUE/out" 2>/dev/null; then
-    skip "the queue" "no chrome to tap in"
-  else
-    is "queue-check ran"                "0" "$querc"
-    is "...without complaining"         ""  "$(head -2 "$QUE/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$QUE/out")" -ge 35 ] && echo yes || echo "no: $(wc -l < "$QUE/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$QUE/out"
-  fi
-  rm -rf "$QUE"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the automations screens, in a real browser"
-if [ -d "$ROOT/web" ]; then
-  # The list, the editor and the sentence builder against a stand-in daemon, with touch at 390x844
-  # and a mouse and keys at 1280x900, in every state a person can land in: reading, nothing there,
-  # a failed read, a full list. The daemon counts what reached it, because most of what matters
-  # here is what was NOT sent: a switch or a proposal before its passkey, a delete on the first tap,
-  # a proposal nobody saved. The rules behind the routes are the fleet-serve group's and the
-  # runner's are the engine's; this one is what a thumb gets.
-  # WATCHED GOING RED: against the client as it arrived (the bundle rows, then the first row that
-  # needs the new shape), and against copies with one thing broken, twenty-seven in all: among
-  # them the notices' snap point, day toggles under a thumb, the switch beneath the stretched name
-  # (which a tap in its middle does not notice, because the knob paints above it either way), the
-  # desk's Projects list not read, a relaunch with no trail, save left primary beside a proposal, a
-  # one-tap delete, a passkey not asked, keys falling through to Projects, and a bundle without
-  # the screen. Several breakages in one copy hid each other: a bar pushed off the screen stranded
-  # the editor open, and "the card opens it" passed for it. So a row that stays green in a batch is
-  # tried again alone.
-  AUC="$(mktemp -d "$TEST_RUNS.$$.autos.XXXXXX")"
-  node "$ROOT/test/helpers/automations-check.mjs" > "$AUC/out" 2> "$AUC/err"
-  aucrc=$?
-  if grep -q 'no chrome' "$AUC/out" 2>/dev/null; then
-    skip "the automations screens" "no chrome to tap in"
-  else
-    is "automations-check ran"          "0" "$aucrc"
-    is "...without complaining"         ""  "$(head -2 "$AUC/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUC/out")" -ge 150 ] && echo yes || echo "no: $(wc -l < "$AUC/out")")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$AUC/out"
-  fi
-  rm -rf "$AUC"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: Reviews, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── a branch's recorded flows are reviewed on the phone ──────────────────────
-  # fleet-shots serve was loopback-only, so the review it drew could not be reached from the
-  # phone the agents report to. The screen now lives in the app: one row on Projects, one
-  # card per branch with its newest run (older ones folded), the run with its video and a
-  # chapter per step, and the verdict --check reads, pinned at the bottom. Driven with touch
-  # at 390x844 and a mouse and keys at 1280x900, against a server that can throw the
-  # `shots` switch: off answers the index 404, and the client must draw no row and no screen.
-  #   The chapter rows need a server that serves Range: a <video> cannot seek a file handed
-  # over whole, and a tap on chapter 3 set 6s and played on from 0:00 — which is how
-  # fleet-serve's own static path was found serving the fixture video that way.
-  #   WATCHED GOING RED: against staging's client (14 of 19), and against copies of this one
-  # broken on purpose — the off 404 read as a list (3 rows), the seek dropped (1), the
-  # phone's state copy drifting from lib/shots.mjs (1), and the cursor lit beside the open
-  # run at a desk (1).
-  RVC="$(mktemp -d "$TEST_RUNS.$$.reviews.XXXXXX")"
-  node "$ROOT/test/helpers/reviews-check.mjs" > "$RVC/out" 2> "$RVC/err"
-  rvcrc=$?
-  if grep -q 'no chrome' "$RVC/out" 2>/dev/null; then
-    skip "the reviews screen" "no chrome to tap in"
-  else
-    is "reviews-check ran"              "0" "$rvcrc"
-    is "...without complaining"         ""  "$(head -2 "$RVC/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$RVC/out")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$RVC/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$RVC/out"
-  fi
-  rm -rf "${RVC:?}"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: a reload keeps the tab's place, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── where the app is, in the address ─────────────────────────────────────────
-  # The client restored from ONE stored state, and localStorage is the origin's, not the
-  # tab's: two desk tabs overwrote each other's place on every poll, a reload put back
-  # whatever tab wrote last, and no screen could be linked to. The place is in the URL now
-  # (web/place.js), read once at boot, and the stored state is the fallback for an address
-  # that names none — every open of the installed app, which launches start_url.
-  #   place-check is the codec and the clamps with no DOM: every screen's round trip, only
-  # place keys in the query, a hand-written hole landing where the stored state with the
-  # same hole lands, the URL winning, and no URL leaving the stored state as it was.
-  # WATCHED GOING RED: against staging (no place.js: the import row), and against copies of
-  # place.js with the cross-project grid kept (1 row), the stored place leaking through a
-  # field the URL left out (8), and the tab clamp dropped (1).
-  #   place-nav-check drives the real client at 390x844 through the lock on every load:
-  # reload on a session (and its pane) stays there; a tab and the pane switch replace the
-  # address and add no entry; two tabs of one browser, one store, each reload to their own
-  # place; a link opens on the lock with nothing of it drawn, then its screen, and back walks
-  # the trail a walk would have left — and only then leaves; `#reviews` still opens Reviews;
-  # a bare address still lands on Projects. WATCHED GOING RED: against staging's client (25
-  # of 34 — the 9 it passes are the invariants: depth, the lock first, the shared store, no
-  # place), against a copy that does not seed the trail after a link (8), and one that
-  # pushes where it should replace (4).
-  PLC="$(mktemp -d "$TEST_RUNS.$$.place.XXXXXX")"
-  node "$ROOT/test/helpers/place-check.mjs" > "$PLC/unit" 2> "$PLC/unit.err"
-  is "place-check ran"                "0" "$?"
-  is "...without complaining"         ""  "$(head -2 "$PLC/unit.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PLC/unit")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PLC/unit") rows")"
-  while IFS=$'\x1f' read -r name want got; do
-    is "$name" "$want" "$got"
-  done < "$PLC/unit"
-  node "$ROOT/test/helpers/place-nav-check.mjs" > "$PLC/out" 2> "$PLC/err"
-  plcrc=$?
-  if grep -q 'no chrome' "$PLC/out" 2>/dev/null; then
-    skip "a place in the address" "no chrome to reload in"
-  else
-    is "place-nav-check ran"            "0" "$plcrc"
-    is "...without complaining"         ""  "$(head -2 "$PLC/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PLC/out")" -ge 34 ] && echo yes || echo "no: $(wc -l < "$PLC/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$PLC/out"
-  fi
-  rm -rf "${PLC:?}"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: the owner's music keeps playing, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── the owner's music keeps playing until they ask the app to speak ──────────
-  # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
-  # every first tap anywhere, and set a non-mixable 'playback' session, resumed an
-  # AudioContext and spoke a silent utterance — each of which takes the iOS audio session.
-  # The helper stubs those APIs before app.js runs and records every call, then taps for
-  # real. Watched going red on the pre-fix client (every plain-tap row logged all six calls),
-  # and the talk rows with talkStop() put back to suspend-without-release. The other
-  # direction is asserted too: the speaker DOES unlock, inside its own tap, and hands the
-  # session back when the voice ends. Whether music actually resumes is a phone's to say.
-  #   The session rows went red on macOS CI with nothing wrong: each tap was delivered twice
-  # (touch, then a mouse pair), and on a loaded runner the second click opened the card the
-  # first one had just drawn, skipping the grid. One tap is one click now, asserted, and a
-  # step that misses says what was on screen. WATCHED GOING RED: the mouse pair put back
-  # (`a tap is one click` got 2), openProject() made a no-op (the session row names the
-  # Projects screen it was still on), and the speaker's class renamed (no speaker, why).
-  AUD="$(mktemp -d "$TEST_RUNS.$$.aud.XXXXXX")"
-  node "$ROOT/test/helpers/audio-check.mjs" > "$AUD/out" 2> "$AUD/err"
-  audrc=$?
-  if grep -q 'no chrome' "$AUD/out" 2>/dev/null; then
-    skip "the audio session" "no chrome to tap in"
-  else
-    is "audio-check ran"                "0" "$audrc"
-    is "...without complaining"         ""  "$(head -2 "$AUD/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUD/out")" -ge 14 ] && echo yes || echo "no: $(wc -l < "$AUD/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$AUD/out"
-  fi
-  rm -rf "${AUD:?}"
+  rm -rf "$PHC"
 else
   skip "phone client" "web/ not present"
 fi
@@ -23756,39 +23378,6 @@ if [ -d "$ROOT/web" ]; then
     grep -q -- ' -o ' <<< "$l" || noisy="$noisy run.sh:say-aloud"
   done <<< "$(grep -E '^[[:space:]]*(if .*&& )?say |&& say |; say ' "$ROOT/test/run.sh" | grep -v '^[[:space:]]*#' | grep -v 'is "')"
   is "no browser, say or player in the suite makes a sound" "" "${noisy# }"
-else
-  skip "phone client" "web/ not present"
-fi
-
-group "phone client: barge-in, in a real browser"
-if [ -d "$ROOT/web" ]; then
-
-  # ── barge-in: the owner can talk over the answer, the answer cannot ─────────
-  # Conversation mode keeps the mic open while it reads an answer, so the owner can cut in
-  # with a follow-up ("I sent it and forgot something"). The real client, in a real browser
-  # (muted — lib/browser.mjs never plays to the machine's speakers), against a fake
-  # fleet-serve, with a fake mic that HEARS THE PAGE: its own voice comes back at the worst
-  # echo ratio measured on a laptop's speaker. Both directions, because a gate that never
-  # fires and one that always fires each pass half of them: the answer is read to the end
-  # over its own echo, and the owner's voice over it stops it, listens, and is sent as a
-  # follow-up that is shown queued. Watched going red with the client before this change,
-  # the gate at 0.3 or blind to the output level (the app cut itself off at sentence 2),
-  # the barge never firing, and the band's tap ignored.
-  BGC="$(mktemp -d "$TEST_RUNS.$$.barge.XXXXXX")"
-  node "$ROOT/test/helpers/barge-check.mjs" > "$BGC/out" 2> "$BGC/err"
-  bgcrc=$?
-  if grep -q '^#SKIP' "$BGC/out" 2>/dev/null; then
-    skip "barge-in" "no chrome to listen in"
-  else
-    is "barge-check ran"                "0" "$bgcrc"
-    is "...without complaining"         ""  "$(head -2 "$BGC/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$BGC/out")" -ge 15 ] && echo yes || echo "no: $(wc -l < "$BGC/out") rows")"
-    while IFS=$'\x1f' read -r name want got; do
-      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
-      is "$name" "$want" "$got"
-    done < "$BGC/out"
-  fi
-  rm -rf "$BGC"
 else
   skip "phone client" "web/ not present"
 fi

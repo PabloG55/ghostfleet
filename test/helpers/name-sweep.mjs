@@ -649,6 +649,11 @@ const BINARY_REVIEWED = new Set([
   'cb9ac55c5cc13cb5',   // web/fixtures/shots/docs-install.png
   '68234ec7e201e78f',   // web/fixtures/shots/flow.mp4
   '32a065ac00c98c87',   // web/fixtures/shots/web-invoices.png
+  // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
+  // packages the team app installs), so they carry the foundries' tables and nothing of ours.
+  '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
+  '18be452724bfdc23',   // web/fonts/jetbrains-mono-latin-wght-normal.woff2
+  'e6c72ea470224920',   // web/fonts/silkscreen-latin-400-normal.woff2
 ]);
 {
   const unreviewed = skipped.filter(f => {
@@ -668,6 +673,8 @@ const BINARY_EXPECTED = [
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.
   'ee/team/web/public/icons/apple-touch-icon.png', 'ee/team/web/public/icons/icon-192.png', 'ee/team/web/public/icons/icon-512.png',
+  // The phone's fonts, served from web/ so the app asks nothing of a font CDN.
+  'web/fonts/inter-latin-wght-normal.woff2', 'web/fonts/jetbrains-mono-latin-wght-normal.woff2', 'web/fonts/silkscreen-latin-400-normal.woff2',
   'web/fixtures/shots/api-health.png', 'web/fixtures/shots/api-keys.png', 'web/fixtures/shots/api-search.png', 'web/fixtures/shots/docs-config.png', 'web/fixtures/shots/docs-install.png', 'web/fixtures/shots/flow.mp4', 'web/fixtures/shots/web-invoices.png',
 ].sort().join(' ');
 is('...skipping binaries by content, and naming them', BINARY_EXPECTED, skipped.sort().join(' '));

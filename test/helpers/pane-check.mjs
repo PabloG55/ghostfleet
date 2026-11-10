@@ -37,7 +37,17 @@ const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US 
 
 const A = await import(new URL('../../web/ansi.js', import.meta.url).href);
 const G = await import(new URL('../../web/grid.js', import.meta.url).href);
-const CSS = fs.readFileSync(path.join(ROOT, 'web', 'app.css'), 'utf8');
+// The phone's stylesheet as built (web/ui's, with brand/tokens.css inside it): the box a cell
+// lands in and the colours the pane is painted on are whatever THIS file says.
+const CSS = fs.readFileSync(path.join(ROOT, 'web', 'phone.css'), 'utf8');
+// A token's value, followed through var() to the colour it ends at: `--fg: var(--gf-fg)` is the
+// app's text colour only by way of brand/tokens.css.
+const token = (name, seen = 0) => {
+  const m = new RegExp(`--${name}:\\s*([^;]+);`).exec(CSS);
+  const v = m ? m[1].replace(/\/\*.*?\*\//g, '').trim() : null;
+  const ref = v && /^var\(--([\w-]+)\)$/.exec(v);
+  return ref && seen < 5 ? token(ref[1], seen + 1) : v;
+};
 const fx = (f) => fs.readFileSync(path.join(ROOT, 'test', 'fixtures', f), 'utf8');
 const E = '\x1b';
 
@@ -95,7 +105,7 @@ is('the dialog capture really contains SGR 1', true, DIALOG.includes(`${E}[1m`))
 }
 
 // ── 4. one cell per cell ──────────────────────────────────────────────────
-// grid.js's cells() is the split and app.css is the box; this asserts the renderer USES
+// grid.js's cells() is the split and the stylesheet's `.pane .c` is the box; this asserts the renderer USES
 // them, in both directions, because boxing everything would satisfy a naive check while
 // tripling the markup, and boxing nothing is the bug.
 is('the pane boxes at 1ch', true, /\.pane \.c \{[^}]*width: 1ch/.test(CSS));
@@ -202,11 +212,12 @@ is('...and 48 still sets a background', true, A.render(`${E}[48;5;237mX${E}[0m`)
   const r = A.render(`${E}[7mX${E}[27m`).html;
   is('reverse with defaults swaps them', true, /color:#0b0d10/.test(r) && /background:#c9d1d9/.test(r));
   is('...and 27 turns it off', 'Y', A.render(`${E}[7m${E}[27mY`).html);
-  // The two defaults have to be app.css's, or reverse paints the page's background as a
+  // The two defaults have to be the stylesheet's, or reverse paints the page's background as a
   // foreground it does not have. Checked against the stylesheet, not against memory.
   const hex = (v) => '#' + v.map(n => n.toString(16).padStart(2, '0')).join('');
-  is('the default fg matches the stylesheet', true, CSS.includes(`--fg: ${hex(A.DEFAULT_FG)}`));
-  is('the default bg matches the stylesheet', true, CSS.includes(`--bg: ${hex(A.DEFAULT_BG)}`));
+  is('the default fg matches the stylesheet', hex(A.DEFAULT_FG), token('fg'));
+  is('the default bg matches the stylesheet', hex(A.DEFAULT_BG), token('bg'));
+  is('...and the pane is painted in it', true, /\.pane \{[^}]*color: var\(--fg\)/.test(CSS));
 }
 
 // ── 9. the dialog is legible, which is the whole point ────────────────────
