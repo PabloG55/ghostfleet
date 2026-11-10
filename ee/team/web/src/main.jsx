@@ -10,7 +10,7 @@ import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
 import { Assistant, HomeAgent, Launcher } from './assistant.jsx';
 import { bind, unbind, useAgent } from './agent.js';
 import { TaskRail, TaskChip } from './tasks.jsx';
-import { Automations, noticesSeen } from './automations.jsx';
+import { Automations, noticesSeen } from '../../../../web/ui/automations.jsx';
 import { teamAdapter } from './adapter.js';
 // The shared screens, from the MIT core (web/ui/README.md); everything else here is the team app's.
 import { FleetProvider } from '../../../../web/ui/adapter.jsx';

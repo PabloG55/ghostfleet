@@ -250,3 +250,53 @@ The **assistant** and **automations** are still in `ee/team/web/src/`:
 
 Moving either means growing the adapter by those calls, and that is phase 2's to define
 against fleet-serve, where the two automations screens become one.
+
+### The phone-only screens' members
+
+These phase 2 screens are shared by both apps despite the heading: `Automations`,
+`Reviews` / `Review`, `StackPicker` / `StackView`, `Queue`, `Held`, `Search` /
+`SearchInput`, and `SignIns` / `PendingSignIns` / `SignInCard`. Each file suggests its
+hash routes. The phone spreads `web/src/adapter-extras.js`'s `adapterExtras` into its
+adapter; the team adapter includes `teamScreenExtras(ctx)`. Neither app's routes are
+mounted by these components. This supersedes the earlier “Not here yet” notes for
+these screens; the assistant remains app-owned.
+
+| Member | Shape | What it is for | fleet-serve endpoint |
+| --- | --- | --- | --- |
+| `screenProjects()` | → `{ projects: [{ name, path?, host?, sessions?, canPrompt? }] }` | Search and the stack picker; project names retain paired-host addresses | `GET /api/projects` |
+| `waiting()` | → `{ items: [{ id, project, session?, state, text, reason?, since?, host? }] }` | Ledger asks and held wakes; a held wake opens its input box; a reply uses existing `act('fleet_send', …)` quoting the item | `GET /api/waiting` |
+| `reviews()` | → `{ groups, multi?, missing? }` or `null` when disabled; a group has `{ key, project, profile, branch, host_key?, host?, latest, earlier }` | One newest run per branch, with earlier runs folded below it | `GET /api/shots` |
+| `review(profile, run, host?)` | → `{ run: { id, project, profile?, branch, kind, provenance?, videoSrc?, steps: [{ n, name, src?, start?, notes?, requests? }], verdict, state? } }` | One recording or set of stills; adapter prepares media URLs | `GET /api/shots/run?profile=&run=&host=` and `GET /api/shots/media` with the run's media ticket |
+| `saveReview(body)` | `{ profile, run, host?, flow?, chapters?, state? }` → `{ ok, state? }` | Autosave the whole verdict, serialized; notes flush on blur or leaving the run | `POST /api/shots/verdict` (paired host retained in body) |
+| `pendingSignIns()` | → `{ items: [{ id, kind, provider, server, project, session, host?, status, expires?, authorize?, profile?, sock?, connector?, first_site? }] }` | MCP authorization and Claude account cards; the team returns no cards to non-admins | `GET /api/logins` (includes paired hosts) |
+| `startAccountLogin(project, session, sock?)` | → `{ ok }` | Start one session's Claude account login | `POST /api/verb`, `fleet_account_login_start` |
+| `finishLogin(project, id, callback)` | → `{ ok }` | Submit an MCP callback through the unrecorded request path after a fresh passkey | `POST /api/verb`, `fleet_login_finish` |
+| `finishAccountLogin(project, id, code)` | → `{ ok }` | Submit the Claude account code through the same private request path | `POST /api/verb`, `fleet_account_login_finish` |
+| `automations()` | → `{ automations, notices?, runs?, fleet?, me?: { admin, projects }, capabilities?: { actions, events, states, scopes? } }` | Shared automation list/editor; `fleet` supplies project/session choices when no `projects` prop is passed | `GET /api/automations` |
+| `saveAutomation(automation)` | → `{ automation }` | Save or toggle; phone adapter translates event placeholders and requests a passkey for session creation/stopping | `POST /api/automations` |
+| `deleteAutomation(id)` | → `{ ok? }` | Delete after confirmation | `POST /api/automations/delete` |
+| `runAutomation(id)` | → `{ ok, running?, text? }` | Run now; phone requests the same passkey as save when required | `POST /api/automations/run` |
+| `automationAI(messages, draft)` | → `{ reply, automation? }` | Build a reviewable draft in the editor | `POST /api/automations/draft` |
+| `automationsSeen()` | optional, → promise | Mark daemon notices seen; the team uses the shared local seen timestamp | `POST /api/automations/seen` |
+
+The team server exposes `/api/waiting`, `/api/shots`, `/api/shots/run`,
+`/api/shots/media`, `/api/shots/verdict`, and `/api/logins` plus POST
+`/api/logins/start`, `/api/logins/finish`, `/api/logins/account`. Cookie-authenticated
+media requests recheck project access. Viewers read their projects, members save
+verdicts on their projects, and only admins read or finish sign-ins. Automation
+members retain the existing team endpoints (AI uses `/api/automations/ai`).
+
+`StackView` takes `members: [{ project, session }]`; the picker navigates to
+`/stack/<URI-encoded JSON members>`, or calls its `onOpen(members)` prop. `Review`
+takes `{ host, profile, run }`; its suggested route uses `-` for an empty host.
+`Search` takes an optional initial `query`, preserving it per history entry.
+`SearchInput` takes `{ value, onChange, onOpen? }`. Stack conversations reuse
+`SessionView` and the existing adapter members, including `session`, `pane`, `act`
+and `go`; project search opens the lead via `lead`.
+
+Sign-in fields are uncontrolled DOM inputs. Submission clears them before awaiting
+anything; a secret reaches only the dedicated login request. Replies and exceptions
+are reduced to fixed status words. Never route these calls through generic `act`,
+log their arguments, or put drafts in history, hook state or browser storage.
+The original team model/catalogs remain for its server consumers within the file
+boundary; the shared editor's pure vocabulary and words now live in core.

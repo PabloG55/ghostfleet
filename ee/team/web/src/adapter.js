@@ -1,5 +1,6 @@
 // The team app's side of web/ui/adapter.jsx: the shared screens' fleet, over this app's server.
 // Every call is the server's own, scoped to the signed-in person; the slots are teamSlots(ctx).
+import { teamScreenExtras } from './adapter-extras.js';
 import { api, ATTACH_PER_MESSAGE } from './api.js';
 import { teamSlots } from './slots.jsx';
 import { t } from './i18n.js';
@@ -24,6 +25,12 @@ export function canTerm(me, project) {
 
 export function teamAdapter(ctx) {
   return {
+    ...teamScreenExtras(ctx),
+    automations: async () => ({ ...await api.automations(), capabilities:{actions:['send','spawn','pause','resume','wake','interrupt','reopen','stop','check','notify','wait','summary'],events:['finished','need-you','started','limit','lost'],states:['need-you','working','ready','idle','parked','limit','interrupted','asleep','lost']} }),
+    saveAutomation: api.saveAutomation,
+    deleteAutomation: api.deleteAutomation,
+    runAutomation: api.runAutomation,
+    automationAI: api.automationAI,
     grid: api.grid,
     session: api.session,
     pane: api.pane,

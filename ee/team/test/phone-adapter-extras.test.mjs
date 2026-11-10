@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+const storage = () => { const values=new Map();return {getItem:k=>values.get(k) || null,setItem:(k,v)=>values.set(k,String(v)),removeItem:k=>values.delete(k),dump:()=>[...values]}; };
+globalThis.localStorage=storage();globalThis.sessionStorage=storage();
+const api=await import('../../../web/api.js');
+const {adapterExtras:a}=await import('../../../web/src/adapter-extras.js');
+test('phone sign-ins use the dedicated unrecorded path, retaining paired project addresses only on the request',async t=>{
+ api.useFixtures();
+ const requests=[], logs=[], secret='synthetic-private-code';
+ t.mock.method(globalThis,'fetch',async(url,opts)=>{const body=JSON.parse(opts.body);requests.push({url,body});return {status:200,headers:new Headers(),json:async()=>({ok:true,text:secret})};});
+ for(const key of ['log','warn','error']) t.mock.method(console,key,(...args)=>logs.push(args));
+ const before=api.auditLog();
+ await a.finishLogin('acme-web@scratch','mcp',`http://localhost/callback?code=${secret}`);
+ await a.finishAccountLogin('acme-web@scratch','account',secret);
+ await a.startAccountLogin('acme-web@scratch','master','cf-acme-web');
+ assert.deepEqual(requests.map(r=>r.body.tool),['fleet_login_finish','fleet_account_login_finish','fleet_account_login_start']);
+ assert.ok(requests.every(r=>r.url==='/api/verb' && r.body.args.project==='acme-web@scratch'));
+ assert.equal(requests[1].body.args.code,secret);
+ assert.deepEqual(api.auditLog(),before);
+ assert.ok(!JSON.stringify([localStorage.dump(),sessionStorage.dump(),logs,api.auditLog()]).includes(secret));
+});
+test('phone automation adapter translates event placeholders and limits the palette to fleet-serve vocabulary',async t=>{
+ api.setBaseUrl('http://127.0.0.1:1');await api.reprobe();api.setToken('fixture-token',Date.now()/1000+600);
+ const calls=[];
+ const automation={id:'daily',name:'Daily check',trigger:{type:'event',event:'finished',project:'acme-web',session:'master'},steps:[{action:'send',project:'{project}',session:'{session}',prompt:'Check {date} at {time}'}]};
+ t.mock.method(globalThis,'fetch',async(url,opts={})=>{calls.push({url,body:opts.body ? JSON.parse(opts.body) : null});return {status:200,headers:new Headers(),ok:true,json:async()=>opts.method==='POST' ? {ok:true,automation:JSON.parse(opts.body).automation} : {ok:true,automations:[automation],fleet:[]}};});
+ const j=await a.automations();assert.equal(j.automations[0].steps[0].project,'{proyecto}');assert.equal(j.automations[0].editable,true);
+ assert.ok(!j.capabilities.actions.includes('summary'));assert.ok(!j.capabilities.events.includes('lost'));assert.deepEqual(j.capabilities.scopes,['personal']);
+ await a.saveAutomation(j.automations[0]);assert.equal(calls.at(-1).body.automation.steps[0].prompt,'Check {date} at {time}');
+ const before=calls.length;
+ await assert.rejects(a.saveAutomation({...automation,steps:[{action:'spawn',project:'acme-web',name:'onboarding'}]}),/passkey/i);
+ assert.equal(calls.length,before,'spawn never saves without the passkey ceremony');
+});
+test('phone review reads and writes keep the paired host and ticketed media URLs',async t=>{
+ api.setBaseUrl('http://127.0.0.1:1');await api.reprobe();api.setToken('fixture-token',Date.now()/1000+600);
+ const calls=[];
+ t.mock.method(globalThis,'fetch',async(url,opts={})=>{calls.push({url,body:opts.body ? JSON.parse(opts.body) : null});return {status:200,headers:new Headers(),ok:true,json:async()=>opts.method==='POST' ? {ok:true} : {ok:true,run:{video:'recording.mp4',steps:[{file:'page.png'}]},media:{ticket:'fixture-ticket'}}};});
+ const j=await a.review('work','run','scratch');assert.match(calls[0].url,/host=scratch/);assert.match(j.run.videoSrc,/host=scratch/);assert.match(j.run.steps[0].src,/k=fixture-ticket/);
+ await a.saveReview({host:'scratch',profile:'work',run:'run',state:{1:{v:'ok'}}});assert.equal(calls.at(-1).body.host,'scratch');
+});
