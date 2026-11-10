@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 4d98190c8e19
+// CLIENT-HASH: 8eb72f182111
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -450,9 +450,11 @@
 // v102 is the same terminal, built by the file the team app's terminal uses too: term.js now
 // builds the key row and picks the phone's opening font, and app.js hands it the socket. A
 // phone on v101 runs its own copy of the same key row, so nothing a person presses differs.
-const VERSION = 'ghostfleet-v102';
+// v103 adds pending MCP authorizations, including sessions reached through a paired host,
+// and lets the same card finish Claude Code's own account sign-in on a paired host.
+const VERSION = 'ghostfleet-v103';
 const SHELL = [
-  './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
+  './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js', './grid-search.js', './place.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
@@ -548,6 +550,8 @@ function pushText(d) {
   const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
   const verb = kind === 'needs-you' ? 'needs you' : kind === 'mixed' ? 'needs you' : 'has an answer';
   if (n === 1) {
+    if (named.length === 1 && named[0].server)
+      return { title: `${named[0].server} needs authorization`, body: `${named[0].project}/${named[0].session} · open the fleet app` };
     // ONE, SO NOT "1 sessions". In anonymous mode there is no name to put in front of the
     // verb, and a count of one printed through the plural branch is the tell that a lock
     // screen line was assembled rather than written — measured by rendering every shape
@@ -560,7 +564,7 @@ function pushText(d) {
   return { title: `${n} sessions ${what}`,
            // No names to list is the POINT of anonymous mode, not a degraded version of
            // the other one, so it says what to do instead of showing an empty list.
-           body: named.length ? named.map(x => `${x.project}/${x.session}`).join(' · ') : 'open ghostfleet to see which' };
+           body: named.length ? named.map(x => `${x.project}/${x.session}${x.server ? ` · ${x.server} needs authorization` : ''}`).join(' · ') : 'open ghostfleet to see which' };
 }
 // A Claude account notice (fleet-accounts): which profile moved to which login, or ran out.
 // Every word is here; the payload carries an event word, names (absent in anonymous mode),

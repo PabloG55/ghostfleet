@@ -1,1 +1,9 @@
-{ "modules": ["./register.js"] }
+{
+  "modules": ["./register.js"],
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "mcp__.*__authenticate",
+      "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/login-capture.mjs\"", "timeout": 5 }]
+    }]
+  }
+}
