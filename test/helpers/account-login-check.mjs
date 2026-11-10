@@ -24,6 +24,13 @@ export async function checkAccountLogin({ home, remote, rt, T, is, read, files, 
     is('busy start refuses without queuing /login', true, r.status === 400 && /busy/.test(r.json?.text));
     is('busy start types nothing', 0, (await state()).count);
     await mode('expired');
+    let list = await home.auth.api(home.base, 'GET', '/api/logins');
+    const needed = list.json?.items?.find(x => x.kind === 'account');
+    is('phone sees account need with host, session and profile', ['laptop', 'api-1', 'work', 'needs-login'],
+      [needed?.host, needed?.session, needed?.profile, needed?.status]);
+    const notice = read(path.join(remote.home, '.config/ghostfleet/telegram/outbox/account-cf-acme-api-api-1.json'));
+    is('Telegram names the session and profile without URL', true,
+      /api-1.*work.*Claude account sign-in/.test(notice.text) && !JSON.stringify(notice).includes('http'));
     r = await start();
     is('start sends /login to this session and captures its URL', [200, 'prompt'], [r.status, (await state()).mode]);
     const file = path.join(remote.fleet, 'logins', `${r.json?.id}.json`), record = read(file);
@@ -57,6 +64,54 @@ export async function checkAccountLogin({ home, remote, rt, T, is, read, files, 
     r = await finish();
     is('second use refuses', true, r.status === 400 && /used/.test(r.json?.text));
     is('second use types nothing more', 1, (await state()).count);
+    await mode('prompt');
+    r = await home.auth.verb(home.base, 'fleet_account_login_start', { project: 'acme-api@laptop', session: 'api-1' });
+    is('home starts the remote session through its pair', 200, r.status);
+    const pairedFile = path.join(remote.fleet, 'logins', `${r.json?.id}.json`), paired = read(pairedFile);
+    const cross = async (assertion = true) => home.auth.verb(home.base, 'fleet_account_login_finish',
+      { project: 'acme-api@laptop', id: paired.id, code }, assertion ? await home.auth.fresh(home.base, 'finish login') : null);
+    r = await cross(false);
+    is('home refuses missing assertion before crossing', 401, r.status);
+    is('missing home assertion types nothing', 1, (await state()).count);
+    const body = { tool: 'fleet_account_login_finish', args: { project: 'acme-api', id: paired.id, code } };
+    r = await request(remote.base, 'POST', '/api/verb', { body });
+    is('unsigned pair request refuses', 401, r.status);
+    is('unsigned request types nothing', 1, (await state()).count);
+    const noSig = P.signedHeaders(remotePeer, { method: 'POST', pathq: '/api/verb', body: Buffer.from(JSON.stringify(body)), onBehalf: 'phone' });
+    delete noSig['x-fleet-pair-sig'];
+    r = await request(remote.base, 'POST', '/api/verb', { body, headers: noSig });
+    is('pair without signature refuses', 401, r.status);
+    is('missing signature types nothing', 1, (await state()).count);
+    await mode('idle');
+    const signed = P.signedHeaders(remotePeer, { method: 'POST', pathq: '/api/verb', body: Buffer.from(JSON.stringify(body)), onBehalf: 'phone' });
+    await request(remote.base, 'POST', '/api/verb', { body, headers: signed });
+    r = await request(remote.base, 'POST', '/api/verb', { body, headers: signed });
+    is('replayed pair signature refuses', true, r.status === 401 && /already/.test(r.json?.text));
+    is('replay types nothing', 1, (await state()).count);
+    await mode('prompt');
+    fs.writeFileSync(path.join(remote.fleet, 'cf-acme-api.pair'), 'hide\n');
+    r = await cross();
+    is('hidden peer project refuses finish', 400, r.status);
+    is('hidden peer project types nothing', 1, (await state()).count);
+    list = await home.auth.api(home.base, 'GET', '/api/logins');
+    is('hidden project has no account card', false, list.json?.items?.some(x => x.project === 'acme-api@laptop'));
+    fs.unlinkSync(path.join(remote.fleet, 'cf-acme-api.pair'));
+    r = await cross();
+    is('home assertion finishes the remote record', [200, true], [r.status, r.json?.ok]);
+    is('paired finish types exactly once', [2, true], [(await state()).count, (await state()).exact]);
+    r = await cross();
+    is('paired second use refuses', true, r.status === 400 && /used/.test(r.json?.text));
+    is('paired second use types nothing', 2, (await state()).count);
+    const assertion = await home.auth.fresh(home.base, 'finish login');
+    await home.auth.verb(home.base, 'fleet_account_login_finish', { project: 'acme-api@laptop', id: paired.id, code }, assertion);
+    r = await home.auth.verb(home.base, 'fleet_account_login_finish', { project: 'acme-api@laptop', id: paired.id, code }, assertion);
+    is('home assertion cannot be reused', 401, r.status);
+    for (const h of [home, remote]) {
+      const audits = fs.readFileSync(path.join(h.dir, 'audit'), 'utf8').trim().split('\n').map(JSON.parse);
+      is(`${h.id} audit records account finish and authority`, true, audits.some(x => x.verb === 'fleet_account_login_finish'
+        && (h === home ? x.confirmed === 'passkey' && x.via === 'proxy' : x.via === 'pair' && x.origin_host === 'vm')));
+    }
+    is('paired pane history contains no sentinel', false, tm(remote, 'capture-pane', '-p', '-S', '-', '-t', 'api-1').includes('phone-sentinel-'));
     is('sentinel absent from everything both hosts wrote', [], files(T).filter(f => fs.statSync(f).isFile() && fs.readFileSync(f).includes(Buffer.from(code))).map(f => path.relative(T, f)));
   } finally { try { tm(remote, 'kill-server'); } catch {} }
 }

@@ -2401,14 +2401,17 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //                     projects. Never a private or excluded project's (eventsForPeer), and
 //                     never a third host's: what this host fetched from ITS peers stays here
 // LOGIN EXCEPTION: the home host checks the fresh passkey where it was made; the remote
-// checks the pair signature and its OWN pending record, including state and loopback target.
+// checks the pair signature and its OWN pending record. fleet_login_finish checks the
+// state and loopback target; fleet_account_login_finish checks the session, pane,
+// issuing server and current login prompt. fleet_account_login_start addresses ONE
+// nonbusy session, with the same scope as fleet_send.
 // A paired host can already fleet_send arbitrary prompts to remote sessions, strictly more
 // power than completing an authorization the remote started with state it issued. Residual
-// risk: a compromised paired host could finish a pending login with a code for an account
+// risk: a compromised paired host could sign a session into an account
 // it controls. That grants no wider power than fleet_send already grants to that host.
 const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
-const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
 // has to land where the run and its --check are. It is safe to expose because it is no more
@@ -2655,7 +2658,7 @@ async function proxyRemote(req, res, p, url, body, ip) {
     : (p === '/api/attach' || p.startsWith('/api/term')) ? body?.project : undefined);
   const addr = P.splitAddr(named || '');
   if (!addr) return false;
-  const login = p === '/api/verb' && body?.tool === 'fleet_login_finish';
+  const login = p === '/api/verb' && ['fleet_login_finish', 'fleet_account_login_finish'].includes(body?.tool);
   if (login) {
     const a = headerAssertion(req, loadConfig());
     if (!a || a.error) { send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' }); return true; }
