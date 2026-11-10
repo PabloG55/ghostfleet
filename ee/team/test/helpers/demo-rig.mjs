@@ -28,7 +28,12 @@ export async function rig(t) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = ''; child.stdout.on('data', d => { log += d; }); child.stderr.on('data', d => { log += d; });
-  t.after(async () => { const ended = once(child, 'exit'); child.kill('SIGTERM'); await ended; fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const ended = once(child, 'exit'); child.kill('SIGTERM'); await ended;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   for (let i = 0; !fs.existsSync(portFile) && i < 200; i++) await new Promise(r => setTimeout(r, 20));
   assert.ok(fs.existsSync(portFile), log);
   const port = Number(fs.readFileSync(portFile));

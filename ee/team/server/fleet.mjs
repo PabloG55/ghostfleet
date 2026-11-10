@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { GF_HOME } from './paths.mjs';
 import * as attachments from './attach.mjs';
 import { t as tr } from '../shared/i18n/index.js';
+import { createTerminalTabs } from './terminal-tab.mjs';
 
 const need = (rel) => {
   const p = path.join(GF_HOME, rel);
@@ -23,6 +24,7 @@ const dispatch = await import(need('mcp/fleet-dispatch.mjs'));
 const perm = await import(need('lib/permission-dialog.mjs'));
 const GRID = path.join(GF_HOME, 'bin', 'fleet-grid.mjs');
 const TMUX_CONF = path.join(GF_HOME, 'tmux', 'cf.tmux.conf');
+export const { openTerminal, checkTerminal } = createTerminalTabs({ projects: () => dispatch.projects(), home: GF_HOME });
 
 const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted']);
 

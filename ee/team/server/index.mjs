@@ -23,6 +23,7 @@ import { GF_HOME } from './paths.mjs';
 import { inRequest, asUser } from './i18n.mjs';
 import { t, msg, render, normLang, locale } from '../shared/i18n/index.js';
 import { createUsage } from './usage.mjs';
+import { createTerminal } from './terminal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -318,6 +319,11 @@ async function route(req, res, url) {
   const guard = (project, action) => { const no = denial(me, project, action); if (no) throw httpErr(no.status, no.text); };
   const mine = async () => visibleProjects(me, await fleet.projects());
 
+  if (p === '/api/term/open') {
+    if (req.method !== 'POST') throw httpErr(405, 'POST only.');
+    return send(res, 200, await terminal.open(me, w.key, await body(req)));
+  }
+
   if (p === '/api/logout' && req.method === 'POST') {
     delete logins[w.key]; writeJson('logins.json', logins);
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
@@ -551,6 +557,9 @@ autos.start();
 const admin = createAdmin({ store, fleet, audit, dropLogins, httpErr });
 const cfgFor = MODE === 'demo' ? null : (await import(pathToFileURL(path.join(GF_HOME, 'lib', 'projects.mjs')).href)).cfgFor;
 const aiAccount = createAiAccount({ dir: DATA, demo: MODE === 'demo', profiles: profilesOf(fleet, cfgFor), readJson, writeJson, audit });
+const terminal = createTerminal({ fleet, demo: MODE === 'demo', audit,
+  authenticate: req => whoIs(req, { setHeader() {} }),
+  allowedHost: host => !!host && HOSTS.has(hostName(host)) });
 
 // Installations from before roles (§2), once: it needs the projects that exist now, so it waits
 // for the fleet to answer rather than migrate everyone onto an empty list.
@@ -583,6 +592,12 @@ const server = http.createServer((req, res) => inRequest(req, async () => {
     if (!e.status) console.error(e);
   }
 }));
+server.on('upgrade', (req, socket, head) => { void terminal.upgrade(req, socket, head); });
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+  terminal.close(); server.close();
+  // Tasks and polling timers have their own lifecycle; do not leave a listener behind.
+  process.exit(0);
+});
 server.listen(PORT, BIND, () => {
   const origin = `http://${BIND.includes(':') ? `[${BIND}]` : BIND}:${PORT}`;
   console.log(`ghostfleet team · ${MODE === 'demo' ? 'DEMO mode (sample data)' : 'REAL mode (your fleet)'}`);

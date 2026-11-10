@@ -4,6 +4,7 @@ import path from 'node:path';
 import * as attachments from './attach.mjs';
 import { dataDir } from './users.mjs';
 import { t as tr } from '../shared/i18n/index.js';
+import { literalProject } from './terminal-tab.mjs';
 
 const now = () => Math.floor(Date.now() / 1000);
 const ago = (min) => now() - min * 60;
@@ -134,6 +135,15 @@ export async function session(project, name) {
            messages: k.messages.slice(-30), next_before: null };
 }
 export async function queue() { return []; }
+export async function openTerminal(project, kind) {
+  if (!literalProject(project)) throw Object.assign(new Error('No such project.'), { status: 404 });
+  find(project);
+  return { session: `_${kind}-${project}` };
+}
+export async function checkTerminal(ticket) {
+  const tab = await openTerminal(ticket.project, ticket.kind);
+  if (tab.session !== ticket.session) throw Object.assign(new Error('No such terminal tab.'), { status: 404 });
+}
 export async function pane(project, name) { const { k } = find(project, name); return { pane: k.pane, prompt: k.prompt }; }
 
 function say(k, text) {
