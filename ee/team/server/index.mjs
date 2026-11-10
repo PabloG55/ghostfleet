@@ -89,11 +89,11 @@ let loginsDirty = false;
 setInterval(() => { if (loginsDirty) { loginsDirty = false; writeJson('logins.json', logins); } }, 5000).unref();
 function mintLogin(user) {
   const tok = crypto.randomBytes(32).toString('base64url');
-  logins[sha256(tok)] = { user: user.id, exp: now() + IDLE };
+  logins[sha256(tok)] = { user: user.id, exp: now() + IDLE, renewed: now() };
   writeJson('logins.json', logins);
   return tok;
 }
-function whoIs(req) {
+function whoIs(req, res) {
   const m = /(?:^|;\s*)gfw=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
   if (!m) return null;
   const k = sha256(m[1]), s = logins[k];
@@ -102,13 +102,33 @@ function whoIs(req) {
   // A disabled account's open logins end on its next request, wherever they are (§2).
   if (!u || u.disabled) { delete logins[k]; loginsDirty = true; return null; }
   s.exp = now() + IDLE; loginsDirty = true;
+  if (now() - (s.renewed || 0) >= 60) {
+    res.setHeader('Set-Cookie', cookie(m[1], IDLE));
+    s.renewed = now();
+  }
   return { user: u, key: k };
 }
-function dropLogins(userId) {
-  for (const [k, s] of Object.entries(logins)) if (s.user === userId) delete logins[k];
+function dropLogins(userId, keep) {
+  for (const [k, s] of Object.entries(logins)) if (s.user === userId && k !== keep) delete logins[k];
   writeJson('logins.json', logins);
 }
 const cookie = (tok, maxAge) => `gfw=${tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
+
+// Count failures before yielding for the response delay, so parallel guesses cannot all
+// enter an empty window. Names share slug() with login; addresses come from the socket.
+const LOGIN_WINDOW = 15 * 60;
+const failuresByName = new Map(), failuresByIp = new Map();
+const dummyLogin = { salt: 'ghostfleet-login-dummy', hash: '0'.repeat(128) };
+function loginFailures(map, key) {
+  const row = map.get(key);
+  if (row && row.until > now()) return row.n;
+  map.delete(key); return 0;
+}
+function failedLogin(map, key) {
+  for (const [k, row] of map) if (row.until <= now()) map.delete(k);
+  const row = map.get(key) || { n: 0, until: now() + LOGIN_WINDOW };
+  row.n++; map.set(key, row);
+}
 
 // ── who works on what, who is looking at what, and what everyone did ─────────────────────
 let state = readJson('state.json', { owners: {} });
@@ -263,14 +283,19 @@ async function route(req, res, url) {
   if (req.method !== 'GET' && req.headers['x-gfw'] !== '1') throw httpErr(403, t('err.noXGFW'));
 
   if (p === '/api/health') {
-    const w = whoIs(req);
+    const w = whoIs(req, res);
     // `setup`: no account exists yet, and the page can only say who has to run admin-cli.
     return send(res, 200, { ok: true, mode: MODE, setup: store.list.length === 0, user: selfUser(w?.user), admin: isAdmin(w?.user) });
   }
   if (p === '/api/login' && req.method === 'POST') {
     const b = await body(req);
-    const u = userById(slug(b.name));
-    if (!u || u.disabled || !pwOk(u, b.password || '')) {
+    const name = slug(b.name);
+    if (loginFailures(failuresByName, name) >= 5 || loginFailures(failuresByIp, ip) >= 20)
+      throw httpErr(429, t('err.loginLimited'));
+    const u = userById(name);
+    const valid = pwOk(u || dummyLogin, b.password || '');
+    if (!u || u.disabled || !valid) {
+      failedLogin(failuresByName, name); failedLogin(failuresByIp, ip);
       audit({ user: slug(b.name) || '?', verb: 'login', ip, result: 'refused', ...(u?.disabled ? { output: msg('act.accountDisabled') } : {}) });
       await new Promise(r => setTimeout(r, 600));
       throw httpErr(401, t('err.badLogin'));
@@ -282,10 +307,13 @@ async function route(req, res, url) {
     return send(res, 200, { ok: true, user: selfUser(u) }, { 'Set-Cookie': cookie(mintLogin(u), IDLE) });
   }
 
-  const w = whoIs(req);
+  const w = whoIs(req, res);
   if (!w) throw httpErr(401, t('err.login'));
   const me = w.user;
   asUser(me);
+  if (me.mustChange && !['/api/me', '/api/password', '/api/logout'].includes(p))
+    throw httpErr(403, t('err.mustChange'));
+  if (p === '/api/me' && req.method === 'GET') return send(res, 200, { ok: true, user: selfUser(me) });
   // Every project-named route below asks here first; 404 when it does not exist for `me`.
   const guard = (project, action) => { const no = denial(me, project, action); if (no) throw httpErr(no.status, no.text); };
   const mine = async () => visibleProjects(me, await fleet.projects());
@@ -298,9 +326,10 @@ async function route(req, res, url) {
   if (p === '/api/password' && req.method === 'POST') {
     const b = await body(req);
     if (!pwOk(me, b.old || '')) throw httpErr(401, t('err.oldPw'));
-    if (String(b.new || '').length < 6) throw httpErr(400, t('err.shortPw'));
+    if (String(b.new || '').length < 12) throw httpErr(400, t('err.shortPw'));
     if (b.new === b.old) throw httpErr(400, t('err.samePw'));
     Object.assign(me, hashPw(b.new), { mustChange: false }); store.save();
+    dropLogins(me.id, w.key);
     audit({ user: me.id, verb: 'password', subject: me.name, result: 'ran' });
     return send(res, 200, { ok: true, user: selfUser(me) });
   }
@@ -529,7 +558,8 @@ async function migrateRoles() {
 await migrateRoles();
 
 const server = http.createServer((req, res) => inRequest(req, async () => {
-  if (req.headers.host && !HOSTS.has(hostName(req.headers.host)))
+  if (!req.headers.host) return send(res, 400, { ok: false, text: t('err.missingHost') });
+  if (!HOSTS.has(hostName(req.headers.host)))
     return send(res, 403, { ok: false, text: t('err.host', { host: req.headers.host, hosts: [...HOSTS].join(', ') }) });
   // Everything a request can throw stays in this try: the handler is async, so an escape
   // is an unhandled rejection, and that ends the process — one `GET /%E0%A4%A` used to

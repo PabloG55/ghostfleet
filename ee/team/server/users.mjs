@@ -64,7 +64,7 @@ export function createUsers(dir) {
     fresh();
     const id = slug(name);
     if (!id) throw err(400, t('err.emptyName'));
-    if (String(password || '').length < 6) throw err(400, t('err.shortPw'));
+    if (String(password || '').length < 12) throw err(400, t('err.shortPw'));
     if (!GLOBAL_ROLES.includes(role)) throw err(400, t('err.badRole', { role: String(role).slice(0, 20) }));
     if (users.some(u => u.id === id)) throw err(409, t('err.userExists', { name }));
     const u = { id, name: String(name).trim(), color: COLORS[users.length % COLORS.length], ...hashPw(password),

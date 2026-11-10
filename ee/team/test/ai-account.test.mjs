@@ -185,8 +185,8 @@ test('over HTTP: only an admin reaches it, and no response ever carries the full
   const port = 20000 + Math.floor(Math.random() * 20000);
   // Accounts come from the console (admin-cli), not from the web: write them the same way.
   const store = createUsers(path.join(data, 'demo'));
-  store.add('Ana', 'secreto1', { role: 'admin' });
-  store.add('Beto', 'secreto2', { role: 'member', projects: {} });
+  store.add('Ana', 'secreto1-long', { role: 'admin' });
+  store.add('Beto', 'secreto2-long', { role: 'member', projects: {} });
   const srv = spawn(process.execPath, [SERVER, '--demo'], { env: { ...process.env, GFW_PORT: String(port), GFW_DATA: data }, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => srv.kill());
   let log = '';
@@ -200,8 +200,8 @@ test('over HTTP: only an admin reaches it, and no response ever carries the full
     const res = await fetch(base + p, { method, headers: { 'X-GFW': '1', 'Content-Type': 'application/json', ...(cookie ? { cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
     return { status: res.status, text: await res.text(), cookie: (res.headers.get('set-cookie') || '').split(';')[0] };
   };
-  const anaC = (await call('POST', '/login', { name: 'Ana', password: 'secreto1' })).cookie;
-  const betoC = (await call('POST', '/login', { name: 'Beto', password: 'secreto2' })).cookie;
+  const anaC = (await call('POST', '/login', { name: 'Ana', password: 'secreto1-long' })).cookie;
+  const betoC = (await call('POST', '/login', { name: 'Beto', password: 'secreto2-long' })).cookie;
 
   assert.equal((await call('GET', '/admin/ai', null, betoC)).status, 404);
   assert.equal((await call('POST', '/admin/ai', { action: 'key', key: KEY }, betoC)).status, 404);
