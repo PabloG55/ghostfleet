@@ -126,9 +126,25 @@ because the grid ignores past times, but it leaves the file behind).
 ## Security
 
 Like `fleet-serve`, this is **remote code execution by design**: sending a task to an
-agent is running commands on this machine. Therefore:
+agent is running commands on this machine.
 
-- it only listens on loopback or on Tailscale, and refuses to open up to the local network or the internet;
+Project grants protect the browser and API routes: a viewer can read, a member can prompt,
+and an admin can manage access. They do not isolate code run by a prompted session. A member
+who can prompt runs commands as the session's OS user. If sessions share the server's OS user,
+they can edit `GFW_DATA/real/users.json` (which the server re-reads on change), read `secrets/`,
+and reach other projects' tmux sockets. A project grant is not a boundary against shell access.
+
+Run the server as a dedicated OS user and arrange permissions so its sessions cannot read `GFW_DATA`
+(the sessions must run with a separate OS identity or equivalent isolation). Otherwise, give members
+only projects you would trust them with in a shell, including everything that OS user can reach.
+
+The bind guard accepts `100.64.0.0/10`. Tailscale and carrier-grade NAT share that range, so the
+range cannot tell them apart or prove that a connection came through Tailscale. Restrict who can
+reach the listener with your network configuration.
+
+The HTTP controls are:
+
+- it only listens on loopback or the accepted tailnet address ranges;
 - it only answers to the names it is reached by (`127.0.0.1`, `localhost`, the `--bind` IP and those in
   `GFW_HOSTS`, e.g. a MagicDNS name): a foreign page that points its domain at this machine (DNS rebinding)
   gets 403;
