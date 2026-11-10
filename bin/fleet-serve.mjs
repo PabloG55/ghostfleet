@@ -2425,7 +2425,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // inside a run dir this host's own runDir() resolves, with a body cleanVerdict() checks
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
-const PAIR_POSTS = new Set(['/api/shots/verdict', '/api/voice']);
+const PAIR_POSTS = new Set(['/api/shots/verdict', '/api/voice/ask']);
 const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
@@ -2747,7 +2747,7 @@ async function voiceRequest(req, res, url, ip, bearer) {
   if (req.method !== 'POST') return voiceText(res, 405, 'POST only.');
   let body, token = bearer;
   if (req.headers['x-fleet-pair'] !== undefined) {
-    const pa = await pairAuth(req, res, '/api/voice', url, ip);
+    const pa = await pairAuth(req, res, '/api/voice/ask', url, ip);
     if (!pa) return;
     body = pa.body;
     token = body.voice_bearer;
@@ -2765,7 +2765,7 @@ async function voiceRequest(req, res, url, ip, bearer) {
       // Like phone sign-in, the pairing authenticates the hop. The bearer is in
       // the signed body so it cannot be substituted independently of the text.
       // No audit args, command argv, disk file or error includes this envelope.
-      const r = await P.peerRequest(peer, { method: 'POST', pathq: '/api/voice',
+      const r = await P.peerRequest(peer, { method: 'POST', pathq: '/api/voice/ask',
         body: { text: body?.text, lang: body?.lang, voice_bearer: token }, onBehalf: 'voice', timeout: 50000 });
       return voiceText(res, r.status || 502, r.status ? (r.json?.text || 'The turn host refused the request.') : 'Could not reach the turn host; check Telegram before trying again.', r.json?.lang || 'en');
     }
@@ -2821,7 +2821,9 @@ async function api(req, res, url, ip) {
   } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
 
-  if (p === '/api/voice') return voiceRequest(req, res, url, ip, bearer);
+  // Siri's device bearer belongs only to this exact route. The phone's existing
+  // /api/voice readiness and /api/voice/hear still pass through passkey auth.
+  if (p === '/api/voice/ask') return voiceRequest(req, res, url, ip, bearer);
 
   let pairBody = null;
   if (!OPEN.has(p) && req.headers['x-fleet-pair'] !== undefined) {

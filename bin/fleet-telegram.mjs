@@ -724,15 +724,16 @@ async function speak(text, replyTo, sec) {
 // records how far it got, so a retry resumes instead of repeating.
 let pumping = false;
 let acceptingVoice = false;
+let voiceSweepAt = 0;
 async function pumpVoice() {
   if (acceptingVoice || stopping) return;
   acceptingVoice = true;
   try {
-    let requests;
-    try { requests = fs.readdirSync(voice.requestsDir()).filter(voice.isVoice)
-      .map(id => voice.read(path.join(voice.requestDir(id), 'request.json'))).filter(Boolean)
-      .sort((a, b) => a.created - b.created); } catch { return; }
-    for (const q of requests) {
+    if (Date.now() >= voiceSweepAt) {
+      voice.pruneRequests();
+      voiceSweepAt = Date.now() + 60000;
+    }
+    for (const q of voice.pendingRequests()) {
       const id = q.id, dir = voice.requestDir(id);
       if (!q || fs.existsSync(path.join(dir, 'submitted'))) continue;
       try {

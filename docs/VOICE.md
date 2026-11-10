@@ -70,8 +70,8 @@ unverified. If import fails, use these steps:
    by name from Siri. Do not add Open App, SSH, JavaScript, shell or third-party
    actions. Do not share a configured copy containing the token.
 
-The endpoint is `POST /api/voice`. Use the paired host's existing trusted HTTPS
-origin plus `/api/voice?host=scratch`, where `scratch` is the turn host's **pair
+The endpoint is `POST /api/voice/ask`. Use the paired host's existing trusted HTTPS
+origin plus `/api/voice/ask?host=scratch`, where `scratch` is the turn host's **pair
 key** from `fleet-serve pairs` on the paired host. Use this identical complete
 URL on every device, including the Mac running the Shortcut. A direct caller
 of the turn host may omit `?host=…`. Forwarding is one hop; the linked project
@@ -94,7 +94,8 @@ Voice is another inbound source of the Telegram daemon's own turn path. The
 prompt begins `[telegram] [voice]` and asks for a few short spoken sentences in
 the question's language, with no markdown or links. Keeping `[telegram]` first
 preserves the existing prompt marker, armed reply address, guard and Stop relay.
-Voice has the **exact** allowlist, command exceptions, scratch/checkout write
+A voice turn has the same tools as a Telegram turn. Voice has the **exact**
+allowlist, command exceptions, scratch/checkout write
 scope, unsupported-agent refusals and Codex opt-in/gap in [TELEGRAM.md](TELEGRAM.md).
 By default it can read, search, browse, use fleet tools and write to scratch;
 shell commands and checkout writes require the owner's Telegram exceptions.
@@ -118,9 +119,18 @@ the bridge's own outbox to the owner's chat. A persisted, exclusive delivery
 decision prevents the same final going to both HTTP and Telegram. Disconnecting
 the HTTP waiter also yields to Telegram. Normal outbox retries and chunk
 progress apply. Permission requests go to Telegram, separately from the final.
-Private request/delivery files remain in `voice-requests/` for recovery; do not
-publish that directory. Revocation prevents new requests; it does not cancel
-an already authorized queued turn.
+Private request/delivery files in `voice-requests/` are swept once a minute.
+Submitted records with a delivery decision are removed 30 minutes after their
+deadline, leaving ample time for the HTTP waiter and ordinary late answers.
+A submitted record whose HTTP server died gets a Telegram fallback decision
+once its deadline passes. After pruning, a later final still goes through the
+normal Telegram outbox exactly once, with its JSON wrapper removed even without
+`request.json`. The fleet-send queue is independent and is not pruned.
+Unsubmitted, corrupt or incomplete records expire after a hard 24-hour file-age
+cap, so a bad record cannot remain forever. Recent unsubmitted or queued records
+are retained; submitted records are skipped by the 250 ms dispatch loop. Do not
+publish the private request directory. Revocation prevents new requests; it does
+not cancel an already authorized queued turn.
 
 **Timeout evidence, checked 2026-11-10:** Apple's
 [URLSession documentation](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/timeoutintervalforrequest)
@@ -169,8 +179,10 @@ This chain does not explicitly open an app. That supports the possibility of
 locked operation when Siri/Shortcut lock-screen access is enabled, but does
 **not** prove this exact chain works locked on the owner's iPhone. No physical
 locked-phone test was available. Treat nearby speech as potentially able to
-start a turn until the owner tests it, and decide the lock-screen Siri/Shortcut
-setting accordingly. No extra unlock policy is built into the endpoint.
+start a turn until tested. To keep a locked iPhone from starting a voice turn,
+turn off Siri on the lock screen in the iPhone's Siri settings (Allow Siri When
+Locked). The voice turn retains the same tools as a Telegram turn regardless of
+locked-phone behavior; the allowlist does not change.
 
 ## Why HTTPS rather than SSH
 

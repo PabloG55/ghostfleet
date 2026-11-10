@@ -30947,6 +30947,18 @@ else
   skip "voice leaks" "node, tmux or jq missing"
 fi
 
+group "voice Shortcut: completed and stale requests are pruned without losing late answers"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  VCOUT="$TMUX_TMPDIR/voice-cleanup.out"
+  node "$ROOT/test/helpers/voice-check.mjs" cleanup > "$VCOUT" 2> "$VCOUT.err"
+  is "voice cleanup: harness completed" "0" "$?"
+  is "voice cleanup: no harness errors" "" "$(cat "$VCOUT.err")"
+  is "voice cleanup: assertions ran" "yes" "$([ -s "$VCOUT" ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
+else
+  skip "voice cleanup" "node, tmux or jq missing"
+fi
+
 group "voice Shortcut: the paired host forwards to the turn host"
 if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   VCOUT="$TMUX_TMPDIR/voice-pair.out"

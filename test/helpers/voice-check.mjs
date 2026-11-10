@@ -74,13 +74,13 @@ try {
   const command = `env ${Object.entries(agentEnv).map(([k, v]) => `${k}=${sq(v)}`).join(' ')} bash ${sq(path.join(HERE, 'voice-session.sh'))} ${sq(session)}`;
   tm('new-session', '-d', '-x', '220', '-y', '40', '-s', 'master', '-c', project, command); servers.push(() => tm('kill-server'));
   if (!(await until(() => tm('capture-pane', '-p', '-t', 'master').includes('❯')))) throw new Error('stub session did not start');
-  child(path.join(RT, 'bin/fleet-telegram.mjs'), ['run'], h.env, path.join(h.dir, 'telegram.log'));
+  let bridge = child(path.join(RT, 'bin/fleet-telegram.mjs'), ['run'], h.env, path.join(h.dir, 'telegram.log'));
   if (!(await until(() => !!read(path.join(h.td, 'daemon.pid'))))) throw new Error('scratch Telegram daemon did not start');
   process.env.GHOSTFLEET_TELEGRAM_DIR = h.td;
   const voice = await import(pathToFileURL(path.join(RT, 'lib/voice.mjs')));
   const token = voice.addDevice('scratch');
   await start(h);
-  const ask = (text = 'status', t = token, base = h.base, suffix = '', lang = 'en') => request(base, 'POST', '/api/voice' + suffix,
+  const ask = (text = 'status', t = token, base = h.base, suffix = '', lang = 'en') => request(base, 'POST', '/api/voice/ask' + suffix,
     { headers: t ? { authorization: `Bearer ${t}` } : {}, body: { text, lang } });
   const prompts = () => fs.readdirSync(session).filter(n => /^prompt\./.test(n)).length;
   const sent = () => read(path.join(stub, 'requests.jsonl')).split('\n').filter(Boolean).map(s => JSON.parse(s)).filter(r => r.method === 'sendMessage' && r.ok !== false);
@@ -89,6 +89,10 @@ try {
     is('missing token is 401', 401, (await ask('status', '')).status);
     const wrong = `gfvoice_${crypto.randomBytes(32).toString('base64url')}`;
     is('unknown token is 401', 401, (await ask('status', wrong)).status);
+    for (const [method, route] of [['GET', '/api/voice'], ['POST', '/api/voice/hear'], ['GET', '/api/jarvis'], ['POST', '/api/jarvis/hear'], ['POST', '/api/jarvis/confirm']]) {
+      is(`${method} ${route} still requires its passkey token`, 401, (await request(h.base, method, route, { ...(method === 'POST' ? { body: {} } : {}) })).status);
+      is(`a Siri bearer cannot access ${method} ${route}`, 401, (await request(h.base, method, route, { headers: { authorization: `Bearer ${token}` }, ...(method === 'POST' ? { body: {} } : {}) })).status);
+    }
     voice.revokeDevice('scratch');
     is('revoked token is 401', 401, (await ask()).status);
     is('unauthorized requests start no turn', 0, prompts());
@@ -165,13 +169,61 @@ try {
     is('request carrying bearers in dictation completes', 200, (await ask(`status ${token} ${otherToken}`)).status);
     const collect = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(d => d.isDirectory() ? collect(path.join(dir, d.name)) : [path.join(dir, d.name)]);
     const files = collect(h.dir).filter(f => !f.includes('/keys/'));
-    is('serve.log was actually written', true, read(h.log).includes('/api/voice -> 200'));
+    is('serve.log was actually written', true, read(h.log).includes('/api/voice/ask -> 200'));
     is('the turn prompt was actually captured', 1, prompts());
     is('the ledger actually recorded the received prompt', true, read(path.join(ff, 'voice-session.ledger')).includes('[telegram]'));
     is('token absent from serve.log, ledgers, transcript, prompts and request storage', 0, files.filter(f => read(f).includes(token)).length);
     is('another device token is also absent from every file', 0, files.filter(f => read(f).includes(otherToken)).length);
     is('stored credentials contain only a hash', true, read(path.join(h.td, 'voice-devices/scratch.json')).includes(voice.digest(token)));
     is('prompt redacts even an accidentally dictated bearer', true, read(path.join(session, 'prompt.1')).includes('<redacted>'));
+  } else if (mode === 'cleanup') {
+    bridge.kill('SIGTERM');
+    if (!(await until(() => bridge.exitCode !== null || bridge.signalCode !== null))) throw new Error('scratch bridge did not stop');
+    desk('slow desk');
+    if (!(await until(() => prompts() === 1))) throw new Error('desk fixture did not run');
+    const now = Date.now(), minute = 60000;
+    const old = voice.enqueue('old question', 'es', now - 31 * minute);
+    const fresh = voice.enqueue('fresh question', 'en', now + minute);
+    const queued = voice.enqueue('held question', 'en', now - 31 * minute);
+    const stale = voice.enqueue('expired question', 'en', now - 25 * 60 * minute);
+    const corrupt = voice.enqueue('bad record', 'en', now);
+    const incomplete = voice.enqueue('incomplete record', 'en', now);
+    for (const id of [old, fresh]) {
+      fs.writeFileSync(path.join(voice.requestDir(id), 'submitted'), '');
+      voice.defer(id, 'en');
+    }
+    for (const id of [stale, corrupt, incomplete]) {
+      const f = path.join(voice.requestDir(id), 'request.json'), age = new Date(now - 25 * 60 * minute);
+      if (id === corrupt) fs.writeFileSync(f, '{bad JSON');
+      if (id === incomplete) fs.rmSync(f);
+      fs.utimesSync(id === incomplete ? voice.requestDir(id) : f, age, age);
+    }
+    bridge = child(path.join(RT, 'bin/fleet-telegram.mjs'), ['run'], h.env, path.join(h.dir, 'telegram.log'));
+    is('old finished request is removed by the daemon tick', true, await until(() => !fs.existsSync(voice.requestDir(old)), 1800));
+    // Dispatch follows the sweep: reaching the queue also proves the sweep has
+    // finished, rather than inspecting a directory part-way through a remove.
+    is('unsubmitted request passes into the real queue', true, await until(() => read(path.join(ff, 'cf-acme-api.master.queue')).includes(queued), 1200));
+    is('fresh finished request stays', true, fs.existsSync(voice.requestDir(fresh)));
+    let submittedReads = 0;
+    const originalRead = fs.readFileSync;
+    try {
+      fs.readFileSync = function (file, ...args) {
+        if (file === path.join(voice.requestDir(fresh), 'request.json')) submittedReads++;
+        return originalRead.call(this, file, ...args);
+      };
+      voice.pendingRequests();
+    } finally { fs.readFileSync = originalRead; }
+    is('dispatch scans do not parse submitted questions', 0, submittedReads);
+    is('recent queued request stays despite its old deadline', true, fs.existsSync(voice.requestDir(queued)));
+    is('unsubmitted request beyond the hard age cap is gone', false, fs.existsSync(voice.requestDir(stale)));
+    is('corrupt request beyond the hard age cap is gone', false, fs.existsSync(voice.requestDir(corrupt)));
+    is('incomplete directory beyond the hard age cap is gone', false, fs.existsSync(voice.requestDir(incomplete)));
+    const out = path.join(h.td, 'outbox', `late.${old}.json`);
+    fs.writeFileSync(out, JSON.stringify({ reply_to: old, event: 'answered', text: JSON.stringify({ text: 'Respuesta tardía.', lang: 'es' }) }));
+    is('answer after pruning reaches Telegram', true, await until(() => sent().some(r => r.body.text === 'Respuesta tardía.')));
+    await sleep(500);
+    is('late answer is delivered once with its JSON wrapper removed', 1, sent().filter(r => r.body.text === 'Respuesta tardía.').length);
+    is('late answer leaves the normal outbox', false, fs.existsSync(out));
   } else if (mode === 'pair') {
     const gateway = await host('toolbox'); await start(gateway);
     const open = cli('fleet-serve', ['pair', '--as', 'scratch'], h.env);
@@ -192,7 +244,7 @@ try {
     is('forwarding did not start duplicate turns', 1, prompts());
     const P = await import(pathToFileURL(path.join(RT, 'lib/peers.mjs')));
     const peer = P.loadPeers(P.peersFile(gateway.env.GHOSTFLEET_SERVE_CONFIG)).peers[0];
-    const chained = await P.peerRequest(peer, { method: 'POST', pathq: '/api/voice?host=toolbox', body: { text: 'status', voice_bearer: token } });
+    const chained = await P.peerRequest(peer, { method: 'POST', pathq: '/api/voice/ask?host=toolbox', body: { text: 'status', voice_bearer: token } });
     is('a signed second hop is refused', 403, chained.status);
   } else throw new Error('unknown voice check group');
 } catch (e) { console.error(`voice-check: ${e.name}: ${e.message}`); bad = true; }
