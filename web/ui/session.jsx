@@ -6,6 +6,7 @@ import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
 import { sendsOnEnter } from './keys.js';
+import { useLayer } from './select.jsx';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -160,6 +161,14 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
   const [confirm, setConfirm] = useState(null);
   const [rename, setRename] = useState(null);
   const [menu, setMenu] = useState(false);
+  // More is a layer like every picker and popover: Esc closes it and puts the focus back on its
+  // button, a press outside closes it. It used to close only when the mouse left it, so on a
+  // touch screen it stayed open until one of its actions was chosen, and Esc did nothing.
+  const menuWrap = useRef(null);
+  useLayer(menu, (n) => menuWrap.current?.contains(n), (focus) => {
+    setMenu(false);
+    if (focus) menuWrap.current?.querySelector('.btn')?.focus({ preventScroll: true });
+  });
   const [labelEdit, setLabelEdit] = useState(null);
   const [schedOpen, setSchedOpen] = useState(false);
   const [files, setFiles] = useState([]);       // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
@@ -264,10 +273,10 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
           {!card?.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
-          <div class="menu-wrap">
-            <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-expanded={menu}>{t('sess.more')} ▾</Btn>
+          <div class="menu-wrap" ref={menuWrap}>
+            <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
             {menu ? (
-              <div class="menu" onMouseLeave={() => setMenu(false)}>
+              <div class="menu">
                 <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button>
                 <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button>
                 <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button>

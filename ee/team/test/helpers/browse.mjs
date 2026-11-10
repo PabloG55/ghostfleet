@@ -35,14 +35,23 @@ export async function browse(t, { user = 'admin', lang = 'en', width = 1280, hei
     for (let i = 0; i < 150; i++) { const v = await b.evaluate(fn, ...args); if (v) return v; await sleep(100); }
     throw new Error(`waited 15s for ${what}`);
   };
-  // A mouse press and release in the middle of the first element the selector finds.
+  // A mouse press and release in the middle of the first element the selector finds, once it has
+  // stopped moving: a session's owner picker loads late and pushes More to the right, and under
+  // a loaded machine the press landed where More had been.
+  const centre = (s) => {
+    const el = document.querySelector(s);
+    if (!el) return null;
+    const rc = el.getBoundingClientRect();
+    return rc.width ? { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 } : null;
+  };
   const click = async (sel) => {
-    const at = await until(sel, (s) => {
-      const el = document.querySelector(s);
-      if (!el) return null;
-      const rc = el.getBoundingClientRect();
-      return rc.width ? { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2 } : null;
-    }, sel);
+    let at = await until(sel, centre, sel);
+    for (let i = 0; i < 20; i++) {
+      await sleep(100);
+      const now = await until(sel, centre, sel);
+      if (now.x === at.x && now.y === at.y) break;
+      at = now;
+    }
     const ev = { x: at.x, y: at.y, button: 'left', clickCount: 1 };
     await b.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
     await b.call('Input.dispatchMouseEvent', { type: 'mousePressed', buttons: 1, ...ev });
