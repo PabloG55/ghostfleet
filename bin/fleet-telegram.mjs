@@ -28,8 +28,8 @@
 //   fleet-telegram run                        the daemon in the foreground (what the unit runs)
 //   fleet-telegram send "<text>" [--file <path>]
 //   fleet-telegram config [secret-cmd <cmd> | transcribe-cmd <cmd> | speak-cmd <cmd> |
-//                          voice-ack <text> | allow <pattern>… | allow --only <pattern>… |
-//                          allow --reset | disallow <pattern>…]
+//                          voice-ack <text> | coalesce-ms <n> | allow <pattern>… |
+//                          allow --only <pattern>… | allow --reset | disallow <pattern>…]
 //
 // Node builtins only: ghostfleet is a zero-dependency package.
 import fs from 'node:fs';
@@ -254,7 +254,7 @@ const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); inflight.s
 let state = {};
 const saveState = () => { try { writeJson(STATE, state); } catch {} };
 
-const HELP = (t) => `This chat talks to ${t ? `${t.name}/${t.session}` : 'a fleet session (not linked yet)'}. Write to it and its answer comes back here. Photos and files arrive as files it can open; voice notes are transcribed when the desk has a transcriber set up.\n\n/status — what it is doing\n/help — this`;
+const HELP = (t) => `This chat talks to ${t ? `${t.name}/${t.session}` : 'a fleet session (not linked yet)'}. Write to it and its answer comes back here. Photos and files arrive as files it can open; voice notes are transcribed when the desk has a transcriber set up. Messages sent a few seconds apart are read together, as one.\n\n/status — what it is doing\n/help — this`;
 
 // ── what a message carries ───────────────────────────────────────────────────
 // A sentence for the owner: nothing reached the session, and this says why.
@@ -371,59 +371,128 @@ async function ownContent(msg, text, sec, t) {
   return null;
 }
 
-async function onMessage(msg, sec) {
-  const chat = String(msg?.chat?.id ?? '');
-  if (chat !== sec.chat) { state.dropped = (state.dropped || 0) + 1; log(`dropped from ${chat || '(no chat)'}`); return; }
-  const id = Number(msg.message_id) || 0;
-  const reply = (text) => sendText(sec.token, sec.chat, redact(text), { replyTo: id }).catch((e) => log(`reply failed: ${e.message}`));
+// ── a batch: the messages the owner sent together ────────────────────────────
+// A LINE AND THE LINK UNDER IT ARE ONE REQUEST. The phone sends what the owner types as
+// separate messages, often a second apart — the words, then the link they are about — and
+// each used to start a turn of its own. The first turn then asked for the link the owner had
+// already sent, and the second answered a link with no question. So messages are held until
+// the chat has been quiet for a moment (`config coalesce-ms`, 3 s unless set; 0 turns it
+// off) and delivered together as ONE turn. However fast the owner keeps typing, nothing waits
+// more than COALESCE_CAP_MS from the first message: a batch that never goes quiet still goes.
+//   An album is one batch whatever the window says: Telegram hands its photos over as one
+// message each, a few milliseconds apart, and a caption on the first photo is about all of them.
+const COALESCE_MS = 3000;
+const COALESCE_CAP_MS = 30000;
+const ALBUM_MS = 1500;
+const coalesceMs = () => {
+  const v = config().coalesce_ms;
+  return Number.isInteger(v) && v >= 0 ? Math.min(v, COALESCE_CAP_MS) : COALESCE_MS;
+};
+let batch = null;                    // { first, last, updates: [{ update_id, message }] }
+let pollFrom = 0;                    // the next update to ask for: past every one already taken
+// When the open batch is due: a quiet window after its last message, the cap after its
+// first, and never while an album is still arriving.
+function dueAt() {
+  if (!batch?.updates.length) return Infinity;
+  const tail = batch.updates[batch.updates.length - 1].message;
+  const album = tail?.media_group_id ? batch.last + ALBUM_MS : 0;
+  return Math.max(Math.min(batch.last + coalesceMs(), batch.first + COALESCE_CAP_MS), album);
+}
+const ackFor = (sec, id) => (text) => sendText(sec.token, sec.chat, redact(text), { replyTo: id }).catch((e) => log(`reply failed: ${e.message}`));
+const typing = (sec) => api(sec.token, 'sendChatAction', { chat_id: sec.chat, action: 'typing' }).catch(() => {});
+
+// A slash command is the daemon's to answer, never the session's to run: a phone message
+// must not be able to start a skill or a /command in a terminal. Any other text that starts
+// with `/` is delivered as words, behind the [telegram] tag, and runs nothing.
+const commandOf = (msg) => /^\/(start|help|status)(?:@\w+)?$/i.exec(typeof msg?.text === 'string' ? msg.text.trim() : '');
+async function command(cmd, msg, sec) {
+  const reply = ackFor(sec, Number(msg.message_id) || 0);
+  log(`command: /${cmd[1].toLowerCase()}`);
   let t;
   try { t = resolveLink(); } catch (e) { log(`not delivered: ${e.message}`); return reply(`Not delivered — ${e.message}.`); }
+  if (cmd[1].toLowerCase() !== 'status') return reply(HELP(t));
+  const r = await run('fleet-list', ['-s', t.sock], envFor(t), 15000);
+  const line = r.out.split('\n').find((l) => l.split(/\s+/)[0] === t.session) || `${t.session}: no live session`;
+  return reply(`${t.name}/${t.session}\n\`${line.replace(/`/g, "'")}\``);
+}
 
-  // A slash command is the daemon's to answer, never the session's to run: a phone message
-  // must not be able to start a skill or a /command in a terminal. Any other text that
-  // starts with `/` is delivered as words, behind the [telegram] tag, and runs nothing.
-  const text = typeof msg.text === 'string' ? msg.text.trim() : '';
-  const cmd = /^\/(start|help|status)(?:@\w+)?$/i.exec(text);
-  if (cmd) {
-    if (cmd[1].toLowerCase() !== 'status') return reply(HELP(t));
-    const r = await run('fleet-list', ['-s', t.sock], envFor(t), 15000);
-    const line = r.out.split('\n').find((l) => l.split(/\s+/)[0] === t.session) || `${t.session}: no live session`;
-    return reply(`${t.name}/${t.session}\n\`${line.replace(/`/g, "'")}\``);
-  }
-
-  const w = wiring(t);
-  if (!w.ok) { log(`not delivered: ${w.why}`); return reply(`Not delivered — ${w.why}. At the desk: ${w.fix}.`); }
-
-  // Before anything slow: transcribing and answering take a minute or more, the typing
-  // indicator fades after about 5 s, and silence looks like a crash.
+// One update from the owner's chat joins the batch. Only what deliver() needs later is
+// done now: the typing indicator, from the first message on, and a voice note's
+// acknowledgement, because transcribing and answering take a minute or more and silence
+// looks like a crash.
+function hold(u, sec) {
+  const now = Date.now();
+  const opening = !batch?.updates.length;
+  if (opening) batch = { first: now, last: now, updates: [] };
+  if (!batch.updates.some((x) => x.update_id === u.update_id)) batch.updates.push(u);
+  batch.last = now;
+  typing(sec);
+  const m = u.message;
   const ack = String(config().voice_ack || '');
-  if (ack && (msg.voice || msg.video_note)) await reply(ack);
+  if (ack && (m.voice || m.video_note)) {
+    try { const t = resolveLink(); if (wiring(t).ok) ackFor(sec, Number(m.message_id) || 0)(ack); } catch {}
+  }
+}
+async function flush(sec) {
+  if (!batch?.updates.length) return;
+  const msgs = batch.updates.map((u) => u.message).filter(Boolean);
+  try { await deliver(msgs, sec); } catch (e) { log(`batch of ${msgs.length}: ${e.message}`); }
+  state.offset = Math.max(Number(state.offset) || 0, batch.updates[batch.updates.length - 1].update_id + 1);
+  batch = null;
+  saveState();
+}
+
+async function deliver(msgs, sec) {
+  const last = msgs[msgs.length - 1];
+  let t;
+  try { t = resolveLink(); } catch (e) { log(`not delivered: ${e.message}`); return ackFor(sec, Number(last.message_id) || 0)(`Not delivered — ${e.message}.`); }
+  const w = wiring(t);
+  if (!w.ok) { log(`not delivered: ${w.why}`); return ackFor(sec, Number(last.message_id) || 0)(`Not delivered — ${w.why}. At the desk: ${w.fix}.`); }
+
+  // Each message keeps what it carried — its quote, its words, its file's line — in the order
+  // it was sent. One that cannot be delivered is answered on its own and the rest still go.
+  const parts = [];
+  let spoken = false, id = 0;
+  for (const msg of msgs) {
+    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+    const reply = ackFor(sec, Number(msg.message_id) || 0);
+    try {
+      const own = await ownContent(msg, text, sec, t);
+      if (!own) { await reply(`Only text, files and voice notes reach ${t.session}; that one was not delivered.`); continue; }
+      const q = await quotedBlock(msg, sec, t);
+      parts.push({ words: [q.head, own.body].filter(Boolean).join(' '),
+                   files: [q.line, own.line].filter(Boolean).join('\n'),
+                   // a photo or a file and nothing said about it: its own line says all there is
+                   bare: !text && !String(msg.caption || '').trim() && !q.head && Boolean(own.line) });
+      spoken = spoken || Boolean(own.spoken);
+      id = Number(msg.message_id) || 0;
+    } catch (e) {
+      log(`not delivered: ${e.message}`);
+      await reply(e instanceof Refused ? e.message : `Not delivered — ${e.message}.`);
+    }
+  }
+  if (!parts.length) return;
 
   // [telegram] stays the very first thing, whatever else there is. hooks/fleet-event.sh marks
   // the turn from that prefix, and that is also where the turn is told its answer goes to the
   // phone and which tools it has. A quote placed in front of it would leave the turn unmarked and
   // untold, with the guard holding it on the armed reply address alone, one signal of its two.
-  // The quote and the words share that first line, and any stored file's line comes last. A quote
-  // is flattened to one line anyway, which is what stops it forging a "file:" line of its own.
-  let prompt = '', spoken = false;
-  try {
-    const own = await ownContent(msg, text, sec, t);
-    if (!own) return reply(`Only text, files and voice notes reach ${t.session}; that one was not delivered.`);
-    spoken = Boolean(own.spoken);
-    const q = await quotedBlock(msg, sec, t);
-    const files = [q.line, own.line].filter(Boolean).join('\n');
-    prompt = `[telegram] ${[q.head, own.body].filter(Boolean).join(' ')}${files ? `\n\n${files}` : ''}`;
-  } catch (e) {
-    log(`not delivered: ${e.message}`);
-    return reply(e instanceof Refused ? e.message : `Not delivered — ${e.message}.`);
-  }
+  // A message's quote and words share its first line, and any stored file's line comes after
+  // them. A quote is flattened to one line anyway, which is what stops it forging a "file:" line
+  // of its own. In a batch, an album's uncaptioned photos are their lines alone: "(a photo, no
+  // caption)" three times over says less than the caption beside them.
+  const said = parts.some((p) => !p.bare);
+  const body = parts.map((p, i) => [p.bare && (said || i > 0) ? '' : p.words, p.files].filter(Boolean).join('\n\n')).join('\n\n');
+  const prompt = `[telegram] ${body}`;
 
   // fleet-send, as the owner: to a busy session it QUEUES, and the queued turn carries the
   // reply address, so the answer is that turn's — the busy turn's own Stop answers nobody.
   // "This answer should be spoken" rides the same address (v<id>, not m<id>) rather than a
   // table in this daemon: the address already crosses the queue, the mod's handoff, the Stop
   // hook and a daemon restart, and it goes away with the answer, so there is nothing to prune
-  // when a turn is interrupted and never answers.
+  // when a turn is interrupted and never answers. A batch is answered as a reply to its last
+  // message, and spoken if any message in it was a voice note.
+  const reply = ackFor(sec, id);
   const r = await run('fleet-send', ['-s', t.sock, '--owner', '--reply-to', `telegram/${spoken ? 'v' : 'm'}${id}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
   if (r.code !== 0) {
     log(`not delivered to ${t.session}: exit ${r.code}`);
@@ -431,9 +500,9 @@ async function onMessage(msg, sec) {
   }
   state.delivered = (state.delivered || 0) + 1;
   const queued = /queued #\d+/.test(r.out);
-  log(`delivered ${prompt.length} chars to ${t.name}/${t.session}${queued ? ' (queued)' : ''}`);
+  log(`delivered ${prompt.length} chars from ${parts.length} message${parts.length === 1 ? '' : 's'} to ${t.name}/${t.session}${queued ? ' (queued)' : ''}`);
   if (queued) reply(`${t.session} is in the middle of something — your message is queued and runs next.`);
-  else api(sec.token, 'sendChatAction', { chat_id: sec.chat, action: 'typing' }).catch(() => {});
+  else typing(sec);
 }
 
 // A voice note in, its words out, by the owner's own command (`config transcribe-cmd`),
@@ -598,19 +667,37 @@ async function daemon() {
   while (!stopping) {
     let sec;
     try { sec = secrets(); } catch (e) { setError(e.message); await nap(30000); continue; }
+    if (Date.now() >= dueAt()) { await flush(sec); continue; }
     try {
-      const ups = await api(sec.token, 'getUpdates', { offset: state.offset || 0, timeout: POLL, allowed_updates: ['message'] },
-                            { timeout: (POLL + 15) * 1000, signal: inflight.signal });
+      // While a batch is open the poll is only as long as the batch may still wait, so it goes
+      // out on time and a message that lands meanwhile still joins it; then the long poll again.
+      const due = dueAt();
+      const wait = due === Infinity ? POLL : Math.max(0, Math.min(POLL, Math.ceil((due - Date.now()) / 1000)));
+      const ups = await api(sec.token, 'getUpdates', { offset: pollFrom || state.offset || 0, timeout: wait, allowed_updates: ['message'] },
+                            { timeout: (wait + 15) * 1000, signal: inflight.signal });
       state.last_poll = Math.floor(Date.now() / 1000);
       if (state.last_error) state.last_error = '';
       backoff = 1;
       for (const u of ups || []) {
         if (stopping) break;
-        if (u.message) await onMessage(u.message, sec).catch((e) => log(`message ${u.update_id}: ${e.message}`));
-        // Advanced after the message was handled, so a crash part-way repeats it rather
-        // than losing it — the failure this whole path exists to fix is the silent one.
-        state.offset = u.update_id + 1;
-        saveState();
+        const m = u.message;
+        pollFrom = u.update_id + 1;
+        if (m && String(m?.chat?.id ?? '') !== sec.chat) {
+          state.dropped = (state.dropped || 0) + 1; log(`dropped from ${String(m?.chat?.id ?? '') || '(no chat)'}`);
+        } else if (m && commandOf(m)) {
+          // Answered now, and after whatever the owner sent before it: /status must see
+          // that work already handed over, not a batch still waiting.
+          await flush(sec);
+          await command(commandOf(m), m, sec).catch((e) => log(`message ${u.update_id}: ${e.message}`));
+        } else if (m) {
+          // Coalescing off: each message is its own turn, except the pieces of one album.
+          if (batch && coalesceMs() === 0 && !(m.media_group_id && m.media_group_id === batch.updates[batch.updates.length - 1].message?.media_group_id)) await flush(sec);
+          hold(u, sec);
+        }
+        // Advanced past an update once nothing of it is waiting here, so a crash part-way
+        // repeats it rather than losing it — the failure this path exists to fix is the
+        // silent one. A message still in the batch keeps the offset where it was.
+        if (!batch?.updates.length) { state.offset = pollFrom; saveState(); }
       }
       saveState();
     } catch (e) {
@@ -790,6 +877,7 @@ async function status() {
   say(`transcribe:  ${c.transcribe_cmd ? 'set' : 'not set — voice notes arrive as audio files'}`);
   say(`speak:       ${c.speak_cmd ? 'set' : 'not set — a voice note gets a text answer only'}`);
   say(`voice ack:   ${c.voice_ack ? 'set' : 'not set'}`);
+  say(`coalesce:    ${coalesceMs() ? `messages ${coalesceMs()} ms apart or closer go as one turn, none held past ${COALESCE_CAP_MS / 1000}s` : 'off — each message is its own turn'}`);
   const list = allowList();
   say(`allowlist:   ${list.join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
   if (list.some((e) => e.endsWith(':checkout'))) say(`checkout:    ${t ? checkoutLine(t) : 'not linked, so :checkout entries refuse every write'}`);
@@ -884,6 +972,7 @@ async function main(argv) {
         say(`transcribe-cmd: ${c.transcribe_cmd || '(not set)'}`);
         say(`speak-cmd:      ${c.speak_cmd || '(not set)'}`);
         say(`voice-ack:      ${c.voice_ack || '(not set)'}`);
+        say(`coalesce-ms:    ${coalesceMs()}${Number.isInteger(c.coalesce_ms) ? '' : '  (the default)'}`);
         say(`allow:          ${allowList().join(' ')}${Array.isArray(c.allow) && c.allow.length ? '' : '  (the default)'}`);
         say(`link:           ${c.link ? `${c.link.project}/${c.link.session}` : '(not linked)'}`);
         return;
@@ -893,6 +982,15 @@ async function main(argv) {
         if (vals[0].trim()) c.voice_ack = vals[0]; else delete c.voice_ack;
         saveConfig(c);
         return say(`voice-ack ${vals[0].trim() ? 'set' : 'off'}`);
+      }
+      if (what === 'coalesce-ms') {
+        const v = vals[0];
+        if (vals.length !== 1 || (v !== '' && !/^\d+$/.test(v)) || Number(v) > COALESCE_CAP_MS) {
+          fail(`usage: fleet-telegram config coalesce-ms <0-${COALESCE_CAP_MS}>  (how long the chat must be quiet before what was sent goes as one turn; 0 sends each message on its own, '' is the default, ${COALESCE_MS})`, 2);
+        }
+        if (v === '') delete c.coalesce_ms; else c.coalesce_ms = Number(v);
+        saveConfig(c);
+        return say(v === '' ? `coalesce-ms ${COALESCE_MS} (the default)` : Number(v) === 0 ? 'coalesce-ms 0: each message is its own turn (an album is still one)' : `coalesce-ms ${Number(v)}`);
       }
       if (what === 'secret-cmd' || what === 'transcribe-cmd' || what === 'speak-cmd') {
         if (vals.length !== 1) fail(`usage: fleet-telegram config ${what} '<command>'  ('' clears it)`, 2);
@@ -944,7 +1042,7 @@ async function main(argv) {
         }
         return;
       }
-      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, speak-cmd, voice-ack, allow, disallow`, 2);
+      return fail(`unknown config key '${what}' — secret-cmd, transcribe-cmd, speak-cmd, voice-ack, coalesce-ms, allow, disallow`, 2);
     }
     case undefined: case 'help': case '-h': case '--help':
       return say(`fleet-telegram — a Telegram chat connected to one fleet session
@@ -957,6 +1055,7 @@ async function main(argv) {
   fleet-telegram config transcribe-cmd '<cmd>'  turns $1 (an audio file) into words on stdout
   fleet-telegram config speak-cmd '<cmd>'     turns stdin into an OGG/Opus voice file at $1
   fleet-telegram config voice-ack '<text>'    sent the moment a voice note arrives ('' turns it off)
+  fleet-telegram config coalesce-ms <n>       messages this close together go as one turn (3000; 0 = off)
   fleet-telegram config allow [--only|--reset] <entry>…   what a Telegram turn may use:
       Read                      a tool, or a glob over tool names
       Write:scratch             that tool, for files in the session's scratch folder only
