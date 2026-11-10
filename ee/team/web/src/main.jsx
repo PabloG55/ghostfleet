@@ -6,7 +6,7 @@ import { Setup, Login, ChangePassword } from './auth.jsx';
 import { Admin } from './admin/index.jsx';
 import { Activity, Settings } from './views.jsx';
 import { Avatar } from './avatar.jsx';
-import { UsageMeter, UsageChips } from './usage.jsx';
+import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
 import { Assistant, HomeAgent, VoiceBar } from './assistant.jsx';
 import { bind, unbind, useAgent } from './agent.js';
 import { TaskRail, TaskChip } from './tasks.jsx';
@@ -71,7 +71,8 @@ function Shell({ me, mode, onLogout }) {
   const loadUsers = useCallback(() => api.users().then(r => setUsers(r.users)).catch(() => {}), []);
   useEffect(() => { loadUsers(); }, []);
   const { data: pj } = usePoll(() => api.projects(), 4000, []);
-  const { data: usage } = usePoll(() => api.usage(), 15000, []);
+  const quotas = seesUsage(me);
+  const { data: usage } = usePoll(() => (quotas ? api.usage() : Promise.resolve(null)), 15000, [quotas]);
   // Automation notices (a run that failed or was skipped) reach whoever is on any page.
   const { data: autos } = usePoll(() => api.automations(), 20000, []);
   const fresh = (autos?.notices || []).filter(n => n.at > noticesSeen());
@@ -112,7 +113,7 @@ function Shell({ me, mode, onLogout }) {
                <NavLink to="/activity" active={route.view === 'activity'} onClick={close}><Icon name="list" /> {t('nav.activity')}</NavLink>
                {admin ? <NavLink to="/admin" active={route.view === 'admin'} onClick={close}><Icon name="key" /> {t('nav.admin')}</NavLink> : null}
              </>}
-             below={<UsageMeter data={usage} />}
+             below={quotas ? <UsageMeter data={usage} /> : null}
              foot={(close) => (
                <div class="side-foot">
                  <Avatar user={me} size={28} />
@@ -121,7 +122,7 @@ function Shell({ me, mode, onLogout }) {
                  <button class="icon-btn" title={t('nav.logout')} aria-label={t('nav.logout')} onClick={ctx.logout}><Icon name="logout" /></button>
                </div>
              )}
-             topEnd={(open) => <UsageChips data={usage} onClick={open} />}
+             topEnd={quotas ? (open) => <UsageChips data={usage} onClick={open} /> : undefined}
              banner={mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div> : null}
              after={<>
                {rail ? <TaskRail ctx={ctx} projects={projects} onClose={() => setRailOpen(false)} /> : null}

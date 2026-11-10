@@ -7,6 +7,13 @@ import { Icon } from '../../../../web/ui/icon.jsx';
 
 const NAMES = words(['work', 'personal'], 'usage.profile');
 const nameOf = (p) => NAMES[p] || p;
+// Who is shown the quotas. The server answers /api/usage with 404 unless the person is an admin
+// or may prompt in some project (server/index.mjs, access.mjs `can`): a viewer sees how full the
+// accounts are for nothing they can spend. The same question, asked here, so the page neither
+// polls a route that refuses it nor leaves an empty slot where the meter would be.
+export const seesUsage = (me) => me.role === 'admin'
+  || Object.values(me.projects || {}).some((r) => r === 'member' || r === 'admin');
+
 export const toneOf = (pct) => (pct >= 85 ? 'red' : pct >= 60 ? 'yellow' : 'green');
 const hhmm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
