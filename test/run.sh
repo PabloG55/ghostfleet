@@ -3229,6 +3229,100 @@ else
   rm -rf "${CI:?}"
 fi
 
+group "codex: a Telegram turn is held by the guard codex runs, and only a codex that runs it gets one"
+# The allowlist is a PreToolUse hook, and codex runs it: the bridge hands every PreToolUse to
+# hooks/fleet-telegram-guard.sh, whose refusal is exit 2 with the reason on stderr, which is
+# what codex blocks on. So the calls go through the command install.sh registers, the way the
+# stub codex runs it, in a desk turn and in a Telegram one. And fleet-telegram delivers to a
+# codex session only when everything that makes that true is there, checked in the codex home
+# the session itself runs under — each missing piece refused on its own.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex Telegram guard" "jq or node is not installed"
+elif ! TX="$(mktemp -d)" || [ ! -d "$TX" ]; then
+  skip "codex Telegram guard" "no temp dir"
+else
+  TX="$(cd "$TX" && pwd -P)"
+  TH="$TX/home"; TC="$TH/.claude-personal"; TF="$TC/fleet"; TK="$TX/codex"
+  mkdir -p "$TX/rt" "$TK" "$TF" "$TH/.config/ghostfleet" "$TX/x" "$TX/src/acme-api" "$TX/empty"
+  ln -s "$ROOT/lib" "$TX/rt/lib"; ln -s "$ROOT/hooks" "$TX/rt/hooks"; ln -s "$ROOT/mods" "$TX/rt/mods"
+  cx_stub "$TX/bin"
+  printf 'acme-api\t%s\tpersonal\n' "$TX/src/acme-api" > "$TH/.config/ghostfleet/projects"
+  printf 'codex\n' > "$TF/cf-personal-acme-api.w1.agent"
+  env CODEX_HOME="$TK" PATH="$TX/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" install "$TX/rt/hooks/codex-fleet-event.sh" >/dev/null 2>&1
+  TXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
+  ROLL="$TK/sessions/2026/11/10/rollout-2026-11-10T04-00-58-$TXID.jsonl"
+  txp() { jq -c --arg c "$TX/src/acme-api" --arg i "$TXID" --arg r "$ROLL" \
+            '.cwd = $c | .session_id = $i | .transcript_path = $r' "$FIX/codex-hook-$1.json"; }
+  # One event through the INSTALLED hooks, as codex runs them. TOUT/TERR/TRC are its stdout,
+  # stderr and status.
+  txh() { local ev="$1" pl="$2"; shift 2
+          printf '%s' "$pl" | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR HOME="$TH" CODEX_HOME="$TK" \
+            CLAUDE_CONFIG_DIR="$TC" CLAUDE_FLEET_SOCK=cf-personal-acme-api CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_EXPERIMENTAL_DIR="$TX/x" "$@" "$TX/bin/codex" hook "$ev" >"$TX/out" 2>"$TX/err"
+          TRC=$?; TOUT="$(cat "$TX/out")"; TERR="$(cat "$TX/err")"; }
+  ups() { txh UserPromptSubmit "$(jq -c --arg p "$1" --arg t "$2" '.prompt = $p | .turn_id = $t' <<< "$(txp user-prompt-submit)")"; }
+  stp() { txh Stop "$(jq -c --arg t "$1" '.last_assistant_message = "done" | .turn_id = $t' <<< "$(txp stop)")"; }
+  tool() { txh PreToolUse "$(jq -c --arg n "$1" --argjson i "$2" '.tool_name = $n | .tool_input = $i' <<< "$(txp pre-tool-use)")"; }
+  TGX() { env -u TMUX -u TMUX_PANE -u XDG_CONFIG_HOME -u GHOSTFLEET_LAUNCH_AGENTS -u GHOSTFLEET_TELEGRAM_DIR \
+              -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CODEX_HOME HOME="$TH" PATH="$TX/bin:$PATH" \
+              GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 GHOSTFLEET_TELEGRAM_SERVICE=pidfile "$@" "$ROOT/bin/fleet-telegram" status 2>&1 \
+          | sed -n 's/^guard: *//p'; }
+  has() { grep -q -- "$1" <<< "$2" && echo yes || echo no; }
+
+  out="$(env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR HOME="$TH" PATH="$TX/bin:$PATH" GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 \
+           "$ROOT/bin/fleet-telegram" link acme-api/w1 2>&1)"
+  is "linking a codex session whose hooks never reported warns" "yes" "$(has 'have not reported from this session' "$out")"
+  is "...and status says it is not wired"            "yes" "$(has '^NOT WIRED.*have not reported' "$(TGX)")"
+
+  ups "list the files here" turn-desk-1
+  is "a desk prompt through the installed hooks writes the codex record" "codex hooks" \
+     "$(jq -r '"\(.agent) \(.events)"' "$TF/$TXID.json" 2>/dev/null)"
+  is "...and fleet-telegram counts the session wired" "yes" "$(has "^wired ($TK/hooks.json)" "$(TGX)")"
+  tool Bash '{"command":"ls"}'
+  is "a desk turn's shell call runs"                 "0 " "$TRC $TERR"
+  stp turn-desk-1
+
+  ups "[telegram] what is in this folder" turn-tg-1
+  is "a Telegram prompt marks the turn"              "yes" "$([ -f "$TF/cf-personal-acme-api.w1.telegram" ] && echo yes || echo no)"
+  tool Bash '{"command":"ls"}'
+  is "...whose shell call is refused, by exit 2"     "2" "$TRC"
+  is "...with the reason on stderr, which codex shows the model" "yes" "$(has 'This turn came from the owner on Telegram' "$TERR")"
+  is "...and nothing on stdout, which codex would parse" "" "$TOUT"
+  tool apply_patch '{"command":"*** Begin Patch\n*** Add File: notes.md\n+x\n*** End Patch"}'
+  is "...so is a patch (codex's only file write)"     "2" "$TRC"
+  tool mcp__ghostfleet__fleet_send '{"session":"w2","prompt":"list the files in acme-api"}'
+  is "...while the fleet's own tools run"            "0" "$TRC"
+  stp turn-tg-1
+  is "the Stop ends the Telegram turn"               "no" "$([ -f "$TF/cf-personal-acme-api.w1.telegram" ] && echo yes || echo no)"
+  tool Bash '{"command":"ls"}'
+  is "...and the next desk turn's shell runs again"  "0" "$TRC"
+
+  # What fleet-telegram refuses, one piece at a time, each put back after.
+  is "a daemon with no CODEX_HOME reads the session's own home" "yes" "$(has '^wired' "$(TGX CODEX_HOME="$TX/empty")")"
+  cp -p "$TF/$TXID.json" "$TX/rec"
+  jq -c --arg r "$TX/empty/sessions/2026/11/10/rollout-x.jsonl" '.transcript = $r' "$TX/rec" > "$TF/$TXID.json"
+  is "...so a session under a home without the hooks is refused" "yes" "$(has "UserPromptSubmit hook is missing in $TX/empty/hooks.json" "$(TGX CODEX_HOME="$TK")")"
+  jq -c 'del(.events)' "$TX/rec" > "$TF/$TXID.json"
+  is "a record the hooks did not write is refused"   "yes" "$(has 'have not reported' "$(TGX)")"
+  cat "$TX/rec" > "$TF/$TXID.json"
+  cp -p "$TK/config.toml" "$TX/ct"
+  perl -0pi -e 's/\[hooks\.state\."[^"\n]*:pre_tool_use:[^"\n]*"\]\ntrusted_hash = "[^"\n]*"\n//' "$TK/config.toml"
+  is "an untrusted PreToolUse hook is refused (codex would not run it)" "yes" "$(has 'PreToolUse hook is untrusted' "$(TGX)")"
+  cat "$TX/ct" > "$TK/config.toml"
+  is "codex with hooks turned off is refused"        "yes" "$(has 'hooks turned off (features.hooks)' "$(TGX CX_STUB_HOOKS=false)")"
+  printf 'opencode\n' > "$TF/cf-personal-acme-api.w1.agent"
+  is "opencode, which never calls the guard, is still refused" "yes" "$(has 'it runs opencode' "$(TGX)")"
+  printf 'codex\n' > "$TF/cf-personal-acme-api.w1.agent"
+  is "...and with all of it back, wired again"       "yes" "$(has '^wired' "$(TGX)")"
+  # The same session in a WORK profile's fleet (socket cf-acme-api), where the bridge does
+  # nothing at all, with a record that says its hooks reported, as a stale one would.
+  mkdir -p "$TH/.claude/fleet"; printf 'codex\n' > "$TH/.claude/fleet/cf-acme-api.w1.agent"
+  jq -c '.sock = "cf-acme-api"' "$TX/rec" > "$TH/.claude/fleet/$TXID.json"
+  printf 'acme-api\t%s\twork\n' "$TX/src/acme-api" > "$TH/.config/ghostfleet/projects"
+  is "a codex session in a work profile's fleet is refused" "yes" "$(has "work profile's fleet" "$(TGX)")"
+  rm -rf "${TX:?}"
+fi
+
 group "codex-here runs without the shared daemon, when codex has the flag"
 # A stub codex that echoes its argv and answers --help like the build named by CXHELP:
 # 0.160.1's help lists --no-daemon, 0.146.0's does not, and passing it there would stop
@@ -29365,8 +29459,9 @@ AGENT
   is "a message while the guard is unwired is refused"  "1" "$(tgsent | grep -c 'not wired' || true)"
   is "...and runs no turn"                              "0" "$(ls "$TG/s" | grep -c '^prompt\.' || true)"
   tgwire 1
-  # Wired, but the session runs another agent, which never calls a Claude Code hook: the
-  # allowlist would not exist there, so the daemon delivers nothing to it.
+  # Wired, but the session runs codex in a WORK profile's fleet (this one is ~/.claude), where
+  # the codex bridge does nothing by decision: the allowlist would not run there, so the
+  # daemon delivers nothing to it. A wired codex in another profile is the codex group's.
   printf 'codex\n' > "$FF/cf-acme-api.master.agent"
   tgpost _push "$(tgmsg 7 4242 'are you there now')"
   until_ok 60 sent_has 'it runs codex'

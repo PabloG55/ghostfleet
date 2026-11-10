@@ -538,6 +538,17 @@ with the whole patch in `tool_input.command` and no file path. An MCP tool is
 `mcp__<server>__<tool>`. Typing into a command that is already running (`write_stdin`) fires no
 `PreToolUse` (source).
 
+**The model calls its tools from JavaScript.** On 0.166.0 with its default model, every shell
+command in these turns arrived as a custom `exec` tool whose input is a script:
+`text(await tools.exec_command({cmd: "echo probe-one"}))`. The `exec` call itself fires no
+`PreToolUse`, since codex fires one only for function-shaped calls (`registry.rs`,
+`pre_tool_use_payload`). Each tool the script calls fires its own `PreToolUse`, and that is
+the `Bash` above. Asked to list its globals, the script had no `fetch`, `require`, `process`,
+`Deno`, `XMLHttpRequest` or `WebSocket`. It had the standard library plus codex's `tools`,
+`ALL_TOOLS`, `text`, `image`, `audio`, `load`, `store`, `notify`, `exit` and timers. So it reaches
+outside only through `tools.*`, and every such call is checked. What `image` and `audio` will
+read was not probed.
+
 **When.** `SessionStart` is lazy: it fires at the first prompt, not at launch, so a codex pane
 nobody has spoken to has fired nothing. `Stop` fires once per finished turn and never mid-turn:
 22 samples of a turn running a 12-second command saw none until it ended. Esc fires
@@ -552,8 +563,10 @@ would ask; a handler that decides nothing leaves codex to draw its own dialog.
   context as a `developer` message.
 - `PreToolUse`: `"permissionDecision": "deny"` blocks the tool, even under
   `--dangerously-bypass-approvals-and-sandbox` (observed: "The command did not run; it was
-  blocked by the recording hook"). Exit 2 with a reason on stderr also blocks (source, and its
-  unit test). But exit 2 with **empty** stderr, any other status, or a hook that times out is a
+  blocked by the recording hook"). Exit 2 with a reason on stderr also blocks, observed with
+  the Telegram guard. The script's `exec_command` came back as `Script failed … Command blocked
+  by PreToolUse hook: [fleet] This turn came from the owner on Telegram, and Bash is not on
+  the channel's allowlist…`, the command did not run, and the model told the owner so. But exit 2 with **empty** stderr, any other status, or a hook that times out is a
   *failed* hook, and **the tool runs**: a `PreToolUse` made to sleep past a 5-second timeout
   showed "hook timed out after 5s" and the command ran. A guard there fails open on a crash or
   a hang, as Claude's does.

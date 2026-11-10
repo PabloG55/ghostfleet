@@ -21,7 +21,10 @@
 # this socket. Only then is the slot resolved and the payload parsed.
 #
 # Blocking contract: exit 2, message on stderr — Claude Code hands stderr to the model as
-# the reason, so the refusal says what it MAY do instead.
+# the reason, so the refusal says what it MAY do instead. codex speaks the same contract
+# (hooks/codex-fleet-event.sh hands it every PreToolUse): seen live, a refused exec_command
+# failed the script with this message and did not run. What codex does NOT send here is
+# write_stdin, typing into a process an earlier turn left running (docs/TELEGRAM.md).
 #
 #   fleet-telegram-guard.sh                 the hook (payload on stdin)
 #   fleet-telegram-guard.sh --list          the effective allowlist, one line, for the context
