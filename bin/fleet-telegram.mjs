@@ -293,10 +293,22 @@ function codexWiring(t) {
   if (s.hooks !== true) return no(`codex has hooks turned ${s.hooks === false ? 'off (features.hooks)' : 'off or unknown'}`, 'turn them on: codex features enable hooks');
   return { ok: true, file: s.hooksFile, fix: '', why: '' };
 }
+// AND ONLY WHEN THE OWNER HAS SAID YES TO THAT GAP. The guard holds every tool codex asks
+// about, and write_stdin is the one it is never asked about, so a codex Telegram turn is held
+// to the allowlist EXCEPT through a process a desk turn left open. That is less than a Claude
+// Telegram turn is held to, and the fleet does not decide on the owner's behalf that it is
+// enough: until config.json says "allow_codex": true, a codex session is refused, with the
+// reason, exactly as before codex had hooks. Everything codexWiring checks still applies on top.
 function wiring(t) {
   const f = path.join(t.cfg, 'settings.json');
   const agent = agentOfLink(t);
-  if (agent === 'codex') return codexWiring(t);
+  if (agent === 'codex') {
+    if (config().allow_codex !== true) {
+      return { ok: false, file: '', fix: `link a session that runs claude, or accept the gap with "allow_codex": true in ${CONFIG}`,
+               why: `the Telegram tool guard is not wired for ${t.name}/${t.session}: it runs codex, whose write_stdin (typing into a process an earlier turn left running) never reaches the guard, and Telegram to codex is off until the owner allows it` };
+    }
+    return codexWiring(t);
+  }
   if (agent !== 'claude') {
     return { ok: false, file: f, fix: `link a session that runs claude or codex, or switch this one back (fleet-agent)`,
              why: `the Telegram tool guard is not wired for ${t.name}/${t.session}: it runs ${agent}, and the guard is a PreToolUse hook that ${agent} never calls, so a Telegram turn there would be unrestricted` };

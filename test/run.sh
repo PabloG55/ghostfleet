@@ -3324,6 +3324,10 @@ else
               GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 GHOSTFLEET_TELEGRAM_SERVICE=pidfile "$@" "$ROOT/bin/fleet-telegram" status 2>&1 \
           | sed -n 's/^guard: *//p'; }
   has() { grep -q -- "$1" <<< "$2" && echo yes || echo no; }
+  # Telegram to codex is off until the owner accepts the write_stdin gap; the rows below are
+  # about everything checked AFTER that yes, so they run with it, and the end of the group
+  # takes it away again.
+  mkdir -p "$TH/.config/ghostfleet/telegram"; printf '{"allow_codex": true}\n' > "$TH/.config/ghostfleet/telegram/config.json"
 
   out="$(env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR HOME="$TH" PATH="$TX/bin:$PATH" GHOSTFLEET_TELEGRAM_API=http://127.0.0.1:9 \
            "$ROOT/bin/fleet-telegram" link acme-api/w1 2>&1)"
@@ -3370,6 +3374,14 @@ else
   is "opencode, which never calls the guard, is still refused" "yes" "$(has 'it runs opencode' "$(TGX)")"
   printf 'codex\n' > "$TF/cf-personal-acme-api.w1.agent"
   is "...and with all of it back, wired again"       "yes" "$(has '^wired' "$(TGX)")"
+  # The same fully wired session, without the owner's yes: refused, naming write_stdin.
+  TCJ="$TH/.config/ghostfleet/telegram/config.json"; cp -p "$TCJ" "$TX/tcj"
+  jq -c 'del(.allow_codex)' "$TX/tcj" > "$TCJ"
+  is "without allow_codex a wired codex is refused"  "yes" "$(has '^NOT WIRED.*write_stdin' "$(TGX)")"
+  jq -c '.allow_codex = "yes"' "$TX/tcj" > "$TCJ"
+  is "...and only a literal true counts as the yes"  "yes" "$(has '^NOT WIRED.*write_stdin' "$(TGX)")"
+  cat "$TX/tcj" > "$TCJ"
+  is "...and with it back, wired again"              "yes" "$(has '^wired' "$(TGX)")"
   # The same session in a WORK profile's fleet (socket cf-acme-api), where the bridge does
   # nothing at all, with a record that says its hooks reported, as a stale one would.
   mkdir -p "$TH/.claude/fleet"; printf 'codex\n' > "$TH/.claude/fleet/cf-acme-api.w1.agent"
