@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { GF_HOME } from './paths.mjs';
 import * as attachments from './attach.mjs';
@@ -136,10 +136,16 @@ export async function queue(project, name) {
 
 // capture-pane READS. It never attaches and never resizes: either would change the pane the
 // desk is looking at and can blind the status detectors that read it.
-export function pane(project, name) {
+export async function pane(project, name) {
   const t = target(project);
+  const names = await new Promise((resolve, reject) => {
+    execFile('tmux', ['-u', '-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
+      { encoding: 'utf8', timeout: 15000 }, (err, stdout) => err ? reject(err) : resolve(stdout.trimEnd().split('\n')));
+  });
+  if (typeof name !== 'string' || /[+\-:.={}]/.test(name) || !names.includes(name))
+    throw Object.assign(new Error(tr('err.badSession', { session: String(name).slice(0, 60) })), { status: 404 });
   return new Promise((resolve, reject) => {
-    execFile('tmux', ['-L', t.sock, 'capture-pane', '-p', '-e', '-t', name],
+    execFile('tmux', ['-u', '-L', t.sock, 'capture-pane', '-p', '-e', '-t', name],
       { encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err && !stdout) return reject(new Error(`tmux capture-pane: ${(stderr || err.message).trim().split('\n')[0]}`));
@@ -157,10 +163,10 @@ const serialize = (fn) => (chain = chain.then(fn, fn));
 
 export function act(tool, args) {
   return serialize(async () => {
-    // human:true — the request comes from a person who read the dialog in the browser,
-    // which is the one thing fleet-answer lets approve a permission prompt.
+    // Only an answer approves the dialog a person read. A send must retain its sender's
+    // provenance: the dispatcher turns human:true into fleet-send --owner.
     const out = await dispatch.callToolAsync(tool, args,
-      { timeout: 15 * 60 * 1000, human: true, status: tool === 'fleet_send' });
+      { timeout: 15 * 60 * 1000, human: tool === 'fleet_answer', status: tool === 'fleet_send' });
     const text = toText(out);
     const undelivered = tool === 'fleet_send' && typeof out === 'object' && !out.isError && out.code !== 0;
     const refused = undelivered || (typeof out === 'object' && out.isError === true);
@@ -187,6 +193,20 @@ const labelFile = (t, s) => marker(t, s, 'label');
 const schedFile = (t, s) => marker(t, s, 'sched');
 const readSched = (t, s) => { try { return JSON.parse(fs.readFileSync(schedFile(t, s), 'utf8')); } catch { return null; } };
 
+// ps supports these fields on both Linux and macOS. A persisted PID alone can refer to
+// an unrelated process after a reboot; old records without a start time are not proof.
+const processField = (pid, field) => {
+  try { return execFileSync('ps', ['-p', String(pid), '-o', `${field}=`], { encoding: 'utf8', timeout: 2000 }).trim(); }
+  catch { return ''; }
+};
+function ourSchedule(t, session, m) {
+  if (!Number.isSafeInteger(m?.pid) || m.pid <= 1 || !m.started) return false;
+  const command = processField(m.pid, 'command');
+  const expected = `${path.join(GF_HOME, 'bin', 'fleet-schedule')} ${t.sock} ${session} ${m.at}`;
+  return /^(?:\S*\/)?bash\s/.test(command) && command.includes(`${expected} `)
+    && processField(m.pid, 'lstart') === m.started;
+}
+
 export function setLabel(project, session, text) {
   const t = target(project);
   const f = labelFile(t, session);                        // first: it refuses a bad name
@@ -201,7 +221,7 @@ export function cancelSchedule(project, session) {
   const t = target(project);
   const f = schedFile(t, session);                        // first: it refuses a bad name
   const m = readSched(t, session);
-  if (m && m.pid) { try { process.kill(-m.pid, 'SIGTERM'); } catch {} try { process.kill(m.pid, 'SIGTERM'); } catch {} }
+  if (ourSchedule(t, session, m)) { try { process.kill(-m.pid, 'SIGTERM'); } catch {} try { process.kill(m.pid, 'SIGTERM'); } catch {} }
   try { fs.unlinkSync(f); } catch {}
   return { ok: true, text: m ? tr('fleet.unsched') : tr('fleet.noSched') };
 }
@@ -217,7 +237,7 @@ export function schedule(project, session, at, msg) {
   });
   child.unref();
   fs.mkdirSync(fleetDir(t), { recursive: true });
-  fs.writeFileSync(f, JSON.stringify({ at, msg, pid: child.pid }));
+  fs.writeFileSync(f, JSON.stringify({ at, msg, pid: child.pid, started: processField(child.pid, 'lstart') }));
   return { ok: true, text: tr('fleet.sched', { when: { at } }) };
 }
 
