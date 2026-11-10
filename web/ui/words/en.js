@@ -173,6 +173,7 @@ export default {
   'sess.stopBody.b': ' for good. Its worktree and branch stay as they are, and the conversation is kept.',
   'sess.stopped': 'Stopped',
   'common.back': 'Back',
+  'common.backTo': 'Back to {place}',
   'sess.changeLabel': 'Change label',
   'sess.schedMsg': 'Scheduled message: {msg}',
   'sess.unsched': 'Cancel schedule',

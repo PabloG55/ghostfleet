@@ -3,6 +3,7 @@ import { STATUS, StatusMark, sinceTs } from './ui.jsx';
 import { GhostShip as Ship, Ship as Boat } from './fleet.jsx';
 import { t } from './i18n.js';
 import { useFleet, useSlot } from './adapter.jsx';
+import { useKept } from './back.jsx';
 
 // The whole fleet at once: every project an island, every session a boat in its status
 // colour, and the ghost ship flying to wherever something just happened — in any project.
@@ -13,10 +14,12 @@ const WORD = (s) => (STATUS[s] || STATUS.unknown).label.toLowerCase();
 export function FleetMap({ projects }) {
   const { go } = useFleet();
   const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
-  const [events, setEvents] = useState([]);
-  const [focus, setFocus] = useState(null);            // {project, session}
+  // Kept per history entry (back.jsx), so the map gone back to from a session is the map that
+  // was left: the box as it was ticked, the ticker's lines, the ship where it was.
+  const [events, setEvents] = useKept('map.events', []);
+  const [focus, setFocus] = useKept('map.focus', null);            // {project, session}
   const [pos, setPos] = useState(null);
-  const [showIdle, setShowIdle] = useState(false);
+  const [showIdle, setShowIdle] = useKept('map.idle', false);
   const prev = useRef(null);
   const sea = useRef(null);
 
@@ -27,6 +30,7 @@ export function FleetMap({ projects }) {
     const before = prev.current;
     prev.current = now;
     if (!before) {
+      if (focus) return;                                 // come back to: the ship stays where it was
       const latest = projects.flatMap(p => p.sessions.map(s => ({ p: p.name, s }))).sort((a, b) => (b.s.ts || 0) - (a.s.ts || 0))[0];
       if (latest) setFocus({ project: latest.p, session: latest.s.name });
       return;
@@ -104,7 +108,7 @@ export function FleetMap({ projects }) {
             </div>
           ) : null}
         </div>
-        <aside class="ticker">
+        <aside class="ticker" data-keep-scroll="ticker">
           <h2>{t('map.live')}</h2>
           {!events.length ? <p class="muted small">{t('map.waiting')}</p> : null}
           {events.map(e => (

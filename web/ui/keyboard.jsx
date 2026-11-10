@@ -66,7 +66,7 @@ export function DeskKeys({ route, projects, settings, openMenu }) {
 
   useEffect(() => {
     const now = () => live.current;
-    const go = (to) => now().fleet.go(to);
+    const go = (to, opts) => now().fleet.go(to, opts);
     const nth = (n) => (now().projects || [])[n - 1] || null;
     const layer = {
       get prefix() { return prefix.current; },
@@ -104,7 +104,9 @@ export function DeskKeys({ route, projects, settings, openMenu }) {
       try {
         const grid = await now().fleet.grid(p.name);
         const c = (grid?.cards || [])[g.card - 1];
-        if (c) go(sessionTo(p.name, c.name));
+        // the project page was a step on the way, not a screen chosen: the card takes its entry,
+        // so back from the card is the screen the chord was typed on (history.js)
+        if (c) go(sessionTo(p.name, c.name), { replace: true });
       } catch { /* the grid it landed on says what went wrong */ }
     };
     // The keys every screen shares, when the screen on top did not take the key.

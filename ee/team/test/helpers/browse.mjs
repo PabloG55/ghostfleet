@@ -7,7 +7,7 @@ import { launch, sleep } from '../../../../lib/browser.mjs';
 const KEYS = {
   ArrowDown: ['ArrowDown', 40], ArrowUp: ['ArrowUp', 38], Home: ['Home', 36], End: ['End', 35],
   Enter: ['Enter', 13, '\r'], ' ': ['Space', 32, ' '], Escape: ['Escape', 27], Tab: ['Tab', 9],
-  Shift: ['ShiftLeft', 16],
+  Shift: ['ShiftLeft', 16], '`': ['Backquote', 192, '`'],
 };
 function keyOf(k) {
   if (KEYS[k]) { const [code, vk, text] = KEYS[k]; return { key: k, code, vk, text }; }
@@ -24,11 +24,15 @@ export async function browse(t, { user = 'admin', lang = 'en', width = 1280, hei
   const [name, value] = cookie.split('=');
   await b.call('Network.setCookie', { name, value, url: base });
 
+  // 'Ctrl+f' holds Control: a chord types no text.
   const press = async (k) => {
+    const ctrl = k.startsWith('Ctrl+');
+    if (ctrl) k = k.slice(5);
     const { key, code, vk, text } = keyOf(k);
-    const modifiers = k === 'Shift' ? 8 : 0;
-    await b.call('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, text, modifiers });
-    await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
+    const modifiers = (k === 'Shift' ? 8 : 0) | (ctrl ? 2 : 0);
+    const typed = ctrl ? undefined : text;
+    await b.call('Input.dispatchKeyEvent', { type: typed ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, text: typed, modifiers });
+    await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
     await sleep(60);
   };
   const until = async (what, fn, ...args) => {

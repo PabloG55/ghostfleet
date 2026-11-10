@@ -10,6 +10,8 @@ import { ACTIONS, EVENTS, STATES, DAY_NAMES, SCOPES, TEMPLATES, blankTrigger, bl
 import { t as tr, locale } from './i18n.js';
 import { Icon } from '../../../../web/ui/icon.jsx';
 import { useKeys } from '../../../../web/ui/keyboard.jsx';
+import { BackLink } from '../../../../web/ui/back.jsx';
+import { back } from '../../../../web/ui/history.js';
 
 const EVERY = [15, 30, 60, 120, 180, 360, 720, 1440];
 const blank = () => ({ id: null, name: '', enabled: true, scope: 'personal', trigger: blankTrigger('schedule'), steps: [] });
@@ -26,11 +28,12 @@ export function Automations({ ctx, projects, id }) {
   const setTab = (t) => { setTabState(t); try { localStorage.setItem(TAB_KEY, t); } catch {} };
   // The editor offers only the projects this person can read (the server says which).
   const mineOnly = data?.me ? (projects || []).filter(p => data.me.projects.includes(p.name)) : projects;
-  // The phone client's Automations keys (web/ui/keyboard.jsx): n a new one, q / ` back to
-  // home from the list, and from one automation back to the list.
+  // The phone client's Automations keys (web/ui/keyboard.jsx): n a new one, q / ` back
+  // (web/ui/history.js): to the screen this was opened from, or, opened by a link, from one
+  // automation to the list and from the list home.
   useKeys((key) => {
     if (key.ctrl || key.alt) return false;
-    if (key.k === 'q' || key.k === '`') { ctx.go(id ? '/automations' : '/'); return true; }
+    if (key.k === 'q' || key.k === '`') { back(id ? '/automations' : '/'); return true; }
     if (key.k === 'n' && !id) { ctx.go('/automations/new'); return true; }
     return false;
   });
@@ -180,7 +183,8 @@ function Editor({ ctx, projects, data, id, onSaved }) {
     try {
       const r = await api.saveAutomation(draft);
       toast(tr(r.automation.enabled ? 'autos.saved' : 'autos.savedOff', { name: r.automation.name }), 'good');
-      onSaved(); ctx.go('/automations');
+      // back, not a push: the list it came from, with its scroll, and no second list to step over
+      onSaved(); back('/automations');
     } catch (e) { toast(e.message, 'bad'); }
     finally { setSaving(false); }
   };
@@ -189,7 +193,7 @@ function Editor({ ctx, projects, data, id, onSaved }) {
     <div class="page autos-edit">
       <header class="page-head">
         <div class="grow">
-          <a class="muted small" href="#/automations">← {tr('nav.automations')}</a>
+          <BackLink parent="/automations" />
           <input class="auto-title" placeholder={tr('autos.namePh')} value={draft.name}
                  onInput={(e) => set({ name: e.currentTarget.value })} aria-label={tr('auth.name')} />
         </div>

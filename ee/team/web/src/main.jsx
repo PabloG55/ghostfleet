@@ -15,6 +15,7 @@ import { teamAdapter } from './adapter.js';
 // The shared screens, from the MIT core (web/ui/README.md); everything else here is the team app's.
 import { FleetProvider } from '../../../../web/ui/adapter.jsx';
 import { Frame, NavLink, sharedRoute, useHashRoute } from '../../../../web/ui/shell.jsx';
+import { go } from '../../../../web/ui/history.js';
 import { Home } from '../../../../web/ui/home.jsx';
 import { ProjectView } from '../../../../web/ui/project.jsx';
 import { FleetMap } from '../../../../web/ui/map.jsx';
@@ -87,7 +88,7 @@ function Shell({ me, mode, onLogout }) {
   const usersById = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const ctx = {
     me, mode, users, usersById, admin,
-    go: (to) => { location.hash = to; },
+    go,                                    // one history for every back (web/ui/history.js)
     logout: async () => { unbind(); try { await api.logout(); } catch {} onLogout(); },
   };
   // The assistant lives above the pages; it needs to know where the person is.

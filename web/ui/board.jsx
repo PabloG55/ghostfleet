@@ -1,7 +1,7 @@
 // The home page as a picture of the fleet: every fleet with something open is a tile, every
 // session a boat in the colour of what it is doing. Words only where a click is needed — a
 // name on hover, and on the boats that are waiting for an answer.
-import { useState } from 'preact/hooks';
+import { useKept } from './back.jsx';
 import { Ship, Led } from './fleet.jsx';
 import { t, worded } from './i18n.js';
 import { useSlot } from './adapter.jsx';
@@ -38,7 +38,7 @@ const projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 // boat belongs to, in its title and as a badge on it. The single-user client has neither.
 export function Board({ projects }) {
   const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
-  const [showQuiet, setShowQuiet] = useState(false);
+  const [showQuiet, setShowQuiet] = useKept('board.quiet', false);
   const now = Date.now() / 1000;
   const fleets = (projects || []).map(p => {
     const boats = p.sessions.map(s => ({ ...s, look: lookOf(s, now) }))

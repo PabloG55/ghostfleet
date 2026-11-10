@@ -173,6 +173,7 @@ export default {
   'sess.stopBody.b': ' para siempre. Su worktree y su rama quedan como están, y la conversación se conserva.',
   'sess.stopped': 'Detenida',
   'common.back': 'Volver',
+  'common.backTo': 'Volver a {place}',
   'sess.changeLabel': 'Cambiar etiqueta',
   'sess.schedMsg': 'Mensaje programado: {msg}',
   'sess.unsched': 'Cancelar programación',

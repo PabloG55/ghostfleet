@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { useKept } from '../../../../web/ui/back.jsx';
 import { api } from './api.js';
 import { Btn, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
 import { Select } from '../../../../web/ui/select.jsx';
@@ -16,7 +17,7 @@ const RESULT = { ran: 'good', refused: 'bad', changed: 'warn' };
 
 export function Activity({ ctx }) {
   const { data, error } = usePoll(() => api.activity(), 5000, []);
-  const [who, setWho] = useState('all');
+  const [who, setWho] = useKept('activity.who', 'all');   // a teammate picked stays picked when gone back to
   const rows = (data?.rows || []).filter(r => who === 'all' || r.user === who);
   return (
     <div class="page">

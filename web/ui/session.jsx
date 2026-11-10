@@ -7,6 +7,7 @@ import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
 import { sendsOnEnter } from './keys.js';
 import { useLayer } from './select.jsx';
+import { BackLink } from './back.jsx';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -84,7 +85,7 @@ function Chat({ msgs, queued, older, onOlder }) {
   const last = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].ts}` : '';
   useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [last, queued.length]);
   return (
-    <div class="chat" ref={ref} onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }}>
+    <div class="chat" ref={ref} data-keep-scroll="chat" onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }}>
       {older ? <button class="link center" onClick={onOlder}>{t('sess.older')}</button> : null}
       {!msgs.length ? <p class="muted center">{t('sess.noMsgs')}</p> : null}
       {msgs.map((m, i) => {
@@ -253,8 +254,9 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
   return (
     <section class="session">
       <header class="sess-head">
+        {/* where the person came from, by name; opened by a link, the session's project */}
+        <BackLink parent={`/p/${encodeURIComponent(project)}`} />
         <div class="sess-title">
-          <button class="link back" onClick={onGone} aria-label={t('common.back')}>←</button>
           <Ship state={st} size={32} />
           <h1>{name}</h1>
           <StatusPill status={st} />
@@ -364,7 +366,7 @@ export function SessionView({ project, name, card, onChanged, onGone }) {
           <form class="stack modal-body" onSubmit={async (e) => {
             e.preventDefault();
             const r = await act('fleet_rename', { new_name: rename.trim() }, { confirm: true });
-            if (r) { setRename(null); fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(rename.trim())}`); }
+            if (r) { setRename(null); fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(rename.trim())}`, { replace: true }); }
           }}>
             <label class="field"><span>{t('sess.newName')}</span><input value={rename} onInput={(e) => setRename(e.currentTarget.value)} autoFocus /></label>
             <footer><Btn onClick={() => setRename(null)}>{t('common.cancel')}</Btn><Btn kind="primary" type="submit" disabled={!rename.trim() || rename.trim() === name}>{t('sess.rename')}</Btn></footer>

@@ -7,6 +7,8 @@ import { Select } from './select.jsx';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKeys, moveFocus, dirOf, typeIntoComposer, focusComposer, projectTo } from './keyboard.jsx';
 import { cycleName } from './keys.js';
+import { useKept } from './back.jsx';
+import { back } from './history.js';
 
 // Grouped by what each one asks of a person, in the order it should be looked at.
 const GROUPS = Object.values(worded({
@@ -44,14 +46,15 @@ export function Card({ c, active, compact, onOpen }) {
 
 // Slots (adapter.jsx): `filterChips({ cards, filter, setFilter })` draws a row of filters over
 // the groups and `filterCards(cards, filter)` applies the one picked — the team app's "mine",
-// "of a teammate", "nobody's". The filter is a plain value this view keeps ('all' to start),
-// so an app with no filters shows every card.
+// "of a teammate", "nobody's". The filter is a value this view keeps per history entry ('all'
+// to start), so a page gone back to has the chip that was picked; an app with no filters shows
+// every card.
 const allCards = (cards) => cards;
 export function ProjectView({ project, session }) {
   const fleet = useFleet();
   const filterCards = useSlot('filterCards', allCards), filterChips = useSlot('filterChips');
   const { data: g, error, reload } = usePoll(() => fleet.grid(project), 3000, [project]);
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useKept('project.filter', 'all');
   const [spawn, setSpawn] = useState(null);
   const [confirm, setConfirm] = useState(null);
 
@@ -75,8 +78,10 @@ export function ProjectView({ project, session }) {
   // The desk's keys, the grid's or an attached session's (keyboard.jsx; README "The keys").
   // Digits count the cards in the fleet's own order, the desk's numbering, not the groups'.
   const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
-  // ` from a session is tmux's detach: a worker goes back to its grid, the master to Projects.
-  const sessionBack = () => fleet.go(current?.lead ? '/' : projectTo(project));
+  // ` from a session is tmux's detach, and here it is back (history.js): to the screen the
+  // session was opened from, the same step as the browser's back and the session's ← link. A
+  // session opened by a link has no such screen and goes to its project's sessions.
+  const sessionBack = () => back(projectTo(project));
   const cycle = (d) => {
     const cs = g?.cards || [];
     const names = [...cs.filter(c => c.lead), ...cs.filter(c => !c.lead)].map(c => c.name);
@@ -159,13 +164,14 @@ export function ProjectView({ project, session }) {
       <div class="split">
         <aside class="split-list">
           <div class="split-head">
-            <button class="link" onClick={() => fleet.go(`/p/${encodeURIComponent(project)}`)}>← {project}</button>
+            {/* the list's name, not a back: the session's own ← says where back goes */}
+            <a class="link split-name" href={`#${projectTo(project)}`}>{project}</a>
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current}
-                     onChanged={reload} onGone={() => fleet.go(`/p/${encodeURIComponent(project)}`)} />
+                     onChanged={reload} onGone={sessionBack} />
         {modals}
       </div>
     );
