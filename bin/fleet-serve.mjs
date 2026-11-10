@@ -57,6 +57,8 @@ import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
+import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
+import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1199,6 +1201,9 @@ async function sessionQueue(t, session) {
 // that lies without erroring.
 const PANE_SCROLLBACK_MAX = 2000;
 function paneCapture(t, session, scrollback) {
+  let release;
+  try { release = accountPaneLease(path.join(t.cfg, 'fleet'), t.sock, session); }
+  catch { return Promise.resolve({ error: 'account sign-in is being submitted' }); }
   return new Promise((resolve) => {
     const args = ['-L', t.sock, 'capture-pane', '-p', '-e'];
     // -e is the entire point: it keeps the SGR escapes, and colour and attributes are how
@@ -1211,6 +1216,7 @@ function paneCapture(t, session, scrollback) {
     args.push('-t', session);
     execFile('tmux', args, { encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
+        release();
         if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
           return resolve({ error: 'that pane produced more output than this server will buffer — ask for less scrollback' });
         // tmux says "can't find pane: x" on stderr and exits non-zero for a session that
@@ -1523,11 +1529,12 @@ export function pushPayload(events, detail) {
   // Jarvis opens the Jarvis screen, anything else opens the app where it was. Present in
   // anonymous mode too — it says which screen, not which project.
   let jm = null; try { jm = jarvis.readMarker(); } catch {}
-  if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
+  if (events.some(e => e.login)) out.open = 'waiting';
+  else if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
   // A push that is only about items a master holds for the owner opens the list of them (the
   // Projects screen), wherever the app was left: the answer is a reply to the item, not
   // whatever session happened to be on screen.
-  else if (events.length && events.every(e => e.kind === 'waiting')) out.open = 'waiting';
+  else if (events.length && events.every(e => e.kind === 'waiting' || e.login)) out.open = 'waiting';
   // AN ACCOUNT NOTICE (fleet-accounts) is the one kind that is not about a session: which
   // profile moved to which login, or ran out until when. Same rule as the rest — every key
   // literal, every name through NAME_OK, numbers as numbers — so web/sw.js composes the
@@ -1554,7 +1561,8 @@ export function pushPayload(events, detail) {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
       const project = safeName(e.project), session = safeName(e.session);
-      if (project && session) sessions.push({ project, session, kind: PUSH_KINDS.has(e.kind) ? e.kind : 'answer' });
+      if (project && session) sessions.push({ project, session, kind: PUSH_KINDS.has(e.kind) ? e.kind : 'answer',
+        ...(e.login && safeName(e.server) ? { server: safeName(e.server) } : {}) });
     }
     if (sessions.length) out.sessions = sessions;
   }
@@ -2009,6 +2017,7 @@ export function keyboardStep(readings, limit) {
 //   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
 // so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
+  if (ev.login) return false;
   // An account notice belongs to no session, so no status can answer it: only the phone
   // polling (readAt) or the hold expiring does.
   if (ev.kind === 'account') return false;
@@ -2049,6 +2058,27 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status, pla
   return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
 }
 let pushHeld = [];
+const loginSeen = new Set();
+async function loginPushEvents() {
+  const items = loginList(shownToPhone());
+  // The subscribed phone may belong only to this Linux host. Read its peer's pending
+  // logins on the same signed, scoped channel the app uses, without a second hop.
+  const fan = await fanOut('/api/logins', { client: { id: 'push' } }, 5000);
+  for (const { peer, r } of fan || []) if (r.status === 200 && Array.isArray(r.json?.items))
+    for (const item of r.json.items) items.push({ ...item, project: addrOf(item.project, peer), sock: `${peer.key}/${item.sock}` });
+  const accountKey = item => `${item.sock}/account:${item.session}`;
+  const activeAccounts = new Set(items.filter(i => i.kind === 'account' && !i.used
+    && (i.status === 'needs-login' || i.expires > Date.now())).map(accountKey));
+  for (const key of loginSeen) if (key.includes('/account:') && !activeAccounts.has(key)) loginSeen.delete(key);
+  const events = [];
+  for (const item of items) {
+    const key = item.kind === 'account' ? accountKey(item) : `${item.sock}/${item.id}`;
+    if (item.used || (item.status !== 'needs-login' && item.expires <= Date.now()) || loginSeen.has(key)) continue;
+    loginSeen.add(key);
+    events.push({ kind: 'needs-you', login: true, server: item.server, project: item.project.split('@')[0], session: item.session, sock: item.sock });
+  }
+  return events;
+}
 
 async function pushTick() {
   let c;
@@ -2063,7 +2093,10 @@ async function pushTick() {
   const rows = scanFleet(), names = sockProjects();
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
   const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
-                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen)];
+                 ...accountEvents(fleetDirs(), accountSizes), ...waitingEvents(heldScan(shownToPhone()), waitingSeen), ...await loginPushEvents()];
+  // Keep transition sampling before the peer await, and put authorizations in the bounded
+  // named payload first so an answer in the same burst cannot hide their server names.
+  fresh.sort((a, b) => Number(!!b.login) - Number(!!a.login));
   if (!fresh.length && !pushHeld.length) return;
   // AT THE KEYBOARD: what would have been sent is held instead, and what was held goes when
   // he leaves (see holdStep). Read only when there is something to decide, and once per tick.
@@ -2332,7 +2365,7 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //
 //   THE SIGNATURE       is this request from the host we paired with, made just now, once
 //   THE SCOPE           is this something a paired host may ask for at all (PAIR_READS,
-//                       PAIR_VERBS): never a passkey verb (a passkey is bound to the host it
+//                       PAIR_VERBS): normally no passkey verb (a passkey is bound to the host it
 //                       was made on, so the remote could not check one), never the terminal,
 //                       never another hop onwards. A photo crosses wherever a send does
 //                       (pairAllows below)
@@ -2371,9 +2404,18 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 //                     a time, so the other side's fleet-know can answer about this machine's
 //                     projects. Never a private or excluded project's (eventsForPeer), and
 //                     never a third host's: what this host fetched from ITS peers stays here
-const PAIR_READS = new Set(['/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
+// LOGIN EXCEPTION: the home host checks the fresh passkey where it was made; the remote
+// checks the pair signature and its OWN pending record. fleet_login_finish checks the
+// state and loopback target; fleet_account_login_finish checks the session, pane,
+// issuing server and current login prompt. fleet_account_login_start addresses ONE
+// nonbusy session, with the same scope as fleet_send.
+// A paired host can already fleet_send arbitrary prompts to remote sessions, strictly more
+// power than completing an authorization the remote started with state it issued. Residual
+// risk: a compromised paired host could sign a session into an account
+// it controls. That grants no wider power than fleet_send already grants to that host.
+const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
-const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
 // has to land where the run and its --check are. It is safe to expose because it is no more
@@ -2383,7 +2425,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
 const PAIR_POSTS = new Set(['/api/shots/verdict']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume and a review verdict to act';
+const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -2620,6 +2662,11 @@ async function proxyRemote(req, res, p, url, body, ip) {
     : (p === '/api/attach' || p.startsWith('/api/term')) ? body?.project : undefined);
   const addr = P.splitAddr(named || '');
   if (!addr) return false;
+  const login = p === '/api/verb' && ['fleet_login_finish', 'fleet_account_login_finish'].includes(body?.tool);
+  if (login) {
+    const a = headerAssertion(req, loadConfig());
+    if (!a || a.error) { send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' }); return true; }
+  }
   const v = peers();
   const peer = v.peers.find(x => x.key === addr.key);
   if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
@@ -2648,8 +2695,9 @@ async function proxyRemote(req, res, p, url, body, ip) {
                                    timeout: p === '/api/verb' ? 15 * 60 * 1000
                                      : p === '/api/attach' ? attachForwardTimeout(String(body.data || '').length) : 15000 });
   if (p === '/api/verb') {
-    const args = Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
+    const args = login ? { project: addr.project, id: out.args.id } : Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
     auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
+                  ...(login ? { confirmed: 'passkey' } : {}),
                   via: 'proxy', host: peer.label, args: { ...args, project: named },
                   result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
                   output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
@@ -3094,6 +3142,18 @@ function agentCatalogue() {
       ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
   }
 
+  if (p === '/api/logins' && req.method === 'GET') {
+    const fan = fanOut('/api/logins', req, 5000);
+    const project = url.searchParams.get('project');
+    const shown = shownTo(req).filter(t => !project || t.name === project);
+    const items = loginList(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
+    for (const { peer, r } of await fan || [])
+      if (r.status === 200 && Array.isArray(r.json?.items))
+        for (const item of r.json.items) if (!project || project === `${item.project}@${peer.key}`)
+          items.push({ ...item, project: addrOf(item.project, peer), host: peer.label, host_key: peer.key });
+    return send(res, 200, { ok: true, items });
+  }
+
   // The accounts line at the top of Projects, and the sheet behind it (usageReport). Read only:
   // switching an account stays at the desk.
   //   It names no project — a profile, its accounts and their figures — so a project hidden
@@ -3382,6 +3442,37 @@ function agentCatalogue() {
 
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (body.tool === 'fleet_account_login_start') {
+      const r = await serialize(async () => {
+        let result;
+        try { result = await startAccountLogin(shownTo(req), body.args || {}); }
+        catch { result = { status: 500, json: { ok: false, text: 'could not start account sign-in' } }; }
+        auditAppend({ ts: now(), client: req.client.id, ip, verb: 'fleet_account_login_start',
+          project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
+          result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
+        return result;
+      });
+      return send(res, r.status, r.json);
+    }
+    if (body.tool === 'fleet_login_finish' || body.tool === 'fleet_account_login_finish') {
+      const a = req.client.pair ? null : headerAssertion(req, c);
+      if (!req.client.pair && (!a || a.error))
+        return send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' });
+      const r = await serialize(async () => {
+        let result;
+        try { result = body.tool === 'fleet_account_login_finish'
+          ? await finishAccountLogin(shownTo(req), body.args || {}, loginRecords(shownTo(req)))
+          : await finishLogin(shownTo(req), body.args || {}); }
+        catch { result = { status: 500, json: { ok: false, text: 'could not finish login' } }; }
+        auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool,
+          project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
+          subject: /^[a-f0-9]{32}$/.test(String(body.args?.id || '')) ? body.args.id : '-',
+          ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: 'passkey' }),
+          result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
+        return result;
+      });
+      return send(res, r.status, r.json);
+    }
     const tool = typeof body.tool === 'string' ? body.tool : '';
     const v = TOOLS_ALLOWED[tool];
     if (!v) {

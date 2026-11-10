@@ -21321,6 +21321,56 @@ else
   skip "Jarvis experimental switch" "tmux or node missing"
 fi
 
+# ── MCP authorization from the phone, including the paired host ─────────────
+group "Claude account login detector: captures, both directions, both locales"
+for locale in C en_US.UTF-8; do
+  out="$(LC_ALL="$locale" node "$ROOT/test/helpers/account-login-detector-check.mjs" 2>&1)"; rc=$?
+  is "$locale: real login and idle/busy captures; synthetic expired widths" "0" "$rc"
+done
+
+group "MCP phone login: two hosts, replay refusals, secret hygiene and cards"
+if command -v node >/dev/null 2>&1; then
+  MPL="$(mktemp -d "$TEST_RUNS.$$.login.XXXXXX")"
+  node "$ROOT/test/helpers/mcp-login-check.mjs" > "$MPL/hosts" 2> "$MPL/hosts.err"
+  is "MCP two-host helper ran" "0" "$?"
+  is "...without complaining" "" "$(cat "$MPL/hosts.err")"
+  is "...and produced its host checks" "yes" "$([ "$(wc -l < "$MPL/hosts")" -ge 75 ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$MPL/hosts"
+  node "$ROOT/test/helpers/login-card-check.mjs" > "$MPL/cards" 2> "$MPL/cards.err"; rc=$?
+  # The cards need a browser and the host checks above do not: a machine with no chrome
+  # skips the cards alone, and says so, instead of reporting four failures in code it never
+  # ran. Any other error from the helper is still a failure.
+  if [ "$rc" != 0 ] && grep -q 'no chrome' "$MPL/cards.err"; then
+    skip "MCP login cards" "no chrome to render them in"
+  else
+    is "MCP card helper ran" "0" "$rc"
+    is "...without browser errors" "" "$(cat "$MPL/cards.err")"
+    is "...and produced its card checks" "yes" "$([ "$(wc -l < "$MPL/cards")" -ge 60 ] && echo yes || echo no)"
+    while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$MPL/cards"
+  fi
+  rm -rf "${MPL:?}"
+else
+  skip "MCP phone login" "node missing"
+fi
+
+group "Claude account phone login: two hosts, refusals and secret hygiene"
+ACL="$(mktemp -d "$TEST_RUNS.$$.account.XXXXXX")"
+node "$ROOT/test/helpers/mcp-login-check.mjs" "$ROOT" account > "$ACL/out" 2> "$ACL/err"; rc=$?
+is "account login rig ran" "0" "$rc"
+while IFS=$'\x1f' read -r label want got; do
+  [ -z "$label" ] || is "$label" "$want" "$got"
+done < "$ACL/out"
+node "$ROOT/test/helpers/login-card-check.mjs" "$ROOT/web" "" account > "$ACL/cards" 2> "$ACL/cards.err"; rc=$?
+if [ "$rc" != 0 ] && grep -q 'no chrome' "$ACL/cards.err"; then
+  skip "account login cards" "no chrome to render them in"
+else
+  is "account cards ran headlessly" "0" "$rc"
+  while IFS=$'\x1f' read -r label want got; do
+    [ -z "$label" ] || is "$label" "$want" "$got"
+  done < "$ACL/cards"
+fi
+rm -rf "${ACL:?}"
+
 # ── one web client, several machines: two fleet-serves, paired ───────────────
 # The owner runs a fleet on a laptop and on an always-on VM, and each was an app of its own
 # with a passkey of its own. Now `fleet-serve pair` joins two daemons once, and the one the

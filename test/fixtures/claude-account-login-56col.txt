@@ -1,0 +1,50 @@
+Welcome to Claude Code v2.1.321
+........................................................
+
+     *                                       █████▓▓░
+                                 *         ███▓░     ░░
+            ░░░░░░                        ███▓░
+    ░░░   ░░░░░░░░░░                      ███▓░
+   ░░░░░░░░░░░░░░░░░░░    *                ██▓░░      ▓
+                                             ░▓▓███▓▓░
+ *                                 ░░░░
+                                 ░░░░░░░░
+                               ░░░░░░░░░░░░░░░░
+       █████████
+      ██▄█████▄██                        *
+       █████████      *
+.......█ █   █ █........................................
+
+ Browser didn't open? Use the url below to    (c to
+ sign in                                      copy)
+
+https://claude.com/cai/oauth/authorize?code=true&client_
+id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=co
+de&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foaut
+h%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Apr
+ofile+user%3Ainference+user%3Asessions%3Aclaude_code+use
+r%3Amcp_servers+user%3Afile_upload+user%3Aplugins&code_c
+hallenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&cod
+e_challenge_method=S256&state=aaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaa
+
+
+ Paste code here if prompted >
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

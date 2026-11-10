@@ -649,7 +649,7 @@ button.usage { cursor: pointer; }
  * so it wrapped onto a line of its own and hung off the end of it. Truncating keeps it
  * tappable, which is the property that matters; capping the font instead would keep the
  * label whole and unreadable to the person who asked for big text. */
-.seg button, .srow button, .sheet .row button, .hdr .more {
+.seg button, .srow button, .sheet .row button, .login-card .row button, .login-card .row a, .hdr .more {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* ...and the general form, because the three selectors above were each added after a
@@ -661,7 +661,7 @@ button { max-width: 100%; }
  * moves no layout, and it only ever SHRINKS the box, so nothing can be pushed past an edge
  * by pressing it. The border is kept, transparent, so a variant that colours it does not
  * change the button's size. */
-button {
+button, .login-card .row a {
   font: inherit; font-weight: 500; color: var(--fg); background: var(--surface-2); border: 1px solid transparent;
   padding: .5em .85em; border-radius: var(--r2); cursor: pointer;
   -webkit-tap-highlight-color: transparent; touch-action: manipulation;
@@ -772,13 +772,13 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
  *   Do NOT "fix" this with `maximum-scale=1` or `user-scalable=no` on the viewport meta:
  * that disables pinch-zoom for everyone, which is a real accessibility loss, and iOS has
  * ignored it in some versions anyway. 16px is the actual threshold and the actual fix. */
-.sheet input[type=text], .sheet textarea, .sheet select {
+.sheet input[type=text], .sheet textarea, .sheet select, .login-card input[type=text] {
   font: inherit; font-size: 16px; width: 100%; color: var(--white); background: var(--surface-2);
   border: 1px solid transparent; padding: .6em .75em; border-radius: var(--r2);
   transition: border-color var(--t1) var(--ease), background-color var(--t1) var(--ease);
 }
 /* A field says it has the caret with its edge, in the colour that means "this one". */
-.sheet input[type=text]:focus, .sheet textarea:focus, .sheet select:focus,
+.sheet input[type=text]:focus, .sheet textarea:focus, .sheet select:focus, .login-card input[type=text]:focus,
 .composer textarea:focus, .find input:focus {
   border-color: color-mix(in srgb, var(--cyan) 60%, transparent); box-shadow: none;
 }
@@ -789,10 +789,12 @@ html.duo .sheet-x { width: 32px; height: 32px; margin: -4px -6px -10px 12px; }
  * Dim and small on purpose: this is reference, not a control. */
 .sheet .gest { margin: 1em 0 0; padding-top: .8em; border-top: 1px solid var(--hair);
                color: var(--dim); font-size: 12.5px; line-height: 1.6; }
-.sheet .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 1.1em; }
+.sheet .row, .login-card .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 1.1em; }
+.login-card .field { margin-top: 1.1em; }
+.login-card .row a { text-decoration: none; }
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
-.sheet .warn { color: var(--yellow); }
+.sheet .warn, .login-card .warn { color: var(--yellow); }
 /* the answer sheet for a question picker: the question as the thing to read, each option's
  * description under its button, and the Submit step's review of what was chosen */
 .sheet p.q { color: var(--white); }
@@ -1876,3 +1878,4 @@ details[open] > summary.autos-run-head::after { transform: rotate(90deg); }
 .autos-compose { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
 .autos-compose textarea { flex: 1 1 auto; min-width: 0; resize: none; }
 .autos-compose button { flex: none; min-height: 44px; }
+.login-card .account-profile { font-size: 24px; line-height: 1.25; margin: 12px 0; }
