@@ -100,9 +100,28 @@ case "${CLAUDE_FLEET_CODEX_DAEMON:-0}" in
      grep -q -- '--no-daemon' <<< "$help" && DAEMON=(--no-daemon) ;;
 esac
 
+# Start without codex's update check. When a newer release exists, codex-cli 0.166.0 draws
+# "Update available · 0.166.0 → 0.167.0" BEFORE its composer, with "› 1. Update now (runs
+# `brew upgrade --cask codex`)" highlighted (test/fixtures/codex-update-0166-*col.txt,
+# measured 2026-11-10). A fleet-spawn's brief waited behind it for the full ready timeout,
+# and was then typed into the menu, where the Enter that follows a paste picks the highlighted
+# row and upgrades codex under every session on the machine. The fleet never updates codex.
+#   `-c check_for_update_on_startup=false` is codex's own key, set for this process only, so
+# config.toml and every other codex client are left as they were; a codex that does not know
+# the key ignores a -c for it, measured on the same build with a made-up key. NOT with the
+# daemon: a -c override forces embedded mode (above), which would quietly undo
+# CLAUDE_FLEET_CODEX_DAEMON=1. There the dialog can still appear, and fleet-spawn's wait
+# reports it to fleet-inbox instead of typing into it. CLAUDE_FLEET_CODEX_UPDATE_CHECK=1 keeps
+# codex's check.
+UPDATE=()
+case "${CLAUDE_FLEET_CODEX_UPDATE_CHECK:-0}:${CLAUDE_FLEET_CODEX_DAEMON:-0}" in
+  1:*|true:*|yes:*|on:*|*:1|*:true|*:yes|*:on) ;;
+  *) UPDATE=(-c check_for_update_on_startup=false) ;;
+esac
+
 # ${a[@]+"${a[@]}"}, never "${a[@]}" — see opencode-here: bash 3.2 + set -u aborts
 # on an empty array, which would kill the pane whenever yolo/model are unset.
-OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} ${DAEMON[@]+"${DAEMON[@]}"} )
+OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} ${DAEMON[@]+"${DAEMON[@]}"} ${UPDATE[@]+"${UPDATE[@]}"} )
 
 # ── record which conversation this pane is in (lib/codex-rollout.mjs) ────────────
 # Only in a fleet pane, and only for the server the pane is really on: $TMUX names it and

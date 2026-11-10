@@ -530,6 +530,7 @@ shortcut):
 
 ```bash
 codex mcp remove ghostfleet                                    # ~/.codex/config.toml
+rm -f "${CODEX_HOME:-$HOME/.codex}/skills/ghostfleet-orchestrate"   # codex's skill
 tmp=$(mktemp); jq 'del(.mcp.ghostfleet)' ~/.config/opencode/opencode.jsonc > "$tmp" \
   && mv "$tmp" ~/.config/opencode/opencode.jsonc              # opencode's MCP entry
 rm -f ~/.config/opencode/plugin/ghostfleet-event.js            # opencode's event bridge

@@ -2341,10 +2341,11 @@ rm -rf "$IM"
 #             only once codex trusts them. So its caveat says where they do not run
 #             (events_off) instead of saying it has none.
 #   mcp_self  codex starts an MCP server with a scrubbed environment (measured by calling
-#             the tool: fleet_list with no arguments answered "fleet-list: no socket"), so
-#             its sessions must NAME the project. opencode passes its env and does not.
-#   skill     ghostfleet-orchestrate is a Claude Code skill and stays Claude-only, so the
-#             other two have the tools without the instructions for using them.
+#             the tool: fleet_list with no arguments answered "fleet-list: no socket"), and
+#             since 2026-11-10 install.sh lists the session's fleet variables in the table's
+#             env_vars, so it resolves its own fleet. cursor still must NAME the project.
+#   skill     ghostfleet-orchestrate is linked for claude, agy, cursor and, since
+#             2026-11-10, codex. opencode has the tools without the instructions.
 group "agent capabilities are declared, not hardcoded"
 fa() { "$ROOT/bin/fleet-agent" "$@"; }
 # A NAMED HELPER, not a `case` inside $( ). macOS ships bash 3.2 and this suite runs on
@@ -2361,11 +2362,13 @@ done
 # Every agent has the TOOLS now, which is the change; the fields below are where they differ.
 is "all three have the fleet_* tools" "yes" \
    "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
-is "...and only claude, agy and cursor have the skill" "claudeagycursor" \
+is "...and only opencode lacks the skill" "claudecodexagycursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
-# cursor joins codex here, measured by calling fleet_list from a real cursor worker: the
-# server it starts gets none of the session's environment.
-is "...and only codex and cursor need a project" "codexcursor" \
+# cursor alone, measured by calling fleet_list from a real cursor worker: the server it
+# starts gets none of the session's environment. codex left this list on 2026-11-10, when
+# install.sh began writing the env_vars line that forwards it (the install group proves it
+# end to end, in both directions).
+is "...and only cursor needs a project" "cursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" mcp_self)" = no ] && printf '%s' "$a"; done)"
 # The caveat is COMPOSED from those fields, so a fourth agent gets a warning by declaring
 # them. Both directions, because a composer that always returned text would be as useless
@@ -2393,10 +2396,11 @@ is "...only in a work profile's fleet"  "1" "$(fa caveat codex | grep -c 'no fle
 is "...and nobody else says so"       "" "$(for a in $(fa list); do [ "$a" = codex ] && continue; grep -q 'work profile' <<< "$(fa caveat "$a")" && printf '%s ' "$a"; done)"
 # What replaced it, per agent — and the other direction on each, since a composer that
 # printed every clause for everybody would pass all the positives above.
-is "codex must name the project"      "1" "$(fa caveat codex | grep -c 'must name the project' || true)"
-is "...and opencode must not"         "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
+is "cursor must name the project"     "1" "$(fa caveat cursor | grep -c 'must name the project' || true)"
+is "...and codex no longer must"      "0" "$(fa caveat codex | grep -c 'must name the project' || true)"
+is "...nor opencode"                  "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
 is "opencode: no orchestrate skill"   "1" "$(fa caveat opencode | grep -c 'no orchestrate skill' || true)"
-is "codex: no skill either"           "1" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
+is "...but codex has it now"          "0" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
 is "...and claude keeps its skill"    "0" "$(fa caveat claude | grep -c 'no orchestrate skill' || true)"
 is "an unknown agent is refused"      "1" "$(fa caveat nosuch >/dev/null 2>&1; echo $?)"
 # `installed` is what the pickers offer from, and it is a SUBSET of `list` — an option
@@ -2443,10 +2447,28 @@ else
   # A codex that RECORDS its argv: the thing worth asserting is the exact command line,
   # because `codex mcp add NAME -- COMMAND` is the syntax and a missing `--` would register
   # a server with no command and fail only when a session tried to use it.
+  #   It also does to config.toml what codex-cli 0.166.0 was measured doing, because the
+  # env_vars line is written by hand AFTER the add: `mcp add` drops the old table and
+  # appends a fresh one with command + args only (a hand-added env_vars line is gone after a
+  # second add — which is why the installer writes it after every add), and `mcp get --json`
+  # names what the table holds. MR_GET_BAD plays a codex that cannot parse the result, and
+  # MR_ADD_KEEPS one whose add leaves an existing table as it is.
   cat > "$MR/bin/codex" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MR_RAN"
-exit "${MR_CODEX_RC:-0}"
+[ "${MR_CODEX_RC:-0}" = 0 ] || exit "$MR_CODEX_RC"
+cfg="${CODEX_HOME:-${HOME:?the stub refuses to run without a HOME}/.codex}/config.toml"
+case "$1 $2" in
+  "mcp add")
+    [ -z "${MR_ADD_KEEPS:-}" ] || exit 0
+    mkdir -p "$(dirname "$cfg")"; [ -f "$cfg" ] || : > "$cfg"
+    awk '/^\[/ { skip = ($0 == "[mcp_servers.ghostfleet]") } !skip' "$cfg" > "$cfg.t" && cat "$cfg.t" > "$cfg" && rm -f "$cfg.t"
+    printf '\n[mcp_servers.ghostfleet]\ncommand = "%s"\nargs = ["%s"]\n' "$5" "$6" >> "$cfg" ;;
+  "mcp get")
+    [ -z "${MR_GET_BAD:-}" ] || exit 1
+    awk '/^\[/ { t = ($0 == "[mcp_servers.ghostfleet]") } t' "$cfg" ;;
+esac
+exit 0
 STUB
   printf '#!/bin/sh\nexit 0\n' > "$MR/bin/opencode"      # only needs to EXIST
   chmod +x "$MR/bin/codex" "$MR/bin/opencode"
@@ -2454,17 +2476,91 @@ STUB
   # --verbose detail in the installer's own run (one line per agent, and the default is a
   # summary), so asserting on it means asking for it. The quiet direction is asserted
   # below rather than assumed.
+  #   CODEX_HOME and HOME ARE ALWAYS SET, both to scratch. The registrar now EDITS
+  # ${CODEX_HOME:-$HOME/.codex}/config.toml itself, so a row that left them alone would
+  # rewrite the developer's own codex config — the opencode trap below, met from our side.
   mr() {   # $1=xdg-config-home ... runs one registrar with the stubs in front
     ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" VERBOSE=1 \
+      HOME="$MR/home" CODEX_HOME="${MR_CXH-$MR/codex}" \
       bash -c 'set -uo pipefail; source "$0"; shift; "$@"' "$MR/lib.sh" x "$2" 2>&1 )
   }
 
   # ── codex: the argv, and the failure path ─────────────────────────────────
   : > "$MR/ran"
+  mkdir -p "$MR/codex"
+  printf 'model = "keep-me"\n\n[mcp_servers.other]\ncommand = "true"\n' > "$MR/codex/config.toml"
+  chmod 600 "$MR/codex/config.toml"
   out="$(mr "$MR/x1" register_codex_mcp)"
+  cxc="$MR/codex/config.toml"
   is "codex is registered by the CLI"       "1" "$(printf '%s' "$out" | grep -c 'registered ghostfleet MCP' || true)"
-  is "...with the exact argv"               "mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" "$(cat "$MR/ran")"
+  is "...with the exact argv"               "mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" "$(head -1 "$MR/ran")"
+  is "...then read back through codex"      "mcp get ghostfleet --json" "$(sed -n 2p "$MR/ran")"
   is "...and the config file is named"      "1" "$(printf '%s' "$out" | grep -c 'config.toml (codex, global)' || true)"
+  # THE SESSION'S FLEET REACHES THE SERVER: codex scrubs an MCP child's environment, and
+  # env_vars is the one way a table can ask for names back. Without this line a codex
+  # session's fleet_list() says "no socket" — proven end to end below, not just by the text.
+  cxl='env_vars = ["CLAUDE_FLEET_SOCK", "CLAUDE_CONFIG_DIR", "CLAUDE_FLEET_DIR", "CLAUDE_FLEET_SLOT", "CLAUDE_FLEET_AGENT", "CLAUDE_FLEET_PROJECTS", "TMUX", "TMUX_PANE", "TMUX_TMPDIR"]'
+  is "the table forwards the session's fleet"  "$cxl" "$(awk '/^\[/ { t = ($0 == "[mcp_servers.ghostfleet]") } t && /^env_vars/' "$cxc")"
+  is "...and keeps the user's other keys"      'model = "keep-me"|command = "true"' \
+     "$(grep -E '^model|^command = "true"' "$cxc" | paste -sd '|' -)"
+  is "...in a file that stays 0600"            "600" "$(stat -c %a "$cxc" 2>/dev/null || stat -f %Lp "$cxc")"
+  # A RE-RUN — the add drops the line, so this is the case that would stack or lose it.
+  : > "$MR/ran"; out="$(mr "$MR/x1" register_codex_mcp)"
+  is "a second run keeps ONE ghostfleet table" "1" "$(grep -c '^\[mcp_servers.ghostfleet\]' "$cxc")"
+  is "...with ONE env_vars line in it"         "1" "$(grep -c '^env_vars' "$cxc")"
+  is "...and still the other server"           "1" "$(grep -c '^\[mcp_servers.other\]' "$cxc")"
+  # A WRITE CODEX DOES NOT CONFIRM IS UNDONE: a config.toml it cannot parse breaks every
+  # codex session, so the edit is put back and the line to add is printed instead.
+  before="$(cat "$cxc")"
+  out="$(MR_GET_BAD=1 mr "$MR/x1" register_codex_mcp)"
+  is "an unconfirmed edit is not a success"    "0" "$(grep -c '✓' <<< "$out" || true)"
+  is "...it says the calls must name the project" "1" "$(grep -c 'must name the project' <<< "$out" || true)"
+  is "...and prints the line to add"           "1" "$(grep -cF "$cxl" <<< "$out" || true)"
+  is "...with the table put back as codex left it" "0" "$(grep -c '^env_vars' "$cxc")"
+  is "...which is the add's own table"         "1" "$(grep -c '^\[mcp_servers.ghostfleet\]' "$cxc")"
+  # AN ADD THAT KEEPS THE TABLE. 0.166.0's rewrites it, so the installer never meets its own
+  # line there; a build that keeps keys, or a hand edit, would leave one, and the installer's
+  # line has to replace it rather than stack beside it. Spelled across lines, as a hand edit
+  # might be, so the skip has to find the closing bracket and not stop at the first line.
+  printf 'model = "keep-me"\n\n[mcp_servers.ghostfleet]\ncommand = "node"\nenv_vars = [\n  "OLD_NAME",\n]\nargs = ["x"]\n' > "$cxc"
+  : > "$MR/ran"; out="$(MR_ADD_KEEPS=1 mr "$MR/x1" register_codex_mcp)"
+  is "an add that keeps the table: still ONE env_vars line" "1" "$(grep -c 'env_vars' "$cxc")"
+  is "...the installer's, not the old one"     "0" "$(grep -c 'OLD_NAME' <<< "$(cat "$cxc")" || true)"
+  is "...and the table's other keys stay"      'command = "node"|args = ["x"]' "$(grep -E '^command|^args' "$cxc" | paste -sd '|' -)"
+  # NO CODEX_HOME: the default is ~/.codex, which is where the CLI writes too.
+  : > "$MR/ran"; out="$(MR_CXH= mr "$MR/x1" register_codex_mcp)"
+  is "without CODEX_HOME it is ~/.codex"       "1" "$(grep -c '^env_vars' "$MR/home/.codex/config.toml" 2>/dev/null || true)"
+  # ── end to end: a codex-shaped client, the real server, a real fleet ──────
+  # The rows above prove the line is WRITTEN; these prove it is the line that matters. The
+  # client builds the server's environment the way codex 0.166.0 was measured to (base set
+  # + env_vars, everything else dropped), out of an environment that plays a codex pane's,
+  # and calls fleet_list with no project. TMUX is unset there so a suite run from inside a
+  # live fleet pane cannot answer with the live fleet; the socket has to come through
+  # CLAUDE_FLEET_SOCK and this run's TMUX_TMPDIR, both of which are on the list.
+  #   BOTH DIRECTIONS, from one config: the same table minus its env_vars line must lose the
+  # fleet. That is also what keeps the client honest — one that passed the whole
+  # environment through would find the fleet both times, and the second row goes red.
+  if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    E="$MR/e2e"; mkdir -p "$E/cfg/fleet" "$E/codex"
+    ( FLEET_HOME="$ROOT" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" HOME="$MR/home" CODEX_HOME="$E/codex" \
+      bash -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" >/dev/null 2>&1 )
+    tmux -L cf-cxmcp kill-server 2>/dev/null
+    tmux -L cf-cxmcp -f /dev/null new-session -d -s master 'sleep 120'
+    cxcall() {  # $1 = a config.toml -> fleet_list() as a codex session in cf-cxmcp makes it
+      env -u TMUX -u TMUX_PANE HOME="$MR/home" CLAUDE_FLEET_SOCK=cf-cxmcp CLAUDE_CONFIG_DIR="$E/cfg" \
+        CLAUDE_FLEET_DIR="$E/cfg/fleet" CLAUDE_FLEET_SLOT=master CLAUDE_FLEET_AGENT=codex \
+        node "$ROOT/test/helpers/codex-mcp-client.mjs" "$1" ghostfleet fleet_list '{}' 2>&1
+    }
+    out="$(cxcall "$E/codex/config.toml")"
+    is "a codex session's fleet_list() finds its own fleet" "1" "$(grep -c '^master ' <<< "$out" || true)"
+    grep -v '^env_vars' "$E/codex/config.toml" > "$E/bare.toml"
+    out="$(cxcall "$E/bare.toml")"
+    is "...and without env_vars it says no socket"  "1" "$(grep -c 'no socket' <<< "$out" || true)"
+    is "...with no fleet in its answer"             "0" "$(grep -c '^master ' <<< "$out" || true)"
+    tmux -L cf-cxmcp kill-server 2>/dev/null
+  else
+    skip "a codex session's fleet_list() end to end" "tmux or node missing"
+  fi
   # A CLI that fails must not be reported as success — and must say what to run by hand.
   out="$(MR_CODEX_RC=1 mr "$MR/x1" register_codex_mcp)"
   is "a failing codex add is not a success" "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
@@ -2558,11 +2654,86 @@ STUB
      "$(grep -q 'fleet_list(project' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
   is "...and keeps tools and hooks apart"    "yes" \
      "$(grep -q 'MCP is tools; hooks are push events' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  # AND SAYS WHAT CLOSED IT. Since 2026-11-10 codex reaches its own fleet through env_vars, so
+  # the matrix that told a reader to name the project from codex has to stop saying so, while
+  # cursor's cell, which is still true, stays. Counted per cell rather than per line: both
+  # cells sit on one table row, and `grep -c` would answer 1 for one cell or for two.
+  is "...and the key that closed it for codex" "yes" \
+     "$(grep -q 'env_vars' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...so the matrix asks only cursor to name the project" "1" \
+     "$(grep -oF '❌ **name it every time**' <<< "$(grep -F 'and a call with no `project` finds its own fleet' "$ROOT/docs/multi-agent-sessions.md")" | wc -l | tr -d ' ')"
   is "uninstall covers codex"               "1" "$(grep -c 'codex mcp remove ghostfleet' "$ROOT/README.md" || true)"
   is "...and opencode's MCP entry"          "1" "$(grep -c 'del(.mcp.ghostfleet)' "$ROOT/README.md" || true)"
   is "...and opencode's event bridge"       "1" "$(grep -c 'plugin/ghostfleet-event.js' "$ROOT/README.md" || true)"
   rm -rf "$MR"
 fi
+
+# ── codex gets the orchestrate skill: one source, a second destination ──────
+# codex reads $CODEX_HOME/skills/<name>/SKILL.md and follows a link there (measured on
+# 0.166.0: the `$` picker listed a linked skill, and `$ghostfleet-orchestrate` put the
+# whole file into a turn). What has to hold is everything AROUND our one entry: skills/
+# also holds codex's own .system/ and the user's skills, and the installer is re-run
+# routinely. So the folder is snapshotted — every path and every file's checksum — and
+# after two installs and the README's uninstall line it must be the same snapshot.
+#   The uninstall row runs the line OUT OF README.md rather than a copy of it here, so
+# the documented command is the tested one.
+group "install.sh links the orchestrate skill for codex, and only ours"
+CS="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^register_codex_skill() {/,/^}/p' "$ROOT/install.sh" >  "$CS/lib.sh"
+sed -n '/^vsay() {/p'                       "$ROOT/install.sh" >> "$CS/lib.sh"
+is "the codex skill registrar was extracted" "1" "$(grep -c '^register_codex_skill() {' "$CS/lib.sh")"
+is "install.sh calls it"                     "1" "$([ "$(grep -c '^register_codex_skill$' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+mkdir -p "$CS/bin" "$CS/rt/skill/ghostfleet-orchestrate" "$CS/home" "$CS/cx/skills/.system/skill-creator" "$CS/cx/skills/my-notes"
+printf -- '---\nname: ghostfleet-orchestrate\ndescription: x\n---\n' > "$CS/rt/skill/ghostfleet-orchestrate/SKILL.md"
+printf -- '---\nname: skill-creator\ndescription: codex own\n---\n' > "$CS/cx/skills/.system/skill-creator/SKILL.md"
+printf -- '---\nname: my-notes\ndescription: the user own\n---\nkeep me\n' > "$CS/cx/skills/my-notes/SKILL.md"
+printf '#!/bin/sh\nexit 0\n' > "$CS/bin/codex"; chmod +x "$CS/bin/codex"
+BASH_ABS="$(command -v bash)"
+rcs() {  # $1 = CODEX_HOME -> runs the registrar with the codex stub on PATH
+  ( FLEET_HOME="$CS/rt" HOME="$CS/home" CODEX_HOME="$1" PATH="$CS/bin:$PATH" VERBOSE=1 \
+    "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_skill' "$CS/lib.sh" 2>&1 )
+}
+snap() { ( cd "$1" && find . -print | LC_ALL=C sort && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
+before="$(snap "$CS/cx/skills")"
+out="$(rcs "$CS/cx")"
+is "the skill is linked into CODEX_HOME"     "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/cx/skills/ghostfleet-orchestrate")"
+is "...as a LINK to the one source, not a copy" "yes" "$([ -L "$CS/cx/skills/ghostfleet-orchestrate" ] && echo yes || echo no)"
+is "...and it says where"                    "1" "$(grep -c 'linked the ghostfleet-orchestrate skill' <<< "$out" || true)"
+out="$(rcs "$CS/cx")"
+is "a second run leaves ONE entry of ours"   "1" "$(find "$CS/cx/skills" -maxdepth 1 -name 'ghostfleet-orchestrate*' | wc -l | tr -d ' ')"
+# THE ln TRAP: without -n, a second `ln -sf` into an existing link to a directory follows
+# it and plants a link INSIDE the source — in the runtime, where nobody looks.
+is "...and plants nothing inside the source" "SKILL.md" "$(ls "$CS/rt/skill/ghostfleet-orchestrate")"
+is "the user's skill survives"               "keep me" "$(sed -n 5p "$CS/cx/skills/my-notes/SKILL.md")"
+is "...and codex's own .system too"          "yes" "$([ -f "$CS/cx/skills/.system/skill-creator/SKILL.md" ] && echo yes || echo no)"
+un="$(grep -F "# codex's skill" "$ROOT/README.md" | sed 's/[[:space:]]*#.*$//')"
+is "the README has the uninstall line"       "1" "$([ -n "$un" ] && echo 1 || echo 0)"
+( HOME="$CS/home" CODEX_HOME="$CS/cx" "$BASH_ABS" -c "$un" ) 2>/dev/null
+is "uninstall leaves the folder exactly as it was" "$before" "$(snap "$CS/cx/skills")"
+is "...and the source untouched"             "yes" "$([ -f "$CS/rt/skill/ghostfleet-orchestrate/SKILL.md" ] && echo yes || echo no)"
+# A REAL DIRECTORY OF THAT NAME is somebody's own copy. `ln -sfn` would put a link inside
+# it; the registrar must leave it alone and say so.
+mkdir -p "$CS/cx2/skills/ghostfleet-orchestrate"; printf 'mine\n' > "$CS/cx2/skills/ghostfleet-orchestrate/SKILL.md"
+before2="$(snap "$CS/cx2/skills")"
+out="$(rcs "$CS/cx2")"
+is "a directory of that name is left alone"  "$before2" "$(snap "$CS/cx2/skills")"
+is "...and it says so"                       "1" "$(grep -c 'left alone' <<< "$out" || true)"
+# ...and the README line cannot delete it either: rm -f does not remove a directory.
+( HOME="$CS/home" CODEX_HOME="$CS/cx2" "$BASH_ABS" -c "$un" ) 2>/dev/null
+is "...nor does the uninstall line"          "$before2" "$(snap "$CS/cx2/skills")"
+# A STALE LINK (an old runtime) is ours and is repointed.
+mkdir -p "$CS/cx3/skills"; ln -s "$CS/gone/skill/ghostfleet-orchestrate" "$CS/cx3/skills/ghostfleet-orchestrate"
+out="$(rcs "$CS/cx3")"
+is "a stale link of ours is repointed"       "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/cx3/skills/ghostfleet-orchestrate")"
+# No CODEX_HOME: ~/.codex, where codex looks by default.
+out="$(rcs "")"
+is "without CODEX_HOME it is ~/.codex/skills" "$CS/rt/skill/ghostfleet-orchestrate" "$(readlink "$CS/home/.codex/skills/ghostfleet-orchestrate")"
+# No codex: nothing is created, and it says so.
+out="$( FLEET_HOME="$CS/rt" HOME="$CS/home" CODEX_HOME="$CS/cx4" PATH="$CS/empty" VERBOSE=1 \
+        "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_skill' "$CS/lib.sh" 2>&1 )"
+is "no codex: it says so"                    "1" "$(grep -c 'codex not installed' <<< "$out" || true)"
+is "...and creates nothing"                  "no" "$([ -e "$CS/cx4" ] && echo yes || echo no)"
+rm -rf "$CS"
 
 # ── Kokoro, the Mac's voice: offered, verified, never assumed ───────────────
 # lib/kokoro-setup.mjs fetches ~350 MB and builds a venv, so NOTHING here touches the
@@ -3458,7 +3629,10 @@ group "codex-here runs without the shared daemon, when codex has the flag"
 # A stub codex that echoes its argv and answers --help like the build named by CXHELP:
 # 0.160.1's help lists --no-daemon, 0.146.0's does not, and passing it there would stop
 # the pane before codex drew anything. The real launcher, not a copy of its logic.
+# The whole argv is asserted, so it ends with the update skip codex-here passes by default
+# (U, below); the daemon opt-in is the one case without it, because a -c forces embedded mode.
 CX="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CX/bin" "$CX/w"
+U=" -c check_for_update_on_startup=false"
 cat > "$CX/bin/codex" <<'STUB'
 #!/bin/sh
 if [ "$1" = --help ]; then
@@ -3470,14 +3644,14 @@ printf codex; for a; do printf " %s" "$a"; done; echo
 STUB
 chmod +x "$CX/bin/codex"
 cxh() { ( cd "$CX/w" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL \
-          -u CLAUDE_FLEET_CODEX_DAEMON CLAUDE_FLEET_YOLO=0 CODEX_HOME="$CX/home" CXHELP=0.160.1 \
+          -u CLAUDE_FLEET_CODEX_DAEMON -u CLAUDE_FLEET_CODEX_UPDATE_CHECK CLAUDE_FLEET_YOLO=0 CODEX_HOME="$CX/home" CXHELP=0.160.1 \
           PATH="$CX/bin:$PATH" "$@" "$ROOT/bin/codex-here" w1 2>/dev/null ); }
-is "fresh: no daemon"                     "codex --no-daemon" "$(cxh CLAUDE_FLEET_FRESH=1)"
-is "resume by id: no daemon"              "codex resume abc --no-daemon" "$(cxh CLAUDE_FLEET_RESUME=abc)"
-is "resume --last: no daemon"             "codex resume --last --no-daemon" "$(cxh)"
-is "...after the other flags"             "codex --dangerously-bypass-approvals-and-sandbox --model m --no-daemon" \
+is "fresh: no daemon"                     "codex --no-daemon$U" "$(cxh CLAUDE_FLEET_FRESH=1)"
+is "resume by id: no daemon"              "codex resume abc --no-daemon$U" "$(cxh CLAUDE_FLEET_RESUME=abc)"
+is "resume --last: no daemon"             "codex resume --last --no-daemon$U" "$(cxh)"
+is "...after the other flags"             "codex --dangerously-bypass-approvals-and-sandbox --model m --no-daemon$U" \
    "$(cxh CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_YOLO=1 CLAUDE_FLEET_CODEX_TRUST=0 CLAUDE_FLEET_MODEL=m)"
-is "a codex without the flag never gets it" "codex resume --last" "$(cxh CXHELP=0.146.0)"
+is "a codex without the flag never gets it" "codex resume --last$U" "$(cxh CXHELP=0.146.0)"
 is "CLAUDE_FLEET_CODEX_DAEMON=1 attaches"  "codex resume --last" "$(cxh CLAUDE_FLEET_CODEX_DAEMON=1)"
 rm -rf "${CX:?}"
 
@@ -11284,6 +11458,111 @@ else
   skip "a send to a busy session is queued" "tmux/jq missing"
 fi
 
+# ── a busy codex queues in codex, not in its input box ───────────────────────
+# A send to a working codex was pasted into the turn that was running, the fold the Claude
+# queue above exists to stop. codex-cli 0.166.0 ships `codex queue --thread <id> --message`,
+# which runs the prompt as a turn of its own after the current one. A stub codex records its
+# argv here, and the pane draws codex's own busy line. What matters is the thread and the
+# CODEX_HOME it is handed, both taken from the pane's conversation and not from this caller:
+# a queue written under another home is a file no TUI reads, and the send would say "queued"
+# for a prompt that never runs.
+group "a send to a busy codex goes through codex queue"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  CQ="$(cd "$(mktemp -d)" && pwd -P)"; CQF="$CQ/fleet"
+  mkdir -p "$CQF" "$CQ/stub" "$CQ/cxh/sessions/2026/11/10" "$CQ/other/sessions/2026/11/10" "$CQ/flat"
+  CXID=01a1c4ab-0000-7000-8000-00000000c0de; CXOLD=01a1c4ab-0000-7000-8000-0000000001d0; CXOTH=01a1c4ab-0000-7000-8000-000000000bad
+  CXRO="$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T09-00-00-$CXID.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CXRO"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T08-00-00-$CXOLD.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/other/sessions/2026/11/10/rollout-2026-11-10T09-30-00-$CXOTH.jsonl"
+  cp "$FIX/codex-rollout-0166.jsonl" "$CQ/flat/rollout-2026-11-10T09-00-00-$CXOTH.jsonl"
+  cxrec() { jq -nc --arg id "$1" --arg so "$2" --arg sl "$3" --arg t "$4" --argjson ts "$5" \
+              '{session_id:$id,agent:"codex",sock:$so,slot:$sl,transcript:$t,ts:$ts,status:"working"}' > "$CQF/$1.json"; }
+  cxrec "$CXID"  cf-cxq   cx-busy "$CXRO" 200
+  cxrec "$CXOLD" cf-cxq   cx-busy "$CQ/cxh/sessions/2026/11/10/rollout-2026-11-10T08-00-00-$CXOLD.jsonl" 100
+  cxrec "$CXOTH" cf-other cx-busy "$CQ/other/sessions/2026/11/10/rollout-2026-11-10T09-30-00-$CXOTH.jsonl" 300
+  jq -nc --arg t "$CQ/flat/rollout-2026-11-10T09-00-00-$CXOTH.jsonl" \
+     '{session_id:"01a1c4ab-0000-7000-8000-00000000f1a7",agent:"codex",sock:"cf-cxq",slot:"cx-flat",transcript:$t,ts:5}' > "$CQF/flat.json"
+  for n in cx-busy cx-idle cx-lost cx-flat; do printf 'codex\n' > "$CQF/cf-cxq.$n.agent"; done
+  cat > "$CQ/stub/codex" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'CODEX_HOME=%s' "${CODEX_HOME:-}"; printf ' <%s>' "$@"; printf '\n'; } >> "$CQ_LOG"
+[ -n "${CQ_FAIL:-}" ] && { echo "Error: no thread with that id" >&2; exit 1; }
+t=""; for a in "$@"; do case "$a" in --thread=*) t="${a#--thread=}" ;; esac; done
+if command -v sqlite3 >/dev/null 2>&1; then
+  sqlite3 "$CODEX_HOME/queue_1.sqlite" "CREATE TABLE IF NOT EXISTS queued_items (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL, queue_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL); INSERT INTO queued_items VALUES (lower(hex(randomblob(8))), '$t', '{}', (SELECT count(*) FROM queued_items), 0, 0);"
+fi
+echo "Queued message m1 for thread $t."
+STUB
+  chmod +x "$CQ/stub/codex"
+  # $1 = log, $2 = the frame it starts on. Any line it is given is logged and turns it busy,
+  # the way a submitted prompt does.
+  cat > "$CQ/pane" <<'PANE'
+#!/usr/bin/env bash
+log="$1"
+frame() { printf '\033[2J\033[H'
+          if [ "$1" = busy ]; then printf '• Working (12s • esc to interrupt)\n\n'; fi
+          printf '› Ask Codex to do anything\n\n  gpt-6.1-sol low · ~/src/acme-api\n'; }
+frame "$2"
+while IFS= read -r line; do printf 'GOT %s\n' "$line" >> "$log"; frame busy; done
+PANE
+  tmux -L cf-cxq kill-server 2>/dev/null
+  tmux -L cf-cxq -f /dev/null new-session -d -x 120 -y 20 -s cx-busy "bash '$CQ/pane' '$CQ/got.busy' busy" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-idle "bash '$CQ/pane' '$CQ/got.idle' idle" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-lost "bash '$CQ/pane' '$CQ/got.lost' busy" 2>/dev/null
+  tmux -L cf-cxq new-session -d -x 120 -y 20 -s cx-flat "bash '$CQ/pane' '$CQ/got.flat' busy" 2>/dev/null
+  for _ in $(seq 1 30); do grep -q 'Working' <<< "$(tmux -L cf-cxq capture-pane -p -t cx-busy 2>/dev/null)" && break; sleep 0.1; done
+  CS() { env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CODEX_HOME CLAUDE_FLEET_DIR="$CQF" CQ_LOG="$CQ/codex.log" \
+           CLAUDE_FLEET_SUBMIT_DELAY=0.1 PATH="$CQ/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cf-cxq "$@" 2>&1; }
+  : > "$CQ/codex.log"
+  # the lookup itself: the newest record for THIS socket's slot, and the home its path names
+  is "thread: the newest record for this socket's slot" "$CXID|$CQ/cxh|record" \
+     "$(CLAUDE_FLEET_DIR="$CQF" node "$ROOT/lib/codex-rollout.mjs" thread --pid 0 --sock cf-cxq --slot cx-busy | tr '\037' '|')"
+  is "...and a rollout outside a sessions folder names no home" "1" \
+     "$(CLAUDE_FLEET_DIR="$CQF" node "$ROOT/lib/codex-rollout.mjs" thread --pid 0 --sock cf-cxq --slot cx-flat >/dev/null 2>&1; echo $?)"
+  is "--would-queue: a busy codex is working" "working" "$(CS --would-queue cx-busy | tail -1)"
+  is "...an idle one is idle"                 "idle"    "$(CS --would-queue cx-idle | tail -1)"
+  o="$(CS cx-busy "task-golf")"
+  is "a busy codex is queued"                 "1" "$(grep -c '(queued #[0-9]* — it is mid-turn' <<< "$o" || true)"
+  is "...through codex queue, on its thread, under its own home" \
+     "CODEX_HOME=$CQ/cxh <queue> <--thread=$CXID> <--message=task-golf>" "$(tail -1 "$CQ/codex.log")"
+  is "...and nothing is typed into its pane"  "0" "$(grep -c 'task-golf' <<< "$(cat "$CQ/got.busy" 2>/dev/null)" || true)"
+  is "...nor said to be pasted into the turn" "0" "$(grep -c 'pasted INTO the running turn' <<< "$o" || true)"
+  is "...and the dispatch is logged as queued" "queued" "$(tail -1 "$CQF/cf-cxq.sent" 2>/dev/null | cut -f6)"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    is "...the next one says where it stands" "1" "$(grep -c 'queued #2 ' <<< "$(CS cx-busy "task-hotel")" || true)"
+  else
+    skip "...the next one says where it stands" "sqlite3 missing"
+  fi
+  CS cx-busy "-v is not a flag" >/dev/null
+  is "a prompt that starts with - stays the message" "<--message=-v is not a flag>" "$(tail -1 "$CQ/codex.log" | grep -o '<--message=[^>]*>')"
+  o="$(CS --reply-to cf-cxq/cx-idle cx-busy "task-india")"
+  is "a queued question writes no reply marker" "no" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
+  is "...and carries the preamble to codex"   "1" "$(grep -c '\[fleet\] This request comes from another agent' "$CQ/codex.log" || true)"
+  n0="$(grep -c . "$CQ/codex.log")"
+  o="$(CS cx-idle "task-juliet")"
+  is "an idle codex is not queued"            "$n0" "$(grep -c . "$CQ/codex.log")"
+  for _ in $(seq 1 20); do grep -q juliet "$CQ/got.idle" 2>/dev/null && break; sleep 0.1; done
+  is "...it is typed in, as before"           "GOT task-juliet" "$(grep juliet "$CQ/got.idle" 2>/dev/null)"
+  o="$(CS --now cx-busy "task-kilo")"
+  for _ in $(seq 1 20); do grep -q kilo "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
+  is "--now still folds into the running turn" "GOT task-kilo|$n0" "$(grep kilo "$CQ/got.busy" 2>/dev/null)|$(grep -c . "$CQ/codex.log")"
+  o="$(CQ_FAIL=1 CS --reply-to cf-cxq/cx-idle cx-busy "task-lima")"
+  for _ in $(seq 1 20); do grep -q lima "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
+  is "a queue codex refuses falls back to the paste" "1" "$(grep -c 'lima' "$CQ/got.busy" 2>/dev/null || true)"
+  is "...and says why"                        "1" "$(grep -c 'codex would not queue it (Error: no thread with that id' <<< "$o" || true)"
+  is "...and the pasted question keeps its reply marker" "yes" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
+  o="$(CS cx-lost "task-mike")"
+  for _ in $(seq 1 20); do grep -q mike "$CQ/got.lost" 2>/dev/null && break; sleep 0.1; done
+  is "a busy codex with no thread on record is pasted" "GOT task-mike" "$(grep mike "$CQ/got.lost" 2>/dev/null)"
+  is "...and says it could not be queued"     "1" "$(grep -c "could not tell which codex thread 'cx-lost'" <<< "$o" || true)"
+  o="$(CS cx-flat "task-november")"
+  is "a rollout that names no home is not queued anywhere" "0" "$(grep -c 'november' "$CQ/codex.log" || true)"
+  tmux -L cf-cxq kill-server 2>/dev/null; rm -rf "$CQ"
+else
+  skip "a send to a busy codex goes through codex queue" "tmux, node or jq missing"
+fi
+
 # The reply address rides IN the queue record, and becomes a marker only when the prompt
 # is delivered. Written at enqueue time it would be armed by whichever UserPromptSubmit
 # came next — a prompt that is not this one — and answer the asker with a stranger's work.
@@ -12046,6 +12325,84 @@ fi
 # answers the prompt in its pane. "queued — it is mid-turn" read as "sent" on the phone,
 # and the owner waited on a session that was waiting on him. The reply says which it is;
 # fleet-serve keys `queued: 'question'` on these words, so they are asserted exactly.
+# ── codex's update prompt: skipped at launch, and never answered by a spawn ──────
+# codex-cli 0.166.0 opens on "Update available" with "1. Update now (runs `brew upgrade
+# --cask codex`)" highlighted when a release is out (test/fixtures/codex-update-0166-*col.txt).
+# A spawn's brief waited the full ready timeout behind it and was then pasted into it, and the
+# Enter after a paste picks the highlighted row. Two halves: codex-here starts codex with the
+# check off, and the spawn wait reports a prompt it finds instead of typing into it, for the
+# cases the first half does not cover (the daemon opt-in, an older codex, any other menu).
+group "a codex update prompt is skipped at launch and never answered by a spawn"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  CU="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CU/stub" "$CU/cxh" "$CU/home/.config/ghostfleet" "$CU/fleet" "$CU/wt"
+  # ── codex-here: the argv it hands codex ──
+  cat > "$CU/stub/codex" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --help) echo "      --no-daemon"; exit 0 ;; --version) echo "codex-cli 0.166.0"; exit 0 ;; esac
+printf ' <%s>' "$@" > "${CU_ARGV:-/dev/null}"; printf '\n' >> "${CU_ARGV:-/dev/null}"
+STUB
+  chmod +x "$CU/stub/codex"
+  cxh() { ( cd "$CU/wt" && env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_CODEX_DAEMON \
+              -u CLAUDE_FLEET_CODEX_UPDATE_CHECK -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$CU/fleet" CLAUDE_CONFIG_DIR="$CU/cfg" \
+              HOME="$CU/home" CODEX_HOME="$CU/cxh" CU_ARGV="$CU/argv" \
+              PATH="$CU/stub:$PATH" "$@" bash "$ROOT/bin/codex-here" w1 >/dev/null 2>&1 ); cat "$CU/argv" 2>/dev/null; }
+  is "codex-here: a fresh codex starts with the update check off" "1" \
+     "$(grep -cF '<-c> <check_for_update_on_startup=false>' <<< "$(cxh env CLAUDE_FLEET_FRESH=1)" || true)"
+  is "...a resumed one too"                   "1" "$(grep -cE '^ <resume> <0000-r1>.*<-c> <check_for_update_on_startup=false>' <<< "$(cxh env CLAUDE_FLEET_RESUME=0000-r1)" || true)"
+  is "...and a resume --last"                 "1" "$(grep -cE '^ <resume> <--last>.*<check_for_update_on_startup=false>' <<< "$(cxh env)" || true)"
+  is "...CLAUDE_FLEET_CODEX_UPDATE_CHECK=1 keeps codex's check" "0" \
+     "$(grep -c 'check_for_update_on_startup' <<< "$(cxh env CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_CODEX_UPDATE_CHECK=1)" || true)"
+  is "...and the daemon opt-in is not undone by a -c" "0|0" \
+     "$(o="$(cxh env CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_CODEX_DAEMON=1)"; printf '%s|%s' "$(grep -c '<-c>' <<< "$o" || true)" "$(grep -c 'no-daemon' <<< "$o" || true)")"
+  is "...nothing is written to codex's config for it" "0" "$(grep -c 'check_for_update' <<< "$(cat "$CU/cxh/config.toml" 2>/dev/null)" || true)"
+
+  # ── the spawn wait: a real fleet-spawn, a stub launcher that draws a captured frame ──
+  # w-upd stays on the update prompt, w-ok draws a ready composer, w-clear shows the prompt
+  # and then a ready composer, the way a human answering it leaves the pane. Keyed on the
+  # worktree's folder: CLAUDE_FLEET_SLOT in a spawned pane is its dev-stack slot, a number.
+  # The rows without the capture's blank tail, which is taller than the pane: printed whole,
+  # the dialog scrolls into history and the screen the wait reads is empty.
+  cat > "$CU/stub/agent-here" <<STUB
+#!/usr/bin/env bash
+frame() { sed '/^[[:space:]]*\$/d' "\$1"; }
+case "\${PWD##*/}" in
+  w-upd)   frame '$FIX/codex-update-0166-56col.txt' ;;
+  w-ok)    frame '$FIX/codex-idle-0160-56col.txt' ;;
+  w-clear) frame '$FIX/codex-update-0166-56col.txt'; sleep 3; printf '\033[2J\033[H'; frame '$FIX/codex-idle-0160-56col.txt' ;;
+esac
+sleep 120
+STUB
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent"\n' "$CU" > "$CU/stub/fleet-send"
+  chmod +x "$CU/stub/agent-here" "$CU/stub/fleet-send"
+  git init -q -b main "$CU/repo" 2>/dev/null
+  git -C "$CU/repo" config user.email t@t; git -C "$CU/repo" config user.name t
+  : > "$CU/repo/f"; git -C "$CU/repo" add -A; git -C "$CU/repo" commit -qm init 2>/dev/null
+  tmux -L cfcuw kill-server 2>/dev/null
+  cuspawn() { ( cd "$CU/repo" && env -u TMUX -u CLAUDE_FLEET_SLOT HOME="$CU/home" CLAUDE_FLEET_SOCK=cfcuw CLAUDE_FLEET_DIR="$CU/fleet" \
+                  CLAUDE_FLEET_SLOTS="$CU/slots" CLAUDE_FLEET_READY_POLLS=20 CLAUDE_FLEET_READY_EVERY=0.25 \
+                  PATH="$CU/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" "$1" --new --agent codex --prompt "brief for $1" >/dev/null 2>&1 ); }
+  cuspawn w-upd; cuspawn w-ok; cuspawn w-clear
+  for _ in $(seq 1 120); do
+    [ "$(grep -c . <<< "$(grep -E 'w-upd	failed|w-clear	need-you' "$CU/fleet/cfcuw.inbox" 2>/dev/null)")" -ge 2 ] \
+      && grep -q 'w-clear' "$CU/sent" 2>/dev/null && break
+    sleep 0.25
+  done
+  ib="$(cat "$CU/fleet/cfcuw.inbox" 2>/dev/null)"; sent="$(cat "$CU/sent" 2>/dev/null)"
+  is "a brief is not typed into the update prompt"   "0" "$(grep -c 'w-upd' <<< "$sent" || true)"
+  is "...the lead is told it waits on it, once, naming it" "1" \
+     "$(grep -cE '	w-upd	need-you	its initial prompt is waiting on a prompt in its pane.* — menu: Update available · 0\.166\.0 → 0\.167\.0' <<< "$ib" || true)"
+  is "...and then that it was not delivered, and why" "1" \
+     "$(grep -cE '	w-upd	failed	its initial prompt was not delivered — its pane is still on a prompt, and typing into it would answer it: menu: Update available' <<< "$ib" || true)"
+  is "a ready codex gets its brief, as before"       "1" "$(grep -c '^-s cfcuw w-ok brief for w-ok' <<< "$sent" || true)"
+  is "...and no row about it"                         "0" "$(grep -c 'w-ok' <<< "$ib" || true)"
+  is "a prompt that clears: reported, then the brief goes" "1|1" \
+     "$(printf '%s|%s' "$(grep -c '	w-clear	need-you	' <<< "$ib" || true)" "$(grep -c '^-s cfcuw w-clear brief for w-clear' <<< "$sent" || true)")"
+  is "...and no failure for it"                       "0" "$(grep -c '	w-clear	failed' <<< "$ib" || true)"
+  tmux -L cfcuw kill-server 2>/dev/null; rm -rf "${CU:?}"
+else
+  skip "a codex update prompt is skipped at launch and never answered by a spawn" "node, tmux or git missing"
+fi
+
 group "a send held behind a question says so"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   NQ="$(mktemp -d)"; NF="$NQ/fleet"; mkdir -p "$NF/nq-1.handoff"
@@ -12751,6 +13108,11 @@ STUB
     is "...through the symlink, a session started on a launch record still shows it" "1" "$(grep -cE '^docs-pass +[^ ]+ +sonnet( |$)' <<< "$out" || true)"
     is "...a Claude session with nothing to read is ?"                            "1" "$(grep -cE '^blank +[^ ]+ +\? ' <<< "$out" || true)"
     is "...a terminal tab is -"                                                   "1" "$(grep -cE '^_term-legacy +[^ ]+ +- ' <<< "$out" || true)"
+    # fleet-model reads the same reader, which answers FIVE columns since the fifth became
+    # codex's effort. Read into three, the effort lands inside `how` ("reply<TAB>-") and no
+    # case below it ever matches — the "now:" line silently disappears for every session.
+    is "fleet-model: a live session's now is its last reply" "1" \
+       "$(grep -cE 'now: +claude-opus-5-5 — the model its last reply came from' <<< "$(smenv "$ROOT/bin/fleet-model" -s cf-acme-api legacy 2>&1)" || true)"
     mv "$SMD/fleet/cf-acme-api.model" "$SMD/fleet/cf-acme-api.model.keep"   # the project default would answer for them
     out="$(smenv "$SMD/bin/fleet-list-link" -s cf-acme-api 2>/dev/null)"
     is "...an asleep session shows its last model"                                "1" "$(grep -cE '^nap +asleep +sonnet-5-5 ' <<< "$out" || true)"
@@ -12811,6 +13173,66 @@ case "$SMD" in "$_smr"/?*|/tmp/?*) rm -rf "${SMD:?}" ;; esac
 # The report the ceiling is judged by. Its corpus is built by hand (test/helpers/
 # context-corpus.mjs) so every number below can be worked out on paper: five priced calls
 # of 100k/200k/400k/600k/800k, each priced at its context x $0.20/MTok.
+# ── a codex session's model, read from its rollout ──────────────────────────
+# The MODEL column said `-` for every codex row while codex's own status line said
+# `GPT-6.1-Sol low`. The rollout records what each turn ran on (turn_context) and every
+# settings change (thread_settings_applied); test/fixtures/codex-rollout-0166.jsonl is a real
+# one from codex-cli 0.166.0, ids and paths replaced, long texts trimmed. Never the pane:
+# its status line is composed to the width and drops the effort first.
+#   "NEVER A WRONG MODEL" is the half that matters most, so it is asked three ways: a rollout
+# with no turn yet, a project default that is a Claude model name sitting right there, and
+# another agent's row pointing at a rollout that does have one. Each must read `-`.
+group "fleet-list: a codex session's model, from its rollout"
+CXM="$(cd "$(mktemp -d)" && pwd -P)"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  mkdir -p "$CXM/fleet" "$CXM/cfg" "$CXM/wt" "$CXM/ro"
+  RO="$FIX/codex-rollout-0166.jsonl"
+  cp "$RO" "$CXM/ro/turn.jsonl"
+  head -1 "$RO" > "$CXM/ro/new.jsonl"                     # started, no turn yet: nothing to say
+  { cat "$RO"; jq -c '.timestamp = "2026-11-10T09:30:00.000Z" | .payload.thread_settings.reasoning_effort = "high"' \
+      <<< "$(grep -F '"thread_settings_applied"' "$RO")"; } > "$CXM/ro/switch.jsonl"
+  jq -c 'if .type == "turn_context" then del(.payload.effort) else . end' "$RO" \
+    | grep -vF '"thread_settings_applied"' > "$CXM/ro/noeff.jsonl"
+  jq -nc '{type:"assistant",timestamp:"2026-11-10T09:00:00Z",message:{model:"claude-opus-5-5",content:[{type:"text",text:"hi"}]}}' > "$CXM/ro/claude.jsonl"
+  smc5() { printf 'x\t%s\t-\n' "$1" | node "$ROOT/lib/session-model.mjs" current | cut -f2,4,5; }
+  is "current: a codex turn's model, how and effort"   "gpt-6.1-sol	turn	low"     "$(smc5 "$CXM/ro/turn.jsonl")"
+  is "...a later settings change wins"                 "gpt-6.1-sol	switch	high"  "$(smc5 "$CXM/ro/switch.jsonl")"
+  is "...a rollout with no turn has none"              "-	none	-"                   "$(smc5 "$CXM/ro/new.jsonl")"
+  is "...and a Claude transcript has no effort column value" "claude-opus-5-5	reply	-" "$(smc5 "$CXM/ro/claude.jsonl")"
+  rec() { jq -nc --arg s "$1" --arg t "$2" '{slot:$s,sock:"cf-cxmodel",ts:1,status:"ready",transcript:$t}' > "$CXM/fleet/$1.json"; }
+  for n in turn new switch noeff; do rec "cx-$n" "$CXM/ro/$n.jsonl"; printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-$n.agent"; done
+  rec cl "$CXM/ro/claude.jsonl"
+  rec oc "$CXM/ro/turn.jsonl"; printf 'opencode\n' > "$CXM/fleet/cf-cxmodel.oc.agent"
+  printf 'sonnet\n' > "$CXM/fleet/cf-cxmodel.model"       # a Claude project default, for the rows that must ignore it
+  tmux -L cf-cxmodel kill-server 2>/dev/null
+  for n in cx-turn cx-new cx-switch cx-noeff cl oc; do
+    tmux -L cf-cxmodel -f /dev/null new-session -d -s "$n" -c "$CXM/wt" 'sleep 60' 2>/dev/null
+  done
+  # asleep rows read the dormant path: one codex whose record still names its rollout, one
+  # whose record is gone, and a claude one, which keeps showing what a wake would start on
+  for n in cx-nap cx-gone cl-nap; do printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "44444444-0000-4000-8000-00000000000${#n}" "$CXM/wt" 1 > "$CXM/fleet/cf-cxmodel.$n.asleep"; done
+  printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-nap.agent"; printf 'codex\n' > "$CXM/fleet/cf-cxmodel.cx-gone.agent"
+  rec cx-nap "$CXM/ro/turn.jsonl"
+  cxl() { env -u TMUX -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_MODEL HOME="$CXM" \
+            CLAUDE_FLEET_DIR="$CXM/fleet" CLAUDE_CONFIG_DIR="$CXM/cfg" "$ROOT/bin/fleet-list" -s cf-cxmodel 2>&1; }
+  out="$(cxl)"
+  is "a codex row shows its last turn's model and effort" "1" "$(grep -cE '^cx-turn +[^ ]+ +gpt-6\.1-sol/low( |$)' <<< "$out" || true)"
+  is "...as ONE word, so the line still splits as before" "gpt-6.1-sol/low" "$(awk '$1 == "cx-turn" {print $3}' <<< "$out")"
+  is "...the newest settings change wins"                 "1" "$(grep -cE '^cx-switch +[^ ]+ +gpt-6\.1-sol/high( |$)' <<< "$out" || true)"
+  is "...no effort recorded: the model alone"             "1" "$(grep -cE '^cx-noeff +[^ ]+ +gpt-6\.1-sol( |$)' <<< "$out" || true)"
+  is "a rollout with no turn yet is -"                    "1" "$(grep -cE '^cx-new +[^ ]+ +- ' <<< "$out" || true)"
+  is "...not the Claude project default beside it"        "0" "$(grep -cE '^cx-new +[^ ]+ +sonnet' <<< "$out" || true)"
+  is "another agent's row is -, whatever its record names" "1" "$(grep -cE '^oc +[^ ]+ +- ' <<< "$out" || true)"
+  is "a claude row is untouched"                          "1" "$(grep -cE '^cl +[^ ]+ +opus-5-5( |$)' <<< "$out" || true)"
+  is "an asleep codex row reads its rollout"              "1" "$(grep -cE '^cx-nap +asleep +gpt-6\.1-sol/low ' <<< "$out" || true)"
+  is "...one with nothing to read is -, not the project's sonnet" "1" "$(grep -cE '^cx-gone +asleep +- ' <<< "$out" || true)"
+  is "...while an asleep claude row keeps the project default"    "1" "$(grep -cE '^cl-nap +asleep +sonnet ' <<< "$out" || true)"
+  tmux -L cf-cxmodel kill-server 2>/dev/null
+else
+  skip "a codex session's model" "node, jq or tmux missing"
+fi
+rm -rf "$CXM"
+
 group "fleet-meter --context"
 if command -v node >/dev/null 2>&1; then
   CM="$(mktemp -d)"; mkdir -p "$CM/corpus"

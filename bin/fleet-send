@@ -146,8 +146,9 @@ esac
 # prompt is multi-line and a line is the record. The reply address is stored RESOLVED and
 # NOT written as a marker yet: a marker written now would be armed by whichever
 # UserPromptSubmit comes next, which is not necessarily this prompt's.
-#   Claude only. The drain is the Claude Stop hook; a codex/opencode target has nothing
-# that would ever deliver a queued prompt, so it keeps the paste.
+#   Claude here. codex keeps a queue of its own, and a busy codex goes there instead (see
+# CODEX_Q below); opencode has nothing that would ever deliver a queued prompt, so it keeps
+# the paste.
 # ── THE TARGET'S FILES GO IN THE TARGET FLEET'S DIRECTORY ─────────────────────
 # Everything below that is keyed by $SOCK — the queue, the reply-to marker the target's Stop
 # hook reads, the --now mark, the manifest, the sent log — belongs to the TARGET, and was
@@ -482,6 +483,40 @@ _mod_backlog() {
 QUEUEABLE=0; { [ -z "$_a" ] || [ "$_a" = claude ]; } && QUEUEABLE=1
 SELF="${BASH_SOURCE[0]}"
 
+# ── A BUSY CODEX QUEUES IN CODEX ──────────────────────────────────────────────────
+# A send to a working codex was pasted into its input box, and Enter there hands the words to
+# the turn that is running: the same fold the Claude queue above exists to prevent. codex-cli
+# 0.166.0 has the fix built in. `codex queue --thread <id> --message <text>` writes the prompt
+# to $CODEX_HOME/queue_1.sqlite, and the TUI that has the thread open runs it as a turn of
+# its own after the current one, without anything here having to wait for it. Measured
+# 2026-11-10 in a scratch fleet: queued to an idle pane it started a turn at once; queued to a
+# busy one it ran next, as its own turn.
+#   The thread id and the CODEX_HOME both come from the pane's own conversation
+# (lib/codex-rollout.mjs thread), never from this caller's environment: a queue written to
+# another home is a file nobody reads, and the send would report "queued" for a prompt that
+# never runs. Anything that cannot be resolved keeps the paste, and says so.
+#   No reply marker is written for it. codex has no hook that would arm one, and a marker
+# left waiting would be armed by whatever turn starts next, which is the rule the Claude queue
+# keeps by carrying the address in its record.
+_cx_thread() {
+  local pp
+  command -v codex >/dev/null 2>&1 || return 1
+  pp="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_pid}' 2>/dev/null)"
+  node "${FLEET_ENV%/*}/codex-rollout.mjs" thread --pid "${pp:-0}" --sock "$SOCK" --slot "$SESSION" --fleet-dir "$FLEET_DIR" 2>/dev/null
+}
+# Where the prompt stands in that queue, for the same "queued #N" every reader keys on
+# (fleet-serve, fleet-telegram, the wake hook). sqlite3 is not on every host, and the number
+# is only shown to people; reaching no answer reads as 1, never as a missing line.
+_cx_queued() {
+  local n=""
+  case "$2" in ''|*[!0-9A-Za-z-]*) ;; *)
+    command -v sqlite3 >/dev/null 2>&1 && [ -f "$1/queue_1.sqlite" ] \
+      && n="$(sqlite3 -readonly -cmd '.timeout 1000' "$1/queue_1.sqlite" "SELECT count(*) FROM queued_items WHERE thread_id = '$2';" 2>/dev/null)" ;;
+  esac
+  case "$n" in ''|0|*[!0-9]*) n=1 ;; esac
+  printf '%s' "$n"
+}
+
 # --- what a send would meet -------------------------------------------------------
 # --would-queue <session>: one word, and nothing sent. `working` (a turn is running),
 # `need-you` (it is stopped on a question or a permission prompt), `backlog` (idle, but
@@ -490,7 +525,7 @@ SELF="${BASH_SOURCE[0]}"
 # and to tell the owner which. The answer is the same three tests the queue gate below
 # applies, so the two cannot disagree; a session that is not Claude has no queue and says idle.
 if [ "$MODE" = probe ]; then
-  if [ "$QUEUEABLE" = 1 ] && busy; then
+  if { [ "$QUEUEABLE" = 1 ] || [ "$_a" = codex ]; } && busy; then
     if [ "$MOD_STATE" = need-you ]; then echo need-you; else echo working; fi
   elif [ "$QUEUEABLE" = 1 ] && { [ -s "$QUEUE" ] || _mod_backlog; }; then echo backlog
   else echo idle
@@ -630,6 +665,11 @@ if [ "$MODE" = send ] && [ "$QUEUEABLE" = 1 ]; then
   fi
   _qunlock
 fi
+CODEX_Q=""
+if [ "$MODE" = send ] && [ "$_a" = codex ] && busy; then
+  CODEX_Q="$(_cx_thread)" \
+    || { CODEX_Q=""; echo "fleet-send: note — could not tell which codex thread '$SESSION' is in, so it cannot be queued there" >&2; }
+fi
 
 # Through the mod or by paste: decided here, before the reply marker below is written.
 # Past the gate a Claude target is idle (a busy one was queued), so a live mod takes it.
@@ -697,7 +737,7 @@ if [ -n "$RSESS" ]; then
     # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
     rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
   }
-  [ "$USE_MOD" = 1 ] || _paste_reply_marker
+  [ "$USE_MOD" = 1 ] || [ -n "$CODEX_Q" ] || _paste_reply_marker
 
   # THE ASKER'S PEER NAME — what Claude Code's cross-session messaging can address, and
   # the reason bin/claude-here now passes --name: it is the SAME string the hook prints in
@@ -777,7 +817,7 @@ pre_busy=no; busy && pre_busy=yes
 # The one-shot marker tells the UserPromptSubmit hook this interruption was deliberate,
 # so it does not label the prompt "queued behind the task in hand" (hooks/fleet-event.sh).
 [ "$pre_busy" = yes ] && [ "$MODE" = now ] && : > "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
-[ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; this is pasted INTO the running turn, not after it." >&2
+[ "$pre_busy" = yes ] && [ -z "$CODEX_Q" ] && echo "fleet-send: note — '$SESSION' is working; this is pasted INTO the running turn, not after it." >&2
 
 # The relay lives in the CLAUDE event hook (hooks/fleet-event.sh), so a target running a
 # different agent will never answer. Say that HERE: the whole point of --reply-to is not
@@ -903,6 +943,20 @@ _mod_requeue() {
   [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
   exit 0
 }
+if [ -n "$CODEX_Q" ]; then
+  IFS=$'\x1f' read -r _cx_id _cx_home _cx_how <<< "$CODEX_Q"
+  # `=` joins each value to its flag, so a prompt that starts with "-" is not read as one.
+  if _cx_out="$(CODEX_HOME="$_cx_home" codex queue --thread="$_cx_id" --message="$MSG" 2>&1)"; then
+    SENT_OUT=queued
+    _jarvis_delivered
+    echo "fleet-send: → $SESSION (queued #$(_cx_queued "$_cx_home" "$_cx_id") — it is mid-turn; codex runs this as its own turn after that one ends. --now folds it in instead)"
+    exit 0
+  fi
+  echo "fleet-send: note — codex would not queue it ($(printf '%s' "$_cx_out" | tr '\n' ' ' | cut -c1-160)); pasting INTO the running turn instead" >&2
+  CODEX_Q=""
+  [ -n "$RSESS" ] && _paste_reply_marker
+fi
+
 if [ "$USE_MOD" = 1 ]; then
   _spool="$MOD_DIR/$MOD_SID.handoff"
   _hid="${MOD_NOW:-$(date +%s)000}-$$"
