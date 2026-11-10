@@ -1,0 +1,56 @@
+/* Administración → Uso. The bars are the sidebar's usage bars (.ubar), at table size. */
+.uadm { display: flex; flex-direction: column; gap: 14px; }
+.uadm-sum { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.uadm-tile { background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.uadm-tile span { color: var(--dim); font-size: 12.5px; }
+.uadm-tile b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.uadm-tile small { color: var(--dim); font-size: 12px; }
+.uadm .usd { color: var(--green); }
+.uadm-note { margin: 0; }
+.uadm-tablewrap { overflow-x: auto; border: 1px solid var(--hair); border-radius: var(--r); background: var(--panel); }
+.uadm-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.uadm-table th { text-align: left; color: var(--dim); font-weight: 500; font-size: 12px; padding: 10px 12px; border-bottom: 1px solid var(--hair); }
+.uadm-table td { padding: 8px 12px; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+.uadm-table tr:last-child td { border-bottom: 0; }
+.uadm-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.uadm-table td.num b { display: block; }
+.uadm-table td.num small { display: block; color: var(--dim); font-size: 11.5px; }
+.uadm-table tr.is-over td { background: rgba(255, 95, 95, .05); }
+.uadm-who { display: flex; align-items: center; gap: .55em; background: none; border: 0; color: var(--fg); cursor: pointer; padding: 0; font: inherit; text-align: left; }
+.uadm-who .caret { color: var(--dim); width: 1em; }
+.uadm-who .badge { margin-left: .3em; }
+.capcell { min-width: 170px; }
+.ucap { display: flex; align-items: center; gap: .6em; }
+.ucap-track { flex: 1 1 auto; height: 6px; border-radius: var(--r); background: var(--line); overflow: hidden; min-width: 60px; }
+.ucap-track i { display: block; height: 100%; background: var(--c, var(--cyan)); border-radius: var(--r); }
+.ucap-v { font-size: 12.5px; white-space: nowrap; color: var(--c); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ucap-v small { color: var(--dim); font-weight: 400; }
+.uadm-projects td { background: var(--panel2); }
+.uproj { display: grid; grid-template-columns: minmax(90px, 200px) 1fr 64px 90px; gap: 10px; align-items: center; padding: 3px 0 3px 2.2em; font-size: 13px; }
+.uproj .ucap-track i { background: var(--cyan); }
+.uproj b { font-variant-numeric: tabular-nums; text-align: right; }
+.uproj small { text-align: right; }
+.ucap-form { display: flex; flex-direction: column; gap: 12px; }
+.row.end { justify-content: flex-end; }
+.cap-mini { display: none; }
+.admin-tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+.admin-tabs a { padding: .35em .85em; border-radius: var(--r); border: 1px solid var(--line); color: var(--dim); text-decoration: none; font-size: 13px; }
+.admin-tabs a.on { color: var(--fg); border-color: var(--cyan); }
+
+@media (max-width: 700px) {
+  .uadm-sum { grid-template-columns: 1fr; }
+  .uadm-tile { flex-direction: row; align-items: baseline; gap: .6em; }
+  .uadm-tile b { font-size: 18px; }
+  .uproj { grid-template-columns: 1fr auto; padding-left: 0; }
+  .uproj .ucap-track, .uproj small { display: none; }
+  /* The week is the one period a phone can do without. The cap moves under the name, and
+     its button into the row that opens: a table that scrolls sideways hides exactly those. */
+  .uadm-table th:nth-child(3), .uadm-table td:nth-child(3),
+  .uadm-table th:nth-child(5), .uadm-table td:nth-child(5),
+  .uadm-table th:nth-child(6), .uadm-table td:nth-child(6) { display: none; }
+  .uadm-table .uadm-projects td { display: table-cell; }
+  .cap-mini { display: block; margin: 6px 0 0 1.55em; }
+  .uadm-table th, .uadm-table td { padding: 8px 8px; }
+  .uadm-who .badge { white-space: nowrap; }
+  .capcell { min-width: 120px; }
+}

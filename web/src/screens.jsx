@@ -79,6 +79,12 @@ import { clockLabel } from '../grid.js';
 // called until mount() runs, long after both modules have finished evaluating.
 import { ReviewsScreen, ReviewScreen } from './reviews.jsx';
 import { AutomationsScreen } from './automations.jsx';
+// The desk's keyboard rules, from the shared UI (web/ui/keys.js): which keys a text box keeps,
+// when ⏎ sends, how a real keyboard is told from the on-screen one, and the Ctrl-f chord.
+// app.js reads them from here because this bundle is the one module it already loads that
+// is built, so the shared file is bundled in rather than becoming one more file the server
+// has to know to serve and the service worker to precache. The team app reads the same file.
+export { typingIn, sendsOnEnter, enterSends, noteKeyboard, keyboardSeen, setSoftKeyboardProbe, deskKeyInComposer, jumpStep } from '../ui/keys.js';
 
 // ── a button whose key letter stays in the label ──────────────────────────────────────
 // The TUI's footer is muscle memory, and a button that says "p pause" transfers where one
