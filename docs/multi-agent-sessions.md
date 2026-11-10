@@ -108,7 +108,7 @@ than guessed:
 
 | | claude | opencode | codex | agy | cursor |
 |---|---|---|---|---|---|
-| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ✅ `$CODEX_HOME/hooks.json`, trusted in `config.toml` (working + done + need-you; **not** in a work profile's fleet) | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ✅ `$CODEX_HOME/hooks.json`, trusted in `config.toml` (working + done + need-you + the phone sign-in capture; **not** in a work profile's fleet) | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
 | ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
 | …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ | ❌ **name it every time** |
 | orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
@@ -506,8 +506,16 @@ line, `› 1. Review hooks`, is in codex's `blocked_re`, captured at 120, 56 and
 
 `install.sh` writes both halves (`lib/codex-hooks.mjs`, called from `register_codex_hooks`):
 ours after the user's own groups, one record per handler computed as above, and nothing else
-in either file. Six records codex wrote from its own dialog are in
-`test/fixtures/codex-hook-trust.json`, and the suite holds the computation to them. On a
+in either file. Seven records codex wrote from its own dialog are in
+`test/fixtures/codex-hook-trust.json`, and the suite holds the computation to them. The
+seventh is `PostToolUse`, registered with Claude's matcher `mcp__.*__authenticate` so that
+the phone sign-in's capture (`docs/MCP-LOGIN.md`) starts no process for any other tool. It
+was taken alone in a second scratch home, the same way. The hash computed with the matcher
+was the one codex wrote; the same handler without it hashes differently, so a matcher is part
+of the record, and changing one is a re-trust. Whether codex's matcher is a full or a partial
+regex match was not measured, because no turn called an MCP tool. Either reading lets an
+`…__authenticate` call through and keeps every other tool name out. The capture checks the
+whole name again, anchored, before it writes anything. On a
 scratch `CODEX_HOME` with a user hook already trusted, codex started with no review screen
 after the install, brought it up when one record was altered, and started with none after
 `node lib/codex-hooks.mjs uninstall`, which left `hooks.json` byte-identical and

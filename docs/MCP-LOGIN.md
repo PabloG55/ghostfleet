@@ -32,6 +32,26 @@ hook. Apply the same hook update on the Linux host for sessions running there. E
 pairing, project sharing, push subscriptions and Telegram configuration are reused.
 No new port or public OAuth callback is needed. Nothing is deployed by the tests.
 
+### codex sessions
+
+A codex session runs the same `login-capture.mjs`, from codex's own `PostToolUse` hook:
+`hooks/codex-fleet-event.sh` hands it the payload unchanged. install.sh registers that hook in
+`$CODEX_HOME/hooks.json` with the matcher above and trusts it in `config.toml`, and the
+capture finds the session through the record the codex bridge writes under codex's thread id.
+As with every codex event, it does nothing in a work profile's fleet or outside a fleet. Its
+deployment is the codex bridge's: `cf-sync`, then `./install.sh` for the hook and its trust
+record, then a new codex session.
+
+What it covers is narrower than for Claude Code. Claude Code itself gives an MCP server that
+needs OAuth a `mcp__<server>__authenticate` tool. codex 0.166.0 has no such tool: its binary
+says to run `codex mcp login <server>`, a command with a loopback callback of its own, and
+that sign-in never passes through a tool result, so nothing here can capture it. The codex
+capture fires only for an MCP server that implements an `authenticate` tool itself and
+returns the URL in its result. That path was proven with the recorded codex `PostToolUse`
+payload and a stub codex (`./test/run.sh "codex: an MCP authenticate result"`), not with a real
+codex call: the shape of a real MCP `tool_response` from codex was not measured, so both a
+string and content blocks are tested.
+
 ## Verification
 
 `./test/run.sh "MCP phone login"` runs two isolated fleet-serves, a synthetic passkey,

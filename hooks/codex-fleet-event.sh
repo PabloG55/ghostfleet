@@ -3,7 +3,7 @@
 #
 # codex has lifecycle hooks (measured on 0.166.0; `codex features list`: `hooks  stable  true`):
 # $CODEX_HOME/hooks.json, JSON on stdin, one command per event. install.sh registers this
-# file there for six of them (lib/codex-hooks.mjs). Like the agy and cursor bridges, it does
+# file there for seven of them (lib/codex-hooks.mjs). Like the agy and cursor bridges, it does
 # NOT re-implement what hooks/fleet-event.sh does with a turn — status record, inbox row,
 # sub-lead routing, lead wake, reply-to relay, Telegram mark, briefing. It hands
 # fleet-event.sh the Claude-shaped payload it already reads, so there is one implementation
@@ -26,6 +26,11 @@
 #   PreToolUse        -> fleet-telegram-guard.sh, unchanged: codex blocks a tool call on
 #                                          exit 2 with the reason on stderr, the contract the
 #                                          guard already speaks for Claude Code
+#   PostToolUse       -> mods/ghostfleet/hooks/login-capture.mjs, unchanged: an MCP
+#                                          authenticate result becomes a pending login the
+#                                          phone can finish (docs/MCP-LOGIN.md). Registered
+#                                          with Claude's matcher, mcp__.*__authenticate, so
+#                                          no other tool call starts a process for it
 # Nothing else is passed on: fleet-event.sh reads any event it does not name as `working`.
 #
 # THE STDOUT CONTRACT IS CODEX'S. SessionStart and UserPromptSubmit may print one
@@ -55,6 +60,18 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 case "$ev" in
   PreToolUse)
     CLAUDE_FLEET_SOCK="$sock" exec bash "$here/fleet-telegram-guard.sh" ;;
+  PostToolUse)
+    # THE SAME CAPTURE CLAUDE'S MOD RUNS, handed the payload as codex sent it: codex names an
+    # MCP tool mcp__<server>__<tool> and gives tool_response as a string, the two fields
+    # login-shape.js reads. It finds the session by session_id in the fleet dir, which is the
+    # record this bridge writes (keyed by the thread id), and it prints nothing, so codex has
+    # nothing to read as a decision. Its failures are silent by design (tool output is never
+    # logged), and a capture that is missing or crashes must not fail codex's tool call
+    # either: not exec'd, so its status is never the hook's.
+    command -v node >/dev/null 2>&1 || exit 0
+    CLAUDE_FLEET_DIR="${CLAUDE_FLEET_DIR:-$CLAUDE_CONFIG_DIR/fleet}" \
+      node "$here/../mods/ghostfleet/hooks/login-capture.mjs" >/dev/null 2>&1
+    exit 0 ;;
   SessionStart|UserPromptSubmit|Stop|PermissionRequest|Interrupt) ;;
   *) exit 0 ;;
 esac

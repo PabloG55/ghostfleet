@@ -611,11 +611,19 @@ case "${1:-}" in
     exit 0 ;;
   mcp) exit 0 ;;
   hook)
+    # A group's matcher is a regex on the tool's name, tried unanchored (the looser reading:
+    # a row that says a tool did NOT reach a hook holds under either). CX_STUB_LOG, when set,
+    # gets each command it runs, so a row can tell "the hook ran and did nothing" from "codex
+    # never ran it".
     payload="$(cat)"; rc=0
+    tool="$(jq -r '.tool_name // ""' <<< "$payload" 2>/dev/null)"
     while IFS= read -r c; do
       [ -n "$c" ] || continue
+      [ -n "${CX_STUB_LOG:-}" ] && printf '%s\n' "$c" >> "$CX_STUB_LOG"
       printf '%s' "$payload" | sh -c "$c"; r=$?; [ "$r" = 0 ] || rc=$r
-    done < <(jq -r --arg e "$2" '(.hooks[$e] // [])[] | (.hooks // [])[] | select(.type == "command") | .command' "${CODEX_HOME:?}/hooks.json" 2>/dev/null)
+    done < <(jq -r --arg e "$2" --arg t "$tool" '(.hooks[$e] // [])[]
+               | select((.matcher // "") as $m | $m == "" or ($t | test($m)))
+               | (.hooks // [])[] | select(.type == "command") | .command' "${CODEX_HOME:?}/hooks.json" 2>/dev/null)
     exit "$rc" ;;
 esac
 exit 0
@@ -624,10 +632,21 @@ STUB
 }
 cx_hooks_json() {    # <file> [bridge]: hooks.json as install.sh writes it, at this checkout's bridge
   jq -n --arg b "${2:-$ROOT/hooks/codex-fleet-event.sh}" --arg q "'" '
-    { hooks: ( ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","Stop","Interrupt"]
-      | map({ key: ., value: [ { hooks: [ { type: "command", command: ($q + $b + $q + " " + .),
+    { hooks: ( ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","Stop","Interrupt","PostToolUse"]
+      | map({ key: ., value: [ (if . == "PostToolUse" then { matcher: "mcp__.*__authenticate" } else {} end)
+                               + { hooks: [ { type: "command", command: ($q + $b + $q + " " + .),
                                              timeout: (if . == "Interrupt" then 3 else 30 end) } ] } ] })
       | from_entries ) }' > "$1"
+}
+cx_login_payload() { # <cwd> [as-object]: codex's measured PostToolUse, as an MCP authenticate result
+  # The tool and its response are put into the payload codex sent for a Bash call; the rest
+  # (session_id, turn_id, transcript_path, the keys themselves) is what codex sent. codex gave
+  # a Bash result as a string; an MCP one was not measured, so the second shape is the content
+  # blocks Claude's test feeds the same capture (test/helpers/mcp-login-check.mjs).
+  local u='https://auth.example.com/oauth/authorize?response_type=code&client_id=placeholder&redirect_uri=http%3A%2F%2Flocalhost%3A47123%2Fcallback&state=issued-state&scope=tools'
+  jq -c --arg c "$1" --arg u "$u" --arg obj "${2:-}" '.cwd = $c | .tool_name = "mcp__example__authenticate" | .tool_input = {}
+    | ("Ask the user to open this URL in their browser to authorize the example MCP server:\n\n" + $u) as $t
+    | .tool_response = (if $obj != "" then {content: [{type: "text", text: $t}]} else $t end)' "$FIX/codex-hook-post-tool-use.json"
 }
 cx_tree() {          # <dir> -> one digest of every path and every byte under it
   ( cd "$1" && find . | LC_ALL=C sort && find . -type f | LC_ALL=C sort | while IFS= read -r f; do cksum < "$f"; done ) | cksum
@@ -3024,7 +3043,8 @@ group "codex: the bridge does nothing in a work profile's fleet, or outside any 
 # both the bridge must leave no trace: no record, no inbox row, no briefing, no ledger, and
 # — PreToolUse included — no guard. The work profile is the one whose config is ~/.claude
 # (CLAUDE_CONFIG_DIR unset, or pointing there). Every event, every case, one digest of the
-# whole tree before and after.
+# whole tree before and after — PostToolUse as an MCP authenticate result, so the login
+# capture is asked too and writes no pending login there.
 if ! command -v jq >/dev/null 2>&1; then
   skip "codex bridge inert cases" "jq is not installed"
 else
@@ -3032,10 +3052,13 @@ else
   cx_stub "$CX/bin"; mkdir -p "$CX/t/codex" "$CX/t/home/.claude/fleet" "$CX/t/cfg/fleet" "$CX/t/src/acme-api"
   cx_hooks_json "$CX/t/codex/hooks.json"
   CXID="$(jq -r .session_id "$FIX/codex-hook-stop.json")"
-  cxp() { jq -c --arg c "$CX/t/src/acme-api" '.cwd = $c' "$FIX/codex-hook-$1.json"; }
+  # PostToolUse as an MCP authenticate result: the measured Bash one is kept from the bridge by
+  # its matcher, and a row about the bridge that the bridge never saw would prove nothing.
+  cxp() { case "$1" in login) cx_login_payload "$CX/t/src/acme-api" ;;
+                       *) jq -c --arg c "$CX/t/src/acme-api" '.cwd = $c' "$FIX/codex-hook-$1.json" ;; esac; }
   cxall() {   # <env assignments...>: every registered event, as codex would run them
     local ev f; for ev in SessionStart:session-start UserPromptSubmit:user-prompt-submit PreToolUse:pre-tool-use \
-                          PermissionRequest:permission-request Stop:stop Interrupt:interrupt; do
+                          PermissionRequest:permission-request Stop:stop Interrupt:interrupt PostToolUse:login; do
       f="${ev#*:}"; cxp "$f" | env -u TMUX -u TMUX_PANE -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_SOCK \
         HOME="$CX/t/home" CODEX_HOME="$CX/t/codex" CLAUDE_FLEET_NOTIFIER=off "$@" "$CX/bin/codex" hook "${ev%%:*}"
       printf 'rc=%s ' "$?"
@@ -3043,21 +3066,22 @@ else
   before="$(cx_tree "$CX/t")"
   out="$(cxall CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1)"
   is "work profile (no CLAUDE_CONFIG_DIR): nothing written" "$before" "$(cx_tree "$CX/t")"
-  is "...nothing printed, every event exits 0"         "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  is "...nothing printed, every event exits 0"         "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
   out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/home/.claude" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1)"
   is "work profile (CLAUDE_CONFIG_DIR=~/.claude): nothing written" "$before" "$(cx_tree "$CX/t")"
-  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
   out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/home/.claude/" TMUX="/tmp/tmux-501/cf-acme-api,1,0" TMUX_PANE=%1)"
   is "...and from inside a work fleet's tmux, by its socket" "$before" "$(cx_tree "$CX/t")"
   out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/cfg")"
   is "no fleet socket: nothing written"                "$before" "$(cx_tree "$CX/t")"
-  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
+  is "...nothing printed"                              "rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 rc=0 " "$out"
   out="$(cxall CLAUDE_CONFIG_DIR="$CX/t/cfg" TMUX="/tmp/tmux-501/default,1,0" TMUX_PANE=%1)"
   is "...nor in a tmux that is not a fleet's"          "$before" "$(cx_tree "$CX/t")"
   is "the inert runs never wrote to stderr"            "" "$(cat "$CX/err")"
   # The other direction, from the same tree: a non-work profile WITH a socket does write.
   cxall CLAUDE_CONFIG_DIR="$CX/t/cfg" CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=w1 >/dev/null
   is "...while a non-work profile's fleet does record the session" "yes" "$([ -f "$CX/t/cfg/fleet/$CXID.json" ] && echo yes || echo no)"
+  is "...and captures the login the work profile did not" "1" "$(find "$CX/t/cfg/fleet/logins" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
   rm -rf "${CX:?}"
 fi
 
@@ -3140,7 +3164,8 @@ group "install.sh wires codex's hooks once, trusted, after the user's own, and t
 # codex standing in for the user's. The questions are the user's: is my own hook still there
 # and still first, did a second run change a byte, is what uninstall leaves the file I had.
 # And the trust record, because a hook codex has not been told to trust does not run — its
-# hash is held to six that codex wrote itself (test/fixtures/codex-hook-trust.json).
+# hash is held to seven that codex wrote itself (test/fixtures/codex-hook-trust.json), one of
+# them for a group with a matcher.
 if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
   skip "codex hook install" "jq or node is not installed"
 else
@@ -3157,7 +3182,7 @@ else
   st() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" status "$B" 2>&1; }
   un() { env CODEX_HOME="$CI/codex" PATH="$CI/bin:$PATH" node "$ROOT/lib/codex-hooks.mjs" uninstall 2>&1; }
   has() { grep -q "$1" <<< "$2" && echo yes || echo no; }
-  ours() { local e n=""; for e in SessionStart UserPromptSubmit PreToolUse PermissionRequest Stop Interrupt; do
+  ours() { local e n=""; for e in SessionStart UserPromptSubmit PreToolUse PermissionRequest Stop Interrupt PostToolUse; do
              n="$n $(jq -r --arg e "$e" '[(.hooks[$e] // [])[] | .hooks[] | select(.command | test("codex-fleet-event\\.sh.? " + $e + "$"))] | length' "$H" 2>/dev/null)"
            done; echo "${n# }"; }
   # The user's own: a Stop hook in their formatting, and a config with their keys and the
@@ -3167,8 +3192,10 @@ else
   chmod 600 "$C"; cp -p "$H" "$CI/h0"; cp -p "$C" "$CI/c0"
 
   out="$(rch)"
-  is "install wires the six, and says so"             "yes" "$(has 'wired codex event hooks' "$out")"
-  is "...each registered once"                        "1 1 1 1 1 1" "$(ours)"
+  is "install wires the seven, and says so"           "yes" "$(has 'wired codex event hooks' "$out")"
+  is "...each registered once"                        "1 1 1 1 1 1 1" "$(ours)"
+  is "...the login capture behind Claude's own matcher" "mcp__.*__authenticate mcp__.*__authenticate" \
+     "$(jq -r '.hooks.PostToolUse[-1].matcher' "$H") $(jq -r '.hooks.PostToolUse[0].matcher' "$ROOT/mods/ghostfleet/hooks/hooks.json")"
   is "...after the user's Stop hook, which runs first" "notify-me" "$(jq -r '.hooks.Stop[0].hooks[0].command' "$H")"
   is "every one is trusted the way codex checks it"   "0" "$(st >/dev/null; echo $?)"
   is "...the user's own record untouched"             "yes" "$(has 'sha256:the-users-own' "$(cat "$C")")"
@@ -3178,11 +3205,18 @@ else
   is "...and says it was already wired"               "yes" "$(has 'already wired' "$out")"
   # Each hash, recomputed for the command install writes for a user called "you", against
   # the one codex wrote for that command from its own trust dialog.
-  is "the trust record is the hash codex itself writes" "6" "$(node --input-type=module -e '
+  # Every one of EVENTS, so a new event cannot pass by being left out of the fixture.
+  is "the trust record is the hash codex itself writes" "7 of 7" "$(node --input-type=module -e '
        import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
        const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
-       console.log(K.EVENTS.filter(e => K.hookHash(e, null, K.handlerFor("/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh", e)) === f.trusted[e]
-         && JSON.stringify(K.handlerFor("/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh", e)) === JSON.stringify(f.handlers[e])).length)' 2>&1)"
+       const b = "/Users/you/.local/libexec/ghostfleet/hooks/codex-fleet-event.sh";
+       console.log(K.EVENTS.filter(e => K.hookHash(e, K.MATCHERS[e] ?? null, K.handlerFor(b, e)) === f.trusted[e]
+         && (K.MATCHERS[e] ?? null) === (f.matchers?.[e] ?? null)
+         && JSON.stringify(K.handlerFor(b, e)) === JSON.stringify(f.handlers[e])).length, "of", K.EVENTS.length)' 2>&1)"
+  is "...and a group's matcher is in it (codex hashed it)" "differs" "$(node --input-type=module -e '
+       import fs from "node:fs"; import * as K from "'"$ROOT"'/lib/codex-hooks.mjs";
+       const f = JSON.parse(fs.readFileSync("'"$FIX"'/codex-hook-trust.json", "utf8"));
+       console.log(K.hookHash("PostToolUse", null, f.handlers.PostToolUse) === f.trusted.PostToolUse ? "same" : "differs")' 2>&1)"
 
   # ...and with the timeout as codex normalizes it before hashing, which codex showed by not
   # asking again: Interrupt raised past its 3s cap kept its record, Stop moved by a second did not.
@@ -3242,6 +3276,10 @@ else
   is "...and names the way to remove ones wired before" "yes" "$(has 'codex-hooks.mjs uninstall' "$out")"
   rch >/dev/null
   is "with no files at all, install writes both"      "yes yes" "$([ -f "$H" ] && echo yes) $([ -f "$C" ] && echo yes)"
+  # cx_hooks_json is what every other codex group runs on, matcher and all: held to this.
+  cx_hooks_json "$CI/as-suite.json" "$B"
+  is "...and the hooks.json is the one the other groups run on" "same" \
+     "$([ "$(jq -S . "$H")" = "$(jq -S . "$CI/as-suite.json")" ] && echo same || echo differs)"
   un >/dev/null
   is "...and uninstall takes both away again"         "no no" "$([ -e "$H" ] && echo yes || echo no) $([ -e "$C" ] && echo yes || echo no)"
   rm -rf "${CI:?}"
@@ -3339,6 +3377,69 @@ else
   printf 'acme-api\t%s\twork\n' "$TX/src/acme-api" > "$TH/.config/ghostfleet/projects"
   is "a codex session in a work profile's fleet is refused" "yes" "$(has "work profile's fleet" "$(TGX)")"
   rm -rf "${TX:?}"
+fi
+
+group "codex: an MCP authenticate result becomes a pending login the phone can finish"
+# The PostToolUse half of the phone sign-in (docs/MCP-LOGIN.md), for codex: install.sh's
+# hooks.json, the stub codex applying its matcher, the bridge, and the capture Claude's mod
+# runs, unchanged. What a phone needs is a private pending login that names this session,
+# its project and the loopback port and state the URL carries, and it gets it only where
+# the session's record is — the one the bridge writes, keyed by codex's thread id.
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "codex login capture" "jq or node is not installed"
+else
+  CL="$(cd "$(mktemp -d)" && pwd -P)"
+  cx_stub "$CL/bin"; mkdir -p "$CL/codex" "$CL/cfg/fleet" "$CL/home/.claude/fleet" "$CL/src/acme-api" "$CL/rt"
+  cx_hooks_json "$CL/codex/hooks.json"
+  CLF="$CL/cfg/fleet"; CLID="$(jq -r .session_id "$FIX/codex-hook-post-tool-use.json")"
+  clh() { local ev="$1"; shift
+          env -u TMUX -u TMUX_PANE HOME="$CL/home" CODEX_HOME="$CL/codex" CLAUDE_CONFIG_DIR="$CL/cfg" \
+            CLAUDE_FLEET_SOCK=cf-personal-acme-api CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_KNOW=off \
+            GHOSTFLEET_TELEGRAM_DIR="$CL/tg" CX_STUB_LOG="$CL/ran" "$@" "$CL/bin/codex" hook "$ev" 2>>"$CL/err"; }
+  logins() { find "$1/logins" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
+  ran() { grep -c "PostToolUse\$" "$CL/ran" 2>/dev/null || true; }
+  newest() { find "$CLF/logins" -name '*.json' 2>/dev/null | while IFS= read -r f; do printf '%s %s\n' "$(jq -r .created "$f")" "$f"; done | sort -n | tail -1 | cut -d' ' -f2-; }
+  # The session the capture looks for: its first prompt, through the bridge, as in a pane.
+  jq -c --arg c "$CL/src/acme-api" --arg id "$CLID" '.cwd = $c | .session_id = $id' "$FIX/codex-hook-user-prompt-submit.json" | clh UserPromptSubmit >/dev/null
+  is "the session has a record under codex's thread id" "w1 cf-personal-acme-api" "$(jq -r '.slot + " " + .sock' "$CLF/$CLID.json" 2>/dev/null)"
+
+  : > "$CL/ran"; out="$(cx_login_payload "$CL/src/acme-api" | clh PostToolUse; echo "rc=$?")"
+  is "an authenticate result is a pending login"       "1" "$(logins "$CLF")"
+  is "...that only this user can read"                 "600" "$(node -e 'console.log((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$(newest)" 2>/dev/null)"
+  is "...naming the session, its thread, fleet and project" "w1 $CLID cf-personal-acme-api $CL/src/acme-api" \
+     "$(jq -r '[.session, .session_id, .sock, .project] | join(" ")' "$(newest)" 2>/dev/null)"
+  is "...for the loopback port and state the URL carries" "loopback example 47123 /callback issued-state" \
+     "$(jq -r '[.kind, .server, .port, .path, .state] | map(tostring) | join(" ")' "$(newest)" 2>/dev/null)"
+  is "...and codex is told nothing, and its call is not failed" "rc=0" "$out"
+  cx_login_payload "$CL/src/acme-api" object | clh PostToolUse >/dev/null
+  is "the same result as MCP content blocks is one too" "2" "$(logins "$CLF")"
+
+  # The matcher: a tool that is not an authenticate does not start the bridge at all, even
+  # with a sign-in URL in its output, because codex never runs the hook for it.
+  : > "$CL/ran"
+  jq -c '.tool_name = "Bash"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "a Bash call with that URL in it runs no hook"    "0 2" "$(ran) $(logins "$CLF")"
+  jq -c '.tool_name = "mcp__example__search"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "...nor does another tool of the same MCP server" "0 2" "$(ran) $(logins "$CLF")"
+
+  # Where the bridge stays out of it (decision: none of this in a work profile's fleet). The
+  # work fleet HAS a record for the thread — lib/codex-rollout.mjs writes one where the hooks
+  # do not run — so only the bridge's own check stands between this call and a login.
+  jq '.sock = "cf-acme-api"' "$CLF/$CLID.json" > "$CL/home/.claude/fleet/$CLID.json"
+  cx_login_payload "$CL/src/acme-api" | clh PostToolUse CLAUDE_CONFIG_DIR="$CL/home/.claude" CLAUDE_FLEET_SOCK=cf-acme-api >/dev/null
+  is "a work profile's fleet gets no pending login"    "0 2" "$(logins "$CL/home/.claude/fleet") $(logins "$CLF")"
+  cx_login_payload "$CL/src/acme-api" | clh PostToolUse CLAUDE_FLEET_SOCK= >/dev/null
+  is "...and neither does a codex outside any fleet"   "2" "$(logins "$CLF")"
+  jq -c '.session_id = "01a1c4ae-0000-7000-8000-000000000000"' <<< "$(cx_login_payload "$CL/src/acme-api")" | clh PostToolUse >/dev/null
+  is "...nor a thread the fleet has no record of"      "2" "$(logins "$CLF")"
+  # A runtime without the capture (the mod not staged): the hook runs, finds nothing to run,
+  # and the tool call still succeeds.
+  mkdir -p "$CL/rt/hooks"; for f in codex-fleet-event.sh fleet-event.sh fleet-telegram-guard.sh; do ln -s "$ROOT/hooks/$f" "$CL/rt/hooks/$f"; done
+  cx_hooks_json "$CL/codex/hooks.json" "$CL/rt/hooks/codex-fleet-event.sh"
+  : > "$CL/ran"; out="$(cx_login_payload "$CL/src/acme-api" | clh PostToolUse; echo "rc=$?")"
+  is "a runtime with no capture to run still exits 0"  "1 rc=0 2" "$(ran) $out $(logins "$CLF")"
+  is "the bridge never wrote to stderr"                "" "$(cat "$CL/err" 2>/dev/null)"
+  rm -rf "${CL:?}"
 fi
 
 group "codex-here runs without the shared daemon, when codex has the flag"

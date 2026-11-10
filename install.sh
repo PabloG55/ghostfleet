@@ -924,9 +924,9 @@ register_codex_mcp() {
 
 # --- codex's event hooks: the same bridge, registered and TRUSTED -------------------
 # codex 0.166.0 runs a command per lifecycle event from $CODEX_HOME/hooks.json, and
-# hooks/codex-fleet-event.sh turns six of them into what hooks/fleet-event.sh already does
+# hooks/codex-fleet-event.sh turns seven of them into what hooks/fleet-event.sh already does
 # for claude: working, done with the last message, need-you, replies, the briefing, the
-# ledger, and the Telegram guard. Like the MCP entry it is ONE registration for every
+# ledger, the Telegram guard, and the phone sign-in's login capture. Like the MCP entry it is ONE registration for every
 # profile, because codex has one config; the bridge decides per session, at run time, that a
 # work profile's fleet hears nothing.
 #   Registering is not enough on its own: codex runs a hook only once config.toml records it
