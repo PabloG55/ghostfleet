@@ -807,6 +807,35 @@ await section('forget', async () => {
   row('...a second purge has nothing to do', '0 yes', (() => { const a = kh(X, ['forget', leak.id, '--purge']); return `${a.status} ${yes(/already rewritten/.test(a.stdout))}`; })());
   const pc = kh(X, ['rebuild', '--check']);
   row('...and the graph still matches a rebuild', '0', pc.status);
+  // Force the post-rename catch-up past its 1 MiB read boundary, and place a live append
+  // between its writes. Raw chunks used to split one old event and splice the new one
+  // into it: both disappeared from the reader, however many bytes reached the file.
+  const tailRig = newHome('forget-tail');
+  const zVictim = K.record('prompt', { text: 'the line to purge from the tail fixture' }, onApi(tailRig, t));
+  const lateEvents = Array.from({ length: 5000 }, (_, n) => ({ ...fillerEvent(n), id: `klate${n}` }));
+  function fillerEvent(n) {
+    return K.makeEvent({ t: t + n + 1, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: {}, f: { text: 'written across the rename ' + n + ' ' + 'x'.repeat(300) } });
+  }
+  const during = fillerEvent(6000);
+  const rename = fs.renameSync, write = fs.writeSync;
+  let catchingUp = false, inserted = false;
+  fs.renameSync = (from, to) => {
+    if (to !== tailRig.log) return rename(from, to);
+    fs.appendFileSync(to, lateEvents.map(e => JSON.stringify(e) + '\n').join(''));
+    rename(from, to);
+    catchingUp = true;
+  };
+  fs.writeSync = (...args) => {
+    const n = write(...args);
+    if (catchingUp && !inserted) { inserted = true; K.append(tailRig.fl, during); }
+    return n;
+  };
+  let purged;
+  try { purged = K.forget(zVictim.id, { purge: true, env: { ...base(), CLAUDE_FLEET_DIR: tailRig.fl } }); }
+  finally { fs.renameSync = rename; fs.writeSync = write; }
+  const tailIds = new Set(); K.scanLog(tailRig.log, 0, e => tailIds.add(e.id));
+  row('...a live append between catch-up writes leaves every event whole', 'yes yes 5000 yes',
+    `${yes(purged.ok)} ${yes(inserted)} ${lateEvents.filter(e => tailIds.has(e.id)).length} ${yes(tailIds.has(during.id))}`);
   // A writer that keeps writing all through a purge loses nothing: the catch-up before the rename,
   // the old descriptor after it, and the writer's own look at whether it wrote to the log. The
   // last of those is a window of microseconds that lost a line in one purge of three, so a row
@@ -2075,7 +2104,16 @@ await section('backfill: which profiles', () => {
   row('--since keeps what happened from then on', 'yes yes', `${yes(added.length > 0 && added.every(e => e.t >= BF_T + 4 * DAY))} ${yes(w.beforeSince > 0)}`);
   row('--since with a bad date is refused', '2', S.bf('--since', 'not a date').status);
   const G = bfRig('bf-nogh');
-  const off = run('node', [KNOW, 'backfill'], { home: G.h, env: { ...G.env, PATH: `${path.join(G.h, 'no-gh')}:${path.dirname(process.execPath)}:/usr/bin:/bin` } });
+  // A runner can ship gh in /usr/bin. Only the two executables this read needs belong on
+  // PATH; prepending an empty directory still finds the host's gh farther down it.
+  const noGh = path.join(G.h, 'no-gh');
+  fs.mkdirSync(noGh);
+  fs.symlinkSync(process.execPath, path.join(noGh, 'node'));
+  const git = run('sh', ['-c', 'command -v git'], { home: G.h }).stdout.trim();
+  fs.symlinkSync(git, path.join(noGh, 'git'));
+  const missing = run('gh', ['--version'], { home: G.h, env: { PATH: noGh } });
+  row('no gh: the fixture really cannot execute gh', 'ENOENT', missing.error?.code);
+  const off = run('node', [KNOW, 'backfill'], { home: G.h, env: { ...G.env, PATH: noGh } });
   row('no gh: the rest still lands, and it says what it could not read', 'yes yes', `${yes(lines(G.log).some(e => e.kind === 'commit'))} ${yes(/prs: gh is not installed/.test(off.stdout))}`);
 });
 
