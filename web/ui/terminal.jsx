@@ -2,9 +2,9 @@
 // half of the server's terminal contract (ee/team/server/TERMINAL.md).
 //
 // ONE ENGINE. The terminal itself is web/term.js, the phone client's, over the same vendored
-// xterm.js: the same bytes for every key. This file lays it out and gets it a ticket. It is
-// imported on demand, so xterm.js is a chunk of its own and nobody who never opens a shell
-// downloads it.
+// xterm.js: the same bytes for every key. This file lays it out, gets it a ticket and says what
+// each way of closing means. It is imported on demand, so xterm.js is a chunk of its own and
+// nobody who never opens a shell downloads it.
 //
 // PROJECT-LEVEL. The server keeps one shell tab and one editor tab per PROJECT
 // (`_term-<project>`, `_edit-<project>`), not one per session, so the Terminal opened from a
@@ -26,6 +26,9 @@
 //   canTerm(project)                → true when this person may type into the project
 //   termOpen(project, kind, size)   → { ticket, session }; throws an Error carrying .status
 //   termSocket(ticket)              → the WebSocket for one ticket, binaryType 'arraybuffer'
+//   termAccount()                   → who is signed in now ({ mustChange }), null for nobody
+//   signIn()                        → the app's sign-in screen
+//   changePassword()                → the app's password-change flow
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import { sessionTo, projectTo } from './keyboard.jsx';
@@ -36,8 +39,12 @@ export const TOOL_KINDS = ['term', 'edit'];
 const baseTo = (project, session) => (session ? sessionTo(project, session) : projectTo(project));
 export const toolTo = (project, session, kind) => `${baseTo(project, session)}/${kind}`;
 
+// Projects the server answered 404 for, until the page is loaded again: the role the client
+// read at sign-in can be older than the grant (an admin took it away since), and the server is
+// the one that knows. A tab it refused is hidden rather than offered again.
+const refused = new Set();
 const offers = (fleet, project) => typeof fleet.canTerm === 'function' && typeof fleet.termOpen === 'function'
-  && typeof fleet.termSocket === 'function' && !!fleet.canTerm(project);
+  && typeof fleet.termSocket === 'function' && !refused.has(project) && !!fleet.canTerm(project);
 
 // The two tabs, for a tab bar that already exists (the session's). Nothing for a person who
 // may not type into the project: a viewer never sees them.
@@ -67,6 +74,30 @@ export function ProjectTabs({ project, tool }) {
 // on-screen keyboard stays up. The press acts on its click.
 const keepFocus = (e) => e.preventDefault();
 
+// What a closed tab says, and the one thing it offers, in the reader's language. The server's
+// own sentence (`n.why`, in English) is shown only where it is the information: which editor to
+// install, and what refused the connection. Anywhere else it was term.js's fallback ("the
+// connection dropped"), which read as English, lower-case, under a Spanish title.
+function Notice({ n, kind, onAgain, fleet }) {
+  const title = {
+    idle: t('term.idle', { min: n.min }), takeover: t(`term.takeover.${kind}`), failed: t('term.failed'),
+    dropped: t('term.dropped'), ended: t(`term.ended.${kind}`), noEditor: t('term.noEditor'),
+    password: t('term.password'), signedOut: t('term.signedOut'), refused: t('term.refused'),
+  }[n.kind] || t('term.failed');
+  const why = { idle: t('term.idleWhy'), takeover: t('term.takeoverWhy'), password: t('term.passwordWhy'),
+                signedOut: t('term.signedOutWhy'), failed: t('term.failedWhy'), dropped: t('term.droppedWhy'),
+                ended: t('term.endedWhy') }[n.kind] || n.why || '';
+  let act = <Btn kind="primary sm" onClick={onAgain}>{t(n.kind === 'idle' || n.kind === 'takeover' ? 'term.reconnect' : 'term.openAgain')}</Btn>;
+  if (n.kind === 'password') act = fleet.changePassword ? <Btn kind="primary sm" onClick={() => fleet.changePassword()}>{t('term.changePassword')}</Btn> : null;
+  if (n.kind === 'signedOut') act = fleet.signIn ? <Btn kind="primary sm" onClick={() => fleet.signIn()}>{t('term.signIn')}</Btn> : null;
+  return (
+    <div class={`tool-note n-${n.kind}`} role="status">
+      <div class="tool-note-text"><b>{title}</b>{why ? <span>{why}</span> : null}</div>
+      {act}
+    </div>
+  );
+}
+
 // Away from a tab that is not this person's, to the page it hangs from. REPLACING the entry,
 // not adding one: a pushed redirect would put the refused address back under the back button,
 // and back would land on it and be sent forward again, every time.
@@ -76,9 +107,10 @@ function Away({ to }) {
   return null;
 }
 
-// The open tab: a bar (what it is, and how to leave) and the terminal. Mounted with a key per
-// project and kind, so switching tabs is a new terminal and a new ticket. An address typed or
-// pasted by someone who may not open it (a viewer) goes to its page instead.
+// The open tab: a bar (what it is, and how to leave), a notice when it is not connected, and
+// the terminal. Mounted with a key per project and kind, so switching tabs is a new terminal and
+// a new ticket. An address typed or pasted by someone who may not open it (a viewer) goes to its
+// page instead.
 export function ToolPanel(props) {
   const fleet = useFleet();
   if (!offers(fleet, props.project)) return <Away to={baseTo(props.project, props.session)} />;
@@ -89,26 +121,69 @@ function Panel({ project, session, kind }) {
   const panel = useRef(null), host = useRef(null);
   const h = useRef(null);
   // What the callbacks term.js holds need to read now, not at the render they were made in.
-  const live = useRef({ alive: true });
+  const live = useRef({ alive: true, hello: false, retried: false, idle: 1800 });
   const [phase, setPhase] = useState('loading');           // loading → opening → open | closed
+  const [notice, setNotice] = useState(null);
   const [focused, setFocused] = useState(false);
   const [tab, setTab] = useState(`_${kind}-${project}`);
+  const back = baseTo(project, session);
 
-  // A ticket asked for and handed to the socket.
-  const open = async () => {
+  const say = (k, why = '') => {
+    if (!live.current.alive) return;
+    setPhase('closed');
+    setNotice({ kind: k, why: String(why || ''), min: Math.round(live.current.idle / 60) });
+  };
+  // A ticket asked for and handed to the socket. `silent` is the one reopen nobody asked for
+  // (below), which must not reset the budget that stops it from becoming a loop.
+  const open = async (silent = false) => {
     const L = live.current;
     if (!h.current || !L.alive) return;
-    setPhase('opening');
+    if (!silent) L.retried = false;
+    L.hello = false;
+    setNotice(null); setPhase('opening');
     let r;
     try { r = await fleet.termOpen(project, kind, h.current.size()); }
-    catch { if (L.alive) setPhase('closed'); return; }
+    catch (e) { if (L.alive) await denied(e); return; }
     if (!L.alive || !h.current) return;
     if (r.session) setTab(r.session);
     h.current.connect(r.ticket);
   };
-  const onState = ({ state }) => {
-    if (!live.current.alive) return;
-    setPhase(state === 'open' ? 'open' : state === 'opening' ? 'opening' : 'closed');
+  // The POST's refusals (TERMINAL.md "HTTP status"). A 404 is not a notice: the tab goes, and
+  // the page it hung from comes back.
+  const denied = async (e) => {
+    const s = e && e.status;
+    if (s === 404) { refused.add(project); away(back); return; }
+    if (s === 401) return say('signedOut');
+    if (s === 403) {
+      // The temporary-password gate answers before the terminal is reached; anything else
+      // forbidden here is an origin or a header, which the person cannot fix from this page.
+      let who;
+      try { who = fleet.termAccount ? await fleet.termAccount() : undefined; } catch {}
+      if (who === null) return say('signedOut');
+      return say(who && who.mustChange ? 'password' : 'refused', e.message);
+    }
+    if (s === 502 && kind === 'edit' && /no editor/i.test(e.message || '')) return say('noEditor', e.message);
+    return say('failed', (e && e.message) || '');
+  };
+  const onState = ({ state, why, code }) => {
+    const L = live.current;
+    if (!L.alive) return;
+    if (state === 'opening') return setPhase('opening');
+    if (state === 'open') { L.retried = false; setNotice(null); setPhase('open'); return; }
+    // Refused BEFORE hello. A browser is not shown why an upgrade failed, and the likeliest
+    // cause is a ticket that expired between the POST and the socket (30 s): ONE silent reopen,
+    // with a new ticket, and then the failure says so. Never a loop.
+    if (!L.hello) {
+      if (!L.retried) { L.retried = true; open(true); return; }
+      return say('failed', why);
+    }
+    if (code === 4000) return say('idle');
+    if (code === 4001) return say('takeover');
+    // The sign-in, the password rule or the grant changed under an open tab: asking again
+    // lands on whichever of those it was (a 401, a 403 or a 404 above), or opens it again.
+    if (code === 4003 && !L.retried) { L.retried = true; open(true); return; }
+    if (code === 1000) return say('ended', why);
+    return say('dropped', why);
   };
   const leave = () => { if (h.current) h.current.blur(); if (panel.current) panel.current.focus({ preventScroll: true }); };
   const enter = () => { if (h.current) h.current.focus(); };
@@ -119,12 +194,12 @@ function Panel({ project, session, kind }) {
     (async () => {
       let T;
       try { T = await import('../term.js'); }
-      catch { setPhase('closed'); return; }
+      catch (e) { say('failed', e && e.message); return; }
       if (!L.alive || !host.current) return;
       h.current = T.mount(host.current, {
         socket: fleet.termSocket,
         onState,
-        onMessage: (o) => { if (o.t === 'hello' && o.session) setTab(o.session); },
+        onMessage: (o) => { if (o.t === 'hello') { L.hello = true; if (o.idle > 0) L.idle = o.idle; if (o.session) setTab(o.session); } },
         onLeave: leave,
         onFocus: (up) => { if (L.alive) setFocused(up); },
         onCopy: () => toast(t('term.copied'), 'good'),
@@ -160,6 +235,7 @@ function Panel({ project, session, kind }) {
           </Btn>
         </div>
       </div>
+      {notice ? <Notice n={notice} kind={kind} fleet={fleet} onAgain={() => { open(); enter(); }} /> : null}
       <div class={`tool-host${ready ? '' : ' off'}`} ref={host} />
     </section>
   );

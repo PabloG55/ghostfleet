@@ -60,7 +60,7 @@ function parse(hash) {
   return { view: 'home' };
 }
 
-function Shell({ me, mode, onLogout }) {
+function Shell({ me, mode, onLogout, onAccount }) {
   const admin = me.role === 'admin';
   const route = useHashRoute(parse, canonical);
   const [users, setUsers] = useState([me]);
@@ -91,6 +91,10 @@ function Shell({ me, mode, onLogout }) {
     me, mode, users, usersById, admin,
     go: (to) => { location.hash = to; },
     logout: async () => { unbind(); try { await api.logout(); } catch {} onLogout(); },
+    // The sign-in ended under the page, or the account still has a temporary password: the
+    // same two screens App shows at load, reached from wherever the person is.
+    signIn: () => { unbind(); onLogout(); },
+    changePassword: () => onAccount({ ...me, mustChange: true }),
   };
   // The assistant lives above the pages; it needs to know where the person is.
   bind({ go: ctx.go, me, projects: pj?.projects || [], route });
@@ -154,7 +158,7 @@ function App() {
   // A temporary password (admin-cli, a new account, a reset) is changed before anything else.
   if (h.user.mustChange) return <><ChangePassword mode={h.mode} user={h.user} onDone={(user) => setH({ ...h, user })} /><Toasts /></>;
   // Keyed on the language: switching it redraws every screen in the new one.
-  return <Shell key={l} me={h.user} mode={h.mode} onLogout={() => setH({ ...h, user: null })} />;
+  return <Shell key={l} me={h.user} mode={h.mode} onLogout={() => setH({ ...h, user: null })} onAccount={(user) => setH({ ...h, user })} />;
 }
 // The language saved on the account follows the person to any device; an account that has none
 // yet keeps the one this page is showing.

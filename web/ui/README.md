@@ -57,6 +57,8 @@ Phase 2 writes the phone client's, over fleet-serve. An adapter is a plain objec
 | `canTerm(project)` | optional | whether this person may type into the project; the Terminal and Editor tabs show only when it says so and `termOpen` and `termSocket` are there too |
 | `termOpen(project, kind, size)` | optional, → `{ ticket, session }` | a ticket for the project's shell (`'term'`) or editor (`'edit'`); a refusal throws an `Error` carrying its HTTP `status` |
 | `termSocket(ticket)` | optional, → `WebSocket` | the socket for one ticket, with `binaryType` `'arraybuffer'` |
+| `termAccount()` | optional, → `{ mustChange }` or `null` | who is signed in now, to tell a temporary password from another refusal |
+| `signIn()`, `changePassword()` | optional | the app's own sign-in and password screens, offered by a closed tab's notice |
 | `go(to)` | | navigate to a hash route (`'/p/acme-web'`) |
 | `slots` | object | the app's own pieces (below) |
 

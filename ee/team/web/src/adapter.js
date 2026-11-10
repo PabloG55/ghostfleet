@@ -5,7 +5,9 @@ import { teamSlots } from './slots.jsx';
 
 // Who may type into a project's terminal: the server's can(user, project, 'prompt')
 // (server/access.mjs), read from the account the client already has. An admin, or a member
-// whose grant on the project is member or admin. The server decides again on every ticket.
+// whose grant on the project is member or admin. The server decides again on every ticket, and
+// a 404 from it hides the tab (web/ui/terminal.jsx), so a grant taken away since sign-in costs
+// one refused open, not a tab that keeps failing.
 const RANK = { viewer: 1, member: 2, admin: 3 };
 export function canTerm(me, project) {
   if (!me || me.disabled) return false;
@@ -28,6 +30,9 @@ export function teamAdapter(ctx) {
     canTerm: (project) => canTerm(ctx.me, project),
     termOpen: api.termOpen,
     termSocket: api.termSocket,
+    termAccount: () => api.health().then(r => r.user || null),
+    signIn: ctx.signIn,
+    changePassword: ctx.changePassword,
     go: ctx.go,
     slots: teamSlots(ctx),
   };
