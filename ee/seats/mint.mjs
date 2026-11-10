@@ -84,7 +84,7 @@ function main([command, ...args]) {
     console.log(JSON.stringify(result));
     if (!result.ok) process.exitCode = 1;
   } else {
-    throw new Error('Usage: mint.mjs keygen --out <dir> | mint --private <pem> --org <name> --seats N --expires YYYY-MM-DD | check <key> [--public <pem>]');
+    throw new Error('Usage: node ee/seats/mint.mjs keygen --out <dir> | mint --private <pem> --org <name> --seats N --expires YYYY-MM-DD | check <key> [--public <pem>]');
   }
 }
 

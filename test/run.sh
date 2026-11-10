@@ -29444,16 +29444,37 @@ else
   skip "a Telegram chat talks to a fleet session, end to end" "tmux, jq, node or curl missing, or mktemp not available"
 fi
 
-group "offline Team license and seats"
-if command -v node >/dev/null 2>&1; then
-  LIC_OUT="$(mktemp "$TMUX_TMPDIR/license.XXXXXX")"
-  node --test "$ROOT"/ee/license/test/*.test.mjs > "$LIC_OUT" 2>&1
-  lic_rc=$?
-  is "all offline license tests pass" "0" "$lic_rc"
-  [ "$lic_rc" -eq 0 ] || cat "$LIC_OUT"
-  rm -f "${LIC_OUT:?}"
+group "tracked paths have no case collisions"
+if command -v git >/dev/null 2>&1; then
+  tracked_case_collisions() {
+    # Include directory prefixes: a tracked file can also collide with a directory.
+    # Deduplicate exact spellings before folding case so shared parents stay valid.
+    awk -F/ '{ p=""; for (i=1; i<=NF; i++) { p=p (i>1 ? "/" : "") $i; print p } }' |
+      LC_ALL=C sort -u | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | uniq -d
+  }
+  CASE_PATHS="$(git -C "$ROOT" ls-files)"
+  is "git lists the paths to check" "0" "$?"
+  is "no tracked file or directory differs only by case" "" "$(tracked_case_collisions <<< "$CASE_PATHS")"
+  is "the check catches two file spellings" "ee/seats/readme.md" \
+    "$(printf '%s\n' ee/seats/README.md ee/seats/readme.md | tracked_case_collisions)"
+  is "the check catches a file against a directory" "ee/notice" \
+    "$(printf '%s\n' ee/NOTICE ee/notice/index.mjs | tracked_case_collisions)"
+  is "shared directory prefixes are allowed" "" \
+    "$(printf '%s\n' ee/LICENSE ee/seats/index.mjs ee/seats/mint.mjs | tracked_case_collisions)"
 else
-  skip "offline Team license and seats" "node missing"
+  skip "tracked paths have no case collisions" "git missing"
+fi
+
+group "offline Team seats"
+if command -v node >/dev/null 2>&1; then
+  SEATS_OUT="$(mktemp "$TMUX_TMPDIR/seats.XXXXXX")"
+  node --test "$ROOT"/ee/seats/test/*.test.mjs > "$SEATS_OUT" 2>&1
+  seats_rc=$?
+  is "all offline Team seats tests pass" "0" "$seats_rc"
+  [ "$seats_rc" -eq 0 ] || cat "$SEATS_OUT"
+  rm -f "${SEATS_OUT:?}"
+else
+  skip "offline Team seats" "node missing"
 fi
 
 # ── epilogue: the summary every run prints, filtered, sharded or whole ───────

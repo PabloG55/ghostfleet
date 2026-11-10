@@ -38,13 +38,12 @@ checks one additional account and refuses additions beyond two on expiration.
 A forged or malformed key cannot grant the existing-account exception. These
 functions provide policy decisions; the app must enforce creation checks.
 
-The owner runs the following from a case-sensitive checkout (the `ee/LICENSE`
-file and `ee/license/` directory require distinct paths). Store the signing pair
+The owner runs the following from the repository root. Store the signing pair
 in a private directory outside every Git worktree:
 
 ```sh
 KEY_DIR="$HOME/.config/ghostfleet-license"
-node ee/license/mint.mjs keygen --out "$KEY_DIR"
+node ee/seats/mint.mjs keygen --out "$KEY_DIR"
 ```
 
 The directory must be writable by the owner. Key generation creates or secures it
@@ -55,10 +54,10 @@ Keep an offline backup of `private.pem` in a password manager. Losing the privat
 key means every existing customer key must be reissued. Never commit the PEM.
 
 ```sh
-node ee/license/mint.mjs mint --private "$KEY_DIR/private.pem" \
+node ee/seats/mint.mjs mint --private "$KEY_DIR/private.pem" \
   --org acme-api --seats 5 --expires 2031-01-01
-node ee/license/mint.mjs check '<key>' --public "$KEY_DIR/public.pem"
-node ee/license/mint.mjs check '<key>'
+node ee/seats/mint.mjs check '<key>' --public "$KEY_DIR/public.pem"
+node ee/seats/mint.mjs check '<key>'
 ```
 
 Minting requires an explicit Ed25519 private PEM and a future expiration date.
@@ -66,7 +65,7 @@ Minting requires an explicit Ed25519 private PEM and a future expiration date.
 inside this repository or any other Git worktree, including through symlinked
 ancestors. A home directory is allowed when it is outside a Git worktree.
 
-Run `node --test ee/license/test/*.test.mjs` or
-`./test/run.sh "offline Team license and seats"`. Tests generate only disposable
+Run `node --test ee/seats/test/*.test.mjs` or
+`./test/run.sh "offline Team seats"`. Tests generate only disposable
 pairs inside OS temporary directories, including a temporary HOME, then remove
 them. The shipped placeholder remains empty.
