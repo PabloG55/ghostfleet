@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { Btn, usePoll, clock, toast } from '../../../../web/ui/ui.jsx';
 import { Avatar } from './avatar.jsx';
 import { t, lang, setLang, LANGS, LANG_NAMES } from './i18n.js';
+import { PASSWORD_MIN } from '../../shared/password.js';
 import { words } from '../../shared/i18n/index.js';
 import { Icon } from '../../../../web/ui/icon.jsx';
 
@@ -82,8 +83,8 @@ export function Settings({ ctx }) {
           try { await api.password(old, nw); setOld(''); setNw(''); toast(t('settings.pwChanged'), 'good'); } catch (x) { toast(x.message, 'bad'); }
         }}>
           <input type="password" placeholder={t('settings.pwOld')} value={old} onInput={(e) => setOld(e.currentTarget.value)} />
-          <input type="password" placeholder={t('settings.pwNew')} value={nw} onInput={(e) => setNw(e.currentTarget.value)} />
-          <Btn kind="ghost" type="submit" disabled={!old || nw.length < 6}>{t('settings.change')}</Btn>
+          <input type="password" placeholder={t('settings.pwNew', { n: PASSWORD_MIN })} value={nw} onInput={(e) => setNw(e.currentTarget.value)} />
+          <Btn kind="ghost" type="submit" disabled={!old || nw.length < PASSWORD_MIN}>{t('settings.change')}</Btn>
         </form>
       </section>
       <section class="panel">

@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks';
 import { api } from './api.js';
 import { Btn, Logo } from '../../../../web/ui/ui.jsx';
 import { Harbor } from '../../../../web/ui/fleet.jsx';
+import { PASSWORD_MIN } from '../../shared/password.js';
 import { t, lang, setLang, LANGS } from './i18n.js';
 
 // Set when the person flips the language here, so signing in makes that choice their account's.
@@ -63,10 +64,10 @@ export function ChangePassword({ mode, user, onDone }) {
       <p class="muted">{t('auth.pw.why')}</p>
       <form onSubmit={submit} class="stack">
         <label class="field"><span>{t('auth.pw.temp')}</span><input type="password" value={old} onInput={(e) => setOld(e.currentTarget.value)} autoFocus autocomplete="current-password" /></label>
-        <label class="field"><span>{t('auth.pw.new')}</span><input type="password" value={nw} onInput={(e) => setNw(e.currentTarget.value)} placeholder={t('auth.pw.min')} autocomplete="new-password" /></label>
+        <label class="field"><span>{t('auth.pw.new')}</span><input type="password" value={nw} onInput={(e) => setNw(e.currentTarget.value)} placeholder={t('auth.pw.min', { n: PASSWORD_MIN })} autocomplete="new-password" /></label>
         <label class="field"><span>{t('auth.pw.again')}</span><input type="password" value={again} onInput={(e) => setAgain(e.currentTarget.value)} autocomplete="new-password" /></label>
         {err ? <p class="err">{err}</p> : null}
-        <Btn kind="primary" type="submit" disabled={busy || !old || nw.length < 6 || !again}>{busy ? t('common.saving') : t('auth.pw.save')}</Btn>
+        <Btn kind="primary" type="submit" disabled={busy || !old || nw.length < PASSWORD_MIN || !again}>{busy ? t('common.saving') : t('auth.pw.save')}</Btn>
       </form>
     </Shell>
   );
