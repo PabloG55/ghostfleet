@@ -18,6 +18,7 @@ import { describeTrigger } from '../shared/automations.js';
 import { can, denial, visibleProjects, isAdmin, migrate, TOOL_ACTION, automationProjects } from './access.mjs';
 import { createUsers, dataDir, slug, hashPw, pwOk, publicUser, selfUser } from './users.mjs';
 import { createAdmin } from './admin.mjs';
+import { createLicense } from './license.mjs';
 import { createAiAccount, profilesOf } from './ai-account.mjs';
 import { GF_HOME } from './paths.mjs';
 import { inRequest, asUser } from './i18n.mjs';
@@ -554,7 +555,9 @@ tasks.start();
 const autos = createEngine({ fleet, readJson, writeJson, appendLine, readLines, perform, users: () => store.list, can,
   telegram: MODE === 'real' ? (text) => fleet.act('fleet_telegram_send', { text }) : null });
 autos.start();
-const admin = createAdmin({ store, fleet, audit, dropLogins, httpErr });
+const license = createLicense({ dir: DATA, demo: MODE === 'demo', users: () => store.list, readJson, writeJson, audit, httpErr });
+license.start();
+const admin = createAdmin({ store, fleet, audit, dropLogins, httpErr, license });
 const cfgFor = MODE === 'demo' ? null : (await import(pathToFileURL(path.join(GF_HOME, 'lib', 'projects.mjs')).href)).cfgFor;
 const aiAccount = createAiAccount({ dir: DATA, demo: MODE === 'demo', profiles: profilesOf(fleet, cfgFor), readJson, writeJson, audit });
 const terminal = createTerminal({ fleet, demo: MODE === 'demo', audit,

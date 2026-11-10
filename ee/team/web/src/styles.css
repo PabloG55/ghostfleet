@@ -32,6 +32,8 @@
 .boot { height: 100%; display: grid; place-items: center; opacity: .6; }
 
 /* ── layout ──────────────────────────────────────────── */
+.license-bar { display: block; background: rgba(255,215,95,.1); color: var(--yellow); text-align: center; font-size: 12.5px; padding: .35em 16px; border-bottom: 1px solid rgba(255,215,95,.25); text-decoration: none; }
+.license-note { color: var(--yellow); border-left: 2px solid var(--yellow); padding-left: 10px; }
 .demo-bar { background: rgba(255,215,95,.1); color: var(--yellow); text-align: center; font-size: 12.5px; padding: .35em; border-bottom: 1px solid rgba(255,215,95,.25); }
 
 /* ── cards ───────────────────────────────────────────── */

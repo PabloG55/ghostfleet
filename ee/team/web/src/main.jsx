@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'preact/hooks'
 import { api } from './api.js';
 import { Setup, Login, ChangePassword } from './auth.jsx';
 import { Admin } from './admin/index.jsx';
+import { licenseNotice, LICENSE_EVENT } from './admin/license.jsx';
 import { Activity, Settings } from './views.jsx';
 import { Avatar } from './avatar.jsx';
 import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
@@ -94,6 +95,16 @@ function Shell({ me, mode, onLogout, onAccount }) {
     told.current = Math.max(...news.map(n => n.at));
     for (const n of news.slice(0, 3)) toast(n.text, n.kind === 'bad' ? 'bad' : '', 'bolt');
   }, [autos]);
+  // Why the next account would be refused (an expired or invalid key, more accounts than
+  // seats). Admins only: nobody else can act on it, and the server answers them 404 anyway.
+  const [licTick, setLicTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setLicTick(n => n + 1);
+    window.addEventListener(LICENSE_EVENT, bump);
+    return () => window.removeEventListener(LICENSE_EVENT, bump);
+  }, []);
+  const { data: lic } = usePoll(() => (admin ? api.admin.license() : Promise.resolve(null)), 300000, [admin, licTick]);
+  const licNote = admin ? licenseNotice(lic) : null;
   const usersById = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const ctx = {
     me, mode, users, usersById, admin,
@@ -138,7 +149,8 @@ function Shell({ me, mode, onLogout, onAccount }) {
                </div>
              )}
              topEnd={quotas ? (open) => <UsageChips data={usage} onClick={open} /> : undefined}
-             banner={mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div> : null}
+             banner={mode === 'demo' ? <div class="demo-bar">{t('nav.demoBar')}</div>
+               : licNote ? <a class="license-bar" href="#/admin/license" role="status">{licNote}</a> : null}
              after={<>
                {rail ? <TaskRail ctx={ctx} projects={projects} onClose={() => setRailOpen(false)} /> : null}
                {panel

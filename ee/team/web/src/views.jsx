@@ -12,7 +12,7 @@ import { Icon } from '../../../../web/ui/icon.jsx';
 // "Ana <verb> acme-api": the verb reads right before the subject in either language.
 const VERBS = words(['fleet_send', 'attach', 'fleet_answer', 'fleet_interrupt', 'fleet_pause', 'fleet_resume', 'fleet_wake', 'fleet_reopen',
   'fleet_spawn', 'fleet_stop', 'fleet_rename', 'fleet_worktree_remove', 'fleet_unqueue', 'assign', 'login', 'setup', 'add_user', 'password',
-  'auto_save', 'auto_delete', 'route', 'voice_install', 'voice_delete'], 'verb');
+  'auto_save', 'auto_delete', 'route', 'voice_install', 'voice_delete', 'license_set', 'license_remove', 'license_renew', 'license_auto'], 'verb');
 const RESULT = { ran: 'good', refused: 'bad', changed: 'warn' };
 
 export function Activity({ ctx }) {
