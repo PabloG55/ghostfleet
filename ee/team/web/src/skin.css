@@ -3,36 +3,21 @@
 
 /* ── pixel icons (icon.jsx) ─────────────────────────── */
 .chip-trigger .px-ico, .chip-step .px-ico, .blk .px-ico, .seg .px-ico, .node-k .px-ico, .ubar-r .px-ico { vertical-align: -1px; }
-.as-head .x, .rail-head .x, .help .x { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r); }
-.as-head .x:hover, .rail-head .x:hover, .help .x:hover { color: var(--white); background: var(--panel2); }
 
 /* ── type ───────────────────────────────────────────── */
-.auth-card h1 { font-size: 16px; }
 /* section labels: the pixel face, small, with the manual's prompt mark */
-.palette h3, .ai-panel h3, .runs h2, .templates-title, .home-agent-head h2, .admin-users > .row h2 {
+.palette h3, .ai-panel h3, .runs h2, .templates-title, .admin-users > .row h2 {
   font-family: var(--px); font-weight: 400; letter-spacing: .02em; text-transform: none;
 }
 .runs h2 { font-size: 12px; color: var(--dim); }
 .runs h2::before { content: '▸'; color: var(--cyan); margin-right: .1em; font-family: var(--mono); }
 .palette h3, .ai-panel h3 { font-size: 12px; color: var(--dim); }
-.home-agent-head h2 { font-size: 16px; color: var(--white); }
 .admin-users > .row h2 { font-size: 14px; }
-/* The product's name is a title here, so it takes the titles' pixel face, against the shared
-   skin's mono wordmark. Silkscreen has no lowercase and draws the name as its capitals; the
-   text stays lowercase, which is what a reader copies and a screen reader says. Sizes are the
-   face's 8-pixel em: 16 fits the sidebar's 239px brand box with 50px to spare. The phone bar's
-   name is 8 because at 390 the bar has 111px left beside the usage chips and 8 is what fits
-   (81px); at 360 it still steps out and the ship carries the brand alone, as the shared rule
-   arranges. On the sign-in card 24 wrapped onto a second line at 360, hence the step. */
-.brand b { font: 400 16px/1.2 var(--px); letter-spacing: 0; }
-.brand.big b { font-size: 24px; }
-.topbar .brand b { font-size: 8px; line-height: 22px; }
-@media (max-width: 380px) { .brand.big b { font-size: 16px; } }
 
 /* ── windows ────────────────────────────────────────────
  * A panel that holds a whole task gets a title bar: its own first heading, on a slightly
  * lighter strip, with three square lamps that stay grey — a window, not a toy. */
-.home-agent, .auth-card, .palette, .ai-panel, .assistant, .rail, .admin-editor {
+.palette, .ai-panel, .admin-editor {
   border-radius: 0; border: 1px solid var(--line); background: var(--panel); box-shadow: none;
 }
 .palette > h3:first-child, .ai-panel > h3:first-child {
@@ -48,42 +33,21 @@
 @media (max-width: 760px) { .palette > h3:first-child { flex-basis: calc(100% + 24px); } }
 .palette > h3:first-child::after, .ai-panel > h3:first-child::after { left: 12px; }
 
-/* the sign-in window: the harbour is its picture, the bar carries the language */
-.auth { background: transparent; }
-.auth-card { padding: 0 28px 26px; gap: 14px; }
-.lang-toggle { top: 8px; right: 8px; border-radius: 0; border: 1px solid var(--line); background: var(--gf-abyss); }
-.lang-toggle button { font: 600 11px/1 var(--mono); letter-spacing: .02em; padding: 5px 8px; }
-.lang-toggle button.on { background: var(--panel2); color: var(--cyan); }
-@media (max-width: 480px) { .auth-card { padding: 0 18px 20px; } }
 
-/* the home console: a window whose bar is the ship and the question */
-.home-agent { padding: 0 20px 18px; gap: 14px; }
-.home-agent-head { margin: 0 -20px; padding: 8px 16px; background: var(--bar); border-bottom: 1px dashed var(--line); gap: 12px; }
-.home-agent .as-feed { border-top: 1px dashed var(--line); }
 
 /* ── sidebar ────────────────────────────────────────── */
-.demo-bar, .license-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
+.license-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
   font: 12px var(--mono); }
 
 /* ── controls ───────────────────────────────────────── */
-.mic .px-ico { color: inherit; }
 
 /* the owner picker's box keeps the raised fill it had around its native select */
 .select.owner-pick { background-color: var(--panel2); }
-.pchip { border-radius: var(--r); }
 .admin-tabs a { font-weight: 500; }
-.mic { border-radius: var(--r); font: 600 15px var(--sans); }
-.mic.on { animation: none; box-shadow: 0 0 0 2px var(--gf-bg), 0 0 0 3px var(--red); }
-.stop-all { border-radius: var(--r); display: inline-flex; align-items: center; gap: .5em; }
-.as-launch { border-radius: var(--r); border-color: var(--line); box-shadow: var(--gf-shadow-2); font: 600 13.5px var(--sans); }
-.as-launch:hover { border-color: var(--cyan); }
-.vb-btn, .vb-stop { border-radius: var(--r); }
-.vb-btn, .vb-stop { display: inline-flex; align-items: center; gap: .45em; }
-.as-launch.busy { border-color: var(--teal-edge, var(--gf-teal-edge)); }
 .switch i, .switch i::after { border-radius: 0; }
 
 /* ── surfaces: flat, hairline, no soft gradients ────── */
-.log-row, .auto-card, .tpl, .notice, .run, .node, .blk, .tk, .buoy, .as-row, .help, .picker.asking, .sea, .ai-mode, .ai-warn, .ai-note, .log-out {
+.auto-card, .tpl, .notice, .run, .node, .blk, .ai-mode, .ai-warn, .ai-note {
   border-radius: var(--r);
 }
 .auto-name, .ubar-v { font-family: var(--mono); }
@@ -92,21 +56,8 @@
    generic rule above had set Settings' team, the admin's people and the AI page's per-person
    profiles in mono, while project and profile names in the same kind of row stay mono. */
 .row-item > .avatar ~ b, .row-item > .avatar ~ .grow > b { font-family: var(--sans); }
-.help { background: color-mix(in srgb, var(--cyan) 4%, var(--panel)); }
-.sea { background: var(--gf-sea); border-color: var(--line); }
-.log-out { background: var(--gf-abyss); }
 .chip-trigger, .chip-step { border-radius: var(--r); display: inline-flex; align-items: center; gap: .4em; }
 .blk-ico { display: inline-grid; place-items: center; width: 14px; }
 .blk { gap: 10px; }
 .node-k { display: inline-flex; align-items: center; gap: .45em; }
 
-/* ── boats at pixel scale ───────────────────────────────
- * Every boat is a whole multiple of its 32 × 16 sprite (32, 64, 96 px), so a sprite pixel is
- * always whole screen pixels, and it moves one sprite pixel at a time: no rotation, which would
- * smear the pixels, and no easing, which would put them between two. */
-.ship-track .ship { transition: left 1.1s steps(12), color .3s; }
-.ship-track::after { animation: waves 4s steps(24) infinite; }
-
-@media (prefers-reduced-motion: reduce) {
-  .ship-track .ship, .ship-track::after { animation: none !important; transition: none !important; }
-}

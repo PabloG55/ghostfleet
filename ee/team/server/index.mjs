@@ -25,6 +25,9 @@ import { inRequest, asUser } from './i18n.mjs';
 import { t, msg, render, normLang, locale } from '../shared/i18n/index.js';
 import { createUsage } from './usage.mjs';
 import { createTerminal } from './terminal.mjs';
+import { createScreenRoutes } from './screen-routes.mjs';
+import { realScreenSource } from './screen-source.mjs';
+import { createScreenDemo } from './screen-demo.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -320,6 +323,8 @@ async function route(req, res, url) {
   const guard = (project, action) => { const no = denial(me, project, action); if (no) throw httpErr(no.status, no.text); };
   const mine = async () => visibleProjects(me, await fleet.projects());
 
+  if (await screenRoutes(req, res, url, me)) return;
+
   if (p === '/api/term/open') {
     if (req.method !== 'POST') throw httpErr(405, 'POST only.');
     return send(res, 200, await terminal.open(me, w.key, await body(req)));
@@ -578,6 +583,8 @@ async function migrateRoles() {
   }
 }
 await migrateRoles();
+
+const screenRoutes = createScreenRoutes({ source: MODE === 'demo' ? createScreenDemo() : await realScreenSource(), body, send, audit });
 
 const server = http.createServer((req, res) => inRequest(req, async () => {
   if (!req.headers.host) return send(res, 400, { ok: false, text: t('err.missingHost') });

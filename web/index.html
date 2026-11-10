@@ -2,18 +2,18 @@
 <html lang="en" style="background:#0b0d10">
 <head>
 <meta charset="utf-8">
-<!-- viewport-fit=cover + the safe-area insets in app.css: the page runs under the home
+<!-- viewport-fit=cover + the safe-area insets in web/ui/ui.css: the page runs under the home
      indicator at the bottom, and env(safe-area-inset-bottom) keeps the composer off it. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ghostfleet</title>
 <meta name="theme-color" content="#0b0d10">
 <!-- THE GROUND IS PAINTED BEFORE ANYTHING IS FETCHED. Going back could show a fully white
      screen until the page came up: a document's first frame is drawn before app.css has
-     arrived, and until then the canvas is the browser's LIGHT default — as is the web view
+     arrived (phone.css now), and until then the canvas is the browser's LIGHT default — as is the web view
      behind it, which is what the system back gesture slides in when it has no snapshot of
      the screen it is returning to. So the colour is inline, on <html> and in this block,
      and `color-scheme: dark` makes the UA's own defaults (canvas, the view under the page,
-     form controls before styling) dark too. The value is --bg's, and app.css restates it. -->
+     form controls before styling) dark too. The value is --bg's, and phone.css restates it. -->
 <meta name="color-scheme" content="dark">
 <style>html,body{background:#0b0d10;color-scheme:dark;margin:0}</style>
 <!-- iOS installs from these two, not from the manifest (16.4+ reads the manifest for
@@ -42,20 +42,23 @@
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./app.css">
+<!-- The faces web/ui is drawn in (Inter, JetBrains Mono, and Silkscreen for the wordmark),
+     vendored under web/fonts with their licences: the team app gets them from npm, and a phone
+     that is offline still has to draw its own name. -->
+<link rel="stylesheet" href="./fonts/fonts.css">
+<!-- The screens' rules: web/ui's and brand/'s tokens, bundled by vite.config.mjs. -->
+<link rel="stylesheet" href="./phone.css">
 <!-- The terminal's own rules (web/xterm.css, vendored with xterm.js — scripts/vendor-xterm.sh).
      Loaded with the shell rather than with the terminal, because it is 7 kB and a stylesheet
      injected later would be a <link> the CSP and the precache list both have to know about. -->
 <link rel="stylesheet" href="./xterm.css">
 </head>
 <body>
-<!-- Everything below is built by app.js. The static shell is deliberately this small:
-     it is what the service worker serves on a cold offline open, before any state. -->
-<!-- #side is the left pane of a wide window (app.css html.duo) and stays empty on a phone. -->
-<div id="side"></div>
-<div id="app" aria-live="polite"></div>
-<div id="sheet"></div>
-<script type="module" src="./app.js"></script>
+<!-- Everything below is drawn by phone.js: the same app as the team's (web/ui), behind the
+     passkey lock. The static shell is deliberately this small: it is what the service worker
+     serves on a cold offline open, before any state. -->
+<div id="app"></div>
+<script type="module" src="./phone.js"></script>
 <noscript>ghostfleet needs JavaScript: the grid is computed, not a page.</noscript>
 </body>
 </html>

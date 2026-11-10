@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// usage-check — the Claude accounts line at the top of Projects, and the sheet behind it,
-// drawn by a real browser at a phone's size and at a desk's.
+// usage-check — the Claude accounts line at the top of the first page, and the dialog behind it
+// (web/ui/accounts.jsx), drawn by a real browser at a phone's size and at a desk's.
 //
 //     node test/helpers/usage-check.mjs <variants.json> [<shots dir>]   # "name <US> want <US> got" rows
 //
@@ -80,16 +80,16 @@ try {
       await b.evaluate(() => { try { localStorage.clear(); } catch {} return null; });
       await b.call('Page.navigate', { url: `${srv.base}/index.html?usage=${variant}` });
       await until(() => b.evaluate(() => {
-        const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
+        const e = [...document.querySelectorAll('button')].find(x => /^continue without a passkey/i.test(x.textContent.trim()));
         if (e) e.click();
-        return !!document.querySelector(':is(#app, #side) .card .c-top');
+        return !!document.querySelector('.app .main .page.home');
       }));
-      return until(() => b.evaluate(() => !!document.querySelector(':is(#app, #side) .usage')), 8000);
+      return until(() => b.evaluate(() => !!document.querySelector('.main .usage')), 8000);
     };
-    // WHICHEVER PANE PROJECTS IS IN. On a phone that is #app; at 1280 with a mouse the client
-    // draws two panes and Projects is the left one, #side (web/README.md, "On a desk").
+    // The first page is the same at every width: web/ui's main column, the sidebar beside it at a
+    // desk and a drawer on a phone.
     const line = () => b.evaluate(() => {
-      const u = document.querySelector(':is(#app, #side) .usage');
+      const u = document.querySelector('.main .usage');
       if (!u) return null;
       const r = u.getBoundingClientRect(), list = u.parentElement, first = list && list.firstElementChild;
       return {
@@ -109,7 +109,7 @@ try {
         palette: Object.fromEntries(['--green', '--yellow', '--red', '--grey'].map(k => [k, getComputedStyle(document.documentElement).getPropertyValue(k).trim()])),
       };
     });
-    const sheetText = () => b.evaluate(() => { const s = document.querySelector('#sheet .sheet'); return s ? s.textContent : ''; });
+    const sheetText = () => b.evaluate(() => { const s = document.querySelector('.scrim > .modal'); return s ? s.textContent : ''; });
     const shot = async (name) => {
       if (!shots) return;
       const r = await b.call('Page.captureScreenshot', { format: 'png' });
@@ -121,7 +121,7 @@ try {
     is(`${size}: the line is drawn at the top of Projects`, true, await open('on'));
     let l = await line();
     await shot('on');
-    is(`${size}: ...first in the list, above the cards`, true, !!l && l.first);
+    is(`${size}: ...first on the page, above the assistant and the board`, true, !!l && l.first);
     is(`${size}: ...and in view without scrolling`, true, !!l && l.inView);
     is(`${size}: one line per profile, each named, in the brief's shape`,
        ['work | main · 5h 37% (2h10m) · 7d 42% (Sat)', 'personal | all accounts exhausted until 17:00 — workers paused'],
@@ -161,8 +161,8 @@ try {
          `${r3.usage} ${gaps.every(g => g >= 10000)}${gaps.every(g => g >= 10000) ? '' : ' gaps ' + gaps.join(',')}`);
     }
 
-    // ── the sheet: every account of every profile, in `fleet-accounts list`'s words ────
-    await b.evaluate(() => { const u = document.querySelector(':is(#app, #side) .usage'); if (u) u.click(); return null; });
+    // ── the dialog: every account of every profile, in `fleet-accounts list`'s words ────
+    await b.evaluate(() => { const u = document.querySelector('.main .usage'); if (u) u.click(); return null; });
     const st = await until(sheetText, 4000);
     await shot('sheet');
     const want = ['switch at 97% of the 5h or 7d limit, spending the week that ends first',
@@ -176,18 +176,28 @@ try {
       }
       if (a.fix) want.push(a.fix);
     }
-    is(`${size}: the sheet says everything \`list\` says about each account, the pin and the threshold`, [],
+    is(`${size}: the dialog says everything \`list\` says about each account, the pin and the threshold`, [],
        want.filter(t => !st.includes(t)));
-    is(`${size}: ...for all seven accounts`, 7, await b.evaluate(() => document.querySelectorAll('#sheet .u-acct').length));
+    is(`${size}: ...for all seven accounts`, 7, await b.evaluate(() => document.querySelectorAll('.modal .u-acct').length));
     is(`${size}: ...each in its state's colour`, 'green,yellow,red,red,red,red,red',
-       await b.evaluate(() => [...document.querySelectorAll('#sheet .u-acct')].map(n => (n.className.match(/\bu-(green|yellow|red|grey)\b/) || [])[1]).join(',')));
-    // Its buttons named in full, and its width asked of a sheet that is there: an absence
-    // asserted with no sheet open is true of a client that never drew one.
-    // ...by its name: the X every sheet has is a way back too, and says so as "close".
-    is(`${size}: ...and it offers no switch, only the way back`, ['close', 'esc back'],
-       await b.evaluate(() => [...document.querySelectorAll('#sheet .sheet button')].map(n => n.getAttribute('aria-label') || n.textContent.trim())));
+       await b.evaluate(() => [...document.querySelectorAll('.modal .u-acct')].map(n => (n.className.match(/\bu-(green|yellow|red|grey)\b/) || [])[1]).join(',')));
+    // Its buttons named in full, and its width asked of a dialog that is there: an absence
+    // asserted with no dialog open is true of a client that never drew one.
+    // ...by its name: the X every dialog has is the way back, and says so as "Close".
+    is(`${size}: ...and it offers no switch, only the way back`, ['Close'],
+       await b.evaluate(() => [...document.querySelectorAll('.scrim > .modal button')].map(n => n.getAttribute('aria-label') || n.textContent.trim())));
     is(`${size}: ...nor scrolls sideways`, false,
-       await b.evaluate(() => { const s = document.querySelector('#sheet .sheet'); return s ? s.scrollWidth > s.clientWidth + 1 : 'no sheet'; }));
+       await b.evaluate(() => {
+         const s = document.querySelector('.scrim > .modal');
+         if (!s) return 'no dialog';
+         if (s.scrollWidth <= s.clientWidth + 1) return false;
+         // Which part is too wide, named, so a red row says where to look.
+         const edge = s.getBoundingClientRect().right;
+         const n = [...s.querySelectorAll('*')].filter(x => x.getBoundingClientRect().right > edge + 1)
+           .sort((x, y) => y.getBoundingClientRect().right - x.getBoundingClientRect().right)[0];
+         return n ? `${n.tagName.toLowerCase()}.${[...n.classList].join('.')} ends ${Math.round(n.getBoundingClientRect().right - edge)}px past the dialog: ${n.textContent.slice(0, 60)}`
+           : `${s.scrollWidth}px of content in ${s.clientWidth}`;
+       }));
 
     // ── a reading older than six hours is said, in yellow ────────────────────────────
     await open('later');
@@ -212,7 +222,7 @@ try {
     is(`${size}: with the experiment off, the line says so and nothing else`,
        [[V.off.off], 'grey'], l && [l.lines.map(x => x.text), l.lines.map(x => x.hue).join(',')]);
     is(`${size}: ...and is not a control`, 'div', l && l.tag);
-    const tapped = await b.evaluate(() => { const u = document.querySelector(':is(#app, #side) .usage'); if (u) u.click(); return !!u; });
+    const tapped = await b.evaluate(() => { const u = document.querySelector('.main .usage'); if (u) u.click(); return !!u; });
     await sleep(400);
     is(`${size}: ...so a tap on it opens nothing`, 'tapped|', `${tapped ? 'tapped' : 'no line'}|${await sheetText()}`);
 

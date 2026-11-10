@@ -258,7 +258,7 @@ during implementation:
 
 (My first two probe attempts produced nothing at all because the probe used an inline
 `<script>`, which this CSP correctly refuses. The real client already loads
-`<script type="module" src="./app.js">`, so it is unaffected — but it is a neat
+`<script type="module" src="./phone.js">`, so it is unaffected — but it is a neat
 demonstration that the policy is doing its job.)
 
 ## 5. The shape: a verb, not an endpoint

@@ -626,13 +626,13 @@ is('...and the sweep read them', true, scanned > 50);
 const BINARY_REVIEWED = new Set([
   '2c785a8e51bcab64',   // docs/img/pane-fit.png
   '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
-  '242a6f9c498399a1',   // docs/mobile/confirm.png
-  '8b962f74b4b387eb',   // docs/mobile/grid.gif
-  '391976337517eac8',   // docs/mobile/pane.gif
-  '57f0372775587188',   // docs/mobile/phone-demo.gif
-  'd6ea272da209deef',   // docs/mobile/projects.png
-  'a8580058a434195a',   // docs/mobile/session.gif
-  '4f2218f03a99a458',   // docs/mobile/statuses.png
+  // The phone on the shared UI, shot on fixtures at 1x: every frame opened and read, every
+  // name in it one of web/fixtures/'s (acme-api, toolbox, acme-web, billing-svc, scratch).
+  'd662019c5511781e',   // docs/mobile/desk.png
+  '8b439848e76966bd',   // docs/mobile/drawer.png
+  'ec0411437fc28508',   // docs/mobile/home.png
+  '73e3dd7e5010ddc9',   // docs/mobile/phone-demo.gif
+  '828ac58d5d138422',   // docs/mobile/session.png
   '07b65ab7235ca1d3',   // docs/stack-demo.gif
   'ef987172757ffd8c',   // docs/stack-demo.mp4
   '23ec45657a6e9e92',   // docs/worktree-demo.gif
@@ -649,6 +649,11 @@ const BINARY_REVIEWED = new Set([
   'cb9ac55c5cc13cb5',   // web/fixtures/shots/docs-install.png
   '68234ec7e201e78f',   // web/fixtures/shots/flow.mp4
   '32a065ac00c98c87',   // web/fixtures/shots/web-invoices.png
+  // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
+  // packages the team app installs), so they carry the foundries' tables and nothing of ours.
+  '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
+  '18be452724bfdc23',   // web/fonts/jetbrains-mono-latin-wght-normal.woff2
+  'e6c72ea470224920',   // web/fonts/silkscreen-latin-400-normal.woff2
 ]);
 {
   const unreviewed = skipped.filter(f => {
@@ -660,14 +665,16 @@ const BINARY_REVIEWED = new Set([
 
 const BINARY_EXPECTED = [
   'docs/img/pane-fit.png', 'docs/img/pane-permission-dialog.png',
-  'docs/mobile/confirm.png', 'docs/mobile/grid.gif', 'docs/mobile/pane.gif',
-  'docs/mobile/phone-demo.gif', 'docs/mobile/projects.png', 'docs/mobile/session.gif',
-  'docs/mobile/statuses.png', 'docs/stack-demo.gif', 'docs/stack-demo.mp4',
+  'docs/mobile/desk.png', 'docs/mobile/drawer.png', 'docs/mobile/home.png',
+  'docs/mobile/phone-demo.gif', 'docs/mobile/session.png',
+  'docs/stack-demo.gif', 'docs/stack-demo.mp4',
   'docs/worktree-demo.gif', 'docs/worktree-demo.mp4',
   'web/icons/apple-touch-icon.png', 'web/icons/icon-192.png', 'web/icons/icon-512.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.
   'ee/team/web/public/icons/apple-touch-icon.png', 'ee/team/web/public/icons/icon-192.png', 'ee/team/web/public/icons/icon-512.png',
+  // The phone's fonts, served from web/ so the app asks nothing of a font CDN.
+  'web/fonts/inter-latin-wght-normal.woff2', 'web/fonts/jetbrains-mono-latin-wght-normal.woff2', 'web/fonts/silkscreen-latin-400-normal.woff2',
   'web/fixtures/shots/api-health.png', 'web/fixtures/shots/api-keys.png', 'web/fixtures/shots/api-search.png', 'web/fixtures/shots/docs-config.png', 'web/fixtures/shots/docs-install.png', 'web/fixtures/shots/flow.mp4', 'web/fixtures/shots/web-invoices.png',
 ].sort().join(' ');
 is('...skipping binaries by content, and naming them', BINARY_EXPECTED, skipped.sort().join(' '));

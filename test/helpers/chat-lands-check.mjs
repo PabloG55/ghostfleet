@@ -15,9 +15,10 @@
 // that is slow, a slow one overtaken by a fast one, a burst of 429s with a Retry-After, a
 // read still in flight when the app goes to the background. Every scenario writes the
 // reply into the transcript WHILE the chat is open and asks the screen, not the state,
-// whether it arrived. The client is the real one, unmodified, in server mode: the fixture
-// backend would turn every non-200 into "offline", so a 429 could not even be expressed
-// there. What it reads is web/fixtures/, so a reader can open the same conversation in
+// whether it arrived. The client is the real one, unmodified, in server mode — the phone app,
+// which draws web/ui's session screen, so this is that screen's transcript poll
+// (web/ui/transcript.js) being asked. Not fixture mode: the fixture backend would turn every
+// non-200 into "offline", so a 429 could not even be expressed there. What it reads is web/fixtures/, so a reader can open the same conversation in
 // fixture mode and see what these rows see.
 //
 // What it cannot be is a phone. The visibility change is simulated (document.hidden and a
@@ -109,6 +110,18 @@ async function fakeDaemon() {
       return setTimeout(() => { st.busy--; reply(200, fx(`grid-${PROJECT}.json`)); }, st.slowAll);
     }
     if (p === '/api/settings') return reply(200, { global_nudge: false, sessions: {} });
+    // The two reads the real daemon serves that every screen of the app makes besides these: the
+    // digest (every local project's sessions in one read, which the app's own poll takes instead of
+    // a grid per project) and the pane (the session's screen, read for the question it may be
+    // asking). Slow like the rest, and counted, since a loaded Mac is slow at all of them.
+    if (p === '/api/digest' || p === '/api/pane') {
+      st.busy++; st.maxBusy = Math.max(st.maxBusy, st.busy);
+      const body = p === '/api/pane'
+        ? fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`)
+        : { ok: true, projects: fx('projects.json').projects.map(x => ({ name: x.name,
+            sessions: x.name === PROJECT ? fx(`grid-${PROJECT}.json`).cards.map(c => ({ name: c.name, status: c.status, ts: 0, lead: !!c.lead })) : [] })) };
+      return setTimeout(() => { st.busy--; reply(200, body); }, st.slowAll);
+    }
     if (p === '/api/session') {
       const ms = st.convo[row.session] || [];
       const before = u.searchParams.get('before');
@@ -149,14 +162,13 @@ async function fakeDaemon() {
 }
 
 // The installed app reopened on the session it was showing: a token this page process minted
-// (sessionStorage, which a reload keeps) and the last screen (localStorage). Plus a visibility
+// (sessionStorage, which a reload keeps), and the address of the screen, which a reload with a
+// live token goes back to (web/src/phone.jsx). Plus a visibility
 // switch the scenario can flip — document.hidden and the event, which is what a resume hands
 // the page.
-const INIT = (session) => `(() => {
+const INIT = () => `(() => {
   try {
     sessionStorage.setItem('gf.session:' + location.origin, JSON.stringify({ t: 'chat-lands-token', exp: Date.now() / 1000 + 3600 }));
-    localStorage.setItem('gf.last', JSON.stringify({ at: Math.floor(Date.now() / 1000), screen: 'session',
-      project: '${PROJECT}', session: '${session}', view: 'chat' }));
   } catch {}
   let hidden = false;
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
@@ -188,8 +200,8 @@ async function scenario(name, run, { desktop = false, wide = false, open = null,
     b = desktop ? await launch({ width: 1280, height: 800, scale: 1 })
                 : await launch({ width: 390, height: 844, scale: 2, mobile: true });
     if (!desktop) await b.call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-    await b.call('Page.addScriptToEvaluateOnNewDocument', { source: INIT(SESSION) });
-    await b.call('Page.navigate', { url: d.base + '/' });
+    await b.call('Page.addScriptToEvaluateOnNewDocument', { source: INIT() });
+    await b.call('Page.navigate', { url: `${d.base}/#/p/${PROJECT}/s/${SESSION}` });
     const chat = () => b.evaluate(() => { const c = document.querySelector('.chat'); return c ? c.textContent : ''; });
     const has = async (s) => (await chat()).includes(s);
     const last = wide ? 'Retry budget per endpoint' : d.st.convo[SESSION][d.st.convo[SESSION].length - 1].text;
@@ -265,18 +277,26 @@ const SCENARIOS = [
     say(REPLY);
     is('slow: with every read taking 7 s, the reply still appears', true, !!(await until(() => has(REPLY), 24000)));
     is('slow: ...and never more than one transcript read is in flight', 1, st.maxInflight);
-    // One for the screen's own poll and one for the chat's: two pollers, never a backlog.
-    is('slow: ...nor more than two reads of any kind', true, st.maxBusy <= 2);
+    // One read per poller, never a backlog: the app's (the digest), the project's (its grid), the
+    // chat's and the pane's. A poller that started a read behind a slow one would make it five, and
+    // the backlog this was measured as was dozens.
+    is('slow: ...nor more than one read per poller (four on this screen)', true, st.maxBusy <= 4);
+    if (process.env.CHAT_LANDS_DEBUG) console.error('slow: maxBusy', st.maxBusy);
   }],
 
   // ── a slow answer overtaken by a fast one ─────────────────────────────────────────
   // The read that was asked BEFORE the reply was written answers AFTER one that has it. The
   // screen must keep the newer: drawing whichever came back last puts the reply on screen and
   // then takes it away again.
+  // A MESSAGE FIRST, so the slow read carries something the screen does not hold. Without it
+  // that read's snapshot is the page already drawn, it comes back a 304, and "the older read
+  // landed and was drawn" cannot happen in this scenario at all — measured: a client with no
+  // sequence check passed it.
   ['stale', async ({ b, st, has, say }) => {
     const n0 = st.reads;
-    st.delay = (n) => (n === n0 + 1 ? 9000 : 0);
-    await until(() => st.reads > n0, 8000);         // the slow one is asked, before the reply
+    say('Reading the retry tests before changing them.');
+    st.delay = (n) => (n === n0 + 1 ? 9000 : 0);    // the next read: asked after that, before the reply
+    await until(() => st.reads > n0, 8000);
     // Long enough that it is worth not waiting for, and then the reply.
     await sleep(3500);
     say(REPLY);
@@ -367,18 +387,20 @@ const SCENARIOS = [
       const r = document.createRange(); r.selectNodeContents(td);
       const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); return null;
     });
-    // Every mutation under #app from here, so "nothing changed" is counted rather than inferred.
+    // Every mutation in the conversation from here, so "nothing changed" is counted rather than
+    // inferred. The chat, not the whole app: the session's header and the list beside it have
+    // polls of their own, and what this asks is whether the MESSAGE LIST was rebuilt.
     await b.evaluate(() => {
       window.__muts = 0;
       new MutationObserver((l) => { window.__muts += l.length; })
-        .observe(document.getElementById('app'), { subtree: true, childList: true, attributes: true, characterData: true });
+        .observe(document.querySelector('.chat'), { subtree: true, childList: true, attributes: true, characterData: true });
       return null;
     });
     const t0 = Date.now();
     await sleep(6500);                         // past the 5 s poll AND the chat's own
     const asked = st.log.filter(r => r.path === '/api/session' && r.at >= t0).length;
     is(`${n}: the chat polled while nothing changed`, true, asked >= 1);
-    is(`${n}: ...and a poll that brought nothing changed no DOM at all`, 0, await b.evaluate(() => window.__muts));
+    is(`${n}: ...and a poll that brought nothing changed no DOM in the chat at all`, 0, await b.evaluate(() => window.__muts));
     const where1 = await b.evaluate(() => ({ t: ([...document.querySelectorAll('.chat .md-table:not(.fit)')].pop() || {}).scrollLeft,
       c: ([...document.querySelectorAll('.chat .md-code')].pop() || {}).scrollLeft }));
     is(`${n}: ...the table is where it was scrolled to`, wide.table, where1.t);
@@ -400,20 +422,33 @@ const SCENARIOS = [
   // ── the owner scrolled up to read history ─────────────────────────────────────────
   // The conversation's own scroll: up in the history, a poll and a new message must leave the
   // reader where they are — not at the bottom, and not at the top.
+  // WHERE THE READER IS is the message on screen, not the scroll offset: a list that loses a
+  // message above them keeps its scrollTop and still moves them by that message's height. So both
+  // are asked — the offset, and the message at the top of the screen staying where it was drawn.
   ['history', async ({ b, has, say }) => {
     const up = await b.evaluate(() => {
       const c = document.querySelector('.chat');
       c.scrollTop = Math.max(0, Math.floor((c.scrollHeight - c.clientHeight) / 3));
       c.dispatchEvent(new Event('scroll'));
-      return { top: c.scrollTop, end: c.scrollHeight - c.clientHeight };
+      const top = c.getBoundingClientRect().top;
+      const m = [...c.querySelectorAll('[data-k]')].find(n => n.getBoundingClientRect().bottom > top + 1);
+      if (m) m.__gfAnchor = 1;
+      return { top: c.scrollTop, end: c.scrollHeight - c.clientHeight, y: m ? m.getBoundingClientRect().top : null };
     });
-    is('history: fixture: the chat is scrolled up, away from the end', true, up.top > 0 && up.top < up.end - 50);
+    const at = () => b.evaluate(() => {
+      const c = document.querySelector('.chat'), m = [...c.querySelectorAll('[data-k]')].find(n => n.__gfAnchor);
+      return { top: c.scrollTop, y: m ? m.getBoundingClientRect().top : null };
+    });
+    const still = (now) => now.top === up.top && now.y != null && up.y != null && Math.abs(now.y - up.y) <= 1;
+    is('history: fixture: the chat is scrolled up, away from the end', true, up.top > 0 && up.top < up.end - 50 && up.y != null);
     await sleep(6500);
-    is('history: a poll leaves the reader where they were', up.top, await b.evaluate(() => document.querySelector('.chat').scrollTop));
+    const a1 = await at();
+    is('history: a poll leaves the reader where they were', true, still(a1) || a1);
     say(REPLY);
     await until(() => has(REPLY), 9000);
     await sleep(500);
-    is('history: ...and so does a new message', up.top, await b.evaluate(() => document.querySelector('.chat').scrollTop));
+    const a2 = await at();
+    is('history: ...and so does a new message', true, still(a2) || a2);
   }],
 
   // ── opening a chat: it loads, whatever the first read does ──────────────────────────
@@ -435,7 +470,7 @@ const SCENARIOS = [
     const shown = await until(async () => {
       if (await has(last)) return true;
       const st = await b.evaluate(() => { const c = document.querySelector('.chat'), l = c && c.querySelector('.loading');
-        return { line: l ? l.textContent : '', busy: !!c && c.getAttribute('aria-busy') === 'true' && !!c.querySelector('.bub.skel') }; });
+        return { line: l ? l.textContent : '', busy: !!c && c.getAttribute('aria-busy') === 'true' && !!c.querySelector('.bubble.skel') }; });
       if (st.line) said = st.line;
       if (st.busy) skeleton = true;
       return false;
@@ -465,7 +500,7 @@ const SCENARIOS = [
     await toTop();
     const anchor = await b.evaluate(() => {
       const c = document.querySelector('.chat'), top = c.getBoundingClientRect().top;
-      const t = [...c.querySelectorAll('.turn')].find(n => n.getBoundingClientRect().bottom > top + 1);
+      const t = [...c.querySelectorAll('[data-k]')].find(n => n.getBoundingClientRect().bottom > top + 1);
       if (!t) return null;
       t.__gfAnchor = 1;
       return { y: t.getBoundingClientRect().top, text: t.textContent.slice(0, 40) };
@@ -476,13 +511,14 @@ const SCENARIOS = [
     const loaded = await until(() => has(firstOlder), 6000);
     is('older-auto: scrolled to the top, the older page loads with no press', true, !!loaded);
     await sleep(400);
-    const y = await b.evaluate(() => { const t = [...document.querySelectorAll('.chat .turn')].find(n => n.__gfAnchor); return t ? t.getBoundingClientRect().top : null; });
+    const y = await b.evaluate(() => { const t = [...document.querySelectorAll('.chat [data-k]')].find(n => n.__gfAnchor); return t ? t.getBoundingClientRect().top : null; });
     is('older-auto: ...and the message the reader was on did not move', true, !!loaded && y != null && anchor && Math.abs(y - anchor.y) <= 2);
+    if (process.env.CHAT_LANDS_DEBUG) console.error('older-auto: anchor', JSON.stringify(anchor), 'now at', y);
     // Up again, page by page, to the start.
     let marker = false;
     for (let i = 0; i < 12 && !marker; i++) {
       await toTop(); await sleep(700);
-      marker = await b.evaluate(() => !!document.querySelector('.chat .start') && /start of conversation/.test(document.querySelector('.chat .start').textContent));
+      marker = await b.evaluate(() => !!document.querySelector('.chat .start') && /start of conversation/i.test(document.querySelector('.chat .start').textContent));
     }
     is('older-auto: at the start, a quiet "start of conversation" marker', true, marker);
     is('older-auto: ...and the very first message is there', true, await has(st.convo[SESSION][0].text));
@@ -491,7 +527,7 @@ const SCENARIOS = [
     for (let i = 0; i < 3; i++) { await toTop(); await sleep(400); }
     is('older-auto: ...and past the start nothing more is fetched', true, marker && olderAsked() === n0);
     is('older-auto: ...and no "load older" button, since nothing failed', 0,
-       await b.evaluate(() => [...document.querySelectorAll('.chat button')].filter(x => /older/.test(x.textContent)).length));
+       await b.evaluate(() => [...document.querySelectorAll('.chat button')].filter(x => /older|earlier/i.test(x.textContent)).length));
   }, { history: 56 }],
 
   // ...and when that fetch FAILS, the button comes back, as the only way to ask again: retrying
@@ -505,7 +541,7 @@ const SCENARIOS = [
     const asked = st.log.filter(r => /\bbefore=/.test(r.url || '')).length;
     for (let i = 0; i < 3; i++) { await b.evaluate(() => { const c = document.querySelector('.chat'); c.scrollTop = 0; c.dispatchEvent(new Event('scroll')); return null; }); await sleep(300); }
     is('older-fail: ...and scrolling does not keep retrying it', asked, st.log.filter(r => /\bbefore=/.test(r.url || '')).length);
-    const pressed = await b.evaluate(() => { const x = [...document.querySelectorAll('.chat .older button')].find(n => /older/.test(n.textContent)); if (!x) return false; x.click(); return true; });
+    const pressed = await b.evaluate(() => { const x = [...document.querySelectorAll('.chat .older button')].find(n => /older|earlier/i.test(n.textContent)); if (!x) return false; x.click(); return true; });
     is('older-fail: ...with the button to ask again', true, pressed);
     is('older-fail: ...which loads it', true, !!(await until(() => has(above), 6000)));
   }, { history: 56 }],
@@ -528,7 +564,9 @@ let failed = null;
 try {
   // AT MOST FOUR CHROMES AT ONCE: each scenario is a browser of its own, and a machine running
   // a fleet has other things to do.
-  const queue = SCENARIOS.slice();
+  // CHAT_LANDS_ONLY=<name>[,<name>]: the named scenarios alone, for working on one.
+  const only = (process.env.CHAT_LANDS_ONLY || '').split(',').filter(Boolean);
+  const queue = SCENARIOS.filter(([n]) => !only.length || only.includes(n));
   const lanes = Array.from({ length: Math.min(4, queue.length) }, async () => {
     while (queue.length) { const [name, run, opts] = queue.shift(); await scenario(name, run, opts); }
   });

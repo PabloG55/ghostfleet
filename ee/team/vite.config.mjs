@@ -12,7 +12,7 @@ import preact from '@preact/preset-vite';
 // root), but vite serves any file that a served module imports whatever that list says: its
 // import analysis adds each resolved import to a safe set before the list is consulted. So
 // web/ansi.js, web/grid.js (through ansi.js) and web/md.js load in dev, while a direct request
-// for web/app.js, which nothing here imports, is refused, which is the only thing a wider allow
+// for web/sw.js, which nothing here imports, is refused, which is the only thing a wider allow
 // list would change. The brand's tokens.css (the repo's brand/, imported by web/src/main.jsx)
 // is served the same way, and brand/manual.html beside it is refused.
 //

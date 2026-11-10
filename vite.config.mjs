@@ -1,16 +1,19 @@
 // vite.config.mjs — the phone client's build, deliberately the smallest one that can
 // compile a component.
 //
-// WHAT IS BUILT AND WHAT IS NOT. Exactly one entry: web/src/screens.jsx, which holds the
-// two ported screens (Projects and the grid), emitted as web/screens.js. web/app.js,
-// api.js, grid.js, ansi.js, md.js, passkey.js and sw.js are NOT built — they are served as
-// written, the way they have been since there was no build at all. That remains the point:
-// a phone-only bug in any of them is still diagnosed by reading the file the phone actually
-// fetched, and only one file in web/ is a thing you cannot read that way.
-//   ONE ENTRY FOR TWO SCREENS, NOT ONE PER SCREEN, because they share Btn, Icon, VerbBtn,
-// Header, ConfirmBar and CardList. Two entries would either duplicate all six into both
-// bundles or need a third shared chunk and a third name in sw.js's SHELL list, to save
-// nothing: the phone fetches both screens in the same session anyway.
+// WHAT IS BUILT AND WHAT IS NOT. Exactly one entry: web/src/phone.jsx, the phone's app, which
+// is web/ui's one app (the screens the team app draws, web/ui/README.md) behind the phone's own
+// passkey lock and over its own adapter. It is emitted as web/phone.js, with preact beside it as
+// web/preact.js and every stylesheet the screens use as web/phone.css. api.js, grid.js, ansi.js,
+// md.js, passkey.js, term.js and sw.js are NOT built — they are served as written, the way they
+// have been since there was no build at all. That remains the point: a phone-only bug in any of
+// them is still diagnosed by reading the file the phone actually fetched.
+//   ONE ENTRY, NOT ONE PER SCREEN: the screens share nearly everything, and the phone opens most
+// of them in one sitting. A split would only add names to sw.js's SHELL list.
+//   THE CSS IS BUNDLED, NOT LINKED, because two of its sources are not in web/: brand/tokens.css
+// (the --gf-* palette the skin is written in) is outside the npm package's `files`, and web/ui's
+// sheets are imported by both apps. Bundled, phone.css is one file in web/ that the package
+// ships and the precache list names once.
 //
 // ── NO CONTENT HASHING IN THE FILENAMES, AND THIS IS LOAD-BEARING ──────────────────────
 // web/sw.js precaches a hand-written 26-entry SHELL list and carries a CLIENT-HASH digest
@@ -34,8 +37,8 @@
 import path from 'node:path';
 
 // ── the client's own modules stay OUT of the bundle ───────────────────────────────────
-// grid.js and api.js are imported by the ported screen and by app.js alike. Bundling them
-// would put a SECOND copy of each inside screens.js, and two copies of grid.js is two
+// grid.js and api.js are imported by the phone's app and served beside it as written. Bundling
+// them would put a SECOND copy of each inside phone.js, and two copies of grid.js is two
 // answers to "how wide is this card" — exactly the split that cells() and the pane view
 // exist to prevent. So they are marked external and left as real `import` statements in
 // the output, resolved by the browser against web/ at runtime.
@@ -46,7 +49,10 @@ import path from 'node:path';
 // './grid.js'. `output.paths` does that rewrite. Without it the built bundle asks for
 // web/../grid.js — the repository root — and the browser gets a 404 for a file that is
 // sitting right next to it.
-const CLIENT_MODULES = /^\.\.\/(grid|api|ansi|md|passkey)\.js$/;
+// term.js joined the list with the terminal screen (web/ui/terminal.jsx imports it lazily). It
+// matters twice over: inlined, a chunk named `term` would be written to web/term.js and replace
+// the vendored file it was built from.
+const CLIENT_MODULES = /^\.\.\/(grid|api|ansi|md|passkey|term)\.js$/;
 
 /** @type {import('vite').Plugin} */
 // IT GOES IN THE TOP-LEVEL `plugins`, NOT IN `build.rollupOptions.plugins`, and the
@@ -101,7 +107,7 @@ export default {
   },
   build: {
     outDir: 'web',
-    // web/ is the CLIENT, not a build directory: emptying it would delete app.js, the
+    // web/ is the CLIENT, not a build directory: emptying it would delete api.js, the
     // fixtures, the icons and the service worker. Every other guard in this repo would
     // then go red at once, which is small comfort at that point.
     emptyOutDir: false,
@@ -112,28 +118,28 @@ export default {
     // here too.
     target: 'safari16',
     // A preload polyfill is a second script injected into a page this build does not own —
-    // index.html is hand-written and loads app.js itself.
+    // index.html is hand-written and loads phone.js itself.
     modulePreload: false,
     // The size table costs a gzip pass over the output on every build, and cf-sync runs
     // this on the way to the phone.
     reportCompressedSize: false,
     rollupOptions: {
-      input: { screens: path.resolve(import.meta.dirname, 'web/src/screens.jsx') },
+      input: { phone: path.resolve(import.meta.dirname, 'web/src/phone.jsx') },
       // THE ENTRY IS A LIBRARY, NOT A PAGE, and without this line the build silently
       // produces nothing. vite's default for an app build is `false` — entries are assumed
       // to be run for their side effects, so their exports are dropped and the tree-shaker
       // then removes everything that was only reachable through them. Measured: the first
       // build emitted 14.8 kB of preact and not one line of the screen, exited 0, and said
-      // "✓ built in 13ms". app.js imports mount() from here, so the exports ARE the output.
+      // "✓ built in 13ms". The phone's entry has no exports of its own (it renders), but the
+      // setting stays: it is what keeps the next entry with exports from compiling to nothing.
       preserveEntrySignatures: 'exports-only',
       output: {
         format: 'es',
-        // PREACT GETS ITS OWN FILE so that screens.js stays readable. npm ships preact
+        // PREACT GETS ITS OWN FILE so that phone.js stays readable. npm ships preact
         // pre-minified — `minify: false` cannot undo that — and inlining it would bury the
-        // ported screen in 17 kB of single-letter variables, which is exactly the
-        // debuggability this build is supposed to keep. Split, web/screens.js is the
-        // screens as written and web/preact.js is the dependency, and the one you open on a
-        // phone is the one you wrote.
+        // screens in 17 kB of single-letter variables, which is exactly the debuggability
+        // this build is supposed to keep. Split, web/phone.js is the screens as written and
+        // web/preact.js is the dependency, and the one you open on a phone is the one you wrote.
         manualChunks: (id) => (id.includes('node_modules') ? 'preact' : undefined),
         // The three names that would otherwise carry a content hash. Entry and chunk
         // names are what sw.js's SHELL list spells out by hand; an asset name would be
