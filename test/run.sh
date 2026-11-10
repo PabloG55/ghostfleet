@@ -29647,6 +29647,34 @@ https://example.com/acme-web/pricing" "$P"
   is "...and the command reached no turn"               "0" "$(grep -l '/status' "$TB/s"/prompt.* 2>/dev/null | grep -c . || true)"
   TBC config coalesce-ms '' >/dev/null
 
+  # ── a crash inside the window ─────────────────────────────────────────────
+  # The batch has to ask Telegram for what comes next, and asking past an update is what
+  # confirms it: from then on the state file is the only copy. So the daemon is killed only
+  # after the stub has been polled past the message, and the stub drops what is confirmed.
+  TBC config coalesce-ms 10000 >/dev/null
+  d0="$(delivered)"
+  tbsay 151 'held across a crash: the acme-web error log'
+  kept() { [ "$(jq -r '.pending.updates[0].message.message_id // ""' "$TD/state.json" 2>/dev/null)" = 151 ]; }
+  until_ok 40 kept
+  uid="$(jq -r '.pending.updates[0].update_id // 0' "$TD/state.json" 2>/dev/null)"
+  past() { [ "$(jq -s --argjson u "$uid" '[.[] | select(.method == "getUpdates" and (.body.offset // 0) > $u)] | length' "$TB/stub/requests.jsonl" 2>/dev/null)" -ge 1 ]; }
+  until_ok 40 past
+  is "a held message is in the state file inside the window" "yes" "$(kept && echo yes || echo no)"
+  is "...after Telegram was told it arrived"            "yes" "$(past && echo yes || echo no)"
+  kill -9 "$TBPID" 2>/dev/null
+  for _ in $(seq 1 20); do kill -0 "$TBPID" 2>/dev/null || break; sleep 0.1; done
+  is "...and the daemon is killed by its pid before it went" "no|$d0" "$(kill -0 "$TBPID" 2>/dev/null && echo yes || echo no)|$(delivered)"
+  out="$(TBC start)"
+  TBPID="$(tr -dc '0-9' < "$TD/daemon.pid" 2>/dev/null)"
+  is "...started again"                                 "1" "$(grep -c 'started (pid' <<< "$out" || true)"
+  tbturn 120
+  is "...it hands the batch over"                       "[telegram] held across a crash: the acme-web error log" "$P"
+  is "...from the state file"                           "1" "$(grep -c 'kept from the last run: 1 message not handed over yet' "$TD/log" 2>/dev/null || true)"
+  sleep 12                                 # past a second window, for a second delivery that should not come
+  is "...exactly once"                                  "1" "$(( $(delivered) - d0 ))"
+  is "...and lets it go"                                "0" "$(jq '.pending.updates // [] | length' "$TD/state.json" 2>/dev/null)"
+  TBC config coalesce-ms '' >/dev/null
+
   TBC stop >/dev/null
   for _ in $(seq 1 20); do kill -0 "$TBPID" 2>/dev/null || break; sleep 0.1; done
   kill -0 "$TBPID" 2>/dev/null && kill "$TBPID" 2>/dev/null

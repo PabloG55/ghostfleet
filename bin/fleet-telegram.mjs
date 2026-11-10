@@ -388,15 +388,17 @@ const coalesceMs = () => {
   const v = config().coalesce_ms;
   return Number.isInteger(v) && v >= 0 ? Math.min(v, COALESCE_CAP_MS) : COALESCE_MS;
 };
-let batch = null;                    // { first, last, updates: [{ update_id, message }] }
+// The open batch is state.pending, { first, last, updates: [{ update_id, message }] }, and
+// it lives in the state file — see hold() for why it has to.
 let pollFrom = 0;                    // the next update to ask for: past every one already taken
 // When the open batch is due: a quiet window after its last message, the cap after its
 // first, and never while an album is still arriving.
 function dueAt() {
-  if (!batch?.updates.length) return Infinity;
-  const tail = batch.updates[batch.updates.length - 1].message;
-  const album = tail?.media_group_id ? batch.last + ALBUM_MS : 0;
-  return Math.max(Math.min(batch.last + coalesceMs(), batch.first + COALESCE_CAP_MS), album);
+  const b = state.pending;
+  if (!b?.updates?.length) return Infinity;
+  const tail = b.updates[b.updates.length - 1].message;
+  const album = tail?.media_group_id ? b.last + ALBUM_MS : 0;
+  return Math.max(Math.min(b.last + coalesceMs(), b.first + COALESCE_CAP_MS), album);
 }
 const ackFor = (sec, id) => (text) => sendText(sec.token, sec.chat, redact(text), { replyTo: id }).catch((e) => log(`reply failed: ${e.message}`));
 const typing = (sec) => api(sec.token, 'sendChatAction', { chat_id: sec.chat, action: 'typing' }).catch(() => {});
@@ -420,12 +422,20 @@ async function command(cmd, msg, sec) {
 // done now: the typing indicator, from the first message on, and a voice note's
 // acknowledgement, because transcribing and answering take a minute or more and silence
 // looks like a crash.
+//   KEPT BEFORE IT IS CONFIRMED. Telegram drops an update for good once getUpdates asks for
+// anything past it, and the batch has to ask past it to see what comes next — so from the
+// next poll on, the state file is the only copy of a held message. It is written here, before
+// that poll, and a write that fails sends the batch at once rather than hold what a crash
+// would lose. A daemon that dies inside the window hands the batch over when it starts again.
 function hold(u, sec) {
   const now = Date.now();
-  const opening = !batch?.updates.length;
-  if (opening) batch = { first: now, last: now, updates: [] };
-  if (!batch.updates.some((x) => x.update_id === u.update_id)) batch.updates.push(u);
-  batch.last = now;
+  if (!state.pending?.updates?.length) state.pending = { first: now, last: now, updates: [] };
+  const b = state.pending;
+  if (!b.updates.some((x) => x.update_id === u.update_id)) b.updates.push(u);
+  b.last = now;
+  state.offset = Math.max(Number(state.offset) || 0, u.update_id + 1);
+  try { writeJson(STATE, state); }
+  catch (e) { log(`could not keep the batch (${e.message}); sending it now`); b.first = 0; }
   typing(sec);
   const m = u.message;
   const ack = String(config().voice_ack || '');
@@ -433,12 +443,14 @@ function hold(u, sec) {
     try { const t = resolveLink(); if (wiring(t).ok) ackFor(sec, Number(m.message_id) || 0)(ack); } catch {}
   }
 }
+// Let go of only once fleet-send has returned, so a crash between the two hands the batch
+// over again on the next start: a message repeated, never one lost.
 async function flush(sec) {
-  if (!batch?.updates.length) return;
-  const msgs = batch.updates.map((u) => u.message).filter(Boolean);
+  const b = state.pending;
+  if (!b?.updates?.length) return;
+  const msgs = b.updates.map((u) => u.message).filter(Boolean);
   try { await deliver(msgs, sec); } catch (e) { log(`batch of ${msgs.length}: ${e.message}`); }
-  state.offset = Math.max(Number(state.offset) || 0, batch.updates[batch.updates.length - 1].update_id + 1);
-  batch = null;
+  delete state.pending;
   saveState();
 }
 
@@ -653,6 +665,15 @@ async function daemon() {
   fs.writeFileSync(PIDFILE, `${process.pid}\n`, { mode: 0o600 });
   state = readJson(STATE, {});
   Object.assign(state, { pid: process.pid, started: Math.floor(Date.now() / 1000), last_error: '' });
+  // A batch the last run kept and never handed over (see hold): Telegram has forgotten it, so
+  // this is the only copy. Its cap still counts from its first message; its quiet window
+  // starts again now, so a message sent while the daemon was down can still join it.
+  const kept = Array.isArray(state.pending?.updates)
+    ? state.pending.updates.filter((u) => Number.isInteger(u?.update_id) && u.message && typeof u.message === 'object') : [];
+  if (kept.length) {
+    state.pending = { first: Number(state.pending.first) || 0, last: Date.now(), updates: kept };
+    log(`kept from the last run: ${kept.length} message${kept.length === 1 ? '' : 's'} not handed over yet`);
+  } else delete state.pending;
   saveState();
   const bye = () => { if (stopping) return; stopping = true; inflight.abort(); };
   process.on('SIGTERM', bye); process.on('SIGINT', bye);
@@ -691,13 +712,15 @@ async function daemon() {
           await command(commandOf(m), m, sec).catch((e) => log(`message ${u.update_id}: ${e.message}`));
         } else if (m) {
           // Coalescing off: each message is its own turn, except the pieces of one album.
-          if (batch && coalesceMs() === 0 && !(m.media_group_id && m.media_group_id === batch.updates[batch.updates.length - 1].message?.media_group_id)) await flush(sec);
+          const open = state.pending?.updates;
+          if (open?.length && coalesceMs() === 0 && !(m.media_group_id && m.media_group_id === open[open.length - 1].message?.media_group_id)) await flush(sec);
           hold(u, sec);
         }
-        // Advanced past an update once nothing of it is waiting here, so a crash part-way
-        // repeats it rather than losing it — the failure this path exists to fix is the
-        // silent one. A message still in the batch keeps the offset where it was.
-        if (!batch?.updates.length) { state.offset = pollFrom; saveState(); }
+        // Advanced past an update once it is handled or kept (hold() has already written the
+        // batch), so a crash part-way repeats it rather than losing it — the failure this
+        // path exists to fix is the silent one.
+        state.offset = Math.max(Number(state.offset) || 0, pollFrom);
+        saveState();
       }
       saveState();
     } catch (e) {
@@ -874,6 +897,8 @@ async function status() {
   say(`counts:      ${st.delivered || 0} delivered, ${st.sent || 0} answers sent, ${st.dropped || 0} dropped from other chats`);
   let waiting = 0; try { waiting = fs.readdirSync(OUTBOX).filter((n) => n.endsWith('.json')).length; } catch {}
   say(`outbox:      ${waiting} waiting`);
+  const held = Array.isArray(st.pending?.updates) ? st.pending.updates.length : 0;
+  if (held) say(`held:        ${held} message${held === 1 ? '' : 's'} waiting to go to the session as one`);
   say(`transcribe:  ${c.transcribe_cmd ? 'set' : 'not set — voice notes arrive as audio files'}`);
   say(`speak:       ${c.speak_cmd ? 'set' : 'not set — a voice note gets a text answer only'}`);
   say(`voice ack:   ${c.voice_ack ? 'set' : 'not set'}`);
