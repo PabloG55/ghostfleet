@@ -13,7 +13,9 @@ export function teamSlots(ctx) {
   const others = (here) => (here || []).filter(h => h.user !== ctx.me.id);
   return {
     ownerName: (s) => user(s.owner)?.name || null,
-    ownerBadge: (s, size) => { const u = user(s.owner); return u ? <Avatar user={u} size={size} /> : null; },
+    // On a ship, and in the ship's card beside the name (web/ui/shiptip.jsx): the card says who it
+    // is, so the badge draws no native tooltip of its own over it.
+    ownerBadge: (s, size) => { const u = user(s.owner); return u ? <Avatar user={u} size={size} title={null} /> : null; },
 
     cardFoot: (c) => {
       const owner = user(c.owner), o = others(c.here);

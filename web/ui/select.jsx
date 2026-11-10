@@ -105,22 +105,23 @@ const EDGE = 8;  // the least the box keeps from the viewport's edges
 const GAP = 4;   // between the anchor and the box, as .menu sits 4px below its button
 
 // Place `box` under `anchor`, or above it when there is more room there than below and the
-// box does not fit below. Returns the side it took.
-export function placeBy(anchor, box, { maxH = 320, align = 'start', minWidth = 0 } = {}) {
+// box does not fit below. `prefer: 'up'` turns that round: above, unless it does not fit there
+// and below has more room (a ship's card, shiptip.jsx). Returns the side it took.
+export function placeBy(anchor, box, { maxH = 320, align = 'start', minWidth = 0, maxW = Infinity, prefer = 'down' } = {}) {
   const r = anchor.getBoundingClientRect();
   const vw = document.documentElement.clientWidth, vh = innerHeight;
   const keep = box.scrollTop;
-  box.style.maxWidth = `${vw - 2 * EDGE}px`;
+  box.style.maxWidth = `${Math.min(maxW, vw - 2 * EDGE)}px`;
   box.style.minWidth = `${Math.min(minWidth, vw - 2 * EDGE)}px`;
   box.style.maxHeight = 'none';
   const full = box.offsetHeight;
   const below = vh - r.bottom - GAP - EDGE, above = r.top - GAP - EDGE;
-  const up = full > below && above > below;
+  const up = prefer === 'up' ? !(full > above && below > above) : full > below && above > below;
   const h = Math.min(full, maxH, Math.max(0, up ? above : below));
   box.style.maxHeight = `${h}px`;
   box.style.top = `${up ? r.top - GAP - h : r.bottom + GAP}px`;
   const w = box.offsetWidth;
-  let left = align === 'end' ? r.right - w : r.left;
+  let left = align === 'end' ? r.right - w : align === 'center' ? r.left + (r.width - w) / 2 : r.left;
   left = Math.max(EDGE, Math.min(left, vw - EDGE - w));
   box.style.left = `${left}px`;
   box.scrollTop = keep;

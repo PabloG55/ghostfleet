@@ -1,10 +1,11 @@
 // The home page as a picture of the fleet: every fleet with something open is a tile, every
-// session a boat in the colour of what it is doing. Words only where a click is needed — a
-// name on hover, and on the boats that are waiting for an answer.
+// session a boat in the colour of what it is doing. Words only where a click is needed — who a
+// boat is, on hover (shiptip.jsx), and the names of the boats that are waiting for an answer.
 import { useKept } from './back.jsx';
 import { Ship, Led } from './fleet.jsx';
 import { t, worded } from './i18n.js';
 import { useSlot } from './adapter.jsx';
+import { useShipTips } from './shiptip.jsx';
 
 const FRESH_S = 15 * 60;        // "just finished": ready, and its turn ended this recently
 
@@ -34,10 +35,11 @@ export function lookOf(s, now = Date.now() / 1000) {
 const sessionHref = (p, s) => `#/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
 const projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 
-// `ownerName(session)` and `ownerBadge(session, size)` are an app's slots (adapter.jsx): who a
-// boat belongs to, in its title and as a badge on it. The single-user client has neither.
+// `ownerBadge(session, size)` is an app's slot (adapter.jsx): who a boat belongs to, as a badge
+// on it; its card names them (ownerName). The single-user client has neither.
 export function Board({ projects }) {
-  const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
+  const ownerBadge = useSlot('ownerBadge');
+  const tips = useShipTips();
   const [showQuiet, setShowQuiet] = useKept('board.quiet', false);
   const now = Date.now() / 1000;
   const fleets = (projects || []).map(p => {
@@ -64,14 +66,14 @@ export function Board({ projects }) {
       {live.length ? (
         <div class="fleets">
           {live.map(f => (
-            <article key={f.name} class={`fleet c-${LOOKS[f.top].color} lk-${f.top}`}>
+            <article key={f.name} class={`fleet c-${LOOKS[f.top].color} lk-${f.top}`} onPointerEnter={() => tips.warm(f.name)}>
               <a class="fleet-name" href={projectHref(f.name)} title={t('board.open', { name: f.name })}>{f.name}</a>
               <div class="fleet-sea">
                 {f.boats.map(b => {
-                  const owner = ownerName(b), badge = ownerBadge(b, 15);
+                  const badge = ownerBadge(b, 15);
                   return (
                     <a key={b.name} class={`fboat c-${LOOKS[b.look].color} lk-${b.look}`} href={sessionHref(f.name, b.name)}
-                       title={`${b.lead ? t('common.lead') : b.name} · ${LOOKS[b.look].label}${owner ? ` · ${owner}` : ''}`}>
+                       {...tips.bind({ project: f.name, name: b.name, lead: b.lead, ts: b.ts, session: b, word: LOOKS[b.look].label, light: LOOKS[b.look].light })}>
                       <Ship size={b.lead ? 64 : 32} state={LOOKS[b.look].light} />
                       {b.look === 'need' ? <span class="fboat-name">{b.lead ? t('common.lead') : b.name}</span> : null}
                       {badge ? <span class="fboat-owner">{badge}</span> : null}
@@ -83,6 +85,7 @@ export function Board({ projects }) {
           ))}
         </div>
       ) : <p class="muted pad">{t('board.none')}</p>}
+      {tips.card}
       {quiet.length ? (
         <div class={`quiet${showQuiet ? ' open' : ''}`}>
           <button class="quiet-toggle" onClick={() => setShowQuiet(v => !v)} aria-expanded={showQuiet}>

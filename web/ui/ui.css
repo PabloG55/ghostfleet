@@ -224,6 +224,20 @@ textarea { resize: vertical; }
    and over the phone's full-screen assistant (70); the toasts (80) stay on top of both. */
 .popover { position: fixed; right: auto; top: 0; z-index: 72; width: 340px; min-width: 0; padding: 12px 14px; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
 .popover p { margin: 0; }
+/* A ship's card (shiptip.jsx): the same surface, sized to what it says, above the toasts' layer
+   only where a list is (76), so a list opened over it stays on top. It never covers its ship,
+   and the pointer may cross onto it. */
+.ship-tip { width: max-content; z-index: 74; padding: 10px 12px; gap: 6px; font-size: 12.5px; }
+.tip-who { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+.tip-who b { color: var(--white); font-size: 13.5px; overflow-wrap: anywhere; }
+.tip-who span { color: var(--dim); }
+.tip-state { display: flex; align-items: center; gap: .5em; color: var(--white); }
+.tip-rows { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 2px 0 0; padding-top: 7px; border-top: 1px solid var(--line); }
+.tip-rows dt { color: var(--dim); }
+.tip-rows dd { margin: 0; display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; color: var(--fg); }
+.tip-said { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; color: var(--dim); }
+/* A ship is pressed and held for its card on a phone: no text selection, and no link preview. */
+.fboat, .boat { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 
 .ask { margin: 14px 22px 0; border-radius: var(--r); padding: 14px 16px; border: 1px solid rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); display: flex; flex-direction: column; gap: 10px; }
 .ask.question { border-color: rgba(255,215,95,.45); background: linear-gradient(180deg, rgba(255,215,95,.07), rgba(255,215,95,.02)); }

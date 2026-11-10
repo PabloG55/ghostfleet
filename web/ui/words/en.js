@@ -71,6 +71,11 @@ export default {
   'look.open': 'Open',
   'look.off': 'Idle',
   'board.open': 'Open {name}',
+  'tip.agent': 'Agent',
+  'tip.owner': 'Owner',
+  'tip.label': 'Label',
+  'tip.moved': 'Moved',
+  'tip.said': 'Said',
   'board.none': 'No fleet is working right now.',
   'board.quiet': '{n} quiet',
   // ── project ──

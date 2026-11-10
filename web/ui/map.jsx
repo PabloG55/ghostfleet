@@ -4,16 +4,19 @@ import { GhostShip as Ship, Ship as Boat } from './fleet.jsx';
 import { t } from './i18n.js';
 import { useFleet, useSlot } from './adapter.jsx';
 import { useKept } from './back.jsx';
+import { useShipTips } from './shiptip.jsx';
 
 // The whole fleet at once: every project an island, every session a boat in its status
 // colour, and the ghost ship flying to wherever something just happened — in any project.
 const shipState = (s) => (s === 'working' ? 'acting' : s === 'need-you' ? 'thinking' : s === 'starting' ? 'sending' : 'idle');
 const WORD = (s) => (STATUS[s] || STATUS.unknown).label.toLowerCase();
 
-// `ownerName` and `ownerBadge` are the same slots the board takes (adapter.jsx).
+// `ownerBadge` is the same slot the board takes (adapter.jsx), and a boat says who it is in the
+// same card (shiptip.jsx).
 export function FleetMap({ projects }) {
   const { go } = useFleet();
-  const ownerName = useSlot('ownerName'), ownerBadge = useSlot('ownerBadge');
+  const ownerBadge = useSlot('ownerBadge');
+  const tips = useShipTips();
   // Kept per history entry (back.jsx), so the map gone back to from a session is the map that
   // was left: the box as it was ticked, the ticker's lines, the ship where it was.
   const [events, setEvents] = useKept('map.events', []);
@@ -78,18 +81,19 @@ export function FleetMap({ projects }) {
           {projects == null ? <p class="muted pad">{t('map.reading')}</p> : null}
           {projects && !shown.length ? <p class="muted pad">{t('map.none')}</p> : null}
           {shown.map(p => (
-            <section key={p.name} class={`island${p.counts.need_you ? ' hot' : ''}${focus?.project === p.name ? ' focus' : ''}`} data-island={p.name}>
+            <section key={p.name} class={`island${p.counts.need_you ? ' hot' : ''}${focus?.project === p.name ? ' focus' : ''}`} data-island={p.name}
+                     onPointerEnter={() => tips.warm(p.name)}>
               <button class="island-name" onClick={() => go(`/p/${encodeURIComponent(p.name)}`)}>
                 {p.name}{p.counts.need_you ? <span class="badge need">{p.counts.need_you}</span> : null}
               </button>
               <div class="boats">
                 {p.sessions.map(s => {
                   const st = STATUS[s.status] || STATUS.unknown;
-                  const owner = ownerName(s), badge = ownerBadge(s, 15);
+                  const badge = ownerBadge(s, 15);
                   return (
                     <button key={s.name} class={`boat c-${st.color} st-${s.status}`} data-boat={`${p.name}/${s.name}`}
-                            title={`${s.name} · ${st.label}${owner ? ` · ${owner}` : ''}`}
-                            onClick={() => go(`/p/${encodeURIComponent(p.name)}/s/${encodeURIComponent(s.name)}`)}>
+                            {...tips.bind({ project: p.name, name: s.name, lead: s.lead, ts: s.ts, session: s, word: st.label, light: s.status },
+                              () => go(`/p/${encodeURIComponent(p.name)}/s/${encodeURIComponent(s.name)}`))}>
                       <Boat size={34} state={s.status} />
                       <span class="boat-name">{s.lead ? t('common.lead') : s.name}</span>
                       {badge ? <span class="boat-owner">{badge}</span> : null}
@@ -108,6 +112,7 @@ export function FleetMap({ projects }) {
             </div>
           ) : null}
         </div>
+        {tips.card}
         <aside class="ticker" data-keep-scroll="ticker">
           <h2>{t('map.live')}</h2>
           {!events.length ? <p class="muted small">{t('map.waiting')}</p> : null}
