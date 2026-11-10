@@ -140,11 +140,12 @@ try {
     is('demo data says so across the top', true, !!(await until(() => /Demo data/.test(document.querySelector('.demo-bar')?.textContent || ''))));
 
     // ── every screen, at two widths ───────────────────────────────────────────
-    const has = (f) => fs.existsSync(path.join(ROOT, 'web', 'ui', f));
+    const STACK = JSON.stringify([{ project: 'acme-api', session: 'api-fix' }, { project: 'acme-api', session: 'docs-pass' }]);
     const ROUTES = [['home', '#/'], ['map', '#/map'], ['project', '#/p/acme-api'], ['lead session', '#/p/acme-api/s/master'],
       ['session', '#/p/acme-api/s/api-fix'], ['pane', '#/p/acme-api/s/api-fix?tab=pane'], ['settings', '#/settings'], ['activity', '#/activity'],
-      ...(has('queue.jsx') ? [['queue', '#/queue'], ['held', '#/held'], ['reviews', '#/reviews'], ['stacks', '#/stacks'],
-        ['automations', '#/automations'], ['sign-ins', '#/sign-ins'], ['search', '#/search']] : [])];
+      ['queue', '#/queue'], ['held', '#/held'], ['reviews', '#/reviews'], ['one review', '#/reviews/-/work/2026-03-05_14-02-11'],
+      ['stack picker', '#/stack-picker'], ['stack', `#/stack/${encodeURIComponent(STACK)}`], ['automations', '#/automations'],
+      ['sign-ins', '#/sign-ins'], ['search', '#/search?q=api']];
     // A phone, a narrow phone, and a desk: the same screens at 1280 draw the sidebar beside them.
     for (const [w, h] of [[390, 844], [320, 700], [1280, 900]]) {
       await b.viewport(w, h);
@@ -164,8 +165,24 @@ try {
         is(`${w} ${name}: the page does not scroll sideways`, true, m.docX <= 1 && m.mainX <= 1);
       }
     }
+    // A session in a stack column sits under the column's own header (stacks.jsx), so it does not
+    // repeat its back link and its title there: two "← acme-api" links one above the other read as
+    // two places to go back to.
+    await b.evaluate((x) => { location.hash = x; }, `#/stack/${encodeURIComponent(STACK)}`);
+    await sleep(900);
+    is('a session in a stack has no back link or title of its own', '0 0 2', await b.evaluate(() =>
+      [document.querySelectorAll('.stack-column .sess-head .back-link').length,
+       document.querySelectorAll('.stack-column .sess-head h1').length,
+       document.querySelectorAll('.stack-column .sess-head.embedded').length].join(' ')));
     is('at a desk the projects are beside the page, not in a drawer', true,
        await b.evaluate(() => { const s = document.querySelector('.side'); return !!s && s.getBoundingClientRect().left >= 0 && s.getBoundingClientRect().width > 200; }));
+    // Automations are a switch on the daemon, and fixture mode answers like one with it off (a 404):
+    // the old client then had no Automations, and the shared app had a link onto "HTTP 404".
+    await b.evaluate(() => { location.hash = '#/automations'; });
+    await sleep(900);
+    is('automations switched off: no link to them, and their address says this server has none', 'false true',
+       await b.evaluate(() => [[...document.querySelectorAll('.side a.nav')].some(a => /automations/i.test(a.textContent)),
+                               /does not have this page/.test(document.querySelector('.main')?.textContent || '')].join(' ')));
     await b.viewport(390, 844);
     await sleep(300);
     // "Nothing scrolls sideways" is also what a blind measurement says, so it is shown seeing
@@ -258,6 +275,28 @@ try {
     await sleep(600);
     is('...and lands where it was', '#/p/acme-web', await b.evaluate(() => location.hash));
     is('...drawing that project', true, await b.evaluate(() => /acme-web/.test(document.querySelector('.main h1')?.textContent || '')));
+
+    // ── an address changed the moment the app appears ─────────────────────────
+    // The router reads the address when it first draws and listens only from after that paint, so a
+    // change in between (a link handled at start-up, a notification's way in) fired its hashchange
+    // to nobody: the address said the queue and the page went on drawing the main page. The window
+    // is one frame, so the change is made from inside the page, in the task that sees the app appear;
+    // polled from here across a round trip, it lands after the listener and passes on broken code.
+    await b.evaluate(() => { location.hash = '#/'; location.reload(); });
+    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+    await b.evaluate(() => new Promise((ok) => {
+      [...document.querySelectorAll('.auth-card button')].find(x => /without a passkey/i.test(x.textContent)).click();
+      const t0 = Date.now();
+      const tick = () => {
+        if (document.querySelector('.app')) { location.hash = '#/queue'; ok(true); }
+        else if (Date.now() - t0 > 5000) ok(false);
+        else setTimeout(tick, 0);
+      };
+      tick();
+    }));
+    await sleep(900);
+    is('an address changed as the app first draws is the page it shows', 'Queue',
+       await b.evaluate(() => document.querySelector('.main h1')?.textContent.trim() || ''));
 
     // ── paired machines: a heading per machine, and one that is down says so ──
     for (const mode of ['online', 'offline']) {

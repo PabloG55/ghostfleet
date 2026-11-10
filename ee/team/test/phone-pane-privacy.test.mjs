@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { accountPrivacyFile } from '../../../lib/account-logins.mjs';
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'screen-pane-privacy-'));
+const cfg=path.join(root,'cfg'),dir=path.join(cfg,'fleet');fs.mkdirSync(path.join(root,'mcp'),{recursive:true});fs.mkdirSync(path.join(root,'lib'));fs.mkdirSync(dir,{recursive:true});
+fs.writeFileSync(path.join(root,'mcp','fleet-dispatch.mjs'),`export const projects=()=>[{name:'acme-web',sock:'cf-acme-web',cfg:${JSON.stringify(cfg)},path:${JSON.stringify(root)}}];`);
+fs.writeFileSync(path.join(root,'lib','permission-dialog.mjs'),'export const promptSummary=()=>null;');
+process.env.GHOSTFLEET_HOME=root;
+const fleet=await import('../server/fleet.mjs');
+test.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+test('team pane polling cannot capture during account sign-in and releases an in-flight read',async t=>{
+ let captures=0, finish;
+ t.mock.method(cp,'execFile',(cmd,args,opts,cb)=>{if(args.includes('list-sessions'))cb(null,'onboarding\n','');else{captures++;finish=()=>cb(null,'pane','');}});syncBuiltinESMExports();t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports();});
+ const privacy=accountPrivacyFile(dir,'cf-acme-web','onboarding');fs.writeFileSync(privacy,'');
+ await assert.rejects(fleet.pane('acme-web','onboarding'),e=>e.status===409);assert.equal(captures,0);
+ fs.unlinkSync(privacy);const pending=fleet.pane('acme-web','onboarding');await new Promise(r=>setImmediate(r));
+ assert.equal(captures,1);assert.equal(fs.readdirSync(`${privacy}.readers`).length,1,'the core finisher sees this read and waits');finish();await pending;
+ assert.equal(fs.readdirSync(`${privacy}.readers`).length,0,'no stale lease blocks a later finish');
+});

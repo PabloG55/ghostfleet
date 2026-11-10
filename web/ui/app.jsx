@@ -14,7 +14,8 @@
 //   frame           below, foot, topEnd, banner, class: the frame's slots (shell.jsx)
 //   badges          { view: n } beside a nav link (automation notices, waiting sign-ins)
 //   canonical       rewrites an old link in place (useHashRoute)
-// The pages that come from screens still being built elsewhere draw <Pending> until they land.
+// Every view in VIEWS has its screen in SCREENS. There is no per-app copy and no placeholder,
+// so a page cannot be in one app and missing from the other.
 import { useState, useEffect } from 'preact/hooks';
 import './viewport.js'; // the on-screen keyboard: the app follows the visible area while it is up
 import { Frame, NavLink, sharedRoute, useHashRoute } from './shell.jsx';
@@ -23,6 +24,13 @@ import { Home } from './home.jsx';
 import { ProjectView } from './project.jsx';
 import { FleetMap } from './map.jsx';
 import { Activity, Settings } from './views.jsx';
+import { Automations } from './automations.jsx';
+import { Reviews, Review } from './reviews.jsx';
+import { StackPicker, StackView } from './stacks.jsx';
+import { Queue } from './queue.jsx';
+import { Held } from './held.jsx';
+import { SignIns } from './sign-ins.jsx';
+import { Search } from './search.jsx';
 import { Assistant, HomeAgent, Launcher } from './assistant.jsx';
 import { TaskRail, TaskChip } from './tasks.jsx';
 import { bind, unbind, useAgent } from './agent.js';
@@ -31,43 +39,45 @@ import { Icon } from './icon.jsx';
 import { t } from './i18n.js';
 
 // Every page both apps have, in the order the sidebar lists them. `nav` is the link's icon and
-// word; `offer` is the adapter member that says the server has it (a server without it hides the
-// link — the route still answers, with the page saying so).
+// word, and the word is the page's place name (phone-places.js), so the link and the back link that
+// returns to it say the same thing. `offer` is the adapter member that says the server has it (a
+// server without it hides the link; the route still answers, with the page saying so). `under`
+// names the link that stays lit while a page with no link of its own is open: a stack is opened
+// from the picker, a held item from the queue.
 export const VIEWS = [
   { view: 'home' }, { view: 'map' }, { view: 'project' },
-  { view: 'automations', nav: ['bolt', 'nav.automations'], id: true },
-  { view: 'reviews', nav: ['check', 'nav.reviews'], id: true },
-  { view: 'stacks', nav: ['branch', 'nav.stacks'], id: true },
-  { view: 'queue', nav: ['hourglass', 'nav.queue'] },
-  { view: 'held', nav: ['hand', 'nav.held'] },
-  { view: 'sign-ins', nav: ['key', 'nav.signIns'] },
-  { view: 'search', nav: ['search', 'nav.searchAll'], id: true },
+  { view: 'automations', nav: ['bolt', 'phone.nav.automations'] },
+  { view: 'reviews', nav: ['check', 'phone.reviews'] },
+  { view: 'stack-picker', nav: ['branch', 'phone.stackPlace'] },
+  { view: 'stack', under: 'stack-picker' },
+  { view: 'queue', nav: ['hourglass', 'phone.queue'] },
+  { view: 'held', under: 'queue' },
+  { view: 'sign-ins', nav: ['key', 'phone.signIns'] },
+  { view: 'search', nav: ['search', 'phone.search'] },
   { view: 'activity', nav: ['list', 'nav.activity'] },
   { view: 'settings' },
 ];
 export const SHARED = VIEWS.map(v => v.view);
 
+const decode = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
 // The hash, read once for both apps. Home, the map and a project or session are shell.jsx's
-// (the screens link to them); the rest are `#/<view>` with an optional id after it.
+// (the screens link to them). The rest are `#/<view>` with the path after it in `rest` (a review is
+// three segments, a held item two), and a query in `q`: search keeps what was typed in its
+// address, `#/search?q=…`, so a reload or a link opens the same search.
 export function parseRoute(hash, extra) {
   const shared = sharedRoute(hash);
   if (shared && shared.view !== 'home') return shared;
-  const parts = hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const [path, query = ''] = String(hash).split('?');
+  const parts = path.replace(/^#\/?/, '').split('/').map(decode);
   const v = VIEWS.find(x => x.view === parts[0] && !['home', 'map', 'project'].includes(x.view));
-  if (v) return v.id ? { view: v.view, id: parts[1] || null } : { view: v.view };
+  if (v) {
+    let q = '';
+    try { q = new URLSearchParams(query).get('q') || ''; } catch {}
+    return { view: v.view, id: parts[1] || null, rest: parts.slice(1).filter(Boolean), q };
+  }
   return (parts[0] && extra?.parse?.(parts)) || { view: 'home' };
 }
 
-// A page whose screen is still on its way into web/ui: it says what it will be, in the page's
-// own layout, rather than an empty column that looks broken.
-export function Pending({ view }) {
-  return (
-    <div class="page narrow">
-      <header class="page-head"><div><h1>{t(VIEWS.find(v => v.view === view)?.nav?.[1] || 'nav.home')}</h1></div></header>
-      <p class="muted">{t('app.pending')}</p>
-    </div>
-  );
-}
 // A page the server behind this app does not have.
 export function NotHere({ view }) {
   return (
@@ -78,19 +88,39 @@ export function NotHere({ view }) {
   );
 }
 
-// The screens the route table draws. Filled in as each one lands in web/ui; until then a view is
-// drawn by `interim` (the app's copy, on its way here) or <Pending>.
-const SCREENS = {
-  activity: () => <Activity />,
-  settings: () => <Settings />,
+// A stack's members ride in its address as JSON (stacks.jsx), so the address is untrusted input:
+// anything that is not a list of { project, session } strings is an empty stack, never a throw.
+export function stackMembers(id) {
+  let v;
+  try { v = JSON.parse(id || '[]'); } catch { return []; }
+  return Array.isArray(v) ? v.filter(m => m && typeof m.project === 'string' && typeof m.session === 'string')
+    .map(m => ({ project: m.project, session: m.session })) : [];
+}
+
+// The screens the route table draws, one for every view above but home (drawn below, with the
+// assistant's card in it). test/one-base.test.mjs fails when a view has no screen here.
+export const SCREENS = {
   map: (r, p) => <FleetMap projects={p.projects} />,
   project: (r) => <ProjectView key={r.project} project={r.project} session={r.session} tool={r.tool} />,
+  automations: (r, p) => <Automations key={r.id || 'list'} projects={p.projects} id={r.id} />,
+  // #/reviews/<host>/<profile>/<run>: `-` is "this machine" (reviews.jsx reviewRoute).
+  reviews: (r) => (r.rest.length >= 3
+    ? <Review key={r.rest.join('/')} host={r.rest[0] === '-' ? '' : r.rest[0]} profile={r.rest[1]} run={r.rest[2]} />
+    : <Reviews />),
+  'stack-picker': () => <StackPicker />,
+  stack: (r) => <StackView key={r.id} members={stackMembers(r.id)} />,
+  queue: () => <Queue />,
+  held: (r) => <Held project={r.rest[0] || null} id={r.rest[1] || null} />,
+  'sign-ins': () => <SignIns />,
+  search: (r) => <Search query={r.q} />,
+  activity: () => <Activity />,
+  settings: () => <Settings />,
 };
 
 const kept = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v === '1'; } catch { return d; } };
 const keep = (k, on) => { try { localStorage.setItem(k, on ? '1' : '0'); } catch {} };
 
-export function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = {}, canonical, interim = {} }) {
+export function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = {}, canonical }) {
   const fleet = useFleet();
   const route = useHashRoute((h) => parseRoute(h, extra), canonical);
   const [asOpen, setAsOpen] = useState(() => kept('gfw.asOpen', false));
@@ -117,16 +147,14 @@ export function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, ba
   if (own) main = own(route);
   else if (home) main = <Home projects={projects}><HomeAgent projects={projects} /></Home>;
   else if (SHARED.includes(route.view) && !offers(route.view)) main = <NotHere view={route.view} />;
-  else if (SCREENS[route.view]) main = SCREENS[route.view](route, { projects });
-  else if (interim[route.view]) main = interim[route.view](route);
-  else main = <Pending view={route.view} />;
+  else main = SCREENS[route.view](route, { projects });
 
   return (
     <Frame name={name} sub={sub} route={route} projects={projects} hosts={hosts} settings="/settings"
            class={`${frame.class || ''}${panel ? ' with-as' : ''}${rail ? ' with-rail' : ''}`}
            nav={(close) => <>
              {VIEWS.filter(v => v.nav && offers(v.view)).map(v => (
-               <NavLink key={v.view} to={`/${v.view}`} active={route.view === v.view} onClick={close}>
+               <NavLink key={v.view} to={`/${v.view}`} active={route.view === v.view || VIEWS.find(x => x.view === route.view)?.under === v.view} onClick={close}>
                  <Icon name={v.nav[0]} /> {t(v.nav[1])} {badges[v.view] ? <span class="badge warn">{badges[v.view]}</span> : null}
                </NavLink>
              ))}

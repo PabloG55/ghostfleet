@@ -20,6 +20,8 @@ import * as pk from '../passkey.js';
 import * as push from './push.js';
 import { createTasks } from './tasks.js';
 import { t } from '../ui/i18n.js';
+import { screenPlace } from '../ui/phone-places.js';
+import { adapterExtras } from './adapter-extras.js';
 
 // fleet-serve's TOOLS_ALLOWED entries marked `passkey: true`.
 export const PASSKEY = new Set(['fleet_spawn', 'fleet_stop', 'fleet_rename', 'fleet_worktree_remove', 'fleet_project_add']);
@@ -67,6 +69,15 @@ export function phoneAdapter({ lock, go, place }) {
   // Every read and write goes through here, so a session the server let lapse locks the app
   // wherever it was noticed, instead of each screen showing "the server rejected the token".
   const guard = (p) => p.catch((e) => { if (e instanceof api.AuthError) lock(); throw e; });
+
+  // AUTOMATIONS ARE A SWITCH ON THE DAEMON, and a daemon with it off answers their read with a 404
+  // (fixture mode answers the same way, api.js). The old client then had no Automations at all; the
+  // shared app had a link that opened onto "/api/automations → HTTP 404". So a 404 takes the link
+  // and the page away, through offers(), and anything else leaves them. Asked once per adapter (one
+  // per unlock), outside the guard: before the unlock there is no token, and a 401 here is no answer.
+  const off = new Set();
+  const noted = (view) => (e) => { if (e?.status === 404) off.add(view); throw e; };
+  api.getAutomations().catch(noted('automations')).catch(() => {});
 
   // A paired host's grid is read only for its boats, and it is the most expensive read there is
   // (one fleet-grid run on the other machine, through this one): kept for 15 s.
@@ -156,6 +167,13 @@ export function phoneAdapter({ lock, go, place }) {
   const server = () => api.mode() === 'server';
 
   return {
+    // The queue, held items, screen reviews, sign-ins, stacks, search and automations: web/ui's
+    // members over the same api.js and passkey.js (adapter-extras.js; hasPeople: false keeps the
+    // people tabs away). Each call goes through the guard like every other here, so a token the
+    // server let lapse locks the app from these pages too.
+    ...Object.fromEntries(Object.entries(adapterExtras).map(([k, v]) =>
+      [k, typeof v === 'function' ? (...a) => guard(Promise.resolve().then(() => v(...a))
+        .catch(k === 'automations' ? noted('automations') : (e) => { throw e; })) : v])),
     projects,
     grid: (project) => guard(api.getGrid(project)),
     session: async (project, name, before) => {
@@ -180,9 +198,10 @@ export function phoneAdapter({ lock, go, place }) {
     },
     termSocket: api.termSocket,
     go,
-    place,
-    // Every shared page: fleet-serve has them all.
-    offers: () => true,
+    // web/ui's names for its pages first (phone-places.js), then the phone's own, as the team's adapter.
+    place: (to) => screenPlace(to) || place?.(to) || null,
+    // Every shared page: fleet-serve has them all, but automations only while its switch is on.
+    offers: (view) => !off.has(view),
     can: (verb) => !NOT_SERVED.has(verb),
     activity: async () => {
       const j = await guard(api.getAudit(100));

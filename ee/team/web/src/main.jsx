@@ -7,7 +7,7 @@ import { Admin } from './admin/index.jsx';
 import { Avatar } from './avatar.jsx';
 import { UsageMeter, UsageChips, seesUsage } from './usage.jsx';
 import { unbind } from '../../../../web/ui/agent.js';
-import { Automations, noticesSeen } from './automations.jsx';
+import { noticesSeen } from '../../../../web/ui/automations.jsx';
 import { teamAdapter } from './adapter.js';
 // The one app, from the MIT core (web/ui/app.jsx): every page, the sidebar and the assistant.
 // What is here is only what the team app has and ghostfleet itself does not — signing in, the
@@ -85,11 +85,10 @@ function Shell({ me, mode, onLogout, onAccount }) {
     <FleetProvider adapter={fleet}>
       <FleetApp name={NAME} sub={mode === 'demo' ? t('nav.demo') : t('nav.fleet')} projects={projects} me={me} canonical={canonical}
                 badges={{ automations: fresh.length }}
-                interim={{ automations: (r) => <Automations key={r.id || 'list'} ctx={ctx} projects={projects} id={r.id} /> }}
                 extra={{
                   parse: (parts) => (parts[0] === 'admin' ? { view: 'admin', section: parts[1] || null } : null),
                   screens: { admin: (r) => <Admin ctx={ctx} section={r.section} /> },
-                  nav: (route, close) => (admin ? <NavLink to="/admin" active={route.view === 'admin'} onClick={close}><Icon name="key" /> {t('nav.admin')}</NavLink> : null),
+                  nav: (route, close) => (admin ? <NavLink to="/admin" active={route.view === 'admin'} onClick={close}><Icon name="lock" /> {t('nav.admin')}</NavLink> : null),
                 }}
                 frame={{
                   class: mode === 'demo' ? ' is-demo' : '',

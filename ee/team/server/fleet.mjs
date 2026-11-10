@@ -11,6 +11,7 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { GF_HOME } from './paths.mjs';
+import { accountPaneLease } from '../../../lib/account-logins.mjs';
 import * as attachments from './attach.mjs';
 import { t as tr } from '../shared/i18n/index.js';
 import { createTerminalTabs } from './terminal-tab.mjs';
@@ -146,7 +147,10 @@ export async function pane(project, name) {
   });
   if (typeof name !== 'string' || /[+\-:.={}]/.test(name) || !names.includes(name))
     throw Object.assign(new Error(tr('err.badSession', { session: String(name).slice(0, 60) })), { status: 404 });
-  return new Promise((resolve, reject) => {
+  let release;
+  try { release = accountPaneLease(path.join(t.cfg, 'fleet'), t.sock, name); }
+  catch { throw Object.assign(new Error('Sign-in is being submitted'), { status:409 }); }
+  try { return await new Promise((resolve, reject) => {
     execFile('tmux', ['-u', '-L', t.sock, 'capture-pane', '-p', '-e', '-t', name],
       { encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
@@ -155,7 +159,7 @@ export async function pane(project, name) {
         try { prompt = perm.promptSummary(stdout); } catch {}
         resolve({ pane: String(stdout), prompt });
       });
-  });
+  }); } finally { release(); }
 }
 
 // Writes run one at a time: two spawns racing for the same free worktree is a bug that

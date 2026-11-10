@@ -1,6 +1,6 @@
 import { a as d, c as q, d as S$1, f as X, i as _, l as x, n as A, o as g, r as T, s as h, t as u, u as R } from "./preact.js";
 import * as api$1 from "./api.js";
-import * as pk from "./passkey.js";
+import * as passkey from "./passkey.js";
 import { render } from "./md.js";
 import { render as render$1 } from "./ansi.js";
 //#region web/src/push.js
@@ -833,13 +833,6 @@ var en_default = {
 	"vp.failed": "Could not download {name}: {why}",
 	"agent.noServer": "The assistant is not connected to a server yet.",
 	"agent.you": "The owner",
-	"nav.reviews": "Code reviews",
-	"nav.stacks": "Dev stacks",
-	"nav.queue": "Queue",
-	"nav.held": "Held",
-	"nav.signIns": "Sign-ins",
-	"nav.searchAll": "Search",
-	"app.pending": "This page arrives in this release.",
 	"app.notHere": "This server does not have this page.",
 	"settings.reading": "Reading…",
 	"settings.hosts": "Paired machines",
@@ -922,8 +915,312 @@ var en_default = {
 	"task.noProjects": "There is no project to send this to yet.",
 	"task.which": "Which project is this for?",
 	"task.gone": "That request is no longer on the list.",
-	"task.unsure": "No reply yet, and the session is no longer working on it.",
-	"voice.noHear": "This server cannot hear yet."
+	"task.unsent": "I do not know whether it arrived: the page closed while it was sending.",
+	"voice.noHear": "This server cannot hear yet.",
+	"phone.event.finished": "Finishes working",
+	"phone.event.finished.hint": "goes from working to ready",
+	"phone.event.finished.verb": "finishes working",
+	"phone.event.need-you": "Needs you",
+	"phone.event.need-you.hint": "waits for an answer or a permission",
+	"phone.event.need-you.verb": "needs you",
+	"phone.event.started": "Starts working",
+	"phone.event.started.hint": "starts a turn",
+	"phone.event.started.verb": "starts working",
+	"phone.event.limit": "Runs out of quota",
+	"phone.event.limit.hint": "hits the account's usage limit",
+	"phone.event.limit.verb": "runs out of quota",
+	"phone.event.lost": "Goes down",
+	"phone.event.lost.hint": "the machine closed its process",
+	"phone.event.lost.verb": "goes down",
+	"phone.action.send": "Send a prompt",
+	"phone.action.spawn": "Create a session",
+	"phone.action.pause": "Pause",
+	"phone.action.resume": "Resume",
+	"phone.action.wake": "Wake up",
+	"phone.action.interrupt": "Interrupt",
+	"phone.action.reopen": "Reopen if it went down",
+	"phone.action.stop": "Stop",
+	"phone.action.check": "Continue only if…",
+	"phone.action.notify": "Notify me",
+	"phone.action.wait": "Wait",
+	"phone.action.summary": "Summarize my day",
+	"phone.scope.personal": "Personal",
+	"phone.scope.company": "Company's",
+	"phone.state.need-you": "needs you",
+	"phone.state.working": "working",
+	"phone.state.ready": "ready",
+	"phone.state.idle": "idle",
+	"phone.state.parked": "paused",
+	"phone.state.limit": "out of quota",
+	"phone.state.interrupted": "interrupted",
+	"phone.state.asleep": "asleep",
+	"phone.state.lost": "down",
+	"phone.day.0": "Sun",
+	"phone.day.1": "Mon",
+	"phone.day.2": "Tue",
+	"phone.day.3": "Wed",
+	"phone.day.4": "Thu",
+	"phone.day.5": "Fri",
+	"phone.day.6": "Sat",
+	"phone.auto.unnamed": "Untitled automation",
+	"phone.auto.err.event": "unknown event: {event}",
+	"phone.auto.err.triggerSession": "invalid session name in the trigger: '{session}'",
+	"phone.auto.err.onceDate": "the one-time run needs a date",
+	"phone.auto.err.days": "pick at least one day of the week",
+	"phone.auto.err.maxSteps": "{n} steps at most",
+	"phone.auto.err.action": "step {i}: unknown action '{action}'",
+	"phone.auto.err.stepSession": "step {i}: invalid session name '{session}'",
+	"phone.auto.err.stepName": "step {i}: the session name can only have letters, numbers, spaces and . _ ~ -",
+	"phone.auto.err.missing": "step {i} ({action}): {field} is missing",
+	"phone.auto.err.confirm": "step {i}: “{action}” needs you to confirm it",
+	"phone.auto.err.eventOnly": "step {i}: “the event’s session” only exists when the trigger is an event",
+	"phone.auto.err.noSteps": "add at least one action",
+	"phone.auto.field.status": "at least one state",
+	"phone.auto.field.project": "the project",
+	"phone.auto.field.session": "the session",
+	"phone.auto.field.prompt": "the message",
+	"phone.auto.field.name": "the name",
+	"phone.auto.field.text": "the notice's text",
+	"phone.auto.field.minutes": "the minutes",
+	"phone.auto.days.all": "every day",
+	"phone.auto.days.weekdays": "Monday to Friday",
+	"phone.auto.days.weekends": "on weekends",
+	"phone.auto.days.list": "on {days}",
+	"phone.auto.trig.session": "session {session}",
+	"phone.auto.trig.anySession": "any session",
+	"phone.auto.trig.anyProject": "any project",
+	"phone.auto.trig.event": "When {who} in {project} {what}",
+	"phone.auto.trig.once": "Once, on {date} at {at}",
+	"phone.auto.trig.every": "Every {every}",
+	"phone.auto.trig.days": "{days} at {at}",
+	"phone.auto.every.days": "{n} days",
+	"phone.auto.every.days.one": "{n} day",
+	"phone.auto.step.eventSession": "the event's session",
+	"phone.auto.step.send": "Send to {where}: “{prompt}”",
+	"phone.auto.step.spawn": "Create session {name} in {project}",
+	"phone.auto.step.spawnTask": "Create session {name} in {project} with a task",
+	"phone.auto.step.notify": "Notify me: “{text}”",
+	"phone.auto.step.wait": "Wait {minutes} min",
+	"phone.auto.step.summary": "Send me a summary of what happened today in my projects",
+	"phone.auto.step.check": "Continue only if {where} is {states}",
+	"phone.auto.or": " or ",
+	"phone.tpl.resumen-dia.name": "My day in summary",
+	"phone.tpl.resumen-dia.hint": "Every day at a set time, a summary of what happened in your projects: here, and on Telegram if you have it.",
+	"phone.tpl.actualizar-pagina.name": "Update a page's data",
+	"phone.tpl.actualizar-pagina.hint": "Every week, ask a project's master to update a page's data.",
+	"phone.tpl.actualizar-pagina.prompt": "Update the pricing page's data with this week's values, check that it looks right and open a PR.",
+	"phone.auto.why.notAdmin": "whoever saved it ({who}) is no longer an admin",
+	"phone.auto.why.disabled": "their account is disabled",
+	"phone.auto.why.noAccess": "{who} no longer has access to {projects}",
+	"phone.auto.why.event": "{where}: {what}",
+	"phone.auto.why.manual": "by hand, {who}",
+	"phone.auto.notice.paused": "I paused “{name}”: {why}. Once that is fixed, switch it back on.",
+	"phone.auto.notice.missed": "“{name}” did not run on {due}: ghostfleet team was off at that time. I did not run it late.",
+	"phone.auto.notice.loop": "I switched off “{name}”: it fired {n} times in an hour, which looks like a loop. Check it and switch it back on.",
+	"phone.auto.notice.failed": "“{name}” failed at “{step}”: {text}",
+	"phone.auto.noDetail": "no detail",
+	"phone.auto.run.serverOff": "the server was off at that time",
+	"phone.auto.run.refused": "refused: {why}",
+	"phone.auto.run.stillRunning": "the previous run had not finished yet",
+	"phone.auto.run.running": "it is already running",
+	"phone.auto.run.tooMany": "switched off for running too often",
+	"phone.auto.step.waited": "waited {minutes} min",
+	"phone.auto.step.notified": "notice created",
+	"phone.auto.step.noProject": "no project: the step uses the event's and this did not come from an event",
+	"phone.auto.step.noSession": "no session: the step uses the event's and this did not come from an event",
+	"phone.auto.step.refused": "refused: {who} cannot do that in '{project}'",
+	"phone.auto.step.checkGo": "it is {state}: going on",
+	"phone.auto.step.checkHalt": "it is {state}: not going on with the steps below",
+	"phone.auto.step.noLead": "I could not start the lead",
+	"phone.auto.err.notFound": "that automation does not exist",
+	"phone.auto.err.companyEdit": "only an admin edits the company's automations",
+	"phone.auto.err.othersPersonal": "that automation is someone else's personal one",
+	"phone.auto.err.companyCreate": "only an admin creates company automations",
+	"phone.auto.err.companyDelete": "only an admin deletes the company's automations",
+	"phone.auto.err.cannot": "in '{project}' you cannot “{action}”",
+	"phone.auto.err.runNow": "only someone who can edit it can test it by hand",
+	"phone.auto.err.runEvent": "it uses “the event’s session”: it can only run when the event happens",
+	"phone.auto.ran": "done",
+	"phone.auto.failed": "failed",
+	"phone.common.saving": "Saving…",
+	"phone.nav.automations": "Automations",
+	"phone.project.mine": "Mine",
+	"phone.vp.delete": "Delete {name}",
+	"phone.autos.company": "Company",
+	"phone.autos.others": "Others' personal",
+	"phone.autos.sub": "A trigger and some actions: at a time, or when something happens to a session.",
+	"phone.autos.seen": "Seen them",
+	"phone.autos.templates": "Templates",
+	"phone.autos.noCompany": "No company automations",
+	"phone.autos.noCompanyMine": "No company automations in your projects",
+	"phone.autos.companyWhoAdmin": "An admin creates them; whoever has access to their project sees them.",
+	"phone.autos.companyWho": "A company admin creates them.",
+	"phone.autos.noOthers": "Nobody else has personal automations",
+	"phone.autos.none": "You have no automations yet",
+	"phone.autos.example": "For example: “Monday to Friday at 10:00, tell the lead of acme-api to go over what is pending”.",
+	"phone.autos.createFirst": "Create the first one",
+	"phone.autos.runs": "Latest runs",
+	"phone.autos.skipped": "skipped: {why}",
+	"phone.autos.ran": "“{name}” ran",
+	"phone.autos.on": "On",
+	"phone.autos.off": "Off",
+	"phone.autos.turnOff": "Turn off {name}",
+	"phone.autos.turnOn": "Turn on {name}",
+	"phone.autos.ownedBy": "{name}'s",
+	"phone.autos.paused": "Paused: {why}.",
+	"phone.autos.running": "Running now…",
+	"phone.autos.next": "Next: {when}",
+	"phone.autos.waitingEvent": "Waiting for the event",
+	"phone.autos.last": "last {when}",
+	"phone.autos.runningBtn": "Running…",
+	"phone.autos.tryNow": "Try now",
+	"phone.autos.edit": "Edit",
+	"phone.autos.view": "View",
+	"phone.autos.delTitle": "Delete the automation",
+	"phone.autos.delBody.a": "This deletes ",
+	"phone.autos.delBody.b": ". What already ran stays in the history.",
+	"phone.autos.notFound": "I did not find that automation.",
+	"phone.autos.saved": "“{name}” saved",
+	"phone.autos.savedOff": "“{name}” saved (off)",
+	"phone.autos.namePh": "Automation name",
+	"phone.autos.scope": "Scope",
+	"phone.autos.scopePersonal": "Personal: just me, with my permissions",
+	"phone.autos.scopeCompany": "Company: whoever has its project sees it",
+	"phone.autos.roCompany": "It is the company's: only an admin edits it.",
+	"phone.autos.roPersonal": "It is {name}'s personal one: it runs with their permissions, so only that person edits it.",
+	"phone.autos.editor": "Editor",
+	"phone.autos.askAI": "Ask the AI",
+	"phone.autos.flow": "Flow",
+	"phone.autos.blocks": "Blocks",
+	"phone.autos.triggers": "Triggers",
+	"phone.autos.schedule": "Schedule",
+	"phone.autos.sessionEvent": "Session event",
+	"phone.autos.actions": "Actions",
+	"phone.autos.dragHint": "Drag it into the flow, or tap it to add it at the end",
+	"phone.autos.dragHelp": "Drag a block into the flow, or tap it to add it at the end.",
+	"phone.autos.dropEmpty": "Drag an action here from the left (or tap it)",
+	"phone.autos.dropLast": "drop here to add at the end",
+	"phone.autos.when": "When",
+	"phone.autos.event": "Event",
+	"phone.autos.someDays": "Some days",
+	"phone.autos.once": "Once",
+	"phone.autos.everySoOften": "Every so often",
+	"phone.autos.days": "Days",
+	"phone.autos.date": "Date",
+	"phone.autos.time": "Time",
+	"phone.autos.every": "Every",
+	"phone.autos.whenSession": "When a session…",
+	"phone.autos.whichProject": "Which project",
+	"phone.autos.anyProject": "Any project",
+	"phone.autos.whichSession": "Which session",
+	"phone.autos.any": "Any",
+	"phone.autos.cooldown": "Do not repeat with the same session before (min)",
+	"phone.autos.dragMove": "Drag to move",
+	"phone.autos.up": "Move up",
+	"phone.autos.down": "Move down",
+	"phone.autos.removeStep": "Remove step",
+	"phone.autos.project": "Project",
+	"phone.autos.choose": "Choose…",
+	"phone.autos.eventProject": "The event's",
+	"phone.autos.session": "Session",
+	"phone.autos.newName": "Name of the new session",
+	"phone.autos.firstTask": "First task (optional)",
+	"phone.autos.resumeMsg": "Message on resume (optional)",
+	"phone.autos.vars": "You can use {fecha}, {hora}, {proyecto}, {sesion}",
+	"phone.autos.branchOpt": "Branch (optional)",
+	"phone.autos.noticeText": "Notice text",
+	"phone.autos.noticePh": "{sesion} finished in {proyecto}",
+	"phone.autos.ifNow": "…if it is now",
+	"phone.autos.states": "States",
+	"phone.autos.checkHint": "If it is not, the automation ends here (it does not count as an error).",
+	"phone.autos.summaryHint": "What happened today in the projects of whoever runs the automation: who did what, what is still working and who needs you. It arrives as a notice here, and on Telegram too if you are the one with fleet-telegram on this machine.",
+	"phone.autos.minutes": "Minutes (1 to 60)",
+	"phone.autos.confirmStop": "I confirm this automation may stop the session (the worktree is left free, not deleted)",
+	"phone.autos.aiFailed": "I could not: {why}",
+	"phone.autos.aiHint": "Tell it what you want in one sentence, for example: “every day at 9, wake the workers of acme-web and tell the lead to hand out what is pending”. It builds the blocks and you check them before saving.",
+	"phone.autos.aiApplied": "I put it in the editor",
+	"phone.autos.undo": "undo",
+	"phone.autos.aiBusy": "Building it…",
+	"phone.autos.aiPh": "What do you want to automate?",
+	"phone.search": "Search",
+	"phone.searchHint": "Find a project or session",
+	"phone.projects": "Projects",
+	"phone.sessions": "Sessions",
+	"phone.noMatches": "No matches",
+	"phone.held": "Held items",
+	"phone.openHeld": "Open the input box",
+	"phone.heldHint": "A wake is waiting for an empty input box. Open the session to send or clear its text.",
+	"phone.nothingWaiting": "Nothing is waiting on you",
+	"phone.signIns": "Pending sign-ins",
+	"phone.loginStarted": "Sign-in ready",
+	"phone.loginStartFailed": "Could not start sign-in",
+	"phone.loginDone": "Sign-in complete",
+	"phone.loginFailed": "Could not finish sign-in. Check the session and try again.",
+	"phone.loginReadFailed": "Could not read sign-ins",
+	"phone.thisHost": "This host",
+	"phone.firstSite": "First time for this site — check the provider before opening",
+	"phone.signIn": "Sign in",
+	"phone.openConnector": "Open connector settings",
+	"phone.open": "Open",
+	"phone.code": "Claude sign-in code",
+	"phone.callback": "Full redirect URL",
+	"phone.finishLogin": "Finish — confirm sign-in",
+	"phone.expires": "Expires in {time}",
+	"phone.expired": "Expired",
+	"phone.queue": "Queue",
+	"phone.reply": "Reply",
+	"phone.replyHint": "Sent to the lead quoting this item. It leaves the list when the lead closes it.",
+	"phone.stacks": "Session stacks",
+	"phone.openStack": "Open stack · {n}",
+	"phone.noSessions": "No sessions to choose",
+	"phone.editStack": "Choose sessions",
+	"phone.emptyStack": "Choose sessions to build a stack",
+	"phone.openSession": "Open session",
+	"phone.reviews": "Reviews",
+	"phone.review": "Review",
+	"phone.reviewsOff": "Reviews are switched off",
+	"phone.noBranch": "No branch",
+	"phone.video": "Video",
+	"phone.stills": "Images",
+	"phone.steps": "{n} steps",
+	"phone.earlier": "{n} earlier runs",
+	"phone.noReviews": "No recorded runs yet",
+	"phone.hostMissing": "{host} did not answer",
+	"phone.saved": "Saved",
+	"phone.saveFailed": "Could not save",
+	"phone.saving": "Saving…",
+	"phone.retry": "Try again",
+	"phone.approve": "Approve",
+	"phone.reject": "Reject",
+	"phone.reviewNote": "Review note",
+	"phone.restOk": "Mark remaining steps OK",
+	"phone.chapter": "Go to chapter",
+	"phone.ok": "OK",
+	"phone.problem": "Problem",
+	"phone.skip": "Skip",
+	"phone.requests": "Requests · {n}",
+	"phone.autoNameExample": "review-{fecha}",
+	"phone.event.interrupted": "Interrupted",
+	"phone.event.interrupted.hint": "A turn was interrupted",
+	"phone.event.interrupted.verb": "is interrupted",
+	"phone.state.starting": "starting",
+	"phone.state.unknown": "unknown",
+	"phone.approved": "Approved — the review check passes",
+	"phone.rejected": "Rejected — changes are needed",
+	"phone.unreviewed": "Not reviewed — mark each step or review the recording",
+	"phone.changesNeeded": "Some steps need changes",
+	"phone.reasonNeeded": "Flagged steps need a written reason",
+	"phone.queueState.waiting": "Waiting",
+	"phone.queueState.replied": "Replied",
+	"phone.cardHeld": "Held",
+	"phone.signInFailed": "Sign-in failed",
+	"phone.stackPlace": "Stacks",
+	"phone.autoReadOnly": "This automation is read-only.",
+	"phone.steps.one": "{n} step",
+	"phone.earlier.one": "{n} earlier run",
+	"phone.requests.one": "Request · {n}",
+	"phone.auto.err.maxSteps.one": "{n} step at most",
+	"phone.auto.notice.loop.one": "I switched off “{name}”: it fired {n} time in an hour, which looks like a loop. Check it and switch it back on."
 };
 //#endregion
 //#region web/ui/words/es.js
@@ -1339,13 +1636,6 @@ var es_default = {
 	"vp.failed": "No se pudo descargar {name}: {why}",
 	"agent.noServer": "El asistente todavía no está conectado a un servidor.",
 	"agent.you": "El propietario",
-	"nav.reviews": "Revisiones de código",
-	"nav.stacks": "Entornos de desarrollo",
-	"nav.queue": "Cola",
-	"nav.held": "Retenidos",
-	"nav.signIns": "Inicios de sesión",
-	"nav.searchAll": "Buscar",
-	"app.pending": "Esta página llega en esta versión.",
 	"app.notHere": "Este servidor no tiene esta página.",
 	"settings.reading": "Leyendo…",
 	"settings.hosts": "Máquinas emparejadas",
@@ -1428,8 +1718,312 @@ var es_default = {
 	"task.noProjects": "Todavía no hay un proyecto al que mandar esto.",
 	"task.which": "¿Para qué proyecto es esto?",
 	"task.gone": "Ese pedido ya no está en la lista.",
-	"task.unsure": "Todavía no hay respuesta, y la sesión ya no está trabajando en eso.",
-	"voice.noHear": "Este servidor todavía no puede oír."
+	"task.unsent": "No sé si llegó: la página se cerró mientras lo mandaba.",
+	"voice.noHear": "Este servidor todavía no puede oír.",
+	"phone.event.finished": "Termina de trabajar",
+	"phone.event.finished.hint": "pasa de trabajando a lista",
+	"phone.event.finished.verb": "termina de trabajar",
+	"phone.event.need-you": "Te necesita",
+	"phone.event.need-you.hint": "espera una respuesta o un permiso",
+	"phone.event.need-you.verb": "te necesita",
+	"phone.event.started": "Empieza a trabajar",
+	"phone.event.started.hint": "arranca un turno",
+	"phone.event.started.verb": "empieza a trabajar",
+	"phone.event.limit": "Se queda sin cupo",
+	"phone.event.limit.hint": "llega al límite de uso de la cuenta",
+	"phone.event.limit.verb": "se queda sin cupo",
+	"phone.event.lost": "Se cae",
+	"phone.event.lost.hint": "la máquina cerró su proceso",
+	"phone.event.lost.verb": "se cae",
+	"phone.action.send": "Mandar un prompt",
+	"phone.action.spawn": "Crear una sesión",
+	"phone.action.pause": "Pausar",
+	"phone.action.resume": "Reanudar",
+	"phone.action.wake": "Despertar",
+	"phone.action.interrupt": "Interrumpir",
+	"phone.action.reopen": "Reabrir si se cayó",
+	"phone.action.stop": "Detener",
+	"phone.action.check": "Seguir solo si…",
+	"phone.action.notify": "Avisarme",
+	"phone.action.wait": "Esperar",
+	"phone.action.summary": "Resumirme el día",
+	"phone.scope.personal": "Personal",
+	"phone.scope.company": "De la empresa",
+	"phone.state.need-you": "te necesita",
+	"phone.state.working": "trabajando",
+	"phone.state.ready": "lista",
+	"phone.state.idle": "inactiva",
+	"phone.state.parked": "en pausa",
+	"phone.state.limit": "sin cupo",
+	"phone.state.interrupted": "interrumpida",
+	"phone.state.asleep": "dormida",
+	"phone.state.lost": "caída",
+	"phone.day.0": "dom",
+	"phone.day.1": "lun",
+	"phone.day.2": "mar",
+	"phone.day.3": "mié",
+	"phone.day.4": "jue",
+	"phone.day.5": "vie",
+	"phone.day.6": "sáb",
+	"phone.auto.unnamed": "Automatización sin nombre",
+	"phone.auto.err.event": "evento desconocido: {event}",
+	"phone.auto.err.triggerSession": "nombre de sesión inválido en el disparador: '{session}'",
+	"phone.auto.err.onceDate": "falta la fecha de la ejecución única",
+	"phone.auto.err.days": "elige al menos un día de la semana",
+	"phone.auto.err.maxSteps": "como mucho {n} pasos",
+	"phone.auto.err.action": "paso {i}: acción desconocida '{action}'",
+	"phone.auto.err.stepSession": "paso {i}: nombre de sesión inválido '{session}'",
+	"phone.auto.err.stepName": "paso {i}: el nombre de la sesión solo puede tener letras, números, espacios y . _ ~ -",
+	"phone.auto.err.missing": "paso {i} ({action}): falta {field}",
+	"phone.auto.err.confirm": "paso {i}: «{action}» necesita que lo confirmes",
+	"phone.auto.err.eventOnly": "paso {i}: «la sesión del evento» solo existe cuando el disparador es un evento",
+	"phone.auto.err.noSteps": "agrega al menos una acción",
+	"phone.auto.field.status": "al menos un estado",
+	"phone.auto.field.project": "el proyecto",
+	"phone.auto.field.session": "la sesión",
+	"phone.auto.field.prompt": "el mensaje",
+	"phone.auto.field.name": "el nombre",
+	"phone.auto.field.text": "el texto del aviso",
+	"phone.auto.field.minutes": "los minutos",
+	"phone.auto.days.all": "todos los días",
+	"phone.auto.days.weekdays": "de lunes a viernes",
+	"phone.auto.days.weekends": "los fines de semana",
+	"phone.auto.days.list": "los {days}",
+	"phone.auto.trig.session": "la sesión {session}",
+	"phone.auto.trig.anySession": "cualquier sesión",
+	"phone.auto.trig.anyProject": "cualquier proyecto",
+	"phone.auto.trig.event": "Cuando {who} de {project} {what}",
+	"phone.auto.trig.once": "Una vez, el {date} a las {at}",
+	"phone.auto.trig.every": "Cada {every}",
+	"phone.auto.trig.days": "{days} a las {at}",
+	"phone.auto.every.days": "{n} días",
+	"phone.auto.every.days.one": "{n} día",
+	"phone.auto.step.eventSession": "la sesión del evento",
+	"phone.auto.step.send": "Mandar a {where}: «{prompt}»",
+	"phone.auto.step.spawn": "Crear la sesión {name} en {project}",
+	"phone.auto.step.spawnTask": "Crear la sesión {name} en {project} con una tarea",
+	"phone.auto.step.notify": "Avisarme: «{text}»",
+	"phone.auto.step.wait": "Esperar {minutes} min",
+	"phone.auto.step.summary": "Mandarme un resumen de lo que pasó hoy en mis proyectos",
+	"phone.auto.step.check": "Seguir solo si {where} está {states}",
+	"phone.auto.or": " o ",
+	"phone.tpl.resumen-dia.name": "Resumen de mi día",
+	"phone.tpl.resumen-dia.hint": "Cada día a una hora, un resumen de lo que pasó en tus proyectos: aquí, y por Telegram si lo tienes.",
+	"phone.tpl.actualizar-pagina.name": "Actualizar datos de una página",
+	"phone.tpl.actualizar-pagina.hint": "Cada semana, pedirle al master de un proyecto que actualice los datos de una página.",
+	"phone.tpl.actualizar-pagina.prompt": "Actualiza los datos de la página de precios con los valores de esta semana, revisa que se vea bien y abre un PR.",
+	"phone.auto.why.notAdmin": "quien la guardó ({who}) ya no es admin",
+	"phone.auto.why.disabled": "su cuenta está desactivada",
+	"phone.auto.why.noAccess": "{who} ya no tiene acceso a {projects}",
+	"phone.auto.why.event": "{where}: {what}",
+	"phone.auto.why.manual": "a mano, {who}",
+	"phone.auto.notice.paused": "Pausé «{name}»: {why}. Cuando se arregle, vuelve a encenderla.",
+	"phone.auto.notice.missed": "«{name}» no se ejecutó el {due}: ghostfleet team estaba apagado a esa hora. No la corrí tarde.",
+	"phone.auto.notice.loop": "Apagué «{name}»: se disparó {n} veces en una hora, parece un bucle. Revísala y vuelve a encenderla.",
+	"phone.auto.notice.failed": "«{name}» falló en «{step}»: {text}",
+	"phone.auto.noDetail": "sin detalle",
+	"phone.auto.run.serverOff": "el servidor estaba apagado a esa hora",
+	"phone.auto.run.refused": "rechazada: {why}",
+	"phone.auto.run.stillRunning": "la ejecución anterior todavía no terminaba",
+	"phone.auto.run.running": "ya se está ejecutando",
+	"phone.auto.run.tooMany": "apagada por exceso de ejecuciones",
+	"phone.auto.step.waited": "esperé {minutes} min",
+	"phone.auto.step.notified": "aviso creado",
+	"phone.auto.step.noProject": "no hay proyecto: el paso usa el del evento y esto no vino de un evento",
+	"phone.auto.step.noSession": "no hay sesión: el paso usa la del evento y esto no vino de un evento",
+	"phone.auto.step.refused": "rechazado: {who} no puede hacer eso en '{project}'",
+	"phone.auto.step.checkGo": "está {state}: sigo",
+	"phone.auto.step.checkHalt": "está {state}: no sigo con los pasos de abajo",
+	"phone.auto.step.noLead": "no pude arrancar al líder",
+	"phone.auto.err.notFound": "no existe esa automatización",
+	"phone.auto.err.companyEdit": "solo un admin edita las automatizaciones de la empresa",
+	"phone.auto.err.othersPersonal": "esa automatización es personal de otra persona",
+	"phone.auto.err.companyCreate": "solo un admin crea automatizaciones de la empresa",
+	"phone.auto.err.companyDelete": "solo un admin borra las automatizaciones de la empresa",
+	"phone.auto.err.cannot": "en '{project}' no puedes «{action}»",
+	"phone.auto.err.runNow": "solo quien puede editarla la prueba a mano",
+	"phone.auto.err.runEvent": "usa «la sesión del evento»: solo puede correr cuando pase el evento",
+	"phone.auto.ran": "listo",
+	"phone.auto.failed": "falló",
+	"phone.common.saving": "Guardando…",
+	"phone.nav.automations": "Automatizaciones",
+	"phone.project.mine": "Mías",
+	"phone.vp.delete": "Borrar a {name}",
+	"phone.autos.company": "De la empresa",
+	"phone.autos.others": "Personales de otros",
+	"phone.autos.sub": "Un disparador y unas acciones: a una hora, o cuando a una sesión le pasa algo.",
+	"phone.autos.seen": "Ya los vi",
+	"phone.autos.templates": "Plantillas",
+	"phone.autos.noCompany": "No hay automatizaciones de la empresa",
+	"phone.autos.noCompanyMine": "No hay automatizaciones de la empresa en tus proyectos",
+	"phone.autos.companyWhoAdmin": "Las crea un admin; las ve quien tiene acceso a su proyecto.",
+	"phone.autos.companyWho": "Las crea un admin de la empresa.",
+	"phone.autos.noOthers": "Nadie más tiene automatizaciones personales",
+	"phone.autos.none": "Todavía no tienes automatizaciones",
+	"phone.autos.example": "Por ejemplo: «de lunes a viernes a las 10:00, mándale al líder de acme-api que revise los pendientes».",
+	"phone.autos.createFirst": "Crear la primera",
+	"phone.autos.runs": "Últimas ejecuciones",
+	"phone.autos.skipped": "se saltó: {why}",
+	"phone.autos.ran": "«{name}» corrió",
+	"phone.autos.on": "Encendida",
+	"phone.autos.off": "Apagada",
+	"phone.autos.turnOff": "Apagar {name}",
+	"phone.autos.turnOn": "Encender {name}",
+	"phone.autos.ownedBy": "de {name}",
+	"phone.autos.paused": "En pausa: {why}.",
+	"phone.autos.running": "Corriendo ahora…",
+	"phone.autos.next": "Próxima: {when}",
+	"phone.autos.waitingEvent": "Esperando el evento",
+	"phone.autos.last": "última {when}",
+	"phone.autos.runningBtn": "Corriendo…",
+	"phone.autos.tryNow": "Probar ahora",
+	"phone.autos.edit": "Editar",
+	"phone.autos.view": "Ver",
+	"phone.autos.delTitle": "Borrar la automatización",
+	"phone.autos.delBody.a": "Se borra ",
+	"phone.autos.delBody.b": ". Lo que ya corrió queda en el historial.",
+	"phone.autos.notFound": "No encontré esa automatización.",
+	"phone.autos.saved": "«{name}» guardada",
+	"phone.autos.savedOff": "«{name}» guardada (apagada)",
+	"phone.autos.namePh": "Nombre de la automatización",
+	"phone.autos.scope": "Alcance",
+	"phone.autos.scopePersonal": "Personal: solo yo, con mis permisos",
+	"phone.autos.scopeCompany": "De la empresa: la ve quien tiene su proyecto",
+	"phone.autos.roCompany": "Es de la empresa: solo un admin la edita.",
+	"phone.autos.roPersonal": "Es personal de {name}: corre con sus permisos, así que solo esa persona la edita.",
+	"phone.autos.editor": "Editor",
+	"phone.autos.askAI": "Pedírselo a la IA",
+	"phone.autos.flow": "Flujo",
+	"phone.autos.blocks": "Bloques",
+	"phone.autos.triggers": "Disparadores",
+	"phone.autos.schedule": "Horario",
+	"phone.autos.sessionEvent": "Evento de una sesión",
+	"phone.autos.actions": "Acciones",
+	"phone.autos.dragHint": "Arrástrala al flujo, o tócala para agregarla al final",
+	"phone.autos.dragHelp": "Arrastra un bloque al flujo, o tócalo para sumarlo al final.",
+	"phone.autos.dropEmpty": "Arrastra aquí una acción de la izquierda (o tócala)",
+	"phone.autos.dropLast": "suelta aquí para agregar al final",
+	"phone.autos.when": "Cuándo",
+	"phone.autos.event": "Evento",
+	"phone.autos.someDays": "Ciertos días",
+	"phone.autos.once": "Una vez",
+	"phone.autos.everySoOften": "Cada cierto tiempo",
+	"phone.autos.days": "Días",
+	"phone.autos.date": "Fecha",
+	"phone.autos.time": "Hora",
+	"phone.autos.every": "Cada",
+	"phone.autos.whenSession": "Cuando una sesión…",
+	"phone.autos.whichProject": "De qué proyecto",
+	"phone.autos.anyProject": "Cualquier proyecto",
+	"phone.autos.whichSession": "Qué sesión",
+	"phone.autos.any": "Cualquiera",
+	"phone.autos.cooldown": "No repetir con la misma sesión antes de (min)",
+	"phone.autos.dragMove": "Arrastra para mover",
+	"phone.autos.up": "Subir",
+	"phone.autos.down": "Bajar",
+	"phone.autos.removeStep": "Quitar paso",
+	"phone.autos.project": "Proyecto",
+	"phone.autos.choose": "Elige…",
+	"phone.autos.eventProject": "El del evento",
+	"phone.autos.session": "Sesión",
+	"phone.autos.newName": "Nombre de la sesión nueva",
+	"phone.autos.firstTask": "Tarea inicial (opcional)",
+	"phone.autos.resumeMsg": "Mensaje al reanudar (opcional)",
+	"phone.autos.vars": "Puedes usar {fecha}, {hora}, {proyecto}, {sesion}",
+	"phone.autos.branchOpt": "Rama (opcional)",
+	"phone.autos.noticeText": "Texto del aviso",
+	"phone.autos.noticePh": "{sesion} terminó en {proyecto}",
+	"phone.autos.ifNow": "…si ahora está",
+	"phone.autos.states": "Estados",
+	"phone.autos.checkHint": "Si no está así, la automatización termina aquí (no cuenta como error).",
+	"phone.autos.summaryHint": "Lo que pasó hoy en los proyectos de quien corre la automatización: quién hizo qué, qué sigue trabajando y quién te necesita. Llega como aviso aquí, y también por Telegram si eres quien tiene fleet-telegram en esta máquina.",
+	"phone.autos.minutes": "Minutos (1 a 60)",
+	"phone.autos.confirmStop": "Confirmo que esta automatización puede detener la sesión (el worktree queda libre, no se borra)",
+	"phone.autos.aiFailed": "No pude: {why}",
+	"phone.autos.aiHint": "Dile qué quieres en una frase, por ejemplo: «todos los días a las 9, despierta a los workers de acme-web y mándale al líder que reparta lo pendiente». Arma los bloques y tú revisas antes de guardar.",
+	"phone.autos.aiApplied": "Lo puse en el editor",
+	"phone.autos.undo": "deshacer",
+	"phone.autos.aiBusy": "Armándolo…",
+	"phone.autos.aiPh": "¿Qué quieres automatizar?",
+	"phone.search": "Buscar",
+	"phone.searchHint": "Busca un proyecto o una sesión",
+	"phone.projects": "Proyectos",
+	"phone.sessions": "Sesiones",
+	"phone.noMatches": "No hay coincidencias",
+	"phone.held": "Pendientes retenidos",
+	"phone.openHeld": "Abrir el cuadro de entrada",
+	"phone.heldHint": "Una activación espera a que el cuadro de entrada esté vacío. Abre la sesión para enviar o borrar el texto.",
+	"phone.nothingWaiting": "No tienes nada pendiente",
+	"phone.signIns": "Inicios de sesión pendientes",
+	"phone.loginStarted": "Inicio de sesión listo",
+	"phone.loginStartFailed": "No se pudo iniciar sesión",
+	"phone.loginDone": "Inicio de sesión completado",
+	"phone.loginFailed": "No se pudo completar el inicio de sesión. Revisa la sesión e intenta de nuevo.",
+	"phone.loginReadFailed": "No se pudieron consultar los inicios de sesión",
+	"phone.thisHost": "Este equipo",
+	"phone.firstSite": "Es la primera vez en este sitio. Revisa el proveedor antes de abrirlo.",
+	"phone.signIn": "Iniciar sesión",
+	"phone.openConnector": "Abrir los ajustes del conector",
+	"phone.open": "Abrir",
+	"phone.code": "Código de inicio de sesión de Claude",
+	"phone.callback": "URL completa de redirección",
+	"phone.finishLogin": "Completar y confirmar el inicio de sesión",
+	"phone.expires": "Vence en {time}",
+	"phone.expired": "Venció",
+	"phone.queue": "Cola",
+	"phone.reply": "Responder",
+	"phone.replyHint": "Se envía al líder citando este pendiente. Sale de la lista cuando el líder lo cierra.",
+	"phone.stacks": "Grupos de sesiones",
+	"phone.openStack": "Abrir grupo · {n}",
+	"phone.noSessions": "No hay sesiones para elegir",
+	"phone.editStack": "Elegir sesiones",
+	"phone.emptyStack": "Elige sesiones para armar un grupo",
+	"phone.openSession": "Abrir sesión",
+	"phone.reviews": "Revisiones",
+	"phone.review": "Revisión",
+	"phone.reviewsOff": "Las revisiones están desactivadas",
+	"phone.noBranch": "Sin rama",
+	"phone.video": "Video",
+	"phone.stills": "Imágenes",
+	"phone.steps": "{n} pasos",
+	"phone.earlier": "{n} ejecuciones anteriores",
+	"phone.noReviews": "Todavía no hay ejecuciones grabadas",
+	"phone.hostMissing": "{host} no respondió",
+	"phone.saved": "Guardado",
+	"phone.saveFailed": "No se pudo guardar",
+	"phone.saving": "Guardando…",
+	"phone.retry": "Intentar de nuevo",
+	"phone.approve": "Aprobar",
+	"phone.reject": "Rechazar",
+	"phone.reviewNote": "Nota de revisión",
+	"phone.restOk": "Marcar los pasos restantes como correctos",
+	"phone.chapter": "Ir al capítulo",
+	"phone.ok": "Correcto",
+	"phone.problem": "Problema",
+	"phone.skip": "Omitir",
+	"phone.requests": "Solicitudes · {n}",
+	"phone.autoNameExample": "revision-{fecha}",
+	"phone.event.interrupted": "Interrumpido",
+	"phone.event.interrupted.hint": "Se interrumpió un turno",
+	"phone.event.interrupted.verb": "se interrumpe",
+	"phone.state.starting": "iniciando",
+	"phone.state.unknown": "sin datos",
+	"phone.approved": "Aprobado. La revisión pasa la verificación",
+	"phone.rejected": "Rechazado. Se necesitan cambios",
+	"phone.unreviewed": "Sin revisar. Marca cada paso o revisa la grabación",
+	"phone.changesNeeded": "Algunos pasos necesitan cambios",
+	"phone.reasonNeeded": "Los pasos con alertas necesitan una explicación escrita",
+	"phone.queueState.waiting": "Esperando",
+	"phone.queueState.replied": "Respondido",
+	"phone.cardHeld": "Retenido",
+	"phone.signInFailed": "Falló el inicio de sesión",
+	"phone.stackPlace": "Grupos de sesiones",
+	"phone.autoReadOnly": "Esta automatización es de solo lectura.",
+	"phone.steps.one": "{n} paso",
+	"phone.earlier.one": "{n} ejecución anterior",
+	"phone.requests.one": "Solicitud · {n}",
+	"phone.auto.err.maxSteps.one": "como mucho {n} paso",
+	"phone.auto.notice.loop.one": "Apagué «{name}»: se disparó {n} vez en una hora, parece un bucle. Revísala y vuelve a encenderla."
 };
 //#endregion
 //#region web/ui/i18n.js
@@ -2751,7 +3345,7 @@ var saveSoon = () => {
 	if (!saveTimer) saveTimer = setTimeout(flush, 300);
 };
 var nameOf = (el) => el?.classList?.contains("main") ? "main" : el?.dataset?.keepScroll || null;
-function where(el) {
+function where$1(el) {
 	const max = el.scrollHeight - el.clientHeight;
 	return {
 		top: Math.round(el.scrollTop),
@@ -2762,7 +3356,7 @@ function onScroll(e) {
 	const el = e.target;
 	const name = nameOf(el);
 	if (!name || !cur$1) return;
-	rec(cur$1.id).scroll[name] = where(el);
+	rec(cur$1.id).scroll[name] = where$1(el);
 	saveSoon();
 }
 var stopRestore = () => {
@@ -2804,7 +3398,7 @@ function restore(want) {
 		}
 		restoring = null;
 		if (!cur$1) return;
-		for (const name of Object.keys(targets)) if (els[name]) rec(cur$1.id).scroll[name] = where(els[name]);
+		for (const name of Object.keys(targets)) if (els[name]) rec(cur$1.id).scroll[name] = where$1(els[name]);
 		saveSoon();
 	};
 	requestAnimationFrame(step);
@@ -2918,6 +3512,7 @@ function useHashRoute(parse, canonical = (h) => h) {
 		return parse(h);
 	};
 	const [r, setR] = d(read);
+	const [first] = d(() => location.hash);
 	h(() => {
 		const f = () => {
 			const v = read();
@@ -2925,6 +3520,7 @@ function useHashRoute(parse, canonical = (h) => h) {
 			setR(v);
 		};
 		addEventListener("hashchange", f);
+		if (location.hash !== first) f();
 		return () => removeEventListener("hashchange", f);
 	}, []);
 	return r;
@@ -3157,13 +3753,6 @@ function useKept(key, initial) {
 	return [v, set];
 }
 var SHARED_PLACES = {
-	automations: "nav.automations",
-	reviews: "nav.reviews",
-	stacks: "nav.stacks",
-	queue: "nav.queue",
-	held: "nav.held",
-	"sign-ins": "nav.signIns",
-	search: "nav.searchAll",
 	activity: "nav.activity",
 	settings: "nav.settings"
 };
@@ -4720,7 +5309,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, tool = null }) {
+function SessionView({ project, name, card, onChanged, onGone, tool = null, embedded = false }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
@@ -4874,17 +5463,16 @@ function SessionView({ project, name, card, onChanged, onGone, tool = null }) {
 		class: "session",
 		children: [
 			/* @__PURE__ */ u("header", {
-				class: "sess-head",
+				class: `sess-head${embedded ? " embedded" : ""}`,
 				children: [
-					/* @__PURE__ */ u(BackLink, { parent: `/p/${encodeURIComponent(project)}` }),
+					embedded ? null : /* @__PURE__ */ u(BackLink, { parent: `/p/${encodeURIComponent(project)}` }),
 					/* @__PURE__ */ u("div", {
 						class: "sess-title",
 						children: [
-							/* @__PURE__ */ u(Ship, {
+							embedded ? null : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Ship, {
 								state: st,
 								size: 32
-							}),
-							/* @__PURE__ */ u("h1", { children: name }),
+							}), /* @__PURE__ */ u("h1", { children: name })] }),
 							/* @__PURE__ */ u(StatusPill, { status: st }),
 							card?.branch ? /* @__PURE__ */ u("span", {
 								class: "branch",
@@ -6655,6 +7243,2312 @@ function Settings() {
 	});
 }
 //#endregion
+//#region web/ui/automations-model.js
+var EVENTS$1 = worded({
+	finished: {},
+	"need-you": {},
+	started: {},
+	limit: {},
+	lost: {},
+	interrupted: {}
+}, "phone.event", [
+	"label",
+	"hint",
+	"verb"
+]);
+var ACTIONS$1 = worded({
+	send: {
+		icon: "mail",
+		tool: "fleet_send",
+		needs: [
+			"project",
+			"session",
+			"prompt"
+		]
+	},
+	spawn: {
+		icon: "plus",
+		tool: "fleet_spawn",
+		needs: ["project", "name"],
+		optional: ["prompt", "branch"]
+	},
+	pause: {
+		icon: "pause",
+		tool: "fleet_pause",
+		needs: ["project", "session"]
+	},
+	resume: {
+		icon: "play",
+		tool: "fleet_resume",
+		needs: ["project", "session"],
+		optional: ["prompt"]
+	},
+	wake: {
+		icon: "sun",
+		tool: "fleet_wake",
+		needs: ["project", "session"]
+	},
+	interrupt: {
+		icon: "hand",
+		tool: "fleet_interrupt",
+		needs: ["project", "session"]
+	},
+	reopen: {
+		icon: "refresh",
+		tool: "fleet_reopen",
+		needs: ["project", "session"]
+	},
+	stop: {
+		icon: "stop",
+		tool: "fleet_stop",
+		needs: ["project", "session"],
+		danger: true
+	},
+	check: {
+		icon: "question",
+		tool: null,
+		needs: [
+			"project",
+			"session",
+			"status"
+		]
+	},
+	notify: {
+		icon: "bell",
+		tool: null,
+		needs: ["text"]
+	},
+	wait: {
+		icon: "hourglass",
+		tool: null,
+		needs: ["minutes"]
+	},
+	summary: {
+		icon: "clipboard",
+		tool: null,
+		needs: []
+	}
+}, "phone.action");
+var SCOPES = words(["personal", "company"], "phone.scope");
+var STATES$2 = words([
+	"need-you",
+	"working",
+	"ready",
+	"idle",
+	"parked",
+	"limit",
+	"interrupted",
+	"asleep",
+	"lost",
+	"starting",
+	"unknown"
+], "phone.state");
+var DAY_NAMES = words([
+	"0",
+	"1",
+	"2",
+	"3",
+	"4",
+	"5",
+	"6"
+], "phone.day");
+var blankTrigger = (type = "schedule") => type === "event" ? {
+	type: "event",
+	event: "finished",
+	project: "*",
+	session: "*",
+	cooldown: 10
+} : {
+	type: "schedule",
+	mode: "days",
+	at: "10:00",
+	days: [
+		1,
+		2,
+		3,
+		4,
+		5
+	],
+	date: "",
+	minutes: 60
+};
+var blankStep = (action) => ({
+	action,
+	project: "",
+	session: "",
+	prompt: "",
+	name: "",
+	branch: "",
+	minutes: action === "wait" ? 5 : 0,
+	text: "",
+	status: action === "check" ? ["need-you"] : [],
+	confirmed: false
+});
+var anyOr = (v, word) => !v || v === "*" ? word : v;
+function daysWords(days) {
+	const s = [...days].sort().join(",");
+	if (s === "0,1,2,3,4,5,6") return t("phone.auto.days.all");
+	if (s === "1,2,3,4,5") return t("phone.auto.days.weekdays");
+	if (s === "0,6") return t("phone.auto.days.weekends");
+	return t("phone.auto.days.list", { days: days.map((d) => DAY_NAMES[d]).join(", ") });
+}
+var cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+function describeTrigger(tr) {
+	if (!tr) return "";
+	if (tr.type === "event") return t("phone.auto.trig.event", {
+		who: tr.session && tr.session !== "*" ? t("phone.auto.trig.session", { session: tr.session }) : t("phone.auto.trig.anySession"),
+		project: anyOr(tr.project, t("phone.auto.trig.anyProject")),
+		what: EVENTS$1[tr.event]?.verb || tr.event
+	});
+	if (tr.mode === "once") return t("phone.auto.trig.once", {
+		date: tr.date ? tr.date.split("-").reverse().join("/") : "?",
+		at: tr.at
+	});
+	if (tr.mode === "every") return t("phone.auto.trig.every", { every: everyWords(tr.minutes) });
+	return t("phone.auto.trig.days", {
+		days: cap(daysWords(tr.days)),
+		at: tr.at
+	});
+}
+var everyWords = (m) => m % 1440 === 0 ? t("phone.auto.every.days", { n: m / 1440 }) : m % 60 === 0 ? `${m / 60} h` : `${m} min`;
+var where = (s) => `${s.session === "{sesion}" ? t("phone.auto.step.eventSession") : s.session || "?"}${s.project && s.project !== "{proyecto}" ? ` (${s.project})` : ""}`;
+var clip = (x) => `${String(x || "").slice(0, 60)}${String(x || "").length > 60 ? "…" : ""}`;
+function describeStep(s) {
+	const d = ACTIONS$1[s.action];
+	if (!d) return s.action;
+	switch (s.action) {
+		case "send": return t("phone.auto.step.send", {
+			where: where(s),
+			prompt: clip(s.prompt)
+		});
+		case "spawn": return t(s.prompt ? "phone.auto.step.spawnTask" : "phone.auto.step.spawn", {
+			name: s.name || "?",
+			project: s.project || "?"
+		});
+		case "notify": return t("phone.auto.step.notify", { text: String(s.text || "").slice(0, 60) });
+		case "wait": return t("phone.auto.step.wait", { minutes: s.minutes });
+		case "summary": return t("phone.auto.step.summary");
+		case "check": return t("phone.auto.step.check", {
+			where: where(s),
+			states: (s.status || []).map((x) => STATES$2[x] || x).join(t("phone.auto.or")) || "?"
+		});
+		default: return `${d.label} ${where(s)}`;
+	}
+}
+var TEMPLATES = worded({
+	"resumen-dia": {
+		scope: "personal",
+		build: () => ({
+			name: t("phone.tpl.resumen-dia.name"),
+			scope: "personal",
+			enabled: true,
+			trigger: {
+				...blankTrigger("schedule"),
+				days: [
+					0,
+					1,
+					2,
+					3,
+					4,
+					5,
+					6
+				],
+				at: "18:00"
+			},
+			steps: [blankStep("summary")]
+		})
+	},
+	"actualizar-pagina": {
+		scope: "company",
+		build: () => ({
+			name: t("phone.tpl.actualizar-pagina.name"),
+			scope: "company",
+			enabled: true,
+			trigger: {
+				...blankTrigger("schedule"),
+				days: [1],
+				at: "09:00"
+			},
+			steps: [{
+				...blankStep("send"),
+				session: "master",
+				prompt: t("phone.tpl.actualizar-pagina.prompt")
+			}]
+		})
+	}
+}, "phone.tpl", ["name", "hint"]);
+//#endregion
+//#region web/ui/phone-screen.jsx
+var joinMeta = (...parts) => parts.map((p) => p == null ? "" : String(p).trim()).filter(Boolean).join(" · ");
+function CardStatePill({ status, label }) {
+	if (!label) return /* @__PURE__ */ u(StatusPill, {
+		status,
+		small: true
+	});
+	return /* @__PURE__ */ u("span", {
+		class: `pill c-${STATUS[status].color} sm`,
+		children: [
+			/* @__PURE__ */ u(Led, {
+				state: status,
+				size: 7,
+				hidden: true
+			}),
+			" ",
+			label
+		]
+	});
+}
+var sessionRoute = (project, session) => `/p/${encodeURIComponent(project)}/s/${encodeURIComponent(session || "master")}`;
+function PhoneScreen({ title, parent = "/", error, loading, children, actions }) {
+	useKeys((key) => {
+		if (!key.ctrl && !key.alt && ["q", "`"].includes(key.k)) {
+			back(parent);
+			return true;
+		}
+		return false;
+	});
+	return /* @__PURE__ */ u("div", {
+		class: "page fleet-extra",
+		children: [
+			/* @__PURE__ */ u(BackLink, { parent }),
+			/* @__PURE__ */ u("header", {
+				class: "page-head",
+				children: [/* @__PURE__ */ u("h1", { children: title }), /* @__PURE__ */ u("div", {
+					class: "row wrap",
+					children: actions
+				})]
+			}),
+			error ? /* @__PURE__ */ u("p", {
+				class: "err",
+				role: "alert",
+				children: error.message
+			}) : null,
+			loading ? /* @__PURE__ */ u("p", {
+				class: "muted",
+				role: "status",
+				children: t("common.loading")
+			}) : null,
+			children
+		]
+	});
+}
+//#endregion
+//#region web/ui/automations.jsx
+var EVERY = [
+	15,
+	30,
+	60,
+	120,
+	180,
+	360,
+	720,
+	1440
+];
+var blank = () => ({
+	id: null,
+	name: "",
+	enabled: true,
+	scope: "personal",
+	trigger: blankTrigger("schedule"),
+	steps: []
+});
+var TAB_KEY = "gfw.autosTab";
+var SEEN_KEY = "gfw.noticesSeen";
+var noticesSeen = () => {
+	try {
+		return Number(localStorage.getItem(SEEN_KEY)) || 0;
+	} catch {
+		return 0;
+	}
+};
+var markNoticesSeen = (at) => {
+	try {
+		localStorage.setItem(SEEN_KEY, String(at));
+	} catch {}
+};
+var short = (ts) => (/* @__PURE__ */ new Date(ts * 1e3)).toLocaleString(locale(), {
+	weekday: "short",
+	hour: "2-digit",
+	minute: "2-digit"
+});
+function Automations({ ctx, projects, id }) {
+	const api = useFleet();
+	const people = api.hasPeople === true;
+	ctx = ctx || api;
+	const { data, error, reload } = usePoll(() => api.automations(), 1e4, []);
+	const [tab, setTabState] = d(() => {
+		try {
+			return localStorage.getItem(TAB_KEY) || "mine";
+		} catch {
+			return "mine";
+		}
+	});
+	const setTab = (t) => {
+		setTabState(t);
+		try {
+			localStorage.setItem(TAB_KEY, t);
+		} catch {}
+	};
+	projects = (projects || data?.fleet || []).map((p) => ({
+		...p,
+		sessions: Array.isArray(p.sessions) ? p.sessions : data?.fleet?.find((x) => x.name === p.name)?.sessions || []
+	}));
+	const mineOnly = data?.me ? (projects || []).filter((p) => data.me.projects.includes(p.name)) : projects;
+	useKeys((key) => {
+		if (key.ctrl || key.alt) return false;
+		if (key.k === "q" || key.k === "`") {
+			back(id ? "/automations" : "/");
+			return true;
+		}
+		if (key.k === "n" && !id) {
+			ctx.go("/automations/new");
+			return true;
+		}
+		return false;
+	});
+	if (id) return /* @__PURE__ */ u(Editor, {
+		ctx,
+		projects: mineOnly,
+		data,
+		error,
+		id,
+		onSaved: reload
+	}, id);
+	const admin = people && !!data?.me?.admin;
+	const all = data?.automations || [];
+	const tabs = [
+		[
+			"mine",
+			t("phone.project.mine"),
+			all.filter((a) => a.scope === "personal" && a.mine)
+		],
+		...!data?.capabilities?.scopes || data.capabilities.scopes.includes("company") ? [[
+			"company",
+			t("phone.autos.company"),
+			all.filter((a) => a.scope === "company")
+		]] : [],
+		...admin ? [[
+			"others",
+			t("phone.autos.others"),
+			all.filter((a) => a.scope === "personal" && !a.mine)
+		]] : []
+	];
+	const cur = tabs.find((t) => t[0] === tab) || tabs[0];
+	const list = people ? cur[2] : all;
+	const templates = Object.entries(TEMPLATES).filter(([, t]) => (t.scope === "personal" || admin) && (!data?.capabilities?.actions || t.build().steps.every((s) => data.capabilities.actions.includes(s.action))));
+	const seenAt = noticesSeen();
+	const fresh = (data?.notices || []).filter((n) => n.seen === void 0 ? n.at > seenAt : !n.seen);
+	return /* @__PURE__ */ u("div", {
+		class: "page autos",
+		children: [
+			/* @__PURE__ */ u(BackLink, { parent: "/" }),
+			/* @__PURE__ */ u("header", {
+				class: "page-head",
+				children: [/* @__PURE__ */ u("div", { children: [/* @__PURE__ */ u("h1", { children: t("phone.nav.automations") }), /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("phone.autos.sub")
+				})] }), /* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					icon: "plus",
+					onClick: () => ctx.go("/automations/new"),
+					children: t("project.new")
+				})]
+			}),
+			error ? error.status === 404 ? /* @__PURE__ */ u("p", {
+				class: "muted",
+				children: t("app.notHere")
+			}) : /* @__PURE__ */ u("p", {
+				class: "err",
+				children: error.message
+			}) : null,
+			fresh.length ? /* @__PURE__ */ u("section", {
+				class: "notices",
+				children: [fresh.map((n) => /* @__PURE__ */ u("div", {
+					class: `notice k-${n.kind}`,
+					children: [
+						/* @__PURE__ */ u("span", {
+							class: "when",
+							children: clock(n.at)
+						}),
+						" ",
+						n.text
+					]
+				}, n.id)), /* @__PURE__ */ u(Btn, {
+					kind: "ghost sm",
+					onClick: () => {
+						markNoticesSeen(fresh[0].at);
+						api.automationsSeen?.().then(reload).catch(() => {});
+						reload();
+					},
+					children: t("phone.autos.seen")
+				})]
+			}) : null,
+			/* @__PURE__ */ u("section", {
+				class: "templates",
+				"aria-label": t("phone.autos.templates"),
+				children: templates.map(([k, t]) => /* @__PURE__ */ u("button", {
+					class: "tpl",
+					onClick: () => ctx.go(`/automations/template-${k}`),
+					children: [
+						/* @__PURE__ */ u("b", { children: t.name }),
+						" ",
+						people ? /* @__PURE__ */ u("span", {
+							class: `tag${t.scope === "company" ? " team" : ""}`,
+							children: SCOPES[t.scope]
+						}) : null,
+						/* @__PURE__ */ u("span", {
+							class: "muted small",
+							children: t.hint
+						})
+					]
+				}, k))
+			}),
+			people ? /* @__PURE__ */ u("div", {
+				class: "seg autos-tabs",
+				role: "tablist",
+				children: tabs.map(([k, label, items]) => /* @__PURE__ */ u("button", {
+					role: "tab",
+					"aria-selected": cur[0] === k,
+					class: cur[0] === k ? "on" : "",
+					onClick: () => setTab(k),
+					children: [
+						label,
+						" ",
+						/* @__PURE__ */ u("span", {
+							class: "muted",
+							children: items.length
+						})
+					]
+				}, k))
+			}) : null,
+			data && !list.length ? /* @__PURE__ */ u("div", {
+				class: "empty",
+				children: people && cur[0] === "company" ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("b", { children: admin ? t("phone.autos.noCompany") : t("phone.autos.noCompanyMine") }), /* @__PURE__ */ u("span", {
+					class: "muted",
+					children: admin ? t("phone.autos.companyWhoAdmin") : t("phone.autos.companyWho")
+				})] }) : people && cur[0] === "others" ? /* @__PURE__ */ u("b", { children: t("phone.autos.noOthers") }) : /* @__PURE__ */ u(S$1, { children: [
+					/* @__PURE__ */ u("b", { children: t("phone.autos.none") }),
+					/* @__PURE__ */ u("span", {
+						class: "muted",
+						children: t("phone.autos.example")
+					}),
+					/* @__PURE__ */ u(Btn, {
+						kind: "primary",
+						onClick: () => ctx.go("/automations/new"),
+						children: t("phone.autos.createFirst")
+					})
+				] })
+			}) : null,
+			/* @__PURE__ */ u("div", {
+				class: "auto-list",
+				children: list.map((a) => /* @__PURE__ */ u(AutoCard, {
+					people,
+					a,
+					ctx,
+					onChange: reload
+				}, a.id))
+			}),
+			(data?.runs || []).length ? /* @__PURE__ */ u("section", {
+				class: "runs",
+				children: [/* @__PURE__ */ u("h2", { children: t("phone.autos.runs") }), data.runs.map((r, i) => /* @__PURE__ */ u("details", {
+					class: "run",
+					children: [/* @__PURE__ */ u("summary", { children: [
+						/* @__PURE__ */ u("span", {
+							class: `run-st s-${r.status}`,
+							children: r.status === "ok" ? "✓" : r.status === "skipped" ? "↷" : "✕"
+						}),
+						/* @__PURE__ */ u("span", {
+							class: "when",
+							children: clock(r.at)
+						}),
+						/* @__PURE__ */ u("b", {
+							class: "ellipsis",
+							children: r.name
+						}),
+						/* @__PURE__ */ u("span", {
+							class: "muted ellipsis grow",
+							children: r.status === "skipped" ? t("phone.autos.skipped", { why: r.text }) : r.trigger
+						})
+					] }), (r.steps || []).map((s, j) => /* @__PURE__ */ u("div", {
+						class: `run-step${s.ok ? "" : " bad"}`,
+						children: [
+							s.halt ? /* @__PURE__ */ u(Icon, { name: "stop" }) : s.ok ? "✓" : "✕",
+							" ",
+							s.what,
+							s.text ? /* @__PURE__ */ u("small", { children: [" — ", s.text] }) : null
+						]
+					}, j))]
+				}, i))]
+			}) : null
+		]
+	});
+}
+function AutoCard({ a, ctx, people, onChange }) {
+	const api = useFleet();
+	const [ask, setAsk] = d(false);
+	const [busy, setBusy] = d(false);
+	const toggle = async () => {
+		try {
+			await api.saveAutomation({
+				...a,
+				enabled: !a.enabled
+			});
+			onChange();
+		} catch (e) {
+			toast(e.message, "bad");
+		}
+	};
+	const runNow = async () => {
+		setBusy(true);
+		try {
+			const r = await api.runAutomation(a.id);
+			toast(r.ok ? t("phone.autos.ran", { name: a.name }) : r.text, r.ok ? "good" : "bad");
+			onChange();
+		} catch (e) {
+			toast(e.message, "bad");
+		} finally {
+			setBusy(false);
+		}
+	};
+	return /* @__PURE__ */ u("article", {
+		class: `auto-card${a.enabled ? "" : " off"}`,
+		children: [
+			/* @__PURE__ */ u("div", {
+				class: "auto-top",
+				children: [
+					/* @__PURE__ */ u("label", {
+						class: "switch",
+						title: a.enabled ? t("phone.autos.on") : t("phone.autos.off"),
+						children: [/* @__PURE__ */ u("input", {
+							type: "checkbox",
+							checked: a.enabled,
+							onChange: toggle,
+							disabled: !a.editable && !(a.enabled && a.scope === "personal"),
+							"aria-label": t(a.enabled ? "phone.autos.turnOff" : "phone.autos.turnOn", { name: a.name })
+						}), /* @__PURE__ */ u("i", {})]
+					}),
+					/* @__PURE__ */ u("a", {
+						class: "auto-name",
+						href: `#/automations/${a.id}`,
+						children: a.name
+					}),
+					people ? /* @__PURE__ */ u("span", {
+						class: `tag${a.scope === "company" ? " team" : ""}`,
+						children: SCOPES[a.scope]
+					}) : null,
+					people && !a.mine ? /* @__PURE__ */ u("span", {
+						class: "muted small",
+						children: t("phone.autos.ownedBy", { name: a.ownerName })
+					}) : null
+				]
+			}),
+			a.paused && !a.enabled ? /* @__PURE__ */ u("div", {
+				class: "notice k-warn",
+				children: t("phone.autos.paused", { why: a.paused.why })
+			}) : null,
+			/* @__PURE__ */ u("div", {
+				class: "auto-flow",
+				children: [/* @__PURE__ */ u("span", {
+					class: "chip-trigger",
+					children: [
+						/* @__PURE__ */ u(Icon, { name: a.trigger.type === "event" ? "bolt" : "clock" }),
+						" ",
+						describeTrigger(a.trigger)
+					]
+				}), a.steps.map((s, i) => /* @__PURE__ */ u("span", {
+					class: "chip-step",
+					children: [
+						/* @__PURE__ */ u("i", { children: "→" }),
+						" ",
+						/* @__PURE__ */ u(Icon, { name: ACTIONS$1[s.action]?.icon }),
+						" ",
+						describeStep(s)
+					]
+				}, i))]
+			}),
+			/* @__PURE__ */ u("div", {
+				class: "auto-foot",
+				children: [
+					/* @__PURE__ */ u("span", {
+						class: "muted small",
+						children: joinMeta(a.running ? t("phone.autos.running") : a.nextRun ? t("phone.autos.next", { when: short(a.nextRun) }) : a.trigger.type === "event" && a.enabled ? t("phone.autos.waitingEvent") : a.enabled ? "" : t("phone.autos.off"), a.lastRun ? `${t("phone.autos.last", { when: short(a.lastRun.at) })} ${a.lastRun.ok ? "✓" : "✕"}` : "")
+					}),
+					/* @__PURE__ */ u("span", { class: "grow" }),
+					a.editable ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
+						kind: "ghost sm",
+						disabled: busy,
+						onClick: runNow,
+						children: busy ? t("phone.autos.runningBtn") : /* @__PURE__ */ u(S$1, { children: [
+							/* @__PURE__ */ u(Icon, { name: "play" }),
+							" ",
+							t("phone.autos.tryNow")
+						] })
+					}), /* @__PURE__ */ u(Btn, {
+						kind: "ghost sm",
+						onClick: () => ctx.go(`/automations/${a.id}`),
+						children: t("phone.autos.edit")
+					})] }) : /* @__PURE__ */ u(Btn, {
+						kind: "ghost sm",
+						onClick: () => ctx.go(`/automations/${a.id}`),
+						children: t("phone.autos.view")
+					}),
+					a.editable || a.scope === "personal" ? /* @__PURE__ */ u(Btn, {
+						kind: "ghost sm",
+						onClick: () => setAsk(true),
+						"aria-label": t("phone.vp.delete", { name: a.name }),
+						children: /* @__PURE__ */ u(Icon, { name: "close" })
+					}) : null
+				]
+			}),
+			ask ? /* @__PURE__ */ u(Confirm, {
+				title: t("phone.autos.delTitle"),
+				danger: true,
+				action: t("common.delete"),
+				body: /* @__PURE__ */ u("p", { children: [
+					t("phone.autos.delBody.a"),
+					/* @__PURE__ */ u("b", { children: a.name }),
+					t("phone.autos.delBody.b")
+				] }),
+				onYes: async () => {
+					await api.deleteAutomation(a.id);
+					onChange();
+				},
+				onClose: () => setAsk(false)
+			}) : null
+		]
+	});
+}
+function Editor({ ctx, projects, data, error, id, onSaved }) {
+	const api = useFleet();
+	const people = api.hasPeople === true;
+	const tpl = id.startsWith("template-") ? TEMPLATES[id.slice(9)] : null;
+	const fresh = id === "new" || !!tpl;
+	const existing = !fresh ? data?.automations?.find((a) => a.id === id) : null;
+	const [draft, setDraft] = d(null);
+	const [tab, setTab] = d("edit");
+	const [saving, setSaving] = d(false);
+	h(() => {
+		if (!draft && (fresh || existing)) setDraft(existing ? structuredClone(existing) : tpl ? tpl.build() : blank());
+	}, [existing, id]);
+	const admin = people && !!data?.me?.admin;
+	const readOnly = existing && !existing.editable;
+	if (error) return /* @__PURE__ */ u("div", {
+		class: "page",
+		children: [
+			/* @__PURE__ */ u(BackLink, { parent: "/automations" }),
+			/* @__PURE__ */ u("p", {
+				class: "err",
+				role: "alert",
+				children: error.message
+			}),
+			/* @__PURE__ */ u(Btn, {
+				onClick: onSaved,
+				children: t("phone.retry")
+			})
+		]
+	});
+	if (!draft || !data) return /* @__PURE__ */ u("div", {
+		class: "page",
+		children: /* @__PURE__ */ u("p", {
+			class: "muted",
+			children: data ? t("phone.autos.notFound") : t("common.loading")
+		})
+	});
+	const set = (patch) => setDraft((d) => ({
+		...d,
+		...patch
+	}));
+	const setTrigger = (patch) => setDraft((d) => ({
+		...d,
+		trigger: {
+			...d.trigger,
+			...patch
+		}
+	}));
+	const setStep = (i, patch) => setDraft((d) => ({
+		...d,
+		steps: d.steps.map((s, j) => j === i ? {
+			...s,
+			...patch
+		} : s)
+	}));
+	const insert = (action, at) => setDraft((d) => {
+		const steps = [...d.steps];
+		steps.splice(at ?? steps.length, 0, blankStep(action));
+		return {
+			...d,
+			steps
+		};
+	});
+	const move = (from, to) => setDraft((d) => {
+		const steps = [...d.steps];
+		const [s] = steps.splice(from, 1);
+		steps.splice(to > from ? to - 1 : to, 0, s);
+		return {
+			...d,
+			steps
+		};
+	});
+	const remove = (i) => setDraft((d) => ({
+		...d,
+		steps: d.steps.filter((_, j) => j !== i)
+	}));
+	const save = async () => {
+		setSaving(true);
+		try {
+			const r = await api.saveAutomation(draft);
+			toast(t(r.automation.enabled ? "phone.autos.saved" : "phone.autos.savedOff", { name: r.automation.name }), "good");
+			onSaved();
+			back("/automations");
+		} catch (e) {
+			toast(e.message, "bad");
+		} finally {
+			setSaving(false);
+		}
+	};
+	const isEvent = draft.trigger.type === "event";
+	return /* @__PURE__ */ u("div", {
+		class: "page autos-edit",
+		children: [
+			/* @__PURE__ */ u("header", {
+				class: "page-head",
+				children: [/* @__PURE__ */ u("div", {
+					class: "grow",
+					children: [/* @__PURE__ */ u(BackLink, { parent: "/automations" }), /* @__PURE__ */ u("input", {
+						class: "auto-title",
+						placeholder: t("phone.autos.namePh"),
+						value: draft.name,
+						onInput: (e) => set({ name: e.currentTarget.value }),
+						"aria-label": t("auth.name")
+					})]
+				}), /* @__PURE__ */ u("div", {
+					class: "row wrap",
+					children: [
+						people ? admin && !readOnly ? /* @__PURE__ */ u(Select, {
+							class: "scope-pick",
+							value: draft.scope,
+							onChange: (v) => set({ scope: v }),
+							"aria-label": t("phone.autos.scope"),
+							options: [{
+								value: "personal",
+								label: t("phone.autos.scopePersonal")
+							}, {
+								value: "company",
+								label: t("phone.autos.scopeCompany")
+							}]
+						}) : /* @__PURE__ */ u("span", {
+							class: `tag${draft.scope === "company" ? " team" : ""}`,
+							"aria-label": t("phone.autos.scope"),
+							children: SCOPES[draft.scope]
+						}) : null,
+						/* @__PURE__ */ u("label", {
+							class: "switch-l",
+							children: [
+								/* @__PURE__ */ u("span", {
+									class: "switch",
+									children: [/* @__PURE__ */ u("input", {
+										type: "checkbox",
+										checked: draft.enabled,
+										onChange: (e) => set({ enabled: e.currentTarget.checked })
+									}), /* @__PURE__ */ u("i", {})]
+								}),
+								" ",
+								t("phone.autos.on")
+							]
+						}),
+						/* @__PURE__ */ u(Btn, {
+							kind: "primary",
+							disabled: saving || readOnly,
+							onClick: save,
+							children: saving ? t("phone.common.saving") : t("common.save")
+						})
+					]
+				})]
+			}),
+			readOnly ? /* @__PURE__ */ u("p", {
+				class: "notice k-warn",
+				children: !people ? t("phone.autoReadOnly") : existing.scope === "company" ? t("phone.autos.roCompany") : t("phone.autos.roPersonal", { name: existing.ownerName })
+			}) : null,
+			existing?.paused && !existing.enabled ? /* @__PURE__ */ u("p", {
+				class: "notice k-warn",
+				children: t("phone.autos.paused", { why: existing.paused.why })
+			}) : null,
+			/* @__PURE__ */ u("div", {
+				class: "tabs-m",
+				role: "tablist",
+				children: [/* @__PURE__ */ u("button", {
+					class: tab === "edit" ? "on" : "",
+					onClick: () => setTab("edit"),
+					children: t("phone.autos.editor")
+				}), /* @__PURE__ */ u("button", {
+					class: tab === "ai" ? "on" : "",
+					onClick: () => setTab("ai"),
+					children: ["✦ ", t("phone.autos.askAI")]
+				})]
+			}),
+			/* @__PURE__ */ u("div", {
+				class: `builder show-${tab}`,
+				children: [
+					/* @__PURE__ */ u(Palette, {
+						capabilities: data?.capabilities,
+						onAdd: (a) => insert(a),
+						onTrigger: (t) => setTrigger(blankTrigger(t))
+					}),
+					/* @__PURE__ */ u("div", {
+						class: "flow",
+						"aria-label": t("phone.autos.flow"),
+						children: [
+							/* @__PURE__ */ u(TriggerBlock, {
+								capabilities: data?.capabilities,
+								t: draft.trigger,
+								projects,
+								onChange: setTrigger,
+								onType: (t) => set({ trigger: blankTrigger(t) })
+							}),
+							draft.steps.map((s, i) => /* @__PURE__ */ u("div", {
+								class: "flow-item",
+								children: [/* @__PURE__ */ u(Drop, {
+									at: i,
+									onAdd: insert,
+									onMove: move
+								}), /* @__PURE__ */ u(StepBlock, {
+									capabilities: data?.capabilities,
+									s,
+									i,
+									n: draft.steps.length,
+									isEvent,
+									projects,
+									onChange: (p) => setStep(i, p),
+									onRemove: () => remove(i),
+									onMove: move
+								})]
+							}, i)),
+							/* @__PURE__ */ u(Drop, {
+								at: draft.steps.length,
+								onAdd: insert,
+								onMove: move,
+								last: true,
+								empty: !draft.steps.length
+							})
+						]
+					}),
+					/* @__PURE__ */ u(AIPanel, {
+						draft,
+						onDraft: (a) => setDraft((d) => ({
+							...d,
+							...a,
+							id: d.id,
+							scope: d.scope,
+							enabled: d.enabled
+						}))
+					})
+				]
+			})
+		]
+	});
+}
+function Palette({ capabilities, onAdd, onTrigger }) {
+	const drag = (e, kind, v) => {
+		e.dataTransfer.setData("text/plain", `${kind}:${v}`);
+		e.dataTransfer.effectAllowed = "copy";
+	};
+	return /* @__PURE__ */ u("aside", {
+		class: "palette",
+		"aria-label": t("phone.autos.blocks"),
+		children: [
+			/* @__PURE__ */ u("h3", { children: t("phone.autos.triggers") }),
+			/* @__PURE__ */ u("button", {
+				class: "blk trig",
+				draggable: true,
+				onDragStart: (e) => drag(e, "trigger", "schedule"),
+				onClick: () => onTrigger("schedule"),
+				children: [
+					/* @__PURE__ */ u(Icon, { name: "clock" }),
+					" ",
+					t("phone.autos.schedule")
+				]
+			}),
+			/* @__PURE__ */ u("button", {
+				class: "blk trig",
+				draggable: true,
+				onDragStart: (e) => drag(e, "trigger", "event"),
+				onClick: () => onTrigger("event"),
+				children: [
+					/* @__PURE__ */ u(Icon, { name: "bolt" }),
+					" ",
+					t("phone.autos.sessionEvent")
+				]
+			}),
+			/* @__PURE__ */ u("h3", { children: t("phone.autos.actions") }),
+			Object.entries(ACTIONS$1).filter(([k]) => !capabilities?.actions || capabilities.actions.includes(k)).map(([k, d]) => /* @__PURE__ */ u("button", {
+				class: `blk${d.danger ? " danger" : ""}`,
+				draggable: true,
+				onDragStart: (e) => drag(e, "action", k),
+				onClick: () => onAdd(k),
+				title: t("phone.autos.dragHint"),
+				children: [
+					/* @__PURE__ */ u("span", {
+						class: "blk-ico",
+						children: /* @__PURE__ */ u(Icon, { name: d.icon })
+					}),
+					" ",
+					d.label
+				]
+			}, k)),
+			/* @__PURE__ */ u("p", {
+				class: "muted small",
+				children: t("phone.autos.dragHelp")
+			})
+		]
+	});
+}
+function Drop({ at, onAdd, onMove, last, empty }) {
+	const [over, setOver] = d(false);
+	const onDrop = (e) => {
+		e.preventDefault();
+		setOver(false);
+		const [kind, v] = e.dataTransfer.getData("text/plain").split(":");
+		if (kind === "action" && ACTIONS$1[v]) onAdd(v, at);
+		if (kind === "move") onMove(Number(v), at);
+	};
+	return /* @__PURE__ */ u("div", {
+		class: `drop${over ? " over" : ""}${last ? " last" : ""}${empty ? " empty" : ""}`,
+		onDragOver: (e) => {
+			e.preventDefault();
+			setOver(true);
+		},
+		onDragLeave: () => setOver(false),
+		onDrop,
+		children: empty ? t("phone.autos.dropEmpty") : last ? `＋ ${t("phone.autos.dropLast")}` : null
+	});
+}
+function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
+	const [over, setOver] = d(false);
+	const sessions = (projects || []).find((p) => p.name === t$6.project)?.sessions || [];
+	return /* @__PURE__ */ u("section", {
+		class: `node trigger${over ? " over" : ""}`,
+		onDragOver: (e) => {
+			e.preventDefault();
+			setOver(true);
+		},
+		onDragLeave: () => setOver(false),
+		onDrop: (e) => {
+			e.preventDefault();
+			setOver(false);
+			const [k, v] = e.dataTransfer.getData("text/plain").split(":");
+			if (k === "trigger") onType(v);
+		},
+		children: [
+			/* @__PURE__ */ u("header", { children: [/* @__PURE__ */ u("span", {
+				class: "node-k",
+				children: t("phone.autos.when")
+			}), /* @__PURE__ */ u("div", {
+				class: "seg",
+				children: [/* @__PURE__ */ u("button", {
+					class: t$6.type === "schedule" ? "on" : "",
+					onClick: () => t$6.type !== "schedule" && onType("schedule"),
+					children: [
+						/* @__PURE__ */ u(Icon, { name: "clock" }),
+						" ",
+						t("phone.autos.schedule")
+					]
+				}), /* @__PURE__ */ u("button", {
+					class: t$6.type === "event" ? "on" : "",
+					onClick: () => t$6.type !== "event" && onType("event"),
+					children: [
+						/* @__PURE__ */ u(Icon, { name: "bolt" }),
+						" ",
+						t("phone.autos.event")
+					]
+				})]
+			})] }),
+			t$6.type === "schedule" ? /* @__PURE__ */ u("div", {
+				class: "node-body",
+				children: [
+					/* @__PURE__ */ u("div", {
+						class: "seg sm",
+						children: [
+							/* @__PURE__ */ u("button", {
+								class: t$6.mode === "days" ? "on" : "",
+								onClick: () => onChange({ mode: "days" }),
+								children: t("phone.autos.someDays")
+							}),
+							/* @__PURE__ */ u("button", {
+								class: t$6.mode === "once" ? "on" : "",
+								onClick: () => onChange({ mode: "once" }),
+								children: t("phone.autos.once")
+							}),
+							/* @__PURE__ */ u("button", {
+								class: t$6.mode === "every" ? "on" : "",
+								onClick: () => onChange({ mode: "every" }),
+								children: t("phone.autos.everySoOften")
+							})
+						]
+					}),
+					t$6.mode === "days" ? /* @__PURE__ */ u("div", {
+						class: "days",
+						role: "group",
+						"aria-label": t("phone.autos.days"),
+						children: [
+							1,
+							2,
+							3,
+							4,
+							5,
+							6,
+							0
+						].map((d) => /* @__PURE__ */ u("button", {
+							class: t$6.days.includes(d) ? "on" : "",
+							"aria-pressed": t$6.days.includes(d),
+							onClick: () => onChange({ days: t$6.days.includes(d) ? t$6.days.filter((x) => x !== d) : [...t$6.days, d] }),
+							children: DAY_NAMES[d]
+						}, d))
+					}) : null,
+					t$6.mode === "once" ? /* @__PURE__ */ u("label", {
+						class: "field",
+						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.date") }), /* @__PURE__ */ u("input", {
+							type: "date",
+							value: t$6.date,
+							onInput: (e) => onChange({ date: e.currentTarget.value })
+						})]
+					}) : null,
+					t$6.mode !== "every" ? /* @__PURE__ */ u("label", {
+						class: "field",
+						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.time") }), /* @__PURE__ */ u("input", {
+							type: "time",
+							value: t$6.at,
+							onInput: (e) => onChange({ at: e.currentTarget.value })
+						})]
+					}) : /* @__PURE__ */ u(Select, {
+						label: t("phone.autos.every"),
+						value: t$6.minutes,
+						onChange: (v) => onChange({ minutes: Number(v) }),
+						options: EVERY.map((m) => ({
+							value: m,
+							label: everyWords(m)
+						}))
+					})
+				]
+			}) : /* @__PURE__ */ u("div", {
+				class: "node-body",
+				children: [
+					/* @__PURE__ */ u(Select, {
+						label: t("phone.autos.whenSession"),
+						value: t$6.event,
+						onChange: (v) => onChange({ event: v }),
+						options: Object.entries(EVENTS$1).filter(([k]) => !capabilities?.events || capabilities.events.includes(k)).map(([k, d]) => ({
+							value: k,
+							label: `${d.label} (${d.hint})`
+						}))
+					}),
+					/* @__PURE__ */ u("div", {
+						class: "row wrap",
+						children: [/* @__PURE__ */ u(Select, {
+							field: "field grow",
+							label: t("phone.autos.whichProject"),
+							value: t$6.project,
+							onChange: (v) => onChange({
+								project: v,
+								session: "*"
+							}),
+							options: [{
+								value: "*",
+								label: t("phone.autos.anyProject")
+							}, ...(projects || []).map((p) => ({
+								value: p.name,
+								label: p.name
+							}))]
+						}), /* @__PURE__ */ u(Select, {
+							field: "field grow",
+							label: t("phone.autos.whichSession"),
+							value: t$6.session,
+							onChange: (v) => onChange({ session: v }),
+							disabled: t$6.project === "*",
+							options: [{
+								value: "*",
+								label: t("phone.autos.any")
+							}, ...sessions.map((s) => ({
+								value: s.name,
+								label: s.lead ? `${s.name} (${t("common.lead")})` : s.name
+							}))]
+						})]
+					}),
+					/* @__PURE__ */ u("label", {
+						class: "field",
+						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.cooldown") }), /* @__PURE__ */ u("input", {
+							type: "number",
+							min: "1",
+							max: "1440",
+							value: t$6.cooldown,
+							onInput: (e) => onChange({ cooldown: Number(e.currentTarget.value) })
+						})]
+					})
+				]
+			}),
+			/* @__PURE__ */ u("p", {
+				class: "node-say",
+				children: describeTrigger(t$6)
+			})
+		]
+	});
+}
+function StepBlock({ capabilities, s, i, n, isEvent, projects, onChange, onRemove, onMove }) {
+	const d$1 = ACTIONS$1[s.action];
+	const [grab, setGrab] = d(false);
+	const fromEvent = s.project === "{proyecto}";
+	const sessions = (projects || []).find((p) => p.name === s.project)?.sessions || [];
+	const has = (f) => d$1.needs.includes(f) || d$1.optional?.includes(f);
+	return /* @__PURE__ */ u("section", {
+		class: `node step${d$1.danger ? " danger" : ""}${grab ? " grab" : ""}`,
+		draggable: grab,
+		onDragStart: (e) => {
+			e.dataTransfer.setData("text/plain", `move:${i}`);
+			e.dataTransfer.effectAllowed = "move";
+		},
+		onDragEnd: () => setGrab(false),
+		children: [/* @__PURE__ */ u("header", { children: [
+			/* @__PURE__ */ u("span", {
+				class: "handle",
+				title: t("phone.autos.dragMove"),
+				onMouseDown: () => setGrab(true),
+				onMouseUp: () => setGrab(false),
+				children: "⋮⋮"
+			}),
+			/* @__PURE__ */ u("span", {
+				class: "node-k",
+				children: [
+					i + 1,
+					". ",
+					/* @__PURE__ */ u(Icon, { name: d$1.icon }),
+					" ",
+					d$1.label
+				]
+			}),
+			/* @__PURE__ */ u("span", { class: "grow" }),
+			/* @__PURE__ */ u("button", {
+				class: "icon-btn",
+				disabled: i === 0,
+				onClick: () => onMove(i, i - 1),
+				"aria-label": t("phone.autos.up"),
+				children: "↑"
+			}),
+			/* @__PURE__ */ u("button", {
+				class: "icon-btn",
+				disabled: i === n - 1,
+				onClick: () => onMove(i, i + 2),
+				"aria-label": t("phone.autos.down"),
+				children: "↓"
+			}),
+			/* @__PURE__ */ u("button", {
+				class: "icon-btn",
+				onClick: onRemove,
+				"aria-label": t("phone.autos.removeStep"),
+				children: "✕"
+			})
+		] }), /* @__PURE__ */ u("div", {
+			class: "node-body",
+			children: [
+				has("project") ? /* @__PURE__ */ u("div", {
+					class: "row wrap",
+					children: [
+						/* @__PURE__ */ u(Select, {
+							field: "field grow",
+							label: t("phone.autos.project"),
+							value: s.project,
+							onChange: (v) => {
+								const keep = (projects || []).find((p) => p.name === v)?.sessions.some((x) => x.name === s.session);
+								onChange(v === "{proyecto}" ? {
+									project: v,
+									session: "{sesion}"
+								} : {
+									project: v,
+									session: keep ? s.session : ""
+								});
+							},
+							options: [
+								{
+									value: "",
+									label: t("phone.autos.choose")
+								},
+								...isEvent ? [{
+									value: "{proyecto}",
+									label: t("phone.autos.eventProject")
+								}] : [],
+								...(projects || []).map((p) => ({
+									value: p.name,
+									label: p.name
+								}))
+							]
+						}),
+						has("session") ? /* @__PURE__ */ u(Select, {
+							field: "field grow",
+							label: t("phone.autos.session"),
+							value: s.session,
+							onChange: (v) => onChange({ session: v }),
+							disabled: !s.project,
+							options: [
+								{
+									value: "",
+									label: t("phone.autos.choose")
+								},
+								...isEvent ? [{
+									value: "{sesion}",
+									label: t("phone.auto.step.eventSession")
+								}] : [],
+								...!fromEvent ? sessions.map((x) => ({
+									value: x.name,
+									label: x.lead ? `${x.name} (${t("common.lead")})` : x.name
+								})) : []
+							]
+						}) : null,
+						has("name") ? /* @__PURE__ */ u("label", {
+							class: "field grow",
+							children: [/* @__PURE__ */ u("span", { children: t("phone.autos.newName") }), /* @__PURE__ */ u("input", {
+								value: s.name,
+								placeholder: t("phone.autoNameExample"),
+								onInput: (e) => onChange({ name: e.currentTarget.value })
+							})]
+						}) : null
+					]
+				}) : null,
+				has("prompt") ? /* @__PURE__ */ u("label", {
+					class: "field",
+					children: [/* @__PURE__ */ u("span", { children: s.action === "send" ? t("sched.message") : s.action === "spawn" ? t("phone.autos.firstTask") : t("phone.autos.resumeMsg") }), /* @__PURE__ */ u("textarea", {
+						rows: 3,
+						value: s.prompt,
+						placeholder: t("phone.autos.vars"),
+						onInput: (e) => onChange({ prompt: e.currentTarget.value })
+					})]
+				}) : null,
+				has("branch") ? /* @__PURE__ */ u("label", {
+					class: "field",
+					children: [/* @__PURE__ */ u("span", { children: t("phone.autos.branchOpt") }), /* @__PURE__ */ u("input", {
+						value: s.branch,
+						onInput: (e) => onChange({ branch: e.currentTarget.value })
+					})]
+				}) : null,
+				s.action === "notify" ? /* @__PURE__ */ u("label", {
+					class: "field",
+					children: [/* @__PURE__ */ u("span", { children: t("phone.autos.noticeText") }), /* @__PURE__ */ u("input", {
+						value: s.text,
+						placeholder: t("phone.autos.noticePh"),
+						onInput: (e) => onChange({ text: e.currentTarget.value })
+					})]
+				}) : null,
+				s.action === "check" ? /* @__PURE__ */ u("div", {
+					class: "field",
+					children: [
+						/* @__PURE__ */ u("span", { children: t("phone.autos.ifNow") }),
+						/* @__PURE__ */ u("div", {
+							class: "days states",
+							role: "group",
+							"aria-label": t("phone.autos.states"),
+							children: Object.entries(STATES$2).filter(([k]) => !capabilities?.states || capabilities.states.includes(k)).map(([k, label]) => /* @__PURE__ */ u("button", {
+								class: s.status.includes(k) ? "on" : "",
+								"aria-pressed": s.status.includes(k),
+								onClick: () => onChange({ status: s.status.includes(k) ? s.status.filter((x) => x !== k) : [...s.status, k] }),
+								children: label
+							}, k))
+						}),
+						/* @__PURE__ */ u("small", {
+							class: "muted",
+							children: t("phone.autos.checkHint")
+						})
+					]
+				}) : null,
+				s.action === "summary" ? /* @__PURE__ */ u("p", {
+					class: "muted small",
+					children: t("phone.autos.summaryHint")
+				}) : null,
+				s.action === "wait" ? /* @__PURE__ */ u("label", {
+					class: "field",
+					children: [/* @__PURE__ */ u("span", { children: t("phone.autos.minutes") }), /* @__PURE__ */ u("input", {
+						type: "number",
+						min: "1",
+						max: "60",
+						value: s.minutes,
+						onInput: (e) => onChange({ minutes: Number(e.currentTarget.value) })
+					})]
+				}) : null,
+				d$1.danger ? /* @__PURE__ */ u("label", {
+					class: "check danger",
+					children: [/* @__PURE__ */ u("input", {
+						type: "checkbox",
+						checked: s.confirmed,
+						onChange: (e) => onChange({ confirmed: e.currentTarget.checked })
+					}), t("phone.autos.confirmStop")]
+				}) : null
+			]
+		})]
+	});
+}
+function AIPanel({ draft, onDraft }) {
+	const api = useFleet();
+	const [msgs, setMsgs] = d([]);
+	const [text, setText] = d("");
+	const [busy, setBusy] = d(false);
+	const [undo, setUndo] = d(null);
+	const end = A(null);
+	h(() => {
+		end.current?.scrollIntoView({ block: "end" });
+	}, [msgs, busy]);
+	const ask = async () => {
+		const t$7 = text.trim();
+		if (!t$7 || busy) return;
+		const next = [...msgs, {
+			role: "user",
+			text: t$7
+		}];
+		setMsgs(next);
+		setText("");
+		setBusy(true);
+		try {
+			const has = draft.steps.length || draft.name;
+			const r = await api.automationAI(next, has ? {
+				name: draft.name,
+				trigger: draft.trigger,
+				steps: draft.steps
+			} : null);
+			setMsgs((m) => [...m, {
+				role: "ai",
+				text: r.reply,
+				applied: !!r.automation
+			}]);
+			if (r.automation) {
+				setUndo(structuredClone(draft));
+				onDraft(r.automation);
+			}
+		} catch (e) {
+			setMsgs((m) => [...m, {
+				role: "ai",
+				text: t("phone.autos.aiFailed", { why: e.message }),
+				error: true
+			}]);
+		} finally {
+			setBusy(false);
+		}
+	};
+	return /* @__PURE__ */ u("aside", {
+		class: "ai-panel",
+		"aria-label": t("phone.autos.askAI"),
+		children: [
+			/* @__PURE__ */ u("h3", { children: [
+				/* @__PURE__ */ u(Icon, { name: "spark" }),
+				" ",
+				t("phone.autos.askAI")
+			] }),
+			/* @__PURE__ */ u("div", {
+				class: "ai-msgs",
+				children: [
+					!msgs.length ? /* @__PURE__ */ u("p", {
+						class: "muted small",
+						children: t("phone.autos.aiHint")
+					}) : null,
+					msgs.map((m, i) => /* @__PURE__ */ u("div", {
+						class: `ai-msg ${m.role}${m.error ? " error" : ""}`,
+						children: [m.text, m.applied ? /* @__PURE__ */ u("small", {
+							class: "ai-applied",
+							children: [
+								"✓ ",
+								t("phone.autos.aiApplied"),
+								undo && i === msgs.length - 1 ? /* @__PURE__ */ u(S$1, { children: [" · ", /* @__PURE__ */ u("a", {
+									href: "#",
+									onClick: (e) => {
+										e.preventDefault();
+										onDraft(undo);
+										setUndo(null);
+									},
+									children: t("phone.autos.undo")
+								})] }) : null
+							]
+						}) : null]
+					}, i)),
+					busy ? /* @__PURE__ */ u("div", {
+						class: "ai-msg ai muted",
+						children: t("phone.autos.aiBusy")
+					}) : null,
+					/* @__PURE__ */ u("div", { ref: end })
+				]
+			}),
+			/* @__PURE__ */ u("div", {
+				class: "ai-input",
+				children: [/* @__PURE__ */ u("textarea", {
+					rows: 2,
+					value: text,
+					placeholder: t("phone.autos.aiPh"),
+					onInput: (e) => setText(e.currentTarget.value),
+					onKeyDown: (e) => {
+						if (e.key === "Enter" && !e.shiftKey) {
+							e.preventDefault();
+							ask();
+						}
+					}
+				}), /* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					disabled: busy || !text.trim(),
+					onClick: ask,
+					children: t("common.send")
+				})]
+			})
+		]
+	});
+}
+//#endregion
+//#region web/ui/reviews.jsx
+var commitOf = (run) => run.commit ? `${run.commit}${run.dirty ? "*" : ""}` : null;
+var reviewRoute = (host, profile, run) => `/reviews/${[
+	host || "-",
+	profile,
+	run
+].map(encodeURIComponent).join("/")}`;
+function Reviews() {
+	const fleet = useFleet();
+	const { data, error, loading } = usePoll(() => fleet.reviews(), 5e3, []);
+	const [expanded, setExpanded] = useKept("reviews.expanded", []);
+	const open = (g, r) => fleet.go(reviewRoute(g.host_key, g.profile, r.id));
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.reviews"),
+		error,
+		loading,
+		children: [
+			data === null && !loading && !error ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.reviewsOff")
+			}) : null,
+			/* @__PURE__ */ u("div", {
+				class: "extra-grid",
+				children: (data?.groups || []).map((g) => /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("button", {
+					class: `card extra-card s-${g.latest.state?.cls === "ok" ? "green" : g.latest.state?.cls === "bad" ? "red" : "yellow"}`,
+					onClick: () => open(g, g.latest),
+					children: [
+						/* @__PURE__ */ u("span", {
+							class: `pill c-${g.latest.state?.cls === "ok" ? "green" : g.latest.state?.cls === "bad" ? "red" : "yellow"}`,
+							children: g.latest.state?.label
+						}),
+						/* @__PURE__ */ u("h3", { children: g.branch || t("phone.noBranch") }),
+						/* @__PURE__ */ u("p", { children: joinMeta(g.project, g.host, data.multi ? g.profile : "") }),
+						/* @__PURE__ */ u("p", {
+							class: "muted",
+							children: joinMeta(t(g.latest.kind === "recorded" ? "phone.video" : "phone.stills"), g.latest.steps == null ? null : t("phone.steps", { n: g.latest.steps }), commitOf(g.latest), g.latest.at ? ago((Date.now() - Date.parse(g.latest.at)) / 1e3) : null)
+						})
+					]
+				}), g.earlier?.length ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
+					kind: "ghost sm",
+					"aria-expanded": expanded.includes(g.key),
+					onClick: () => setExpanded((xs) => xs.includes(g.key) ? xs.filter((x) => x !== g.key) : [...xs, g.key]),
+					children: t("phone.earlier", { n: g.earlier.length })
+				}), expanded.includes(g.key) ? g.earlier.map((r) => /* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					onClick: () => open(g, r),
+					children: joinMeta(r.state?.label, commitOf(r), r.id)
+				}, r.id)) : null] }) : null] }, g.key))
+			}),
+			data && !data.groups?.length ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.noReviews")
+			}) : null,
+			(data?.missing || []).map((m) => /* @__PURE__ */ u("p", {
+				class: "muted",
+				children: t("phone.hostMissing", { host: m.host })
+			}, m.host_key))
+		]
+	});
+}
+function Review({ host = "", profile, run: id }) {
+	const fleet = useFleet(), video = A(), writer = A({
+		busy: false,
+		dirty: false,
+		timer: 0,
+		run: null,
+		verdict: {}
+	});
+	const [run, setRun] = d(null), [error, setError] = d(null), [save, setSave] = d(""), [verdict, setVerdict] = d({});
+	const [chapter, setChapter] = d(0);
+	h(() => {
+		let live = true;
+		const w = {
+			busy: false,
+			dirty: false,
+			timer: 0,
+			run: null,
+			verdict: {},
+			live: true
+		};
+		writer.current = w;
+		setRun(null);
+		setError(null);
+		setSave("");
+		setChapter(0);
+		w.flush = async () => {
+			clearTimeout(w.timer);
+			w.timer = 0;
+			if (w.busy || !w.dirty || !w.run) return;
+			w.busy = true;
+			w.dirty = false;
+			const v = w.verdict;
+			const body = {
+				host,
+				profile,
+				run: id,
+				...w.run.kind === "recorded" ? {
+					flow: v.flow?.v ? v.flow : { v: "" },
+					chapters: v.chapters || {}
+				} : { state: Object.fromEntries(Object.entries(v).filter(([, x]) => x?.v)) }
+			};
+			try {
+				await fleet.saveReview(body);
+				if (w.live) {
+					setSave(t("phone.saved"));
+					setError(null);
+				}
+			} catch (e) {
+				w.dirty = true;
+				if (w.live) {
+					setSave(t("phone.saveFailed"));
+					setError(e);
+				}
+				w.busy = false;
+				return;
+			}
+			w.busy = false;
+			if (w.dirty) return w.flush();
+		};
+		fleet.review(profile, id, host).then((j) => {
+			if (!live) return;
+			w.run = j.run;
+			w.verdict = j.run.verdict || {};
+			setRun(j.run);
+			setVerdict(w.verdict);
+		}, (e) => {
+			if (live) setError(e);
+		});
+		return () => {
+			live = false;
+			w.live = false;
+			clearTimeout(w.timer);
+			w.flush();
+		};
+	}, [
+		profile,
+		id,
+		host
+	]);
+	const edit = (fn, delay = 0) => {
+		const w = writer.current;
+		w.verdict = fn(w.verdict);
+		w.dirty = true;
+		setVerdict(w.verdict);
+		setSave(t("phone.saving"));
+		clearTimeout(w.timer);
+		if (delay) w.timer = setTimeout(w.flush, delay);
+		else w.flush();
+	};
+	const seek = (n) => {
+		const next = Math.max(0, Math.min((run?.steps?.length || 1) - 1, n));
+		setChapter(next);
+		const step = run?.steps?.[next];
+		if (video.current && step) video.current.currentTime = step.at ?? step.start ?? step.t ?? 0;
+	};
+	const flow = (v) => edit((x) => ({
+		...x,
+		flow: {
+			...x.flow,
+			v: x.flow?.v === v ? "" : v
+		}
+	}));
+	useKeys((key) => {
+		if (key.ctrl || key.alt || !run) return false;
+		if (key.k === " " && video.current) {
+			video.current.paused ? video.current.play().catch(() => {}) : video.current.pause();
+			return true;
+		}
+		if (key.k === "ArrowLeft" || key.k === "ArrowRight") {
+			seek(chapter + (key.k === "ArrowLeft" ? -1 : 1));
+			return true;
+		}
+		if (run.kind === "recorded" && ["a", "r"].includes(key.k)) {
+			flow(key.k === "a" ? "approve" : "reject");
+			return true;
+		}
+		return false;
+	});
+	const note = (label, value, change) => /* @__PURE__ */ u("label", {
+		class: "field",
+		children: [/* @__PURE__ */ u("span", { children: label }), /* @__PURE__ */ u("textarea", {
+			rows: 2,
+			value: value || "",
+			onInput: (e) => change(e.currentTarget.value),
+			onBlur: () => writer.current.flush()
+		})]
+	});
+	const stepEdit = (n, patch, delay = 0) => edit((x) => ({
+		...x,
+		[n]: {
+			...x[n],
+			...patch
+		}
+	}), delay);
+	const steps = run?.steps || [];
+	const problem = steps.filter((s) => verdict[s.n]?.v === "problem").length;
+	const unmarked = steps.filter((s) => !verdict[s.n]?.v).length;
+	const flagged = steps.filter((s) => s.notes?.length && !(["ok", "skip"].includes(verdict[s.n]?.v) && verdict[s.n]?.note?.trim())).length;
+	const gate = run?.kind === "recorded" ? verdict.flow?.v === "approve" ? "approved" : verdict.flow?.v === "reject" ? "rejected" : "unreviewed" : problem ? "changesNeeded" : unmarked ? "unreviewed" : flagged ? "reasonNeeded" : "approved";
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: run?.branch || t("phone.review"),
+		parent: "/reviews",
+		error,
+		loading: !run && !error,
+		children: run ? /* @__PURE__ */ u(S$1, { children: [
+			/* @__PURE__ */ u("span", {
+				class: `pill says c-${gate === "approved" ? "green" : ["rejected", "changesNeeded"].includes(gate) ? "red" : "yellow"}`,
+				children: t(`phone.${gate}`)
+			}),
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: joinMeta(run.project, run.host, profile, run.provenance?.commit)
+			}),
+			/* @__PURE__ */ u("p", {
+				role: "status",
+				children: save
+			}),
+			save === t("phone.saveFailed") ? /* @__PURE__ */ u(Btn, {
+				onClick: () => writer.current.flush(),
+				children: t("phone.retry")
+			}) : null,
+			run.kind === "recorded" ? /* @__PURE__ */ u("div", {
+				class: "stack review-verdict",
+				children: [
+					/* @__PURE__ */ u("video", {
+						ref: video,
+						class: "review-media",
+						src: run.videoSrc,
+						controls: true,
+						playsInline: true
+					}),
+					/* @__PURE__ */ u("div", {
+						class: "row wrap",
+						children: ["approve", "reject"].map((v) => /* @__PURE__ */ u(Btn, {
+							kind: verdict.flow?.v === v ? "primary" : "",
+							"aria-pressed": verdict.flow?.v === v,
+							onClick: () => flow(v),
+							children: t(`phone.${v}`)
+						}))
+					}),
+					note(t("phone.reviewNote"), verdict.flow?.note, (text) => edit((x) => ({
+						...x,
+						flow: {
+							...x.flow,
+							note: text
+						}
+					}), 700))
+				]
+			}) : /* @__PURE__ */ u(Btn, {
+				onClick: () => edit((x) => ({
+					...x,
+					...Object.fromEntries(run.steps.filter((s) => !x[s.n]?.v).map((s) => [s.n, {
+						v: "ok",
+						note: x[s.n]?.note || ""
+					}]))
+				})),
+				children: t("phone.restOk")
+			}),
+			(run.steps || []).map((s, i) => /* @__PURE__ */ u("section", {
+				class: "review-step stack",
+				children: [
+					/* @__PURE__ */ u("h2", { children: [
+						s.n,
+						". ",
+						s.name
+					] }),
+					run.kind === "recorded" ? /* @__PURE__ */ u(Btn, {
+						onClick: () => seek(i),
+						children: t("phone.chapter")
+					}) : /* @__PURE__ */ u("img", {
+						class: "review-media",
+						src: s.src,
+						alt: s.name
+					}),
+					/* @__PURE__ */ u("p", {
+						class: "muted",
+						children: s.url
+					}),
+					(s.notes || []).map((n, j) => /* @__PURE__ */ u("p", {
+						class: "err",
+						children: typeof n === "string" ? n : JSON.stringify(n)
+					}, j)),
+					run.kind !== "recorded" ? /* @__PURE__ */ u("div", {
+						class: "row wrap",
+						children: [
+							"ok",
+							"problem",
+							"skip"
+						].map((v) => /* @__PURE__ */ u(Btn, {
+							"aria-pressed": verdict[s.n]?.v === v,
+							kind: verdict[s.n]?.v === v ? "primary" : "",
+							onClick: () => stepEdit(s.n, { v: verdict[s.n]?.v === v ? "" : v }),
+							children: t(`phone.${v}`)
+						}))
+					}) : null,
+					note(t("phone.reviewNote"), run.kind === "recorded" ? verdict.chapters?.[s.n] : verdict[s.n]?.note, (text) => run.kind === "recorded" ? edit((x) => ({
+						...x,
+						chapters: {
+							...x.chapters,
+							[s.n]: text
+						}
+					}), 700) : stepEdit(s.n, { note: text }, 700)),
+					s.requests?.length ? /* @__PURE__ */ u("details", { children: [/* @__PURE__ */ u("summary", { children: t("phone.requests", { n: s.requests.length }) }), s.requests.map((r, j) => /* @__PURE__ */ u("p", { children: [
+						r.method,
+						" ",
+						r.status,
+						" ",
+						r.url
+					] }, j))] }) : null
+				]
+			}, s.n))
+		] }) : null
+	});
+}
+//#endregion
+//#region web/ui/stacks.jsx
+var keyOf = (m) => JSON.stringify([m.project, m.session]);
+function StackPicker({ members = [], onOpen }) {
+	const fleet = useFleet();
+	const [selected, setSelected] = useKept("stack.members", members), [query, setQuery] = useKept("stack.query", "");
+	const { data, error, loading } = usePoll(async () => {
+		const p = await fleet.screenProjects();
+		return Promise.all((p.projects || []).filter((p) => !p.sessions || p.sessions.total !== 0).map(async (p) => {
+			try {
+				return {
+					...p,
+					...await fleet.grid(p.name)
+				};
+			} catch (error) {
+				return {
+					...p,
+					cards: [],
+					error
+				};
+			}
+		}));
+	}, 5e3, []);
+	const toggle = (m) => setSelected((items) => items.some((x) => keyOf(x) === keyOf(m)) ? items.filter((x) => keyOf(x) !== keyOf(m)) : [...items, m]);
+	const open = () => selected.length && (onOpen ? onOpen(selected) : fleet.go(`/stack/${encodeURIComponent(JSON.stringify(selected))}`));
+	useKeys((key) => {
+		if (!key.ctrl && !key.alt && key.k === "Enter") {
+			open();
+			return true;
+		}
+		return false;
+	});
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.stacks"),
+		error: error || data?.find((p) => p.error)?.error,
+		loading,
+		actions: /* @__PURE__ */ u(Btn, {
+			kind: "primary",
+			disabled: !selected.length,
+			onClick: open,
+			children: t("phone.openStack", { n: selected.length })
+		}),
+		children: [
+			/* @__PURE__ */ u("label", {
+				class: "field",
+				children: [/* @__PURE__ */ u("span", { children: t("phone.search") }), /* @__PURE__ */ u("input", {
+					type: "search",
+					value: query,
+					onInput: (e) => setQuery(e.currentTarget.value)
+				})]
+			}),
+			(data || []).map((p) => {
+				const cards = (p.cards || []).filter((c) => !c.lost && `${p.name} ${c.name} ${c.branch || ""} ${c.msg || ""}`.toLowerCase().includes(query.toLowerCase()));
+				return cards.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(p.name, p.host) }), /* @__PURE__ */ u("div", {
+					class: "extra-grid",
+					children: cards.map((c) => {
+						const m = {
+							project: p.name,
+							session: c.name
+						};
+						return /* @__PURE__ */ u("label", {
+							class: "card extra-card stack-choice",
+							children: [
+								/* @__PURE__ */ u("input", {
+									type: "checkbox",
+									checked: selected.some((x) => keyOf(x) === keyOf(m)),
+									onChange: () => toggle(m)
+								}),
+								/* @__PURE__ */ u("h3", { children: c.name }),
+								/* @__PURE__ */ u(StatusPill, {
+									status: c.status,
+									small: true
+								}),
+								/* @__PURE__ */ u("p", {
+									class: "muted",
+									children: c.branch
+								}),
+								/* @__PURE__ */ u("p", { children: c.msg })
+							]
+						}, c.name);
+					})
+				})] }, p.name) : null;
+			}),
+			data && !data.some((p) => p.cards?.some((c) => !c.lost)) ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.noSessions")
+			}) : null
+		]
+	});
+}
+function StackView({ members = [] }) {
+	const fleet = useFleet(), [active, setActive] = d(0);
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.stacks"),
+		parent: "/stack-picker",
+		actions: /* @__PURE__ */ u(Btn, {
+			onClick: () => fleet.go("/stack-picker"),
+			children: t("phone.editStack")
+		}),
+		children: !members.length ? /* @__PURE__ */ u("p", {
+			class: "empty",
+			children: t("phone.emptyStack")
+		}) : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("div", {
+			class: "seg",
+			role: "tablist",
+			children: members.map((m, i) => /* @__PURE__ */ u("button", {
+				role: "tab",
+				"aria-selected": active === i,
+				class: active === i ? "on" : "",
+				onClick: () => setActive(i),
+				children: joinMeta(m.project, m.session)
+			}))
+		}), /* @__PURE__ */ u("div", {
+			class: "stack-columns",
+			children: members.map((m, i) => /* @__PURE__ */ u("section", {
+				class: `stack-column${i === active ? " stack-active" : ""}`,
+				onFocusIn: () => setActive(i),
+				children: [/* @__PURE__ */ u("header", {
+					class: "row wrap",
+					children: [/* @__PURE__ */ u("h2", { children: joinMeta(m.project, m.session) }), /* @__PURE__ */ u(Btn, {
+						onClick: () => fleet.go(sessionRoute(m.project, m.session)),
+						children: t("phone.openSession")
+					})]
+				}), /* @__PURE__ */ u(SessionView, {
+					embedded: true,
+					project: m.project,
+					name: m.session,
+					onChanged: () => {},
+					onGone: () => fleet.go("/stack-picker")
+				})]
+			}, keyOf(m)))
+		})] })
+	});
+}
+//#endregion
+//#region web/ui/sign-ins.jsx
+function SignInCard({ row, onChanged = () => {} }) {
+	const fleet = useFleet(), input = A();
+	const [busy, setBusy] = d(false), [result, setResult] = d(""), [done, setDone] = d(false), [now, setNow] = d(Date.now());
+	h(() => {
+		const timer = setInterval(() => setNow(Date.now()), 1e3);
+		return () => {
+			clearInterval(timer);
+			if (input.current) input.current.value = "";
+		};
+	}, []);
+	const left = Math.max(0, Math.ceil(((Number(row.expires) || 0) - now) / 1e3));
+	const pending = row.status === "pending" && left > 0 && !done;
+	const account = row.kind === "account";
+	const expired = row.kind !== "connector" && (row.status === "expired" || row.status === "pending" && !left);
+	const state = done || row.status === "done" ? "ready" : expired ? "expired" : pending || row.status === "needs-login" || row.kind === "connector" && row.status === "pending" ? "need-you" : "failed";
+	const status = ["expired", "failed"].includes(state) ? "interrupted" : state;
+	const stateLabel = state === "expired" ? t("phone.expired") : state === "failed" ? t("phone.signInFailed") : null;
+	const start = async () => {
+		setBusy(true);
+		try {
+			const r = await fleet.startAccountLogin(row.project, row.session, row.sock);
+			setResult(r.ok ? t("phone.loginStarted") : t("phone.loginStartFailed"));
+			if (r.ok) onChanged();
+		} catch {
+			setResult(t("phone.loginStartFailed"));
+		} finally {
+			setBusy(false);
+		}
+	};
+	const finish = async () => {
+		let secret = input.current?.value || "";
+		if (input.current) input.current.value = "";
+		setBusy(true);
+		try {
+			const r = account ? await fleet.finishAccountLogin(row.project, row.id, secret) : await fleet.finishLogin(row.project, row.id, secret);
+			secret = "";
+			setResult(t(r.ok ? "phone.loginDone" : "phone.loginFailed"));
+			if (r.ok) {
+				setDone(true);
+				onChanged();
+			}
+		} catch {
+			setResult(t("phone.loginFailed"));
+		} finally {
+			secret = "";
+			if (input.current) input.current.value = "";
+			setBusy(false);
+		}
+	};
+	return /* @__PURE__ */ u("article", {
+		class: `card extra-card s-${STATUS[status].color} login-card`,
+		"data-login": row.id,
+		children: [
+			/* @__PURE__ */ u(CardStatePill, {
+				status,
+				label: stateLabel
+			}),
+			/* @__PURE__ */ u("h3", { children: row.provider }),
+			/* @__PURE__ */ u("p", { children: joinMeta(row.server, row.session, row.host || t("phone.thisHost"), row.project) }),
+			account ? /* @__PURE__ */ u("p", { children: row.profile }) : null,
+			row.first_site ? /* @__PURE__ */ u("p", {
+				class: "err",
+				children: t("phone.firstSite")
+			}) : null,
+			row.kind === "connector" ? /* @__PURE__ */ u("p", { children: joinMeta("claude.ai", row.connector) }) : null,
+			account && row.status === "needs-login" ? /* @__PURE__ */ u(Btn, {
+				disabled: busy,
+				onClick: start,
+				children: t("phone.signIn")
+			}) : null,
+			(pending || row.kind === "connector") && /^https?:\/\//.test(row.authorize || "") ? /* @__PURE__ */ u("a", {
+				class: "btn",
+				href: row.authorize,
+				target: "_blank",
+				rel: "noopener noreferrer",
+				referrerPolicy: "no-referrer",
+				children: t(row.kind === "connector" ? "phone.openConnector" : "phone.open")
+			}) : null,
+			pending && (account || row.kind === "loopback") ? /* @__PURE__ */ u(S$1, { children: [
+				/* @__PURE__ */ u("label", {
+					class: "field",
+					children: [/* @__PURE__ */ u("span", { children: t(account ? "phone.code" : "phone.callback") }), /* @__PURE__ */ u("input", {
+						ref: input,
+						type: account ? "password" : "text",
+						autoComplete: "off",
+						autoCapitalize: "off",
+						spellcheck: false
+					})]
+				}),
+				/* @__PURE__ */ u(Btn, {
+					disabled: busy || !left,
+					onClick: finish,
+					children: t("phone.finishLogin")
+				}),
+				/* @__PURE__ */ u("small", {
+					class: "muted",
+					children: t("phone.expires", { time: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` })
+				})
+			] }) : null,
+			!pending && row.kind !== "connector" && row.status === "pending" && !done ? /* @__PURE__ */ u("p", { children: t("phone.expired") }) : null,
+			/* @__PURE__ */ u("p", {
+				role: "status",
+				children: result || (done ? t("phone.loginDone") : "")
+			})
+		]
+	});
+}
+function PendingSignIns() {
+	const fleet = useFleet();
+	const { data, error, reload } = usePoll(() => fleet.pendingSignIns(), 5e3, []);
+	return /* @__PURE__ */ u(S$1, { children: [error ? /* @__PURE__ */ u("p", {
+		class: "err",
+		role: "alert",
+		children: t("phone.loginReadFailed")
+	}) : null, /* @__PURE__ */ u("div", {
+		class: "extra-grid",
+		children: (data?.items || []).map((r) => /* @__PURE__ */ u(SignInCard, {
+			row: r,
+			onChanged: reload
+		}, r.id))
+	})] });
+}
+function SignIns() {
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.signIns"),
+		children: /* @__PURE__ */ u(PendingSignIns, {})
+	});
+}
+//#endregion
+//#region web/ui/held.jsx
+function HeldCard({ row }) {
+	const fleet = useFleet();
+	return /* @__PURE__ */ u("article", {
+		class: "card extra-card s-yellow",
+		children: [
+			/* @__PURE__ */ u(CardStatePill, {
+				status: "need-you",
+				label: t("phone.cardHeld")
+			}),
+			/* @__PURE__ */ u("h3", { children: joinMeta(row.project, row.session || "master") }),
+			/* @__PURE__ */ u("p", { children: row.text }),
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: joinMeta(row.host, typeof row.reason === "string" ? row.reason : row.reason?.text, row.since ? ago(Date.now() / 1e3 - row.since) : "")
+			}),
+			/* @__PURE__ */ u(Btn, {
+				onClick: () => fleet.go(sessionRoute(row.project, row.session)),
+				children: t("phone.openHeld")
+			})
+		]
+	});
+}
+function Held({ row, project, id }) {
+	const fleet = useFleet();
+	const { data, error, loading } = usePoll(() => row ? Promise.resolve({ items: [row] }) : fleet.waiting(), 5e3, [
+		row,
+		project,
+		id
+	]);
+	const rows = (data?.items || []).filter((r) => r.state === "held" && (!project || r.project === project) && (!id || String(r.id) === String(id)));
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.held"),
+		parent: "/queue",
+		error,
+		loading,
+		children: [
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: t("phone.heldHint")
+			}),
+			/* @__PURE__ */ u("div", {
+				class: "extra-grid",
+				children: rows.map((r) => /* @__PURE__ */ u(HeldCard, { row: r }, `${r.project}/${r.id}`))
+			}),
+			data && !rows.length ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.nothingWaiting")
+			}) : null
+		]
+	});
+}
+//#endregion
+//#region web/ui/queue.jsx
+var replyText = (row, text) => `Re your ledger item ${row.id}: "${row.text}"\n\n${String(text || "").trim()}`;
+function Queue() {
+	const fleet = useFleet();
+	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, []);
+	const [row, setRow] = d(null), [text, setText] = d(""), [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const send = async () => {
+		if (!text.trim() || busy) return;
+		setBusy(true);
+		setFailure("");
+		try {
+			await fleet.act("fleet_send", {
+				project: row.project,
+				session: "master",
+				prompt: replyText(row, text)
+			});
+			setRow(null);
+			setText("");
+			reload();
+		} catch (e) {
+			setFailure(e.message);
+		} finally {
+			setBusy(false);
+		}
+	};
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.queue"),
+		error,
+		loading,
+		children: [
+			/* @__PURE__ */ u(PendingSignIns, {}),
+			/* @__PURE__ */ u("div", {
+				class: "extra-grid",
+				children: (data?.items || []).map((r) => r.state === "held" ? /* @__PURE__ */ u(HeldCard, { row: r }, `${r.project}/${r.id}`) : /* @__PURE__ */ u("article", {
+					class: "card extra-card s-yellow",
+					children: [
+						/* @__PURE__ */ u("span", {
+							class: "pill c-yellow",
+							children: ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state
+						}),
+						/* @__PURE__ */ u("h3", { children: joinMeta(r.project, r.id == null ? null : `#${r.id}`) }),
+						/* @__PURE__ */ u("p", { children: r.text }),
+						/* @__PURE__ */ u("p", {
+							class: "muted",
+							children: joinMeta(r.host, typeof r.reason === "string" ? r.reason : r.reason?.text)
+						}),
+						/* @__PURE__ */ u(Btn, {
+							onClick: () => {
+								setRow(r);
+								setText("");
+							},
+							children: t("phone.reply")
+						})
+					]
+				}, `${r.project}/${r.id}`))
+			}),
+			data && !data.items?.length ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.nothingWaiting")
+			}) : null,
+			row ? /* @__PURE__ */ u(Modal, {
+				title: joinMeta(t("phone.reply"), row.project, row.id == null ? null : `#${row.id}`),
+				onClose: () => !busy && setRow(null),
+				children: [
+					/* @__PURE__ */ u("p", { children: row.text }),
+					/* @__PURE__ */ u("p", {
+						class: "muted",
+						children: t("phone.replyHint")
+					}),
+					/* @__PURE__ */ u("label", {
+						class: "field",
+						children: [/* @__PURE__ */ u("span", { children: t("phone.reply") }), /* @__PURE__ */ u("textarea", {
+							rows: 4,
+							value: text,
+							onInput: (e) => setText(e.currentTarget.value)
+						})]
+					}),
+					failure ? /* @__PURE__ */ u("p", {
+						class: "err",
+						role: "alert",
+						children: failure
+					}) : null,
+					/* @__PURE__ */ u(Btn, {
+						kind: "primary",
+						disabled: busy || !text.trim(),
+						onClick: send,
+						children: t("common.send")
+					})
+				]
+			}) : null
+		]
+	});
+}
+//#endregion
+//#region web/ui/search.jsx
+function SearchInput({ value, onChange, onOpen, inputRef }) {
+	const fleet = useFleet();
+	return /* @__PURE__ */ u("form", {
+		class: "extra-search",
+		role: "search",
+		onSubmit: (e) => {
+			e.preventDefault();
+			onOpen ? onOpen() : fleet.go(`/search?q=${encodeURIComponent(value || "")}`);
+		},
+		children: [/* @__PURE__ */ u("input", {
+			ref: inputRef,
+			type: "search",
+			"aria-label": t("phone.search"),
+			placeholder: t("phone.searchHint"),
+			value: value || "",
+			onInput: (e) => onChange(e.currentTarget.value)
+		}), /* @__PURE__ */ u(Btn, {
+			onClick: () => onOpen ? onOpen() : fleet.go(`/search?q=${encodeURIComponent(value || "")}`),
+			children: t("phone.search")
+		})]
+	});
+}
+function Search({ query = "" }) {
+	const fleet = useFleet(), field = A();
+	const [openError, setOpenError] = d(null);
+	const [q, setQ] = useKept("search.query", query);
+	const { data, error, loading } = usePoll(() => fleet.screenProjects(), 5e3, []);
+	const { data: grids, error: gridError, loading: gridLoading } = usePoll(async () => !q.trim() ? [] : Promise.all((data?.projects || []).filter((p) => !p.sessions || p.sessions.total !== 0).map(async (p) => {
+		try {
+			return {
+				project: p,
+				...await fleet.grid(p.name)
+			};
+		} catch (error) {
+			return {
+				project: p,
+				cards: [],
+				error
+			};
+		}
+	})), 5e3, [data, !!q.trim()]);
+	const needle = q.trim().toLocaleLowerCase();
+	const projects = (data?.projects || []).filter((p) => !needle || `${p.name} ${p.path || ""}`.toLocaleLowerCase().includes(needle));
+	const sessions = (grids || []).flatMap((g) => (g.cards || []).filter((c) => !c.lost && `${c.name} ${c.branch || ""} ${c.path || ""} ${c.pr || ""} ${c.msg || ""} ${c.label || ""}`.toLocaleLowerCase().includes(needle)).map((c) => ({
+		project: g.project,
+		card: c
+	})));
+	const openProject = async (p) => {
+		setOpenError(null);
+		try {
+			if (p.canPrompt === false) {
+				const g = await fleet.grid(p.name);
+				fleet.go(sessionRoute(p.name, g.cards?.find((c) => c.lead)?.name));
+				return;
+			}
+			const r = await fleet.lead(p.name);
+			fleet.go(sessionRoute(p.name, r.session || r.lead || "master"));
+		} catch (e) {
+			setOpenError(e);
+		}
+	};
+	const first = () => projects.length ? openProject(projects[0]) : sessions.length ? fleet.go(sessionRoute(sessions[0].project.name, sessions[0].card.name)) : null;
+	h(() => {
+		field.current?.focus();
+	}, []);
+	useKeys((key) => {
+		if (!key.ctrl && !key.alt && key.k === "/") {
+			field.current?.focus();
+			return true;
+		}
+		return false;
+	});
+	return /* @__PURE__ */ u(PhoneScreen, {
+		title: t("phone.search"),
+		error: openError || error || gridError || grids?.find((g) => g.error)?.error,
+		loading,
+		children: [
+			/* @__PURE__ */ u(SearchInput, {
+				value: q,
+				onChange: setQ,
+				onOpen: first,
+				inputRef: field
+			}),
+			projects.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: t("phone.projects") }), /* @__PURE__ */ u("div", {
+				class: "extra-grid",
+				children: projects.map((p) => /* @__PURE__ */ u("button", {
+					class: "card extra-card",
+					onClick: () => openProject(p),
+					children: [/* @__PURE__ */ u("h3", { children: p.name }), /* @__PURE__ */ u("p", {
+						class: "muted",
+						children: p.host || p.path
+					})]
+				}, p.name))
+			})] }) : null,
+			needle && sessions.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: t("phone.sessions") }), /* @__PURE__ */ u("div", {
+				class: "extra-grid",
+				children: sessions.map(({ project: p, card: c }) => /* @__PURE__ */ u("button", {
+					class: "card extra-card",
+					onClick: () => fleet.go(sessionRoute(p.name, c.name)),
+					children: [
+						/* @__PURE__ */ u(StatusPill, {
+							status: c.status,
+							small: true
+						}),
+						/* @__PURE__ */ u("h3", { children: c.name }),
+						/* @__PURE__ */ u("p", { children: joinMeta(p.name, p.host) }),
+						/* @__PURE__ */ u("p", {
+							class: "muted",
+							children: [
+								c.branch,
+								" ",
+								c.pr,
+								" ",
+								c.label
+							]
+						}),
+						/* @__PURE__ */ u("p", { children: c.msg })
+					]
+				}, `${p.name}/${c.name}`))
+			})] }) : null,
+			!loading && (!needle || !gridLoading) && !sessions.length && !projects.length ? /* @__PURE__ */ u("p", {
+				class: "empty",
+				children: t("phone.noMatches")
+			}) : null
+		]
+	});
+}
+//#endregion
 //#region web/ui/speakable.js
 var EN = {
 	code: "Code omitted.",
@@ -8409,7 +11303,7 @@ function Launcher({ onOpen }) {
 }
 //#endregion
 //#region web/ui/tasks.jsx
-var STATES = worded({
+var STATES$1 = worded({
 	ask: {
 		color: "yellow",
 		rank: 0
@@ -8439,7 +11333,7 @@ var STATES = worded({
 		rank: 4
 	}
 }, "task.state");
-var shown = (S) => S.tasks.filter((x) => !x.hidden).sort((a, b) => STATES[a.status].rank - STATES[b.status].rank || a.at - b.at);
+var shown = (S) => S.tasks.filter((x) => !x.hidden).sort((a, b) => STATES$1[a.status].rank - STATES$1[b.status].rank || a.at - b.at);
 var hhmm = (ts) => (/* @__PURE__ */ new Date(ts * 1e3)).toLocaleTimeString(locale(), {
 	hour: "2-digit",
 	minute: "2-digit"
@@ -8463,7 +11357,7 @@ function Places({ task, projects }) {
 }
 function Task({ task, projects }) {
 	const [open, setOpen] = d(false);
-	const st = STATES[task.status];
+	const st = STATES$1[task.status];
 	const last = task.replies[task.replies.length - 1];
 	const where = task.session || t("common.lead");
 	const waiting = task.status === "ask" || task.status === "failed";
@@ -8587,7 +11481,7 @@ function TaskRail({ projects, onClose }) {
 function TaskChip({ onClick, floating }) {
 	const S = useAgent();
 	const list = shown(S);
-	const waiting = list.filter((x) => STATES[x.status].rank < 2).length;
+	const waiting = list.filter((x) => STATES$1[x.status].rank < 2).length;
 	return /* @__PURE__ */ u("button", {
 		class: `tk-chip${floating ? " floating" : ""}`,
 		onClick,
@@ -8611,35 +11505,35 @@ var VIEWS = [
 	{ view: "project" },
 	{
 		view: "automations",
-		nav: ["bolt", "nav.automations"],
-		id: true
+		nav: ["bolt", "phone.nav.automations"]
 	},
 	{
 		view: "reviews",
-		nav: ["check", "nav.reviews"],
-		id: true
+		nav: ["check", "phone.reviews"]
 	},
 	{
-		view: "stacks",
-		nav: ["branch", "nav.stacks"],
-		id: true
+		view: "stack-picker",
+		nav: ["branch", "phone.stackPlace"]
+	},
+	{
+		view: "stack",
+		under: "stack-picker"
 	},
 	{
 		view: "queue",
-		nav: ["hourglass", "nav.queue"]
+		nav: ["hourglass", "phone.queue"]
 	},
 	{
 		view: "held",
-		nav: ["hand", "nav.held"]
+		under: "queue"
 	},
 	{
 		view: "sign-ins",
-		nav: ["key", "nav.signIns"]
+		nav: ["key", "phone.signIns"]
 	},
 	{
 		view: "search",
-		nav: ["search", "nav.searchAll"],
-		id: true
+		nav: ["search", "phone.search"]
 	},
 	{
 		view: "activity",
@@ -8648,32 +11542,36 @@ var VIEWS = [
 	{ view: "settings" }
 ];
 var SHARED = VIEWS.map((v) => v.view);
+var decode = (x) => {
+	try {
+		return decodeURIComponent(x);
+	} catch {
+		return x;
+	}
+};
 function parseRoute(hash, extra) {
 	const shared = sharedRoute(hash);
 	if (shared && shared.view !== "home") return shared;
-	const parts = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+	const [path, query = ""] = String(hash).split("?");
+	const parts = path.replace(/^#\/?/, "").split("/").map(decode);
 	const v = VIEWS.find((x) => x.view === parts[0] && ![
 		"home",
 		"map",
 		"project"
 	].includes(x.view));
-	if (v) return v.id ? {
-		view: v.view,
-		id: parts[1] || null
-	} : { view: v.view };
+	if (v) {
+		let q = "";
+		try {
+			q = new URLSearchParams(query).get("q") || "";
+		} catch {}
+		return {
+			view: v.view,
+			id: parts[1] || null,
+			rest: parts.slice(1).filter(Boolean),
+			q
+		};
+	}
 	return parts[0] && extra?.parse?.(parts) || { view: "home" };
-}
-function Pending({ view }) {
-	return /* @__PURE__ */ u("div", {
-		class: "page narrow",
-		children: [/* @__PURE__ */ u("header", {
-			class: "page-head",
-			children: /* @__PURE__ */ u("div", { children: /* @__PURE__ */ u("h1", { children: t(VIEWS.find((v) => v.view === view)?.nav?.[1] || "nav.home") }) })
-		}), /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: t("app.pending")
-		})]
-	});
 }
 function NotHere({ view }) {
 	return /* @__PURE__ */ u("div", {
@@ -8687,15 +11585,45 @@ function NotHere({ view }) {
 		})]
 	});
 }
+function stackMembers(id) {
+	let v;
+	try {
+		v = JSON.parse(id || "[]");
+	} catch {
+		return [];
+	}
+	return Array.isArray(v) ? v.filter((m) => m && typeof m.project === "string" && typeof m.session === "string").map((m) => ({
+		project: m.project,
+		session: m.session
+	})) : [];
+}
 var SCREENS = {
-	activity: () => /* @__PURE__ */ u(Activity, {}),
-	settings: () => /* @__PURE__ */ u(Settings, {}),
 	map: (r, p) => /* @__PURE__ */ u(FleetMap, { projects: p.projects }),
 	project: (r) => /* @__PURE__ */ u(ProjectView, {
 		project: r.project,
 		session: r.session,
 		tool: r.tool
-	}, r.project)
+	}, r.project),
+	automations: (r, p) => /* @__PURE__ */ u(Automations, {
+		projects: p.projects,
+		id: r.id
+	}, r.id || "list"),
+	reviews: (r) => r.rest.length >= 3 ? /* @__PURE__ */ u(Review, {
+		host: r.rest[0] === "-" ? "" : r.rest[0],
+		profile: r.rest[1],
+		run: r.rest[2]
+	}, r.rest.join("/")) : /* @__PURE__ */ u(Reviews, {}),
+	"stack-picker": () => /* @__PURE__ */ u(StackPicker, {}),
+	stack: (r) => /* @__PURE__ */ u(StackView, { members: stackMembers(r.id) }, r.id),
+	queue: () => /* @__PURE__ */ u(Queue, {}),
+	held: (r) => /* @__PURE__ */ u(Held, {
+		project: r.rest[0] || null,
+		id: r.rest[1] || null
+	}),
+	"sign-ins": () => /* @__PURE__ */ u(SignIns, {}),
+	search: (r) => /* @__PURE__ */ u(Search, { query: r.q }),
+	activity: () => /* @__PURE__ */ u(Activity, {}),
+	settings: () => /* @__PURE__ */ u(Settings, {})
 };
 var kept = (k, d) => {
 	try {
@@ -8710,7 +11638,7 @@ var keep = (k, on) => {
 		localStorage.setItem(k, on ? "1" : "0");
 	} catch {}
 };
-function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = {}, canonical, interim = {} }) {
+function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = {}, canonical }) {
 	const fleet = useFleet();
 	const route = useHashRoute((h) => parseRoute(h, extra), canonical);
 	const [asOpen, setAsOpen] = d(() => kept("gfw.asOpen", false));
@@ -8743,9 +11671,7 @@ function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = 
 		children: /* @__PURE__ */ u(HomeAgent, { projects })
 	});
 	else if (SHARED.includes(route.view) && !offers(route.view)) main = /* @__PURE__ */ u(NotHere, { view: route.view });
-	else if (SCREENS[route.view]) main = SCREENS[route.view](route, { projects });
-	else if (interim[route.view]) main = interim[route.view](route);
-	else main = /* @__PURE__ */ u(Pending, { view: route.view });
+	else main = SCREENS[route.view](route, { projects });
 	return /* @__PURE__ */ u(Frame, {
 		name,
 		sub,
@@ -8756,7 +11682,7 @@ function FleetApp({ name, sub, projects, hosts, me, extra, frame = {}, badges = 
 		class: `${frame.class || ""}${panel ? " with-as" : ""}${rail ? " with-rail" : ""}`,
 		nav: (close) => /* @__PURE__ */ u(S$1, { children: [VIEWS.filter((v) => v.nav && offers(v.view)).map((v) => /* @__PURE__ */ u(NavLink, {
 			to: `/${v.view}`,
-			active: route.view === v.view,
+			active: route.view === v.view || VIEWS.find((x) => x.view === route.view)?.under === v.view,
 			onClick: close,
 			children: [
 				/* @__PURE__ */ u(Icon, { name: v.nav[0] }),
@@ -8942,7 +11868,7 @@ function createTasks(fleet, tr) {
 		for (const t of all) if (!t.done && t.status === "sending" && now() - t.from > STUCK_S) {
 			Object.assign(t, {
 				status: "failed",
-				error: tr("task.unsure"),
+				error: tr("task.unsent"),
 				question: "",
 				options: [t.project]
 			});
@@ -9010,6 +11936,206 @@ function createTasks(fleet, tr) {
 		taskDone: done
 	};
 }
+var SCREEN_PLACES = Object.freeze(Object.defineProperties({}, Object.fromEntries(Object.entries({
+	"/automations": "phone.nav.automations",
+	"/reviews": "phone.reviews",
+	"/stack-picker": "phone.stackPlace",
+	"/stack": "phone.stackPlace",
+	"/queue": "phone.queue",
+	"/held": "phone.held",
+	"/search": "phone.search",
+	"/sign-ins": "phone.signIns"
+}).map(([route, key]) => [route, {
+	enumerable: true,
+	get: () => t(key)
+}]))));
+function screenPlace(route) {
+	const root = "/" + String(route || "").replace(/^#?\/?/, "").split(/[/?#]/)[0];
+	return Object.hasOwn(SCREEN_PLACES, root) ? SCREEN_PLACES[root] : null;
+}
+//#endregion
+//#region lib/automations-model.mjs
+var EVENTS = {
+	finished: {
+		label: "finishes a turn",
+		hint: "working → ready or idle",
+		is: (a, b) => a === "working" && (b === "ready" || b === "idle")
+	},
+	"need-you": {
+		label: "needs you",
+		hint: "waiting on an answer or a permission",
+		is: (a, b) => b === "need-you" && a !== "need-you"
+	},
+	started: {
+		label: "starts working",
+		hint: "a turn begins",
+		is: (a, b) => b === "working" && a !== "working"
+	},
+	limit: {
+		label: "hits a usage limit",
+		hint: "the account ran out",
+		is: (a, b) => b === "limit" && a !== "limit"
+	},
+	interrupted: {
+		label: "is interrupted",
+		hint: "the turn was cut off",
+		is: (a, b) => b === "interrupted" && a !== "interrupted"
+	}
+};
+var ACTIONS = {
+	send: {
+		label: "send a prompt",
+		tool: "fleet_send",
+		needs: [
+			"project",
+			"session",
+			"prompt"
+		]
+	},
+	spawn: {
+		label: "start a session",
+		tool: "fleet_spawn",
+		needs: ["project", "name"],
+		optional: ["prompt", "branch"],
+		passkey: true
+	},
+	pause: {
+		label: "pause",
+		tool: "fleet_pause",
+		needs: ["project", "session"]
+	},
+	resume: {
+		label: "resume",
+		tool: "fleet_resume",
+		needs: ["project", "session"],
+		optional: ["prompt"]
+	},
+	wake: {
+		label: "wake",
+		tool: "fleet_wake",
+		needs: ["project", "session"]
+	},
+	interrupt: {
+		label: "interrupt",
+		tool: "fleet_interrupt",
+		needs: ["project", "session"]
+	},
+	reopen: {
+		label: "reopen",
+		tool: "fleet_reopen",
+		needs: ["project", "session"]
+	},
+	stop: {
+		label: "stop",
+		tool: "fleet_stop",
+		needs: ["project", "session"],
+		passkey: true
+	},
+	check: {
+		label: "continue only if…",
+		tool: null,
+		needs: [
+			"project",
+			"session",
+			"status"
+		]
+	},
+	notify: {
+		label: "tell me",
+		tool: null,
+		needs: ["text"]
+	},
+	wait: {
+		label: "wait",
+		tool: null,
+		needs: ["minutes"]
+	}
+};
+var STATES = [
+	"need-you",
+	"working",
+	"ready",
+	"parked",
+	"idle",
+	"starting",
+	"unknown",
+	"limit",
+	"interrupted"
+];
+var own = (o, k) => typeof k === "string" && Object.hasOwn(o, k);
+var needsPasskey = (a) => (a?.steps || []).some((s) => own(ACTIONS, s.action) && ACTIONS[s.action].passkey);
+//#endregion
+//#region web/src/adapter-extras.js
+async function assertion(purpose) {
+	if (!passkey.available() || !passkey.registered()) {
+		if (passkey.bypassAllowed()) return null;
+		throw new Error("Register a passkey before continuing");
+	}
+	return passkey.fresh(purpose);
+}
+var toPhone = (value) => JSON.parse(JSON.stringify(value).replace(/\{proyecto\}/g, "{project}").replace(/\{sesion\}/g, "{session}").replace(/\{fecha\}/g, "{date}").replace(/\{hora\}/g, "{time}"));
+var toShared = (value) => JSON.parse(JSON.stringify(value).replace(/\{project\}/g, "{proyecto}").replace(/\{session\}/g, "{sesion}").replace(/\{date\}/g, "{fecha}").replace(/\{time\}/g, "{hora}"));
+var automations = [];
+var adapterExtras = {
+	hasPeople: false,
+	screenProjects: api$1.getProjects,
+	waiting: api$1.getWaiting,
+	reviews: api$1.getShots,
+	review: api$1.getShotsRun,
+	saveReview: api$1.postShotsVerdict,
+	pendingSignIns: api$1.getLogins,
+	startAccountLogin: api$1.startAccountLogin,
+	async finishLogin(project, id, callback) {
+		try {
+			return { ok: (await api$1.finishLogin(project, id, callback, await assertion("finish login"))).ok === true };
+		} finally {
+			callback = "";
+		}
+	},
+	async finishAccountLogin(project, id, code) {
+		try {
+			return { ok: (await api$1.finishAccountLogin(project, id, code, await assertion("finish login"))).ok === true };
+		} finally {
+			code = "";
+		}
+	},
+	async automations() {
+		const j = await api$1.getAutomations();
+		automations = j.automations || [];
+		return {
+			...j,
+			automations: automations.map((a) => ({
+				...toShared(a),
+				scope: "personal",
+				mine: true,
+				editable: true
+			})),
+			capabilities: {
+				scopes: ["personal"],
+				actions: Object.keys(ACTIONS),
+				events: Object.keys(EVENTS),
+				states: STATES
+			}
+		};
+	},
+	async saveAutomation(value) {
+		const a = toPhone(value);
+		return api$1.saveAutomation(a, needsPasskey(a) ? await assertion("save automation") : null);
+	},
+	deleteAutomation: api$1.deleteAutomation,
+	async runAutomation(id) {
+		const a = automations.find((a) => a.id === id);
+		return api$1.runAutomation(id, a && needsPasskey(a) ? await assertion("run automation") : null);
+	},
+	async automationAI(messages, draft) {
+		const r = await api$1.automationDraft(messages, draft ? toPhone(draft) : null);
+		return {
+			...r,
+			automation: r.automation ? toShared(r.automation) : null
+		};
+	},
+	automationsSeen: api$1.automationsSeen
+};
 //#endregion
 //#region web/src/adapter.js
 var PASSKEY = /* @__PURE__ */ new Set([
@@ -9024,14 +12150,14 @@ var NOT_SERVED = /* @__PURE__ */ new Set([
 	"gfw_schedule",
 	"gfw_unschedule"
 ]);
-var devKind = () => /Mac/.test(pk.device().noun) ? "mac" : "phone";
+var devKind = () => /Mac/.test(passkey.device().noun) ? "mac" : "phone";
 var remote = (project) => /@[^@]+$/.test(String(project || ""));
 function assertFor(purpose) {
-	if (!pk.available() || !pk.registered()) {
-		if (pk.bypassAllowed()) return Promise.resolve(null);
-		return Promise.reject(new Error(t("lock.noPasskey", { why: pk.unavailableReason() || t("lock.enrolHint") })));
+	if (!passkey.available() || !passkey.registered()) {
+		if (passkey.bypassAllowed()) return Promise.resolve(null);
+		return Promise.reject(new Error(t("lock.noPasskey", { why: passkey.unavailableReason() || t("lock.enrolHint") })));
 	}
-	return pk.freshReady() ? pk.freshNow(purpose) : pk.fresh(purpose);
+	return passkey.freshReady() ? passkey.freshNow(purpose) : passkey.fresh(purpose);
 }
 var fromCards = (cards) => {
 	const at = Math.floor(Date.now() / 1e3);
@@ -9063,6 +12189,12 @@ function phoneAdapter({ lock, go, place }) {
 		if (e instanceof api$1.AuthError) lock();
 		throw e;
 	});
+	const off = /* @__PURE__ */ new Set();
+	const noted = (view) => (e) => {
+		if (e?.status === 404) off.add(view);
+		throw e;
+	};
+	api$1.getAutomations().catch(noted("automations")).catch(() => {});
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -9194,6 +12326,9 @@ function phoneAdapter({ lock, go, place }) {
 	}
 	const server = () => api$1.mode() === "server";
 	return {
+		...Object.fromEntries(Object.entries(adapterExtras).map(([k, v]) => [k, typeof v === "function" ? (...a) => guard(Promise.resolve().then(() => v(...a)).catch(k === "automations" ? noted("automations") : (e) => {
+			throw e;
+		})) : v])),
 		projects,
 		grid: (project) => guard(api$1.getGrid(project)),
 		session: async (project, name, before) => {
@@ -9210,13 +12345,13 @@ function phoneAdapter({ lock, go, place }) {
 		lead,
 		canTerm: (project) => server() && !remote(project),
 		termOpen: (project, kind, size) => {
-			const asking = pk.available() && pk.registered() ? pk.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
+			const asking = passkey.available() && passkey.registered() ? passkey.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
 			return guard(asking.then((a) => api$1.termOpen(project, size, a, kind)));
 		},
 		termSocket: api$1.termSocket,
 		go,
-		place,
-		offers: () => true,
+		place: (to) => screenPlace(to) || place?.(to) || null,
+		offers: (view) => !off.has(view),
 		can: (verb) => !NOT_SERVED.has(verb),
 		activity: async () => {
 			return { rows: ((await guard(api$1.getAudit(100))).rows || []).filter((r) => !r.unparseable).reverse().map((r) => ({
@@ -9268,7 +12403,7 @@ function phoneAdapter({ lock, go, place }) {
 					}
 				},
 				set: async (on) => {
-					const a = on && pk.registered() ? await pk.fresh("terminal on") : null;
+					const a = on && passkey.registered() ? await passkey.fresh("terminal on") : null;
 					await guard(api$1.termEnable(on, a));
 				}
 			},
@@ -9279,11 +12414,11 @@ function phoneAdapter({ lock, go, place }) {
 			device: {
 				state: () => {
 					const k = devKind();
-					if (!pk.available()) return {
+					if (!passkey.available()) return {
 						text: t("phone.noSensor"),
-						detail: pk.unavailableReason()
+						detail: passkey.unavailableReason()
 					};
-					return pk.registered() ? { text: t(`dev.${k}.has`) } : {
+					return passkey.registered() ? { text: t(`dev.${k}.has`) } : {
 						text: t(`dev.${k}.none`),
 						detail: t(`dev.${k}.enrol`)
 					};
@@ -9292,12 +12427,12 @@ function phoneAdapter({ lock, go, place }) {
 					id: "lock",
 					label: t("phone.lockNow"),
 					run: () => lock()
-				}, ...pk.registered() ? [{
+				}, ...passkey.registered() ? [{
 					id: "forget",
 					label: t("phone.forget"),
 					kind: "danger",
 					run: () => {
-						pk.forget();
+						passkey.forget();
 						lock();
 					}
 				}] : []]
@@ -9397,33 +12532,33 @@ function Lock({ onIn, connection }) {
 		api$1.ready().then(redraw);
 	}, []);
 	h(() => {
-		if (probing || !pk.available() || !pk.registered()) return;
-		if (!pk.prepared() && !pk.preparing() && !pk.prepareError()) pk.prepare().then(redraw, (e) => setErr(pk.describe(e)));
+		if (probing || !passkey.available() || !passkey.registered()) return;
+		if (!passkey.prepared() && !passkey.preparing() && !passkey.prepareError()) passkey.prepare().then(redraw, (e) => setErr(passkey.describe(e)));
 	});
 	h(() => {
-		if (!server || !pk.available() || pk.registered()) return;
-		pk.enrolmentState().then(setWindow, (e) => setWindow({ error: String(e && e.message || e) }));
+		if (!server || !passkey.available() || passkey.registered()) return;
+		passkey.enrolmentState().then(setWindow, (e) => setWindow({ error: String(e && e.message || e) }));
 	}, [server]);
 	const unlock = () => {
-		if (pk.unlocking()) return;
+		if (passkey.unlocking()) return;
 		setErr("");
-		const p = pk.open();
+		const p = passkey.open();
 		redraw();
 		p.then(() => onIn("passkey"), (e) => {
-			setErr(pk.describe(e));
+			setErr(passkey.describe(e));
 			redraw();
 		});
 	};
 	const enrol = async () => {
 		setErr("");
 		try {
-			await pk.register(server ? code : "");
+			await passkey.register(server ? code : "");
 			onIn("enrol");
 		} catch (e) {
 			setErr(String(e && e.message || e));
 		}
 	};
-	const dev = pk.device(), kind = devKind();
+	const dev = passkey.device(), kind = devKind();
 	return /* @__PURE__ */ u(Gate, {
 		name: "ghostfleet",
 		sub: t("lock.tagline"),
@@ -9436,9 +12571,9 @@ function Lock({ onIn, connection }) {
 						class: "muted small",
 						children: r.detail
 					}),
-					!probing && !pk.available() ? /* @__PURE__ */ u("p", {
+					!probing && !passkey.available() ? /* @__PURE__ */ u("p", {
 						class: "warn",
-						children: t("lock.unavailable", { why: pk.unavailableReason() })
+						children: t("lock.unavailable", { why: passkey.unavailableReason() })
 					}) : null,
 					r.mode === "fixtures" ? /* @__PURE__ */ u("p", {
 						class: "warn small",
@@ -9449,7 +12584,7 @@ function Lock({ onIn, connection }) {
 			probing ? null : /* @__PURE__ */ u("div", {
 				class: "stack",
 				children: [
-					pk.available() && !pk.registered() && server ? /* @__PURE__ */ u(S$1, { children: [
+					passkey.available() && !passkey.registered() && server ? /* @__PURE__ */ u(S$1, { children: [
 						/* @__PURE__ */ u("p", {
 							class: window_?.open ? "ok" : "muted",
 							children: window_ == null ? t("lock.asking", { where: api$1.modeLabel() }) : window_.error ? t("lock.askFailed", { why: window_.error }) : window_.open ? t("lock.windowOpen", { client: window_.client }) : t("lock.windowClosed", { how: t(`dev.${kind}.enrol`) })
@@ -9474,21 +12609,21 @@ function Lock({ onIn, connection }) {
 							children: t(`dev.${kind}.enrolBtn`)
 						})
 					] }) : null,
-					pk.available() && !pk.registered() && !server ? /* @__PURE__ */ u(Btn, {
+					passkey.available() && !passkey.registered() && !server ? /* @__PURE__ */ u(Btn, {
 						kind: "primary",
 						onClick: enrol,
 						children: t("lock.register")
 					}) : null,
-					pk.available() && pk.registered() ? /* @__PURE__ */ u(Btn, {
+					passkey.available() && passkey.registered() ? /* @__PURE__ */ u(Btn, {
 						kind: "primary",
-						disabled: pk.unlocking(),
+						disabled: passkey.unlocking(),
 						onClick: unlock,
-						children: pk.unlocking() ? t("lock.unlocking") : t("lock.unlock", { sensor: dev.sensor })
+						children: passkey.unlocking() ? t("lock.unlocking") : t("lock.unlock", { sensor: dev.sensor })
 					}) : null,
-					pk.bypassAllowed() ? /* @__PURE__ */ u(Btn, {
+					passkey.bypassAllowed() ? /* @__PURE__ */ u(Btn, {
 						kind: "ghost",
 						onClick: () => {
-							pk.bypass();
+							passkey.bypass();
 							onIn("bypass");
 						},
 						children: t("lock.bypass")
@@ -9608,10 +12743,10 @@ function Root() {
 		let hidByCeremony = false;
 		const vis = () => {
 			if (document.hidden) {
-				hidByCeremony = pk.busy();
+				hidByCeremony = passkey.busy();
 				return;
 			}
-			if (!hidByCeremony) pk.arm();
+			if (!hidByCeremony) passkey.arm();
 			hidByCeremony = false;
 			if (!api$1.haveToken()) {
 				if (!locked) lock();
@@ -9622,7 +12757,7 @@ function Root() {
 		return () => document.removeEventListener("visibilitychange", vis);
 	}, [locked]);
 	const landed = () => {
-		pk.release();
+		passkey.release();
 		const to = wantPlace || (linkPlace ? null : "/");
 		wantPlace = null;
 		linkPlace = false;
@@ -9631,17 +12766,17 @@ function Root() {
 		} catch {}
 		setVer((v) => v + 1);
 		setLocked(false);
-		pk.prepareFresh().catch(() => {});
+		passkey.prepareFresh().catch(() => {});
 	};
 	const tryAuto = () => {
 		if (document.hidden) return;
-		pk.autoUnlock().then((r) => {
+		passkey.autoUnlock().then((r) => {
 			if (r === "ok") landed();
 		}).catch(() => {});
 	};
 	h(() => {
-		pk.arm();
-		pk.resume().then((r) => {
+		passkey.arm();
+		passkey.resume().then((r) => {
 			if (r === "ok") {
 				linkPlace = true;
 				landed();

@@ -152,7 +152,11 @@ function ScheduleModal({ name, onClose, onSave }) {
 // Slots (adapter.jsx): `ownerPicker({ project, name, owner, onChanged })` beside the session's
 // tools, and `presence(here)` under the header, where `here` is the pane's list of who else has
 // it open. The adapter's optional `presence(project, session, typing)` is told every 5 s.
-export function SessionView({ project, name, card, onChanged, onGone, tool = null }) {
+//
+// `embedded`: the session is a column inside another page (a stack, stacks.jsx), under a header
+// that already names it and links to it. Its own back link and title would say both again, so they
+// are left out; its state, branch and tools stay.
+export function SessionView({ project, name, card, onChanged, onGone, tool = null, embedded = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
@@ -262,12 +266,11 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
   const parked = st === 'parked';
   return (
     <section class="session">
-      <header class="sess-head">
+      <header class={`sess-head${embedded ? ' embedded' : ''}`}>
         {/* where the person came from, by name; opened by a link, the session's project */}
-        <BackLink parent={`/p/${encodeURIComponent(project)}`} />
+        {embedded ? null : <BackLink parent={`/p/${encodeURIComponent(project)}`} />}
         <div class="sess-title">
-          <Ship state={st} size={32} />
-          <h1>{name}</h1>
+          {embedded ? null : <><Ship state={st} size={32} /><h1>{name}</h1></>}
           <StatusPill status={st} />
           {card?.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
           {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}

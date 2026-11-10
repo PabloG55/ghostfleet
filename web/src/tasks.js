@@ -95,7 +95,7 @@ export function createTasks(fleet, tr) {
     const all = load();
     let changed = false;
     for (const t of all) if (!t.done && t.status === 'sending' && now() - t.from > STUCK_S) {
-      Object.assign(t, { status: 'failed', error: tr('task.unsure'), question: '', options: [t.project] });
+      Object.assign(t, { status: 'failed', error: tr('task.unsent'), question: '', options: [t.project] });
       changed = true;
     }
     const followed = all.filter(t => !t.done && t.project && ['sent', 'working', 'need-you', 'replied'].includes(t.status) && now() - t.from < FOLLOW_S);

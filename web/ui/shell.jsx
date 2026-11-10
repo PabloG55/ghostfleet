@@ -47,7 +47,17 @@ export function useHashRoute(parse, canonical = (h) => h) {
     return parse(h);
   };
   const [r, setR] = useState(read);
-  useEffect(() => { const f = () => { const v = read(); arrive(); setR(v); }; addEventListener('hashchange', f); return () => removeEventListener('hashchange', f); }, []);
+  // The listener goes on after the first paint, so an address changed between the first read and
+  // here (a link handled at start-up, a place set the moment the app appears) fired its hashchange
+  // to nobody, and the page went on drawing what was read first while the address said otherwise.
+  // Whatever the address is by now is read once more.
+  const [first] = useState(() => location.hash);
+  useEffect(() => {
+    const f = () => { const v = read(); arrive(); setR(v); };
+    addEventListener('hashchange', f);
+    if (location.hash !== first) f();
+    return () => removeEventListener('hashchange', f);
+  }, []);
   return r;
 }
 

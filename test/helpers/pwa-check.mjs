@@ -143,7 +143,9 @@ is('the terminal is loaded only when it is opened', true,
 // own preload helper, for the lazy terminal, is named `\0vite/…`).
 const regions = [...JS['phone.js'].matchAll(/^\/\/#region (\S+)/gm)].map(m => m[1]);
 is('the bundle says what it is made of', true, regions.length > 10);
-is('...and none of it is the team app', '', regions.filter(r => !/^(web\/|node_modules\/|\\0vite\/)/.test(r)).join(','));
+// lib/ is the daemon's own code (the phone's automations are edited against lib/automations-model.mjs,
+// the shapes fleet-serve validates with), MIT core like web/; ee/ is what may never appear.
+is('...and none of it is the team app', '', regions.filter(r => !/^(web\/|lib\/|node_modules\/|\\0vite\/)/.test(r)).join(','));
 
 // ── 2. installable, and offline-usable ────────────────────────────────────
 const man = JSON.parse(read('manifest.webmanifest'));
