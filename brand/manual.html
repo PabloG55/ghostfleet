@@ -90,7 +90,7 @@
 
 /* ── status LED ────────────────────────────────────────────
  * <i class="gf-led" data-s="need-you"></i>. The names are the app's statuses
- * (STATUS in ee/team/web/src/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
+ * (STATUS in web/ui/ui.jsx). Only what is urgent moves: red pulses, teal breathes,
  * the yellow of starting up blinks; everything else holds still. */
 .gf-led {
   --c: var(--gf-grey);
@@ -110,7 +110,7 @@
 
 /* ── the ship ──────────────────────────────────────────────
  * <span class="gf-ship" data-s="work"><svg viewBox="0 0 32 16">…</svg></span>. The
- * names are the board's LOOKS (ee/team/web/src/board.jsx). */
+ * names are the board's LOOKS (web/ui/board.jsx). */
 .gf-ship { display: inline-block; color: var(--gf-white); line-height: 0; }
 .gf-ship svg { fill: currentColor; display: block; overflow: visible; shape-rendering: crispEdges; }
 .gf-ship[data-s="need"] { color: var(--gf-red); }
@@ -419,6 +419,11 @@ h3::before { content: '▸ '; color: var(--gf-teal); }
    cursors would make everything urgent. */
 .cmd { font: 400 clamp(13px, 1.6vw, 16px)/1.4 var(--px-font); color: var(--gf-teal); overflow-wrap: anywhere; }
 .cmd .ps1 { color: var(--gf-green); }
+/* The product's name inside a pixel heading. Silkscreen has no lowercase, so a prompt or a title
+   that named the product printed it as GHOSTFLEET, which is not how the name is written. The word
+   alone takes the brand's mono, lowercase; the rest of the heading keeps the pixel face, size,
+   weight and colour it had. */
+.px-name { font-family: var(--gf-font-mono); text-transform: lowercase; }
 .cur { display: inline-block; width: .6em; height: 1em; margin-left: .3em; vertical-align: -.12em; background: var(--gf-teal); }
 .cmd.live .cur { animation: px-blink 1.06s steps(1) infinite; }
 @keyframes px-blink { 50% { opacity: 0; } }
@@ -524,7 +529,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
   <div class="wrap">
     <div>
       <p class="eyebrow" data-t="hero.eyebrow"></p>
-      <p class="cmd live" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --manual<span class="cur"></span></p>
+      <p class="cmd live" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --manual<span class="cur"></span></p>
       <h1 id="t-hero">ghostfleet<br><em>team</em></h1>
       <p class="lead" data-t="hero.lead"></p>
       <div class="meta"><span data-t="hero.date"></span><span data-t="hero.topics"></span></div>
@@ -540,7 +545,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="historia" aria-labelledby="t-historia">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="story.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --story<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --story<span class="cur"></span></p>
     <h2 id="t-historia" data-t="story.title"></h2>
     <p class="lead" data-t="story.lead"></p>
     <div class="grid g2">
@@ -569,7 +574,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="logo" aria-labelledby="t-logo">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="logo.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --logo<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --logo<span class="cur"></span></p>
     <h2 id="t-logo" data-t="logo.title"></h2>
     <p class="lead" data-t="logo.lead"></p>
 
@@ -628,7 +633,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="color" aria-labelledby="t-color">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="color.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --colors<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --colors<span class="cur"></span></p>
     <h2 id="t-color" data-t="color.title"></h2>
     <p class="lead" data-t="color.lead"></p>
     <div class="grid g3">
@@ -660,7 +665,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="tipo" aria-labelledby="t-tipo">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="type.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --type<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --type<span class="cur"></span></p>
     <h2 id="t-tipo" data-t="type.title"></h2>
     <p class="lead" data-t="type.lead"></p>
     <div class="grid g2">
@@ -684,7 +689,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="estados" aria-labelledby="t-estados">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="states.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --states<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --states<span class="cur"></span></p>
     <h2 id="t-estados" data-t="states.title"></h2>
     <p class="lead" data-t="states.lead"></p>
     <h3 data-t="states.leds"></h3>
@@ -708,7 +713,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="componentes" aria-labelledby="t-comp">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="comp.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --components<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --components<span class="cur"></span></p>
     <h2 id="t-comp" data-t="comp.title"></h2>
     <p class="lead" data-t="comp.lead"></p>
     <div class="grid g2">
@@ -749,7 +754,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="iconos" aria-labelledby="t-iconos">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="icons.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --icons<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --icons<span class="cur"></span></p>
     <h2 id="t-iconos" data-t="icons.title"></h2>
     <p class="lead" data-t="icons.lead"></p>
     <h3 data-t="icons.glyphs"></h3>
@@ -764,7 +769,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="voz" aria-labelledby="t-voz">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="voice.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --voice<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --voice<span class="cur"></span></p>
     <h2 id="t-voz" data-t="voice.title"></h2>
     <p class="lead" data-t="voice.lead"></p>
     <div class="grid g4" style="margin-bottom:24px">
@@ -783,7 +788,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
 <section class="s" id="aplicaciones" aria-labelledby="t-apps">
   <div class="wrap"><div class="win">
     <div class="win-bar"><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i><span data-t="apps.num"></span></div>
-    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> ghostfleet brand --apps<span class="cur"></span></p>
+    <p class="cmd" aria-hidden="true"><span class="ps1">$</span> <span class="px-name">ghostfleet</span> brand --apps<span class="cur"></span></p>
     <h2 id="t-apps" data-t="apps.title"></h2>
     <p class="lead" data-t="apps.lead"></p>
     <div class="grid g2">
@@ -1040,7 +1045,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "icon.flag": "Flag (lead)",
 
     "voice.num": "<b>08</b> / voice",
-    "voice.title": "How ghostfleet talks",
+    "voice.title": "How <span class='px-name'>ghostfleet</span> talks",
     "voice.lead": "Like a good teammate on call: talks to you directly, gets to the point, tells you what happened and what you can do about it. Plain English, short sentences, lead with the verb.",
     "voice.facts": "Facts first",
     "voice.facts.p": "Which session, what happened, how long ago. Feelings, if there’s room, come after.",
@@ -1304,7 +1309,7 @@ footer { border-top: 2px dashed var(--gf-line); font-family: var(--gf-font-mono)
     "icon.flag": "Bandera (líder)",
 
     "voice.num": "<b>08</b> / voz",
-    "voice.title": "Cómo habla ghostfleet",
+    "voice.title": "Cómo habla <span class='px-name'>ghostfleet</span>",
     "voice.lead": "Como un buen compañero de guardia: tutea, va al grano, dice qué pasó y qué puedes hacer. Español neutro, frases cortas, verbos al principio.",
     "voice.facts": "Primero el dato",
     "voice.facts.p": "Qué sesión, qué pasó, hace cuánto. La emoción, si cabe, después.",
@@ -1464,13 +1469,13 @@ function renderDonts() {
   }).join('');
 }
 
-// states: the app's (STATUS in ee/team/web/src/ui.jsx), with their LED, glyph and colour
+// states: the app's (STATUS in web/ui/ui.jsx), with their LED, glyph and colour
 const STATUS = [
   ['need-you', '●', 'red'], ['working', '◆', 'teal'], ['ready', '✓', 'green'], ['starting', '…', 'yellow'],
   ['limit', '⧗', 'yellow'], ['interrupted', '⚠', 'yellow'], ['parked', '⏸', 'grey'], ['idle', '·', 'grey'],
   ['asleep', '☾', 'grey'], ['lost', '✕', 'grey'],
 ];
-// the fleet: the board's LOOKS (ee/team/web/src/board.jsx)
+// the fleet: the board's LOOKS (web/ui/board.jsx)
 const LOOKS = [['need', 'red', 'acme-api'], ['work', 'teal', 'acme-web'], ['fresh', 'green', 'toolbox'],
                ['warn', 'yellow', 'billing-svc'], ['open', 'white', 'scratch'], ['off', 'grey', 'docs']];
 function renderStates() {
