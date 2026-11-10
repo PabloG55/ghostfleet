@@ -7,15 +7,22 @@
 
 /* ── the tabs ─────────────────────────────────────────────────────────────
  * Links, so a tab is a route and back returns to the page before: drawn as the tab buttons
- * beside them are. With four of them a phone is narrower than the bar, so the bar scrolls
- * inside itself rather than push the page sideways. */
+ * beside them are. The session's four are one word each so that they fit a 320 px phone (its
+ * words say why); a bar that still runs out, under larger text, scrolls inside itself rather than
+ * push the page sideways. */
 .tabs > a[role="tab"] { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em;
                         color: var(--dim); font-weight: 500; text-decoration: none; white-space: nowrap; flex: 0 0 auto; }
 .tabs > a[role="tab"]:hover { color: var(--fg); }
 .tabs > a[role="tab"].on { color: var(--white); border-bottom-color: var(--cyan); }
-.tabs:has(> .tool-tab) { overflow-x: auto; scrollbar-width: none; }
+/* NEVER SHRUNK. Scrolling sideways makes the bar a scroll container, and in the session's column a
+ * scroll container's minimum height is 0, so the bar gave up height to whatever sat above it: with
+ * a permission card open it was 12 px of its 47 at 390x844, the tabs a strip under the chat. */
+.tabs:has(> .tool-tab) { overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
 .tabs:has(> .tool-tab)::-webkit-scrollbar { display: none; }
 .tabs:has(> .tool-tab) > button { white-space: nowrap; flex: 0 0 auto; }
+/* On the narrowest phones a tab's sides give way first: at full padding the Spanish four ended
+ * 0 px inside a 320 px row, which is a fit on paper and a cut tab after any rounding. */
+@media (max-width: 360px) { .tabs > button[role="tab"], .tabs > a[role="tab"] { padding-left: .6em; padding-right: .6em; } }
 /* The project page's bar sits inside the page's own padding. */
 .page .tabs.page-tabs { padding: 0; margin: 0 0 16px; }
 
@@ -82,4 +89,8 @@
 @media (max-width: 900px) {
   .tool { padding: 10px 16px 12px; }
   .page .tool { padding: 0; }
+  /* INTO THE GUTTER, to 4px from each edge. term.js's phone font (floor(short side / 42)) is
+   * sized for the terminal spanning the screen; inside the page's 16px gutters and its own
+   * border a 390pt phone came out at 63 columns, under the 64 the suite holds the editor to. */
+  .tool-host { margin-inline: -12px; }
 }

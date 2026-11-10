@@ -847,6 +847,66 @@ await section('forget', async () => {
   const tailIds = new Set(); K.scanLog(tailRig.log, 0, e => tailIds.add(e.id));
   row('...a live append between catch-up writes leaves every event whole', 'yes yes 5000 yes',
     `${yes(purged.ok)} ${yes(inserted)} ${lateEvents.filter(e => tailIds.has(e.id)).length} ${yes(tailIds.has(during.id))}`);
+  // A LINE HALF WRITTEN WHEN THE PURGE LOOKS. Linux shows a write that crosses a page one page at a
+  // time, so a look at the log's size can end inside a line. Each rig below plants half a line on
+  // the old descriptor at one moment and finishes it at another, as that writer would, with no
+  // second process to schedule. 'before': the purge's last look sees half of it, the writer finishes
+  // before the rename (its own look saw the old file, so it writes nothing again), and another
+  // writer appends to the new file before the catch-up. 'during': the half appears past the rename
+  // and is finished at the purge's next look. 'after': it is finished only once the purge has let
+  // go, and the writer, looking, writes the whole line again. Taking the half line across the
+  // rename glued the next line onto it in the first and the third, and lost both in the first.
+  const halfRig = (name, when) => {
+    const home = newHome(name);
+    const alias = path.join(home.h, 'fleet-alias');
+    fs.symlinkSync(home.fl, alias, 'dir');
+    const rig = { ...home, fl: alias, log: path.join(alias, K.LOG) };
+    const victim = K.record('prompt', { text: `the line to purge from ${name}` }, onApi(rig, t));
+    const real = fs.realpathSync(rig.log);
+    const old = fs.openSync(real, 'a');
+    const ev = (n, text) => K.makeEvent({ t: t + n, kind: 'prompt', machine: 'laptop', profile: 'work', project: 'acme-api', src: {}, f: { text } });
+    const half = ev(1, 'a line half written when the purge looked ' + 'x'.repeat(200));
+    const after = ev(2, 'a line appended to the new file after the rename');
+    const line = JSON.stringify(half), first = line.slice(0, line.length >> 1), rest = line.slice(line.length >> 1) + '\n';
+    const finish = () => { fs.writeSync(old, rest); if (when !== 'before') fs.appendFileSync(real, line + '\n'); };
+    const rename = fs.renameSync, open = fs.openSync, fstat = fs.fstatSync;
+    let src = -1, tombed = false, renamed = false, finished = false, looks = 0;
+    // forget appends its tombstone first, so the half line goes in at the purge's own open of the
+    // log, after it: planted any earlier, the tombstone would be glued onto it
+    fs.openSync = (p, flags, ...a) => {
+      const fd = open(p, flags, ...a);
+      if (p === real && !renamed) {
+        if (flags === 'a') tombed = true;
+        else if (flags === 'r' && tombed && src < 0) { src = fd; if (when === 'before') fs.writeSync(old, first); }
+      }
+      return fd;
+    };
+    fs.renameSync = (from, to) => {
+      if (to === real && when === 'before') { fs.writeSync(old, rest); finished = true; }
+      const r = rename(from, to);
+      if (to === real) { renamed = true; if (when === 'before') K.append(rig.fl, after); else fs.writeSync(old, first); }
+      return r;
+    };
+    fs.fstatSync = (fd, ...a) => {
+      if (when === 'during' && renamed && fd === src && !finished && ++looks === 2) { finish(); finished = true; }
+      return fstat(fd, ...a);
+    };
+    let ok;
+    try { ok = K.forget(victim.id, { purge: true, env: { ...base(), CLAUDE_FLEET_DIR: rig.fl } }).ok; }
+    finally { fs.openSync = open; fs.renameSync = rename; fs.fstatSync = fstat; }
+    if (!finished) finish();
+    fs.closeSync(old);
+    const all = text(real).split('\n').filter(Boolean);
+    const whole = (e) => all.some(l => { try { return JSON.parse(l).id === e.id; } catch { return false; } });
+    const torn = all.filter(l => { try { JSON.parse(l); return false; } catch { return true; } });
+    return { ok, whole: whole(half), after: whole(after), torn, first };
+  };
+  const hb = halfRig('forget-half-before', 'before');
+  row('...a line half written at the purge\'s last look, and one appended after the rename: both whole, none torn', 'yes yes yes 0', `${yes(hb.ok)} ${yes(hb.whole)} ${yes(hb.after)} ${hb.torn.length}`);
+  const hd = halfRig('forget-half-during', 'during');
+  row('...half written past the rename and finished while the purge waits: carried whole, none torn', 'yes yes 0', `${yes(hd.ok)} ${yes(hd.whole)} ${hd.torn.length}`);
+  const ha = halfRig('forget-half-after', 'after');
+  row('...finished only after the purge let go: the half is a line of its own, and the whole line lands after it', 'yes yes yes', `${yes(ha.ok)} ${yes(ha.whole)} ${yes(ha.torn.length === 1 && ha.torn[0] === ha.first)}`);
   // A writer that keeps writing all through a purge loses nothing: the catch-up before the rename,
   // the old descriptor after it, and the writer's own look at whether it wrote to the log. The
   // last of those is a window of microseconds that lost a line in one purge of three, so a row
@@ -878,7 +938,9 @@ await section('forget', async () => {
     let said = '';
     const writer = spawn('node', ['--input-type=module', '-e', writerCode(round)], { env: { ...base(), HOME: Y.h }, stdio: ['ignore', 'pipe', 'ignore'] });
     writer.stdout.on('data', d => { said += d; });
-    const exited = new Promise(res => writer.on('exit', res));
+    // 'close', not 'exit': a child's exit can be seen before the last of its stdout is read, and
+    // the count it prints last is the book this row balances
+    const exited = new Promise(res => writer.on('close', res));
     for (let i = 0; i < 400 && fs.statSync(Y.log).size === size; i++) await sleep(5);   // it is writing
     const purge = spawn('node', [KNOW, 'forget', victim.id, '--purge'], { env: { ...base(), HOME: Y.h }, stdio: 'ignore' });
     if (await new Promise(res => purge.on('exit', res))) failed++;

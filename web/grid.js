@@ -96,8 +96,8 @@ function limitAtOf(card) { return card.limit_at ?? card.limitAt ?? null; }
 // The phone stopped drawing box art (it draws a surface card with a status chip and two
 // real lines of the agent's last message), so it needs the card's CONTENT rather than its
 // picture. This is that content, and it is deliberately the ONLY place the content is
-// decided: cardLines() below formats this into the TUI's 32 columns, and web/app.js's
-// cardEl() lays the same fields out as DOM.
+// decided: cardLines() below formats this into the TUI's 32 columns, and anything that lays
+// the same card out as DOM reads these fields rather than deciding its own.
 //
 // WHY ONE SOURCE AND NOT TWO RENDERERS READING THE CARD THEMSELVES. Every rule here is a
 // judgement that took an argument to settle — which of `folder` and `branch` is redundant,

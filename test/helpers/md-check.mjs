@@ -178,14 +178,15 @@ is('null in, nothing out', 0, md.parse(null).length);
   is('outer pipes are optional', 'a,b', md.cells('a | b').join(','));
   is('a fenced table is code, not a table', 'code', kinds('```\n| a | b |\n|---|---|\n```'));
   is('a paragraph stops where a table starts', 'para,table', kinds('intro line\n| a | b |\n|---|---|\n| 1 | 2 |'));
-  // The width rule md.js and app.css share: three columns or fewer fit, more scroll.
+  // The width rule md.js and the stylesheet share: three columns or fewer fit, more scroll.
   is('a narrow table is fitted, a wide one scrolls', '3', String(md.FIT_COLS));
 }
 
 // ── 7. the renderer and the read-aloud stay independent ───────────────────
 // They are complementary — rendered for the eye, stripped for the ear — and neither may be
-// built on the other's output. If speakable() ever spoke md.js's plain text it would
-// inherit its decisions, and a rendering fix would silently change what the phone SAYS.
+// built on the other's output. If speakable() (web/ui/speakable.js) ever spoke md.js's plain
+// text it would inherit its decisions, and a rendering fix would silently change what the
+// assistant SAYS.
 const read = (rel) => fs.readFileSync(new URL('../../' + rel, import.meta.url), 'utf8');
 // COMMENTS STRIPPED FIRST. This file's subject explains at length why it does not use
 // innerHTML, so a naive grep for the word finds the explanation and calls the code guilty
@@ -193,7 +194,9 @@ const read = (rel) => fs.readFileSync(new URL('../../' + rel, import.meta.url), 
 // about not storing the token and passed while proving nothing. Only real code counts.
 const code = (src) => src.replace(/^\s*\/\/.*$/gm, '');
 const MD_SRC = code(read('web/md.js'));
-const APP_SRC = read('web/app.js');
+const SPEAK_SRC = read('web/ui/speakable.js');
+const UI_SRC = code(read('web/ui/ui.jsx'));
+const SESSION_SRC = code(read('web/ui/session.jsx'));
 is('md.js imports nothing at all', '', (MD_SRC.match(/^import .*/gm) || []).join(';'));
 is('...and never assigns innerHTML', '', (MD_SRC.match(/innerHTML/g) || []).join(''));
 is('...and reaches the document only through create* calls that cannot carry markup', '',
@@ -201,12 +204,17 @@ is('...and reaches the document only through create* calls that cannot carry mar
      .filter(c => !/createTextNode|createElement|createDocumentFragment/.test(c)).join(','));
 // The read-aloud filter is markdown-aware too, and it must go on doing its own stripping
 // from the SOURCE. One built on the other's output would mean a rendering change silently
-// altering what the phone says out loud.
-const SPEAKABLE = (APP_SRC.match(/export function speakable[\s\S]*?\n\}/) || [''])[0];
+// altering what the assistant says out loud.
+const SPEAKABLE = (SPEAK_SRC.match(/export function speakable[\s\S]*?\n\}/) || [''])[0];
 is('speakable() exists to be checked', true, SPEAKABLE.length > 100);
+is('...and imports nothing, the renderer least of all', '', (code(SPEAK_SRC).match(/^import .*/gm) || []).join(';'));
 is('...and does not call the renderer', '', (SPEAKABLE.match(/\bmd\.[a-z]+/gi) || []).join(','));
-is('...and still names fenced code itself', true, /Code omitted/.test(SPEAKABLE));
-is('...and app.js renders bubbles through md, not through el({html})', '',
-   (APP_SRC.match(/html:/g) || []).join(''));
+is('...and still names fenced code itself', true, /```\[\\s\\S\]\*\?```/.test(SPEAKABLE) && /code: 'Code omitted\.'/.test(SPEAK_SRC));
+// A bubble is md.js's NODES, appended — never a string of markup. Both apps draw a message
+// through web/ui's <Markdown>, so that one component is the whole of the rule.
+const MARKDOWN = (UI_SRC.match(/export function Markdown\([\s\S]*?\n\}/) || [''])[0];
+is('web/ui renders a message through md.js', true, /import \{ render as renderMd \} from '\.\.\/md\.js'/.test(UI_SRC) && /renderMd\(/.test(MARKDOWN));
+is('...appending its nodes, never markup', '', (MARKDOWN.match(/innerHTML|dangerouslySetInnerHTML/g) || []).join(','));
+is('...and the session screen draws its bubbles with it', true, /<Markdown text=\{m\.text\} \/>/.test(SESSION_SRC));
 
 console.log(rows.join('\n'));

@@ -1,7 +1,7 @@
 // node scripts/test-resolve.mjs — what the assistant understands on its own, and what the
 // dispatcher's answer is held to. One project name (scratch) is also an everyday word on purpose.
 import assert from 'node:assert/strict';
-import { command } from '../web/src/resolve.js';
+import { command } from '../../../web/ui/resolve.js';
 import { check } from '../server/router.mjs';
 
 const projects = [

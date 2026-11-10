@@ -41,7 +41,7 @@
 //   (image)  pixels, for what only pixels show: real fonts, real colour, real clipping,
 //            and a PDF, where there is no DOM at all and the pixels ARE the artifact.
 // Geometry — does it overflow, is it clipped — is better asked of the layout engine than
-// of either, and test/helpers/viewport-check.mjs already asks it that way.
+// of either, and test/helpers/phone-check.mjs already asks it that way.
 //
 //   --width N     viewport width  (default 1280)
 //   --height N    viewport height (default 800)

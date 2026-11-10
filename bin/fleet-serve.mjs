@@ -2852,8 +2852,8 @@ async function api(req, res, url, ip) {
     // when this one does or the client would give up on a token the server still honours.
     res.setHeader('X-Session-Expires', String(s.exp));
     // WHEN DID THIS DEVICE LAST LOOK. A GET from a live token is the phone polling, which
-    // it only does while the app is on screen (web/app.js stops the timer on
-    // document.hidden, and iOS hides a backgrounded PWA). That is the signal the push
+    // it only does while the app is on screen (web/ui's polls stop on document.hidden,
+    // and iOS hides a backgrounded PWA). That is the signal the push
     // sender uses to shut up: a notification for something already on screen is noise,
     // and the decision has to be made HERE rather than in the service worker, because a
     // push the worker declines to show can cost the subscription (iOS).
@@ -3189,7 +3189,7 @@ function agentCatalogue() {
   }
 
   // ── what every master holds for the owner, across every project and profile ─
-  // The owner's list (web/app.js "waiting on you"): each master's waiting items, the ones the
+  // The owner's list (web/ui/queue.jsx, "waiting on you"): each master's waiting items, the ones the
   // owner replied to that it has not closed yet, and requests nobody has touched in hours. Read off
   // the ledger files (heldScan); nothing here changes one. An item leaves when its master
   // closes or drops it — the reply is a message (fleet_send), never a close by hand.

@@ -48,6 +48,13 @@ export const api = {
     return ws;
   },
   speak: (text, voice) => call('POST', '/api/speak', { text, voice }),
+  // A 16 kHz WAV of what was said; the text whisper heard in it.
+  hear: async (wav) => {
+    const res = await fetch('/api/hear', { method: 'POST', headers: { 'X-GFW': '1', 'X-GFW-Lang': lang(), 'Content-Type': 'audio/wav' }, body: wav, credentials: 'same-origin' });
+    let j = null; try { j = await res.json(); } catch {}
+    if (!res.ok || !j?.ok) throw new Error(j?.text || `error ${res.status}`);
+    return j;
+  },
   route: (b) => call('POST', '/api/route', b),
   tasks: () => call('GET', '/api/tasks'),
   taskSent: (b) => call('POST', '/api/tasks/sent', b),

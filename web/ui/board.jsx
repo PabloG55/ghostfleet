@@ -6,6 +6,7 @@ import { Ship, Led } from './fleet.jsx';
 import { t, worded } from './i18n.js';
 import { useSlot } from './adapter.jsx';
 import { useShipTips } from './shiptip.jsx';
+import { ProjectName } from './ui.jsx';
 
 const FRESH_S = 15 * 60;        // "just finished": ready, and its turn ended this recently
 
@@ -67,7 +68,7 @@ export function Board({ projects }) {
         <div class="fleets">
           {live.map(f => (
             <article key={f.name} class={`fleet c-${LOOKS[f.top].color} lk-${f.top}`} onPointerEnter={() => tips.warm(f.name)}>
-              <a class="fleet-name" href={projectHref(f.name)} title={t('board.open', { name: f.name })}>{f.name}</a>
+              <a class="fleet-name" href={projectHref(f.name)} title={t('board.open', { name: f.name })}><ProjectName name={f.name} /></a>
               <div class="fleet-sea">
                 {f.boats.map(b => {
                   const badge = ownerBadge(b, 15);
@@ -91,7 +92,7 @@ export function Board({ projects }) {
           <button class="quiet-toggle" onClick={() => setShowQuiet(v => !v)} aria-expanded={showQuiet}>
             <i class="qdot" /> {t('board.quiet', { n: quiet.length })} {showQuiet ? '▴' : '▾'}
           </button>
-          {showQuiet ? quiet.map(f => <a key={f.name} class="qchip" href={projectHref(f.name)}>{f.name}</a>) : null}
+          {showQuiet ? quiet.map(f => <a key={f.name} class="qchip" href={projectHref(f.name)}><ProjectName name={f.name} /></a>) : null}
         </div>
       ) : null}
     </section>

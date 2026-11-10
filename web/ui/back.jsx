@@ -25,13 +25,17 @@ export function useKept(key, initial) {
   return [v, set];
 }
 
-// The shared routes are named here; an app names its own with the adapter's `place(route)`.
+// Home, the map, a project, a session, Activity and Settings are named here. The other shared
+// pages are named by phone-places.js, which each adapter composes into its `place(route)` ahead of
+// its own names (`route => screenPlace(route) || appPlace(route)`).
+const SHARED_PLACES = { activity: 'nav.activity', settings: 'nav.settings' };
 export function placeName(to, own) {
   let parts;
   try { parts = String(to).replace(/^#?\/?/, '').split('/').map(decodeURIComponent); } catch { parts = []; }
   if (parts[0] === 'p' && parts[1]) return parts[2] === 's' && parts[3] ? parts[3] : parts[1];
   if (parts[0] === 'map') return t('nav.map');
   if (!parts[0]) return t('nav.home');
+  if (SHARED_PLACES[parts[0]]) return t(SHARED_PLACES[parts[0]]);
   return own?.(to) || t('common.back');
 }
 

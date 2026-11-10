@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
 import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
@@ -9,6 +9,8 @@ import { sendsOnEnter } from './keys.js';
 import { ToolTabs, ToolPanel } from './terminal.jsx';
 import { useLayer } from './select.jsx';
 import { BackLink } from './back.jsx';
+import { useTranscript } from './transcript.js';
+import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -78,30 +80,131 @@ function Terminal({ pane }) {
   );
 }
 
+// A message's key: when it was said, by whom, and which of that pair it is. Not its index — a page
+// prepended above shifts every index, and a key that moves rebuilds the bubble, which throws a table
+// scrolled sideways back to its first column and drops a selection in it.
+function keyed(msgs) {
+  const seen = new Map();
+  return msgs.map((m) => { const k = `${m.ts}:${m.role}`; const n = seen.get(k) || 0; seen.set(k, n + 1); return [`${k}:${n}`, m]; });
+}
+
+// Waiting is drawn as the shape of a conversation, without words — the phone's rule. A read that
+// FAILED says so in one line, why and that it is being asked again, because a skeleton that never
+// resolves is exactly the "it does not load until I send" this was reported as.
+function ChatLoading({ load }) {
+  return (
+    <div class="chat" aria-busy="true">
+      {load.tries ? <p class="loading err center" role="status">{t('chat.loadFailed', { why: load.why })}</p> : null}
+      {[0, 1, 2].map(i => <div key={i} class={`msg ${i === 1 ? 'me' : 'ai'} skel`} aria-hidden="true"><div class="bubble skel" /></div>)}
+    </div>
+  );
+}
+
+// OLDER MESSAGES LOAD BY SCROLLING UP: within OLDER_NEAR_PX of the top is the press. The message the
+// reader is on stays exactly where it was: measured when the page above is ASKED for, and held there
+// on every paint until it lands — through the "loading" line going in above it as well as the page,
+// either of which alone would push it down. A scroll while it is out moves the hold with the reader,
+// so it never fights a thumb. A list that does not fill its box asks by itself: it has no top to
+// scroll to.
+const OLDER_NEAR_PX = 240;
+// THE SWIPE to the next or previous session, on the chat and not the screen: the Screen tab is a
+// terminal that scrolls sideways on purpose. A finger only (a mouse drag there is selecting text),
+// never from the left edge (iOS's own back gesture starts there), and more across than down.
+const SWIPE_NEXT = 60, EDGE = 24;
+
 // `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
-function Chat({ msgs, queued, older, onOlder }) {
+function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   const author = useSlot('author');
   const ref = useRef(null);
   const stick = useRef(true);
-  const last = msgs.length ? `${msgs.length}:${msgs[msgs.length - 1].ts}` : '';
-  useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [last, queued.length]);
+  const ours = useRef(-1);            // the scrollTop this chat last set itself (below)
+  const anchor = useRef(null);
+  const swipe = useRef(null);
+  const msgs = page.messages || [];
+  const rows = keyed(msgs);
+  const last = rows.length ? rows[rows.length - 1][0] : '';
+  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; };
+  useEffect(() => { const n = ref.current; if (n && stick.current) toEnd(n); }, [last, queued.length]);
+  // A CHAT AT ITS END STAYS AT ITS END. It jumped there when a message arrived, and its end moves
+  // without one: the box shrinks when a permission card or a keyboard comes up, and a message grows
+  // when its font lands. Under a permission card at 390x844 it sat 29 px short as opened, and the
+  // newest message's last line lay under the Assistant button, the room left for that button being
+  // at the very end. So the box and every row in it are watched, and while the reader is at the end
+  // (`stick`) a change of size takes it back there. Not a tools row, which grows because the reader
+  // opened it, and not while older messages land above (`anchor`).
+  //   `stick` is the READER's: the browser sends the scroll event for a jump the chat made itself a
+  // frame later, measured against whatever the box is by then, and a card drawn in that frame read
+  // as the reader leaving the end, 415 px up, after which nothing took the chat back. A scroll that
+  // lands where the chat put it (`ours`) leaves `stick` as it was.
+  useLayoutEffect(() => {
+    const box = ref.current;
+    if (!box || typeof ResizeObserver === 'undefined') return;
+    const seen = new WeakSet();
+    const ro = new ResizeObserver(() => { if (stick.current && !anchor.current) toEnd(box); });
+    const watch = () => { for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== 'DETAILS') { seen.add(c); ro.observe(c); } };
+    watch();
+    const mo = new MutationObserver(watch);
+    mo.observe(box, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
+  const measure = () => {
+    const box = ref.current; if (!box) return;
+    const top = box.getBoundingClientRect().top;
+    const n = [...box.children].find(c => c.dataset.k && c.getBoundingClientRect().bottom > top);
+    anchor.current = n ? { k: n.dataset.k, top: n.getBoundingClientRect().top } : null;
+  };
+  const held = () => { const box = ref.current, a = anchor.current; return a && box ? [...box.children].find(c => c.dataset.k === a.k) : null; };
+  useLayoutEffect(() => {
+    const box = ref.current, a = anchor.current;
+    if (a && box) {
+      const n = held();
+      const d = n ? n.getBoundingClientRect().top - a.top : 0;
+      if (d) box.scrollTop += d;
+      if (!older.busy) anchor.current = null;
+    }
+    if (box && page.next_before && !older.busy && !older.err && box.scrollHeight <= box.clientHeight + 1) onOlder();
+  });
+  const nearTop = (box) => {
+    const n = held(); if (n) anchor.current.top = n.getBoundingClientRect().top;
+    if (!page.next_before || older.busy || older.err) return;
+    if (box.scrollHeight <= box.clientHeight || box.scrollTop > OLDER_NEAR_PX) return;
+    measure(); onOlder();
+  };
+  const down = (e) => { swipe.current = e.pointerType !== 'mouse' && e.clientX > EDGE ? { x: e.clientX, y: e.clientY } : null; };
+  const up = (e) => {
+    const s0 = swipe.current; swipe.current = null;
+    if (!s0 || !onStep) return;
+    const dx = e.clientX - s0.x, dy = e.clientY - s0.y;
+    if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
+    onStep(dx < 0 ? 1 : -1);
+  };
   return (
-    <div class="chat" ref={ref} data-keep-scroll="chat" onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }}>
-      {older ? <button class="link center" onClick={onOlder}>{t('sess.older')}</button> : null}
+    <div class="chat" ref={ref} data-keep-scroll="chat" onPointerDown={down} onPointerUp={up} onPointerCancel={() => { swipe.current = null; }}
+         onScroll={(e) => {
+           const n = e.currentTarget;
+           if (Math.abs(n.scrollTop - ours.current) > 1) { ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }
+           nearTop(n);
+         }}>
+      {page.next_before
+        ? (older.busy ? <p class="older muted center" role="status">{t('chat.olderLoading')}</p>
+          : older.err ? <div class="older center"><span class="muted">{t('chat.olderFailed', { why: older.err })}</span>
+                          <button class="link" onClick={() => { measure(); onRetryOlder(); }}>{t('sess.older')}</button></div>
+          : null)
+        : msgs.length ? <p class="start muted center">{t('chat.start')}</p> : null}
       {!msgs.length ? <p class="muted center">{t('sess.noMsgs')}</p> : null}
-      {msgs.map((m, i) => {
+      {rows.map(([k, m]) => {
         if (m.role === 'tools') {
           const tools = m.tools || [];
           const names = [...new Set(tools.map(x => x.name))];
           return (
-            <details key={`${m.ts}-${i}`} class="tools">
+            <details key={k} data-k={k} class="tools">
               <summary><Icon name="gear" /> {t('sess.actions', { n: tools.length })} · {names.slice(0, 4).join(', ')}{names.length > 4 ? '…' : ''}<span class="when">{sinceTs(m.ts)}</span></summary>
               <ul>{tools.map((x, j) => <li key={j}><b>{x.name}</b> <span>{x.detail}</span></li>)}</ul>
             </details>
           );
         }
         return (
-          <div key={`${m.ts}-${i}`} class={`msg ${m.role === 'user' ? 'me' : 'ai'}`}>
+          <div key={k} data-k={k} class={`msg ${m.role === 'user' ? 'me' : 'ai'}`}>
             <div class="who">
               {m.role === 'user'
                 ? <>{author(m) || t('sess.instruction')}</>
@@ -152,19 +255,42 @@ function ScheduleModal({ name, onClose, onSave }) {
 // Slots (adapter.jsx): `ownerPicker({ project, name, owner, onChanged })` beside the session's
 // tools, and `presence(here)` under the header, where `here` is the pane's list of who else has
 // it open. The adapter's optional `presence(project, session, typing)` is told every 5 s.
-export function SessionView({ project, name, card, onChanged, onGone, tool = null }) {
+//
+// `embedded`: the session is a column inside another page (a stack, stacks.jsx), under a header
+// that already names it and links to it. Its own back link and title would say both again, so they
+// are left out; its state, branch and tools stay.
+//
+// `quiet`: a column that does not have the focus. A STACK IS SEVERAL OF THESE READING AT ONCE, and
+// the daemon allows one device 240 reads a minute. A focused session reads its transcript every
+// 2 s while an answer is owed and its pane every 2.5 s, up to 54 a minute; four of those is most of
+// the budget, and the old phone client was told by a burst of 429s what that costs: replies that
+// did not land until the chat was reopened. So a quiet column reads its transcript at the idle
+// pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
+// of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
+export const QUIET_PANE_MS = 15000;
+export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
   // From a Terminal or Editor tab (a route of its own) the session's two tabs go back to its page.
   const pick = (x) => { setTab(x); if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
-  const [extra, setExtra] = useState([]);      // older pages, loaded on demand
-  const [before, setBefore] = useState(null);
-  const [draft, setDraft] = useState('');
+  // The box is this session's draft (drafts.js): its words and files are back when the session is
+  // opened again, after a reload and after a relaunch, until a send of them succeeds. The view is
+  // mounted per session (keyed by its parent), so the draft is read once, here.
+  const dkey = draftKey(project, name);
+  const [draft, setDraftState] = useState(() => draftText(dkey));
+  const setDraft = (v) => { setDraftState(v); keepDraft(dkey, v); };
+  const [lost, setLost] = useState(() => lostFiles(dkey));
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [rename, setRename] = useState(null);
   const [menu, setMenu] = useState(false);
+  // What this server does at all (adapter.jsx `can`): a verb it refuses by name is not offered,
+  // rather than offered and refused on every tap.
+  const can = (verb) => (typeof fleet.can === 'function' ? fleet.can(verb) : true);
+  // Stop, rename and pause wait for the CARD, not just for "not the lead": a deep link draws this
+  // screen before the grid answers, and `!card?.lead` read the lead as a worker for that second —
+  // measured, the lead's menu offered "Stop session…" until its card arrived.
   // More is a layer like every picker and popover: Esc closes it and puts the focus back on its
   // button, a press outside closes it. It used to close only when the mouse left it, so on a
   // touch screen it stayed open until one of its actions was chosen, and Esc did nothing.
@@ -175,23 +301,44 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
   });
   const [labelEdit, setLabelEdit] = useState(null);
   const [schedOpen, setSchedOpen] = useState(false);
-  const [files, setFiles] = useState([]);       // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
+  const [files, setFilesState] = useState(() => draftFiles(dkey));   // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
+  // An upload answers seconds after it was picked, perhaps once the person has moved on: it lands in
+  // THIS session's draft, and on the screen only while the screen is still this session's.
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const setFiles = (fn) => {
+    const next = fn(draftFiles(dkey));
+    keepDraft(dkey, draftText(dkey), next);
+    if (mounted.current) setFilesState(next);
+  };
   const [drag, setDrag] = useState(false);
   const picker = useRef(null);
-  const typing = useRef(false);
-  useEffect(() => { setFiles([]); }, [project, name]);
+  const typing = useRef(!!draft);
 
-  const sess = usePoll(() => fleet.session(project, name), 3000, [project, name]);
-  const pane = usePoll(() => fleet.pane(project, name), 2500, [project, name]);
-  useEffect(() => { setBefore(sess.data?.next_before ?? null); }, [sess.data?.next_before]);
+  // The transcript on its own poll (transcript.js), LIVE while an answer is owed: the session
+  // working, or a message sent in the last two minutes.
+  const sentAt = useRef(0);
+  const statusNow = useRef('unknown');
+  const quietRef = useRef(quiet); quietRef.current = quiet;
+  const tr = useTranscript(fleet, project, name, () => !quietRef.current &&
+    (statusNow.current === 'working' || statusNow.current === 'starting' || Date.now() - sentAt.current < 120000));
+  const lastPane = useRef({ at: 0, data: null });
+  const pane = usePoll(async () => {
+    const was = lastPane.current;
+    if (quietRef.current && was.data && Date.now() - was.at < QUIET_PANE_MS) return was.data;
+    const data = await fleet.pane(project, name);
+    lastPane.current = { at: Date.now(), data };
+    return data;
+  }, 2500, [project, name]);
   useEffect(() => {
     if (!fleet.presence) return undefined;
     const iv = setInterval(() => { if (!document.hidden) fleet.presence(project, name, typing.current).catch(() => {}); }, 5000);
     return () => clearInterval(iv);
   }, [project, name]);
 
-  const st = card ? statusOf(card) : (sess.data?.status || 'unknown');
-  const owner = card?.owner || sess.data?.owner || null;
+  const st = card ? statusOf(card) : (tr.page?.status || 'unknown');
+  statusNow.current = st;
+  const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
 
   const act = async (tool, args = {}, opts = {}) => {
@@ -200,7 +347,7 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
       const r = await fleet.act(tool, { project, session: name, ...args }, opts);
       if (r.queued === 'question') toast(t('sess.queuedQ'), '');
       else if (r.queued) toast(t('sess.queuedTurn'), '');
-      onChanged(); sess.reload(); pane.reload();
+      onChanged(); tr.reload(); pane.reload();
       return r;
     } catch (e) {
       if (e.body?.changed) { toast(t('sess.changed'), 'bad'); pane.reload(); }
@@ -233,13 +380,12 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
     const prompt = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
     const r = await act('fleet_send', { prompt });
-    if (r) { setDraft(''); typing.current = false; for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview); setFiles([]); }
-  };
-  const loadOlder = async () => {
-    try {
-      const r = await fleet.session(project, name, before);
-      setExtra(x => [...(r.messages || []), ...x]); setBefore(r.next_before ?? null);
-    } catch (e) { toast(e.message, 'bad'); }
+    if (r) {
+      sentAt.current = Date.now(); typing.current = false;
+      for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
+      sentDraft(dkey); setDraftState(''); setLost(0);
+      if (mounted.current) setFilesState([]);
+    }
   };
 
   const stop = (reclaim) => setConfirm({
@@ -252,41 +398,41 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
     onYes: async () => { const r = await act('fleet_stop', reclaim ? { reclaim: true } : {}, { confirm: true }); if (r) { toast(r.text?.split('\n')[0] || t('sess.stopped'), 'good'); onGone(); } },
   });
 
-  const msgs = [...extra, ...(sess.data?.messages || [])];
   const parked = st === 'parked';
   return (
     <section class="session">
-      <header class="sess-head">
+      <header class={`sess-head${embedded ? ' embedded' : ''}`}>
         {/* where the person came from, by name; opened by a link, the session's project */}
-        <BackLink parent={`/p/${encodeURIComponent(project)}`} />
+        {embedded ? null : <BackLink parent={`/p/${encodeURIComponent(project)}`} />}
         <div class="sess-title">
-          <Ship state={st} size={32} />
-          <h1>{name}</h1>
+          {embedded ? null : <><Ship state={st} size={32} /><h1>{name}</h1></>}
           <StatusPill status={st} />
           {card?.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
           {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
-          {card?.label ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button> : null}
+          {card?.label ? (can('gfw_label')
+            ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button>
+            : <span class="chip-label"><Icon name="tag" /> {card.label}</span>) : null}
           {card?.sched ? (
             <span class="chip-sched" title={t('sess.schedMsg', { msg: card.sched.msg || '' })}><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 30)}”
-              <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button></span>
+              {can('gfw_unschedule') ? <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button> : null}</span>
           ) : null}
         </div>
         <div class="sess-tools">
-          {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); sess.reload(); } })}
+          {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
           {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
           {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
-          {!card?.lead && !['asleep', 'lost'].includes(st)
+          {card && !card.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
           <div class="menu-wrap" ref={menuWrap}>
             <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
             {menu ? (
               <div class="menu">
-                <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button>
-                <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button>
-                <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button>
-                {!card?.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
-                {!card?.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}
+                {can('gfw_label') ? <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button> : null}
+                {can('gfw_schedule') ? <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button> : null}
+                {card && !card.lead ? <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button> : null}
+                {card && !card.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
+                {card && !card.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}
               </div>
             ) : null}
           </div>
@@ -300,6 +446,7 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
           <p class="muted small">{t('sess.limitWhy')}</p>
           {card?.sched
             ? <p>{t('sess.alreadySched', { when: hhmm(card.sched.at) })}</p>
+            : !can('gfw_schedule') ? null
             : <div class="row wrap">
                 <Btn kind="primary" disabled={busy} onClick={() => act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') })}>
                   <Icon name="clock" /> {t('sess.resumeOnQuota')}</Btn>
@@ -316,9 +463,9 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
         <ToolTabs project={project} session={name} tool={tool} />
       </div>
       {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
-        ? (sess.error && !sess.data
-            ? <p class="err pad">{t('sess.readFailed', { why: sess.error.message })}</p>
-            : <Chat msgs={msgs} queued={sess.data?.queued || []} older={before != null} onOlder={loadOlder} />)
+        ? (!tr.page ? <ChatLoading load={tr.load} />
+            : <Chat page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
+                    onRetryOlder={tr.retryOlder} onStep={onStep} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
       {/* The composer is the agent's; a Terminal or Editor tab has the keyboard to itself. */}
@@ -326,6 +473,10 @@ export function SessionView({ project, name, card, onChanged, onGone, tool = nul
             onDragOver={(e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setDrag(true); } }}
             onDragLeave={() => setDrag(false)}
             onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); } }}>
+        {lost ? (
+          <p class="att-lost" role="status">{t('sess.filesLost', { n: lost })}{' '}
+            <button type="button" class="link-btn" onClick={() => { seenLost(dkey); setLost(0); }}>{t('common.ok')}</button></p>
+        ) : null}
         {files.length ? (
           <div class="att-list">
             {files.map(f => (
