@@ -156,7 +156,8 @@ export function Select({
     close(true);
     if (o && !same(o.value, value)) onChange(o.value);
   };
-  useLayer(open, (n) => btn.current?.contains(n) || list.current?.contains(n), close);
+  const lab = useRef(null);
+  useLayer(open, (n) => btn.current?.contains(n) || list.current?.contains(n) || lab.current?.contains(n), close);
   useFollow(open, () => {
     if (btn.current && list.current) {
       list.current.style.fontSize = getComputedStyle(btn.current).fontSize;
@@ -250,7 +251,10 @@ export function Select({
   if (label == null) return <>{button}{box}</>;
   return (
     <div class={field}>
-      <span id={lid} class={labelClass} onClick={() => btn.current?.focus()}>{label}</span>
+      {/* A press on the label is a press on the field, as a <label> presses the button it is
+          for: it only moved the focus, which a mouse never sees, under a pointer that said more */}
+      <span id={lid} ref={lab} class={`select-label${labelClass ? ` ${labelClass}` : ''}`}
+            onClick={() => { btn.current?.focus({ preventScroll: true }); btn.current?.click(); }}>{label}</span>
       {button}{box}
     </div>
   );

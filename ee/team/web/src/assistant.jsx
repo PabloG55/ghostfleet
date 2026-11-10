@@ -107,7 +107,7 @@ export function Feed({ ctx, limit, empty }) {
     <div class="as-feed" ref={ref}>
       {!rows.length && !S.interim ? empty : null}
       {rows.map(e => (
-        <div key={e.id} class={`as-row ${e.kind}${e.bad ? ' bad' : ''}${e.ask ? ' ask-row' : ''}`}
+        <div key={e.id} class={`as-row ${e.kind}${e.bad ? ' bad' : ''}${e.ask ? ' ask-row' : ''}${e.session && e.project ? ' go' : ''}`}
              onClick={e.session && e.project ? () => ctx.go(`/p/${encodeURIComponent(e.project)}/s/${encodeURIComponent(e.session)}`) : undefined}>
           {e.kind === 'me' ? <><span class="tag-me">{e.voice ? <><Icon name="mic" /> {t('settings.you')}</> : t('settings.you')}</span> {unframe(e.text)}</>
             : e.kind === 'ai' ? <><span class="tag-ai">{e.project || t('common.lead')}</span>{e.title ? <em class="tag-about"> {e.title}</em> : null} {plainText(e.text)}</>

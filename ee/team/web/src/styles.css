@@ -84,15 +84,18 @@
 .as-row { font-size: 13px; line-height: 1.45; padding: .5em .7em; border-radius: var(--r); background: var(--panel2); border: 1px solid var(--hair); }
 .as-row.me { background: var(--gf-teal-deep); border-color: var(--gf-teal-edge); align-self: flex-end; max-width: 92%; }
 .as-row.me.live { opacity: .7; border-style: dashed; }
-.as-row.event { background: transparent; border: 0; padding: .1em .2em; color: var(--dim); font-size: 12.5px; cursor: pointer; }
-.as-row.event:hover { color: var(--fg); }
+.as-row.event { background: transparent; border: 0; padding: .1em .2em; color: var(--dim); font-size: 12.5px; }
+/* a row that opens its session (a lead's reply, a session's state changing) is one press target;
+   every event row wore the pointer and the hover, and a question or an error opened nothing */
+.as-row.go { cursor: pointer; }
+.as-row.event.go:hover { color: var(--fg); }
 .as-row.bad { color: var(--red); }
 .as-row .tag-me, .as-row .tag-ai, .as-row .tag-ev { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; margin-right: .3em; }
 .tag-me { color: var(--cyan); } .tag-ai { color: var(--green); } .tag-ev { color: var(--yellow); }
 .as-controls { border-top: 1px solid var(--hair); padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
 .mic { display: flex; align-items: center; justify-content: center; gap: .6em; width: 100%; padding: .9em; border-radius: var(--r); cursor: pointer;
   background: var(--cyan); color: var(--gf-teal-ink); border: 0; font-weight: 700; font-size: 15px; transition: background .2s, box-shadow .2s; }
-.mic:disabled { opacity: .4; cursor: default; }
+.mic:disabled { opacity: .4; }
 .mic .mic-ico { font-size: 18px; }
 .mic.on { background: var(--red); color: var(--gf-red-ink); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,95,95,.45); } 50% { box-shadow: 0 0 0 10px rgba(255,95,95,0); } }
@@ -426,3 +429,9 @@
 @media (max-width: 760px) {
   .admin-split { grid-template-columns: 1fr; }
 }
+
+/* Read and copied from, as the shared screens' messages are (web/ui/ui.css): what the assistant
+   and the person said (not a row that opens its session on a press), a task opened in the rail,
+   an automation's chat and its runs, the activity log's detail, a temporary password. The rest
+   of the app is chrome and selects nothing. */
+:where(.as-feed .as-row:not(.go), .ai-msg, .tk-more, .log-detail, .log-out, .run-step, .temp-pw) { cursor: auto; -webkit-user-select: text; user-select: text; }

@@ -35,6 +35,28 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); f
    box over whatever was tapped, which on this dark ground reads as a focus box; the phone
    client turns it off the same way (web/app.css). */
 html { -webkit-tap-highlight-color: transparent; }
+/* The cursor says what a press does, and the chrome selects nothing. The browser's `cursor: auto`
+   is an I-beam over any text, so the sidebar's usage meters, the person's own name at its foot
+   and every heading and label said they could be typed in, and a double-click selected them.
+   Set once at the root, so what is drawn outside the shell has it too: a list, a popover or a
+   toast goes to the end of <body> (select.jsx Portal), and the sign-in page has no shell. Then
+   the pointer on everything that takes a press, the I-beam and selection where text is typed,
+   and selection again on text people copy from (below, and the app's own in its layout).
+   `:where` adds no specificity, so a screen's own rule wins: a drag handle's grab, a static
+   row's arrow. */
+html { cursor: default; -webkit-user-select: none; user-select: none; }
+:where(a[href], button, select, summary, label:has(input:is([type=checkbox], [type=radio])), [role=button], [role=tab], [role=option],
+  [role=menuitem], [role=menuitemradio], [role=switch], input:is([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit])) { cursor: pointer; }
+:where(input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit]), textarea, [contenteditable]:not([contenteditable=false])) {
+  cursor: text; -webkit-user-select: text; user-select: text; }
+/* Disabled is never the pointer, whatever the control's own rule says: `.chips button` and its
+   kind outrank any plain :disabled rule this early in the file. */
+:is(button, select, input, textarea, summary, [role=button], [role=tab], [role=option], [role=menuitem]):is(:disabled, [aria-disabled=true]) { cursor: not-allowed !important; }
+/* Read and copied from: a message, rendered markdown, code, an error, the last thing a session
+   said on its ship's card (which the pointer can cross onto). Not a session card's last message:
+   the card opens the session on a press, and a drag to select it ended in that press. */
+:where(:is(.msg .bubble, .md, pre, code, .err, .notice, .ask-cmd, .tip-said):not(:is(a[href], button, summary, [role=button], [role=option], [role=menuitem], .card) *)) {
+  cursor: auto; -webkit-user-select: text; user-select: text; }
 #app { height: 100%; }
 a { color: var(--cyan); }
 code, pre { font-family: var(--mono); }
@@ -47,7 +69,10 @@ input, textarea, .select {
   outline: none; transition: border-color .15s;
 }
 input:focus, textarea:focus, :where(:root:not(.by-pointer)) .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
-/* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped */
+/* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped.
+   Its label presses it, as a <label> presses the button it is for. */
+.select-label { cursor: pointer; }
+.select-label:has(~ .select:disabled) { cursor: not-allowed; }
 .select { display: flex; align-items: center; gap: .5em; text-align: left; cursor: pointer; min-width: 0; }
 .select-v { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .select:disabled { cursor: not-allowed; opacity: .45; }
@@ -76,7 +101,7 @@ textarea { resize: vertical; }
 }
 .btn:hover:not(:disabled) { border-color: #3a4450; background: #1b212a; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
-.btn:disabled { opacity: .45; cursor: default; }
+.btn:disabled { opacity: .45; }
 .btn.primary { background: var(--cyan); border-color: var(--cyan); color: var(--gf-teal-ink); font-weight: 600; }
 .btn.primary:hover:not(:disabled) { background: var(--gf-teal-hover); border-color: var(--gf-teal-hover); }
 .btn.danger { background: transparent; border-color: rgba(255,95,95,.5); color: var(--red); }
@@ -255,7 +280,7 @@ textarea { resize: vertical; }
 .opt.yes:hover:not(:disabled) { background: rgba(135,215,135,.1); }
 .opt.no b { color: var(--red); } .opt.no:hover:not(:disabled) { background: rgba(255,95,95,.08); }
 .opt.chosen { border-color: var(--cyan); }
-.opt:disabled { opacity: .5; cursor: default; }
+.opt:disabled { opacity: .5; }
 
 .tabs { display: flex; gap: 2px; padding: 12px 22px 0; border-bottom: 1px solid var(--hair); }
 .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em; cursor: pointer; color: var(--dim); font-weight: 500; }
