@@ -2561,6 +2561,14 @@ STUB
      "$(grep -q 'fleet_list(project' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
   is "...and keeps tools and hooks apart"    "yes" \
      "$(grep -q 'MCP is tools; hooks are push events' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  # AND SAYS WHAT CLOSED IT. Since 2026-11-10 codex reaches its own fleet through env_vars, so
+  # the matrix that told a reader to name the project from codex has to stop saying so, while
+  # cursor's cell, which is still true, stays. Counted per cell rather than per line: both
+  # cells sit on one table row, and `grep -c` would answer 1 for one cell or for two.
+  is "...and the key that closed it for codex" "yes" \
+     "$(grep -q 'env_vars' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...so the matrix asks only cursor to name the project" "1" \
+     "$(grep -oF '❌ **name it every time**' <<< "$(grep -F 'and a call with no `project` finds its own fleet' "$ROOT/docs/multi-agent-sessions.md")" | wc -l | tr -d ' ')"
   is "uninstall covers codex"               "1" "$(grep -c 'codex mcp remove ghostfleet' "$ROOT/README.md" || true)"
   is "...and opencode's MCP entry"          "1" "$(grep -c 'del(.mcp.ghostfleet)' "$ROOT/README.md" || true)"
   is "...and opencode's event bridge"       "1" "$(grep -c 'plugin/ghostfleet-event.js' "$ROOT/README.md" || true)"

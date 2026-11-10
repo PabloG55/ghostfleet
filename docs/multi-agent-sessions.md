@@ -65,15 +65,17 @@ assumed; Codex degrades to nothing, because it could not be run at all.)*
   treat non-Claude sessions as unmeterable and skip them — never park them on a reading
   taken from a different agent's pane, and never count them toward the ceiling.
 - **Resume semantics differ.** `claude-here` guarantees re-opening a session resumes its
-  conversation. OpenCode matches this via cwd-scoped `--continue` (verified). Codex is
-  unverified: opening it starts fresh, and it says so at launch rather than pretending.
-- **Tools without instructions, and (for codex) without a fleet.** Since 2026-08-27 all
-  three agents have the `fleet_*` tools. Two things still degrade: neither non-Claude agent
-  gets `skill/ghostfleet-orchestrate`, so it has the tools and no instructions for them; and
-  a **codex** session must pass `project` explicitly, because codex starts MCP servers with
-  a scrubbed environment and the tools cannot otherwise tell which fleet they are in. See
-  Q4 for the measurements. Hooks are unaffected by any of it — MCP is tools, hooks are push
-  events, and codex still supplies none.
+  conversation. OpenCode matches this via cwd-scoped `--continue` (verified). Codex resumes
+  by the id `codex-here` recorded, since codex-cli 0.160.1 (measured 2026-10-10, below).
+- **Tools, and (for opencode) no instructions.** Since 2026-08-27 every agent has the
+  `fleet_*` tools. codex stopped degrading on both counts this line used to list on
+  2026-11-10, measured on codex-cli 0.166.0: `install.sh` links
+  `skill/ghostfleet-orchestrate` into `$CODEX_HOME/skills/`, and lists the session's fleet
+  variables in codex's MCP table as `env_vars`, so a call with no `project` finds its own
+  fleet through the scrubbed environment codex starts MCP servers with. opencode still has
+  the tools without the skill, and cursor must still name the project. See Q4 for the
+  measurements. Hooks are unaffected by any of it — MCP is tools, hooks are push events,
+  and codex still supplies none.
 - **A missing busy regex is not "never busy".** An agent with no validated detector is
   reported as *unknown*, never as idle — the always-idle failure mode is the one this repo
   has been bitten by before.
@@ -108,8 +110,10 @@ than guessed:
 |---|---|---|---|---|---|
 | fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
 | ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
-| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ | ❌ **name it every time** |
-| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
+| …and a call with no `project` finds its own fleet | ✅ | ✅ | ✅ through `env_vars`, since 0.166.0 | ✅ | ❌ **name it every time** |
+| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ✅ symlinked into `$CODEX_HOME/skills/`, since 0.166.0 | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
+| a send while it is busy | ✅ queued by the fleet, its own turn | pasted, not queued | ✅ `codex queue`, its own turn, since 0.166.0 | pasted, not queued | pasted, not queued |
+| `fleet-list`'s MODEL column | ✅ | `-` | ✅ model/effort from its rollout, since 0.166.0 | `-` | `-` |
 | resume across a pane kill | ✅ | ✅ | ✅ by recorded id, since 0.160.1 | ✅ | ✅ |
 
 agy was added on 2026-10-01 and cursor on 2026-10-06, both measured the same way — see
@@ -121,16 +125,18 @@ other: a codex master can now call the fleet — list it, send to it, spawn into
 still cannot tell it anything. No inbox row, no master woken, its status read from its pane
 exactly as before. "You can see it, you will not be told."
 
-The third row is codex's own behaviour rather than a gap in the installer: it starts an MCP
-server with a **scrubbed environment**, so nothing the session exported reaches the tools
-and `fleet_list` with no arguments cannot tell which fleet it is in — where the identical
-call from opencode resolves its own. From codex, name the project on every call. Q4 has both
-transcripts.
+The third row was codex's own behaviour until 2026-11-10, and is now the installer's job.
+codex starts an MCP server with a **scrubbed environment**, so nothing the session exported
+reached the tools and `fleet_list` with no arguments could not tell which fleet it was in.
+codex-cli 0.166.0 forwards each name its table lists in `env_vars` that the session has set,
+and `install.sh` writes that list. A session started before the re-install keeps the server
+it started with, and must still name the project. Q4 has the transcripts.
 
 What that costs in practice is composed from the five capability fields rather than
 written out per agent, so a fourth agent gets its warning by declaring them — and a clause
 that stops being true is shrunk rather than left standing, which is what happened to the
-"no fleet_* tools" line on the 27th:
+"no fleet_* tools" line on the 27th, and to codex's "must name the project" and "no
+orchestrate skill" on 2026-11-10 (codex-cli 0.166.0):
 
 ```
 $ fleet-agent caveat claude     (empty — nothing is given up)
@@ -138,8 +144,7 @@ $ fleet-agent caveat opencode   no orchestrate skill: it has the fleet_* tools b
                                 instructions, so it will not drain the inbox or dispatch
                                 siblings unless you tell it to
 $ fleet-agent caveat codex      no fleet events: status is guessed from its pane, and a
-                                question it asks may never reach the inbox. fleet_* tools
-                                must name the project: … . no orchestrate skill: …
+                                question it asks may never reach the inbox
 ```
 
 The codex `no resume` clause was shrunk away on 2026-10-10. Re-measured on codex-cli 0.160.1
@@ -376,14 +381,14 @@ the detectors run against them in both directions, which is the bar CLAUDE.md se
 calling a signal reliable. What is still missing for codex is the event bridge, which the
 matrix above states at the point where the choice is made (resume landed 2026-10-10).
 
-### Q4 (answered 2026-08-27). MCP registration — wired, with one asymmetry
+### Q4 (answered 2026-08-27). MCP registration — wired; its one asymmetry closed 2026-11-10
 
 `install.sh` registers the fleet's MCP server for **all three** agents now:
 
 | agent | where | how |
 |---|---|---|
 | claude | `<config dir>/.claude.json`, **once per profile** | `claude mcp add -s user` (or jq, if the CLI is absent) |
-| codex | `~/.codex/config.toml`, **once, globally** | `codex mcp add ghostfleet -- node <server>` |
+| codex | `~/.codex/config.toml`, **once, globally** | `codex mcp add ghostfleet -- node <server>`, then an `env_vars` line by hand (since 2026-11-10) |
 | opencode | `~/.config/opencode/opencode.jsonc`, **once, globally** | jq — not `opencode mcp add`, see below |
 
 One registration per CLI is correct rather than a compromise: for Claude a profile *is* a
@@ -393,9 +398,10 @@ and profile it serves from the session's `CLAUDE_FLEET_SOCK` / `CLAUDE_CONFIG_DI
 runtime, and `agent-here` exports both per session — so one entry serves every fleet and
 every profile.
 
-**`fleet_list` from a codex session needs an explicit `project`; from opencode it does
-not.** This is the one asymmetry, and it is codex's behaviour rather than a gap in the
-wiring. Measured by *calling* the tool, not by reading `codex mcp list`:
+**Until 2026-11-10, `fleet_list` from a codex session needed an explicit `project`; from
+opencode it did not.** That was the one asymmetry. It is codex's behaviour rather than a gap
+in the wiring, and the wiring now works around it (below). As measured on 2026-08-27, by
+*calling* the tool, not by reading `codex mcp list`:
 
 ```
 # codex, CLAUDE_FLEET_SOCK exported, fleet_list with no arguments:
@@ -414,12 +420,28 @@ install-nonint         working    (you)          <- resolved its own fleet
 ```
 
 codex launches an MCP server with a **scrubbed environment**, so nothing the session
-exported reaches the server and the tools cannot tell which fleet they are in.
+exported reaches the server unless the table asks for it.
 `-c shell_environment_policy.inherit=all` does not change it — that policy governs codex's
-shell tool, not its MCP children. So from codex, name the project on every call
-(`fleet_list(project: …)`, `fleet_send(project: …, …)`); `fleet_send`'s `reply_to` needs a
-resolvable self and is unavailable there for the same reason. This is recorded as the
-`mcp_self` field in `bin/fleet-agent` and printed in its caveat, so the pickers say it too.
+shell tool, not its MCP children. Measured on codex-cli 0.166.0 (2026-11-10) by a stub
+server that dumped `env` from a real session: the child gets `HOME LANG LOGNAME PATH SHELL
+TERM TMPDIR USER` (and `__CF_USER_TEXT_ENCODING` on macOS), then the table's static `env`,
+then each name listed in `env_vars` that the session has set. `codex mcp add` writes only
+`command` and `args`, its `--env` pins values rather than naming variables, and `env_vars`
+has no flag, so `install.sh` adds the line itself and keeps it only once `codex mcp get
+--json` reads it back. One session, one turn, the same call to two registrations of the same
+server, one with the list and one without:
+
+```
+# codex 0.166.0, fleet_list with NO arguments
+with env_vars:      SESSION                STATUS     MODEL
+                    master                 working    ?
+without:            fleet-list: no socket (run inside a fleet session, or pass -s <socket>)
+```
+
+A session started before that install, or a config an older `install.sh` wrote, still has
+the scrubbed server: there, name the project on every call (`fleet_list(project: …)`,
+`fleet_send(project: …, …)`), and `fleet_send`'s `reply_to`, which needs a resolvable self,
+is unavailable. `mcp_self` in `bin/fleet-agent` is `yes` for codex now; cursor's is `no`.
 
 **Why `opencode mcp add` is not used.** It exists and takes a command after `--`
 (undocumented in its `--help`), but it cannot be pointed at a file: with
@@ -431,13 +453,14 @@ cannot be tested without editing the developer's own config, so the installer wr
 JSONC itself — the same fallback it already has for `.claude.json`. A `.jsonc` that jq
 cannot parse (it may hold comments) is left untouched, with the entry printed for pasting.
 
-**MCP is tools; hooks are push events.** Wiring MCP gives codex neither hooks nor the
-orchestrate skill: it writes no inbox row, wakes no master, its status is still read from
-its pane, and nothing tells the session the fleet exists. "You can see it, you will not be
-told" is exactly as true for codex after this as before. opencode has both halves and
-reaches near parity, minus the skill. `skill/ghostfleet-orchestrate` is a Claude Code
-feature and stays Claude-only — both non-Claude agents have the tools without the
-instructions for using them.
+**MCP is tools; hooks are push events.** Wiring MCP gives codex no hooks: it writes no
+inbox row, wakes no master, its status is still read from its pane, and nothing tells the
+session the fleet exists. "You can see it, you will not be told" is exactly as true for
+codex after this as before. opencode has both halves and reaches near parity, minus the
+skill. The skill was Claude-only when this was written. agy and cursor read the same
+`SKILL.md`, and so does codex since 2026-11-10 (codex-cli 0.166.0: its `$` picker lists it,
+and `$ghostfleet-orchestrate` puts it into the turn), so opencode is the one left with the tools and without
+the instructions for using them.
 
 **Already-running sessions do not gain the tools.** An MCP server is spawned once per
 session and lives as long as it, so a session open when the installer ran keeps the server
@@ -627,7 +650,8 @@ model, so every later cursor session, the owner's own included, came up on it. `
 never passes `CLAUDE_FLEET_MODEL`; pick cursor's model with `/model` inside the session.
 
 **MCP: tools, not its own fleet.** cursor starts the ghostfleet server without the session's
-environment, which is codex's behaviour. A real worker with `CLAUDE_FLEET_SOCK`, `$TMUX` and
+environment, which codex does too unless its table lists the names in `env_vars` (install.sh's
+has since 2026-11-10). A real worker with `CLAUDE_FLEET_SOCK`, `$TMUX` and
 `CLAUDE_FLEET_PROJECTS` exported called `fleet_list` with no arguments and got `fleet-list: no
 socket`. Naming the project resolved it from the default projects file, not the one the session
 had exported. So `mcp_self` is `no`, and that is the whole of `fleet-agent caveat cursor`.

@@ -416,8 +416,8 @@ agent_field() {
         # a tool prompt is seen only on the pane — through blocked_re above.
         hooks)      printf 'yes' ;;
         mcp)        printf 'yes' ;;   # ~/.gemini/config/mcp_config.json
-        # The one non-claude agent that also gets the INSTRUCTIONS: agy discovers skills from
-        # ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
+        # agy gets the INSTRUCTIONS too (so do cursor and, since 2026-11-10, codex): it discovers
+        # skills from ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
         skill)      printf 'yes' ;;
         # YES, measured by CALLING it, the way opencode's was: with the server registered in
         # mcp_config.json and CLAUDE_FLEET_SOCK exported, `agy -p` called fleet_list with NO
