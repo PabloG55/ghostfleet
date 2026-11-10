@@ -57,7 +57,7 @@ import * as K from '../lib/know.mjs';
 import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '../lib/attach.mjs';
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
-import { loginList } from '../lib/logins.mjs';
+import { loginList, finishLogin } from '../lib/logins.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -3395,6 +3395,22 @@ function agentCatalogue() {
 
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (body.tool === 'fleet_login_finish') {
+      const a = req.client.pair ? null : headerAssertion(req, c);
+      if (!req.client.pair && (!a || a.error))
+        return send(res, 401, { ok: false, needs: 'passkey', text: 'finishing a login needs a fresh passkey assertion' });
+      const r = await serialize(async () => {
+        let result;
+        try { result = await finishLogin(shownTo(req), body.args || {}); }
+        catch { result = { status: 500, json: { ok: false, text: 'could not finish login' } }; }
+        auditAppend({ ts: now(), client: req.client.id, ip, verb: 'fleet_login_finish',
+          project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
+          ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: 'passkey' }),
+          result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
+        return result;
+      });
+      return send(res, r.status, r.json);
+    }
     const tool = typeof body.tool === 'string' ? body.tool : '';
     const v = TOOLS_ALLOWED[tool];
     if (!v) {
