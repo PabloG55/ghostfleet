@@ -3184,17 +3184,20 @@ function useRequest(scope, key, active = true) {
 }
 function Modal({ title, onClose, children, wide, sheet = false }) {
 	const box = A(null);
-	h(() => {
+	_(() => {
 		if (!sheet) return;
 		const previous = document.activeElement;
 		const dialog = box.current;
 		const owner = dialog?.closest(".session, .proposal-slot");
-		(dialog?.querySelector("input:not(:disabled), textarea:not(:disabled)") || dialog?.querySelector(".x"))?.focus({ preventScroll: true });
+		dialog?.focus({ preventScroll: true });
 		const trap = (e) => {
 			if (e.key !== "Tab") return;
 			const items = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex=\"0\"]")].filter((n) => n.getClientRects().length);
 			const first = items[0], last = items[items.length - 1];
-			if (e.shiftKey && document.activeElement === first) {
+			if (document.activeElement === dialog) {
+				e.preventDefault();
+				(e.shiftKey ? last : first)?.focus();
+			} else if (e.shiftKey && document.activeElement === first) {
 				e.preventDefault();
 				last?.focus();
 			} else if (!e.shiftKey && document.activeElement === last) {
@@ -3227,6 +3230,7 @@ function Modal({ title, onClose, children, wide, sheet = false }) {
 			role: "dialog",
 			"aria-modal": "true",
 			"aria-label": title,
+			tabIndex: sheet ? -1 : void 0,
 			children: [/* @__PURE__ */ u("header", { children: [/* @__PURE__ */ u("h2", { children: title }), /* @__PURE__ */ u("button", {
 				class: "x",
 				"aria-label": t("common.close"),
@@ -6083,11 +6087,12 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const uploading = files.some((f) => f.state === "up");
 	const ready = files.filter((f) => f.state === "ok");
 	const sendDraft = async () => {
+		if (prompt || st === "limit") return;
 		const text = draft.trim();
 		if (!text && !ready.length || uploading) return;
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
-		const prompt = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
-		if (await act("fleet_send", { prompt })) {
+		const message = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
+		if (await act("fleet_send", { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -6509,13 +6514,16 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									type: "button",
 									class: "btn request-return",
 									onClick: prompt ? request.show : quota.show,
-									children: t(prompt ? canAnswer ? "sess.answerRequest" : "sess.viewRequest" : "sess.viewLimit")
+									children: [/* @__PURE__ */ u(Icon, {
+										name: prompt ? "question" : "hourglass",
+										size: 18
+									}), t(prompt ? canAnswer ? "sess.answerRequest" : "sess.viewRequest" : "sess.viewLimit")]
 								}) : null]
 							}),
 							/* @__PURE__ */ u(Btn, {
 								kind: "primary",
 								type: "submit",
-								disabled: busy || uploading || !draft.trim() && !ready.length,
+								disabled: !!prompt || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
 								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]

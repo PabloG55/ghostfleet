@@ -150,17 +150,18 @@ export function useRequest(scope, key, active = true) {
 
 export function Modal({ title, onClose, children, wide, sheet = false }) {
   const box = useRef(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!sheet) return;
     const previous = document.activeElement;
     const dialog = box.current;
     const owner = dialog?.closest('.session, .proposal-slot');
-    (dialog?.querySelector('input:not(:disabled), textarea:not(:disabled)') || dialog?.querySelector('.x'))?.focus({ preventScroll: true });
+    dialog?.focus({ preventScroll: true });
     const trap = (e) => {
       if (e.key !== 'Tab') return;
       const items = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')].filter(n => n.getClientRects().length);
       const first = items[0], last = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      if (document.activeElement === dialog) { e.preventDefault(); (e.shiftKey ? last : first)?.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     };
     dialog?.addEventListener('keydown', trap);
@@ -177,7 +178,7 @@ export function Modal({ title, onClose, children, wide, sheet = false }) {
   }, [onClose]);
   return (
     <div class={`scrim${sheet ? ' sheet' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={box} class={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={box} class={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={sheet ? -1 : undefined}>
         <header><h2>{title}</h2><button class="x" aria-label={t('common.close')} onClick={onClose}><Icon name="close" /></button></header>
         {children}
       </div>

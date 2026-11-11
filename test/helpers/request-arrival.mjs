@@ -66,7 +66,13 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     await sleep(2800);
     await b.evaluate(() => document.querySelector('.modal .x')?.click());
     await b.evaluate(() => document.fonts.ready.then(() => 0));
+    // A nonempty draft makes the disabled Send assertion meaningful, without a key press.
+    await b.evaluate(() => {
+      const input = document.querySelector('.composer textarea');
+      input.value = 'Keep this draft'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     const before = await rects();
+    const inputBox = await b.evaluate(() => { const r = document.querySelector('.composer textarea').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; });
     const sentAtStart = await count();
     const n = `${app} ${w}${readonly ? ' read-only' : ''}: request arrival`;
     is(`${n}: starts with the three measured surfaces`, true, before.every(Boolean));
@@ -78,14 +84,38 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     is(`${n}: tabs, chat and composer stay put`, before, await rects());
     await shot(w, 'open');
     if (!opened) { await b.evaluate(() => { window.__arrive = null; }); continue; }
+    is(`${n}: choices share both edges in one column`, true, await b.evaluate(() => {
+      const opts = [...document.querySelectorAll('.modal .ask .opt')].map(n => n.getBoundingClientRect());
+      const box = document.querySelector('.modal .ask-opts').getBoundingClientRect();
+      return opts.length === 3 && opts.every((r, i) => Math.abs(r.left - box.left) < .5 && Math.abs(r.right - box.right) < .5 && (!i || r.top >= opts[i - 1].bottom));
+    }));
+    is(`${n}: automatic focus is on the dialog container`, true, await until(() => document.activeElement === document.querySelector('.modal[tabindex="-1"]')));
+    is(`${n}: arrival gives the X no visible focus ring`, true, await b.evaluate(() => {
+      const s = getComputedStyle(document.querySelector('.modal .x'));
+      return (s.outlineStyle === 'none' || parseFloat(s.outlineWidth) === 0) && s.boxShadow === 'none';
+    }));
     is(`${n}: phone sheet or centred desktop modal`, true, await b.evaluate(() => {
       const r = document.querySelector('[role=dialog]').getBoundingClientRect();
       return innerWidth <= 900 ? Math.abs(r.bottom - innerHeight) < 2 : Math.abs(r.x + r.width / 2 - innerWidth / 2) < 2 && Math.abs(r.y + r.height / 2 - innerHeight / 2) < 2;
+    }));
+    await b.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    is(`${n}: Tab gives the X its keyboard ring`, true, await until(() => {
+      const x = document.querySelector('.modal .x');
+      return document.activeElement === x && x.matches(':focus-visible') && getComputedStyle(x).boxShadow !== 'none';
     }));
     await click('.modal .x');
     is(`${n}: X closes without answering`, false, await b.evaluate(() => !!document.querySelector('[role=dialog]')));
     is(`${n}: reserved button remains`, true, await b.evaluate(() => !!document.querySelector('.request-return')));
     is(`${n}: dismissal leaves the layout put`, before, await rects());
+    is(`${n}: the return button exactly fills the input box`, inputBox, await b.evaluate(() => { const r = document.querySelector('.request-return').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }));
+    is(`${n}: the return button has its request colour, icon and pointer`, true, await b.evaluate(() => {
+      const n = document.querySelector('.request-return'), s = getComputedStyle(n);
+      const yellow = document.createElement('span'); yellow.style.color = 'var(--yellow)'; n.append(yellow);
+      const colour = getComputedStyle(yellow).color; yellow.remove();
+      return s.color === colour && s.cursor === 'pointer' && !!n.querySelector('svg');
+    }));
+    is(`${n}: pending requests disable Send even with a draft`, true, await b.evaluate(() => document.querySelector('.composer button[type=submit]').disabled));
     await shot(w, 'closed');
     await sleep(2800);
     is(`${n}: the same poll does not reopen it`, false, await b.evaluate(() => !!document.querySelector('[role=dialog]')));

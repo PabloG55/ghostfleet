@@ -397,13 +397,14 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const uploading = files.some(f => f.state === 'up');
   const ready = files.filter(f => f.state === 'ok');
   const sendDraft = async () => {
+    if (prompt || st === 'limit') return;
     const text = draft.trim();
     if ((!text && !ready.length) || uploading) return;
     // Words first: a message that opens with a path (`/home/…`) reads as a slash command.
     const list = ready.map(f => `- ${f.path}`).join('\n');
-    const prompt = !ready.length ? text
+    const message = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
-    const r = await act('fleet_send', { prompt });
+    const r = await act('fleet_send', { prompt: message });
     if (r) {
       sentAt.current = Date.now(); typing.current = false;
       for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -530,10 +531,11 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
                       else if (sendsOnEnter(e)) { e.preventDefault(); sendDraft(); }
                     }} />
           {prompt || st === 'limit' ? <button type="button" class="btn request-return" onClick={prompt ? request.show : quota.show}>
+            <Icon name={prompt ? 'question' : 'hourglass'} size={18} />
             {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
           </button> : null}
           </div>
-          <Btn kind="primary" type="submit" disabled={busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
+          <Btn kind="primary" type="submit" disabled={!!prompt || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
         </div>
       </form>}
 

@@ -114,10 +114,11 @@ async function fakeDaemon() {
     // digest (every local project's sessions in one read, which the app's own poll takes instead of
     // a grid per project) and the pane (the session's screen, read for the question it may be
     // asking). Slow like the rest, and counted, since a loaded Mac is slow at all of them.
+    // Transcript/typing scenarios have no pending agent request; arrival coverage is separate.
     if (p === '/api/digest' || p === '/api/pane') {
       st.busy++; st.maxBusy = Math.max(st.maxBusy, st.busy);
       const body = p === '/api/pane'
-        ? fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`)
+        ? { ...fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`), prompt: null }
         : { ok: true, projects: fx('projects.json').projects.map(x => ({ name: x.name,
             sessions: x.name === PROJECT ? fx(`grid-${PROJECT}.json`).cards.map(c => ({ name: c.name, status: c.status, ts: 0, lead: !!c.lead })) : [] })) };
       return setTimeout(() => { st.busy--; reply(200, body); }, st.slowAll);

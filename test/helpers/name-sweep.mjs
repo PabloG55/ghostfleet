@@ -649,34 +649,11 @@ const BINARY_REVIEWED = new Set([
   'cb9ac55c5cc13cb5',   // web/fixtures/shots/docs-install.png
   '68234ec7e201e78f',   // web/fixtures/shots/flow.mp4
   '32a065ac00c98c87',   // web/fixtures/shots/web-invoices.png
-  // Permission arrival proof: fixture-only before/open/closed, both apps and the viewer; every still opened.
-  '3036032675fc6752',   // docs/permission-modal/phone-1280-before.png
-  'a7d9033adb3bfefc',   // docs/permission-modal/phone-1280-closed.png
-  '52d5eb05c8446ae8',   // docs/permission-modal/phone-1280-open.png
-  'd31843980afb6372',   // docs/permission-modal/phone-320-before.png
-  'df99d83340a04131',   // docs/permission-modal/phone-320-closed.png
-  'c11837ece59bb221',   // docs/permission-modal/phone-320-open.png
-  'a6b59ccbdcec888e',   // docs/permission-modal/phone-390-before.png
-  '573ee8d4f966669d',   // docs/permission-modal/phone-390-closed.png
-  '05cdec50359be39a',   // docs/permission-modal/phone-390-open.png
-  'd703ba6aac562450',   // docs/permission-modal/team-1280-before.png
-  'cbf2769e76d308d4',   // docs/permission-modal/team-1280-closed.png
-  '8d21294f8731662e',   // docs/permission-modal/team-1280-open.png
-  '67d922e74cfbb137',   // docs/permission-modal/team-1280-readonly-before.png
-  '1385e11b6d76fbef',   // docs/permission-modal/team-1280-readonly-closed.png
-  '934d36322866a1e3',   // docs/permission-modal/team-1280-readonly-open.png
-  '5ad631ccb9a60294',   // docs/permission-modal/team-320-before.png
-  '586662bb4219d048',   // docs/permission-modal/team-320-closed.png
-  '553ab2853bce9920',   // docs/permission-modal/team-320-open.png
-  'bf5de14d8f962b64',   // docs/permission-modal/team-320-readonly-before.png
-  'da07c8ce2a91a98d',   // docs/permission-modal/team-320-readonly-closed.png
-  'b61d0d4313b12552',   // docs/permission-modal/team-320-readonly-open.png
-  'e27efdbefbba9575',   // docs/permission-modal/team-390-before.png
-  '333638bcdbd9f7e1',   // docs/permission-modal/team-390-closed.png
-  '9ad6d8acb11b5735',   // docs/permission-modal/team-390-open.png
-  '8a71e2f69e710017',   // docs/permission-modal/team-390-readonly-before.png
-  '17fce3cff2a0b49b',   // docs/permission-modal/team-390-readonly-closed.png
-  '0aae60de1286023a',   // docs/permission-modal/team-390-readonly-open.png
+  // Permission arrival proof: four retained fixture-only views; all widths and states were shot and read.
+  'a2bc3e4e2d91a287',   // docs/permission-modal/phone-1280-open.png
+  '4fd83b83dd59282d',   // docs/permission-modal/phone-390-closed.png
+  '79b86b2231cd9cbb',   // docs/permission-modal/phone-390-open.png
+  '35eb5432802e6af1',   // docs/permission-modal/team-390-readonly-open.png
   // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
   // packages the team app installs), so they carry the foundries' tables and nothing of ours.
   '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
@@ -698,32 +675,9 @@ const BINARY_EXPECTED = [
   'docs/stack-demo.gif', 'docs/stack-demo.mp4',
   'docs/worktree-demo.gif', 'docs/worktree-demo.mp4',
   'web/icons/apple-touch-icon.png', 'web/icons/icon-192.png', 'web/icons/icon-512.png',
-  'docs/permission-modal/phone-1280-before.png',
-  'docs/permission-modal/phone-1280-closed.png',
   'docs/permission-modal/phone-1280-open.png',
-  'docs/permission-modal/phone-320-before.png',
-  'docs/permission-modal/phone-320-closed.png',
-  'docs/permission-modal/phone-320-open.png',
-  'docs/permission-modal/phone-390-before.png',
   'docs/permission-modal/phone-390-closed.png',
   'docs/permission-modal/phone-390-open.png',
-  'docs/permission-modal/team-1280-before.png',
-  'docs/permission-modal/team-1280-closed.png',
-  'docs/permission-modal/team-1280-open.png',
-  'docs/permission-modal/team-1280-readonly-before.png',
-  'docs/permission-modal/team-1280-readonly-closed.png',
-  'docs/permission-modal/team-1280-readonly-open.png',
-  'docs/permission-modal/team-320-before.png',
-  'docs/permission-modal/team-320-closed.png',
-  'docs/permission-modal/team-320-open.png',
-  'docs/permission-modal/team-320-readonly-before.png',
-  'docs/permission-modal/team-320-readonly-closed.png',
-  'docs/permission-modal/team-320-readonly-open.png',
-  'docs/permission-modal/team-390-before.png',
-  'docs/permission-modal/team-390-closed.png',
-  'docs/permission-modal/team-390-open.png',
-  'docs/permission-modal/team-390-readonly-before.png',
-  'docs/permission-modal/team-390-readonly-closed.png',
   'docs/permission-modal/team-390-readonly-open.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.

@@ -14,17 +14,16 @@ The rows also exercise X, outside press, Escape, returning to the session, a dif
 
 Every image below was opened and read. Only fixture/demo data is shown. Digests are recorded in `test/helpers/name-sweep.mjs`. The numbered choices and their colours intentionally retain the existing content, including all three choices on desktop.
 
-| App / role | Width | Before arrival | Open | Dismissed |
-|---|---:|---|---|---|
-| phone / owner | 390 | [before](phone-390-before.png) | [open](phone-390-open.png) | [closed](phone-390-closed.png) |
-| phone / owner | 320 | [before](phone-320-before.png) | [open](phone-320-open.png) | [closed](phone-320-closed.png) |
-| phone / owner | 1280 | [before](phone-1280-before.png) | [open](phone-1280-open.png) | [closed](phone-1280-closed.png) |
-| team / admin | 390 | [before](team-390-before.png) | [open](team-390-open.png) | [closed](team-390-closed.png) |
-| team / admin | 320 | [before](team-320-before.png) | [open](team-320-open.png) | [closed](team-320-closed.png) |
-| team / admin | 1280 | [before](team-1280-before.png) | [open](team-1280-open.png) | [closed](team-1280-closed.png) |
-| team / viewer | 390 | [before](team-390-readonly-before.png) | [open](team-390-readonly-open.png) | [closed](team-390-readonly-closed.png) |
-| team / viewer | 320 | [before](team-320-readonly-before.png) | [open](team-320-readonly-open.png) | [closed](team-320-readonly-closed.png) |
-| team / viewer | 1280 | [before](team-1280-readonly-before.png) | [open](team-1280-readonly-open.png) | [closed](team-1280-readonly-closed.png) |
+Only these four PNGs are retained in git. Every width and state, including 320px and both team roles, was shot and read; the remaining captures are held in the review temp directory.
+
+| View | Screenshot |
+|---|---|
+| Phone 390, open | [phone-390-open.png](phone-390-open.png) |
+| Phone 390, dismissed (re-shot) | [phone-390-closed.png](phone-390-closed.png) |
+| Desktop 1280, open | [phone-1280-open.png](phone-1280-open.png) |
+| Team viewer 390, open | [team-390-readonly-open.png](team-390-readonly-open.png) |
+
+Choices fill one column in every view, the dialog container receives automatic focus without a keyboard ring, and Tab gives the X its keyboard ring. The return button uses the request's yellow, an icon and a pointer cursor, fills exactly the input's reserved box, and leaves Send disabled while the request is pending. The arrival rows assert each behavior.
 
 ## Sweep decisions
 

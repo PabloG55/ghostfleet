@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 6954a17f8602
+// CLIENT-HASH: 70cf92934161
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -460,7 +460,7 @@
 // paint (cache-first), and the controllerchange reload swaps it in once nothing is being
 // typed; on an installed iOS app, swipe it away and reopen it to be sure. Its stored screen
 // and tab are not carried over (the new app keeps its place in the address), its passkey is.
-const VERSION = 'ghostfleet-v105';
+const VERSION = 'ghostfleet-v106';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

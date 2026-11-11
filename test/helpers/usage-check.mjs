@@ -11,7 +11,8 @@
 // nothing else: every state word in them is still the one describe() chose.
 //   The payload reaches the page through its own fetch: the fixture backend asks for
 // fixtures/usage.json, and a script installed before the app runs answers that one request
-// with the variant named in the query string. Everything else is the shipped fixture fleet.
+// with the variant named in the query string. Other data is the shipped fixture fleet, with
+// pending assistant approvals cleared so each account dialog can be inspected on its own.
 //   ONE BROWSER AT A TIME, phone then desktop: the suite's ceiling is four, and a check that
 // held two would be spending half of it on itself.
 import fs from 'node:fs';
@@ -49,6 +50,9 @@ const INJECT = `(() => {
   const real = window.fetch.bind(window);
   window.__reads = { usage: 0, projects: 0, at: [] };
   window.fetch = (u, o) => {
+    // Account-only scenarios have no assistant approval competing for the dialog.
+    if (String(u).includes('fixtures/jarvis.json')) return real(u, o).then(async r =>
+      new Response(JSON.stringify({ ...await r.json(), pending: [] }), { status: 200 }));
     if (String(u).includes('fixtures/projects.json')) window.__reads.projects++;
     if (!String(u).includes('fixtures/usage.json')) return real(u, o);
     window.__reads.usage++; window.__reads.at.push(Date.now());

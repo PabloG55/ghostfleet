@@ -292,6 +292,8 @@ textarea { resize: vertical; }
 .opt.no b { color: var(--red); } .opt.no:hover:not(:disabled) { background: rgba(255,95,95,.08); }
 .opt.chosen { border-color: var(--cyan); }
 .opt:disabled { opacity: .5; }
+.modal .ask-opts { display: grid; grid-template-columns: minmax(0, 1fr); }
+.modal .ask-opts > .opt { width: 100%; }
 
 .tabs { display: flex; gap: 2px; padding: 12px 22px 0; border-bottom: 1px solid var(--hair); }
 .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em; cursor: pointer; color: var(--dim); font-weight: 500; }
@@ -371,7 +373,9 @@ textarea { resize: vertical; }
 .composer-input { flex: 1 1 auto; min-width: 0; position: relative; }
 .composer-input textarea { display: block; width: 100%; }
 .composer-input.has-request textarea { visibility: hidden; }
-.composer-input .request-return { position: absolute; inset: 0; width: 100%; height: 100%; white-space: normal; }
+.composer-input .request-return { position: absolute; inset: 0; width: 100%; height: 100%; white-space: normal;
+  display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--yellow);
+  border-color: color-mix(in srgb, var(--yellow) 55%, var(--line)); cursor: pointer; }
 .composer textarea { flex: 1 1 auto; min-height: 46px; max-height: 220px; }
 .attach-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; font-size: 20px; cursor: pointer; }
 .attach-btn:hover { border-color: var(--cyan); background: rgba(95,215,215,.08); }
