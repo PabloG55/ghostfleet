@@ -82,6 +82,8 @@ async function fakeDaemon() {
     busy: 0, maxBusy: 0,         // reads of any kind in flight
     older: 0, maxOlder: 0,       // reads of an OLDER page (`before`) in flight
     olderFails: 0,               // how many older-page reads to fail before answering
+    holdPane: false,             // typing starts before the fixture's pending request arrives
+    answered: false,
   };
   const json = (res, code, j, extra = {}) => {
     const body = JSON.stringify(j);
@@ -102,6 +104,16 @@ async function fakeDaemon() {
     st.log.push(row);
     const reply = (code, j, extra) => { row.end = Date.now(); row.status = code; json(res, code, j, extra); };
     if (p === '/api/health') return reply(200, { ok: true, version: 'chat-lands-check' });
+    if (p === '/api/verb') {
+      let body = '';
+      req.on('data', c => { body += c; });
+      return req.on('end', () => {
+        const { tool, args } = JSON.parse(body);
+        row.tool = tool; row.args = args;
+        if (tool === 'fleet_answer') { st.answered = true; return reply(200, { ok: true }); }
+        reply(400, { ok: false, text: 'unexpected verb in transcript check' });
+      });
+    }
     if (req.method === 'GET' && Date.now() < st.limitedUntil)
       return reply(429, { ok: false, text: 'rate limited' }, { 'Retry-After': String(Math.ceil((st.limitedUntil - Date.now()) / 1000)) });
     if (p === '/api/projects') return reply(200, { ...fx('projects.json'), jarvis_enabled: false });
@@ -114,14 +126,18 @@ async function fakeDaemon() {
     // digest (every local project's sessions in one read, which the app's own poll takes instead of
     // a grid per project) and the pane (the session's screen, read for the question it may be
     // asking). Slow like the rest, and counted, since a loaded Mac is slow at all of them.
-    // Transcript/typing scenarios have no pending agent request; arrival coverage is separate.
     if (p === '/api/digest' || p === '/api/pane') {
       st.busy++; st.maxBusy = Math.max(st.maxBusy, st.busy);
       const body = p === '/api/pane'
-        ? { ...fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`), prompt: null }
+        ? fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`)
         : { ok: true, projects: fx('projects.json').projects.map(x => ({ name: x.name,
             sessions: x.name === PROJECT ? fx(`grid-${PROJECT}.json`).cards.map(c => ({ name: c.name, status: c.status, ts: 0, lead: !!c.lead })) : [] })) };
-      return setTimeout(() => { st.busy--; reply(200, body); }, st.slowAll);
+      const deliver = () => {
+        if (p === '/api/pane' && st.holdPane) return setTimeout(deliver, 25);
+        if (p === '/api/pane' && st.answered) body.prompt = null;
+        st.busy--; reply(200, body);
+      };
+      return setTimeout(deliver, st.slowAll);
     }
     if (p === '/api/session') {
       const ms = st.convo[row.session] || [];
@@ -186,6 +202,7 @@ const until = async (fn, ms) => { const t0 = Date.now(); let v; while (Date.now(
 // One Chrome and one daemon per scenario, so no scenario can see another's state.
 async function scenario(name, run, { desktop = false, wide = false, open = null, history = 0 } = {}) {
   const d = await fakeDaemon();
+  d.st.holdPane = name === 'typing' || !!open;
   // A longer conversation than the fixture's, written BEFORE it: three more pages to scroll up
   // through, each message tall enough that a page fills a screen.
   if (history) {
@@ -235,6 +252,27 @@ async function staysFor(has, ms) {
   return true;
 }
 
+// Cursor movement is a real composer keystroke without changing the draft. Keep it active
+// while waiting on a slow transcript; a single inserted sentence followed by 20 s idle is
+// a typing pause, and should open the request.
+async function keepTyping(b) {
+  for (const type of ['rawKeyDown', 'keyUp']) await b.call('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+}
+const visibleDraft = b => b.evaluate(() => {
+  const n = document.querySelector('.composer textarea');
+  return [getComputedStyle(n).visibility === 'visible', n.value];
+});
+async function pauseAndAnswer(b) {
+  const started = Date.now();
+  const opened = await until(() => b.evaluate(() => !!document.querySelector('.session [role=dialog] .ask')), 5000);
+  const waited = Date.now() - started;
+  if (opened) {
+    await b.evaluate(() => document.querySelector('.session .ask .opt:last-child').click());
+    await until(() => b.evaluate(() => !document.querySelector('.session .request-return')), 5000);
+  }
+  return !!opened && waited >= 1800;
+}
+
 const SCENARIOS = [
   // ── the control: nothing misbehaves ────────────────────────────────────────────
   // Green on the client that had the bug, and it is here for that: it is what proves the rows
@@ -255,16 +293,19 @@ const SCENARIOS = [
   // ── the owner is typing the next message ──────────────────────────────────────────
   // pollPaused() held the WHOLE poll while the composer had focus — so the keyboard would not
   // close under a half-typed message — and the reply then waited for the keyboard to go away.
-  ['typing', async ({ b, has, say }) => {
+  ['typing', async ({ b, st, has, say }) => {
     await b.evaluate(() => { const t = document.querySelector('.composer textarea'); t.focus(); return null; });
     await b.call('Input.insertText', { text: 'and also check the toolbox build' });
+    st.holdPane = false;
     await sleep(500);
     say(REPLY);
-    is('typing: the reply lands while the owner is typing the next message', true, !!(await until(() => has(REPLY), 9000)));
+    is('typing: the reply lands while the owner is typing the next message', true, !!(await until(async () => { await keepTyping(b); return has(REPLY); }, 9000)));
     is('typing: ...and the box keeps its focus', true, await b.evaluate(() => {
       const a = document.activeElement; return !!a && a.tagName === 'TEXTAREA' && a.isConnected; }));
     is('typing: ...and its words', 'and also check the toolbox build',
        await b.evaluate(() => { const t = document.querySelector('.composer textarea'); return t ? t.value : ''; }));
+    is('typing: the pending dialog waits until the 2 s typing pause', true, await pauseAndAnswer(b));
+    is('typing: the draft is back in the box after answering', [true, 'and also check the toolbox build'], await visibleDraft(b));
   }],
 
   // ── a slow daemon ─────────────────────────────────────────────────────────────
@@ -466,9 +507,11 @@ const SCENARIOS = [
     const n = `open (${kind})`;
     await b.evaluate(() => { const t = document.querySelector('.composer textarea'); if (t) t.focus(); return null; });
     await b.call('Input.insertText', { text: 'check the billing-svc build' });
+    st.holdPane = false;
     let said = '', skeleton = false;
     const t0 = Date.now();
     const shown = await until(async () => {
+      await keepTyping(b);
       if (await has(last)) return true;
       const st = await b.evaluate(() => { const c = document.querySelector('.chat'), l = c && c.querySelector('.loading');
         return { line: l ? l.textContent : '', busy: !!c && c.getAttribute('aria-busy') === 'true' && !!c.querySelector('.bubble.skel') }; });
@@ -486,6 +529,8 @@ const SCENARIOS = [
     is(`${n}: ...and nothing was sent`, 0, st.log.filter(r => r.path === '/api/verb').length);
     is(`${n}: ...and the half-typed message is still in the box`, 'check the billing-svc build',
        await b.evaluate(() => { const t = document.querySelector('.composer textarea'); return t ? t.value : ''; }));
+    is(`${n}: the pending dialog opens after typing pauses`, true, await pauseAndAnswer(b));
+    is(`${n}: answering returns the visible draft`, [true, 'check the billing-svc build'], await visibleDraft(b));
     if (process.env.CHAT_LANDS_DEBUG) console.error(n, Date.now() - t0, 'ms', JSON.stringify(said));
   }, { open: (st) => { st.first = first; if (slow) st.delay = (k) => (k === 1 ? slow : 0); } }]),
 

@@ -5962,6 +5962,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const [drag, setDrag] = d(false);
 	const picker = A(null);
 	const typing = A(!!draft);
+	const composer = A(null);
+	const lastComposerKey = A(-Infinity);
+	const typingPause = A(null);
+	const [composerFocused, setComposerFocused] = d(false);
+	const [composerRecent, setComposerRecent] = d(false);
+	const composerKey = () => {
+		lastComposerKey.current = performance.now();
+		setComposerRecent(true);
+		clearTimeout(typingPause.current);
+		typingPause.current = setTimeout(() => setComposerRecent(false), 2e3);
+	};
+	h(() => () => clearTimeout(typingPause.current), []);
 	const sentAt = A(0);
 	const statusNow = A("unknown");
 	const quietRef = A(quiet);
@@ -5993,7 +6005,13 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
 	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
-	const request = useRequest(`session:${project}/${name}`, pane.data ? prompt?.fingerprint || null : void 0, available);
+	const held = !!prompt && composerFocused && composerRecent;
+	const request = useRequest(`session:${project}/${name}`, pane.data ? prompt?.fingerprint || null : void 0, available && !held);
+	const showRequest = () => {
+		clearTimeout(typingPause.current);
+		setComposerRecent(false);
+		request.show();
+	};
 	const quota = useRequest(`quota:${project}/${name}`, card ? st === "limit" ? String(card.limit_at || "limit") : null : void 0, available && !prompt);
 	const canAnswer = !fleet.canAnswer || fleet.canAnswer(project);
 	const [typedAnswer, setTypedAnswer] = d("");
@@ -6038,10 +6056,16 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 			answering.current = false;
 		}
 	};
+	const requestOpenedAt = A(Infinity);
+	_(() => {
+		requestOpenedAt.current = request.open ? performance.now() : Infinity;
+	}, [request.open, prompt?.fingerprint]);
 	_(() => {
 		if (!request.open || !canAnswer || prompt?.typing) return;
 		const key = (e) => {
-			if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+			if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+			const now = performance.now();
+			if (now - requestOpenedAt.current < 600 || now - lastComposerKey.current <= 1500) return;
 			const o = prompt.options?.find((o) => String(o.n) === e.key);
 			if (o) {
 				e.preventDefault();
@@ -6087,7 +6111,11 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const uploading = files.some((f) => f.state === "up");
 	const ready = files.filter((f) => f.state === "ok");
 	const sendDraft = async () => {
-		if (prompt || st === "limit") return;
+		if (prompt) {
+			showRequest();
+			return;
+		}
+		if (st === "limit") return;
 		const text = draft.trim();
 		if (!text && !ready.length || uploading) return;
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
@@ -6485,14 +6513,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 								}
 							}),
 							/* @__PURE__ */ u("div", {
-								class: `composer-input${prompt || st === "limit" ? " has-request" : ""}`,
+								class: `composer-input${prompt && !held || st === "limit" ? " has-request" : ""}`,
 								children: [/* @__PURE__ */ u("textarea", {
+									ref: composer,
 									rows: 2,
 									value: draft,
 									placeholder: drag ? t("sess.drop") : t("sess.writeTo", { name }),
+									onFocus: () => setComposerFocused(true),
+									onBlur: () => setComposerFocused(false),
 									onInput: (e) => {
 										setDraft(e.currentTarget.value);
 										typing.current = !!e.currentTarget.value;
+										if (document.activeElement === composer.current) composerKey();
 									},
 									onPaste: (e) => {
 										const fs = [...e.clipboardData?.files || []];
@@ -6502,18 +6534,22 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 										}
 									},
 									onKeyDown: (e) => {
+										composerKey();
 										if (e.key === "Escape" && !e.isComposing) {
 											e.preventDefault();
 											e.currentTarget.blur();
+										} else if (held && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
+											e.preventDefault();
+											showRequest();
 										} else if (sendsOnEnter(e)) {
 											e.preventDefault();
 											sendDraft();
 										}
 									}
-								}), prompt || st === "limit" ? /* @__PURE__ */ u("button", {
+								}), prompt && !held || st === "limit" ? /* @__PURE__ */ u("button", {
 									type: "button",
 									class: "btn request-return",
-									onClick: prompt ? request.show : quota.show,
+									onClick: prompt ? showRequest : quota.show,
 									children: [/* @__PURE__ */ u(Icon, {
 										name: prompt ? "question" : "hourglass",
 										size: 18
@@ -6523,7 +6559,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 							/* @__PURE__ */ u(Btn, {
 								kind: "primary",
 								type: "submit",
-								disabled: !!prompt || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
+								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
 								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]

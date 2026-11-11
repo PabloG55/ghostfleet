@@ -10,6 +10,10 @@ The arrival row was run against the old inline card first. At 390px the tabs mov
 
 The rows also exercise X, outside press, Escape, returning to the session, a different fingerprint, remote disappearance, and the original answer payload sent once (including desktop number keys). The existing dialog audit includes permission and assistant approval dialogs.
 
+A request arriving during composer activity waits for a 2 s typing pause or blur. Enter opens the held request without sending the draft. Digit shortcuts wait at least 600 ms after opening and more than 1.5 s after the last composer keystroke; clicks are immediate. Answering or disappearance restores the existing draft from `drafts.js`.
+
+`node test/helpers/phone-check.mjs --typing-only` exercises real keyboard events at 390 and 1280. Against `2447a8e`, the 100 ms digit called `fleet_answer`, leaving the 1 s digit with no dialog to answer; arrival also stole composer focus and truncated the sentence. Those rows pass with the guards and deferral. The assistant approval dismissal/navigation regression already passed on that baseline and remains covered. The transcript check retains the pending fixture, types while reads are delayed, then checks opening after the pause and draft restoration after answering.
+
 ## Screenshots read
 
 Every image below was opened and read. Only fixture/demo data is shown. Digests are recorded in `test/helpers/name-sweep.mjs`. The numbered choices and their colours intentionally retain the existing content, including all three choices on desktop.
@@ -23,7 +27,7 @@ Only these four PNGs are retained in git. Every width and state, including 320px
 | Desktop 1280, open | [phone-1280-open.png](phone-1280-open.png) |
 | Team viewer 390, open | [team-390-readonly-open.png](team-390-readonly-open.png) |
 
-Choices fill one column in every view, the dialog container receives automatic focus without a keyboard ring, and Tab gives the X its keyboard ring. The return button uses the request's yellow, an icon and a pointer cursor, fills exactly the input's reserved box, and leaves Send disabled while the request is pending. The arrival rows assert each behavior.
+Choices fill one column in every view, the dialog container receives automatic focus without a keyboard ring, and Tab gives the X its keyboard ring. The return button uses the request's yellow, an icon and a pointer cursor, fills exactly the input's reserved box, and leaves Send disabled beside it. The arrival rows assert each behavior.
 
 ## Sweep decisions
 

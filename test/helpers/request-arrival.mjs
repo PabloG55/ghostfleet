@@ -147,7 +147,10 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
       is(`${n}: a read-only number key sends nothing`, sentAtStart, await count());
     } else {
       const sentBefore = await count();
-      if (w === 1280) await b.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: '3', code: 'Digit3', windowsVirtualKeyCode: 51 });
+      if (w === 1280) {
+        await sleep(700); // A deliberate shortcut, after the dialog's typed-through guard.
+        await b.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: '3', code: 'Digit3', windowsVirtualKeyCode: 51 });
+      }
       else await click('.ask .opt:last-child');
       await until(() => !document.querySelector('[role=dialog]'));
       is(`${n}: answer closes it`, false, await b.evaluate(() => !!document.querySelector('[role=dialog]')));
