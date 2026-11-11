@@ -1,9 +1,11 @@
 # Offline Team subscriptions
 
 This standalone module is under the [ghostfleet Team License](../LICENSE).
-It uses Node builtins and makes no network calls. A later change will wire it into
-the team app. Count active accounts before calling it; account storage belongs to
-the app.
+It uses Node builtins. Verifying a key and checking seats make no network calls; the
+one function that does, `renewKey`, is handed its `fetch` by the caller and makes no
+request while `RENEW_URL` is empty. The team app calls this module from
+`ee/team/server/license.mjs`, which counts the accounts (those not disabled), stores
+the key and schedules the renewal; account storage belongs to the app.
 
 `verifyKey(key, { publicKey, now })` verifies an Ed25519 signature and returns
 `{ ok: true, org, seats, expires, id }`, or `{ ok: false, reason }`. Reasons are
@@ -37,6 +39,47 @@ Use `canAdd` with the **current** account count before creating an account: it
 checks one additional account and refuses additions beyond two on expiration.
 A forged or malformed key cannot grant the existing-account exception. These
 functions provide policy decisions; the app must enforce creation checks.
+
+`describeKey(key, { publicKey, now })` reads an authentic key whether or not it is
+in date: `{ ok: true, org, seats, expires, id, expired }`, or the same failures as
+`verifyKey` except `expired`. It is for a screen that has to name a lapsed
+subscription and for the renewal comparison below. It grants nothing; only
+`verifyKey`, `seatCheck` and `canAdd` decide what is allowed.
+
+## Renewal
+
+A subscription renews, and each renewal is a new key: the same `id` and `org`, a
+later `expires`. `RENEW_URL` in `public-key.mjs`, next to `PUBLIC_KEY`, is the
+license service's address. It ships empty, and empty means renewal is unavailable:
+no request is made.
+
+`renewKey({ key, url, publicKey, now, fetch, timeoutMs })` in `renew.mjs` asks once
+and decides. `url` defaults to `RENEW_URL` and `fetch` to the global one; nothing is
+stored or scheduled here.
+
+- Request: `POST url` with the JSON body `{"key":"<current gft1 key>"}` and nothing
+  else. Redirects are refused.
+- `200 {"key":"<gft1 key>"}` is the newest key of that license; `404` is an unknown
+  license; anything else is a transient error.
+- The returned key is accepted only if `verifyKey` passes, its `id` and `org` equal
+  the current key's, and its `expires` is later. An expired current key can be
+  renewed; a key that is not authentic cannot, and is never sent.
+
+It returns `{ ok: true, key, license }`, or `{ ok: false, reason, detail? }` with the
+current key left for the caller to keep:
+
+| reason | meaning | request made |
+|---|---|---|
+| `unavailable` | `url` is empty | no |
+| `no-key` | there is no key to renew | no |
+| `current-invalid` | the current key is not authentic (`detail`: why) | no |
+| `unknown-license` | the service answered 404 | yes |
+| `transient` | network error, timeout, another status, or a body without a string `key` | yes |
+| `rejected` | the returned key does not verify (`detail`: `verifyKey`'s reason) | yes |
+| `other-license` | it verifies and names another `id` or `org` | yes |
+| `not-newer` | same license, and it does not expire later than the current key | yes |
+
+## Owner tooling
 
 The owner runs the following from the repository root. Store the signing pair
 in a private directory outside every Git worktree:

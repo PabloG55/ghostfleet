@@ -5,6 +5,7 @@
 import { Users } from './users.jsx';
 import { AiAccount } from './ai.jsx';
 import { UsageAdmin } from './usage.jsx';
+import { License } from './license.jsx';
 import { t } from '../i18n.js';
 import { worded } from '../../../shared/i18n/index.js';
 
@@ -12,6 +13,7 @@ export const SECTIONS = Object.values(worded({
   users: { id: 'users', View: Users },
   ai: { id: 'ai', View: AiAccount },
   usage: { id: 'usage', View: UsageAdmin },
+  license: { id: 'license', View: License },
 }, 'admin'));
 
 export function Admin({ ctx, section }) {

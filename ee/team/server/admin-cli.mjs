@@ -7,6 +7,7 @@
 //   node server/admin-cli.mjs reset-password <name> [--demo]
 //   node server/admin-cli.mjs list [--demo]
 import { createUsers, dataDir, slug, hashPw, tempPassword } from './users.mjs';
+import { seatGate, refusalText } from './license.mjs';
 
 const argv = process.argv.slice(2);
 const mode = argv.includes('--demo') || process.env.GFW_MODE === 'demo' ? 'demo' : 'real';
@@ -23,6 +24,10 @@ function usage(code = 2) {
 try {
   if (cmd === 'create-admin') {
     if (!name) usage();
+    // The same seat check as the panel, from the same license.json: the console is where the
+    // first admin comes from, not a way around the limit for the third account.
+    const gate = seatGate({ dir, users: store.list, demo: mode === 'demo' });
+    if (!gate.allowed) throw new Error(refusalText(gate));
     const pw = tempPassword();
     const u = store.add(name, pw, { role: 'admin' });
     u.mustChange = true; store.save();

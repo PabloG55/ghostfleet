@@ -36,6 +36,8 @@
 
 
 /* ── sidebar ────────────────────────────────────────── */
+.license-bar { background: color-mix(in srgb, var(--yellow) 8%, var(--gf-abyss)); border-bottom: 1px dashed color-mix(in srgb, var(--yellow) 35%, transparent);
+  font: 12px var(--mono); }
 
 /* ── controls ───────────────────────────────────────── */
 
