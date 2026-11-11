@@ -93,6 +93,7 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 
 /* the modal's header is its title bar */
 .modal { box-shadow: var(--gf-shadow-2); }
+.scrim.sheet > .modal:focus { outline: none; box-shadow: var(--gf-shadow-2); }
 .modal header { padding: 8px 10px 8px 56px; position: relative; background: var(--bar); border-bottom: 1px dashed var(--line); }
 .modal header::before { content: ''; position: absolute; left: 14px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
   background: var(--line); box-shadow: 10px 0 0 var(--line), 20px 0 0 var(--line); }

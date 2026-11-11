@@ -603,6 +603,8 @@ textarea { resize: vertical; }
 .opt.no b { color: var(--red); } .opt.no:hover:not(:disabled) { background: rgba(255,95,95,.08); }
 .opt.chosen { border-color: var(--cyan); }
 .opt:disabled { opacity: .5; }
+.modal .ask-opts { display: grid; grid-template-columns: minmax(0, 1fr); }
+.modal .ask-opts > .opt { width: 100%; }
 
 .tabs { display: flex; gap: 2px; padding: 12px 22px 0; border-bottom: 1px solid var(--hair); }
 .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: .45em .9em; cursor: pointer; color: var(--dim); font-weight: 500; }
@@ -679,6 +681,12 @@ textarea { resize: vertical; }
    fixed — it stays the last child of the column, and where the column fits it changes nothing. */
 .session > .composer { position: sticky; bottom: 0; z-index: 2; }
 .composer-row { display: flex; gap: 10px; align-items: flex-end; }
+.composer-input { flex: 1 1 auto; min-width: 0; position: relative; }
+.composer-input textarea { display: block; width: 100%; }
+.composer-input.has-request textarea { visibility: hidden; }
+.composer-input .request-return { position: absolute; inset: 0; width: 100%; height: 100%; white-space: normal;
+  display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--yellow);
+  border-color: color-mix(in srgb, var(--yellow) 55%, var(--line)); cursor: pointer; }
 .composer textarea { flex: 1 1 auto; min-height: 46px; max-height: 220px; }
 .attach-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; font-size: 20px; cursor: pointer; }
 .attach-btn:hover { border-color: var(--cyan); background: rgba(95,215,215,.08); }
@@ -710,6 +718,11 @@ textarea { resize: vertical; }
 .scrim, .side-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: grid; place-items: center; padding: 16px; }
 .modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); width: 100%; max-width: 480px; max-height: calc(100vh - 32px); overflow-y: auto; box-shadow: 0 24px 60px rgba(0,0,0,.5); }
 .modal.wide { max-width: 640px; }
+.modal > .ask { margin: 0; padding: 16px 18px; border: 0; background: none; }
+@media (max-width: 900px) {
+  .scrim.sheet { place-items: end center; padding: 16px 0 0; }
+  .scrim.sheet > .modal { max-width: 100%; max-height: calc(100dvh - 16px); border-radius: var(--r) var(--r) 0 0; }
+}
 .modal header { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px 0; }
 .modal header h2 { font-size: 17px; }
 .modal .x { background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 16px; }
@@ -1138,6 +1151,9 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 /* Jarvis's calls waiting on a yes (assistant.jsx Proposals): one row each, the buttons kept
  * together so a narrow card wraps the words and never splits Yes from No. */
 .as-asks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.proposal-slot { height: 36px; flex: none; }
+.proposal-return { height: 36px; }
+.modal .as-asks { padding: 16px 18px; }
 .as-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 10px;
   border: 1px solid var(--line); border-left: 3px solid var(--yellow); background: var(--panel); }
 .as-ask .grow { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
@@ -1407,6 +1423,7 @@ h1, .page-head h1 { font: 400 24px/1.2 var(--px); letter-spacing: 0; color: var(
 
 /* the modal's header is its title bar */
 .modal { box-shadow: var(--gf-shadow-2); }
+.scrim.sheet > .modal:focus { outline: none; box-shadow: var(--gf-shadow-2); }
 .modal header { padding: 8px 10px 8px 56px; position: relative; background: var(--bar); border-bottom: 1px dashed var(--line); }
 .modal header::before { content: ''; position: absolute; left: 14px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
   background: var(--line); box-shadow: 10px 0 0 var(--line), 20px 0 0 var(--line); }

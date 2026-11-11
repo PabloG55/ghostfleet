@@ -30,11 +30,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { launch, serveDir, sleep } from '../../lib/browser.mjs';
+import { requestArrivals } from './request-arrival.mjs';
+import { requestTyping } from './request-typing.mjs';
 
 const ROOT = path.resolve(new URL('../..', import.meta.url).pathname);
 const argv = process.argv.slice(2);
 const served = argv[0] === '--served' ? argv[1] : '';
-const WEB = path.resolve(!served && argv[0] ? argv[0] : path.join(ROOT, 'web'));
+const arrivalOnly = argv[0] === '--arrival-only';
+const typingOnly = argv[0] === '--typing-only';
+const WEB = path.resolve((arrivalOnly || typingOnly ? argv[1] : !served && argv[0]) || path.join(ROOT, 'web'));
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
@@ -107,6 +111,15 @@ try {
     await open(390, 844);
     await b.call('Page.navigate', { url: srv.base + '/' });
 
+    if (arrivalOnly || typingOnly) {
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      if (typingOnly) await requestTyping({ b, is, shots: process.env.REQUEST_TYPING_SHOTS || '' });
+      else await requestArrivals({ b, is, shots: process.env.REQUEST_SHOTS || '', go: async () => {
+        await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+        await until(() => !!document.querySelector('.composer'));
+      } });
+    } else {
     // ── the lock, in fixture mode ──────────────────────────────────────────────
     is('the lock is drawn', true, !!(await until(() => !!document.querySelector('.auth-card'))));
     const bypass = await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
@@ -387,12 +400,11 @@ try {
     // The fixture holds one proposal. A No costs no passkey, so it can be pressed here; the Yes is
     // the adapter's assertFor, the same path as every passkey verb.
     await b.evaluate(() => { location.hash = '#/'; });
+    await until(() => !!document.querySelector('.home-agent .proposal-return'));
+    await clickText('.home-agent .proposal-return', '');
     const ask = await until(() => { const r = document.querySelector('.home-agent .as-ask'); return r && [r.querySelector('.grow'), ...r.querySelectorAll('button')].map(n => n.textContent.replace(/\s+/g, ' ').trim()).join(' | '); });
     is('the home card lists what Jarvis waits on a yes for', 'Jarvis asks: stop acme-api/docs-pass and remove its worktree? K7Q2 | Yes | No', ask);
-    is('...above the place to talk', true, await b.evaluate(() => {
-      const a = document.querySelector('.home-agent .as-asks'), c = document.querySelector('.home-agent .console');
-      return !!(a && c && (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING));
-    }));
+    is('...in the app dialog', true, await b.evaluate(() => !!document.querySelector('.home-agent [role=dialog] .as-asks')));
     await clickText('.home-agent .as-ask button', '^No$');
     is('...a No answers it, and it leaves the list', true, !!(await until(() => !document.querySelector('.home-agent .as-ask'))));
     is('...saying what will not happen', true, !!(await until(() => /Jarvis will not stop acme-api\/docs-pass/.test(document.querySelector('.toasts')?.textContent || ''))));
@@ -412,10 +424,10 @@ try {
               { ...base, laterAt: now - day }, { ...base, laterAt: now - 4 * day }, { ...base, on: true }]
         .map(c => offerWanted(c) ? 'yes' : 'no').join(' ');
     }));
-    await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+    await b.evaluate(() => { location.hash = '#/p/acme-api/s/master'; });
 
-    // ── a poll does not take the keyboard away ────────────────────────────────
-    await until(() => !!document.querySelector('.composer textarea'));
+    // ── a poll does not take the keyboard away (a session with no pending request) ──
+    await until(() => document.querySelector('.sess-title h1')?.textContent === 'master' && !!document.querySelector('.composer textarea'));
     await b.evaluate(() => { const ta = document.querySelector('.composer textarea'); ta.__mark = 1; ta.focus(); });
     await b.call('Input.insertText', { text: 'half a sentence' });
     await sleep(6500);                                   // past one 5 s poll, and its answer
@@ -452,7 +464,7 @@ try {
     is('nothing on the way through claimed the audio session', '', (await b.evaluate(() => window.__audio)).join(','));
 
     // ── a draft per session (web/ui/drafts.js) ────────────────────────────────
-    // api-fix's box holds "half a sentence" from above. Each session's box is its own, and the
+    // master's box holds "half a sentence" from above. Each session's box is its own, and the
     // words come back after leaving, after a reload, and go only when a send of them succeeds.
     const boxOf = async (hash) => {
       await b.evaluate((x) => { location.hash = x; }, hash);
@@ -460,27 +472,27 @@ try {
       await sleep(300);
       return b.evaluate(() => document.querySelector('.composer textarea').value);
     };
-    is('another session\'s box is its own', '', await boxOf('#/p/acme-api/s/docs-pass'));
-    is('...and the draft is there on coming back', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    is('another session\'s box is its own', '', await boxOf('#/p/acme-api/s/api-fix'));
+    is('...and the draft is there on coming back', 'half a sentence', await boxOf('#/p/acme-api/s/master'));
     // The files a draft had cannot survive a reload; the draft remembers how many, and says so.
     await b.evaluate(() => {
       const o = JSON.parse(localStorage.getItem('gfw.drafts') || '{}');
-      o['acme-api\x1fapi-fix'] = { ...o['acme-api\x1fapi-fix'], files: 2 };
+      o['acme-api\x1fmaster'] = { ...o['acme-api\x1fmaster'], files: 2 };
       localStorage.setItem('gfw.drafts', JSON.stringify(o));
       location.reload();
     });
     await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
     await clickText('.auth-card button', 'without a passkey');
     await until(() => !!document.querySelector('.app'));
-    is('...and after a reload', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    is('...and after a reload', 'half a sentence', await boxOf('#/p/acme-api/s/master'));
     is('...saying how many of its files the reload dropped', '2 files attached to this draft did not survive the reload. Attach them again. OK',
        (await texts('.composer .att-lost')).join(' ').replace(/\s+/g, ' '));
     await clickText('.composer .att-lost button', '^OK$');
     is('...until that has been read', 0, (await texts('.composer .att-lost')).length);
     await clickText('.composer button[type=submit]', 'Send');
     is('a send that succeeds empties the box', true, !!(await until(() => document.querySelector('.composer textarea')?.value === '')));
-    is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/docs-pass') + await boxOf('#/p/acme-api/s/api-fix'));
-    is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fapi-fix' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));
+    is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/api-fix') + await boxOf('#/p/acme-api/s/master'));
+    is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fmaster' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));
 
     // ── a reload keeps its place ──────────────────────────────────────────────
     // The place is the address (web/ui/history.js): a reload, a link opened or a desk tab whose
@@ -493,6 +505,7 @@ try {
     await until(() => !!document.querySelector('.app'));
     await sleep(600);
     is('...and lands where it was', '#/p/acme-web', await b.evaluate(() => location.hash));
+    await until(() => /acme-web/.test(document.querySelector('.main h1')?.textContent || ''));
     is('...drawing that project', true, await b.evaluate(() => /acme-web/.test(document.querySelector('.main h1')?.textContent || '')));
 
     // ── an address changed the moment the app appears ─────────────────────────
@@ -594,7 +607,13 @@ try {
     const server = CASES.map(([m, v]) => runState(m, v));
     is('the phone\'s run state matches the server\'s, case by case', JSON.stringify(server), JSON.stringify(client));
     is('...and the cases are not all one answer', true, new Set(server.map(s => JSON.stringify(s))).size >= 3);
+    await requestArrivals({ b, is, go: async () => {
+      await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+      await until(() => !!document.querySelector('.composer'));
+    } });
+    await requestTyping({ b, is });
     is('no page error, anywhere on the way', '', errors.join(' | '));
+    }
   }
 } catch (e) {
   is('phone-check ran to the end', '', String((e && e.stack) || e).split('\n').slice(0, 2).join(' '));

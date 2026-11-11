@@ -649,6 +649,11 @@ const BINARY_REVIEWED = new Set([
   'cb9ac55c5cc13cb5',   // web/fixtures/shots/docs-install.png
   '68234ec7e201e78f',   // web/fixtures/shots/flow.mp4
   '32a065ac00c98c87',   // web/fixtures/shots/web-invoices.png
+  // Permission arrival proof: four retained fixture-only views; all widths and states were shot and read.
+  'a2bc3e4e2d91a287',   // docs/permission-modal/phone-1280-open.png
+  '4fd83b83dd59282d',   // docs/permission-modal/phone-390-closed.png
+  '79b86b2231cd9cbb',   // docs/permission-modal/phone-390-open.png
+  '35eb5432802e6af1',   // docs/permission-modal/team-390-readonly-open.png
   // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
   // packages the team app installs), so they carry the foundries' tables and nothing of ours.
   '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
@@ -670,6 +675,10 @@ const BINARY_EXPECTED = [
   'docs/stack-demo.gif', 'docs/stack-demo.mp4',
   'docs/worktree-demo.gif', 'docs/worktree-demo.mp4',
   'web/icons/apple-touch-icon.png', 'web/icons/icon-192.png', 'web/icons/icon-512.png',
+  'docs/permission-modal/phone-1280-open.png',
+  'docs/permission-modal/phone-390-closed.png',
+  'docs/permission-modal/phone-390-open.png',
+  'docs/permission-modal/team-390-readonly-open.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.
   'ee/team/web/public/icons/apple-touch-icon.png', 'ee/team/web/public/icons/icon-192.png', 'ee/team/web/public/icons/icon-512.png',

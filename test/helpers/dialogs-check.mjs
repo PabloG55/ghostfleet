@@ -112,8 +112,17 @@ try {
     return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
   }, sel, text);
   async function tap(sel, text = '') {
-    const p = await until(() => centreOf(sel, text), 4000);
+    let p = await until(() => centreOf(sel, text), 4000);
     if (!p) return false;
+    // Session data and fonts can land between locating More and the pointer press.
+    // Use its settled position, as the team browser helper does for the owner picker.
+    for (let i = 0; i < 20; i++) {
+      await sleep(80);
+      const now = await centreOf(sel, text);
+      if (!now) return false;
+      if (now.x === p.x && now.y === p.y) break;
+      p = now;
+    }
     await press(p.x, p.y);
     return true;
   }
@@ -167,19 +176,23 @@ try {
       return !!document.querySelector('.app .main');
     }), 10000);
     await sleep(300);
+    await b.evaluate(() => document.fonts.ready.then(() => 0));
+    await tap('.modal .x');
   }
   async function step(name, fn) {
     try { await fn(); } catch (e) { is(`${name}: ran to the end`, 'yes', String((e && e.message) || e).slice(0, 160)); }
   }
   // Where the dialogs live.
   const toProject = (p) => async () => { await goTo(`/p/${p}`); await until(() => centreOf('.page button', 'New session'), 8000); };
-  const toSession = async () => { await goTo('/p/acme-api/s/api-fix'); await until(() => centreOf('.sess-tools button', 'More'), 8000); };
+  const toSession = async () => { await goTo('/p/acme-api/s/api-fix'); await until(() => b.evaluate(() => !!document.querySelector('.session .request-return') && !!document.querySelector('.sess-title .branch')), 8000); await tap('.modal .x'); };
   const fromMenu = (item) => async () => { await tap('.sess-tools button', 'More'); await tap('.menu button', item); };
   const toQueue = async () => { await goTo('/queue'); await until(() => centreOf('.extra-card button', 'Reply'), 8000); };
 
   // Every dialog the fixture fleet can open on the phone's screens, from the screen it lives on.
   // Label and schedule are not here: the phone's server does not serve them (adapter NOT_SERVED).
   const DIALOGS = [
+    { name: 'permission request', home: toSession, open: () => tap('.request-return') },
+    { name: 'assistant approval', home: async () => { await goTo('/'); await tap('.modal .x'); }, open: () => tap('.proposal-return') },
     { name: 'new session', home: toProject('acme-api'), open: () => tap('.page button', 'New session') },
     { name: 'delete a free worktree', home: toProject('toolbox'), open: () => tap('.free-row button', 'Delete') },
     { name: 'rename', home: toSession, open: fromMenu('Rename') },

@@ -702,7 +702,10 @@ var en_default = {
 	"sess.remove": "Remove {name}",
 	"sess.attach": "Attach files or images",
 	"sess.drop": "Drop the files here…",
-	"sess.pendingAbove": "There is a pending request above; what you write is queued until it is answered.",
+	"sess.answerRequest": "Answer the request",
+	"sess.viewRequest": "View the request",
+	"sess.viewLimit": "View usage limit",
+	"sess.requestReadonly": "You can view this request. A project member must answer it.",
 	"sess.writeTo": "Write to {name}…  (attach or drag a file · Enter sends)",
 	"sess.uploadingBtn": "Uploading…",
 	"sess.labelTitle": "Session label",
@@ -1554,7 +1557,10 @@ var es_default = {
 	"sess.remove": "Quitar {name}",
 	"sess.attach": "Adjuntar archivos o imágenes",
 	"sess.drop": "Suelta aquí los archivos…",
-	"sess.pendingAbove": "Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.",
+	"sess.answerRequest": "Responder al pedido",
+	"sess.viewRequest": "Ver el pedido",
+	"sess.viewLimit": "Ver límite de uso",
+	"sess.requestReadonly": "Puedes ver este pedido. Debe responderlo un miembro del proyecto.",
 	"sess.writeTo": "Escríbele a {name}…  (adjunta o arrastra un archivo · Enter envía)",
 	"sess.uploadingBtn": "Subiendo…",
 	"sess.labelTitle": "Etiqueta de la sesión",
@@ -3151,7 +3157,61 @@ function ProjectName({ name }) {
 		children: [" · ", host]
 	})] }) : bare;
 }
-function Modal({ title, onClose, children, wide }) {
+var requestsSeen = /* @__PURE__ */ new Map();
+function useRequest(scope, key, active = true) {
+	const [opened, setOpened] = d(null);
+	h(() => {
+		if (key === void 0 || !active) return;
+		if (key === null) {
+			requestsSeen.delete(scope);
+			setOpened(null);
+			return;
+		}
+		if (requestsSeen.get(scope) !== key) {
+			requestsSeen.set(scope, key);
+			setOpened(key);
+		}
+	}, [
+		scope,
+		key,
+		active
+	]);
+	return {
+		open: !!key && opened === key && active,
+		close: () => setOpened(null),
+		show: () => setOpened(key)
+	};
+}
+function Modal({ title, onClose, children, wide, sheet = false }) {
+	const box = A(null);
+	_(() => {
+		if (!sheet) return;
+		const previous = document.activeElement;
+		const dialog = box.current;
+		const owner = dialog?.closest(".session, .proposal-slot");
+		dialog?.focus({ preventScroll: true });
+		const trap = (e) => {
+			if (e.key !== "Tab") return;
+			const items = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex=\"0\"]")].filter((n) => n.getClientRects().length);
+			const first = items[0], last = items[items.length - 1];
+			if (document.activeElement === dialog) {
+				e.preventDefault();
+				(e.shiftKey ? last : first)?.focus();
+			} else if (e.shiftKey && document.activeElement === first) {
+				e.preventDefault();
+				last?.focus();
+			} else if (!e.shiftKey && document.activeElement === last) {
+				e.preventDefault();
+				first?.focus();
+			}
+		};
+		dialog?.addEventListener("keydown", trap);
+		return () => {
+			dialog?.removeEventListener("keydown", trap);
+			const back = owner?.querySelector(".request-return, .proposal-return") || previous;
+			if (back?.isConnected && back.getClientRects().length && getComputedStyle(back).visibility !== "hidden") back.focus({ preventScroll: true });
+		};
+	}, [sheet]);
 	h(() => {
 		const k = (e) => {
 			if (e.key === "Escape") onClose();
@@ -3160,15 +3220,17 @@ function Modal({ title, onClose, children, wide }) {
 		return () => removeEventListener("keydown", k);
 	}, [onClose]);
 	return /* @__PURE__ */ u("div", {
-		class: "scrim",
+		class: `scrim${sheet ? " sheet" : ""}`,
 		onMouseDown: (e) => {
 			if (e.target === e.currentTarget) onClose();
 		},
 		children: /* @__PURE__ */ u("div", {
+			ref: box,
 			class: `modal${wide ? " wide" : ""}`,
 			role: "dialog",
 			"aria-modal": "true",
 			"aria-label": title,
+			tabIndex: sheet ? -1 : void 0,
 			children: [/* @__PURE__ */ u("header", { children: [/* @__PURE__ */ u("h2", { children: title }), /* @__PURE__ */ u("button", {
 				class: "x",
 				"aria-label": t("common.close"),
@@ -5458,14 +5520,13 @@ function optionText(label) {
 		kind: ""
 	};
 }
-function PromptCard({ prompt, onAnswer, busy }) {
-	const [typed, setTyped] = d("");
+function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
 	if (prompt.kind === "permission") return /* @__PURE__ */ u("div", {
 		class: "ask permission",
 		children: [
 			/* @__PURE__ */ u("div", {
 				class: "ask-head",
-				children: [/* @__PURE__ */ u("b", { children: ["● ", t("sess.asksPermission")] }), /* @__PURE__ */ u("span", { children: prompt.tool || t("sess.aTool") })]
+				children: /* @__PURE__ */ u("b", { children: prompt.tool || t("sess.aTool") })
 			}),
 			prompt.command ? /* @__PURE__ */ u("pre", {
 				class: "ask-cmd",
@@ -5498,14 +5559,10 @@ function PromptCard({ prompt, onAnswer, busy }) {
 		children: [
 			/* @__PURE__ */ u("div", {
 				class: "ask-head",
-				children: [
-					/* @__PURE__ */ u("b", { children: ["● ", t("sess.asks")] }),
-					tabs.length > 1 ? /* @__PURE__ */ u("span", { children: t("sess.qOf", {
-						i: prompt.tab != null ? prompt.tab + 1 : "?",
-						n: tabs.length
-					}) }) : null,
-					prompt.submit ? /* @__PURE__ */ u("span", { children: t("sess.review") }) : null
-				]
+				children: [tabs.length > 1 ? /* @__PURE__ */ u("span", { children: t("sess.qOf", {
+					i: prompt.tab != null ? prompt.tab + 1 : "?",
+					n: tabs.length
+				}) }) : null, prompt.submit ? /* @__PURE__ */ u("span", { children: t("sess.review") }) : null]
 			}),
 			/* @__PURE__ */ u("p", {
 				class: "ask-q",
@@ -5519,6 +5576,7 @@ function PromptCard({ prompt, onAnswer, busy }) {
 				},
 				children: [/* @__PURE__ */ u("input", {
 					class: "grow",
+					disabled: busy,
 					value: typed,
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: t("sess.yourAnswer"),
@@ -5904,6 +5962,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const [drag, setDrag] = d(false);
 	const picker = A(null);
 	const typing = A(!!draft);
+	const composer = A(null);
+	const lastComposerKey = A(-Infinity);
+	const typingPause = A(null);
+	const [composerFocused, setComposerFocused] = d(false);
+	const [composerRecent, setComposerRecent] = d(false);
+	const composerKey = () => {
+		lastComposerKey.current = performance.now();
+		setComposerRecent(true);
+		clearTimeout(typingPause.current);
+		typingPause.current = setTimeout(() => setComposerRecent(false), 2e3);
+	};
+	h(() => () => clearTimeout(typingPause.current), []);
 	const sentAt = A(0);
 	const statusNow = A("unknown");
 	const quietRef = A(quiet);
@@ -5934,6 +6004,21 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	statusNow.current = st;
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
+	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+	const held = !!prompt && composerFocused && composerRecent;
+	const request = useRequest(`session:${project}/${name}`, pane.data ? prompt?.fingerprint || null : void 0, available && !held);
+	const showRequest = () => {
+		clearTimeout(typingPause.current);
+		setComposerRecent(false);
+		request.show();
+	};
+	const quota = useRequest(`quota:${project}/${name}`, card ? st === "limit" ? String(card.limit_at || "limit") : null : void 0, available && !prompt);
+	const canAnswer = !fleet.canAnswer || fleet.canAnswer(project);
+	const [typedAnswer, setTypedAnswer] = d("");
+	h(() => {
+		setTypedAnswer("");
+	}, [prompt?.fingerprint]);
+	const answering = A(false);
 	const act = async (tool, args = {}, opts = {}) => {
 		setBusy(true);
 		try {
@@ -5958,11 +6043,42 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 			setBusy(false);
 		}
 	};
-	const answer = (text, noEnter) => act("fleet_answer", {
-		text,
-		no_enter: noEnter,
-		expect: prompt?.fingerprint
-	});
+	const answer = async (text, noEnter) => {
+		if (!canAnswer || answering.current || !prompt) return;
+		answering.current = true;
+		try {
+			if (await act("fleet_answer", {
+				text,
+				no_enter: noEnter,
+				expect: prompt.fingerprint
+			})) request.close();
+		} finally {
+			answering.current = false;
+		}
+	};
+	const requestOpenedAt = A(Infinity);
+	_(() => {
+		requestOpenedAt.current = request.open ? performance.now() : Infinity;
+	}, [request.open, prompt?.fingerprint]);
+	_(() => {
+		if (!request.open || !canAnswer || prompt?.typing) return;
+		const key = (e) => {
+			if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+			const now = performance.now();
+			if (now - requestOpenedAt.current < 600 || now - lastComposerKey.current <= 1500) return;
+			const o = prompt.options?.find((o) => String(o.n) === e.key);
+			if (o) {
+				e.preventDefault();
+				answer(String(o.n), prompt.kind !== "permission");
+			}
+		};
+		addEventListener("keydown", key);
+		return () => removeEventListener("keydown", key);
+	}, [
+		request.open,
+		prompt,
+		canAnswer
+	]);
 	const addFiles = (list) => {
 		const picked = [...list || []].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
 		if (list?.length > picked.length) toast(t("sess.maxFiles", { n: fleet.attachPerMessage }), "");
@@ -5995,11 +6111,16 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const uploading = files.some((f) => f.state === "up");
 	const ready = files.filter((f) => f.state === "ok");
 	const sendDraft = async () => {
+		if (prompt) {
+			showRequest();
+			return;
+		}
+		if (st === "limit") return;
 		const text = draft.trim();
 		if (!text && !ready.length || uploading) return;
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
-		const prompt = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
-		if (await act("fleet_send", { prompt })) {
+		const message = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
+		if (await act("fleet_send", { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -6200,48 +6321,68 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 					presence(pane.data?.here || [])
 				]
 			}),
-			st === "limit" ? /* @__PURE__ */ u("div", {
-				class: "ask limit",
-				children: [
-					/* @__PURE__ */ u("div", {
-						class: "ask-head",
-						children: [/* @__PURE__ */ u("b", { children: [
-							/* @__PURE__ */ u(Icon, { name: "hourglass" }),
-							" ",
-							t("status.limit.hint")
-						] }), card?.limit_at ? /* @__PURE__ */ u("span", { children: t("sess.quotaBack", { when: hhmm$1(card.limit_at) }) }) : null]
-					}),
-					/* @__PURE__ */ u("p", {
-						class: "muted small",
-						children: t("sess.limitWhy")
-					}),
-					card?.sched ? /* @__PURE__ */ u("p", { children: t("sess.alreadySched", { when: hhmm$1(card.sched.at) }) }) : !can("gfw_schedule") ? null : /* @__PURE__ */ u("div", {
-						class: "row wrap",
-						children: [/* @__PURE__ */ u(Btn, {
-							kind: "primary",
-							disabled: busy,
-							onClick: () => act("gfw_schedule", {
-								at: (card?.limit_at || Math.floor(Date.now() / 1e3) + 18e3) + 90,
-								msg: t("sess.continueMsg")
-							}),
-							children: [
-								/* @__PURE__ */ u(Icon, { name: "clock" }),
+			quota.open ? /* @__PURE__ */ u(Modal, {
+				sheet: true,
+				title: t("status.limit.hint"),
+				onClose: quota.close,
+				children: /* @__PURE__ */ u("div", {
+					class: "ask limit",
+					children: [
+						/* @__PURE__ */ u("div", {
+							class: "ask-head",
+							children: [/* @__PURE__ */ u("b", { children: [
+								/* @__PURE__ */ u(Icon, { name: "hourglass" }),
 								" ",
-								t("sess.resumeOnQuota")
-							]
-						}), /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setSchedOpen(true),
-							children: t("sess.otherTime")
-						})]
-					})
-				]
+								t("status.limit.hint")
+							] }), card?.limit_at ? /* @__PURE__ */ u("span", { children: t("sess.quotaBack", { when: hhmm$1(card.limit_at) }) }) : null]
+						}),
+						/* @__PURE__ */ u("p", {
+							class: "muted small",
+							children: t("sess.limitWhy")
+						}),
+						card?.sched ? /* @__PURE__ */ u("p", { children: t("sess.alreadySched", { when: hhmm$1(card.sched.at) }) }) : !can("gfw_schedule") ? null : /* @__PURE__ */ u("div", {
+							class: "row wrap",
+							children: [/* @__PURE__ */ u(Btn, {
+								kind: "primary",
+								disabled: busy,
+								onClick: async () => {
+									if (await act("gfw_schedule", {
+										at: (card?.limit_at || Math.floor(Date.now() / 1e3) + 18e3) + 90,
+										msg: t("sess.continueMsg")
+									})) quota.close();
+								},
+								children: [
+									/* @__PURE__ */ u(Icon, { name: "clock" }),
+									" ",
+									t("sess.resumeOnQuota")
+								]
+							}), /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => {
+									quota.close();
+									setSchedOpen(true);
+								},
+								children: t("sess.otherTime")
+							})]
+						})
+					]
+				})
 			}) : null,
-			prompt ? /* @__PURE__ */ u(PromptCard, {
-				prompt,
-				onAnswer: answer,
-				busy
-			}, prompt.fingerprint) : null,
+			request.open ? /* @__PURE__ */ u(Modal, {
+				sheet: true,
+				title: t(prompt.kind === "permission" ? "sess.asksPermission" : "sess.asks"),
+				onClose: request.close,
+				children: [/* @__PURE__ */ u(PromptCard, {
+					prompt,
+					onAnswer: answer,
+					busy: busy || !canAnswer,
+					typed: typedAnswer,
+					setTyped: setTypedAnswer
+				}, prompt.fingerprint), !canAnswer ? /* @__PURE__ */ u("p", {
+					class: "modal-body muted small",
+					children: t("sess.requestReadonly")
+				}) : null]
+			}) : null,
 			/* @__PURE__ */ u("div", {
 				class: "tabs",
 				role: "tablist",
@@ -6371,35 +6512,54 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									e.currentTarget.value = "";
 								}
 							}),
-							/* @__PURE__ */ u("textarea", {
-								rows: 2,
-								value: draft,
-								placeholder: drag ? t("sess.drop") : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
-								onInput: (e) => {
-									setDraft(e.currentTarget.value);
-									typing.current = !!e.currentTarget.value;
-								},
-								onPaste: (e) => {
-									const fs = [...e.clipboardData?.files || []];
-									if (fs.length) {
-										e.preventDefault();
-										addFiles(fs);
+							/* @__PURE__ */ u("div", {
+								class: `composer-input${prompt && !held || st === "limit" ? " has-request" : ""}`,
+								children: [/* @__PURE__ */ u("textarea", {
+									ref: composer,
+									rows: 2,
+									value: draft,
+									placeholder: drag ? t("sess.drop") : t("sess.writeTo", { name }),
+									onFocus: () => setComposerFocused(true),
+									onBlur: () => setComposerFocused(false),
+									onInput: (e) => {
+										setDraft(e.currentTarget.value);
+										typing.current = !!e.currentTarget.value;
+										if (document.activeElement === composer.current) composerKey();
+									},
+									onPaste: (e) => {
+										const fs = [...e.clipboardData?.files || []];
+										if (fs.length) {
+											e.preventDefault();
+											addFiles(fs);
+										}
+									},
+									onKeyDown: (e) => {
+										composerKey();
+										if (e.key === "Escape" && !e.isComposing) {
+											e.preventDefault();
+											e.currentTarget.blur();
+										} else if (held && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
+											e.preventDefault();
+											showRequest();
+										} else if (sendsOnEnter(e)) {
+											e.preventDefault();
+											sendDraft();
+										}
 									}
-								},
-								onKeyDown: (e) => {
-									if (e.key === "Escape" && !e.isComposing) {
-										e.preventDefault();
-										e.currentTarget.blur();
-									} else if (sendsOnEnter(e)) {
-										e.preventDefault();
-										sendDraft();
-									}
-								}
+								}), prompt && !held || st === "limit" ? /* @__PURE__ */ u("button", {
+									type: "button",
+									class: "btn request-return",
+									onClick: prompt ? showRequest : quota.show,
+									children: [/* @__PURE__ */ u(Icon, {
+										name: prompt ? "question" : "hourglass",
+										size: 18
+									}), t(prompt ? canAnswer ? "sess.answerRequest" : "sess.viewRequest" : "sess.viewLimit")]
+								}) : null]
 							}),
 							/* @__PURE__ */ u(Btn, {
 								kind: "primary",
 								type: "submit",
-								disabled: busy || uploading || !draft.trim() && !ready.length,
+								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
 								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]
@@ -11890,11 +12050,13 @@ function Proposals() {
 	const { data, reload } = usePoll(() => has ? fleet.proposals() : Promise.resolve([]), has ? 15e3 : 0, [has]);
 	const [busyId, setBusyId] = d("");
 	const list = Array.isArray(data) ? data : [];
-	if (!has || !list.length) return null;
+	const request = useRequest("proposals", data == null ? void 0 : list.map((p) => `${p.id}:${!!p.granted}`).join("|") || null);
+	if (!has) return null;
 	const answer = async (p, yes) => {
 		setBusyId(p.id);
 		try {
 			await fleet.answerProposal(p, yes);
+			request.close();
 			toast(t(yes ? "as.proposalYesDone" : "as.proposalNoDone", { summary: p.summary }), "good");
 		} catch (e) {
 			toast(String(e && e.message || e), "bad");
@@ -11903,36 +12065,48 @@ function Proposals() {
 			reload();
 		}
 	};
-	return /* @__PURE__ */ u("ul", {
-		class: "as-asks",
-		"aria-label": t("as.proposals"),
-		children: list.map((p) => /* @__PURE__ */ u("li", {
-			class: "as-ask",
-			children: [/* @__PURE__ */ u("span", {
-				class: "grow",
-				children: [
-					t(p.granted ? "as.proposalGranted" : "as.proposal", { summary: p.summary }),
-					" ",
-					/* @__PURE__ */ u("small", {
-						class: "muted",
-						children: p.id
-					})
-				]
-			}), p.granted ? null : /* @__PURE__ */ u("span", {
-				class: "as-ask-btns",
-				children: [/* @__PURE__ */ u(Btn, {
-					kind: "primary sm",
-					disabled: busyId === p.id,
-					onClick: () => answer(p, true),
-					children: t("as.proposalYes")
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "sm",
-					disabled: busyId === p.id,
-					onClick: () => answer(p, false),
-					children: t("as.proposalNo")
-				})]
-			})]
-		}, p.id))
+	return /* @__PURE__ */ u("div", {
+		class: "proposal-slot",
+		children: [list.length ? /* @__PURE__ */ u(Btn, {
+			kind: "sm proposal-return",
+			onClick: request.show,
+			children: t("sess.answerRequest")
+		}) : null, request.open ? /* @__PURE__ */ u(Modal, {
+			sheet: true,
+			title: t("as.proposals"),
+			onClose: request.close,
+			children: /* @__PURE__ */ u("ul", {
+				class: "as-asks modal-body",
+				"aria-label": t("as.proposals"),
+				children: list.map((p) => /* @__PURE__ */ u("li", {
+					class: "as-ask",
+					children: [/* @__PURE__ */ u("span", {
+						class: "grow",
+						children: [
+							t(p.granted ? "as.proposalGranted" : "as.proposal", { summary: p.summary }),
+							" ",
+							/* @__PURE__ */ u("small", {
+								class: "muted",
+								children: p.id
+							})
+						]
+					}), p.granted ? null : /* @__PURE__ */ u("span", {
+						class: "as-ask-btns",
+						children: [/* @__PURE__ */ u(Btn, {
+							kind: "primary sm",
+							disabled: busyId === p.id,
+							onClick: () => answer(p, true),
+							children: t("as.proposalYes")
+						}), /* @__PURE__ */ u(Btn, {
+							kind: "sm",
+							disabled: busyId === p.id,
+							onClick: () => answer(p, false),
+							children: t("as.proposalNo")
+						})]
+					})]
+				}, p.id))
+			})
+		}) : null]
 	});
 }
 function HomeAgent({ projects }) {

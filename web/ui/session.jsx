@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
+import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
@@ -22,12 +22,11 @@ function optionText(label) {
   return { text: l, sub: '', kind: '' };
 }
 
-function PromptCard({ prompt, onAnswer, busy }) {
-  const [typed, setTyped] = useState('');
+function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
   if (prompt.kind === 'permission') {
     return (
       <div class="ask permission">
-        <div class="ask-head"><b>● {t('sess.asksPermission')}</b><span>{prompt.tool || t('sess.aTool')}</span></div>
+        <div class="ask-head"><b>{prompt.tool || t('sess.aTool')}</b></div>
         {prompt.command ? <pre class="ask-cmd">{prompt.command.replace(/╌+/g, '').trim()}</pre> : null}
         <div class="ask-opts">
           {(prompt.options || []).map(o => {
@@ -46,13 +45,13 @@ function PromptCard({ prompt, onAnswer, busy }) {
   const tabs = (prompt.tabs || []).filter(x => !x.submit);
   return (
     <div class="ask question">
-      <div class="ask-head"><b>● {t('sess.asks')}</b>
+      <div class="ask-head">
         {tabs.length > 1 ? <span>{t('sess.qOf', { i: prompt.tab != null ? prompt.tab + 1 : '?', n: tabs.length })}</span> : null}
         {prompt.submit ? <span>{t('sess.review')}</span> : null}</div>
       <p class="ask-q">{prompt.question}</p>
       {prompt.typing ? (
         <form class="row" onSubmit={(e) => { e.preventDefault(); if (typed.trim()) onAnswer(typed.trim(), false); }}>
-          <input class="grow" value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
+          <input class="grow" disabled={busy} value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
           <Btn kind="primary" type="submit" disabled={busy || !typed.trim()}>{t('common.send')}</Btn>
         </form>
       ) : (
@@ -314,6 +313,18 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const [drag, setDrag] = useState(false);
   const picker = useRef(null);
   const typing = useRef(!!draft);
+  const composer = useRef(null);
+  const lastComposerKey = useRef(-Infinity);
+  const typingPause = useRef(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [composerRecent, setComposerRecent] = useState(false);
+  const composerKey = () => {
+    lastComposerKey.current = performance.now();
+    setComposerRecent(true);
+    clearTimeout(typingPause.current);
+    typingPause.current = setTimeout(() => setComposerRecent(false), 2000);
+  };
+  useEffect(() => () => clearTimeout(typingPause.current), []);
 
   // The transcript on its own poll (transcript.js), LIVE while an answer is owed: the session
   // working, or a message sent in the last two minutes.
@@ -340,6 +351,17 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   statusNow.current = st;
   const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
+  const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+  // A request waits for a pause in an active sentence. The draft stays in its original box
+  // until then; Enter explicitly opens the request rather than sending that sentence.
+  const held = !!prompt && composerFocused && composerRecent;
+  const request = useRequest(`session:${project}/${name}`, pane.data ? (prompt?.fingerprint || null) : undefined, available && !held);
+  const showRequest = () => { clearTimeout(typingPause.current); setComposerRecent(false); request.show(); };
+  const quota = useRequest(`quota:${project}/${name}`, card ? (st === 'limit' ? String(card.limit_at || 'limit') : null) : undefined, available && !prompt);
+  const canAnswer = !fleet.canAnswer || fleet.canAnswer(project);
+  const [typedAnswer, setTypedAnswer] = useState('');
+  useEffect(() => { setTypedAnswer(''); }, [prompt?.fingerprint]);
+  const answering = useRef(false);
 
   const act = async (tool, args = {}, opts = {}) => {
     setBusy(true);
@@ -355,7 +377,33 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       return null;
     } finally { setBusy(false); }
   };
-  const answer = (text, noEnter) => act('fleet_answer', { text, no_enter: noEnter, expect: prompt?.fingerprint });
+  const answer = async (text, noEnter) => {
+    if (!canAnswer || answering.current || !prompt) return;
+    answering.current = true;
+    try {
+      const r = await act('fleet_answer', { text, no_enter: noEnter, expect: prompt.fingerprint });
+      if (r) request.close();
+    } finally { answering.current = false; }
+  };
+  // The dialog owns these keys; the app's normal desk shortcuts deliberately stop at a modal.
+  const requestOpenedAt = useRef(Infinity);
+  useLayoutEffect(() => {
+    requestOpenedAt.current = request.open ? performance.now() : Infinity;
+  }, [request.open, prompt?.fingerprint]);
+  useLayoutEffect(() => {
+    if (!request.open || !canAnswer || prompt?.typing) return;
+    const key = (e) => {
+      if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+      // Focus may have just left a sentence containing a number. Neither typed-through keys
+      // nor a held key may authorize a tool; deliberate clicks remain immediate.
+      const now = performance.now();
+      if (now - requestOpenedAt.current < 600 || now - lastComposerKey.current <= 1500) return;
+      const o = prompt.options?.find(o => String(o.n) === e.key);
+      if (o) { e.preventDefault(); answer(String(o.n), prompt.kind !== 'permission'); }
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [request.open, prompt, canAnswer]);
   // Each file goes up as soon as it is picked, so "Send" only sends the words that name them.
   const addFiles = (list) => {
     const picked = [...(list || [])].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
@@ -373,13 +421,15 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const uploading = files.some(f => f.state === 'up');
   const ready = files.filter(f => f.state === 'ok');
   const sendDraft = async () => {
+    if (prompt) { showRequest(); return; }
+    if (st === 'limit') return;
     const text = draft.trim();
     if ((!text && !ready.length) || uploading) return;
     // Words first: a message that opens with a path (`/home/…`) reads as a slash command.
     const list = ready.map(f => `- ${f.path}`).join('\n');
-    const prompt = !ready.length ? text
+    const message = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
-    const r = await act('fleet_send', { prompt });
+    const r = await act('fleet_send', { prompt: message });
     if (r) {
       sentAt.current = Date.now(); typing.current = false;
       for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -440,7 +490,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         {presence(pane.data?.here || [])}
       </header>
 
-      {st === 'limit' ? (
+      {quota.open ? <Modal sheet title={t('status.limit.hint')} onClose={quota.close}>
         <div class="ask limit">
           <div class="ask-head"><b><Icon name="hourglass" /> {t('status.limit.hint')}</b>{card?.limit_at ? <span>{t('sess.quotaBack', { when: hhmm(card.limit_at) })}</span> : null}</div>
           <p class="muted small">{t('sess.limitWhy')}</p>
@@ -448,14 +498,17 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
             ? <p>{t('sess.alreadySched', { when: hhmm(card.sched.at) })}</p>
             : !can('gfw_schedule') ? null
             : <div class="row wrap">
-                <Btn kind="primary" disabled={busy} onClick={() => act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') })}>
+                <Btn kind="primary" disabled={busy} onClick={async () => { const r = await act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') }); if (r) quota.close(); }}>
                   <Icon name="clock" /> {t('sess.resumeOnQuota')}</Btn>
-                <Btn kind="ghost" onClick={() => setSchedOpen(true)}>{t('sess.otherTime')}</Btn>
+                <Btn kind="ghost" onClick={() => { quota.close(); setSchedOpen(true); }}>{t('sess.otherTime')}</Btn>
               </div>}
         </div>
-      ) : null}
+      </Modal> : null}
 
-      {prompt ? <PromptCard key={prompt.fingerprint} prompt={prompt} onAnswer={answer} busy={busy} /> : null}
+      {request.open ? <Modal sheet title={t(prompt.kind === 'permission' ? 'sess.asksPermission' : 'sess.asks')} onClose={request.close}>
+        <PromptCard key={prompt.fingerprint} prompt={prompt} onAnswer={answer} busy={busy || !canAnswer} typed={typedAnswer} setTyped={setTypedAnswer} />
+        {!canAnswer ? <p class="modal-body muted small">{t('sess.requestReadonly')}</p> : null}
+      </Modal> : null}
 
       <div class="tabs" role="tablist">
         <button role="tab" class={!tool && tab === 'chat' ? 'on' : ''} onClick={() => pick('chat')}>{t('sess.chat')}</button>
@@ -492,16 +545,26 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         <div class="composer-row">
           <button type="button" class="attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
-          <textarea rows={2} value={draft} placeholder={drag ? t('sess.drop') : prompt ? t('sess.pendingAbove') : t('sess.writeTo', { name })}
-                    onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value; }}
+          <div class={`composer-input${(prompt && !held) || st === 'limit' ? ' has-request' : ''}`}>
+          <textarea ref={composer} rows={2} value={draft} placeholder={drag ? t('sess.drop') : t('sess.writeTo', { name })}
+                    onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)}
+                    onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value;
+                      if (document.activeElement === composer.current) composerKey(); }}
                     onPaste={(e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } }}
                     onKeyDown={(e) => {
+                      composerKey();
                       // Esc leaves the box. ⏎ sends with a keyboard and is a new line on a phone's
                       // on-screen one, never mid-composition (keys.js sendsOnEnter).
                       if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
+                      else if (held && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); showRequest(); }
                       else if (sendsOnEnter(e)) { e.preventDefault(); sendDraft(); }
                     }} />
-          <Btn kind="primary" type="submit" disabled={busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
+          {(prompt && !held) || st === 'limit' ? <button type="button" class="btn request-return" onClick={prompt ? showRequest : quota.show}>
+            <Icon name={prompt ? 'question' : 'hourglass'} size={18} />
+            {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
+          </button> : null}
+          </div>
+          <Btn kind="primary" type="submit" disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
         </div>
       </form>}
 
