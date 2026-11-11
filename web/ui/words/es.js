@@ -285,6 +285,7 @@ export default {
   'sess.drop': 'Suelta aquí los archivos…',
   'sess.pendingAbove': 'Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.',
   'sess.writeTo': 'Escríbele a {name}…  (adjunta o arrastra un archivo · Enter envía)',
+  'sess.writeToShort': 'Escríbele a {name}…',
   'sess.uploadingBtn': 'Subiendo…',
   'sess.labelTitle': 'Etiqueta de la sesión',
   'sess.labelWhy': 'Una nota corta para reconocerla de un vistazo, como “urgente cliente” o “esperando revisión”. Se ve en la tarjeta y en la terminal. Vacía la quita.',

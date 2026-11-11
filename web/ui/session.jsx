@@ -494,7 +494,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         <div class="composer-row">
           <button type="button" class="attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
-          <textarea rows={2} value={draft} placeholder={drag ? t('sess.drop') : prompt ? t('sess.pendingAbove') : t('sess.writeTo', { name })}
+          <textarea rows={embedded ? 1 : 2} value={draft} placeholder={drag ? t('sess.drop') : embedded ? t('sess.writeToShort', { name }) : prompt ? t('sess.pendingAbove') : t('sess.writeTo', { name })}
                     onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value; }}
                     onPaste={(e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } }}
                     onKeyDown={(e) => {

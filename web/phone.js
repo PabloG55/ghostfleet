@@ -704,6 +704,7 @@ var en_default = {
 	"sess.drop": "Drop the files here…",
 	"sess.pendingAbove": "There is a pending request above; what you write is queued until it is answered.",
 	"sess.writeTo": "Write to {name}…  (attach or drag a file · Enter sends)",
+	"sess.writeToShort": "Write to {name}…",
 	"sess.uploadingBtn": "Uploading…",
 	"sess.labelTitle": "Session label",
 	"sess.labelWhy": "A short note to recognise it at a glance, like “client urgent” or “waiting on review”. It shows on the card and in the terminal. Empty removes it.",
@@ -1559,6 +1560,7 @@ var es_default = {
 	"sess.drop": "Suelta aquí los archivos…",
 	"sess.pendingAbove": "Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.",
 	"sess.writeTo": "Escríbele a {name}…  (adjunta o arrastra un archivo · Enter envía)",
+	"sess.writeToShort": "Escríbele a {name}…",
 	"sess.uploadingBtn": "Subiendo…",
 	"sess.labelTitle": "Etiqueta de la sesión",
 	"sess.labelWhy": "Una nota corta para reconocerla de un vistazo, como “urgente cliente” o “esperando revisión”. Se ve en la tarjeta y en la terminal. Vacía la quita.",
@@ -6400,9 +6402,9 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 								}
 							}),
 							/* @__PURE__ */ u("textarea", {
-								rows: 2,
+								rows: embedded ? 1 : 2,
 								value: draft,
-								placeholder: drag ? t("sess.drop") : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
+								placeholder: drag ? t("sess.drop") : embedded ? t("sess.writeToShort", { name }) : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
 								onInput: (e) => {
 									setDraft(e.currentTarget.value);
 									typing.current = !!e.currentTarget.value;
@@ -7496,7 +7498,11 @@ var VERBS = words([
 	"auto_delete",
 	"route",
 	"voice_install",
-	"voice_delete"
+	"voice_delete",
+	"license_set",
+	"license_remove",
+	"license_renew",
+	"license_auto"
 ], "verb");
 var RESULT = {
 	ran: "good",

@@ -34,33 +34,57 @@ function decode(part) {
   return bytes;
 }
 
+// The signed payload of a key, before anyone asks whether it is still in date.
+function signed(key, publicKey) {
+  if (!publicKey || (typeof publicKey === 'string' && !publicKey.trim())) return failure('no-public-key');
+  if (typeof key !== 'string') return failure('malformed');
+  const parts = key.split('.');
+  if (parts.length !== 3 || parts[0] !== 'gft1') return failure('malformed');
+  let bytes, signature, payload;
+  try {
+    bytes = decode(parts[1]);
+    signature = decode(parts[2]);
+    payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch { return failure('malformed'); }
+  try {
+    const verifier = publicKey?.type === 'public' ? publicKey : createPublicKey(publicKey);
+    if (verifier.asymmetricKeyType !== 'ed25519' || !verify(null, bytes, verifier, signature)) {
+      return failure('bad-signature');
+    }
+  } catch { return failure('bad-signature'); }
+  if (!validPayload(payload)) return failure('malformed');
+  if (payload.v !== 1) return failure('unknown-version');
+  return { ok: true, payload };
+}
+const clock = now => (now instanceof Date ? now.getTime() : typeof now === 'number' ? now : isoTime(now));
+
 export function verifyKey(key, options = {}) {
   try {
     const { publicKey = PUBLIC_KEY, now = new Date() } = options;
-    if (!publicKey || (typeof publicKey === 'string' && !publicKey.trim())) return failure('no-public-key');
-    if (typeof key !== 'string') return failure('malformed');
-    const parts = key.split('.');
-    if (parts.length !== 3 || parts[0] !== 'gft1') return failure('malformed');
-    let bytes, signature, payload;
-    try {
-      bytes = decode(parts[1]);
-      signature = decode(parts[2]);
-      payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    } catch { return failure('malformed'); }
-    try {
-      const verifier = publicKey?.type === 'public' ? publicKey : createPublicKey(publicKey);
-      if (verifier.asymmetricKeyType !== 'ed25519' || !verify(null, bytes, verifier, signature)) {
-        return failure('bad-signature');
-      }
-    } catch { return failure('bad-signature'); }
-    if (!validPayload(payload)) return failure('malformed');
-    if (payload.v !== 1) return failure('unknown-version');
-    const time = now instanceof Date ? now.getTime() :
-      typeof now === 'number' ? now : isoTime(now);
+    const s = signed(key, publicKey);
+    if (!s.ok) return s;
+    const time = clock(now);
     if (!Number.isFinite(time)) return failure('malformed');
-    if (time >= isoTime(payload.expires)) return failure('expired');
-    const { org, seats, expires, id } = payload;
+    if (time >= isoTime(s.payload.expires)) return failure('expired');
+    const { org, seats, expires, id } = s.payload;
     return { ok: true, org, seats, expires, id };
+  } catch { return failure('malformed'); }
+}
+
+// What an authentic key says, in date or not: `expired` is a field here rather than a failure.
+// A screen has to name the organisation of a subscription that lapsed, and a renewal has to
+// compare a newer key against the lapsed one; verifyKey answers neither, because it refuses an
+// expired key before it tells anyone whose it was. This grants nothing: only verifyKey and
+// the seat checks decide what is allowed.
+export function describeKey(key, options = {}) {
+  try {
+    const { publicKey = PUBLIC_KEY, now = new Date() } = options;
+    const s = signed(key, publicKey);
+    if (!s.ok) return s;
+    const time = clock(now);
+    if (!Number.isFinite(time)) return failure('malformed');
+    const { org, seats, expires, id } = s.payload;
+    return { ok: true, org, seats, expires, id, expired: time >= isoTime(expires) };
   } catch { return failure('malformed'); }
 }
 

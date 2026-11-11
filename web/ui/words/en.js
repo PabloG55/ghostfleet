@@ -287,6 +287,7 @@ export default {
   'sess.drop': 'Drop the files here…',
   'sess.pendingAbove': 'There is a pending request above; what you write is queued until it is answered.',
   'sess.writeTo': 'Write to {name}…  (attach or drag a file · Enter sends)',
+  'sess.writeToShort': 'Write to {name}…',
   'sess.uploadingBtn': 'Uploading…',
   'sess.labelTitle': 'Session label',
   'sess.labelWhy': 'A short note to recognise it at a glance, like “client urgent” or “waiting on review”. It shows on the card and in the terminal. Empty removes it.',
