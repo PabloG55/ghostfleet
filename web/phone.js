@@ -7628,7 +7628,11 @@ var VERBS = words([
 	"auto_delete",
 	"route",
 	"voice_install",
-	"voice_delete"
+	"voice_delete",
+	"license_set",
+	"license_remove",
+	"license_renew",
+	"license_auto"
 ], "verb");
 var RESULT = {
 	ran: "good",

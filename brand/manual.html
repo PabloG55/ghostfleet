@@ -470,8 +470,11 @@ section.s { padding: 48px 0; border-bottom: 0; }
 .eyebrow { line-height: 1.4; }
 .say .ctx { font-size: 12px; }
 
-/* status LEDs as terminal LEDs: square, with a bezel and a hard glow */
-.led-row .gf-led { width: 10px; height: 10px; border-radius: 0; outline: 1px solid color-mix(in srgb, var(--c) 45%, transparent); outline-offset: 2px; }
+/* status LEDs as terminal LEDs: round, with a bezel ring and a hard glow. Round is the one
+ * exception to the skin's square corners: a light is a lamp, not a panel, and a square one
+ * reads as a checkbox or a pixel of the grid behind it. The outline follows border-radius,
+ * so the bezel is a ring. */
+.led-row .gf-led { width: 10px; height: 10px; border-radius: 50%; outline: 1px solid color-mix(in srgb, var(--c) 45%, transparent); outline-offset: 2px; }
 .led-row .gf-led[data-s="lost"] { outline-color: var(--gf-line); }
 
 /* sprites at pixel scale: whole multiples of the 32 × 16 grid, moving one sprite pixel

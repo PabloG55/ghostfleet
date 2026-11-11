@@ -22,6 +22,8 @@
 .demo-note { background: rgba(255,215,95,.08); border: 1px solid rgba(255,215,95,.3); color: var(--yellow); border-radius: var(--r); padding: .5em .75em; margin: 0; font-size: 13px; }
 
 /* ── layout ──────────────────────────────────────────── */
+.license-bar { display: block; background: rgba(255,215,95,.1); color: var(--yellow); text-align: center; font-size: 12.5px; padding: .35em 16px; border-bottom: 1px solid rgba(255,215,95,.25); text-decoration: none; }
+.license-note { color: var(--yellow); border-left: 2px solid var(--yellow); padding-left: 10px; }
 
 /* ── cards ───────────────────────────────────────────── */
 .owner { display: inline-flex; align-items: center; gap: .4em; }

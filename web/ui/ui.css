@@ -1,6 +1,6 @@
 /* web/ui/ui.css — the layout of the shared screens: the frame, the board, the map, a project and
  * a session. Colour, type and motion come from the brand's tokens (brand/tokens.css), and
- * skin.css lays the terminal look over this file: window title bars, the pixel grid, square
+ * skin.css lays the terminal look over this file: window title bars, the pixel grid, round
  * lights, the pixel face for titles. Dark, because the brand is a terminal on a dark profile.
  *
  * An app built on these screens loads, in this order: brand/tokens.css, this file, its own
@@ -600,7 +600,7 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .quiet { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .quiet-toggle { background: none; border: 1px solid var(--hair); color: var(--dim); border-radius: var(--r); padding: 4px 12px; cursor: pointer; font-size: 12.5px; display: inline-flex; gap: 6px; align-items: center; }
 .quiet-toggle:hover { color: var(--white); }
-.qdot { width: 8px; height: 8px; border-radius: var(--r); background: var(--grey); opacity: .6; }
+.qdot { width: 8px; height: 8px; border-radius: 50%; background: var(--grey); opacity: .6; }
 .qchip { font-family: var(--mono); font-size: 12px; color: var(--dim); text-decoration: none; border: 1px solid var(--hair); border-radius: var(--r); padding: 3px 10px; }
 .qchip:hover { color: var(--white); border-color: var(--grey); }
 
@@ -613,7 +613,7 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
  * pattern differs as well as the colour — breathing, a hard on/off, a double strobe — so a
  * light still says which it is to someone who cannot tell amber from green. */
 .led { --led: 9px; position: relative; display: inline-block; flex: none; vertical-align: middle;
-  width: var(--led); height: var(--led); border-radius: var(--r);
+  width: var(--led); height: var(--led); border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, var(--gf-white) 0 12%, color-mix(in srgb, var(--c) 75%, var(--gf-white)) 24%, var(--c) 55%, color-mix(in srgb, var(--c) 55%, #000) 100%);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 45%, #000),
               0 0 calc(var(--led) * .8) color-mix(in srgb, var(--c) 75%, transparent),
