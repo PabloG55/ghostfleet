@@ -77,6 +77,7 @@ function write(dir, m, files = {}) {
 async function host(id, projects, runs) {
   const dir = path.join(T, id), home = path.join(dir, 'home'), xd = path.join(dir, 'xd');
   fs.mkdirSync(path.join(home, '.config', 'ghostfleet'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config/ghostfleet/local-trust'), 'off\n');
   fs.mkdirSync(xd, { recursive: true });
   fs.writeFileSync(path.join(xd, 'shots.enabled'), 'on\n');
   const lines = [];

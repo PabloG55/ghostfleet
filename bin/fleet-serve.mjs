@@ -60,6 +60,7 @@ import { createAutomations } from '../lib/automations.mjs';
 import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
 import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
 import * as voice from '../lib/voice.mjs';
+import { connectingUid } from '../lib/local-trust.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,6 +68,7 @@ const GRID = path.join(BIN, 'fleet-grid.mjs');
 const TMUX_CONF = path.join(REPO, 'tmux', 'cf.tmux.conf');
 const WEB = path.join(REPO, 'web');                       // the PWA, when it lands
 const CFG_HOME = path.join(HOME, '.config', 'ghostfleet');
+const LOCAL_TRUST = path.join(CFG_HOME, 'local-trust');
 const CONFIG = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(CFG_HOME, 'serve.json');
 // Beside serve.json, never inside it: the config is rewritten by `enroll` and `revoke` from
 // another process, and a file both processes write is a file one of them clobbers.
@@ -464,7 +466,7 @@ function verifySig(jwk, alg, data, sig) {
 // the challenge, the credential and the session token each belong to one listener, so an
 // assertion made at localhost is refused on the tailnet and the reverse, and a token minted
 // on one is dead on the other. Any process on the Mac can reach 127.0.0.1, which is why
-// the localhost listener gets no shortcut past the passkey — only a different rp_id.
+// direct localhost trust is decided separately below, including the caller's uid on Linux.
 //
 // `ls` absent means the configured listener, which is what every caller was before there
 // were two.
@@ -987,7 +989,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
                     [k, typeof val === 'string' ? val.slice(0, 500) : val])),
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
-                  confirmed: v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
+                  confirmed: client.local ? 'local' : v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
                   result: undelivered ? 'not delivered' : unwoken ? 'failed' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
@@ -1308,6 +1310,44 @@ async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
   });
 }
 
+let listening = null;
+const localClient = { id: '@localhost', local: true };
+function localTrustOn() {
+  try { return fs.readFileSync(LOCAL_TRUST, 'utf8').trim() === 'on'; } catch (e) { return e.code === 'ENOENT'; }
+}
+// Measured against a scratch HTTP server: Tailscale Serve arrived from 127.0.0.1
+// with the tailnet Host, X-Forwarded-For/Host/Proto, Tailscale-Headers-Info and
+// Tailscale-User-Login/Name/Profile-Pic. peers.mjs peerRequest also arrived from
+// 127.0.0.1, Host localhost, but ONLY X-Fleet-Pair/Ts/Nonce/Sig and On-Behalf:
+// no X-Forwarded-For. Neither loopback nor absence of that one header proves directness.
+// Accept only normal browser headers; an unknown proxy's extra header fails closed too.
+const DIRECT_HEADERS = new Set(('host origin connection upgrade user-agent accept accept-encoding accept-language ' +
+  'cache-control pragma content-type content-length authorization cookie dnt priority referer ' +
+  'if-none-match if-modified-since range te x-fleet-assertion ' +
+  'sec-gpc sec-fetch-site sec-fetch-mode sec-fetch-dest sec-fetch-user sec-ch-ua sec-ch-ua-mobile sec-ch-ua-platform ' +
+  'sec-ch-ua-full-version-list sec-ch-ua-arch sec-ch-ua-bitness sec-ch-ua-model sec-ch-ua-full-version ' +
+  'sec-ch-ua-platform-version sec-ch-ua-wow64 sec-websocket-key sec-websocket-version sec-websocket-protocol sec-websocket-extensions').split(' '));
+function localRequest(req, c) {
+  // Verified in serve(): tailnet traffic has its own https.Server and bind. Only
+  // listenLocal(), or a configured loopback listener with rp_id localhost, stamps
+  // this flag. Host, proxy headers and socket address can never select a listener.
+  if (!req.ls?.localhost) return false;
+  if (!localTrustOn()) return false;
+  const addr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (addr !== '::1' && !/^127\./.test(addr)) return false;
+  if (process.platform === 'linux' && connectingUid(req.socket) !== process.getuid()) return false;
+  const scope = scopeOf(c, req.ls);
+  if (scope.rp_id !== LOCAL_RP) return false;
+  const port = req.ls?.port ?? listening?.port ?? c.port;
+  const origin = `${req.socket.encrypted ? 'https' : 'http'}://localhost${port === (req.socket.encrypted ? 443 : 80) ? '' : ':' + port}`;
+  if (req.headers.host !== new URL(origin).host || !scope.origins.includes(origin)) return false;
+  if (Object.keys(req.headers).some(h => !DIRECT_HEADERS.has(h))) return false;
+  if ((!['GET', 'HEAD', 'OPTIONS'].includes(req.method) || req.headers.upgrade) && req.headers.origin !== origin) return false;
+  // A foreign Origin must never obtain even a read using the owner's loopback authority.
+  if (req.headers.origin !== undefined && req.headers.origin !== origin) return false;
+  return true;
+}
+
 // Which Host headers we answer to. A browser pointed at a name that resolves to our
 // address can otherwise be used to reach us from a page we did not serve (DNS
 // rebinding), and for an endpoint that spawns processes that is worth two lines.
@@ -1315,7 +1355,6 @@ async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
 // first cut built this set from the config's port only, so `--port N` started a daemon
 // that then 403'd every single request as an unexpected Host — a server that looked up
 // and answered nothing.
-let listening = null;
 function allowedHosts(c, ls) {
   const h = new Set();
   // The localhost listener answers to its own name and nothing else — not 127.0.0.1, whose
@@ -2172,7 +2211,7 @@ const automations = createAutomations({
     return { name: t.name, share, sessions: g.error ? [] : (g.json.cards || []).map(x => ({ name: x.name, status: x.status, lead: !!x.lead })) };
   })),
   audit: (row) => auditAppend({ ts: now(), ip: 'local', ...row }),
-  clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; },
+  clientLive: (id) => { if (id === localClient.id) return localTrustOn(); const cl = clientById(id); return !!cl && !cl.revoked; },
   log,
 });
 
@@ -2426,7 +2465,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_re
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
 const PAIR_POSTS = new Set(['/api/shots/verdict', '/api/voice/ask']);
-const PAIR_SCOPE_WORDS = 'projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
+const PAIR_SCOPE_WORDS = 'terminals, editors, projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it
@@ -2440,7 +2479,7 @@ export function pairAllows(method, p, body, verbs = PAIR_VERBS) {
   if (method === 'GET') return PAIR_READS.has(p);
   if (method !== 'POST') return false;
   if (p === '/api/verb') return verbs.has(body?.tool);
-  if (p === '/api/attach') return verbs.has('fleet_send');
+  if (p === '/api/attach' || p === '/api/term/open') return verbs.has('fleet_send');
   return PAIR_POSTS.has(p);
 }
 // THE TIME A FORWARDED PHOTO GETS. The body can be ATTACH_BODY_CAP, and the remote may run a
@@ -2448,7 +2487,6 @@ export function pairAllows(method, p, body, verbs = PAIR_VERBS) {
 // link while the remote was still writing it. Budgeted at 256 KB/s plus half a minute for the
 // conversion: the 9 MB cap gets ~66 s, a small PNG the half minute.
 export const attachForwardTimeout = (bytes) => 30000 + Math.ceil(Math.max(0, bytes) / (256 * 1024)) * 1000;
-export const TERM_REMOTE_WHY = 'the terminal never crosses machines: a shell is opened only by the host it runs on — open that host\'s own app for one';
 const pairNonces = new Map();       // "<pid>:<nonce>" -> expiry: the replay table for signed requests
 const peerLive = new Map();         // key -> { online, why, at, down_until }: what the last call found
 const peerCache = new Map();        // key -> { at, json }: the last good /api/projects, for a slow answer
@@ -2499,7 +2537,7 @@ async function callPeer(peer, opts, { fan = false } = {}) {
 async function fanOut(pathq, req, timeout = 8000) {
   const v = peers();
   if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
-  return Promise.all(v.peers.map(async (peer) => ({ peer, r: await callPeer(peer, { pathq, onBehalf: req.client.id, timeout }, { fan: true }) })));
+  return Promise.all(v.peers.map(async (peer) => ({ peer, r: await callPeer(peer, { pathq, onBehalf: req.client.local ? 'localhost' : req.client.id, timeout }, { fan: true }) })));
 }
 // What lib/shots.mjs may do with this host's peers, on behalf of the phone that asked: its
 // list fans out like /api/waiting's, and a tap is a single signed call. The media is the one
@@ -2511,7 +2549,7 @@ function shotsPeers(req) {
   // client it acts for is the one the ticket was minted for, which lib/shots.mjs passes in.
   const me = req.session ? req.client : null;     // see the Reviews dispatch: req.client may be a socket
   if (!v.peers.length || (me && me.pair)) return null;
-  const who = (x) => x || (me && me.id) || '';
+  const who = (x) => { const id = x || (me && me.id) || ''; return id === localClient.id ? 'localhost' : id; };
   const byKey = (k) => v.peers.find(x => x.key === k.key);
   return {
     self: () => P.selfLabel(v),
@@ -2596,7 +2634,7 @@ async function pairAuth(req, res, p, url, ip) {
   // ONE HOP. A paired host asks about this host's own projects, by their bare names; an
   // address naming yet another host is refused rather than forwarded, so no chain of
   // pairings can be walked and two hosts can never bounce one request between them.
-  const named = url.searchParams.get('project') || (body.args && body.args.project) || (p === '/api/attach' && body.project) || '';
+  const named = url.searchParams.get('project') || (body.args && body.args.project) || ((p === '/api/attach' || p === '/api/term/open') && body.project) || '';
   if (P.splitAddr(named)) { send(res, 403, { ok: false, text: 'a paired host asks about this host\'s own projects; a request is never forwarded a second time' }); return null; }
   req.client = { id: `${r.peer.label}/${r.onBehalf || 'host'}`, pair: r.peer, onBehalf: r.onBehalf || '' };
   req.session = { exp: now(), purpose: 'pair' };
@@ -2671,7 +2709,6 @@ async function proxyRemote(req, res, p, url, body, ip) {
   const v = peers();
   const peer = v.peers.find(x => x.key === addr.key);
   if (!peer) { send(res, 404, { ok: false, text: `'${addr.key}' is not a host paired with this one (fleet-serve pairs lists them)` }); return true; }
-  if (p.startsWith('/api/term')) { send(res, 403, { ok: false, remote: true, text: TERM_REMOTE_WHY }); return true; }
   // 400, NOT 403, for everything refused below. web/api.js reads a 401 or a 403 on a read or
   // a verb as "this session is dead" and locks the app — a refusal about WHERE a project is
   // must not log the owner out of the machine he is on. (The terminal's 403 above is read by
@@ -2689,16 +2726,16 @@ async function proxyRemote(req, res, p, url, body, ip) {
   // rule, the sniffing, the SVG refusal, the O_EXCL write, the path check) and answers with
   // ITS path, which is passed back untouched — the send that follows goes to the same
   // machine, so that path is the one that names the file where it will be read.
-  else if (p === '/api/attach') out = { ...body, project: addr.project };
+  else if (p === '/api/attach' || p === '/api/term/open') out = { ...body, project: addr.project };
   else out = { ...body, args: { ...(body.args || {}), project: addr.project } };
   const headers = req.headers['if-none-match'] ? { 'if-none-match': String(req.headers['if-none-match']) } : {};
-  const r = await callPeer(peer, { method: req.method, pathq, body: out, onBehalf: req.client.id, headers,
+  const r = await callPeer(peer, { method: req.method, pathq, body: out, onBehalf: req.client.local ? 'localhost' : req.client.id, headers,
                                    timeout: p === '/api/verb' ? 15 * 60 * 1000
                                      : p === '/api/attach' ? attachForwardTimeout(String(body.data || '').length) : 15000 });
   if (p === '/api/verb') {
     const args = login ? { project: addr.project, id: out.args.id } : Object.fromEntries(Object.entries(out.args).map(([k, x]) => [k, typeof x === 'string' ? x.slice(0, 500) : x]));
     auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool, project: named, subject: args.session || named,
-                  ...(login ? { confirmed: 'passkey' } : {}),
+                  ...(login ? { confirmed: req.localTrust ? 'local' : 'passkey' } : {}),
                   via: 'proxy', host: peer.label, args: { ...args, project: named },
                   result: !r.status ? 'unreachable' : r.status < 400 ? 'ran' : 'refused',
                   output: String((r.json && r.json.text) || r.error || '').slice(0, 500) });
@@ -2734,6 +2771,13 @@ async function proxyRemote(req, res, p, url, body, ip) {
   if (j && typeof j === 'object' && !Array.isArray(j)) {
     j = { ...j, host: peer.label, host_key: peer.key };
     if (j.project === addr.project) j.project = named;
+  }
+  if (p === '/api/term/open' && r.status === 200 && j?.ticket) {
+    for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
+    const ticket = rand(32);
+    tickets.set(sha256(ticket), { client: req.client.id, ...ticketCaller(req), rp_id: scopeOf(loadConfig(), req.ls).rp_id,
+      remote: { peer: peer.id, ticket: j.ticket, onBehalf: req.client.local ? 'localhost' : req.client.id }, exp: now() + TERM_TICKET_TTL });
+    j.ticket = ticket;
   }
   send(res, r.status, j ?? { ok: false, text: String(r.text || '').slice(0, 300) }, r.headers.etag ? { ETag: r.headers.etag } : {});
   return true;
@@ -2804,12 +2848,13 @@ async function api(req, res, url, ip) {
   const p = url.pathname;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const scope = scopeOf(c, req.ls);
+  req.localTrust = localRequest(req, c);
 
   // Every POST is checked against this listener's origins as well. A browser sends Origin
   // on a cross-site request; refusing an unrecognised one closes CSRF from any page that
   // is not ours, and costs a client of ours nothing. THIS listener's: the tailnet origin is
   // as foreign to the localhost socket as any other site, and the reverse.
-  if (req.method === 'POST' && req.headers.origin && !scope.origins.includes(req.headers.origin))
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin !== undefined && !scope.origins.includes(req.headers.origin))
     return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured for this listener` });
 
   if (p === '/api/auth/challenge') {
@@ -2844,7 +2889,7 @@ async function api(req, res, url, ip) {
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
     // only because a passkey signed a challenge, and it dies after session_ttl unused.
-    const s = liveSession(bearer, scope.rp_id);
+    const s = req.localTrust ? { cl: localClient, exp: now() + c.session_ttl } : liveSession(bearer, scope.rp_id);
     if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires once idle)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
     // The slide, told to the client: web/api.js keeps its own copy of the expiry so it can
@@ -3340,6 +3385,7 @@ function agentCatalogue() {
     const f = funnelState();
     return send(res, 200, { ok: true, version: VERSION, bind: req.ls?.local ? LOCAL_BIND : c.bind, port: listening?.port ?? c.port,
       rp_id: scope.rp_id,
+      local_trust: req.localTrust === true,
       client: req.client.id, session_expires_in: req.session.exp - now(),
       grid_json: gridSupportsJson(), web: webPresent ? WEB : null, awake: awakeHeld,
       funnel: f.checked ? (f.on.length ? { on: f.on } : 'off') : `unverified (${f.why})`,
@@ -3422,7 +3468,7 @@ function agentCatalogue() {
   // deprecated `client` alias for its socket, so `req.client || null` handed the media route a
   // Socket for a client. Nothing read it until a paired host's media needed to know whether
   // the request was signed. A session — a phone's or a signature's — is what made a client.
-  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req), pairScope: req.session ? peerScope(req) : null });
+  if (p === '/api/shots' || p.startsWith('/api/shots/')) return shots.api(req, res, p, url, body, { send, serialize, audit: auditAppend, now, ip, client: req.session ? req.client : null, rp_id: scope.rp_id, clientLive: (id) => { if (id === localClient.id) return req.localTrust; const cl = clientById(id); return !!cl && !cl.revoked; }, peers: shotsPeers(req), pairScope: req.session ? peerScope(req) : null });
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
@@ -3454,7 +3500,7 @@ function agentCatalogue() {
     const r = jarvis.answer(id, ans === 'yes', 'phone');
     if (!r.ok) return send(res, 404, { ok: false, text: r.text });
     try { auditAppend({ ts: now(), client: req.client.id, ip, verb: 'jarvis_confirm', project: m.name, subject: id, result: 'ran',
-                        confirmed: ans === 'yes' ? 'passkey:jarvis-yes' : null, output: `${ans} — ${r.summary}`.slice(0, 300) }); } catch {}
+                        confirmed: ans === 'yes' ? (req.localTrust ? 'local' : 'passkey:jarvis-yes') : null, output: `${ans} — ${r.summary}`.slice(0, 300) }); } catch {}
     inboxRow(proj(m.name), 'master', `${ans} to ${id} (${r.summary}) · from ${req.client.id}@${ip}`);
     const tell = ans === 'yes'
       ? `[fleet] The owner tapped YES on the phone for proposal ${id} (${r.summary}). Make that exact call now, then tell him in one line that it is done.`
@@ -3531,7 +3577,7 @@ function agentCatalogue() {
         auditAppend({ ts: now(), client: req.client.id, ip, verb: body.tool,
           project: shownTo(req).some(t => t.name === body.args?.project) ? body.args.project : null,
           subject: /^[a-f0-9]{32}$/.test(String(body.args?.id || '')) ? body.args.id : '-',
-          ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: 'passkey' }),
+          ...(req.client.pair ? { via: 'pair', origin_host: req.client.pair.label, origin_client: req.client.onBehalf } : { confirmed: req.localTrust ? 'local' : 'passkey' }),
           result: result.json.ok ? 'ran' : 'refused', output: result.json.text });
         return result;
       });
@@ -3564,6 +3610,7 @@ function agentCatalogue() {
 // implementation, so the second factor on a tapped yes cannot end up weaker than the one on
 // a tapped stop. null = no header at all.
 function headerAssertion(req, c) {
+  if (req.localTrust) return { purpose: 'local', local: true };
   const hdr = req.headers['x-fleet-assertion'];
   if (!hdr) return null;
   let parsed;
@@ -3578,28 +3625,12 @@ function headerAssertion(req, c) {
 }
 
 // ── TERMINAL: a real shell from the web client, inside the fleet's own tmux ─────
-// Everything else this server does is a verb with a name and an audit row. A terminal is
-// not: it is a shell, which is every verb at once, so it gets every control the verbs have
-// plus three of its own, and each one answers a different question:
-//
-//   OFF PER DEVICE        is this device one the owner chose to give a shell to at all.
-//                         Recorded on the enrolled client — the device — with when and from
-//                         where it was switched on, and switching it ON takes a fresh
-//                         passkey. Off is the default and switching off needs nothing.
-//   A FRESH ASSERTION     is the owner holding the phone at the moment a shell opens — the
-//   PER OPEN              unlock does not count, by the same rule as a destructive verb (§7).
-//   A ONE-USE TICKET      a browser cannot put a bearer token on a WebSocket, so the open
-//                         request (token + assertion) mints a ticket that is good for one
-//                         upgrade within TERM_TICKET_TTL, for this client, this session.
-//   ORIGIN + HOST         the upgrade is refused unless Origin is one of the configured
-//                         origins. A WebSocket is not covered by CORS, so without this any
-//                         page the phone visits could try one.
-//   THE IDLE CLOSE        terminal_idle seconds with no keystroke closes it (default 900).
-//                         The SAME window as the session token's idle slide, on purpose: a
-//                         phone left unlocked on a table must not hold a shell open longer
-//                         than it holds the app. Keystrokes, not output — a build printing
-//                         to a terminal nobody is at is exactly the case to close. Closing
-//                         loses nothing: the tab is a tmux session and stays on the grid.
+// Whoever can send a prompt can already ask that session to run commands. Terminal
+// and editor therefore use chat authorization: no device switch or second assertion.
+// A short-lived one-use ticket binds the upgrade to that exact session (or the direct
+// local connection), and paired callers carry a signed pairing plus on-behalf identity.
+// Host and Origin are checked on every upgrade. Keystrokes, not output, reset the
+// terminal's idle close, and session revocation also ends the connection.
 //
 // And it is never a shell of its own: it attaches to a fleet TAB (bin/fleet-tab's
 // `_term-<project>`), so the desk sees the same session the phone is typing into.
@@ -3613,7 +3644,7 @@ const TERM_MAX_MESSAGE = 1 << 20;          // a 1 MB paste is plenty; a browser 
 const TERM_PING_MS = 30_000;               // a phone that slept leaves a socket nobody will close
 const tickets = new Map();                 // sha(ticket) -> { client, project, sock, session, cols, rows, exp }
 const terms = new Set();                   // the live bridges, for the per-client cap and shutdown
-const termOn = (cl) => !!(cl && !cl.revoked && cl.terminal && cl.terminal.on);
+
 const termIdle = (c = loadConfig()) => Math.max(10, Number(c.terminal_idle) || 900);
 const termSize = (n, lo, hi, dflt) => (Number.isInteger(n) && n >= lo && n <= hi ? n : dflt);
 
@@ -3628,6 +3659,55 @@ const termSize = (n, lo, hi, dflt) => (Number.isInteger(n) && n >= lo && n <= hi
 //   With no editor installed fleet-tab says so on the desk's status line, where nobody at a
 // phone will read it, and exits 1 with nothing on stderr — so the words are said here.
 const TERM_KINDS = { term: 'terminal', edit: 'editor' };
+function ticketCaller(req) {
+  return req.localTrust ? { local: true }
+    : req.client.pair ? { pair: req.client.pair.id, onBehalf: req.client.onBehalf }
+    : { sessionHash: sha256((req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim()) };
+}
+function ticketCallerLive(t) {
+  if (t.local) return localTrustOn();
+  if (t.pair) {
+    const peer = peers().peers.find(p => p.id === t.pair);
+    const project = projects().find(p => p.name === t.project && p.sock === t.sock);
+    return !!peer && !!project && pairScope(projects(), peer).sees(project);
+  }
+  const s = sessions.get(t.sessionHash);
+  return !!s && s.client === t.client && s.exp > now() && sessionClientLive(s);
+}
+
+// The browser connects only to the host that authenticated it. That host spends its
+// own ticket and signs the remote upgrade; the remote checks both the pairing and
+// on-behalf caller against its ticket. Raw frames retain WebSocket masking end to end.
+function relayTermUpgrade(req, sock, t, refuse) {
+  const peer = peers().peers.find(p => p.id === t.remote.peer);
+  if (!peer) return refuse(403, 'the host is no longer paired');
+  const u = new URL('/api/term/ws', peer.url);
+  u.searchParams.set('ticket', t.remote.ticket);
+  const pathq = u.pathname + u.search;
+  const headers = { host: u.host, origin: u.origin, connection: 'Upgrade', upgrade: 'websocket',
+    'sec-websocket-version': '13', 'sec-websocket-key': req.headers['sec-websocket-key'],
+    ...P.signedHeaders(peer, { method: 'GET', pathq, body: Buffer.alloc(0), onBehalf: t.remote.onBehalf }) };
+  const lib = u.protocol === 'https:' ? https : http;
+  const out = lib.request({ hostname: u.hostname === 'localhost' ? '127.0.0.1' : u.hostname.replace(/^\[|\]$/g, ''),
+    port: u.port || (u.protocol === 'https:' ? 443 : 80), method: 'GET', path: pathq, headers });
+  out.setTimeout(15000, () => out.destroy(new Error('paired terminal timed out')));
+  out.on('error', () => { if (!sock.destroyed) refuse(502, 'paired terminal did not answer'); });
+  out.on('response', res => { res.resume(); refuse(res.statusCode === 401 ? 401 : 502, 'paired host refused the terminal ticket'); });
+  sock.once('close', () => out.destroy());
+  out.on('upgrade', (res, remote, head) => {
+    out.setTimeout(0);
+    if (!ticketCallerLive(t) || sock.destroyed) { remote.destroy(); if (!sock.destroyed) refuse(401, 'the session ended'); return; }
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${wsAccept(req.headers['sec-websocket-key'])}\r\n\r\n`);
+    if (head.length) sock.write(head);
+    sock.pipe(remote); remote.pipe(sock);
+    const close = () => { clearInterval(tick); sock.destroy(); remote.destroy(); };
+    const tick = setInterval(() => { if (!ticketCallerLive(t) || !peers().peers.some(p => p.id === peer.id)) close(); }, 1000);
+    tick.unref?.();
+    sock.on('close', close); remote.on('close', close);
+    remote.on('error', close);
+  });
+  out.end();
+}
 function openTermTab(t, kind = 'term') {
   const what = TERM_KINDS[kind];
   return new Promise((resolve) => {
@@ -3649,40 +3729,14 @@ function openTermTab(t, kind = 'term') {
 
 async function termRoutes(p, req, res, body, c, ip) {
   const cl = req.client;
+  // Compatibility with older clients: there is no per-device terminal permission.
   if (p === '/api/term' && req.method === 'GET')
-    return send(res, 200, { ok: true, enabled: termOn(cl), since: cl.terminal?.on ? cl.terminal.at : null, idle: termIdle(c) });
-
-  if (p === '/api/term/enable') {
-    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    const on = body.on === true;
-    // ON is a grant and takes a fresh passkey; OFF only ever takes something away.
-    let assertion = null;
-    if (on) {
-      assertion = headerAssertion(req, c);
-      if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'turning the terminal on needs a fresh passkey assertion in X-Fleet-Assertion' });
-      if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
-    }
-    const fresh = loadConfig({ force: true });
-    const me = fresh.clients.find(x => x.id === cl.id);
-    if (!me) return send(res, 401, { ok: false, needs: 'passkey', text: 'this client is no longer enrolled' });
-    me.terminal = on ? { on: true, at: now(), ip } : { on: false, at: now(), ip };
-    saveConfig(fresh);
-    auditAppend({ ts: now(), client: cl.id, ip, verb: on ? 'terminal_enable' : 'terminal_disable', project: null,
-                  subject: cl.id, args: {}, confirmed: on ? `passkey:${assertion.purpose || 'unnamed'}` : null,
-                  result: 'ran', output: '' });
-    log(`terminal ${on ? 'ENABLED' : 'disabled'} for '${cl.id}' from ${ip}`);
-    if (!on) for (const b of terms) if (b.client === cl.id) b.end(4003, 'the terminal was switched off for this device');
-    return send(res, 200, { ok: true, enabled: on });
-  }
+    return send(res, 200, { ok: true, enabled: true, idle: termIdle(c) });
+  if (p === '/api/term/enable')
+    return send(res, 410, { ok: false, text: 'the terminal follows chat access; there is no device switch' });
 
   if (p === '/api/term/open') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    // ORDER IS DELIBERATE: the device check first, so a disabled device is told what to do
-    // about it rather than asked for a fingerprint it cannot use.
-    if (!termOn(cl)) return send(res, 403, { ok: false, needs: 'enable', text: 'the terminal is off for this device — switch it on in settings (it asks for the passkey)' });
-    const assertion = headerAssertion(req, c);
-    if (!assertion) return send(res, 401, { ok: false, needs: 'passkey', text: 'opening a terminal needs a fresh passkey assertion in X-Fleet-Assertion — every time, not only at unlock' });
-    if (assertion.error) return send(res, 401, { ok: false, needs: 'passkey', text: assertion.error });
     const rp = resolveProject(typeof body.project === 'string' ? body.project : '', peerScope(req));
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
     const kind = body.kind == null ? 'term' : body.kind;
@@ -3694,11 +3748,11 @@ async function termRoutes(p, req, res, body, c, ip) {
     if (tab.error) return send(res, 502, { ok: false, text: tab.error });
     const ticket = rand(32);
     // Tagged with the listener that minted it: termUpgrade spends it only on that one.
-    tickets.set(sha256(ticket), { client: cl.id, rp_id: scopeOf(c, req.ls).rp_id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
+    tickets.set(sha256(ticket), { client: cl.id, ...ticketCaller(req), rp_id: scopeOf(c, req.ls).rp_id, project: rp.t.name, sock: rp.t.sock, session: tab.name,
       cols: termSize(body.cols, 2, 500, 80), rows: termSize(body.rows, 1, 300, 24), exp: now() + TERM_TICKET_TTL });
     for (const [k, v] of tickets) if (v.exp <= now()) tickets.delete(k);
     auditAppend({ ts: now(), client: cl.id, ip, verb: 'terminal', project: rp.t.name, subject: tab.name, args: {},
-                  confirmed: `passkey:${assertion.purpose || 'unnamed'}`, result: 'ran', output: '' });
+                  confirmed: req.localTrust ? 'local' : 'session', result: 'ran', output: '' });
     inboxRow(rp.t, tab.name, `${TERM_KINDS[kind]} opened · from ${cl.id}@${ip}`);
     return send(res, 200, { ok: true, project: rp.t.name, session: tab.name, ticket, ttl: TERM_TICKET_TTL, idle: termIdle(c) });
   }
@@ -3737,14 +3791,19 @@ function termUpgrade(req, sock) {
     return refuse(400, 'not a WebSocket upgrade');
   const raw = url.searchParams.get('ticket') || '';
   const k = sha256(raw), t = raw && tickets.get(k);
+  if (t?.local && !localRequest(req, c)) return refuse(403, 'a local ticket requires a direct localhost connection with local trust enabled');
   if (t) tickets.delete(k);                                  // single use, spent even on a refusal below
-  if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again (it asks for the passkey)');
+  if (!t || t.exp <= now()) return refuse(401, 'no live terminal ticket — open the terminal again');
   // A ticket is the listener's that minted it, as a session token is: one minted on the
   // tailnet is not a way in at localhost, nor the reverse. Spent above all the same.
   if (rpOfRow(c, t) !== scope.rp_id)
     return refuse(403, `that ticket was minted on the other listener ('${rpOfRow(c, t)}'), not this one ('${scope.rp_id}') — open the terminal again here`);
-  const cl = clientById(t.client);
-  if (!termOn(cl)) return refuse(403, 'the terminal is off for this device');
+  if (!ticketCallerLive(t)) return refuse(401, 'the session that opened this terminal has ended');
+  if (t.pair) {
+    const signed = P.verifySigned(peers(), req, url.pathname + url.search, Buffer.alloc(0), pairNonces);
+    if (signed.error || signed.peer.id !== t.pair || signed.onBehalf !== t.onBehalf) return refuse(401, 'the terminal ticket belongs to another paired caller');
+  } else if (req.headers['x-fleet-pair'] !== undefined) return refuse(401, 'this terminal ticket was not opened by a paired caller');
+  if (t.remote) return relayTermUpgrade(req, sock, t, refuse);
   sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
              `Sec-WebSocket-Accept: ${wsAccept(req.headers['sec-websocket-key'])}\r\n\r\n`);
   sock.setNoDelay(true);
@@ -3837,7 +3896,7 @@ function termBridge(sock, t, ip) {
     const idle = termIdle();
     if (Date.now() - lastInput > idle * 1000) return b.end(4000, `idle for ${idle >= 120 ? `${Math.round(idle / 60)} minutes` : `${idle}s`} — closed; the tab is still open on the desk`);
     // Revoked, or switched off from another device, since it opened.
-    if (!termOn(clientById(t.client))) return b.end(4003, 'the terminal was switched off for this device');
+    if (!ticketCallerLive(t)) return b.end(4003, 'the session that opened this terminal has ended');
     if (Date.now() - lastPong > TERM_PING_MS * 2 + 5000) return b.end(1001, 'the browser stopped answering');
     write(OP.ping, Buffer.alloc(0));
   }, Math.min(TERM_PING_MS, Math.max(1000, termIdle() * 250)));
@@ -3969,7 +4028,7 @@ let localErr = '';                          // why the last localhost attempt fa
 async function listenLocal(addrs, port, c, tune, { quiet = false } = {}) {
   const plan = localPlan(addrs, c.rp_id);
   if (!plan.on) { if (!quiet) log(`  localhost: not a second listener — ${plan.why}`); return null; }
-  const ls = Object.freeze({ local: true, bind: LOCAL_BIND, port });
+  const ls = Object.freeze({ local: true, localhost: true, bind: LOCAL_BIND, port });
   const srv = tune(http.createServer((req, res) => { req.ls = ls; requestHandler(req, res); }), ls);
   const err = await new Promise((resolve) => {
     srv.once('error', resolve);
@@ -4057,10 +4116,11 @@ async function serve(argv) {
     srv.on('upgrade', (req, sock) => { req.ls = ls; termUpgrade(req, sock); });
     return srv;
   };
-  const onConfigured = (req, res) => { req.ls = null; requestHandler(req, res); };
+  const configuredLs = Object.freeze({ local: false, localhost: kind === 'loopback' && c.rp_id === LOCAL_RP, bind, port });
+  const onConfigured = (req, res) => { req.ls = configuredLs; requestHandler(req, res); };
   const makeServer = () => tune(c.tls
     ? https.createServer({ cert: fs.readFileSync(c.tls.cert), key: fs.readFileSync(c.tls.key) }, onConfigured)
-    : http.createServer(onConfigured), null);
+    : http.createServer(onConfigured), configuredLs);
   const lit = net.isIPv6(bind) ? `[${bind}]` : bind;
   listening = { bind, port };
 

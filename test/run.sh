@@ -9422,6 +9422,7 @@ if command -v node >/dev/null 2>&1; then
   RVS="$TMUX_TMPDIR/rvsrv"; mkdir -p "$RVS/home" "$RVS/xd"
   printf 'on\n' > "$RVS/xd/shots.enabled"
   node "$ROOT/test/helpers/reviews-api-check.mjs" build "$RVS/home"
+  printf 'off\n' > "$RVS/home/.config/ghostfleet/local-trust"
   RPORT="$(free_port)"; RPORT="${RPORT:-18913}"
   RBASE="http://localhost:$RPORT"
   rv_env() { env GHOSTFLEET_SERVE_CONFIG="$RVS/serve.json" GHOSTFLEET_SERVE_AUDIT="$RVS/audit.jsonl" HOME="$RVS/home" TMUX= \
@@ -18510,6 +18511,7 @@ else
 # run can attribute to a dead one.
 SV="$TMUX_TMPDIR/serve"; mkdir -p "$SV"
 mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
+printf 'off\n' > "$SV/home/.config/ghostfleet/local-trust"
 cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$SV/"
 # ...and the mod's hooks, which fleet-serve reads each master's ledger through (/api/waiting).
 mkdir -p "$SV/mods/ghostfleet" && cp -R "$ROOT/mods/ghostfleet/hooks" "$SV/mods/ghostfleet/"
@@ -19107,6 +19109,7 @@ if [ -z "$SV" ]; then
   skip "/api/pane" "node missing"
 else
 PN="$TMUX_TMPDIR/pane"; mkdir -p "$PN/home/.config/ghostfleet" "$PN/repo" "$PN/other"
+printf 'off\n' > "$PN/home/.config/ghostfleet/local-trust"
 printf 'demo\t%s\twork\nother\t%s\twork\n' "$PN/repo" "$PN/other" > "$PN/home/.config/ghostfleet/projects"
 # The dialog, on a pane sized like the one it was captured from, so the geometry the
 # endpoint reports can be checked against a number we chose rather than one we read back.
@@ -19416,6 +19419,7 @@ group "fleet-serve: the REAL grid, two projects, one daemon process"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 RG="$TMUX_TMPDIR/realgrid"; mkdir -p "$RG"
 mkdir -p "$RG/home/.config/ghostfleet" "$RG/home/.claude/fleet"
+  printf 'off\n' > "$RG/home/.config/ghostfleet/local-trust"
 for pj in pa pb; do
   mkdir -p "$RG/$pj"
   git init -q "$RG/$pj/main" 2>/dev/null
@@ -19540,6 +19544,7 @@ group "fleet-serve: the open chat's read is cheap, conditional and shared"
 # needs: free_port answers in digits
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   CS="$TMUX_TMPDIR/chatserve"; mkdir -p "$CS/home/.config/ghostfleet" "$CS/home/.claude/fleet" "$CS/repo"
+  printf 'off\n' > "$CS/home/.config/ghostfleet/local-trust"
   cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$CS/"
   mv "$CS/bin/fleet-read" "$CS/bin/fleet-read.real"
   printf '#!/bin/sh\necho x >> "%s/spawns"\nexec "$(dirname "$0")/fleet-read.real" "$@"\n' "$CS" > "$CS/bin/fleet-read"
@@ -19638,6 +19643,7 @@ lh_rt() {
   LH="$SV/lh"; mkdir -p "$LH"
   [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/phone.js" ] && return 0
   mkdir -p "$LH/rt" "$LH/proj" "$LH/home/.config/ghostfleet" "$LH/home/.claude/fleet"
+  printf 'off\n' > "$LH/home/.config/ghostfleet/local-trust"
   printf 'lhterm\t%s\twork\n' "$LH/proj" > "$LH/home/.config/ghostfleet/projects"
   cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$ROOT/tmux" "$LH/rt/"
 }
@@ -19840,7 +19846,7 @@ else
       node "$ROOT/test/helpers/term-local.mjs" "$(LH_SERVE)" "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN" lhterm \
       > "$LH/term" 2> "$LH/term.err"
     is "term-local ran"                  "" "$(head -2 "$LH/term.err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
+    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 15 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$LH/term"
@@ -19955,6 +19961,7 @@ if ! command -v curl >/dev/null 2>&1; then
 else
   PU="$(cd "$(mktemp -d)" && pwd -P)"
   mkdir -p "$PU/home/.config/ghostfleet" "$PU/home/.claude/fleet" "$PU/home/.claude-personal/fleet" "$PU/repo" "$PU/prepo"
+  printf 'off\n' > "$PU/home/.config/ghostfleet/local-trust"
   # TWO PROFILES, because a push channel scoped to one fleet dir is the failure CLAUDE.md
   # names: work notifies, personal is silent, and silence has no error in it to find.
   printf 'demo\t%s\twork\npers\t%s\tpersonal\n' "$PU/repo" "$PU/prepo" > "$PU/home/.config/ghostfleet/projects"
@@ -21295,7 +21302,7 @@ rm -rf "$SV"
 fi
 serve_stop
 
-# ── the web terminal: a fleet tab, from the browser, behind four gates ───────
+# ── the web terminal: a fleet tab, from the browser, with chat access ───────
 # A real shell in the web client, attached to the project's `_term-<project>` tab on the
 # fleet's own tmux server (bin/fleet-tab), through fleet-serve's WebSocket and a tmux
 # control-mode client (lib/web-term.mjs). The gates are the server's, and each refusal row
@@ -21307,9 +21314,7 @@ serve_stop
 #   passkey.js runs the ceremony (test/helpers/term-check.mjs).
 #   WATCHED GOING RED, each on purpose and then put back: the origin check removed (the
 #   evil-origin and no-origin rows took a 101, and two extra control clients attached); the
-#   per-device check removed from open (the disabled-device rows got 200 and a tab); the
-#   fresh assertion not required on open (the no-passkey row got through); the 'end'
-#   listener removed (a dropped socket kept its control client — the row that found the
+#   'end' listener removed (a dropped socket kept its control client — the row that found the
 #   bug); the client's query swallowing removed (xterm's answers to nvim's queries landed in
 #   the shell as typing: the back-to-the-shell and desk-key rows); fleet-tab's -d ignored
 #   (the desk's client was moved into the tab); a vendored byte changed (--check).
@@ -21329,7 +21334,7 @@ serve_stop
 #   removed, every row stayed green — a headless Chrome never moves the focus to a tapped
 #   button, so there is nothing here for it to lose. Whether the keyboard stays up is an
 #   iPhone's to say.
-group "fleet-serve: the web terminal is a fleet tab behind four gates"
+group "fleet-serve: the web terminal is a fleet tab with chat access"
 if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d "$TEST_RUNS.$$.term.XXXXXX")" && pwd -P)"
   # ── the wire formats, alone ─────────────────────────────────────────────────
@@ -21399,6 +21404,7 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
 
   # ── one daemon, the suite's own tmux, two projects so the halves start clean ──
   mkdir -p "$WT/home/.config/ghostfleet" "$WT/probe" "$WT/ui"
+  printf 'off\n' > "$WT/home/.config/ghostfleet/local-trust"
   printf 'wtprobe\t%s\twork\nwtui\t%s\twork\n' "$WT/probe" "$WT/ui" > "$WT/home/.config/ghostfleet/projects"
   WTPORT="$(free_port)"; WTPORT="${WTPORT:-18961}"
   WTBASE="http://localhost:$WTPORT"
@@ -21438,8 +21444,8 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     is "term: serve.log holds none of what the terminal printed" "0" "$(grep -c "${wtmark:-no-marker}" "$WT/log" || true)"
     is "...but does say a terminal opened and closed" "yes" \
        "$(grep -q 'terminal open: ' "$WT/log" && grep -q 'terminal closed: ' "$WT/log" && echo yes || echo no)"
-    is "term: the audit log has the opens, confirmed by passkey" "yes" \
-       "$(grep -q '"verb":"terminal".*"confirmed":"passkey:terminal' "$WT/audit.jsonl" && echo yes || echo no)"
+    is "term: the audit log has the opens, authorized by session" "yes" \
+       "$(grep -q '"verb":"terminal".*"confirmed":"session' "$WT/audit.jsonl" && echo yes || echo no)"
     wtcsp="$(curl -sI "$WTBASE/" | tr -d '\r')"
     is "term: the page's CSP lets the terminal's socket and styles in, and script nowhere else" "yes" \
        "$(grep -qi "^content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:$WTPORT wss://localhost:$WTPORT;" <<< "$wtcsp" && echo yes || echo no)"
@@ -22456,8 +22462,8 @@ if grep -q 'no chrome' "$PDC/out" 2>/dev/null; then
 else
   is "paired-check ran"               "0" "$pdcrc"
   is "...without complaining"         ""  "$(head -2 "$PDC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  # 57 rows when it was written: 27 at each size, and the gate's three lifted from the adapter.
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
+  # 54 browser rows: the server-backed terminal gate is exercised by local-trust.mjs.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 54 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
@@ -30680,6 +30686,24 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
 else
   skip "voice pair" "node, tmux or jq missing"
+fi
+
+
+group "fleet-serve: local trust and chat authorize terminals and editors"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  LT="$(mktemp -d)"
+  node "$ROOT/test/helpers/local-trust.mjs" > "$LT/rows" 2> "$LT/err"
+  is "local-trust helper exits cleanly" "0" "$?"
+  LOCAL_TRUST_DUAL=1 LOCAL_TRUST_NO_BROWSER=1 node "$ROOT/test/helpers/local-trust.mjs" >> "$LT/rows" 2>> "$LT/err"
+  is "local-trust two-listener helper exits cleanly" "0" "$?"
+  is "local-trust helper produces its rows" "yes" "$([ "$(grep -c "$US" "$LT/rows")" -ge 40 ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; else is "$name" "$want" "$got"; fi
+  done < "$LT/rows"
+  rm -rf "$LT"
+else
+  skip "local trust and chat terminal access" "node or tmux missing"
 fi
 
 

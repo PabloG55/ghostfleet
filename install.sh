@@ -513,6 +513,17 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     2) UNASKED+=("$what (the editor ^N opens)") ;;
   esac
 fi
+# Local chat and shell access use the OS account's trust on macOS and Linux. Keep an
+# existing off choice; an update must never undo the shared-machine owner's decision.
+local_trust_default() {
+  local trust_dir="$HOME/.config/ghostfleet"
+  mkdir -p "$trust_dir"
+  if [ ! -e "$trust_dir/local-trust" ]; then
+    ( umask 077; printf 'on\n' > "$trust_dir/local-trust" )
+  fi
+}
+local_trust_default
+
 # THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots, accounts, peek) ARE OFF UNLESS SOMEBODY
 # TURNS THEM ON. `fleet-experimental list` writes every switch down the first time: on for a
 # machine that already uses a feature, so an update changes nothing for somebody using it,

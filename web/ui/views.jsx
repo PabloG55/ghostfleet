@@ -183,7 +183,6 @@ export function Settings() {
       </section>
       {people()}
       {s.push ? <SwitchSection title={t('settings.push')} label={t('settings.pushLabel')} icon="bell" part={s.push} /> : null}
-      {s.terminal ? <SwitchSection title={t('settings.terminal')} label={t('settings.terminalLabel')} icon="term" part={s.terminal} /> : null}
       {s.hosts ? <Hosts part={s.hosts} /> : null}
       {s.device ? <Device part={s.device} /> : null}
       {s.connection ? <Connection part={s.connection} /> : null}

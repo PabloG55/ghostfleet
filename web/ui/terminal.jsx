@@ -175,9 +175,6 @@ function Panel({ project, session, kind }) {
     const s = e && e.status;
     if (s === 404) { refused.add(project); away(back); return; }
     if (s === 401) return say('signedOut');
-    // A phone's own switch for the terminal (fleet-serve /api/term/enable), which only this device
-    // can turn on: not a refusal to show, a setting to point at.
-    if (s === 403 && e.needs === 'enable') return say('off');
     if (s === 403) {
       // The temporary-password gate answers before the terminal is reached; anything else
       // forbidden here is an origin or a header, which the person cannot fix from this page.

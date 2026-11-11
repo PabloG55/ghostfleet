@@ -943,6 +943,7 @@ var en_default = {
 	"say.theLink": "the link",
 	"say.line": "line",
 	"say.goesOn": "… and it goes on.",
+	"phone.localAccess": "Local access on this computer",
 	"phone.noSensor": "No passkey on this device",
 	"phone.lockNow": "Lock now",
 	"phone.forget": "Forget the passkey",
@@ -1795,6 +1796,7 @@ var es_default = {
 	"say.theLink": "el enlace",
 	"say.line": "línea",
 	"say.goesOn": "… y sigue.",
+	"phone.localAccess": "Acceso local en este equipo",
 	"phone.noSensor": "Este dispositivo no tiene llave de acceso",
 	"phone.lockNow": "Bloquear ahora",
 	"phone.forget": "Olvidar la llave de acceso",
@@ -4955,7 +4957,6 @@ function Panel({ project, session, kind }) {
 			return;
 		}
 		if (s === 401) return say("signedOut");
-		if (s === 403 && e.needs === "enable") return say("off");
 		if (s === 403) {
 			let who;
 			try {
@@ -7835,12 +7836,6 @@ function Settings() {
 				label: t("settings.pushLabel"),
 				icon: "bell",
 				part: s.push
-			}) : null,
-			s.terminal ? /* @__PURE__ */ u(SwitchSection, {
-				title: t("settings.terminal"),
-				label: t("settings.terminalLabel"),
-				icon: "term",
-				part: s.terminal
 			}) : null,
 			s.hosts ? /* @__PURE__ */ u(Hosts, { part: s.hosts }) : null,
 			s.device ? /* @__PURE__ */ u(Device, { part: s.device }) : null,
@@ -12988,6 +12983,7 @@ var needsPasskey = (a) => (a?.steps || []).some((s) => own(ACTIONS, s.action) &&
 //#endregion
 //#region web/src/adapter-extras.js
 async function assertion(purpose) {
+	if (api$1.localTrusted()) return null;
 	if (!passkey.available() || !passkey.registered()) {
 		if (passkey.bypassAllowed()) return null;
 		throw new Error("Register a passkey before continuing");
@@ -13131,6 +13127,7 @@ var NOT_SERVED = /* @__PURE__ */ new Set([
 var devKind = () => /Mac/.test(passkey.device().noun) ? "mac" : "phone";
 var remote = (project) => /@[^@]+$/.test(String(project || ""));
 function assertFor(purpose) {
+	if (api$1.localTrusted()) return Promise.resolve(null);
 	if (!passkey.available() || !passkey.registered()) {
 		if (passkey.bypassAllowed()) return Promise.resolve(null);
 		return Promise.reject(new Error(t("lock.noPasskey", { why: passkey.unavailableReason() || t("lock.enrolHint") })));
@@ -13173,26 +13170,6 @@ function phoneAdapter({ lock, go, place }) {
 		throw e;
 	};
 	api$1.getAutomations().catch(noted("automations")).catch(() => {});
-	let termOn = null, termAsked = false, termReading = null;
-	const readTerm = () => {
-		termAsked = true;
-		return termReading ||= api$1.getTerm().then((j) => {
-			termOn = !!j.enabled;
-		}, () => {}).finally(() => {
-			termReading = null;
-		});
-	};
-	const termOff = () => Object.assign(new Error(t("term.off")), {
-		status: 403,
-		needs: "enable"
-	});
-	const openTerm = (project, kind, size) => {
-		const asking = passkey.available() && passkey.registered() ? passkey.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
-		return guard(asking.then((a) => api$1.termOpen(project, size, a, kind))).catch((e) => {
-			if (e && e.needs === "enable") termOn = false;
-			throw e;
-		});
-	};
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -13303,11 +13280,8 @@ function phoneAdapter({ lock, go, place }) {
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,
 		lead,
-		canTerm: (project) => {
-			if (server() && !termAsked) readTerm();
-			return server() && !remote(project);
-		},
-		termWhy: (project) => remote(project) ? t("phone.noTermRemote", { host: String(project).split("@").pop() }) : "",
+		canTerm: () => server(),
+		termWhy: () => "",
 		proposals: async () => {
 			if (jarvisOff) return [];
 			try {
@@ -13322,14 +13296,7 @@ function phoneAdapter({ lock, go, place }) {
 			}
 		},
 		answerProposal: async (p, yes) => guard(api$1.jarvisConfirm(p.id, yes ? "yes" : "no", yes ? await assertFor(`jarvis yes ${p.id}`) : null)),
-		termOpen: (project, kind, size) => {
-			if (termReading) return termReading.then(() => termOn === false ? Promise.reject(termOff()) : openTerm(project, kind, size));
-			if (termOn === false) {
-				readTerm();
-				return Promise.reject(termOff());
-			}
-			return openTerm(project, kind, size);
-		},
+		termOpen: (project, kind, size) => guard(api$1.termOpen(project, size, null, kind)),
 		termSocket: api$1.termSocket,
 		go,
 		place: (to) => screenPlace(to) || place?.(to) || null,
@@ -13364,38 +13331,13 @@ function phoneAdapter({ lock, go, place }) {
 				state: () => state(t),
 				set: (on) => on ? enable(t) : disable()
 			},
-			terminal: {
-				state: async () => {
-					if (!server()) return {
-						ready: false,
-						why: t("phone.termFixtures")
-					};
-					try {
-						termOn = !!(await guard(api$1.getTerm())).enabled;
-						return {
-							ready: true,
-							on: termOn,
-							why: termOn ? t("phone.termOn") : ""
-						};
-					} catch (e) {
-						return {
-							ready: false,
-							why: e.status === 404 ? t("phone.termOld") : e.message
-						};
-					}
-				},
-				set: async (on) => {
-					const a = on && passkey.registered() ? await passkey.fresh("terminal on") : null;
-					await guard(api$1.termEnable(on, a));
-					termOn = !!on;
-				}
-			},
 			hosts: {
 				list: async () => (await guard(api$1.getProjects())).hosts || [],
 				unpair: (key) => guard(api$1.unpairHost(key))
 			},
 			device: {
 				state: () => {
+					if (api$1.localTrusted()) return { text: t("phone.localAccess") };
 					const k = devKind();
 					if (!passkey.available()) return {
 						text: t("phone.noSensor"),
@@ -13406,7 +13348,7 @@ function phoneAdapter({ lock, go, place }) {
 						detail: t(`dev.${k}.enrol`)
 					};
 				},
-				actions: () => [{
+				actions: () => api$1.localTrusted() ? [] : [{
 					id: "lock",
 					label: t("phone.lockNow"),
 					run: () => lock()
@@ -13515,11 +13457,11 @@ function Lock({ onIn, connection }) {
 		api$1.ready().then(redraw);
 	}, []);
 	h(() => {
-		if (probing || !passkey.available() || !passkey.registered()) return;
+		if (probing || api$1.localTrusted() || !passkey.available() || !passkey.registered()) return;
 		if (!passkey.prepared() && !passkey.preparing() && !passkey.prepareError()) passkey.prepare().then(redraw, (e) => setErr(passkey.describe(e)));
 	});
 	h(() => {
-		if (!server || !passkey.available() || passkey.registered()) return;
+		if (!server || api$1.localTrusted() || !passkey.available() || passkey.registered()) return;
 		passkey.enrolmentState().then(setWindow, (e) => setWindow({ error: String(e && e.message || e) }));
 	}, [server]);
 	const unlock = () => {
@@ -13807,7 +13749,7 @@ function Root() {
 			}
 			if (!hidByCeremony) passkey.arm();
 			hidByCeremony = false;
-			if (!api$1.haveToken()) {
+			if (!api$1.haveAccess()) {
 				if (!locked) lock();
 				else tryAuto();
 			}
@@ -13825,7 +13767,7 @@ function Root() {
 		} catch {}
 		setVer((v) => v + 1);
 		setLocked(false);
-		passkey.prepareFresh().catch(() => {});
+		if (!api$1.localTrusted()) passkey.prepareFresh().catch(() => {});
 	};
 	const tryAuto = () => {
 		if (document.hidden) return;
@@ -13835,7 +13777,7 @@ function Root() {
 	};
 	h(() => {
 		passkey.arm();
-		passkey.resume().then((r) => {
+		api$1.ready().then(() => api$1.localTrusted() ? "ok" : passkey.resume()).then((r) => {
 			if (r === "ok") {
 				linkPlace = true;
 				landed();
@@ -13860,7 +13802,7 @@ if ("serviceWorker" in navigator) {
 	navigator.serviceWorker.addEventListener("message", (ev) => {
 		const to = ev?.data?.open === "jarvis" ? "/" : ev?.data?.open === "waiting" ? "/queue" : null;
 		if (to) {
-			if (api$1.haveToken()) go$1(to);
+			if (api$1.haveAccess()) go$1(to);
 			else wantPlace = to;
 		}
 	});

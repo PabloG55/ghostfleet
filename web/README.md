@@ -301,7 +301,7 @@ had not learned was rebuilt in `web/ui/`, where the team app has it too:
 | the Claude accounts line on Projects, read only | the first page (`web/ui/accounts.jsx`) |
 | a reply that lands in the open chat without reopening it | `web/ui/transcript.js` |
 | another machine's projects by name and machine | everywhere a project is named |
-| the terminal off per device, and why it is off | Settings, and the Terminal tab |
+| terminal and editor with the same access as chat | Terminal and Editor tabs |
 | `Ctrl-a t` and `Ctrl-a n` | the same keys |
 | a wake that fails opens nothing | `src/lead.js` |
 | every dialog closes on its X and on a press outside it | web/ui's `Modal` |
@@ -521,21 +521,21 @@ browser, or the socket dropping, detaches; the tab stays.
 **The editor is the same screen with the other tab in it** — the desk's `Ctrl-n`: `bin/fleet-tab
 edit` opens `$EDITOR` (default `nvim .`, with `lib/nvim-copy-on-select.lua`) on the project's
 folder as `_edit-<project>`, so a LazyVim config is the editor you get. Its tab is beside the
-Terminal's, and `Ctrl-a n` opens it from a session (`Ctrl-n` itself is the browser's). It is behind **every gate below, unchanged** — the same device switch, a fresh
-passkey per open, the one-use ticket, the Origin check — because nvim's `:terminal` is a
-shell, so it is no lesser surface. Like the terminal it is absent for another machine's
-project.
+Terminal's, and `Ctrl-a n` opens it from a session (`Ctrl-n` itself is the browser's). It uses the same authorization as chat. Whoever can send a prompt to a session can
+already ask it to run commands, so terminal and editor add no new power and ask for
+nothing more: there is no device switch and no passkey at each open. The phone's app lock
+still grants remote chat access. Both tabs are available for paired projects too, through
+the home host's signed relay and the same project-sharing rules as chat.
 
-**Four gates, all on the server** (`bin/fleet-serve.mjs`, TERMINAL):
-
-1. **off per device.** Settings → *Terminal* turns it on for this device — it asks for the
-   passkey, and the Mac records the switch on this device's enrolment (`terminal: { on, at,
-   ip }` in `serve.json`) with an audit row. Off never asks, and closes any terminal open.
-2. **a fresh passkey at every open**, like a destructive verb — the unlock does not count. The
-   challenge is fetched before the tap, so on iOS the sheet is asked for inside it.
-3. **the address fleet-serve already binds** (tailnet or loopback), nothing new; the
-   WebSocket also needs a configured `Origin` and a one-use ticket from the open.
-4. **inside the fleet's tmux**, so the Mac sees it.
+The server mints a short-lived, one-use terminal ticket bound to the caller's exact chat
+session. The WebSocket checks Host and Origin, and ending the session or revoking the
+pairing ends access. Direct localhost skips the app lock on macOS and Linux when the
+server verifies loopback, the local Host, no forwarding headers, and the exact local
+Origin for every POST and upgrade. Linux also verifies the connecting socket's uid in
+`/proc/net/tcp` or `/proc/net/tcp6`. Local trust defaults on; write `off` to
+`~/.config/ghostfleet/local-trust` to require passkeys locally too. The server tells the
+client whether this connection has local trust; the browser never guesses it from its
+hostname. See [the security model](../docs/mobile.md#on-this-computer-macos-and-linux-httplocalhost8787).
 
 It closes after **15 minutes without a keystroke** (`terminal_idle` in `serve.json`) — the same
 idle window as the session token, so an unlocked phone on a table does not hold a shell open

@@ -169,7 +169,7 @@ async function detect(origin) {
   try { r = await probeFetch(origin + PROBE_PATH); }
   catch (e) { return fixturesBecause(`fixtures — nothing answered ${origin}${PROBE_PATH} (${String((e && e.message) || e)})`); }
   if (probeVerdict(r) === 'server')
-    return { mode: 'server', base: origin, source: 'probe',
+    return { mode: 'server', base: origin, source: 'probe', localTrust: r.status === 200 && r.body?.local_trust === true,
              detail: r.status === 401
                ? `${origin} — served this app, and its API asked for a passkey (401), which is the server enforcing §5`
                : `${origin} — served this app, and its API answered (${r.status})` };
@@ -190,6 +190,9 @@ export function resolution() {
   return { mode: 'probing', base: '', source: 'probe',
            detail: o ? `looking for a fleet at ${o}…` : 'looking for a fleet…' };
 }
+// Only the daemon's answer grants this; never inferred from a hostname or stored locally.
+export function localTrusted() { return resolved?.localTrust === true; }
+export function haveAccess() { return localTrusted() || haveToken(); }
 export function mode() { return resolution().mode; }
 export function baseUrl() { return resolution().base; }
 // The short form for the header, so every screen can say which fleet it is showing.
@@ -202,7 +205,13 @@ export function modeLabel() {
 // requests go. Memoised: the probe happens once per load.
 export async function ready() {
   if (resolved) return resolved;
-  if (pref().kind !== 'auto') { resolved = resolution(); return resolved; }
+  if (pref().kind !== 'auto') {
+    const chosen = resolution();
+    if (chosen.mode === 'server') {
+      try { const r = await probeFetch(chosen.base + PROBE_PATH); chosen.localTrust = r.status === 200 && r.body?.local_trust === true; } catch {}
+    }
+    resolved = chosen; return resolved;
+  }
   if (!resolving) resolving = detect(pageOrigin()).then(r => { resolved = r; resolving = null; return r; });
   return resolving;
 }
@@ -250,7 +259,10 @@ function storeToken() {
 }
 export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; storeToken(); }
 export function haveToken() { return !!token && Date.now() / 1000 < tokenExp; }
-export function clearToken() { token = null; tokenExp = 0; storeToken(); }
+export function clearToken() {
+  if (resolved) resolved.localTrust = false;
+  token = null; tokenExp = 0; storeToken();
+}
 // The reload half: whatever this page process minted before the app reloaded itself, if it
 // has not visibly expired. Nothing is trusted from it but the string — passkey.resume()
 // asks the server.
@@ -556,7 +568,7 @@ export async function getShotsRun(profile, id, host = '') {
 // gives — which is what `fleet-shots --check` will say.
 export async function postShotsVerdict(body) {
   if ((await ready()).mode === 'server') {
-    if (!haveToken()) throw new AuthError('no live session token');
+    if (!haveAccess()) throw new AuthError('no live session token');
     let r;
     try {
       r = await fetch(baseUrl() + '/api/shots/verdict', {
@@ -802,7 +814,7 @@ export async function pushKey() {
 }
 export async function pushSubscribe(sub) {
   if ((await ready()).mode !== 'server') throw new Error('push needs a real fleet-serve, not fixtures');
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   return authFetch('subscribe', '/api/push/subscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -811,7 +823,7 @@ export async function pushSubscribe(sub) {
 }
 export async function pushUnsubscribe(endpoint) {
   if ((await ready()).mode !== 'server') return { ok: true, removed: 0 };
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   return authFetch('unsubscribe', '/api/push/unsubscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -855,7 +867,7 @@ export async function jarvisConfirm(id, answer, assertion = null) {
     record('jarvis_confirm', { id, answer }, 'ok (fixture — recorded, not executed)');
     return { ok: true, id, answer, told: false, text: `fixture: ${answer} recorded for ${id}, nothing ran` };
   }
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   const j = await authFetch('confirm', '/api/jarvis/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
@@ -876,7 +888,7 @@ export async function getAutomations() {
 }
 async function autoPost(kind, path, body, assertion = null) {
   if ((await ready()).mode !== 'server') throw new Error('automations need a real fleet-serve, not fixtures');
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   const r = await authFetch(kind, path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
@@ -916,7 +928,7 @@ async function postHear(path, wav) {
 }
 export async function hear(wav) {
   if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   let r = await postHear('/api/voice/hear', wav);
   if (r.status === 404) r = await postHear('/api/jarvis/hear', wav);
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
@@ -935,7 +947,7 @@ export class SpeechOff extends Error {}
 // the Mac keeps synthesising what is still to be played instead of superseding it.
 export async function speakPlan(text, more = false) {
   if ((await ready()).mode !== 'server') throw new SpeechOff('fixtures have no Kokoro');
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   let r;
   try {
     r = await fetch(baseUrl() + '/api/speak', { method: 'POST', cache: 'no-store',
@@ -972,7 +984,7 @@ export async function attach(project, session, file) {
     // than inventing a path that would go into a prompt and name nothing.
     throw new Error('attachments need a real fleet — there is nowhere to put a file in fixture mode');
   }
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   // CHECKED BEFORE IT IS SENT. The server caps this too and has to, but a phone that
   // uploads five megabytes over a tunnel to be told the number would have spent the five
   // megabytes. Same limit, said the same way, before the cost is paid.
@@ -1014,7 +1026,7 @@ export async function attach(project, session, file) {
 export class TermRefused extends Error {}
 async function termCall(path, method, body, assertion) {
   if ((await ready()).mode !== 'server') throw new TermRefused('the terminal needs the fleet server — fixtures have no shell to open');
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   let r;
   try {
     r = await fetch(baseUrl() + path, {
@@ -1028,12 +1040,11 @@ async function termCall(path, method, body, assertion) {
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
   // A 401 that asks for a PASSKEY is about the fresh assertion, not the session: the token
   // is fine and clearing it would lock the app over a cancelled Face ID.
-  if (r.status === 401 && j.needs !== 'passkey') { clearToken(); throw new AuthError('the server refused the session'); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server refused the session'); }
   if (!j.ok) throw Object.assign(new TermRefused(j.text || `HTTP ${r.status}`), { status: r.status, needs: j.needs || '' });
   return j;
 }
 export const getTerm = () => termCall('/api/term', 'GET');
-export const termEnable = (on, assertion = null) => termCall('/api/term/enable', 'POST', { on: !!on }, assertion);
 // kind 'edit' is the desk's Ctrl-n editor tab instead of the shell: the same request, the
 // same gates. Left out for the terminal, so a daemon from before the editor still answers it.
 export const termOpen = (project, size, assertion, kind = 'term') =>
@@ -1051,7 +1062,7 @@ export function termSocket(ticket) {
 // Unpair and rename, from the settings sheet. Neither is a verb: they change this daemon's
 // pairing file rather than a fleet, and a paired host can ask for neither.
 async function postPairs(path, body) {
-  if (!haveToken()) throw new AuthError('no live session token');
+  if (!haveAccess()) throw new AuthError('no live session token');
   let r;
   try {
     r = await fetch(baseUrl() + path, { method: 'POST', cache: 'no-store',
@@ -1078,7 +1089,7 @@ export async function relabelHost(host, label) {
 
 export async function verb(tool, args, assertion = null) {
   if ((await ready()).mode === 'server') {
-    if (!haveToken()) throw new AuthError('no live session token');
+    if (!haveAccess()) throw new AuthError('no live session token');
     let r;
     try {
       r = await fetch(baseUrl() + '/api/verb', {
