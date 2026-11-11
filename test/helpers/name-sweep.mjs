@@ -624,6 +624,8 @@ is('...and the sweep read them', true, scanned > 50);
 // tell whether it is the same bytes as the one somebody vouched for. That is the whole of
 // what is being claimed, and it is worth exactly as much as the look that preceded it.
 const BINARY_REVIEWED = new Set([
+  '35fb44308a4afcbd',   // docs/mobile/local-terminal.png
+  '73f8749932f6fc9e',   // docs/mobile/local-app.png
   '2c785a8e51bcab64',   // docs/img/pane-fit.png
   '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
   // The phone on the shared UI, shot on fixtures at 1x: every frame opened and read, every
@@ -664,6 +666,8 @@ const BINARY_REVIEWED = new Set([
 }
 
 const BINARY_EXPECTED = [
+  'docs/mobile/local-terminal.png',
+  'docs/mobile/local-app.png',
   'docs/img/pane-fit.png', 'docs/img/pane-permission-dialog.png',
   'docs/mobile/desk.png', 'docs/mobile/drawer.png', 'docs/mobile/home.png',
   'docs/mobile/phone-demo.gif', 'docs/mobile/session.png',

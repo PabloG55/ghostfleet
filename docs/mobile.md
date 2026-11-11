@@ -352,14 +352,15 @@ either breaks confusingly or — if `*` gets pasted in while debugging — widen
 The VPN authenticates a **device**, not a person; an unlocked phone on the tailnet is
 inside. So the service also requires:
 
-- **A passkey whenever there is no live session.** Face ID on first launch and whenever
+- **Outside direct localhost, a passkey whenever there is no live session.** Face ID on first launch and whenever
   the app comes back after 15 minutes without a request — backgrounded, relaunched or
   evicted by iOS, it is the same rule. Not a password: a password typed twenty times a day
   converges on something short, autofills from a manager on the very unlocked phone that
   is the threat, and is replayable. A passkey is bound to the secure enclave, cannot be
   copied off the device, and does not degrade with use.
 - **Server-enforced, not client-enforced.** The passkey assertion mints a session token
-  and the API rejects any request without a live one. A lock screen that only gates the UI
+  and the API rejects remote requests without a live one. Direct localhost is the
+  explicit exception below. A lock screen that only gates the UI
   is decoration — `curl` with the bearer token would walk straight past it.
 - **An idle window, not a deadline.** The token dies after `session_ttl` (900 s) *without
   a request*; every authenticated request — the visible app's own polls included — pushes
@@ -391,7 +392,7 @@ The layers answer different questions, which is why all of them are here: Tailne
 *can this device join*; the ACL — *may it reach this port*; the passkey — *is this the
 owner*; the session token — *is that still true right now*.
 
-### On the Mac itself: `http://localhost:8787`
+### On this computer (macOS and Linux): `http://localhost:8787`
 
 The same client opens on the Mac without Tailscale: `ghostfleet web` (or `fleet-web`)
 opens `http://localhost:<port>` in the default browser. It starts nothing; if `fleet-serve`
@@ -419,23 +420,52 @@ have no second listener, and both are reported at startup and by `fleet-serve ch
 - `127.0.0.1` bound for another name (a tunnel's). Serving two relying parties from one
   socket would mean reading the scope from the `Host` header, which the client writes.
 
-`localhost` is **its own relying party**. A passkey is bound to the rp_id it was made for,
-so the Mac enrols its own the first time, through the same flow as the phone:
-`fleet-serve enroll mac`, then the code, then Touch ID. `http://localhost` is a secure
-context without TLS, the one `http://` origin WebAuthn accepts. The two listeners share
-nothing. Origin, `clientData.origin`, the authenticator's rpIdHash, the challenge, the
-credential and the session token each belong to the socket they were made on. An assertion
-made at localhost is refused on the tailnet and the reverse, a POST carrying the other
-listener's Origin is refused, and a token minted on one is dead on the other. The tailnet's
-passkeys and sessions are untouched.
+**Direct localhost opens straight into the app.** Whoever can chat with a session can
+already ask it to run commands. The terminal and editor add no new power, so they ask for
+nothing beyond chat access: no per-open passkey and no device switch. The phone's app lock
+stays: its passkey unlock grants remote chat access, including terminal and editor access.
 
-**Why localhost still needs the passkey.** `127.0.0.1` cannot be reached from the network,
-but **every process on the Mac** can reach it: every agent the fleet runs, every
-`npm install` postinstall script, and every page open in a local browser that tries a
-`fetch`. Without the tailnet there is no second layer. The passkey, the idle session, the
-second assertion on destructive verbs, the Origin check and the `Host` allowlist (which
-keeps DNS rebinding out) are all that stand between those processes and an endpoint that
-runs code as you. So localhost gets a different rp_id, and nothing else is relaxed.
+The server grants local access only when all of these hold:
+
+- it arrived on the server's localhost listener, identified by the listener itself;
+- the connecting socket is loopback;
+- Host exactly names this listener's localhost origin (blocking DNS rebinding);
+- there are no forwarding headers, including pair signatures; unknown headers also fail
+  closed, using a small allowlist of normal browser headers;
+- every state-changing request and terminal WebSocket upgrade has the exact local Origin;
+- on Linux, the client socket belongs to the daemon's uid. The daemon finds the client's
+  complete address/port tuple in `/proc/net/tcp` or `/proc/net/tcp6` and reads its uid.
+  Another user on the same box, or an unreadable proc table, gets the passkey lock.
+
+These checks are per request. The client learns `local_trust` from `/api/health`; it never
+infers trust from the address bar and receives no reusable local bearer token. Every POST
+with a foreign Origin is refused, and no response grants access through CORS. The same
+checks protect local terminal tickets when the WebSocket connects. Local processes under
+the owner's account have the same access as the owner; on macOS this includes other local
+accounts, so shared Macs should turn local trust off.
+
+Local trust defaults **on** on both platforms. The installer creates
+`~/.config/ghostfleet/local-trust` containing `on` if it is absent and preserves an existing
+choice. To require passkeys locally as well, write `off` to that file; it takes effect on
+the next request and closes local terminals on their next authorization check. Only `on`
+(or an absent file) enables it; malformed or unreadable settings fail closed.
+
+The configured tailnet address has its own TLS server; `serve()` creates it separately
+from `listenLocal()`'s loopback HTTP server. Requests and WebSocket upgrades receive their
+listener identity there, before any headers are inspected. A tailnet request cannot select
+the localhost listener with Host or forwarding headers. A standalone configured loopback
+listener for `rp_id: localhost` is marked as localhost by the server too.
+
+For the additional proxy-header checks, measured on a scratch HTTP server: Tailscale Serve arrived from `127.0.0.1` with a tailnet
+Host, `X-Forwarded-For/Host/Proto`, `Tailscale-Headers-Info` and the Tailscale user headers.
+Pair forwarding also arrived from `127.0.0.1`, with Host localhost and
+`X-Fleet-Pair/Ts/Nonce/Sig` plus `X-Fleet-On-Behalf`, **without** `X-Forwarded-For`.
+Neither path receives local trust. The paired host's app and a phone through Tailscale
+continue to use the passkey session they use for chat.
+
+When local trust is off, localhost is its own passkey relying party. Enrol at localhost
+with `fleet-serve enroll mac` and the code printed there. Its passkeys, challenges and
+session tokens remain separate from the tailnet listener's.
 
 ### Several machines, one app: `fleet-serve pair`
 
@@ -472,9 +502,12 @@ server to server, signed with a credential the two exchanged once, at pairing.
   so that path names the file where the agent will read it. Both audit logs record it. The
   permission is not a separate setting: a photo is allowed only while `fleet_send` is. A
   machine that does not answer shows as a failed upload that names it.
-- **What does not cross:** the web terminal (a shell is opened only by the machine it runs
-  on; for another machine's project the control is absent, with one line saying why), any
-  passkey verb (a passkey only verifies on the machine it was made on), and project
+- **Terminal and editor cross on the same terms as chat.** The home host authenticates the
+  caller and relays a signed WebSocket upgrade to the paired host. Each ticket is short
+  lived and single use; the home ticket is bound to the caller's exact session, and the
+  remote ticket to the pairing and signed caller. Ending that session or removing the
+  pairing closes access. Project sharing rules apply just as they do to chat.
+- **What does not cross:** any passkey verb (a passkey only verifies on the machine it was made on), and project
   settings. Each is refused on the home host, by name.
 
 **Keeping a project to this machine.** Each project says what a paired machine may have of it,
@@ -708,21 +741,16 @@ conversations on a phone (§6, and web/README.md *The stack*). "A phone has no s
 true; what changed is that one conversation at a time, a swipe apart, turned out to be the
 phone's way of having several.
 
-**The `Ctrl-t` terminal tab was the third, and the owner has since reopened it** — on purpose,
-with its own gates, and the argument that kept it out is the reason those gates exist rather
-than something that stopped being true. The pane view (§7a) is a periodic `capture-pane`:
-one direction, no session of its own, nothing to type into but the audited verbs. A terminal
-is an interactive shell — a live byte stream both ways and arbitrary commands outside the
-verb vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface.
+**The terminal and editor use the same permission as chat.** Whoever can send a prompt
+can already ask the session to run commands. Opening an interactive shell or editor adds
+no new power, so it asks for no extra passkey and has no device switch. The phone's app
+lock remains the remote login. A paired machine's terminal follows its chat access too.
 
-So the terminal is not a shell of its own: it is the project's fleet tab (`bin/fleet-tab`,
-`_term-<project>`), attached as a tmux control-mode client, so the desk sees the same session
-the phone types into. And it is everything a verb is plus four more (web/README.md, *The
-terminal*, and `bin/fleet-serve.mjs` TERMINAL): **off per device** until switched on in
-settings, which takes a passkey and is recorded on that device's enrolment; **a fresh passkey
-at every open**; a WebSocket that needs a configured **Origin** and a one-use ticket, on the
-address this daemon already binds; and an **idle close** after 15 minutes without a
-keystroke — the session token's own window. Nothing it prints reaches `serve.log`.
+Both tabs use the project's fleet tmux session (`bin/fleet-tab`), visible at the desk.
+The short-lived, one-use ticket binds the WebSocket to the exact caller session; Host and
+Origin are checked at the upgrade, and expired or revoked sessions cannot spend tickets.
+The terminal closes after its idle window without a keystroke. Output does not count as
+activity, and closing the browser leaves the tmux tab available at the desk.
 
 ### The one place the phone shows LESS, and why the numbers did not move
 

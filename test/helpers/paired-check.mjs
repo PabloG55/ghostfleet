@@ -37,25 +37,6 @@ const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
 const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
 process.on('uncaughtException', (e) => { console.log(rows.join('\n')); console.error(String(e && e.stack || e)); process.exit(1); });
 
-// ── the terminal gate, lifted ──────────────────────────────────────────────────────────────
-// Fixture mode has no tmux, so the phone offers no terminal there for ANY project, and a
-// browser row "a remote project has no terminal" would pass for a client that offered one
-// everywhere a server answers. So the adapter's own two lines are lifted and called with a
-// server: another machine's project has none, this machine's has one.
-{
-  const src = fs.readFileSync(path.join(WEB, 'src', 'adapter.js'), 'utf8');
-  const rem = (/export const remote = (\(project\) => [^\n]*);/.exec(src) || [])[1] || '';
-  const gate = (/canTerm: (\(project\) => \{[^\n]*\}),/.exec(src) || [])[1] || '';
-  let canTerm = null;
-  try {
-    // eslint-disable-next-line no-new-func
-    canTerm = new Function('server', 'termAsked', 'readTerm', `const remote = ${rem}; return ${gate};`)(() => true, true, () => {});
-  } catch {}
-  is('the terminal gate is the adapter\'s own', 'function', typeof canTerm);
-  is('...another machine\'s project has no terminal, with a server answering', false, canTerm ? canTerm('billing-svc@vm') : null);
-  is('...and this machine\'s has one', true, canTerm ? canTerm('billing-svc') : null);
-}
-
 let b = null, srv = null;
 try {
   srv = await serveDir(WEB);
@@ -223,13 +204,13 @@ try {
       await openProject('vm', 'billing-svc');
       s = await settle(x => /billing-svc/.test(x.h1));
       is(`${at}: the remote project's page is titled with its name and its machine`, 'billing-svc · vm', s.h1);
-      is(`${at}: ...it offers no terminal or editor tab`, [], s.tools);
-      is(`${at}: ...and says why, in one line`, true, /another machine/.test(s.termWhy) && !/\n/.test(s.termWhy));
+      is(`${at}: ...fixtures offer no shell`, [], s.tools);
+      is(`${at}: ...has no obsolete refusal about the other machine`, '', s.termWhy);
       await fresh({ ...size, paired: 'online' });
       await openProject('laptop', 'billing-svc');
       s = await settle(x => /billing-svc/.test(x.h1));
       is(`${at}: this machine's project of the same name is titled with its name alone`, 'billing-svc', s.h1);
-      is(`${at}: ...and has no such line: the absence is about the machine`, '', s.termWhy);
+      is(`${at}: ...also has no obsolete terminal refusal`, '', s.termWhy);
     });
 
     // A PHOTO FOR ANOTHER MACHINE'S SESSION GOES TO THE UPLOAD, like a local one. In fixture mode

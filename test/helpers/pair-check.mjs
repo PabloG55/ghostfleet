@@ -93,6 +93,7 @@ const now = Date.now();
 async function host(id, projects) {
   const dir = path.join(T, id), home = path.join(dir, 'home');
   fs.mkdirSync(path.join(home, '.config', 'ghostfleet'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config/ghostfleet/local-trust'), 'off\n');
   fs.mkdirSync(path.join(home, '.claude', 'fleet'), { recursive: true });
   const lines = [];
   for (const [name, prof] of projects) { fs.mkdirSync(path.join(dir, name), { recursive: true }); lines.push(`${name}\t${path.join(dir, name)}\t${prof}`); }
@@ -311,11 +312,10 @@ r = await pa.verb(A.base, 'fleet_stop', { project: 'toolbox@vm', session: 'w1' }
 is('a passkey verb does not cross', 400, r.status);
 is('...and says a passkey only works where it was made', true, /passkey only works on the host it was made on/.test(r.text));
 is('...and nothing was stopped on either host', 0, ranLines(A, /^fleet-stop/).length + ranLines(B, /^fleet-stop/).length);
-r = await pa.api(A.base, 'POST', '/api/term/open', { project: 'toolbox@vm', cols: 80, rows: 24 }, { headers: { 'x-fleet-assertion': JSON.stringify(await pa.fresh(A.base, 'terminal')) } });
-// remote:true — refused BECAUSE the project is on another machine, not because this
-// device's terminal happens to be off (which would also be a 403).
-is('the terminal does not cross', '403 remote', `${r.status} ${r.json && r.json.remote ? 'remote' : 'local'}`);
-is('...and says why, in one line', true, r.json && /terminal never crosses machines/.test(r.json.text) && !/\n/.test(r.json.text));
+// Chat permission also grants the paired terminal; local-trust.mjs drives its socket.
+r = await pa.api(A.base, 'POST', '/api/term/open', { project: 'toolbox@vm', cols: 80, rows: 24 });
+is('the paired terminal opens without another assertion', true, r.status === 200 && !!r.json?.ticket);
+if (r.status === 200) { try { execFileSync('tmux', ['-L', 'cf-toolbox', 'kill-server'], { stdio: 'pipe' }); } catch {} }
 r = await pa.api(A.base, 'GET', '/api/checkouts?project=toolbox@vm');
 is('a read outside the scope does not cross', 400, r.status);
 

@@ -40,6 +40,7 @@ async function host(id) {
   }
   for (const k of ['CLAUDE_FLEET_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_FLEET_SOCK', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[k];
   fs.mkdirSync(path.join(home, '.config/ghostfleet'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config/ghostfleet/local-trust'), 'off\n');
   const fleet = path.join(home, '.claude/fleet');
   fs.mkdirSync(fleet, { recursive: true });
   const tg = path.join(home, '.config/ghostfleet/telegram'); fs.mkdirSync(tg);

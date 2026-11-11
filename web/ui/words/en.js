@@ -531,6 +531,7 @@ export default {
   'say.theLink': 'the link',
   'say.line': 'line',
   'say.goesOn': '… and it goes on.',
+  'phone.localAccess': 'Local access on this computer',
   'phone.noSensor': 'No passkey on this device',
   'phone.lockNow': 'Lock now',
   'phone.forget': 'Forget the passkey',

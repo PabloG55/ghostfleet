@@ -37,13 +37,13 @@ export function Lock({ onIn, connection }) {
   // The challenge the tap will sign, fetched NOW so the tap has nothing to wait for. Once per
   // failure: a failed fetch is shown and the next tap asks again.
   useEffect(() => {
-    if (probing || !pk.available() || !pk.registered()) return;
+    if (probing || api.localTrusted() || !pk.available() || !pk.registered()) return;
     if (!pk.prepared() && !pk.preparing() && !pk.prepareError()) pk.prepare().then(redraw, (e) => setErr(pk.describe(e)));
   });
   // Asked before anything is typed: a closed window is knowable in advance, and finding out
   // afterwards means biometrics spent on a refusal.
   useEffect(() => {
-    if (!server || !pk.available() || pk.registered()) return;
+    if (!server || api.localTrusted() || !pk.available() || pk.registered()) return;
     pk.enrolmentState().then(setWindow, (e) => setWindow({ error: String((e && e.message) || e) }));
   }, [server]);
 

@@ -529,6 +529,7 @@ export default {
   'say.theLink': 'el enlace',
   'say.line': 'línea',
   'say.goesOn': '… y sigue.',
+  'phone.localAccess': 'Acceso local en este equipo',
   'phone.noSensor': 'Este dispositivo no tiene llave de acceso',
   'phone.lockNow': 'Bloquear ahora',
   'phone.forget': 'Olvidar la llave de acceso',

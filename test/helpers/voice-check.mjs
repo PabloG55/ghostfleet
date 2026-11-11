@@ -29,7 +29,8 @@ function child(file, args, e, log) {
 }
 async function host(name) {
   const dir = path.join(T, name), home = path.join(dir, 'home'), p = await port();
-  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(path.join(home, '.config/ghostfleet'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config/ghostfleet/local-trust'), 'off\n');
   const e = { ...env, HOME: home, GHOSTFLEET_SERVE_CONFIG: path.join(dir, 'serve.json'), GHOSTFLEET_SERVE_AUDIT: path.join(dir, 'audit.jsonl'),
     GHOSTFLEET_TELEGRAM_DIR: path.join(home, '.config/ghostfleet/telegram'), GHOSTFLEET_AT_MAC_FILE: path.join(dir, 'no-keyboard.json') };
   cli('fleet-serve', ['init', '--bind', '127.0.0.1', '--port', String(p)], e);
