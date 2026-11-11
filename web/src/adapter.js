@@ -113,8 +113,9 @@ export function phoneAdapter({ lock, go, place }) {
 
   // Projects, in the shape every shared screen reads, with the machine each one is on.
   async function projects() {
-    const j = await guard(api.getProjects());
-    const digest = await api.getDigest().catch(() => null);
+    // Asked together: neither answer is needed to ask for the other, and one after the other was
+    // two round trips before the first page had anything to draw.
+    const [j, digest] = await Promise.all([guard(api.getProjects()), api.getDigest().catch(() => null)]);
     const local = new Map((digest?.projects || []).map(p => [p.name, p]));
     const rows = await Promise.all((j.projects || []).map(async (p) => {
       const d = !p.host_key && local.get(p.name);

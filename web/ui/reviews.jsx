@@ -10,7 +10,7 @@ const commitOf = run => run.commit ? `${run.commit}${run.dirty ? '*' : ''}` : nu
 export const reviewRoute = (host, profile, run) => `/reviews/${[host || '-', profile, run].map(encodeURIComponent).join('/')}`;
 export function Reviews() {
   const fleet = useFleet();
-  const { data, error, loading } = usePoll(() => fleet.reviews(), 5000, []);
+  const { data, error, loading } = usePoll(() => fleet.reviews(), 5000, [], { key: 'reviews' });
   const [expanded, setExpanded] = useKept('reviews.expanded', []);
   const open = (g, r) => fleet.go(reviewRoute(g.host_key, g.profile, r.id));
   return <PhoneScreen title={t('phone.reviews')} error={error} loading={loading}>

@@ -14,6 +14,7 @@ import { t, lang, LANGS, LANG_NAMES, words } from './i18n.js';
 import { setLang } from './lang.js';
 import { Icon } from './icon.jsx';
 import { Led } from './fleet.jsx';
+import { Skeleton, AsOf } from './skeleton.jsx';
 
 // "Ana <verb> acme-api": the verb reads right before the subject in either language.
 const VERBS = words(['fleet_send', 'attach', 'fleet_answer', 'fleet_interrupt', 'fleet_pause', 'fleet_resume', 'fleet_wake', 'fleet_reopen',
@@ -23,7 +24,7 @@ const RESULT = { ran: 'good', refused: 'bad', changed: 'warn' };
 
 export function Activity() {
   const fleet = useFleet();
-  const { data, error } = usePoll(() => fleet.activity(), 5000, []);
+  const { data, error, at, stale } = usePoll(() => fleet.activity(), 5000, [], { key: 'activity' });
   const [who, setWho] = useKept('activity.who', 'all');   // a person picked stays picked when gone back to
   const rows = (data?.rows || []).filter(r => who === 'all' || r.user === who);
   const people = useSlot('activityPeople');
@@ -34,6 +35,8 @@ export function Activity() {
       <header class="page-head"><div><h1>{t('activity.title')}</h1><p class="muted">{t('activity.sub')}</p></div></header>
       {people({ who, setWho })}
       {error ? <p class="err">{error.message}</p> : null}
+      <AsOf at={at} stale={stale} />
+      {!data && !error ? <Skeleton shape="rows" n={8} /> : null}
       <div class="log">
         {rows.map((r, i) => {
           const [rl, rk] = RESULT[r.result] ? [t(`result.${r.result}`), RESULT[r.result]] : [r.result, ''];
@@ -86,7 +89,7 @@ function SwitchSection({ title, part, label, icon }) {
   return (
     <section class="panel">
       <h2><Icon name={icon} /> {title}</h2>
-      {st == null ? <p class="muted">{t('settings.reading')}</p>
+      {st == null ? <Skeleton shape="toggle" n={1} />
         : st.ready === false ? <p class="muted">{st.why}</p>
         : <Toggle label={label} hint={st.why} on={st.on} busy={busy} onChange={flip} />}
     </section>
@@ -104,6 +107,7 @@ function Hosts({ part }) {
       <h2><Icon name="map" /> {t('settings.hosts')}</h2>
       {error ? <p class="err">{error.message}</p> : null}
       {data && !hosts.length ? <p class="muted">{t('settings.hostsNone')}</p> : null}
+      {!data && !error ? <Skeleton shape="rows" n={1} /> : null}
       <div class="rows">
         {hosts.map(h => (
           <div class="row-item static" key={h.key}>

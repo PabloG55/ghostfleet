@@ -7,6 +7,7 @@ import { Led } from './fleet.jsx';
 import { Icon } from './icon.jsx';
 import { t, locale, worded } from './i18n.js';
 import { typingIn } from './keys.js';
+import { useKeptReads } from './adapter.jsx';
 
 // The nine statuses, with the TUI's own glyphs (bin/fleet-grid.mjs's STATUS table) and words a
 // person reads without a legend. Plus the two the cards carry as flags. The colour is the
@@ -75,27 +76,53 @@ export const clock = (ts) => new Date(ts * 1000).toLocaleString(locale(), { day:
 // server slower than the period had a second read started behind the first, then a third — the
 // backlog that came back as a burst of 429s, measured at 399 reads in under three minutes from one
 // phone. An explicit reload() still asks.
-export function usePoll(fn, ms, deps) {
-  const [data, setData] = useState(null);
+//   A HIDDEN PAGE ASKS NOTHING, AND ASKS ONCE WHEN IT COMES BACK. The tick already skipped while
+// the page was hidden, but it did not catch up: a phone brought back from the app switcher went
+// on showing what it had when it was put away until the interval next came round, up to a whole
+// period later (15 s on the slow ones) — and a reader does not wait that long before deciding
+// the screen is stuck. Coming back to the front reads once, unless a read is already out or the
+// last answer is younger than the period.
+//   `opt.key` KEEPS THE LAST ANSWER (adapter.jsx keptReads), so a screen gone back to paints
+// what it last showed instead of a skeleton, and says so: `stale` is true and `at` is when that
+// answer was read, until the read made on mount lands. The key names the READ, deps included
+// (`grid:acme-api`), and the store belongs to the adapter, so another server's answer is never
+// painted. Without a key nothing is kept and a mount starts empty, as before.
+export function usePoll(fn, ms, deps, opt) {
+  const key = (opt && opt.key) || '';
+  const store = useKeptReads();
+  const first = key ? store.get(key) : null;
+  const [data, setData] = useState(first ? first.data : null);
   const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!first);
+  const [at, setAt] = useState(first ? first.at : 0);
+  const [stale, setStale] = useState(!!first);
   const live = useRef(0);
   const out = useRef(0);
+  const last = useRef(0);
   const run = useCallback(async () => {
     const id = live.current;
     out.current++;
-    try { const d = await fn(); if (id === live.current) { setData(d); setError(null); } }
+    try {
+      const d = await fn();
+      const now = Date.now();
+      if (key) store.set(key, { data: d, at: now });
+      if (id === live.current) { last.current = now; setData(d); setError(null); setAt(now); setStale(false); }
+    }
     catch (e) { if (id === live.current) setError(e); }
     finally { out.current--; if (id === live.current) setLoading(false); }
   }, deps);
   useEffect(() => {
-    live.current++; setLoading(true); setData(null);
+    const kept = key ? store.get(key) : null;
+    live.current++; setLoading(!kept); setData(kept ? kept.data : null); setAt(kept ? kept.at : 0); setStale(!!kept);
     run();
     if (!ms) return undefined;
-    const iv = setInterval(() => { if (!document.hidden && !out.current) run(); }, ms);
-    return () => clearInterval(iv);
+    // A tick that comes round just behind the catch-up read is that read again: it waits its turn.
+    const iv = setInterval(() => { if (!document.hidden && !out.current && Date.now() - last.current >= ms / 2) run(); }, ms);
+    const back = () => { if (!document.hidden && !out.current && Date.now() - last.current >= ms) run(); };
+    document.addEventListener('visibilitychange', back);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', back); };
   }, [run]);
-  return { data, error, loading, reload: run };
+  return { data, error, loading, at, stale, reload: run };
 }
 
 // Drawn before the paint, not after it: a bubble that is empty for a frame and then fills is a

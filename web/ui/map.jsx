@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'preact/hooks';
 import { STATUS, StatusMark, sinceTs } from './ui.jsx';
+import { Skeleton } from './skeleton.jsx';
 import { GhostShip as Ship, Ship as Boat } from './fleet.jsx';
 import { t } from './i18n.js';
 import { useFleet, useSlot } from './adapter.jsx';
@@ -78,7 +79,7 @@ export function FleetMap({ projects }) {
       </header>
       <div class="map-wrap">
         <div class="ocean" ref={sea}>
-          {projects == null ? <p class="muted pad">{t('map.reading')}</p> : null}
+          {projects == null ? <Skeleton shape="fleets" box="sk-isles" n={3} /> : null}
           {projects && !shown.length ? <p class="muted pad">{t('map.none')}</p> : null}
           {shown.map(p => (
             <section key={p.name} class={`island${p.counts.need_you ? ' hot' : ''}${focus?.project === p.name ? ' focus' : ''}`} data-island={p.name}

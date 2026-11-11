@@ -6,6 +6,7 @@ import { useState, useRef, useEffect } from 'preact/hooks';
 import { useFleet } from './adapter.jsx';
 import './automations.css';
 import { Btn, Confirm, usePoll, clock, toast } from './ui.jsx';
+import { Skeleton, AsOf } from './skeleton.jsx';
 import { Select } from './select.jsx';
 import { ACTIONS, EVENTS, STATES, DAY_NAMES, SCOPES, TEMPLATES, blankTrigger, blankStep, describeTrigger, describeStep, everyWords } from './automations-model.js';
 // `t` is a trigger or a template all through this file, so the words come in as `tr`.
@@ -29,7 +30,7 @@ export function Automations({ ctx, projects, id }) {
   const api = useFleet();
   const people = api.hasPeople === true;
   ctx = ctx || api;
-  const { data, error, reload } = usePoll(() => api.automations(), 10000, []);
+  const { data, error, reload, at, stale } = usePoll(() => api.automations(), 10000, [], { key: 'automations' });
   const [tab, setTabState] = useState(() => { try { return localStorage.getItem(TAB_KEY) || 'mine'; } catch { return 'mine'; } });
   const setTab = (t) => { setTabState(t); try { localStorage.setItem(TAB_KEY, t); } catch {} };
   // The editor offers only the projects this person can read (the server says which).
@@ -97,6 +98,8 @@ export function Automations({ ctx, projects, id }) {
           </>}
         </div>
       ) : null}
+      <AsOf at={at} stale={stale} />
+      {!data && !error ? <Skeleton shape="rows" n={3} /> : null}
       <div class="auto-list">
         {list.map(a => <AutoCard key={a.id} people={people} a={a} ctx={ctx} onChange={reload} />)}
       </div>
@@ -184,7 +187,7 @@ function Editor({ ctx, projects, data, error, id, onSaved }) {
   const admin = people && !!data?.me?.admin;
   const readOnly = existing && !existing.editable;
   if (error) return <div class="page"><BackLink parent="/automations" /><p class="err" role="alert">{error.message}</p><Btn onClick={onSaved}>{tr('phone.retry')}</Btn></div>;
-  if (!draft || !data) return <div class="page"><p class="muted">{data ? tr('phone.autos.notFound') : tr('common.loading')}</p></div>;
+  if (!draft || !data) return <div class="page">{data ? <p class="muted">{tr('phone.autos.notFound')}</p> : <Skeleton shape="rows" n={4} />}</div>;
   const set = (patch) => setDraft(d => ({ ...d, ...patch }));
   const setTrigger = (patch) => setDraft(d => ({ ...d, trigger: { ...d.trigger, ...patch } }));
   const setStep = (i, patch) => setDraft(d => ({ ...d, steps: d.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) }));

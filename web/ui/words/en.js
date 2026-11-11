@@ -59,6 +59,8 @@ export default {
   'map.closed': '{project}: {session} closed',
   'map.sub': 'The whole fleet at once. The ghost ship goes wherever something is happening.',
   'map.showIdle': 'Show projects with no sessions ({n})',
+  'skel.asOfNow': 'as of just now',
+  'skel.asOf': 'as of {n} min ago',
   'map.reading': 'Reading the fleet…',
   'map.none': 'No project has open sessions.',
   'map.noSessions': 'no sessions',

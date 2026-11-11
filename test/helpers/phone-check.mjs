@@ -572,6 +572,147 @@ try {
     await sleep(300);
     is('390 session, opened cold from its link: the newest message clears the Assistant button', 'clear', await clear());
 
+    // ── waiting is a skeleton, where the data will be (web/ui/skeleton.jsx) ───────────────
+    // Every fixture read is held back two seconds, by a wrapper put in before the page's own code
+    // (a reload, so the adapter is new and has kept no answer to paint instead). A screen then has
+    // two seconds of waiting to draw, which on a laptop reading local files it otherwise never has.
+    //   WHAT IS HELD: the blocks of the page that are there while it waits are marked and
+    // measured, and measured again once the data has landed. None may have moved, and the first
+    // thing the data drew must stand where the skeleton stood.
+    await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      const f0 = window.fetch.bind(window);
+      window.fetch = async (u, o) => {
+        const ms = window.__holdMs == null ? Number(sessionStorage.getItem('gf.test.hold') || 0) : window.__holdMs;
+        if (ms && /fixtures\\//.test(String((u && u.url) || u))) await new Promise(r => setTimeout(r, ms));
+        return f0(u, o);
+      };
+    })();` });
+    const midLoad = () => b.evaluate(() => {
+      const sk = document.querySelector('.main .sk:not(.sk-line)');
+      const page = document.querySelector('.main .page');
+      if (!page) return { sk: false, why: 'no page' };
+      let i = 0;
+      const kept = {};
+      for (const el of page.querySelectorAll(':scope > *, :scope > * > *, :scope > * > * > *')) {
+        if (el.closest('.sk') || !el.getClientRects().length) continue;
+        const r = el.getBoundingClientRect();
+        el.dataset.mid = String(i);
+        kept[i++] = [Math.round(r.top), Math.round(r.left), el.className || el.tagName];
+      }
+      const cs = sk ? getComputedStyle(sk) : null;
+      return { sk: !!sk, shown: cs ? cs.visibility : '', delay: cs ? cs.animationDelay : '', name: cs ? cs.animationName : '',
+               top: sk ? Math.round(sk.getBoundingClientRect().top) : null, kept, words: /Loading…|Reading the fleet…|Reading…/.test(page.textContent) };
+    });
+    const landed = (dataSel) => b.evaluate((sel) => {
+      const moved = [];
+      for (const el of document.querySelectorAll('.main .page [data-mid]')) {
+        const r = el.getBoundingClientRect(), was = window.__mid[el.dataset.mid];
+        if (was && el.getClientRects().length && (Math.abs(Math.round(r.top) - was[0]) > 1 || Math.abs(Math.round(r.left) - was[1]) > 1))
+          moved.push(`${was[2] || '?'}: ${was[0]} to ${Math.round(r.top)} px`);
+      }
+      const first = document.querySelector(sel);
+      return { moved: moved.slice(0, 3).join(', ') || 'none moved', top: first ? Math.round(first.getBoundingClientRect().top) : null,
+               sk: !!document.querySelector('.main .sk:not(.sk-line)') };
+    }, dataSel);
+    // [name, address, the data's first block, the box the skeleton stands in for]
+    const WAITS = [['home', '#/', '.board .fleets', true], ['project', '#/p/acme-api', '.main .group .cards', false],
+                   ['queue', '#/queue', '.main .extra-grid .card, .main .page > .empty', false], ['search', '#/search?q=api', '.main .extra-grid', false],
+                   ['reviews', '#/reviews', '.main .extra-grid .card', false]];
+    for (const [w, h] of [[390, 844], [1280, 900]]) {
+      await b.viewport(w, h);
+      await b.evaluate(() => { sessionStorage.setItem('gf.test.hold', '2000'); location.hash = '#/'; });
+      await sleep(200);
+      await b.evaluate(() => location.reload());
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      await until(() => !!document.querySelector('.app .main .page'));
+      for (const [name, hash, dataSel, cold] of WAITS) {
+        if (!cold) {
+          await b.evaluate(() => { location.hash = '#/settings'; });
+          await sleep(300);
+          await b.evaluate((x) => { location.hash = x; }, hash);
+        }
+        await sleep(700);
+        const mid = await midLoad();
+        await b.evaluate((k) => { window.__mid = k; }, mid.kept || {});
+        is(`${w} ${name}, its data held 2 s: a skeleton is drawn`, true, mid.sk);
+        is(`${w} ${name}: ...shown by now`, 'visible', mid.shown);
+        is(`${w} ${name}: ...after a wait of its own, so a quick read never flashes one`, 'sk-show 0.18s', `${mid.name} ${mid.delay}`);
+        is(`${w} ${name}: ...and no words where a shape fits`, false, mid.words);
+        if (name === 'home') {
+          // The pulse is motion, and is off for a reader who asked for less of it; the wait is not.
+          const anim = () => b.evaluate(() => ['.main .sk .sk-bar', '.main .sk'].map((q) => { const e = document.querySelector(q); return e ? getComputedStyle(e).animationName : 'absent'; }).join(' '));
+          is(`${w} the skeleton pulses`, 'skel sk-show', await anim());
+          await b.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+          is(`${w} ...and stands still under reduced motion, still waiting its 180 ms`, 'none sk-show', await anim());
+          await b.call('Emulation.setEmulatedMedia', { features: [] });
+        }
+        // Twice over: the demo derives each project's rollup from its grid, one after the other, so a
+        // held Search is a dozen seconds of reads that are one on a daemon.
+        for (let i = 0; i < 2; i++) if (await until((sel) => !!document.querySelector(sel) && !document.querySelector('.main .sk:not(.sk-line)'), dataSel)) break;
+        await sleep(150);
+        const end = await landed(dataSel);
+        is(`${w} ${name}: when the data lands the skeleton is gone`, false, end.sk);
+        is(`${w} ${name}: ...nothing that was on the page has moved`, 'none moved', end.moved);
+        is(`${w} ${name}: ...and the data stands where the skeleton stood`, true, mid.top != null && end.top != null && Math.abs(end.top - mid.top) <= 1 ? true : `${mid.top} to ${end.top} px`);
+      }
+      // GONE BACK TO, a screen paints what it last showed, and says how old it is, instead of a
+      // skeleton of data it had ten seconds ago (usePoll's key, adapter.jsx keptReads).
+      await b.evaluate(() => { location.hash = '#/settings'; });
+      await sleep(300);
+      await b.evaluate(() => { location.hash = '#/p/acme-api'; });
+      await sleep(500);
+      const back = await b.evaluate(() => ({ cards: document.querySelectorAll('.main .cards .card').length, sk: !!document.querySelector('.main .sk'), asOf: document.querySelector('.main .as-of')?.textContent || '' }));
+      is(`${w} a project gone back to paints its last answer while the next is out`, true, back.cards > 0);
+      is(`${w} ...with no skeleton`, false, back.sk);
+      is(`${w} ...and dated`, true, /as of/.test(back.asOf));
+      is(`${w} ...until the read lands, when the date goes`, true, !!(await until(() => !document.querySelector('.main .as-of') && document.querySelectorAll('.main .cards .card').length > 0)));
+    }
+    await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
+    await b.viewport(390, 844);
+
+    // ── a page nobody is looking at asks nothing, and asks once when it is looked at again ──
+    // REALLY hidden: a second tab is opened in front of this one, which is what the app switcher
+    // does to it (document.hidden is true; nothing is stubbed). Thirty seconds of reads are
+    // counted on the session screen, the one with the most timers, then the tab is closed and the
+    // page is in front again. Settings' paired machines are read every 15 s, so a read of them in
+    // the first second back is the catch-up and not the interval happening to come round.
+    //   THE CATCH-UP IS TIMED FROM THE MOMENT THE PAGE IS SHOWN, not counted over a second: an
+    // interval that was due while the page was hidden comes round within a second of its return
+    // anyway (Chrome aligns a hidden page's timers to the second), so "a read in the first second"
+    // was green on a client with no catch-up at all. A read made BY the return is made in the
+    // same task as the event; one made by a timer is hundreds of milliseconds behind it.
+    const countReads = (re) => b.evaluate((r) => (window.__seen || []).filter(x => new RegExp(r).test(x[1])).length, re);
+    await b.evaluate(() => {
+      const f1 = window.fetch; window.__seen = [];
+      window.fetch = (u, o) => { window.__seen.push([performance.now(), String((u && u.url) || u)]); return f1(u, o); };
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) window.__shownAt = performance.now(); }, true);
+      location.hash = '#/p/acme-api/s/api-fix';
+    });
+    await until(() => !!document.querySelector('.main .chat .msg:not(.skel)'));
+    await sleep(6000);
+    const awake = await countReads('fixtures/');
+    is('a session in front reads as it goes', true, awake >= 2 ? true : `${awake} reads in 6 s`);
+    for (const [name, hash] of [['a session', '#/p/acme-api/s/api-fix'], ['settings', '#/settings']]) {
+      await b.evaluate((x) => { location.hash = x; }, hash);
+      await sleep(2500);
+      const tab = await b.newTab();
+      await sleep(500);
+      is(`${name}, with another tab in front, is hidden`, 'hidden', await b.evaluate(() => document.visibilityState));
+      await b.evaluate(() => { window.__seen = []; window.__shownAt = 0; });
+      await sleep(30000);
+      const quiet = await countReads('fixtures/');
+      is(`${name}: ...and reads nothing in 30 s`, 0, quiet);
+      await b.call('Target.closeTarget', { targetId: tab.targetId }).catch(() => {});
+      await until(() => document.visibilityState === 'visible' && window.__shownAt > 0);
+      await sleep(1500);
+      const gap = await b.evaluate(() => { const f = (window.__seen || []).find(x => /fixtures\/projects/.test(x[1])); return f ? Math.round(f[0] - window.__shownAt) : null; });
+      is(`${name}: shown again, the fleet is read at once, not when its interval next comes round`, true, gap != null && gap < 250 ? true : `${gap} ms after it was shown`);
+      // one for each thing on the page that reads the fleet (the app's own poll, and Settings' list)
+      const burst = await countReads('fixtures/projects');
+      is(`${name}: ...once each, not a burst`, true, burst >= 1 && burst <= 2 ? true : `${burst} reads of the fleet in 1.5 s`);
+    }
+
     // ── one answer to "is this run done": the client's state against the server's ──
     // The phone works a recorded run's state out the moment a verdict is tapped (and fixture mode
     // never asks a server at all), so web/api.js's copy must say what lib/shots.mjs says, which is

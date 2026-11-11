@@ -71,6 +71,13 @@ const first = await timed();
 is('the first read is the newest page', 20, first.r.json && first.r.json.messages ? first.r.json.messages.length : -1);
 is('...and it is the transcript we built', true, JSON.stringify(first.r.json || {}).includes('answer 7999'));
 
+// ── COMPRESSED, WHEN ASKED ───────────────────────────────────────────────────
+// A page of the chat is the largest JSON a poll carries. A browser says it reads gzip and gets
+// it; this client does not say so and must get what it always got.
+const zipped = await get({ 'accept-encoding': 'gzip' });
+is('a page of the chat is gzipped for a client that reads gzip', 'gzip', (zipped.headers && zipped.headers['content-encoding']) || '');
+is('...and plain for one that does not', '', (first.r.headers && first.r.headers['content-encoding']) || '');
+
 // ── THE BOUND ────────────────────────────────────────────────────────────────
 // The read every open chat repeats: same page, nothing new. The median of five, so one slow
 // spawn on a loaded runner is not the verdict. 250 ms is about a third of what the old reader

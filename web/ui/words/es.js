@@ -59,6 +59,8 @@ export default {
   'map.closed': '{project}: se cerró {session}',
   'map.sub': 'Toda la flota a la vez. El barco fantasma va a donde está pasando algo.',
   'map.showIdle': 'Mostrar proyectos sin sesiones ({n})',
+  'skel.asOfNow': 'hace un momento',
+  'skel.asOf': 'de hace {n} min',
   'map.reading': 'Leyendo la flota…',
   'map.none': 'No hay sesiones abiertas en ningún proyecto.',
   'map.noSessions': 'sin sesiones',

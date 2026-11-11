@@ -35,6 +35,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -1280,10 +1281,24 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
   '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png',
   '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.mp4': 'video/mp4' };
 
+// TEXT GOES OUT COMPRESSED, to a client that says it reads gzip. Nothing did: a phone's first
+// load of the app was 885 kB over the wire, 720 kB of it JavaScript, CSS and JSON that gzip takes
+// to about a quarter, and every poll after it was its JSON at full length. A browser always
+// sends Accept-Encoding; the suite's own client and curl do not, so they get the bytes they
+// always got. Small bodies are left alone — under GZIP_MIN the header costs what it saves.
+const GZIP_MIN = 1024;
+const GZIP_TYPES = new Set(['.html', '.js', '.css', '.json', '.webmanifest', '.svg', '.txt']);
+const takesGzip = (req) => /\bgzip\b/.test(String((req && req.headers && req.headers['accept-encoding']) || ''));
+
 function send(res, status, obj, extra = {}) {
-  const body = Buffer.from(JSON.stringify(obj) + '\n');
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8',
-    'content-length': body.length, 'cache-control': 'no-store', ...extra });
+  let body = Buffer.from(JSON.stringify(obj) + '\n');
+  const head = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...extra };
+  if (body.length >= GZIP_MIN && takesGzip(res.req) && !head['content-encoding']) {
+    body = zlib.gzipSync(body, { level: 6 });
+    head['content-encoding'] = 'gzip';
+    head.vary = 'Accept-Encoding';
+  }
+  res.writeHead(status, { ...head, 'content-length': body.length });
   res.end(body);
 }
 async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
@@ -2224,9 +2239,33 @@ function serveStatic(req, res, pathname) {
   // seeked: a tap on chapter 3 set currentTime to 6s and the player went on from 0:00. iOS
   // goes further and will not play it at all. The media route's own Range handling serves it.
   if (req.headers.range) return shots.serveFile(req, res, full, MIME[path.extname(full)] || 'application/octet-stream');
-  res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream',
+  const ext = path.extname(full);
+  if (GZIP_TYPES.has(ext) && st.size >= GZIP_MIN && takesGzip(req)) {
+    const body = gzipped(full, st);
+    if (body) {
+      res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream', 'content-length': body.length,
+        'content-encoding': 'gzip', vary: 'Accept-Encoding', 'cache-control': 'no-cache' });
+      res.end(body);
+      return;
+    }
+  }
+  res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream',
     'content-length': st.size, 'cache-control': 'no-cache', 'accept-ranges': 'bytes' });
   fs.createReadStream(full).pipe(res);
+}
+
+// A shell file, compressed once and kept until the file changes (its size and mtime are the
+// key, so a cf-sync is seen on the next request). The shell is a dozen files; nothing is evicted.
+const gz = new Map();
+function gzipped(full, st) {
+  const key = `${st.size}:${st.mtimeMs}`;
+  const hit = gz.get(full);
+  if (hit && hit.key === key) return hit.body;
+  try {
+    const body = zlib.gzipSync(fs.readFileSync(full), { level: 9 });
+    gz.set(full, { key, body });
+    return body;
+  } catch { return null; }
 }
 
 // The assertion check, shared by "let me in" (/api/auth/assert) and "authorise this

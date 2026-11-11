@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, Btn, usePoll, toast } from './ui.jsx';
+import { useRoom } from './skeleton.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -182,9 +183,13 @@ export function Assistant({ projects, onClose, chip }) {
 export function Proposals() {
   const fleet = useFleet();
   const has = typeof fleet.proposals === 'function';
-  const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has]);
+  const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has], { key: 'proposals' });
   const [busyId, setBusyId] = useState('');
   const list = Array.isArray(data) ? data : [];
+  // What is waiting on a yes is above the box a person types in: while the first read is out the
+  // list keeps the room it had last time (skeleton.jsx useRoom), so the box is not pushed down.
+  const room = useRoom('proposals', has && data == null, !list.length);
+  if (has && data == null && room.h) return <ul class="as-asks" ref={room.ref} style={room.style} aria-busy="true" />;
   if (!has || !list.length) return null;
   const answer = async (p, yes) => {
     setBusyId(p.id);
@@ -195,7 +200,7 @@ export function Proposals() {
     finally { setBusyId(''); reload(); }
   };
   return (
-    <ul class="as-asks" aria-label={t('as.proposals')}>
+    <ul class="as-asks" ref={room.ref} aria-label={t('as.proposals')}>
       {list.map(p => (
         <li key={p.id} class="as-ask">
           <span class="grow">{t(p.granted ? 'as.proposalGranted' : 'as.proposal', { summary: p.summary })} <small class="muted">{p.id}</small></span>

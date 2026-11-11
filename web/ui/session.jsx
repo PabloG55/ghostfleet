@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
 import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
+import { Skeleton } from './skeleton.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
@@ -75,7 +76,7 @@ function Terminal({ pane }) {
   useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [html]);
   return (
     <div class="term" ref={ref} onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 40; }}>
-      {pane == null ? <p class="muted">{t('sess.readingTerm')}</p> : <pre class="pane" dangerouslySetInnerHTML={{ __html: html }} />}
+      {pane == null ? <Skeleton shape="lines" n={8} /> : <pre class="pane" dangerouslySetInnerHTML={{ __html: html }} />}
     </div>
   );
 }
@@ -93,7 +94,7 @@ function keyed(msgs) {
 // resolves is exactly the "it does not load until I send" this was reported as.
 function ChatLoading({ load }) {
   return (
-    <div class="chat" aria-busy="true">
+    <div class="chat sk-late" aria-busy="true">
       {load.tries ? <p class="loading err center" role="status">{t('chat.loadFailed', { why: load.why })}</p> : null}
       {[0, 1, 2].map(i => <div key={i} class={`msg ${i === 1 ? 'me' : 'ai'} skel`} aria-hidden="true"><div class="bubble skel" /></div>)}
     </div>

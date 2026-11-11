@@ -20805,6 +20805,21 @@ if sv_start origin; then
     is "$name" "$want" "$got"
   done < "$PWO/out"
 
+  # ── the shell goes out compressed, to a client that reads gzip ─────────────
+  # Nothing did: a phone's first load was every file at full length. Both directions, because a
+  # header on a body nobody compressed is a blank page, and a compressed body with no header is
+  # one too: the bytes must be the file, the header must say gzip only when asked, and it must be
+  # worth it. curl without --compressed asks for nothing, as the suite's own client does.
+  gz_head() { curl -s -m5 -o /dev/null -D - "$@" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-encoding"{print $2}'; }
+  is "the shell is gzipped for a client that reads gzip"  "gzip" "$(gz_head -H 'Accept-Encoding: gzip, br' "$BASE/phone.js")"
+  is "...and plain for one that does not"                 ""     "$(gz_head "$BASE/phone.js")"
+  is "...and what arrives is the file"                    "$(cksum < "$ROOT/web/phone.js")" "$(curl -s -m5 --compressed "$BASE/phone.js" | cksum)"
+  is "...and the plain one is too"                        "$(cksum < "$ROOT/web/phone.js")" "$(curl -s -m5 "$BASE/phone.js" | cksum)"
+  gz_n="$(curl -s -m5 -H 'Accept-Encoding: gzip' "$BASE/phone.js" | wc -c | tr -d ' ')"
+  is "...at under a third of its length"                  "yes"  "$([ "$gz_n" -gt 0 ] && [ "$((gz_n * 3))" -lt "$(wc -c < "$ROOT/web/phone.js")" ] && echo yes || echo "no: $gz_n bytes")"
+  is "...a font is left as it is"                         ""     "$(gz_head -H 'Accept-Encoding: gzip' "$BASE/fonts/inter-latin-wght-normal.woff2")"
+  is "...and so is a body too small to gain"              ""     "$(gz_head -H 'Accept-Encoding: gzip' "$BASE/api/health")"
+
   # ── and the client has to RUN, and paint what it decided ──────────────────
   # `node --check` proves syntax, not that it runs (CLAUDE.md), and the old client met that
   # once: its boot block sat above a `const` the lock screen draws, so every screen was blank

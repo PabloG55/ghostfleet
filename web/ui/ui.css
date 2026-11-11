@@ -317,6 +317,40 @@ textarea { resize: vertical; }
   .bubble.skel { animation: skel 1.6s ease-in-out infinite; }
   @keyframes skel { 50% { opacity: .3; } }
 }
+
+/* ── THE SKELETON (skeleton.jsx): the shape of what a screen is waiting for ──────────────────
+ * Laid out from the first frame, in the box the data will use, and INVISIBLE FOR 180 ms: a read
+ * that answers inside that never flashes one, and one that does not gets the shape without
+ * anything having moved to make room. The wait is a zero-length animation's delay, so it needs
+ * no timer and it is not motion — it holds under reduced motion, where only the pulse is off. */
+.sk { animation: sk-show 0s linear 180ms both; }
+@keyframes sk-show { from { visibility: hidden; } to { visibility: visible; } }
+.sk-item { min-width: 0; }
+.sk-b { background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); display: flex; gap: 10px; min-width: 0; }
+.sk-bar { display: block; flex: none; height: .8em; max-width: 100%; border-radius: var(--r); background: var(--line); }
+.sk-bar.tall { height: 1.15em; }
+.sk-bar.grow { flex: 1; min-width: 0; }
+.sk-bar.w1 { width: 3em; } .sk-bar.w2 { width: 6em; } .sk-bar.w3 { width: 5em; } .sk-bar.w4 { width: 8em; } .sk-bar.w5 { width: 11em; }
+.sk-bar.w6 { width: 60%; } .sk-bar.w7 { width: 70%; } .sk-bar.w8 { width: 16em; } .sk-bar.w9 { width: 90%; }
+.sk-card { flex-direction: column; padding: 16px; min-height: 132px; }
+.sk-row { align-items: center; padding: .55em .85em; min-height: 2.6em; }
+.sk-fleet { flex-direction: column; padding: 10px 12px 0; min-height: 118px; }
+.sk-sea { display: block; flex: 1; margin: 0 -12px; background: color-mix(in srgb, var(--line) 35%, transparent); }
+.sk-toggle { align-items: center; justify-content: space-between; border: 0; background: none; min-height: 2.6em; }
+.sk-toggle span { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sk-line { display: inline-flex; align-items: center; max-width: 100%; vertical-align: bottom; }
+.sk-line .sk-bar { display: inline-block; }
+.sk-rows, .sk-lines { display: flex; flex-direction: column; gap: 4px; }
+.sk-lines { gap: 9px; padding: .6em 0; }
+.sk-isles { display: flex; flex-wrap: wrap; gap: 22px; }
+.sk-isles .sk-item { width: 180px; }
+.split-list .sk-row { min-height: 3.4em; }
+/* the chat's own three bubbles (session.jsx) wait the same 180 ms before they show */
+.sk-late .msg.skel { animation: sk-show 0s linear 180ms both; }
+.as-of { margin: 0 0 8px; }
+@media (prefers-reduced-motion: no-preference) {
+  .sk .sk-bar, .sk .sk-sea { animation: skel 1.6s ease-in-out infinite; }
+}
 .chat > .older, .chat > .start { font-size: 12px; margin: 0 auto; }
 .chat > .older { display: flex; flex-wrap: wrap; gap: .3em .8em; justify-content: center; align-items: baseline; }
 .chat > .loading { font-size: 13px; margin: 0 auto; max-width: 36em; }

@@ -5,6 +5,7 @@ button.usage { cursor: pointer; }
 button.usage:hover { border-color: var(--dim); }
 button.usage:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .usage .u-line { display: flex; gap: 12px; min-width: 0; }
+.usage .u-line .sk-line { line-height: 20px; }
 .usage .u-prof { color: var(--dim); flex: none; font-size: 12px; min-width: 5.5em; line-height: 20px; }
 .usage .u-text { min-width: 0; overflow-wrap: anywhere; line-height: 20px; }
 .u-green .u-text, .u-green .u-state { color: var(--green); }
