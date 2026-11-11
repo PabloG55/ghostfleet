@@ -13,11 +13,48 @@
 .review-media { display:block; width:100%; max-height:65vh; object-fit:contain; background:var(--panel); }
 .review-step { margin:18px 0; padding:14px; border:1px solid var(--line); }
 .review-step textarea { width:100%; }
-.stack-columns { display:flex; gap:12px; overflow:auto; margin-top:16px; }
-.stack-column { flex:1 0 420px; min-width:0; border:1px solid var(--line); }
-.stack-column > header { padding:12px; }
-.stack-column .session { height:70vh; min-height:420px; }
-.stack-choice { cursor:pointer; }
-.stack-choice input { width:auto; }
-@media(max-width:760px) { .stack-columns { display:block; } .stack-column { display:none; } .stack-column.stack-active { display:block; } .fleet-extra .page-head { flex-wrap:wrap; gap:12px; } }
+/* Pinned controls, with a single scrolling list below them, in the shared app shell. */
+.main > .page.stack-picker, .main > .page.stack-view {
+  flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; padding-bottom: 16px; overflow: hidden;
+}
+.stack-picker > *, .stack-view > * { flex-shrink: 0; }
+.stack-picker .stack-search { margin-bottom: 16px; }
+.stack-list { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.stack-group { border-bottom: 1px solid var(--hair); }
+/* Cover partial glyphs from rows clipped at the list's scroll boundary. */
+.stack-group > summary { position: sticky; top: 0; z-index: 3; background: var(--bg); list-style: none; cursor: pointer; padding: 16px 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stack-group > summary::-webkit-details-marker { display: none; }
+.stack-group > summary::before { content: '▸'; color: var(--dim); }
+.stack-group[open] > summary::before { content: '▾'; }
+.stack-group > summary h2 { margin: 0; color: var(--fg); }
+.stack-group > summary > span { margin-left: auto; font-size: 12px; }
+.stack-choice { display: grid; grid-template-columns: 20px minmax(0,28ch) max-content minmax(0,36ch); justify-content: start; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; min-height: 44px; }
+.stack-choice:hover { background: var(--panel2); }
+.stack-choice input { width: auto; }
+.stack-name, .stack-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 13px; }
+.stack-branch { text-align: left; }
+.stack-columns { flex: 1 1 0; min-height: 0; display: flex; gap: 12px; overflow: auto; margin-top: 16px; }
+.stack-column { display: flex; flex-direction: column; flex: 1 0 290px; min-width: 0; min-height: 0; border: 1px solid var(--line); }
+.stack-column.stack-active { border-color: var(--cyan); }
+.stack-column > header { padding: 12px; flex: none; }
+.stack-column > header h2 { margin: 0; overflow-wrap: anywhere; }
+.stack-column .session { flex: 1 1 0; min-height: 0; }
+.stack-column .sess-head { padding: 12px; }
+.stack-view .stack-switcher { overflow-x: auto; flex-wrap: nowrap; max-width: 100%; }
+.stack-switcher button { white-space: nowrap; flex-shrink: 0; }
+.stack-column .session > .tool { padding: 8px 12px; }
+.stack-column .tool-host { margin-inline: 0; }
+.stack-column .composer { padding: 12px; }
+.stack-column .composer-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 8px; }
+.stack-column .composer textarea { grid-column: 1 / -1; grid-row: 1; width: 100%; min-width: 0; }
+.stack-column .composer textarea::placeholder { white-space: nowrap; text-overflow: ellipsis; }
+.stack-column .composer .attach-btn { grid-row: 2; }
+.stack-column .composer button[type=submit] { grid-row: 2; grid-column: 3; }
+@media(max-width:759px) {
+  .stack-column { display: none; flex-basis: 100%; }
+  .stack-column.stack-active { display: flex; }
+  .stack-choice { grid-template-columns: 20px minmax(0,1fr) auto; gap: 8px; }
+  .stack-branch { grid-column: 2 / -1; text-align: left; }
+}
+@media(max-width:760px) { .fleet-extra .page-head { flex-wrap:wrap; gap:12px; } }
 .fleet-extra button.extra-card { width:100%; }

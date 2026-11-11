@@ -30,6 +30,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { launch, serveDir, sleep } from '../../lib/browser.mjs';
+import { stackChecks } from './stacks-check.mjs';
+import { realStackChecks } from './stacks-real-check.mjs';
 
 const ROOT = path.resolve(new URL('../..', import.meta.url).pathname);
 const argv = process.argv.slice(2);
@@ -601,6 +603,10 @@ try {
 } finally {
   try { await b?.close(); } catch {}
   try { srv?.close(); } catch {}
+}
+if (!served && !rows.some(r => r.includes('no chrome'))) {
+  try { rows.push(...await stackChecks(), ...await realStackChecks()); }
+  catch (e) { is('stack checks ran to the end', '', String(e.stack || e).split('\n').slice(0, 2).join(' ')); }
 }
 console.log(rows.join('\n'));
 process.exit(0);
