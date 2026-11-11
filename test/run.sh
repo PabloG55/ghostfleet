@@ -23381,6 +23381,8 @@ if [ -d "$ROOT/web" ]; then
   #   - stackChecks: all 13 rows failed on the original source: groups were cards with messages,
   #     the picker scrolled its action away, desktop kept a member bar, columns said No data,
   #     and Terminal/Editor navigated away instead of pausing and resuming inside a column.
+  #   - realStackChecks: the real phone client left three rows red before the follow-up fixes:
+  #     metadata spread across the row, no project at the scroll edge, and wrapped composer hints.
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?

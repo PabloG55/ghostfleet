@@ -21,6 +21,7 @@
 .stack-picker .stack-search { margin-bottom: 16px; }
 .stack-list { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .stack-group { border-bottom: 1px solid var(--hair); }
+/* Cover partial glyphs from rows clipped at the list's scroll boundary. */
 .stack-group > summary { position: sticky; top: 0; z-index: 3; background: var(--bg); list-style: none; cursor: pointer; padding: 16px 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .stack-group > summary::-webkit-details-marker { display: none; }
 .stack-group > summary::before { content: '▸'; color: var(--dim); }
