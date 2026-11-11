@@ -69,6 +69,8 @@ export const api = {
     addUser: (b) => call('POST', '/api/admin/users', b),
     updateUser: (b) => call('POST', '/api/admin/users/update', b),
     resetPassword: (id) => call('POST', '/api/admin/users/reset', { id }),
+    license: () => call('GET', '/api/admin/license'),
+    licenseAct: (b) => call('POST', '/api/admin/license', b),
   },
   automations: () => call('GET', '/api/automations'),
   saveAutomation: (automation) => call('POST', '/api/automations', { automation }),

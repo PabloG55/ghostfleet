@@ -7,6 +7,7 @@ import { Btn, Modal, Confirm, toast } from '../../../../../web/ui/ui.jsx';
 import { Avatar } from '../avatar.jsx';
 import { t } from '../i18n.js';
 import { words } from '../../../shared/i18n/index.js';
+import { LICENSE_EVENT } from './license.jsx';
 
 const ROLE = words(['admin', 'member'], 'role');
 // '' is "no access"; its key is spelled `none`.
@@ -129,7 +130,8 @@ export function Users({ ctx }) {
   const [pick, setPick] = useState(null);
   const [adding, setAdding] = useState(false);
   const [shown, setShown] = useState(null);
-  const load = () => api.admin.users().then(setData).catch(x => toast(x.message, 'bad'));
+  // Every reload follows an account change, and the count against the license moved with it.
+  const load = () => api.admin.users().then(setData).then(() => window.dispatchEvent(new Event(LICENSE_EVENT))).catch(x => toast(x.message, 'bad'));
   useEffect(() => { load(); }, []);
   if (!data) return <p class="muted pad">{t('common.loading')}</p>;
   const sel = data.users.find(u => u.id === pick) || null;
