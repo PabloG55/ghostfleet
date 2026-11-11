@@ -1227,6 +1227,9 @@ var en_default = {
 	"phone.replyHint": "Sent to the lead quoting this item. It leaves the list when the lead closes it.",
 	"phone.stacks": "Session stacks",
 	"phone.openStack": "Open stack · {n}",
+	"term.columnPaused": "Select this column to resume the terminal.",
+	"phone.stackCount": "{n} sessions · {selected} selected",
+	"phone.stackCount.one": "{n} session · {selected} selected",
 	"phone.noSessions": "No sessions to choose",
 	"phone.editStack": "Choose sessions",
 	"phone.emptyStack": "Choose sessions to build a stack",
@@ -2079,6 +2082,9 @@ var es_default = {
 	"phone.replyHint": "Se envía al líder citando este pendiente. Sale de la lista cuando el líder lo cierra.",
 	"phone.stacks": "Grupos de sesiones",
 	"phone.openStack": "Abrir grupo · {n}",
+	"term.columnPaused": "Selecciona esta columna para reanudar el terminal.",
+	"phone.stackCount": "{n} sesiones · selección: {selected}",
+	"phone.stackCount.one": "{n} sesión · selección: {selected}",
 	"phone.noSessions": "No hay sesiones para elegir",
 	"phone.editStack": "Elegir sesiones",
 	"phone.emptyStack": "Elige sesiones para armar un grupo",
@@ -4792,7 +4798,7 @@ var baseTo = (project, session) => session ? sessionTo(project, session) : proje
 var toolTo = (project, session, kind) => `${baseTo(project, session)}/${kind}`;
 var refused = /* @__PURE__ */ new Set();
 var offers = (fleet, project) => typeof fleet.canTerm === "function" && typeof fleet.termOpen === "function" && typeof fleet.termSocket === "function" && !refused.has(project) && !!fleet.canTerm(project);
-function ToolTabs({ project, session, tool }) {
+function ToolTabs({ project, session, tool, onPick = null }) {
 	const fleet = useFleet();
 	const on = A(null);
 	h(() => {
@@ -4803,7 +4809,14 @@ function ToolTabs({ project, session, tool }) {
 		else if (x.left < y.left) bar.scrollLeft -= y.left - x.left + 16;
 	}, [tool]);
 	if (!offers(fleet, project)) return null;
-	return TOOL_KINDS.map((k) => /* @__PURE__ */ u("a", {
+	return TOOL_KINDS.map((k) => onPick ? /* @__PURE__ */ u("button", {
+		ref: tool === k ? on : null,
+		role: "tab",
+		class: `tool-tab${tool === k ? " on" : ""}`,
+		"aria-selected": tool === k,
+		onClick: () => onPick(k),
+		children: t(`term.tab.${k}`)
+	}, k) : /* @__PURE__ */ u("a", {
 		ref: tool === k ? on : null,
 		role: "tab",
 		class: `tool-tab${tool === k ? " on" : ""}`,
@@ -4900,10 +4913,18 @@ function Away({ to }) {
 	return null;
 }
 function ToolPanel(props) {
-	if (!offers(useFleet(), props.project)) return /* @__PURE__ */ u(Away, { to: baseTo(props.project, props.session) });
+	if (!offers(useFleet(), props.project)) return props.onUnavailable ? null : /* @__PURE__ */ u(Away, { to: baseTo(props.project, props.session) });
+	if (props.quiet) return /* @__PURE__ */ u("section", {
+		class: `tool k-${props.kind}`,
+		tabIndex: 0,
+		children: /* @__PURE__ */ u("p", {
+			class: "muted",
+			children: t("term.columnPaused")
+		})
+	});
 	return /* @__PURE__ */ u(Panel, { ...props });
 }
-function Panel({ project, session, kind }) {
+function Panel({ project, session, kind, onUnavailable }) {
 	const fleet = useFleet();
 	const panel = A(null), host = A(null), row = A(null);
 	const h$1 = A(null);
@@ -4951,7 +4972,8 @@ function Panel({ project, session, kind }) {
 		const s = e && e.status;
 		if (s === 404) {
 			refused.add(project);
-			away(back);
+			if (onUnavailable) onUnavailable();
+			else away(back);
 			return;
 		}
 		if (s === 401) return say("signedOut");
@@ -5864,13 +5886,16 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
+function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
+	const [localTool, setLocalTool] = d(null);
+	const tool = embedded ? localTool : routeTool;
 	const pick = (x) => {
 		setTab(x);
-		if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
+		if (embedded) setLocalTool(null);
+		else if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
 	};
 	const dkey = draftKey(project, name);
 	const [draft, setDraftState] = d(() => draftText(dkey));
@@ -6262,14 +6287,17 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 					/* @__PURE__ */ u(ToolTabs, {
 						project,
 						session: name,
-						tool
+						tool,
+						onPick: embedded ? setLocalTool : null
 					})
 				]
 			}),
 			tool ? /* @__PURE__ */ u(ToolPanel, {
 				project,
 				session: name,
-				kind: tool
+				kind: tool,
+				quiet,
+				onUnavailable: embedded ? () => setLocalTool(null) : null
 			}, tool) : tab === "chat" ? !tr.page ? /* @__PURE__ */ u(ChatLoading, { load: tr.load }) : /* @__PURE__ */ u(Chat, {
 				page: tr.page,
 				queued: tr.page.queued || [],
@@ -8108,7 +8136,7 @@ function CardStatePill({ status, label }) {
 	});
 }
 var sessionRoute = (project, session) => `/p/${encodeURIComponent(project)}/s/${encodeURIComponent(session || "master")}`;
-function PhoneScreen({ title, parent = "/", error, loading, children, actions }) {
+function PhoneScreen({ title, parent = "/", error, loading, children, actions, class: extra = "" }) {
 	useKeys((key) => {
 		if (!key.ctrl && !key.alt && ["q", "`"].includes(key.k)) {
 			back(parent);
@@ -8117,7 +8145,7 @@ function PhoneScreen({ title, parent = "/", error, loading, children, actions })
 		return false;
 	});
 	return /* @__PURE__ */ u("div", {
-		class: "page fleet-extra",
+		class: `page fleet-extra ${extra}`,
 		children: [
 			/* @__PURE__ */ u(BackLink, { parent }),
 			/* @__PURE__ */ u("header", {
@@ -9650,7 +9678,10 @@ function StackPicker({ members = [], onOpen }) {
 		}
 		return false;
 	});
+	const [expanded, setExpanded] = useKept("stack.expanded", {});
+	const search = query.trim().toLowerCase();
 	return /* @__PURE__ */ u(PhoneScreen, {
+		class: "stack-picker",
 		title: t("phone.stacks"),
 		error: error || data?.find((p) => p.error)?.error,
 		loading,
@@ -9660,55 +9691,74 @@ function StackPicker({ members = [], onOpen }) {
 			onClick: open,
 			children: t("phone.openStack", { n: selected.length })
 		}),
-		children: [
-			/* @__PURE__ */ u("label", {
-				class: "field",
-				children: [/* @__PURE__ */ u("span", { children: t("phone.search") }), /* @__PURE__ */ u("input", {
-					type: "search",
-					value: query,
-					onInput: (e) => setQuery(e.currentTarget.value)
-				})]
-			}),
-			(data || []).map((p) => {
-				const cards = (p.cards || []).filter((c) => !c.lost && `${p.name} ${c.name} ${c.branch || ""} ${c.msg || ""}`.toLowerCase().includes(query.toLowerCase()));
-				return cards.length ? /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(splitAddr(p.name)[0], p.host) }), /* @__PURE__ */ u("div", {
-					class: "extra-grid",
-					children: cards.map((c) => {
+		children: [/* @__PURE__ */ u("label", {
+			class: "field stack-search",
+			children: [/* @__PURE__ */ u("span", { children: t("phone.search") }), /* @__PURE__ */ u("input", {
+				type: "search",
+				value: query,
+				onInput: (e) => setQuery(e.currentTarget.value)
+			})]
+		}), /* @__PURE__ */ u("div", {
+			class: "stack-list",
+			"data-keep-scroll": "stack-list",
+			children: [(data || []).map((p) => {
+				const sessions = (p.cards || []).filter((c) => !c.lost);
+				const cards = sessions.filter((c) => `${p.name} ${p.host || ""} ${c.name} ${c.branch || ""}`.toLowerCase().includes(search));
+				const count = selected.filter((m) => m.project === p.name).length;
+				const isOpen = search ? true : expanded[p.name] ?? !!count;
+				return cards.length ? /* @__PURE__ */ u("details", {
+					class: "stack-group",
+					open: isOpen,
+					onToggle: (e) => {
+						const open = e.currentTarget.open;
+						if (!search && open !== isOpen) setExpanded((v) => ({
+							...v,
+							[p.name]: open
+						}));
+					},
+					children: [/* @__PURE__ */ u("summary", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(splitAddr(p.name)[0], p.host) }), /* @__PURE__ */ u("span", {
+						class: "muted",
+						children: t("phone.stackCount", {
+							n: sessions.length,
+							selected: count
+						})
+					})] }), /* @__PURE__ */ u("div", { children: cards.map((c) => {
 						const m = {
 							project: p.name,
 							session: c.name
 						};
 						return /* @__PURE__ */ u("label", {
-							class: "card extra-card stack-choice",
+							class: "stack-choice",
 							children: [
 								/* @__PURE__ */ u("input", {
 									type: "checkbox",
 									checked: selected.some((x) => keyOf(x) === keyOf(m)),
 									onChange: () => toggle(m)
 								}),
-								/* @__PURE__ */ u("h3", { children: c.name }),
+								/* @__PURE__ */ u("span", {
+									class: "stack-name",
+									children: c.name
+								}),
 								/* @__PURE__ */ u(StatusPill, {
 									status: c.status,
 									small: true
 								}),
-								/* @__PURE__ */ u("p", {
-									class: "muted",
+								/* @__PURE__ */ u("span", {
+									class: "muted stack-branch",
 									children: c.branch
-								}),
-								/* @__PURE__ */ u("p", { children: c.msg })
+								})
 							]
 						}, c.name);
-					})
-				})] }, p.name) : null;
-			}),
-			data && !data.some((p) => p.cards?.some((c) => !c.lost)) ? /* @__PURE__ */ u("p", {
+					}) })]
+				}, p.name) : null;
+			}), data && !data.some((p) => p.cards?.some((c) => !c.lost)) ? /* @__PURE__ */ u("p", {
 				class: "empty",
 				children: t("phone.noSessions")
-			}) : null
-		]
+			}) : null]
+		})]
 	});
 }
-var NARROW = "(max-width: 760px)";
+var NARROW = "(max-width: 759px)";
 function useNarrow() {
 	const q = () => {
 		try {
@@ -9733,7 +9783,11 @@ function useNarrow() {
 }
 function StackView({ members = [] }) {
 	const fleet = useFleet(), [active, setActive] = d(0), narrow = useNarrow();
+	const projects = [...new Set(members.map((m) => m.project))];
+	const cards = usePoll(async () => Object.fromEntries(await Promise.all(projects.map(async (project) => [project, (await fleet.grid(project)).cards || []]))), Math.max(5e3, projects.length * 7500), [JSON.stringify(projects)]);
 	return /* @__PURE__ */ u(PhoneScreen, {
+		class: "stack-view",
+		error: cards.error,
 		title: t("phone.stacks"),
 		parent: "/stack-picker",
 		actions: /* @__PURE__ */ u(Btn, {
@@ -9743,8 +9797,8 @@ function StackView({ members = [] }) {
 		children: !members.length ? /* @__PURE__ */ u("p", {
 			class: "empty",
 			children: t("phone.emptyStack")
-		}) : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("div", {
-			class: "seg",
+		}) : /* @__PURE__ */ u(S$1, { children: [narrow ? /* @__PURE__ */ u("div", {
+			class: "seg stack-switcher",
 			role: "tablist",
 			children: members.map((m, i) => /* @__PURE__ */ u("button", {
 				role: "tab",
@@ -9753,10 +9807,11 @@ function StackView({ members = [] }) {
 				onClick: () => setActive(i),
 				children: memberName(m)
 			}))
-		}), /* @__PURE__ */ u("div", {
+		}) : null, /* @__PURE__ */ u("div", {
 			class: "stack-columns",
 			children: members.map((m, i) => /* @__PURE__ */ u("section", {
 				class: `stack-column${i === active ? " stack-active" : ""}`,
+				onPointerDown: () => setActive(i),
 				onFocusIn: () => setActive(i),
 				children: [/* @__PURE__ */ u("header", {
 					class: "row wrap",
@@ -9765,11 +9820,12 @@ function StackView({ members = [] }) {
 						children: t("phone.openSession")
 					})]
 				}), narrow && i !== active ? null : /* @__PURE__ */ u(SessionView, {
+					card: cards.data?.[m.project]?.find((c) => c.name === m.session),
 					embedded: true,
 					quiet: i !== active,
 					project: m.project,
 					name: m.session,
-					onChanged: () => {},
+					onChanged: cards.reload,
 					onGone: () => fleet.go("/stack-picker")
 				})]
 			}, keyOf(m)))

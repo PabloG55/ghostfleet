@@ -268,12 +268,14 @@ function ScheduleModal({ name, onClose, onSave }) {
 // pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
 // of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
 export const QUIET_PANE_MS = 15000;
-export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
+export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
+  const [localTool, setLocalTool] = useState(null);
+  const tool = embedded ? localTool : routeTool;
   // From a Terminal or Editor tab (a route of its own) the session's two tabs go back to its page.
-  const pick = (x) => { setTab(x); if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
+  const pick = (x) => { setTab(x); if (embedded) setLocalTool(null); else if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
   // The box is this session's draft (drafts.js): its words and files are back when the session is
   // opened again, after a reload and after a relaunch, until a send of them succeeds. The view is
   // mounted per session (keyed by its parent), so the draft is read once, here.
@@ -460,9 +462,9 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       <div class="tabs" role="tablist">
         <button role="tab" class={!tool && tab === 'chat' ? 'on' : ''} onClick={() => pick('chat')}>{t('sess.chat')}</button>
         <button role="tab" class={!tool && tab === 'term' ? 'on' : ''} title={t('sess.screenHint')} onClick={() => pick('term')}>{t('sess.screen')}</button>
-        <ToolTabs project={project} session={name} tool={tool} />
+        <ToolTabs project={project} session={name} tool={tool} onPick={embedded ? setLocalTool : null} />
       </div>
-      {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
+      {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} quiet={quiet} onUnavailable={embedded ? () => setLocalTool(null) : null} /> : tab === 'chat'
         ? (!tr.page ? <ChatLoading load={tr.load} />
             : <Chat page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
                     onRetryOlder={tr.retryOlder} onStep={onStep} />)

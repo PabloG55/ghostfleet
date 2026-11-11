@@ -12,12 +12,12 @@ export function CardStatePill({ status, label }) {
   return <span class={`pill c-${STATUS[status].color} sm`}><Led state={status} size={7} hidden /> {label}</span>;
 }
 export const sessionRoute = (project, session) => `/p/${encodeURIComponent(project)}/s/${encodeURIComponent(session || 'master')}`;
-export function PhoneScreen({ title, parent = '/', error, loading, children, actions }) {
+export function PhoneScreen({ title, parent = '/', error, loading, children, actions, class: extra = '' }) {
   useKeys(key => {
     if (!key.ctrl && !key.alt && ['q', '`'].includes(key.k)) { back(parent); return true; }
     return false;
   });
-  return <div class="page fleet-extra"><BackLink parent={parent} /><header class="page-head"><h1>{title}</h1><div class="row wrap">{actions}</div></header>
+  return <div class={`page fleet-extra ${extra}`}><BackLink parent={parent} /><header class="page-head"><h1>{title}</h1><div class="row wrap">{actions}</div></header>
     {error ? <p class="err" role="alert">{error.message}</p> : null}
     {loading ? <p class="muted" role="status">{t('common.loading')}</p> : null}{children}</div>;
 }

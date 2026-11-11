@@ -50,7 +50,7 @@ export const offers = (fleet, project) => typeof fleet.canTerm === 'function' &&
 
 // The two tabs, for a tab bar that already exists (the session's). Nothing for a person who
 // may not type into the project: a viewer never sees them.
-export function ToolTabs({ project, session, tool }) {
+export function ToolTabs({ project, session, tool, onPick = null }) {
   const fleet = useFleet();
   const on = useRef(null);
   // A phone's bar is narrower than four tabs and scrolls inside itself (terminal.css): the open
@@ -64,7 +64,9 @@ export function ToolTabs({ project, session, tool }) {
   }, [tool]);
   if (!offers(fleet, project)) return null;
   return TOOL_KINDS.map(k => (
-    <a key={k} ref={tool === k ? on : null} role="tab" class={`tool-tab${tool === k ? ' on' : ''}`} aria-selected={tool === k}
+    onPick ? <button key={k} ref={tool === k ? on : null} role="tab" class={`tool-tab${tool === k ? ' on' : ''}`} aria-selected={tool === k}
+       onClick={() => onPick(k)}>{t(`term.tab.${k}`)}</button>
+    : <a key={k} ref={tool === k ? on : null} role="tab" class={`tool-tab${tool === k ? ' on' : ''}`} aria-selected={tool === k}
        href={`#${toolTo(project, session, k)}`}>{t(`term.tab.${k}`)}</a>
   ));
 }
@@ -133,10 +135,13 @@ function Away({ to }) {
 // address typed or pasted by someone who may not open it (a viewer) goes to its page instead.
 export function ToolPanel(props) {
   const fleet = useFleet();
-  if (!offers(fleet, props.project)) return <Away to={baseTo(props.project, props.session)} />;
+  if (!offers(fleet, props.project)) return props.onUnavailable ? null : <Away to={baseTo(props.project, props.session)} />;
+  // Unmounting disposes the socket, including a ticket still being asked for. The server's
+  // project tab survives; focusing this column reconnects to it with a fresh ticket.
+  if (props.quiet) return <section class={`tool k-${props.kind}`} tabIndex={0}><p class="muted">{t('term.columnPaused')}</p></section>;
   return <Panel {...props} />;
 }
-function Panel({ project, session, kind }) {
+function Panel({ project, session, kind, onUnavailable }) {
   const fleet = useFleet();
   const panel = useRef(null), host = useRef(null), row = useRef(null);
   const h = useRef(null);
@@ -173,7 +178,7 @@ function Panel({ project, session, kind }) {
   // the page it hung from comes back.
   const denied = async (e) => {
     const s = e && e.status;
-    if (s === 404) { refused.add(project); away(back); return; }
+    if (s === 404) { refused.add(project); if (onUnavailable) onUnavailable(); else away(back); return; }
     if (s === 401) return say('signedOut');
     // A phone's own switch for the terminal (fleet-serve /api/term/enable), which only this device
     // can turn on: not a refusal to show, a setting to point at.

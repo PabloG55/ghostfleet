@@ -212,8 +212,8 @@ try {
     // `acme-api@vm · vm`. The picker's headings are the one place the two meet on one line.
     await step(`${at}: the stack picker names the machine once`, async () => {
       await fresh({ ...size, paired: 'online', hash: '#/stack-picker' });
-      await until(() => b.evaluate(() => [...document.querySelectorAll('.main section h2')].some(h => / · vm$/.test(h.textContent.trim()))), 8000);
-      const heads = await b.evaluate(() => [...document.querySelectorAll('.main section h2')].map(h => h.textContent.replace(/\s+/g, ' ').trim()));
+      await until(() => b.evaluate(() => [...document.querySelectorAll('.stack-group h2')].some(h => / · vm$/.test(h.textContent.trim()))), 8000);
+      const heads = await b.evaluate(() => [...document.querySelectorAll('.stack-group h2')].map(h => h.textContent.replace(/\s+/g, ' ').trim()));
       is(`${at}: the stack picker heads the vm's project with its name and the machine`, true, heads.includes('acme-api · vm'));
       is(`${at}: ...and no heading is an address`, [], heads.filter(x => /@/.test(x)));
     });
