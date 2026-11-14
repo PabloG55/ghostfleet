@@ -57,7 +57,24 @@ const STUBS = `(() => {
   }
   const play = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { note('play'); return play.call(this); };
-  try { const s = window.speechSynthesis; if (s) { const sp = s.speak.bind(s); s.speak = (u) => { note('speak'); return sp(u); }; } } catch {}
+  // A voice and an ear this file controls: every utterance is written down and held until the test
+  // ends it (__finish), and the recogniser hears whatever __heard holds, after 400 ms, or nothing.
+  window.__said = []; window.__cancels = 0; window.__rec = { starts: 0, aborts: 0 }; window.__heard = '';
+  let curU = null;
+  const fake = { speaking: false, getVoices: () => [], cancel: () => { window.__cancels++; curU = null; },
+    speak: (u) => { note('speak'); window.__said.push(u.text); curU = u; } };
+  try { Object.defineProperty(window, 'speechSynthesis', { get: () => fake, configurable: true }); } catch {}
+  window.SpeechSynthesisUtterance = function (text) { this.text = text; };
+  window.__finish = () => { const u = curU; curU = null; if (u && u.onend) u.onend(); };
+  window.SpeechRecognition = window.webkitSpeechRecognition = function () {
+    const r = this; let dead = false;
+    r.start = () => { window.__rec.starts++; setTimeout(() => {
+      if (dead) return;
+      if (window.__heard) r.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: window.__heard }], { isFinal: true })] });
+      setTimeout(() => { if (!dead) r.onend(); }, 30);
+    }, 400); };
+    r.stop = () => {}; r.abort = () => { dead = true; window.__rec.aborts++; };
+  };
   try { const md = navigator.mediaDevices; if (md) { const g = md.getUserMedia.bind(md); md.getUserMedia = (c) => { note('getUserMedia'); return g(c); }; } } catch {}
   try { if (navigator.audioSession) { const a = navigator.audioSession; Object.defineProperty(a, 'type', { set: (v) => note('audioSession=' + v), get: () => 'auto' }); } } catch {}
 })();`;
@@ -571,6 +588,100 @@ try {
     await b.evaluate(() => document.fonts.ready.then(() => 0));
     await sleep(300);
     is('390 session, opened cold from its link: the newest message clears the Assistant button', 'clear', await clear());
+
+    // ── a chat that talks: the ▶ on every message, and speak mode in the composer ──
+    // The voice and the ear are the stubs above. The session is one the fixture has no transcript
+    // for, so its messages come from a fetch answer this block controls, and a reply can "arrive".
+    {
+      const { speakable, speechChunks } = await import(new URL('../../web/ui/speakable.js', import.meta.url).href);
+      const { EN } = await import(new URL('../../web/ui/speakable.js', import.meta.url).href);
+      const spoken = (md) => speechChunks(speakable(md, EN)).join(' ');
+      const nowS = Math.floor(Date.now() / 1000);
+      const A1 = 'Pinned `retry.ts` and added **429** handling.', U1 = 'Please check the backoff.';
+      await b.viewport(390, 844);
+      await b.evaluate((a1, u1, n) => {
+        window.__types = [{ ts: n - 300, role: 'user', text: u1 }, { ts: n - 200, role: 'assistant', text: a1 }];
+        if (!window.__realFetch) {
+          window.__realFetch = window.fetch;
+          window.fetch = (u, o) => String(u).includes('session-acme-api-types.json')
+            ? Promise.resolve(new Response(JSON.stringify({ project: 'acme-api', session: 'types', agent: 'claude', status: 'ready', total: window.__types.length, messages: window.__types }), { status: 200 }))
+            : window.__realFetch(u, o);
+        }
+        location.hash = '#/p/acme-api/s/types';
+      }, A1, U1, nowS);
+      is('a chat with two messages is drawn', 2, await until(() => { const n = document.querySelectorAll('.chat .msg').length; return n === 2 ? n : 0; }));
+      const bubbles = () => b.evaluate(() => [...document.querySelectorAll('.chat .msg')].map(m => { const r = m.querySelector('.read-btn'); return { me: m.classList.contains('me'), label: r && r.getAttribute('aria-label'), top: Math.round(m.getBoundingClientRect().top) }; }));
+      const before = await bubbles();
+      is('every message has a ▶, named for a screen reader: the person\'s and the agent\'s', 'true:Read aloud,false:Read aloud',
+         before.map(x => `${x.me}:${x.label}`).join(','));
+      const said = () => b.evaluate(() => window.__said.filter(x => x.trim()));
+      const press = (i) => b.evaluate((k) => document.querySelectorAll('.chat .msg .read-btn')[k].click(), i);
+      await press(1);
+      is('pressing it speaks what speakable() makes of the message', spoken(A1), (await said()).join(' '));
+      is('...which is not the markdown as written', true, spoken(A1) !== A1 && !/\*\*/.test(spoken(A1)));
+      const during = await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(','));
+      is('...and its button says Stop, and the other still says Read aloud', 'Read aloud/false,Stop reading/true', during);
+      is('...with no message moving', JSON.stringify(before.map(x => x.top)), JSON.stringify((await bubbles()).map(x => x.top)));
+      const cStop = await b.evaluate(() => window.__cancels);
+      await press(1);
+      is('a second press stops it: the voice is cancelled', true, (await b.evaluate(() => window.__cancels)) > cStop);
+      is('...and the button is back to Read aloud', 'Read aloud/false,Read aloud/false',
+         await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(',')));
+      await press(1); await press(0);
+      is('only one message plays at a time: the second press replaces the first', 'Read aloud/false,Stop reading/true'.split(',').reverse().join(','),
+         await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(',')));
+      is('...and the person\'s own words were spoken', true, (await said()).pop() === spoken(U1));
+      // Leaving the session stops it.
+      const c0 = await b.evaluate(() => window.__cancels);
+      await b.evaluate(() => { location.hash = '#/'; });
+      await sleep(500);
+      is('leaving the session stops a message that is playing', true, (await b.evaluate(() => window.__cancels)) > c0);
+
+      // ── speak mode: listen → send → (the turn ends) → speak → listen ──
+      const sends = () => b.evaluate(async () => (await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'fleet_send' && r.args.session === 'types').map(r => r.args.prompt));
+      const reply = (text) => b.evaluate(async (tx, n) => {
+        window.__types = [...window.__types, { ts: n, role: 'assistant', text: tx }];
+        await (await import('./api.js')).verb('fleet_resume', { project: 'acme-api', session: 'types' });
+      }, text, Math.floor(Date.now() / 1000) + 5);
+      const open = async () => { await b.evaluate(() => { location.hash = '#/p/acme-api/s/types'; }); await until(() => !!document.querySelector('.speak-btn')); };
+      await open();
+      is('no page error in the chat so far', '', errors.join(' | '));
+      is('the composer offers speak mode, named', 'Speak mode', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      await b.evaluate(() => { window.__heard = 'run the tests'; window.__said.length = 0; document.querySelector('.speak-btn').click(); });
+      is('...turned on, it listens (the ear was opened)', true, !!(await until(() => window.__rec.starts >= 1)));
+      is('...and says so', 'Turn speak mode off', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      is('the transcript is sent to the session', true, !!(await until(async () => (await (await import('./api.js')).getAudit()).rows.some(r => r.verb === 'fleet_send' && r.args.session === 'types'))));
+      is('...as it was heard, marked as spoken', '(spoken) run the tests', (await sends())[0]);
+      await sleep(1500);
+      is('...and nothing is read while the turn is still going', 0, (await said()).length);
+      const R1 = 'All done: **the tests pass**.';
+      await reply(R1);
+      is('when the turn ends the reply is read aloud, through speakable()', spoken(R1), await (async () => { await until(() => window.__said.some(x => x.trim())); return (await said()).join(' '); })());
+      is('...and the ear is not open while it speaks', 1, await b.evaluate(() => window.__rec.starts));
+      await b.evaluate(() => { window.__heard = ''; window.__finish(); });
+      is('...then it listens again', true, !!(await until(() => window.__rec.starts >= 2)));
+      await sleep(900);
+      is('a silence is never sent as a message', 1, (await sends()).length);
+      is('...and ends speak mode, rather than listening to nothing for good', 'Speak mode', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      // The toggle turns it off by hand.
+      await b.evaluate(() => { window.__heard = 'later'; const n = window.__rec.starts; document.querySelector('.speak-btn').click(); window.__n0 = n; });
+      await sleep(100);
+      await b.evaluate(() => document.querySelector('.speak-btn').click());
+      await sleep(900);
+      is('the toggle turns it off, and what was said after is not sent', 1, (await sends()).length);
+      is('...the ear is let go', true, (await b.evaluate(() => window.__rec.aborts)) >= 1);
+      // Leaving the screen while it speaks stops the voice and the loop.
+      await b.evaluate(() => { window.__heard = 'one more'; window.__said.length = 0; document.querySelector('.speak-btn').click(); });
+      await until(async () => (await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'fleet_send' && r.args.session === 'types').length >= 2);
+      await reply('Second answer.');
+      await until(() => window.__said.some(x => x.trim()));
+      const c1 = await b.evaluate(() => ({ cancels: window.__cancels, starts: window.__rec.starts }));
+      await b.evaluate(() => { location.hash = '#/'; });
+      await sleep(900);
+      const c2 = await b.evaluate(() => ({ cancels: window.__cancels, starts: window.__rec.starts }));
+      is('leaving the screen while it speaks stops the voice', true, c2.cancels > c1.cancels);
+      is('...and it does not listen again afterwards', c1.starts, c2.starts);
+    }
 
     // ── one answer to "is this run done": the client's state against the server's ──
     // The phone works a recorded run's state out the moment a verdict is tapped (and fixture mode
