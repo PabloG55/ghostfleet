@@ -1515,10 +1515,17 @@ test('a bare answer to the agent\'s numbered question folds into the item that a
   w.judge = verdictOf(() => 'open', { waitingOnPerson: true })
   await $.turn.complete(done('t1', 'Two options:\n1. acme-api staging\n2. acme-web preview\nWhich one?'))
   await settle(clock)
+  // the choice is the person's, as a question with its options; the request stays the session's
+  const asked = book(w).items.filter((i: any) => i.source === 'question')
+  expect(asked.map((i: any) => [i.state, i.options.map((o: any) => o.key).join('')])).toEqual([['open', '12']])
+  expect(book(w).items[0].state).toBe('open')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 1 }))
   for (const reply of ['ok go with 2']) {
     await type($, reply)
-    expect(book(w).items.length).toBe(1)
+    expect(book(w).items.length).toBe(2)
     expect(book(w).items[0].replies.map((r: any) => r.text)).toEqual([reply])
+    expect(book(w).items[0].state).toBe('open')
+    expect(book(w).items[1]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'person', answer: expect.objectContaining({ option: '2' }) }))
   }
   await $.turn.start({ text: 'ok go with 2', turnId: 't2' })
   w.judge = verdict(() => 'open')
@@ -1528,7 +1535,44 @@ test('a bare answer to the agent\'s numbered question folds into the item that a
   // after an answer with no numbered question, "4" is a message of its own
   await clock.advance(COOLDOWN)
   await type($, '4')
-  expect(book(w).items.length).toBe(2)
+  expect(book(w).items.length).toBe(3)
+})
+
+// ONE DECISION, ONE ITEM: a request the judge holds for the person's pick, in the turn that put the
+// pick as numbered options, is that question's, not a second thing for them to answer.
+test('a request held for the pick its own turn asked is not a second item for the person; the answer hands it back', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'pick a deploy target for the export')
+  await $.turn.start({ text: 'pick a deploy target for the export', turnId: 't1' })
+  w.heard = ['pick a deploy target for the export']
+  w.judge = (prompt: string) => ({ isAnswered: true, usage: {}, text: JSON.stringify({ items: [...prompt.matchAll(/^(\d+) \[/gm)].map(m => ({ id: m[1], status: 'in-progress', reason: 'waits on the person: their pick of target' })), promises: [], waitingOnPerson: true }) })
+  await $.turn.complete(done('t1', 'Two options:\n1. acme-api staging\n2. acme-web preview\nWhich one?'))
+  await settle(clock)
+  const q = book(w).items.find((i: any) => i.source === 'question')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'waiting', awaits: [q.id] }))
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 1 }))
+  await type($, 'ok go with 2')
+  expect(book(w).items.find((i: any) => i.id === q.id)).toEqual(expect.objectContaining({ state: 'done', answer: expect.objectContaining({ option: '2' }) }))
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'open', replies: [expect.objectContaining({ text: 'ok go with 2' })] }))
+  expect(book(w).items[0].awaits).toBeUndefined()
+  expect(rec(w).ledger.for_you ?? 0).toBe(0)
+  // the other direction: a question closed some other way gives the request back to the person
+  await clock.advance(COOLDOWN)
+  await type($, 'pick a region for the export too')
+  await $.turn.start({ text: 'pick a region for the export too', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Two regions:\n1. us-east\n2. eu-west\nWhich one?'))
+  await settle(clock)
+  const r = book(w).items.find((i: any) => i.text === 'pick a region for the export too')
+  const q2 = book(w).items.find((i: any) => i.source === 'question' && i.turnId === 't2')
+  expect(r).toEqual(expect.objectContaining({ state: 'waiting', awaits: [q2.id] }))
+  const shut: any = await $.command.run({ command: 'ledger', args: `close ${q2.id}` } as any)
+  expect(shut.text).toBe(`ledger: closed ${q2.id}`)
+  await clock.advance(COOLDOWN)
+  await type($, 'status?')
+  expect(book(w).items.find((i: any) => i.id === r.id).awaits).toBeUndefined()
+  expect(notes(w)[notes(w).length - 1]).toContain('pick a region for the export too')
 })
 
 // A brief from the lead is done only with proof (ledger.js needsProof): the judge reading it as
@@ -1664,29 +1708,42 @@ test("a turn the person's own message started shows the judge their waiting item
   expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'judge' }))
 })
 
-// A waiting item waited as long as the band kept it, a week: 34 of 35 were over a day old.
-test('a waiting item untouched for a day expires: off the queue and the note, still listed by all, still closable', async ($, on) => {
+// A waiting item waited as long as the band kept it, a week: 34 of 35 were over a day old. Retiring
+// them after a day took unanswered questions off the person's list while the answer was still owed,
+// so what waits on the PERSON never expires (ledger.js FOR YOU); only what waits on someone else does.
+test('an item waiting on the person a day untouched is still theirs, on the note and the record; one waiting on a deploy expires', async ($, on) => {
   const day = 86_400_000
   const now = 10 * day
   const clock = mock.clock(on, { now })
   const w = world(on)
   await start($)
-  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, items: [
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 3, items: [
     { id: '1', text: 'open the app to load the new version', at: now - day - 60_000, state: 'waiting', source: 'user', progress: { at: now - day - 60_000, reason: 'waits on the person: reload the app' } },
     { id: '2', text: 'tell me which region', at: now - 60_000, state: 'waiting', source: 'user', progress: { at: now - 60_000, reason: 'waits on the person: their pick of region' } },
+    { id: '3', text: 'publish the acme-api client', at: now - day - 60_000, state: 'waiting', source: 'fleet', progress: { at: now - day - 60_000, reason: 'reported: waiting on the registry to propagate' } },
   ] }))
-  // the status note is the queue's list (heldItems): the fresh one is on it, the day-old one not
+  // the status note is the queue's list (heldItems): the day-old one is on it beside the fresh one
   await type($, 'status?')
   const held = notes(w)[0]
+  expect(held).toContain('1 (waiting on them 1d)')
   expect(held).toContain('2 (waiting on them')
-  expect(held).not.toContain('open the app to load the new version')
+  expect(held).not.toContain('publish the acme-api client')
   await $.turn.start({ text: 'status?', turnId: 't1' })
   w.judge = verdict(() => 'open')
-  await $.turn.complete(done('t1', 'One thing waits on you: the region.'))
+  await $.turn.complete(done('t1', 'Two things wait on you: the reload and the region.'))
   await settle(clock)
-  expect(book(w).items.slice(0, 2).map((i: any) => i.state)).toEqual(['expired', 'waiting'])
+  expect(book(w).items.slice(0, 3).map((i: any) => i.state)).toEqual(['waiting', 'waiting', 'expired'])
+  // ...and a day later still: the record a day older is the same as the clock a day on, without
+  // running a day of the mod's half-second looks
+  const older = book(w)
+  older.items = older.items.map((i: any) => ({ ...i, at: i.at - day, ...(i.progress ? { progress: { ...i.progress, at: i.progress.at - day } } : {}) }))
+  w.files.set(LEDGER, JSON.stringify(older))
+  await clock.advance(COOLDOWN)
+  await type($, 'status?')
+  expect(notes(w)[notes(w).length - 1]).toContain('1 (waiting on them 2d)')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 2 }))
   const all: any = await $.command.run({ command: 'ledger', args: 'all' } as any)
-  expect(all.text).toContain('open the app to load the new version')
+  expect(all.text).toContain('publish the acme-api client')
   const shut: any = await $.command.run({ command: 'ledger', args: 'close 1' } as any)
   expect(shut.text).toBe('ledger: closed 1')
 })
@@ -1901,4 +1958,179 @@ test('a close from Bash during the turn skips the judge, as the tool\'s does; on
   await $.turn.complete(done('t2', "Renamed. I'll keep the preview server running."))
   await settle(clock)
   expect(w.judged.length).toBe(1)
+})
+
+// ── FOR YOU: what waits on the person, apart from what the session owes ──────────────
+// Measured: a lead ended a turn on twenty numbered questions while its band read "3 open", and
+// the person asked why a bunch of things needed their answer and only three were open.
+const TWENTY = 'Before I go on I need your call on these:\n\n'
+  + Array.from({ length: 20 }, (_, k) => `${k + 1}. Should acme-api step ${k + 1} use the new client?`).join('\n')
+  + '\n\nAnswer by number.'
+
+test('twenty numbered questions at the end of a turn are twenty items for the person, and the band says so apart from what is open', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'plan the acme-api migration')
+  await $.turn.start({ text: 'plan the acme-api migration', turnId: 't1' })
+  w.heard = ['plan the acme-api migration']
+  w.judge = verdictOf(() => 'in-progress', { waitingOnPerson: true })
+  await $.turn.complete(done('t1', TWENTY))
+  await settle(clock)
+  const qs = book(w).items.filter((i: any) => i.source === 'question')
+  expect(qs.map((i: any) => i.n)).toEqual(Array.from({ length: 20 }, (_, k) => k + 1))
+  expect(qs.every((i: any) => i.state === 'open' && i.turnId === 't1')).toBe(true)
+  // the judge never saw them: its prompt lists the request and nothing else
+  expect(itemsOf(w.judged[0])).not.toContain('use the new client?')
+  expect(itemsOf(w.judged[0])).toContain('plan the acme-api migration')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 20 }))
+  expect(await band($)).toContain('· 20 for you')
+  // the other direction: a turn that ends on an offer list asks nothing
+  await clock.advance(COOLDOWN)
+  await type($, 'and list what shipped')
+  await $.turn.start({ text: 'and list what shipped', turnId: 't2' })
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t2', 'Shipped:\n1. the login fix\n2. the export endpoint\n\nWant me to open the PR?'))
+  await settle(clock)
+  expect(book(w).items.filter((i: any) => i.source === 'question').length).toBe(20)
+})
+
+test('"1" answers exactly question 1 of the turn that asked; "sí al 3" and "5: no, use JSON" answer theirs; the rest stay', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'plan the acme-api migration')
+  await $.turn.start({ text: 'plan the acme-api migration', turnId: 't1' })
+  w.heard = ['plan the acme-api migration']
+  w.judge = verdictOf(() => 'in-progress', { waitingOnPerson: true })
+  await $.turn.complete(done('t1', TWENTY))
+  await settle(clock)
+  await type($, '1')
+  const byN = () => new Map(book(w).items.filter((i: any) => i.source === 'question').map((i: any) => [i.n, i]))
+  expect(byN().get(1)).toEqual(expect.objectContaining({ state: 'done', closedBy: 'person', answer: expect.objectContaining({ text: '1' }) }))
+  expect([...byN().values()].filter((i: any) => i.state === 'open').length).toBe(19)
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 19 }))
+  await type($, 'sí al 3\n5: no, use JSON')
+  expect([3, 5].map(n => byN().get(n).state)).toEqual(['done', 'done'])
+  expect(byN().get(5).answer.text).toContain('use JSON')
+  expect([2, 4, 6, 20].map(n => byN().get(n).state)).toEqual(['open', 'open', 'open', 'open'])
+  expect(await band($)).toContain('· 17 for you')
+})
+
+test('the judge cannot close a question as done, nor a request whose missing piece is the person', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'choose the billing-svc store and wire it')
+  await $.turn.start({ text: 'choose the billing-svc store and wire it', turnId: 't1' })
+  w.heard = ['choose the billing-svc store and wire it']
+  // a judge that calls everything done, citing the person as what is left
+  w.judge = (prompt: string) => {
+    const ids = [...prompt.matchAll(/^(\d+) \[/gm)].map(m => m[1])
+    return { isAnswered: true, text: JSON.stringify({ items: ids.map(id => ({ id, status: 'done', reason: 'waits on the person: their pick of store' })), promises: [], waitingOnPerson: true }), usage: {} }
+  }
+  await $.turn.complete(done('t1', 'Wired the interface. Which store should it use?\n\n1. Should billing-svc use sqlite?\n2. Should it keep the webhook log for 30 days?'))
+  await settle(clock)
+  const items = book(w).items
+  expect(items[0]).toEqual(expect.objectContaining({ source: 'user', state: 'waiting' }))
+  expect(items[0].closedBy).toBeUndefined()
+  expect(items.filter((i: any) => i.source === 'question').map((i: any) => i.state)).toEqual(['open', 'open'])
+  // a second turn, the same judge: still nothing of the person's is closed by it
+  await clock.advance(COOLDOWN)
+  await type($, 'also bump the version')
+  await $.turn.start({ text: 'also bump the version', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Bumped.'))
+  await settle(clock)
+  expect(book(w).items.filter((i: any) => i.source === 'question').map((i: any) => i.state)).toEqual(['open', 'open'])
+  expect(book(w).items.filter((i: any) => i.closedBy === 'judge' && i.source === 'question')).toEqual([])
+})
+
+// fleet-send and fleet-schedule mark what they paste (`<sock>.<session>.pasted`); a paste arrives
+// in the composer as typed text, and the mark is the only thing that tells the two apart.
+const MARKS = `${DIR}/cf-acme-api.w1.pasted`
+const mark = (text: string, at: number, kind = '') => `${at}\t${kind}\t0\t${text.length}\n`
+
+test('a prompt fleet-send pasted is the lead\'s brief, never the person\'s: owed to the sender and not for the person', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const brief = 'add the acme-api export endpoint and report back'
+  w.files.set(MARKS, mark(brief, 999_000))
+  await type($, brief)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ source: 'fleet', text: brief }))
+  expect(w.files.has(MARKS)).toBe(false)       // the mark was spent
+  await $.turn.start({ text: brief, turnId: 't1' })
+  w.judge = verdictOf(() => 'in-progress', { waitingOnPerson: true })
+  await $.turn.complete(done('t1', 'Started; I need the lead to confirm the route name before I go on.'))
+  await settle(clock)
+  expect(rec(w).ledger.for_you ?? 0).toBe(0)
+  // the other direction: the same words typed with no mark are the person's
+  await clock.advance(COOLDOWN)
+  await type($, 'rename the acme-web cache keys')
+  expect(book(w).items.find((i: any) => i.text === 'rename the acme-web cache keys')).toEqual(expect.objectContaining({ source: 'user' }))
+  // ...a mark too old, or for a text of another size, is not this paste's
+  w.files.set(MARKS, mark('x'.repeat(200), 1_000_000 + COOLDOWN - 120_000) + mark('y'.repeat(400), 1_000_000 + COOLDOWN))
+  await type($, 'list the toolbox scripts')
+  expect(book(w).items.find((i: any) => i.text === 'list the toolbox scripts')).toEqual(expect.objectContaining({ source: 'user' }))
+  // ...and the owner's own words, sent through fleet-send --owner, stay the person's
+  w.files.set(MARKS, mark('merge the docs PR now', 1_000_000 + COOLDOWN, 'owner'))
+  await type($, 'merge the docs PR now')
+  expect(book(w).items.find((i: any) => i.text === 'merge the docs PR now')).toEqual(expect.objectContaining({ source: 'user' }))
+})
+
+test('an explain request is no item and is not judged; its answer is kept on the item it explains', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'plan the acme-api migration')
+  await $.turn.start({ text: 'plan the acme-api migration', turnId: 't1' })
+  w.heard = ['plan the acme-api migration']
+  w.judge = verdictOf(() => 'in-progress', { waitingOnPerson: true })
+  await $.turn.complete(done('t1', 'Two calls for you:\n\n1. Should acme-api drop the v1 routes?\n2. Should the migration run at night?'))
+  await settle(clock)
+  const q = book(w).items.find((i: any) => i.source === 'question' && i.n === 1)
+  const said: any = await $.command.run({ command: 'ledger', args: `explain ${q.id}` } as any)
+  expect(said.text).toContain(`asked for an explanation of ${q.id}`)
+  // with a fleet record, the request goes through fleet-send --explain, which waits for a turn
+  await settle(clock)
+  const ask = (w as any).ran?.find?.((a: string[]) => a.includes('--explain'))
+  void ask
+  const prompt = `[ghostfleet ledger: explain ${q.id}] The person tapped "explain" on ledger item ${q.id}`
+  w.files.set(MARKS, mark(prompt + ' …', 1_000_000, 'explain'))
+  const judgedBefore = w.judged.length
+  await type($, prompt + ' …')
+  expect(book(w).items.filter((i: any) => i.text.startsWith('[ghostfleet ledger: explain'))).toEqual([])
+  await $.turn.start({ text: prompt + ' …', turnId: 't2' })
+  await $.turn.complete(done('t2', 'In plain words: dropping v1 means old scripts stop working. I recommend yes, after a warning release.'))
+  await settle(clock)
+  expect(w.judged.length).toBe(judgedBefore)
+  const after = book(w).items.find((i: any) => i.id === q.id)
+  expect(after).toEqual(expect.objectContaining({ state: 'open', explain: expect.objectContaining({ text: expect.stringContaining('I recommend yes') }) }))
+  // its turn's numbered lines, if any, ask the person nothing new
+  expect(book(w).items.filter((i: any) => i.source === 'question').length).toBe(2)
+})
+
+// A file from before the split: an open request whose last report said it waits on the person
+// was never `waiting`, so it was counted as the session's and the person was never shown it.
+test('an old open item whose report waits on the person is read as theirs; one waiting on CI, and a lead\'s, are not; nothing is deleted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 3, items: [
+    { id: '1', text: 'tell me which region for acme-api', at: 900_000, state: 'open', source: 'user', progress: { at: 950_000, reason: 'waits on the person: their pick of region' } },
+    { id: '2', text: 'ship the acme-web build', at: 900_000, state: 'open', source: 'user', progress: { at: 950_000, reason: 'CI is running on the PR' } },
+    { id: '3', text: 'add the toolbox export', at: 900_000, state: 'open', source: 'fleet', progress: { at: 950_000, reason: 'waits on the person: their pick of format' } },
+  ] }))
+  await type($, 'status?')
+  expect(await band($)).toContain('· 1 for you')
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ for_you: 1 }))
+  // the part of the note that is the person's: the open items note above it is the session's
+  const all = notes(w)[notes(w).length - 1]
+  const note = all.slice(all.indexOf('[ghostfleet ledger: waiting on the person]'))
+  expect(all).toContain('[ghostfleet ledger: waiting on the person]')
+  expect(note).toContain('tell me which region for acme-api')
+  expect(note).not.toContain('ship the acme-web build')
+  expect(note).not.toContain('add the toolbox export')
+  const after = book(w).items
+  expect(after.slice(0, 3).map((i: any) => [i.id, i.state])).toEqual([['1', 'waiting'], ['2', 'open'], ['3', 'open']])
 })

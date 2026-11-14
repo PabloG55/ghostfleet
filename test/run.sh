@@ -6157,8 +6157,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
   # WHAT THE SESSION HOLDS FOR THE PERSON (heldItems), and the status question that has the
   # agent ask it (isStatusQuestion, statusNote). Each state paired with the one beside it that
-  # must NOT be held: a fresh open ask, a promise, a closed item, a week-old waiting one. And
-  # each status phrasing paired with a request that names a status and is work.
+  # must NOT be held: a fresh open ask, a promise, a closed item. What waits on the PERSON never
+  # ages off (ledger.js FOR YOU), so a week-old one is held, first, as the oldest; a week-old one
+  # waiting on someone else is not. And each status phrasing paired with a request that names a
+  # status and is work.
   lh="$(node --no-warnings --input-type=module -e "
     import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
     const H = 3600000, now = 100 * 24 * H
@@ -6171,7 +6173,8 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       it('5', { progress: { at: now - H, reason: 'a worker is on it' } }),   // reported an hour ago
       it('6', { source: 'promise' }),                              // the agent's own: never held
       it('7', { state: 'done' }),
-      it('8', { state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H } }),  // past BAND_DAYS
+      it('8', { state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H } }),  // past BAND_DAYS, still theirs
+      it('9', { source: 'fleet', state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H, reason: 'reported: waiting on the registry' } }),
     ] }
     const held = L.heldItems(l, now).map(i => i.id + ':' + i.state).join(',')
     const yes = ['whats the status', 'status?', 'Status update please', 'any update?', \"what's left\", 'where are we?',
@@ -6188,7 +6191,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       L.requestText(note + ' and also fix it') === 'and also fix it',
     ].join(' | '))" 2>&1)"
   is "ledger: held for the person = waiting, answered, untouched 4h; a status question asks each, and a request naming a status does not; a quoted status note is not the person's words" \
-     "3:open,1:waiting,2:replied | all-yes | all-no | 2 | 1 | 3,1,2 | true | true | true" "$lh"
+     "8:waiting,3:open,1:waiting,2:replied | all-yes | all-no | 2 | 1 | 8,3,1,2 | true | true | true" "$lh"
   # ...AND THE TWO KINDS OF ITEM #82 AND #83 ADDED, through the code that makes them rather
   # than a hand-built item: a worker's ask CARRIED to its master by fleet-stop (carryItems), and
   # a `fleet` item the judge read as done, which stays open for its proof (applyVerdict). A
@@ -16166,6 +16169,10 @@ fi
 # tools no session had (0 uses against 3,305 closes from Bash); and a stopped worker's items
 # went to its lead even when its PR had merged (23 carried items open in one lead's ledger).
 # Each assertion here is the shape of one of those, in both directions.
+#   THE DAY OF WAITING WAS REVERSED for what waits on the person: retiring it after a day took an
+# unanswered question off their list while the answer was still owed, and a lead that ended a
+# turn on twenty questions showed "3 open". An item waiting on the person now stays until they
+# answer or it is dropped (ledger.js FOR YOU); what expires is only what waits on someone else.
 group "the ledger: the owner's words, a day of waiting, a one-line rule, carried work that landed"
 if command -v node >/dev/null 2>&1; then
   lf="$(node --no-warnings --input-type=module - "$ROOT" <<'NODE' 2>&1
@@ -16181,13 +16188,30 @@ const w = { ...L.emptyLedger(), seq: 3, items: [
   { id: '3', text: 'fix the login redirect', at: now - h, state: 'open', source: 'user' },
 ] }
 out.push('held ' + L.heldItems(w, now).map(r => r.id).join(','))
-out.push('count ' + (L.listing(w, now).match(/\+(\d+) waiting/) || [, '0'])[1])
+out.push('count ' + (L.listing(w, now).match(/for you \((\d+)\)/) || [, '0'])[1])
 const ex = L.expireDormant(w, now)
 out.push('expire ' + (ex ? ex.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
-out.push('closable ' + (ex && L.closeByHand(ex, '1', now) ? 'yes' : 'no') + ' ' + (ex && L.listing(ex, now, { all: true }).includes('open the app') ? 'listed' : 'gone'))
-// a reply no item shares a word with: only the person's own turn shows the judge the fresh one
+// ...while one waiting on SOMEONE ELSE (a brief from the lead, held for a deploy) still retires after a day
+const wl = { ...w, items: [{ ...w.items[0], source: 'fleet', progress: { at: now - day - h, reason: 'reported: waiting on the registry' } }, w.items[1]] }
+const exl = L.expireDormant(wl, now)
+out.push('expire-lead ' + (exl ? exl.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
+out.push('closable ' + (L.closeByHand(w, '1', now) ? 'yes' : 'no') + ' ' + (L.listing(w, now, { all: true }).includes('open the app') ? 'listed' : 'gone'))
+// a reply no item shares a word with: only the person's own turn shows the judge what waits on
+// them, the day-old one too (it is still theirs), and never a brief waiting a day on someone else
 out.push('revisit ' + L.revisitTurn(w, now, 'Went with JSON.').map(i => i.id).join(',') + '|'
   + L.revisitTurn(w, now, 'Went with JSON.', { person: true }).map(i => i.id).join(','))
+out.push('revisit-lead ' + L.revisitTurn(wl, now, 'Went with JSON.', { person: true }).map(i => i.id).join(','))
+// a request held for a question of theirs still open: not counted twice, and still waiting on
+// them, so neither the day nor the file's trim may take it from under the question
+const wa = { ...L.emptyLedger(), seq: 200, items: [
+  { id: '1', text: 'move acme-web to the v2 export', at: now - day - h, state: 'waiting', source: 'user', awaits: ['2'], progress: { at: now - day - h, reason: 'waits on the person: their pick of region', turnId: 't1' } },
+  { id: '2', text: 'Which region should the export run in?', at: now - day - h, state: 'open', source: 'question', turnId: 't1', n: 1 },
+  ...Array.from({ length: L.KEEP_ITEMS - 2 }, (_, k) => ({ id: String(k + 3), text: `ask ${k + 3}`, at: now - h, state: 'done', source: 'user' })),
+] }
+const wae = L.expireDormant(wa, now)
+out.push('await-expire ' + (wae ? wae.items.filter(i => i.state === 'expired').map(i => i.id).join(',') : 'none'))
+const wat = L.addItem(wa, { text: 'one more ask', at: now, source: 'user', asIs: true }).items.map(i => i.id)
+out.push('await-trim ' + ['1', '2', '3'].map(id => `${id}:${wat.includes(id) ? 'kept' : 'gone'}`).join(' '))
 // (c) the note: eight items of 130 characters, and a ninth for the count
 let n = { ...L.emptyLedger(), seq: 1000 }
 for (let k = 0; k < 9; k++) n = L.addItem(n, { text: `rework the acme-web ${k} ` + 'x'.repeat(120), at: now, source: 'user', asIs: true })
@@ -16236,12 +16260,16 @@ NODE
   lfv() { grep "^$1 " <<< "$lf" | head -1 | cut -d' ' -f2-; }
   is "a delivery is the person's only when marked as the owner's; a nudge is nothing; any other mark is a brief" \
      "user fleet null fleet fleet" "$(lfv source)"
-  is "a waiting item a day old is off the queue; one an hour old is on it" "2" "$(lfv held)"
-  is "...and off /ledger's waiting count" "1" "$(lfv count)"
-  is "...and the next judged turn retires it as expired, and only it" "1:expired,2:waiting,3:open" "$(lfv expire)"
+  is "a waiting item a day old is still on the queue, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
+  is "...and on /ledger's for-you count" "2" "$(lfv count)"
+  is "...and no judged turn retires it" "none" "$(lfv expire)"
+  is "...while one a day old that waits on someone else does retire, and only it" "1:expired,2:waiting" "$(lfv expire-lead)"
   is "...still listed by all, still closable" "yes listed" "$(lfv closable)"
-  is "a reply no item shares a word with: the person's own turn shows the judge their fresh waiting item, another turn does not" \
-     "|2" "$(lfv revisit)"
+  is "a reply no item shares a word with: the person's own turn shows the judge what waits on them, a day old too; another turn does not" \
+     "|2,1" "$(lfv revisit)"
+  is "...and never a brief that has waited a day on someone else" "2" "$(lfv revisit-lead)"
+  is "a request held for the person's open question: a day untouched does not expire it" "none" "$(lfv await-expire)"
+  is "...nor is it what the trim takes, with its question; the oldest of the rest goes" "1:kept 2:kept 3:gone" "$(lfv await-trim)"
   is "the note: eight items of 130 characters with four-digit ids fit in 1,250, name the CLI only, and keep the rule" \
      "fits cli-only rule" "$(lfv note)"
   is "...and so do the re-prompts" "cli-only" "$(lfv gate)"
@@ -23273,14 +23301,35 @@ if [ -d "$ROOT/web" ]; then
   # other and must agree on one thing, that a reply quoting an item wakes it. Watched red
   # with the quote taken out of replyText (the item stayed waiting). Six rows since the
   # phone moved onto web/ui: the card's own rows went with the old client's waitingModel(),
-  # and the Queue is web/ui's screen in both apps now.
+  # and the Queue is web/ui's screen in both apps now. Three more for a question asked of the
+  # person: the same head settles THAT question with its option (red with the head's parse
+  # broken), and the screen marks it answered in the ledger as well (red with the call gone).
   node "$ROOT/test/helpers/waiting-check.mjs" > "$PW/waiting" 2> "$PW/waiting.err"
   is "waiting-check ran"              "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/waiting.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 6 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 9 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/waiting"
+
+  # test/helpers/explain-check.mjs: EXPLÍCAME in a real browser, at 390 and at 1280, on the
+  # fixture queue — every item for the person a card with Explain; one tap sends one request
+  # for that item; the answer opens in a sheet on the phone and a dialog at the desk, never
+  # inline, with the item's options; a busy session's request waits and the sheet says so; an
+  # option chosen answers the item. Watched red with the sheet taken off the Modal, the options
+  # dropped from the sheet, and the ledger's answer call removed.
+  node "$ROOT/test/helpers/explain-check.mjs" > "$PW/explain" 2> "$PW/explain.err"
+  exrc=$?
+  if grep -q '^no chrome$' "$PW/explain" 2>/dev/null; then
+    skip "Explícame in a browser" "no chrome to look in"
+  else
+    is "explain-check ran"            "0" "$exrc"
+    is "...without complaining"       ""  "$(head -2 "$PW/explain.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"   "yes" "$([ "$(wc -l < "$PW/explain")" -ge 38 ] && echo yes || echo "no: $(wc -l < "$PW/explain") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PW/explain"
+  fi
 
   node "$ROOT/test/helpers/speak-check.mjs" > "$PW/speak" 2> "$PW/speak.err"
   is "speak-check ran"                "0" "$?"

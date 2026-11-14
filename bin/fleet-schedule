@@ -39,6 +39,18 @@ sleep "$delay"
 if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   # bracketed paste (multi-line safe) + a beat before Enter, else the Enter lands
   # inside the paste instead of submitting the turn
+  # Marked as the fleet's before it is pasted, as fleet-send marks a paste (its _paste_marker
+  # says why): typed into the box, it would otherwise read as the person's own words. The
+  # default "continue" is a wake (nudge) and makes no item; a message of its own is a brief.
+  # In the TARGET fleet's directory, which is where its mod looks (lib/fleet-env.mjs).
+  _pdir="$FLEET_DIR"
+  if command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] \
+     && _env="$(node "$BIN_DIR/../lib/fleet-env.mjs" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+    IFS=$'\x1f' read -r _ _d _ <<< "$_env"
+    [ -n "$_d" ] && _pdir="$_d"
+  fi
+  _kind=""; [ "$MSG" = continue ] && _kind=nudge
+  printf '%s\t%s\t0\t%s\n' "$(($(date +%s) * 1000))" "$_kind" "${#MSG}" >> "$_pdir/$SOCK.$SESSION.pasted" 2>/dev/null || true
   tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
   tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
   sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.5}"

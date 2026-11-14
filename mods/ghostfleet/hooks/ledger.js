@@ -15,7 +15,8 @@
 //            | waiting (a judged turn said it waits on the PERSON: off the open list and the
 //            gate until they speak to it, see waitsOnPersonNote)
 //            | expired (stale and untouched for EXPIRE_DAYS, or waiting and untouched for
-//              WAITING_EXPIRE_MS: retired, not open, still listed by `all` and still closable)
+//              WAITING_EXPIRE_MS when it is not for the person: retired, not open, still
+//              listed by `all` and still closable. What is for the person never expires)
 //            | carried (its session was stopped and the item went to its lead, see carryItems)
 //            | moved (its session went on under another profile's fleet dir, and the item with
 //              it: this file is the copy left behind, see adoptLedger)
@@ -26,6 +27,16 @@
 //                     (fleet-send --owner, a handoff `kind: "owner"`: the phone, see deliverySource)
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY): a lead's brief
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
+//            question a question the agent put to the PERSON at the end of a turn, one item per
+//                     numbered question (turnQuestions): `n` its number there, `options` its
+//                     choices, `answer` { text, at, option? } once they gave one. FOR YOU, below
+//   for you  what waits on the person, kept apart from what the agent owes (forYou): an open
+//            question, and a request the agent is holding for their pick, files or OK (waiting).
+//            Never a `fleet` item, which is owed to the session that sent it, and never a
+//            promise, which is the agent's own word. It never expires: it stays until the
+//            person answers it or it is dropped (see FOR YOU)
+//   explain  { askedAt, at?, text?, lang } on a for-you item: the person asked the session that
+//            raised it to explain it in plain words, and what it said (explainPrompt)
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
 //   answered { at, turnId, reason }: a `fleet` item the judge read as done. It stays OPEN:
 //            a brief from the lead is done only with proof (needsProof); the gate asks for
@@ -68,11 +79,13 @@ export const ledgerFile = (dir, sessionId) => `${dir}/${sessionId}.ledger`
 
 export const emptyLedger = () => ({ v: LEDGER_VERSION, seq: 0, items: [] })
 
-// A file that is missing, torn or someone else's shape reads as empty, never as a throw.
+// A file that is missing, torn or someone else's shape reads as empty, never as a throw. Each
+// item is read through `reclassified`, so a file written before FOR YOU says what it holds by
+// today's rule, whoever reads it and whether or not it is ever written again.
 export function parseLedger(text) {
   try {
     const l = JSON.parse(text)
-    if (l && typeof l === 'object' && Array.isArray(l.items)) return { ...emptyLedger(), ...l, items: l.items.filter(i => i && i.id) }
+    if (l && typeof l === 'object' && Array.isArray(l.items)) return { ...emptyLedger(), ...l, items: awaitsHeld(l.items.filter(i => i && i.id).map(reclassified)) }
   } catch {}
   return emptyLedger()
 }
@@ -172,8 +185,8 @@ export const isNudge = text => /^\s*\[fleet\]/.test(String(text || '')) && /\bno
 // prompts in 14 days. So they are `user`: split into asks and judged like a typed message.
 // The mark is the test, never the wording, and nothing a caller passes can set it: the MCP
 // tool has no field for it, and a worker's own fleet-send has to spell out --owner. A nudge
-// is no item at all (null).
-export const deliverySource = kind => (kind === 'nudge' ? null : kind === 'owner' ? 'user' : 'fleet')
+// is no item at all (null), and so is a request to explain an item (EXPLÍCAME below).
+export const deliverySource = kind => (kind === 'nudge' || kind === 'explain' ? null : kind === 'owner' ? 'user' : 'fleet')
 
 // The asks in one message, each an item of its own, so each can be closed on its own proof.
 // A message of three asks kept as one item could only close when all three were done, and
@@ -372,10 +385,10 @@ export function askedIn(answer, n = 400) {
 export function foldReply(ledger, text, { at, choiceTurn, source = '', asked = '' }) {
   if (!choiceTurn || !isBareChoice(text)) return null
   const of = ledger.items.filter(i => i.turnId === choiceTurn && OWED.has(i.state))
-  const it = of.filter(i => i.source !== 'promise').pop() || of.pop()
+  const it = of.filter(i => i.source !== 'promise' && i.source !== QUESTION).pop() || of.filter(i => i.source !== QUESTION).pop()
   if (!it) return null
   const reply = { at, text: excerpt(requestText(text), 40), ...(source ? { source } : {}), ...(asked ? { asked } : {}) }
-  const items = ledger.items.map(i => (i === it ? { ...reopened(i), replies: [...(i.replies || []), reply].slice(-3) } : i))
+  const items = ledger.items.map(i => (i === it ? { ...reopened(i), replies: [...(i.replies || []).filter(r => r.at !== at), reply].slice(-3) } : i))
   return { id: it.id, ledger: { ...ledger, items } }
 }
 
@@ -421,13 +434,22 @@ export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, 
     ...(queued ? { queued: true } : {}), ...(prompt ? { prompt } : {}), ...(by ? { addedBy: by } : {}),
     ...(inTurn ? { inTurn: true } : {}), ...(asked ? { asked } : {}),
   }
-  const items = [...ledger.items, item].slice(-KEEP_ITEMS)
-  return { ...ledger, seq, items }
+  return { ...ledger, seq, items: kept([...ledger.items, item]) }
+}
+// The ledger keeps its last KEEP_ITEMS items, and what waits on the person is never what goes:
+// the oldest of the rest go first. A trim by position alone took the oldest for-you item with
+// it, and that is the one the person has been asked longest.
+function kept(items) {
+  if (items.length <= KEEP_ITEMS) return items
+  let over = items.length - KEEP_ITEMS
+  const out = items.filter(i => (over > 0 && !heldOnPerson(i) ? (over--, false) : true))
+  return out.length > KEEP_ITEMS ? out.slice(-KEEP_ITEMS) : out
 }
 
 const fresh = (i, nowMs) => nowMs - (Number(i.at) || 0) <= BAND_DAYS * DAY_MS
-// Every open item, owed or not: what the judge reads and the gate picks from.
-export const openItems = (ledger, nowMs) => ledger.items.filter(i => i.state === 'open' && fresh(i, nowMs))
+// Every open item, owed or not: what the judge reads and the gate picks from. Never a question
+// to the person: that is for them to answer, not work the agent owes (see FOR YOU).
+export const openItems = (ledger, nowMs) => ledger.items.filter(i => i.state === 'open' && i.source !== QUESTION && fresh(i, nowMs))
 
 // A PERSON'S REQUEST IS OWED ONLY ONCE IT OUTLIVES ITS TURN. A plain instruction the session
 // just carries out is not an open loop, and it was treated as one. Measured over fourteen days
@@ -472,18 +494,20 @@ export function closedInTurn(ledger, { turnId, startedAt = 0 }) {
     && (i.closedTurn ? i.closedTurn === turnId : startedAt > 0 && (Number(i.closedAt) || 0) >= startedAt))
 }
 
-// What the record and the band say: open requests, open promises, the oldest open of each.
-// Owed ones only (see owed).
+// What the record and the band say: open requests, open promises, the oldest open of each,
+// owed ones only (see owed); and, apart from them, what is for the person (forYouItems).
 export function ledgerSummary(ledger, nowMs) {
   const open = owedItems(ledger, nowMs)
   const req = open.filter(i => i.source !== 'promise')
   const prom = open.filter(i => i.source === 'promise')
+  const yours = forYouItems(ledger, nowMs)
   const oldest = list => list.length ? { id: list[0].id, text: excerpt(list[0].text, 80), at: list[0].at } : null
   // A failure is shown while something is open: with nothing open it has cost nothing, and
   // a hand-cleared ledger would otherwise go on saying so until the next judged turn.
   const j = req.length || prom.length ? ledger.judge : null
   return {
     open: req.length, promises: prom.length, oldest: oldest(req), oldestPromise: oldest(prom),
+    forYou: yours.length, oldestForYou: oldest(yours),
     judgeFailing: j && j.ok === false ? excerpt(j.why, 80) : null,
   }
 }
@@ -553,7 +577,7 @@ export function judgePrompt(items, turn, { promises, earlier = [], openPromises 
     '',
     'For EACH item decide:',
     '- "done": the turn (any block of it) or an earlier turn did it, answered it, or reports it completed. Work written in an earlier block counts: "the draft is above" in the last block refers to a draft in an earlier one.',
-    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything the item asks of it and says plainly that only something outside its control remains (a registry or deploy propagating, a review) with nothing more for the agent to do.',
+    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything the item asks of it and says plainly that only something outside its control remains (a registry or deploy propagating, a review by someone else) with nothing more for the agent to do. Never when what remains is the PERSON\'s answer, pick, files or OK: that is "in-progress" with "waits on the person: <what>", and it stays in front of them until they give it.',
     '- "in-progress": the turn reports THIS item\'s current state and says the work is still going on elsewhere or waits on something, with a step still owed after it. E.g. "dry run done; the build is running in a worker, I\'ll ship it when it lands", "CI is running on the PR", "waiting on your pick between A and B". Work the agent could do now and simply did not is not this: it is "open". When what it waits on is the PERSON (their pick, their files, their action), the reason says so: "waits on the person: <what>".',
     '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
     '- "open": the turn did not address the item: not mentioned, or only acknowledged ("on it"), or partly done with no word on the rest. E.g. two requests, and the turn only answers the first: the second is "open".',
@@ -771,10 +795,12 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
         return kept < STALE_TURNS ? { ...i, keptOpen: kept }
           : { ...i, keptOpen: kept, state: 'stale', closedAt: nowMs, closedBy: 'judge', reason: `no turn addressed it in ${kept} judged turns` }
       }
+      if (v.status === 'done' && waitsOnPersonNote(v.reason)) return heldForPerson(i, v, nowMs, turnId)
       if (v.status === 'done' && needsProof(i)) return answeredOnly(i, v, nowMs, turnId)
       return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
     }),
   }
+  next = tagAwaits(next, turnId)
   if (promises === 'off') return next
   const openP = () => next.items.filter(i => i.source === 'promise' && i.state === 'open')
   const close = (ids, reason) => {
@@ -817,7 +843,8 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
 // A stale item untouched for EXPIRE_DAYS is retired (expireDormant): `expired`, never open,
 // never revisited.
 //
-// A WAITING ITEM EXPIRES TOO, after WAITING_EXPIRE_MS untouched. It was the person's and waited
+// A WAITING ITEM EXPIRED TOO, after WAITING_EXPIRE_MS untouched; today only one that is not for
+// the person does (a lead's brief held on its sender: see FOR YOU). It was the person's and waited
 // as long as the band kept it, a week, and the person's queue filled with what they had already
 // moved past. Measured: of 35 waiting items within 7 days, 34 were over a day old and 27 had
 // three or more messages from the person since, among them a question a later PR had settled,
@@ -826,7 +853,11 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
 // day: a question put to the person at night is still in front of them the next morning, and
 // one they have not answered in a day of talking to the session is one they have moved past.
 // Off heldItems (the phone's queue, the status note) the moment it is a day old, and written
-// as `expired` at the next judged turn; still in `/ledger all`, still closable. And a turn the
+// as `expired` at the next judged turn; still in `/ledger all`, still closable. That retired
+// decisions nobody had made: a question unanswered for a day is not a question answered, and
+// the person's queue cannot drop what they were asked. So what is for the person stays until
+// they answer it (by number now, answerRefs) or drop it, and the queue shows each with its own
+// answer controls instead of a day's worth of guesses. And a turn the
 // person's own message started shows the judge their waiting items, word match or not
 // (revisitTurn), so the reply the words could not tie to its item still closes it.
 //
@@ -863,7 +894,7 @@ const lastTouch = i => {
   const t = [i.at, i.progress && i.progress.at, i.woke].filter(x => typeof x === 'number')
   return t.length ? Math.max(...t) : 0
 }
-const waitedOut = (i, nowMs) => i.state === 'waiting' && nowMs - lastTouch(i) > WAITING_EXPIRE_MS
+const waitedOut = (i, nowMs) => i.state === 'waiting' && !heldOnPerson(i) && nowMs - lastTouch(i) > WAITING_EXPIRE_MS
 const pastDue = (i, nowMs) => (i.state === 'stale' && nowMs - lastTouch(i) > EXPIRE_DAYS * DAY_MS) || waitedOut(i, nowMs)
 export function revisit(ledger, nowMs, text, n = JUDGE_BATCH) {
   const t = String(text || '')
@@ -873,8 +904,9 @@ export function revisit(ledger, nowMs, text, n = JUDGE_BATCH) {
 }
 // What a turn's judge is shown beside the open items: the dormant ones its text mentions
 // (revisit), and on a turn the PERSON's own message started (`person`: typed, or delivered as
-// the owner's, never a nudge, a gate's re-prompt or a lead's brief) every waiting item still
-// inside its day, newest first, at most JUDGE_BATCH, mentioned or not. The person moved; the
+// the owner's, never a nudge, a gate's re-prompt or a lead's brief) every waiting item not past
+// due (one waiting on the person never is; one waiting on anyone else is after a day), newest
+// first, at most JUDGE_BATCH, mentioned or not. The person moved; the
 // judge reads whether the turn did what they waited for (done closes it, in progress reopens
 // it: revisited), and one it did not address stays waiting.
 export function revisitTurn(ledger, nowMs, text, { person = false } = {}) {
@@ -896,11 +928,379 @@ export function expireDormant(ledger, nowMs) {
 // A verdict on a dormant item: done and not-done close it; in progress reopens it, or keeps it
 // waiting when what it waits on is still the person; "open" leaves it where it was.
 function revisited(i, v, nowMs, turnId) {
+  if (v.status === 'done' && waitsOnPersonNote(v.reason)) return heldForPerson(i, v, nowMs, turnId)
   if (v.status === 'done' && needsProof(i)) return answeredOnly(reopened(i), v, nowMs, turnId)
   if (v.status === 'done' || v.status === 'not-done') return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
   if (v.status !== 'in-progress') return i
   const progress = { at: nowMs, ...(turnId ? { turnId } : {}), ...(v.reason ? { reason: v.reason } : {}) }
   return waitsOnPersonNote(v.reason) ? { ...i, state: 'waiting', progress } : { ...reopened(i), progress }
+}
+
+// A "done" whose reason is that it waits on the person is not done: the missing piece is their
+// answer, and closing it took the question out of their sight. It is held for them (waiting),
+// with what the judge said it waits on as its note.
+function heldForPerson(i, v, nowMs, turnId) {
+  const { closedAt, closedBy, reason, keptOpen, answered, ...rest } = i
+  return { ...rest, state: 'waiting', progress: { at: nowMs, ...(turnId ? { turnId } : {}), reason: v.reason } }
+}
+
+// ── FOR YOU: what waits on the person, kept apart from what the agent owes ────────
+//
+// ONE LEDGER, TWO DIRECTIONS. The ledger kept what the person asked and what the agent
+// promised, and what the agent asked the PERSON had no place of its own: at best a request the
+// judge read as "in progress, waits on the person" (waiting), counted nowhere and retired a day
+// later; at worst "done, reported: waiting on your pick", closed. Measured on one lead: a turn
+// ended on 20 numbered questions to the owner while its band read "3 open", and those three were
+// the agent's own work. So every item has a direction:
+//   owed by the agent  the person's asks, a lead's briefs, the agent's promises: the band's
+//                      "N open", the note, the judge and the gate, exactly as before
+//   for you            forYou(): an open `question`, and a request the agent holds `waiting` on
+//                      the person. The band's "M for you", the phone's list and the briefing's
+//                      WAITING ON THE OWNER all read this one rule (forYouItems, ledgerChanges)
+// A for-you item never expires (WAITING_EXPIRE_MS is for what is not for you), is never handed
+// to the judge as work the agent owes, and leaves when the person answers it (settleQuestions,
+// answerItem, wakeWaiting, foldReply), when the agent closes it with their answer, or when it is
+// dropped. NOT A `fleet` ITEM: a prompt one session sent another is owed to the sender, and it is
+// the sender's to answer, never the owner's. NOR A PROMISE: that is the agent's own word.
+export const QUESTION = 'question'
+export function forYou(i) {
+  if (!i || i.source === 'fleet' || i.source === 'promise') return false
+  if (i.source === QUESTION) return i.state === 'open'
+  return i.state === 'waiting' && !awaiting(i)
+}
+// Held for questions of the person's still open (awaitsHeld keeps only those): not counted for
+// them a second time, but still waiting on their answer, so neither the day's expiry nor the
+// trim may take it. Taking it left the question with nothing to hand back when it was answered.
+const awaiting = i => Boolean(i) && i.state === 'waiting' && Array.isArray(i.awaits) && i.awaits.length > 0
+export const heldOnPerson = i => forYou(i) || awaiting(i)
+// ONE DECISION, ONE ITEM. A turn that ends on its questions, about a request the judge then holds
+// for the person, is one thing for them to answer, not two: the request `awaits` those questions
+// and is not listed itself while any is open, and the questions answered hand it back to the
+// session (wakeAwaiting). A request whose questions all closed some other way (dropped, closed by
+// the agent) is listed again on read, so nothing waits on the person unseen.
+function awaitsHeld(items) {
+  if (!items.some(i => Array.isArray(i.awaits))) return items
+  const open = new Set(items.filter(i => i.source === QUESTION && i.state === 'open').map(i => i.id))
+  return items.map(i => {
+    if (!Array.isArray(i.awaits)) return i
+    const left = i.awaits.filter(id => open.has(String(id)))
+    if (left.length === i.awaits.length) return i
+    const { awaits, ...rest } = i
+    return left.length ? { ...rest, awaits: left } : rest
+  })
+}
+// The questions a turn asked, and the requests it held for the person in the same turn.
+function tagAwaits(ledger, turnId) {
+  if (!turnId) return ledger
+  const qs = ledger.items.filter(i => i.source === QUESTION && i.state === 'open' && i.turnId === turnId).map(i => i.id)
+  if (!qs.length) return ledger
+  return { ...ledger, items: ledger.items.map(i => (i.state === 'waiting' && i.source !== QUESTION && i.progress && i.progress.turnId === turnId ? { ...i, awaits: qs } : i)) }
+}
+// Questions answered: a request that awaited them is the session's move again once none of its
+// questions is open, carrying the answer as the person's reply.
+function wakeAwaiting(ledger, ids, text, at) {
+  const done = new Set(ids.map(String))
+  if (!ledger.items.some(i => Array.isArray(i.awaits) && i.awaits.some(id => done.has(String(id))))) return ledger
+  const open = new Set(ledger.items.filter(i => i.source === QUESTION && i.state === 'open').map(i => i.id))
+  return {
+    ...ledger,
+    items: ledger.items.map(i => {
+      if (!Array.isArray(i.awaits) || !i.awaits.some(id => done.has(String(id)))) return i
+      const left = i.awaits.filter(id => open.has(String(id)))
+      if (left.length) return { ...i, awaits: left }
+      const { awaits, ...rest } = i
+      // No `asked`: the answer is on record once, as the question's (ownerAnswers).
+      const reply = { at, text: excerpt(requestText(text), 200), source: 'user' }
+      return { ...reopened(rest), woke: at, replies: [...(i.replies || []).filter(r => r.at !== at), reply].slice(-3) }
+    }),
+  }
+}
+// A file from before the split, read by today's rule. One shape changes: an open request whose
+// last report said it waits on the person, written before such a report made an item `waiting`,
+// is waiting now. Read, not rewritten: the next write keeps it, and nothing is deleted.
+function reclassified(i) {
+  if (i.state === 'open' && !['fleet', 'promise', QUESTION].includes(i.source) && !i.woke
+      && i.progress && waitsOnPersonNote(i.progress.reason)) return { ...i, state: 'waiting' }
+  return i
+}
+
+// THE QUESTIONS A TURN ENDED ON, one per numbered question. The last numbered list in the
+// final text, with at most TAIL_LINES lines of closing prose after it:
+//   each numbered line that asks (a "?" in it, or in the lines indented under it) is a question
+//   of its own, and its lettered lines ((a) …, b) …) are its options;
+//   a list with no "?" in it, under a line that asks ("Which do you want?") or above a closing
+//   line that asks for a pick ("which one?", "¿cuál?"), is ONE question, its lines the options.
+// Anything else ended on no question: a list of what was done with "want me to open the PR?"
+// under it is an offer, and the lines above it are not its choices. Code blocks are set aside.
+const NUM_LINE = /^(\s*)(?:[-*]\s+)?(?:\*\*|__)?\(?(\d{1,3})[.)](?:\*\*|__)?\s+(\S.*)$/
+const SUB_LINE = /^\s*(?:[-*]\s+)?\(?([a-h])[.)]\s+(\S.*)$/i
+const ASKS = /[?？]/
+const PICK = /\b(which|pick|choose|prefer|option|cu[aá]l|elige|escoge|prefieres|opci[oó]n)\b/i
+export const QUESTIONS_MAX = 40
+const TAIL_LINES = 3
+const TAIL_CHARS = 400
+const tidy = s => oneLine(String(s || '').replace(/\*\*|__/g, ''))
+export function turnQuestions(answer) {
+  const lines = String(answer || '').replace(/\r/g, '').replace(/^\s*```[\s\S]*?^\s*```[^\n]*$/gm, '').split('\n')
+  const segs = []
+  let seg = null
+  const leadAt = k => { for (let j = k - 1; j >= 0 && j >= k - 2; j--) if (lines[j].trim()) return NUM_LINE.test(lines[j]) ? '' : tidy(lines[j]); return '' }
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k]
+    const open = seg && !seg.closed
+    const m = NUM_LINE.exec(line)
+    if (m) {
+      const ind = m[1].length, n = Number(m[2])
+      const last = open && seg.items[seg.items.length - 1]
+      if (open && ind >= seg.indent + 2) { last.more.push(tidy(line)); seg.end = k; continue }
+      if (!open || n <= last.n) {
+        if (open) seg.closed = true
+        seg = { lead: leadAt(k), indent: ind, items: [], end: k, closed: false }
+        segs.push(seg)
+      }
+      seg.items.push({ n, text: tidy(m[3]), subs: [], more: [] })
+      seg.end = k
+      continue
+    }
+    if (!open || !line.trim()) continue
+    const it = seg.items[seg.items.length - 1]
+    const s = SUB_LINE.exec(line)
+    if (s) { it.subs.push({ key: s[1].toLowerCase(), text: tidy(s[2]) }); seg.end = k; continue }
+    if (/^(?:\s{2,}|\t)\S/.test(line)) { it.more.push(tidy(line)); seg.end = k; continue }
+    seg.closed = true
+  }
+  const last = segs[segs.length - 1]
+  if (!last) return []
+  const tail = lines.slice(last.end + 1).map(tidy).filter(Boolean)
+  if (tail.length > TAIL_LINES || tail.join(' ').length > TAIL_CHARS) return []
+  const asks = it => ASKS.test(it.text) || it.more.some(l => ASKS.test(l))
+  const qs = last.items.filter(asks)
+  if (qs.length) {
+    return qs.slice(0, QUESTIONS_MAX).map(it => ({
+      n: it.n, text: excerpt([it.text, ...it.more].join(' ')),
+      ...(it.subs.length ? { options: it.subs.slice(0, 8).map(o => ({ key: o.key, text: excerpt(o.text, 120) })) } : {}),
+    }))
+  }
+  const above = last.lead && ASKS.test(last.lead) ? last.lead : ''
+  const ask = above || tail.find(t => ASKS.test(t) && PICK.test(t)) || ''
+  if (!ask || last.items.length < 2 || last.items.length > 9 || last.items.some(it => it.text.length > 200)) return []
+  // A pick asked under the list reads with the line that led into it: "Two ways to do it: …
+  // Which do you prefer?" says what is being picked; "Which do you prefer?" alone does not.
+  const text = above || !last.lead ? ask : `${last.lead.replace(/[:\s]+$/, '')}: ${ask}`
+  return [{ text: excerpt(text), options: last.items.map(it => ({ key: String(it.n), text: excerpt(it.text, 120) })) }]
+}
+
+// Each question an item of its own, FOR YOU, carrying its number and options. The same question
+// asked again while it is open (a turn that re-lists what it still needs) is that item, with
+// this turn's number, so "1" means the list the person is looking at, and never a second copy.
+export function addQuestions(ledger, questions, { at, turnId }) {
+  if (!questions || !questions.length) return null
+  let next = ledger
+  const ids = []
+  for (const q of questions) {
+    const fields = { ...(turnId ? { turnId } : {}), ...(q.n ? { n: q.n } : {}), ...(q.options ? { options: q.options } : {}) }
+    const again = next.items.find(i => i.source === QUESTION && i.state === 'open' && normAsk(i.text) === normAsk(q.text))
+    if (again) {
+      const { n: _n, options: _o, ...rest } = again
+      next = { ...next, items: next.items.map(i => (i === again ? { ...rest, ...fields, askedAgain: at } : i)) }
+      ids.push(again.id)
+      continue
+    }
+    next = addItem(next, { text: q.text, at, turnId, source: QUESTION, asIs: true })
+    const it = next.items[next.items.length - 1]
+    next = { ...next, items: next.items.map(i => (i === it ? { ...i, ...fields } : i)) }
+    ids.push(it.id)
+  }
+  return { ledger: next, ids }
+}
+
+// THE PERSON'S ANSWER BY NUMBER: "1", "3a", "1 a", "sí al 3", "1: yes, 2: no", "2 y 4", one line
+// per answer. Each answers the question of that number from the turn that asked (choiceTurn) and
+// nothing older, since "1" means the list in front of them. A list that was ONE question with
+// numbered choices takes the number as its choice. A bare "yes" answers the turn's question when
+// it asked one; "all yes", "sí a todo" answers every one. A loose mention never answers one:
+// that is two shared words (mentions), and a decision from the owner never decays.
+// A number that only starts a sentence ("3 more things: …", "2 tests fail") is not an answer:
+// after a bare space the rest must read as one (ANSWER_WORD), or be three words at most.
+const REF_HEAD = /^\s*(?:q|#)?\(?(\d{1,3})([a-h])?\)?(?![\d%])(\s*[.):=\-–—]\s*|\s+|$)(.*)$/i
+const ANSWER_WORD = /^(?:yes|yeah|yep|no|nope|s[ií]|ok|okay|dale|go|sure|claro|skip|later|wait|drop|keep|use|both|none|neither|ninguno|ninguna|todos|todas|all|mejor|después|despues|primero|nah|correct|right|agreed|de acuerdo|vale|perfecto|perfect|fine|good|bien|mal)\b/i
+const REF_SAID = /(?:^|\s)(?:(?:s[ií]|yes|no|ok|okay|dale)\s+(?:al|a la|a|to|for|on|en|para el|para la)\s+|(?:punto|pregunta|question|item|option|opci[oó]n|n[uú]mero|number|#)\s*)(\d{1,3})([a-h])?\b/i
+const REF_SPLIT = /\n|[;,]|\s+(?:y|e|and|&)\s+(?=(?:q|#)?\(?\d)/i
+const YES_ALL = /^(?:(?:yes|s[ií]|ok|dale|go)\s+(?:to\s+|a\s+)?(?:all|todo|todos|todas)|(?:all|todos|todas)\s+(?:yes|s[ií]|ok)|both|ambos|ambas)[.!]*$/i
+const YES = /^(?:yes|yeah|yep|y|s[ií]|ok|okay|dale|sure|claro|go ahead|de una)[.!]*$/i
+export function answerRefs(text) {
+  const body = unquote(String(text || '').replace(PASTE, ' '))
+  if (!oneLine(body) || oneLine(body).length > ANSWER_MAX) return []
+  const refs = []
+  for (const part of body.split(REF_SPLIT)) {
+    const seg = oneLine(part)
+    if (!seg) continue
+    const m = REF_HEAD.exec(seg)
+    const bare = m && !m[3].trim() && m[4]
+    if (m && (!bare || ANSWER_WORD.test(m[4]) || /^\(?[a-h]\)?[.)]?(?:\s|$)/i.test(m[4]) || m[4].split(/\s+/).length <= 3)) {
+      let opt = (m[2] || '').toLowerCase(), rest = oneLine(m[4])
+      const lone = /^\(?([a-h])\)?[.)]?(?:\s+(.*))?$/i.exec(rest)
+      if (!opt && lone) { opt = lone[1].toLowerCase(); rest = oneLine(lone[2]) }
+      refs.push({ n: Number(m[1]), opt, said: seg, rest })
+      continue
+    }
+    const s = REF_SAID.exec(seg)
+    if (s) { refs.push({ n: Number(s[1]), opt: (s[2] || '').toLowerCase(), said: seg, rest: seg }); continue }
+    // words that run on after a comma belong to the answer before them: "5: no, use JSON"
+    if (refs.length) { const r = refs[refs.length - 1]; r.rest = oneLine(`${r.rest} ${seg}`); r.said = `${r.said}, ${seg}` }
+  }
+  return refs
+}
+const optionText = (q, key) => ((q.options || []).find(o => o.key === key) || {}).text || ''
+const answered = (i, a, at) => ({ ...i, state: 'done', closedAt: at, closedBy: 'person', answer: { ...a, at } })
+// A REPLY THAT NAMES ITS ITEM: the phone's and the desk's reply box (web/ui/queue.jsx replyText)
+// sends `Re your ledger item <id>: "<its text>"` and then the person's words. The id is the
+// ledger's, not the question's number in its turn, so read as a numbered answer it would settle
+// whichever question of the latest turn happened to carry that number. It settles that item, from
+// any turn, and nothing else.
+const REPLY_HEAD = /^\s*Re your ledger item (\d+): "[^\n]*"\s*(?:\n([\s\S]*))?$/
+export function replyOf(text) {
+  const m = REPLY_HEAD.exec(String(text || ''))
+  return m ? { id: m[1], said: oneLine(m[2] || '') } : null
+}
+function optionPicked(q, said) {
+  const m = /^\(?([a-h]|\d{1,2})\)?(?:[.):]|\s|$)/i.exec(said)
+  if (m && optionText(q, m[1].toLowerCase())) return m[1].toLowerCase()
+  const o = (q.options || []).find(x => oneLine(x.text).toLowerCase() === said.toLowerCase())
+  return o ? String(o.key) : ''
+}
+export function settleQuestions(ledger, text, { at, choiceTurn }) {
+  const reply = replyOf(text)
+  if (reply) {
+    const q = ledger.items.find(i => i.id === reply.id && i.source === QUESTION && i.state === 'open')
+    if (!q || !reply.said) return null
+    const key = optionPicked(q, reply.said), o = key ? optionText(q, key) : ''
+    const a = { text: excerpt(o && !reply.said.includes(o) ? `${reply.said} (${o})` : reply.said, 200), ...(key ? { option: key } : {}) }
+    return { ledger: wakeAwaiting({ ...ledger, items: ledger.items.map(i => (i === q ? answered(i, a, at) : i)) }, [q.id], reply.said, at), ids: [q.id] }
+  }
+  if (!choiceTurn) return null
+  const asked = ledger.items.filter(i => i.source === QUESTION && i.state === 'open' && i.turnId === choiceTurn)
+  if (!asked.length) return null
+  const said = requestText(text)
+  if (!said || said.length > ANSWER_MAX) return null
+  const one = asked.length === 1 ? asked[0] : null
+  const picks = new Map()
+  const pick = (q, key, words) => {
+    const o = key ? optionText(q, key) : ''
+    picks.set(q.id, { text: excerpt(o ? `${words} (${o})` : words, 200), ...(o ? { option: key } : {}) })
+  }
+  if (YES_ALL.test(said)) for (const q of asked) pick(q, '', said)
+  else {
+    for (const r of answerRefs(text)) {
+      if (one && !one.n && optionText(one, String(r.n))) { pick(one, String(r.n), r.said); continue }
+      const q = asked.find(i => Number(i.n) === r.n)
+      if (q) pick(q, r.opt && optionText(q, r.opt) ? r.opt : '', r.said)
+    }
+    const letter = /^\(?([a-h])\)?[.)]?$/i.exec(said)
+    // "ok go with 2" to the one question whose options are numbered: the one number it names,
+    // when that number is one of the options. Short replies only: past a line it is a new ask.
+    const nums = one && !one.n && said.length <= 60 ? [...new Set(said.match(/(?<![\w.#$])\d{1,2}(?![\w.%:])/g) || [])] : []
+    if (!picks.size && one && letter && optionText(one, letter[1].toLowerCase())) pick(one, letter[1].toLowerCase(), said)
+    else if (!picks.size && nums.length === 1 && optionText(one, nums[0])) pick(one, nums[0], said)
+    else if (!picks.size && one && YES.test(said)) pick(one, '', said)
+  }
+  if (!picks.size) return null
+  return { ledger: wakeAwaiting({ ...ledger, items: ledger.items.map(i => (picks.has(i.id) ? answered(i, picks.get(i.id), at) : i)) }, [...picks.keys()], said, at), ids: [...picks.keys()] }
+}
+
+// An answer given outside the conversation: the phone's or the desk's option button, or
+// `fleet-ledger answer <id> "<words>"`. A question is answered (done, the person's); a request
+// held waiting on them is the agent's move again, with their words as a reply. Either way the
+// session is told in a message of its own (the caller sends it), and this is the ledger's half.
+export function answerItem(ledger, id, text, { nowMs, option = '' }) {
+  const it = ledger.items.find(i => i.id === String(id ?? '').trim())
+  if (!it) return { ledger: null, said: `ledger: no item ${id}` }
+  if (!forYou(it)) return { ledger: null, said: `ledger: item ${it.id} is not waiting on the person (${it.state})` }
+  const words = oneLine(text)
+  if (!words) return { ledger: null, said: `ledger: ${it.id} not answered: the answer is empty` }
+  const key = String(option || '').trim().toLowerCase()
+  const o = key ? optionText(it, key) : ''
+  const next = it.source === QUESTION
+    ? answered(it, { text: excerpt(o && !words.includes(o) ? `${words} (${o})` : words, 200), ...(o ? { option: key } : {}) }, nowMs)
+    : { ...reopened(it), woke: nowMs, replies: [...(it.replies || []), { at: nowMs, text: excerpt(words, 200), source: 'user', asked: excerpt(it.text, 400) }].slice(-3) }
+  const out = { ...ledger, items: ledger.items.map(i => (i === it ? next : i)) }
+  return { ledger: it.source === QUESTION ? wakeAwaiting(out, [it.id], o && !words.includes(o) ? `${words} (${o})` : words, nowMs) : out, said: `ledger: ${it.id} answered` }
+}
+
+// What the person sees as theirs, one row per for-you item, oldest first and a turn's questions
+// in their order: the phone's list (fleet-serve /api/waiting, the team app's), the band's count
+// (ledgerSummary) and the briefing (through ledgerChanges). No age limit: see FOR YOU.
+export function forYouItems(ledger, nowMs) {
+  const rows = []
+  for (const i of ledger.items) {
+    // Theirs once the turn that made it is over, as everything owed is (owed): a request held
+    // for them in its own turn is listed when that turn settles.
+    if (!forYou(i) || !owed(i, nowMs)) continue
+    const q = i.source === QUESTION
+    rows.push({
+      id: i.id, text: excerpt(i.text), source: i.source, at: Number(i.at) || 0, state: q ? 'question' : 'waiting',
+      reason: i.progress && i.progress.reason ? excerpt(i.progress.reason, 160) : '',
+      since: q ? Number(i.askedAgain) || Number(i.at) || 0 : Number(i.progress && i.progress.at) || Number(i.at) || 0,
+      ...(i.n ? { n: Number(i.n) } : {}), ...(i.options ? { options: i.options } : {}), ...(i.explain ? { explain: i.explain } : {}),
+    })
+  }
+  return rows.sort((a, b) => a.since - b.since || (a.n || 0) - (b.n || 0) || Number(a.id) - Number(b.id))
+}
+
+// ── EXPLÍCAME: one for-you item, explained by the session that raised it ──────────
+// The person taps "explain" on an item and the SESSION THAT ASKED it says, in plain words and in
+// their language, what is being decided, what each option causes and what it recommends. No other
+// model: the one that asked is the one that knows. It is a prompt like any other, so it waits for
+// its turn (fleet-send queues behind a running turn; /ledger explain submits once idle) and never
+// interrupts one. Marked as an explain request by its delivery (`kind: "explain"`), never by its
+// words; it makes no item, is not judged, and its turn's text is kept on the item (`explain`).
+export const EXPLAIN_HEAD = '[ghostfleet ledger: explain'
+export const explainOf = text => { const m = /^\s*\[ghostfleet ledger: explain (\d+)\]/.exec(String(text || '')); return m ? m[1] : '' }
+const ES_WORDS = /\b(el|la|los|las|que|de|del|por|para|con|una?|es|esto|eso|pero|como|tambien|tenemos|puedes|hazlo|dale|porque|cuando|donde|ya|muy|ahora|hay|bien|aqui|todo|esta)\b/gi
+const ES_MARKS = /[ñáéíóú¿¡]/gi
+const EN_WORDS = /\b(the|and|is|are|to|of|it|that|this|with|for|you|can|please|should|what|how|why|when|we|do|does|not|just|make|fix)\b/gi
+const count = (t, re) => (String(t).match(re) || []).length
+export function langOf(text) {
+  const t = String(text || '')
+  return count(t, ES_WORDS) + count(t, ES_MARKS) > count(t, EN_WORDS) ? 'es' : 'en'
+}
+// The person's language is the one they write in here: their own last words in this ledger.
+export function personLang(ledger, fallback = '') {
+  const said = ledger.items.filter(i => i.source === 'user').slice(-12).map(i => i.text).join(' ')
+  return said.trim() ? langOf(said) : fallback ? langOf(fallback) : 'en'
+}
+export function explainPrompt(item, { lang = 'en' } = {}) {
+  const opts = (item.options || []).map(o => `${o.key}) ${o.text}`)
+  return [
+    `${EXPLAIN_HEAD} ${item.id}] The person tapped "explain" on ledger item ${item.id}, ${item.source === QUESTION ? 'a question you asked them' : 'something you are holding until they decide or act'}:`,
+    `"${excerpt(item.text, 240)}"`,
+    ...(opts.length ? [`Its options: ${opts.join('; ')}`] : []),
+    ...(item.progress && item.progress.reason ? [`What you last said about it: ${excerpt(item.progress.reason, 160)}`] : []),
+    `Explain this one item to them in plain, simple words${lang === 'es' ? ', IN SPANISH (they write in Spanish)' : ''}: what is being decided, what each option would cause, and which one you recommend and why. At most 120 words, no code and no jargon. Do not do any work or change anything, and do not answer other items: only explain. (The ledger keeps your answer for them.)`,
+  ].join('\n')
+}
+export function markExplainAsked(ledger, id, { nowMs, lang }) {
+  const it = ledger.items.find(i => i.id === String(id ?? '').trim())
+  if (!it) return { ledger: null, said: `ledger: no item ${id}` }
+  if (!forYou(it)) return { ledger: null, said: `ledger: item ${it.id} is not waiting on the person (${it.state})` }
+  const explain = { askedAt: nowMs, lang: lang || 'en' }
+  return { ledger: { ...ledger, items: ledger.items.map(i => (i === it ? { ...i, explain } : i)) }, item: it, said: `ledger: asked for an explanation of ${it.id}` }
+}
+// The send never reached the session (no such session, a dead fleet): said on the item, so the
+// sheet stops waiting and says why, instead of "waiting for the session" forever.
+export function explainFailed(ledger, id, why, nowMs) {
+  const it = ledger.items.find(i => i.id === String(id ?? '').trim())
+  if (!it || !it.explain) return { ledger: null, said: `ledger: no explanation was asked of ${id}` }
+  const explain = { ...it.explain, failed: excerpt(oneLine(why) || 'the request could not be sent', 200), failedAt: nowMs }
+  return { ledger: { ...ledger, items: ledger.items.map(i => (i === it ? { ...i, explain } : i)) }, said: `ledger: ${it.id} could not be explained` }
+}
+export const EXPLAIN_MAX = 2000
+export function setExplanation(ledger, id, text, nowMs) {
+  const it = ledger.items.find(i => i.id === String(id ?? '').trim())
+  const t = String(text || '').trim()
+  if (!it || !t) return null
+  const explain = { ...(it.explain || {}), at: nowMs, text: t.length > EXPLAIN_MAX ? `${t.slice(0, EXPLAIN_MAX - 1)}…` : t }
+  return { ...ledger, items: ledger.items.map(i => (i === it ? { ...i, explain } : i)) }
 }
 
 // The items the gate may re-prompt about: open, fresh, never gated before, from the latest
@@ -1064,6 +1464,8 @@ export const TOOL = { close: 'mcp__ghostfleet__ledger_close', drop: 'mcp__ghostf
 // them, ~740 characters each) spelled out both. The tools' handlers stay, for a session that
 // does have them; the words go.
 export const CLI = { close: 'fleet-ledger close <id> "<proof>"', drop: 'fleet-ledger drop <id> "<reason>"', add: 'fleet-ledger add "<ask>"' }
+const CLI_ANSWER = 'fleet-ledger answer <id> "<answer>"'
+const CLI_EXPLAIN = 'fleet-ledger explain <id>'
 export const PROOF = 240
 
 // Open, and the dormant and retired states too: a stale promise whose work did land is
@@ -1076,7 +1478,8 @@ function closeAs(ledger, id, state, field, why, { nowMs, turnId }) {
   const it = ledger.items.find(i => i.id === String(id ?? '').trim())
   if (!it) return { ledger: null, said: `ledger: no item ${id}` }
   if (!CLOSABLE.has(it.state)) return { ledger: null, said: `ledger: item ${it.id} is already ${it.state}` }
-  const closed = { ...it, state, closedAt: nowMs, closedBy: 'agent', [field]: excerpt(why, PROOF), ...(turnId ? { closedTurn: turnId } : {}) }
+  const closed = { ...it, state, closedAt: nowMs, closedBy: 'agent', [field]: excerpt(why, PROOF), ...(turnId ? { closedTurn: turnId } : {}),
+    ...(it.source === QUESTION && state === 'done' ? { answer: { text: excerpt(why, 200), at: nowMs } } : {}) }
   return { ledger: { ...ledger, items: ledger.items.map(i => (i === it ? closed : i)) }, said: `ledger: ${it.id} ${state === 'done' ? 'closed' : 'dropped'}` }
 }
 export function closeByAgent(ledger, id, proof, ctx) {
@@ -1136,10 +1539,14 @@ export function contextNote(ledger, nowMs) {
 // outstanding items were waiting on the owner, each closed only after the owner wrote. The
 // limit on an unattended run was how soon the owner saw those.
 //
-// heldItems() is the list the person is shown (the phone, fleet-serve /api/waiting) and
-// asked (statusNote), one row per item:
-//   waiting   a judged turn said it waits on the person (waitsOnPersonNote), within the day
-//             it waits (WAITING_EXPIRE_MS); `since` is when
+// heldItems() is what a status question asks the agent to put to the person (statusNote), one
+// row per item. The phone and the briefing show only the first two kinds, the ones FOR YOU
+// (forYouItems); the other two are the agent's to move, and listed there as the person's they
+// were the agent's work handed back:
+//   question  a question the agent asked them that they have not answered (turnQuestions)
+//   waiting   a judged turn said it waits on the person (waitsOnPersonNote); `since` is when.
+//             For the person, so no age limit (see FOR YOU); a lead's brief held on its
+//             sender is listed within WAITING_EXPIRE_MS and BAND_DAYS, as before
 //   replied   it was waiting and the person's message spoke to it (wakeWaiting): open again,
 //             the agent's move now. Still listed, so a reply does not make the row vanish
 //             before the agent has acted on it; it leaves when the agent closes or drops it.
@@ -1169,12 +1576,16 @@ export function heldItems(ledger, nowMs) {
   const rows = []
   const replies = new Set(ledger.items.filter(i => i.woke).map(i => Number(i.woke)))
   for (const i of ledger.items) {
-    if (!fresh(i, nowMs) || !owed(i, nowMs)) continue
+    // What waits on the person never ages off the list; it is theirs once its turn settles.
+    const yours = forYou(i)
+    if (!owed(i, nowMs) || (!yours && !fresh(i, nowMs))) continue
     if (i.state === 'open' && replies.has(Number(i.at)) && !i.woke) continue
     const reason = i.progress && i.progress.reason ? excerpt(i.progress.reason, 160) : ''
     const c = i.carried
     const came = c ? { from: String(c.from || ''), was: String(c.state || ''), ...(c.note ? { note: excerpt(c.note, 160) } : {}) } : {}
     const row = state => ({ id: i.id, text: excerpt(i.text), source: i.source, at: Number(i.at) || 0, state, reason, ...came })
+    if (i.source === QUESTION) { if (yours) rows.push({ ...row('question'), since: Number(i.askedAgain) || Number(i.at) || 0, ...(i.n ? { n: Number(i.n) } : {}), ...(i.options ? { options: i.options } : {}) }); continue }
+    if (i.state === 'waiting' && Array.isArray(i.awaits) && i.awaits.length) continue
     if (i.state === 'waiting' && !waitedOut(i, nowMs)) rows.push({ ...row('waiting'), since: Number(i.progress && i.progress.at) || Number(i.at) || 0 })
     else if (i.state === 'open' && i.woke) rows.push({ ...row('replied'), since: Number(i.woke) })
     else if (i.state === 'open' && i.source !== 'promise' && !i.answered && nowMs - lastTouch(i) >= HELD_OPEN_MS) rows.push({ ...row('open'), since: lastTouch(i) })
@@ -1216,7 +1627,7 @@ export function statusNote(ledger, nowMs) {
   const held = heldItems(ledger, nowMs)
   if (!held.length) return ''
   const shown = held.slice(0, STATUS_ITEMS)
-  const word = { waiting: 'waiting on them', replied: 'they replied, yours to finish', open: 'open, untouched' }
+  const word = { question: 'you asked them', waiting: 'waiting on them', replied: 'they replied, yours to finish', open: 'open, untouched' }
   return [
     STATUS_HEAD,
     'The person just asked for status. These items are held for them:',
@@ -1420,7 +1831,8 @@ export function dropCarried(ledger, from, reason, { nowMs }) {
 // `clear` closes every open item by hand; the history stays in the file.
 export const clearOpen = (ledger, nowMs) => ({
   ...ledger,
-  items: ledger.items.map(i => (i.state === 'open' ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'person' } : i)),
+  // what the agent owes, never a question to the person: clearing the agent's list answers nothing
+  items: ledger.items.map(i => (i.state === 'open' && i.source !== QUESTION ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'person' } : i)),
 })
 
 const ago = ms => {
@@ -1432,11 +1844,13 @@ const ago = ms => {
 // an item still inside its turn is a count under it, and `all` lists it, marked.
 export function listing(ledger, nowMs, { all = false } = {}) {
   const rows = (all ? ledger.items : owedItems(ledger, nowMs))
-  const held = all ? 0 : ledger.items.filter(i => i.state === 'waiting' && fresh(i, nowMs) && !waitedOut(i, nowMs)).length
+  const yours = all ? [] : forYouItems(ledger, nowMs)
   const inTurn = all ? 0 : openItems(ledger, nowMs).length - rows.length
+  const opts = r => (r.options ? `  [${r.options.map(o => `${o.key}) ${excerpt(o.text, 30)}`).join(' ')}]` : '')
   const waits = [
-    ...(held ? [`+${held} waiting on the person (all lists them)`] : []),
     ...(inTurn ? [`+${inTurn} in the turn answering ${inTurn === 1 ? 'it' : 'them'}, owed only if not done there (all lists them)`] : []),
+    ...(yours.length ? [`for you (${yours.length}): answer by number in the chat, or ${CLI_ANSWER}; ${CLI_EXPLAIN} asks the session to explain one`,
+      ...yours.map(r => `${r.id.padStart(3)}  ${r.state.padEnd(8)} ${(r.n ? `#${r.n}` : '').padEnd(7)} ${ago(nowMs - r.since).padStart(4)}  ${excerpt(r.text, 100)}${opts(r)}${r.reason ? `  (${excerpt(r.reason, 60)})` : ''}${r.explain && r.explain.text ? '  [explained]' : r.explain && r.explain.failed ? '  [explain failed]' : r.explain ? '  [explain asked]' : ''}`)] : []),
   ]
   const j = ledger.judge
   const judged = !j ? [] : [j.ok
@@ -1460,17 +1874,22 @@ export function listing(ledger, nowMs, { all = false } = {}) {
 
 // The band's ledger row as text runs, the longest form that fits `columns`:
 //   ledger · 2 open · oldest 4m "fix the login redirect…" · promise: merge when green
+// What is FOR the person is its own count beside the agent's, never folded into it, and it
+// stays at every width: "ledger · 3 open" over a turn that ended on twenty questions to the
+// person was the band saying there was nothing for them.
+//   ledger · 5 open · 20 for you · oldest 4m "fix the login redirect…" · promise: merge when green
 // Narrower, the quote goes, then the promise's words, then everything but the counts. A judge
 // whose last call failed says so first, at every width: a failing judge closes nothing, and
 // a count that only grows was all the band showed of it.
 //   ledger · judge failing: reply was not the JSON asked for · 24 open · …
-export const LEDGER_COLOR = { open: '#ffd75f', promise: '#87afd7', failing: '#ff5f5f' }
+export const LEDGER_COLOR = { open: '#ffd75f', promise: '#87afd7', failing: '#ff5f5f', forYou: '#5fd7ff' }
 export function ledgerRuns(s, nowMs, columns) {
-  if (!s || (!s.open && !s.promises && !s.judgeFailing)) return null
+  if (!s || (!s.open && !s.promises && !s.judgeFailing && !s.forYou)) return null
   const cols = Math.max(1, Number(columns) || 80)
   const sep = { text: ' · ', dim: true }
   const head = { text: 'ledger', dim: true }
   const open = s.open ? { text: `${s.open} open`, color: LEDGER_COLOR.open, bold: true } : null
+  const yours = s.forYou ? { text: `${s.forYou} for you`, color: LEDGER_COLOR.forYou, bold: true } : null
   const fail = n => (s.judgeFailing
     ? { text: n ? `judge failing: ${excerpt(s.judgeFailing, n)}` : 'judge failing', color: LEDGER_COLOR.failing, bold: true }
     : null)
@@ -1483,15 +1902,17 @@ export function ledgerRuns(s, nowMs, columns) {
   const tiny = [
     s.judgeFailing ? { text: '✗', color: LEDGER_COLOR.failing, bold: true } : null,
     s.open ? { ...open, text: `${s.open}○` } : null,
+    s.forYou ? { ...yours, text: `${s.forYou}?` } : null,
     s.promises ? { text: `${s.promises}◇`, color: LEDGER_COLOR.promise } : null,
   ]
   const forms = [
-    [head, fail(60), open, quote(48), prom(40)],
-    [head, fail(40), open, quote(24), prom(24)],
-    [head, fail(24), open, s.oldest ? { text: `oldest ${age}`, dim: true } : null, prom(0)],
-    [head, fail(0), open, prom(0)],
-    [fail(0), open, prom(0)],
+    [head, fail(60), open, yours, quote(48), prom(40)],
+    [head, fail(40), open, yours, quote(24), prom(24)],
+    [head, fail(24), open, yours, s.oldest ? { text: `oldest ${age}`, dim: true } : null, prom(0)],
+    [head, fail(0), open, yours, prom(0)],
+    [fail(0), open, yours, prom(0)],
     tiny,
+    tiny.filter(Boolean).slice(0, 2),
     [tiny.find(Boolean)],
   ]
   let runs = null
@@ -1508,7 +1929,10 @@ export function ledgerRuns(s, nowMs, columns) {
 // applyLedger, fleet-ledger, lib/ledger-landed.mjs, lib/ledger-carry.mjs — so the memory
 // never has to watch the files, and spelled once, here, because the mod can import only
 // this directory and lib/ can import it too. `t` is the ledger's own time for the change:
-// when the item was asked, or closed.
+// when the item was asked, or closed. `for` is its direction (forYou): "you" for what waits on
+// the person, "model" for what the agent owes, decided here once so that the briefing, which
+// reads the memory and never a ledger file, says WAITING ON THE OWNER by the same rule as the
+// band and the phone.
 // WHAT THE OWNER ANSWERED, read off one ledger, so a live write and a backfill spell it the same.
 // Each is an answer the ledger can show was given to a question, and nothing weaker:
 //   a bare reply to a numbered question (foldReply), from the person: its `source` says so, and
@@ -1519,6 +1943,8 @@ export function ledgerRuns(s, nowMs, columns) {
 //     briefing and meant nothing. They are counted (unaskedReplies), not guessed at
 //   a whole message, the next thing the person said after a numbered question (addPrompt)
 //   a lead's QUESTION that waited on the person, woken by a message of theirs
+//   a question the agent asked them (QUESTION), answered by its number, by the phone's option
+//     button, or closed by the agent with their words (settleQuestions, answerItem, closeAs)
 // NOT ANY OTHER WAKE. A wake is two shared words (mentions, loose), which is right for "the person
 // may have moved" and wrong for "the person decided". Measured on one log: 34 wakes by the person,
 // none of them passing the strict reading, one with a question in it, and most of them a follow-up
@@ -1541,6 +1967,7 @@ export function ownerAnswers(ledger) {
       if (r.source === 'user' && r.asked) out.push({ id: String(i.id), t: Number(r.at) || 0, answer: r.text, question: r.asked, how: 'reply' })
     }
     if (i.asked && i.source === 'user') out.push({ id: String(i.id), t: Number(i.at) || 0, answer: i.text, question: i.asked, how: 'reply' })
+    if (i.source === QUESTION && i.answer && i.answer.text) out.push({ id: String(i.id), t: Number(i.answer.at) || Number(i.closedAt) || 0, answer: i.answer.text, question: i.text, how: 'question' })
     if (i.woke && i.source === 'fleet' && String(i.text || '').includes('?')) {
       const by = items.find(x => x !== i && x.source === 'user' && Number(x.at) === Number(i.woke))
       if (by) out.push({ id: String(i.id), t: Number(i.woke) || 0, answer: by.text, question: i.text, how: 'woke' })
@@ -1553,10 +1980,11 @@ export function ledgerChanges(before, after) {
   const out = []
   for (const i of (after && after.items) || []) {
     const o = was.get(String(i.id))
-    if (!o) out.push({ op: 'open', id: String(i.id), text: i.text, source: i.source, state: i.state, t: Number(i.at) || 0 })
+    const dir = forYou(i) ? 'you' : 'model'
+    if (!o) out.push({ op: 'open', id: String(i.id), text: i.text, source: i.source, state: i.state, for: dir, t: Number(i.at) || 0 })
     else if (o.state !== i.state) {
       out.push({ op: 'state', id: String(i.id), text: i.text, state: i.state, proof: i.proof, reason: i.reason,
-                 by: i.closedBy, t: Number(i.closedAt || i.expiredAt) || 0 })
+                 by: i.closedBy, for: dir, t: Number(i.closedAt || i.expiredAt) || 0 })
     }
   }
   const told = new Set(ownerAnswers(before).map(a => `${a.id}/${a.t}`))

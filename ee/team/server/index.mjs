@@ -174,6 +174,8 @@ const TOOLS = {
   fleet_wake:            { fields: ['project', 'session'] },
   fleet_reopen:          { fields: ['project', 'session'] },
   fleet_unqueue:         { fields: ['project', 'session', 'prompt'] },
+  // Explain one item that waits on a person, or answer it (an option tapped): the ledger's half.
+  fleet_ledger:          { fields: ['project', 'session', 'verb', 'id', 'text', 'option'] },
   fleet_spawn:           { fields: ['project', 'name', 'branch', 'from', 'prompt', 'model', 'reuse', 'force_new'] },
   fleet_rename:          { fields: ['project', 'session', 'new_name'], confirm: true },
   fleet_stop:            { fields: ['project', 'session', 'reclaim', 'force'], confirm: true },
