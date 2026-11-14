@@ -180,6 +180,8 @@ try {
       is(`${at} · ...and it leaves the list, the others staying`, false, !left || left.some(x => x.text.includes(Q1)));
     });
     await step(`${at} · a busy session`, async () => {
+      // the last answer's "Answered" toast first goes, or the shot shows it over this sheet
+      await until(() => b.evaluate(() => !document.querySelector('.toasts .toast')), 6000);
       is(`${at} · Explain on an item whose session is mid-turn`, true, await tap('.foryou-actions button', 'Explain', Q3));
       const s = await until(async () => { const x = await sheet(); return x && /busy/.test(x.status) ? x : null; }, 4000);
       is(`${at} · the sheet says the session is busy and the request waits, interrupting nothing`, true,
