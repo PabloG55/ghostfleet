@@ -166,7 +166,7 @@ try {
     const st = await until(sheetText, 4000);
     await shot('sheet');
     const want = ['switch at 97% of the 5h or 7d limit, spending the week that ends first',
-      "on 'main' by hand until 15:47 — the planner leaves it there unless it runs out",
+      "on 'main' by hand — held there until it reaches the threshold or runs out",
       'personal — ALL EXHAUSTED until 17:00, workers paused'];
     for (const p of V.on.profiles) for (const a of p.accounts) {
       want.push(a.state + (a.active && a.state !== 'active' ? ' (active)' : ''));
