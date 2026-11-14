@@ -704,6 +704,16 @@ var en_default = {
 	"sess.drop": "Drop the files here…",
 	"sess.pendingAbove": "There is a pending request above; what you write is queued until it is answered.",
 	"sess.writeTo": "Write to {name}…  (attach or drag a file · Enter sends)",
+	"chat.read": "Read aloud",
+	"chat.stopRead": "Stop reading",
+	"chat.speak": "Speak mode",
+	"chat.speakOff": "Turn speak mode off",
+	"chat.speakListening": "Listening — speak, then pause to send",
+	"chat.speakHearing": "Hearing you…",
+	"chat.speakSending": "Sending…",
+	"chat.speakWaiting": "Waiting for the reply…",
+	"chat.speakReading": "Reading the reply…",
+	"chat.speakNoMic": "This browser cannot listen: no microphone or recogniser.",
 	"sess.uploadingBtn": "Uploading…",
 	"sess.labelTitle": "Session label",
 	"sess.labelWhy": "A short note to recognise it at a glance, like “client urgent” or “waiting on review”. It shows on the card and in the terminal. Empty removes it.",
@@ -1573,6 +1583,16 @@ var es_default = {
 	"sess.drop": "Suelta aquí los archivos…",
 	"sess.pendingAbove": "Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.",
 	"sess.writeTo": "Escríbele a {name}…  (adjunta o arrastra un archivo · Enter envía)",
+	"chat.read": "Leer en voz alta",
+	"chat.stopRead": "Dejar de leer",
+	"chat.speak": "Modo voz",
+	"chat.speakOff": "Apagar el modo voz",
+	"chat.speakListening": "Escuchando — habla y haz una pausa para enviar",
+	"chat.speakHearing": "Te escucho…",
+	"chat.speakSending": "Enviando…",
+	"chat.speakWaiting": "Esperando la respuesta…",
+	"chat.speakReading": "Leyendo la respuesta…",
+	"chat.speakNoMic": "Este navegador no puede escuchar: no hay micrófono ni reconocedor.",
 	"sess.uploadingBtn": "Subiendo…",
 	"sess.labelTitle": "Etiqueta de la sesión",
 	"sess.labelWhy": "Una nota corta para reconocerla de un vistazo, como “urgente cliente” o “esperando revisión”. Se ve en la tarjeta y en la terminal. Vacía la quita.",
@@ -3449,13 +3469,13 @@ var MAX = 80;
 var SETTLE = 400;
 var GIVE_UP = 2e3;
 var started = false;
-var cur$1 = null;
+var cur$2 = null;
 var here = "#/";
 var pending = null;
 var store$1 = /* @__PURE__ */ new Map();
 var restoring = null;
 var saveTimer = 0;
-var subs$2 = /* @__PURE__ */ new Set();
+var subs$3 = /* @__PURE__ */ new Set();
 var route = (to) => "/" + String(to ?? "").replace(/^#?\/?/, "");
 var newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 var stampOf = () => {
@@ -3507,8 +3527,8 @@ function where$1(el) {
 function onScroll(e) {
 	const el = e.target;
 	const name = nameOf(el);
-	if (!name || !cur$1) return;
-	rec(cur$1.id).scroll[name] = where$1(el);
+	if (!name || !cur$2) return;
+	rec(cur$2.id).scroll[name] = where$1(el);
 	saveSoon();
 }
 var stopRestore = () => {
@@ -3549,8 +3569,8 @@ function restore(want) {
 			return;
 		}
 		restoring = null;
-		if (!cur$1) return;
-		for (const name of Object.keys(targets)) if (els[name]) rec(cur$1.id).scroll[name] = where$1(els[name]);
+		if (!cur$2) return;
+		for (const name of Object.keys(targets)) if (els[name]) rec(cur$2.id).scroll[name] = where$1(els[name]);
 		saveSoon();
 	};
 	requestAnimationFrame(step);
@@ -3566,13 +3586,13 @@ function startHistory() {
 	} catch {
 		store$1 = /* @__PURE__ */ new Map();
 	}
-	cur$1 = stampOf();
-	if (!cur$1) {
-		cur$1 = {
+	cur$2 = stampOf();
+	if (!cur$2) {
+		cur$2 = {
 			id: newId(),
 			from: null
 		};
-		stamp(cur$1);
+		stamp(cur$2);
 	}
 	here = location.hash || "#/";
 	addEventListener("scroll", onScroll, true);
@@ -3583,31 +3603,31 @@ function startHistory() {
 		"keydown"
 	]) addEventListener(ev, stopRestore, true);
 	addEventListener("pagehide", flush);
-	restore({ ...store$1.get(cur$1.id)?.scroll || {} });
+	restore({ ...store$1.get(cur$2.id)?.scroll || {} });
 }
 function arrive() {
 	if (!started) return startHistory();
 	if ((location.hash || "#/") === here) return;
 	const st = stampOf();
-	if (st) cur$1 = st;
+	if (st) cur$2 = st;
 	else {
-		cur$1 = {
+		cur$2 = {
 			id: newId(),
 			from: here
 		};
-		stamp(cur$1);
+		stamp(cur$2);
 	}
-	const fresh = cur$1.id === pending;
+	const fresh = cur$2.id === pending;
 	pending = null;
 	here = location.hash || "#/";
-	for (const f of subs$2) f();
-	restore(fresh ? {} : { ...store$1.get(cur$1.id)?.scroll || {} });
+	for (const f of subs$3) f();
+	restore(fresh ? {} : { ...store$1.get(cur$2.id)?.scroll || {} });
 }
 function go$1(to, { replace = false } = {}) {
 	startHistory();
 	const h = "#" + route(to);
 	if (h === (location.hash || "#/")) return;
-	const now = stampOf() || cur$1;
+	const now = stampOf() || cur$2;
 	const st = {
 		id: newId(),
 		from: replace ? now?.from ?? null : location.hash || "#/"
@@ -3618,26 +3638,26 @@ function go$1(to, { replace = false } = {}) {
 	pending = st.id;
 }
 function backTo(parent) {
-	const from = (stampOf() || cur$1)?.from;
+	const from = (stampOf() || cur$2)?.from;
 	return route(from != null ? from : parent);
 }
 function back(parent) {
 	startHistory();
-	if ((stampOf() || cur$1)?.from != null) history.back();
+	if ((stampOf() || cur$2)?.from != null) history.back();
 	else go$1(parent, { replace: true });
 }
 function kept$2(key, initial) {
-	const v = cur$1 ? store$1.get(cur$1.id)?.state?.[key] : void 0;
+	const v = cur$2 ? store$1.get(cur$2.id)?.state?.[key] : void 0;
 	return v === void 0 ? initial : v;
 }
 function setKept(key, value) {
-	if (!cur$1) return;
-	rec(cur$1.id).state[key] = value;
+	if (!cur$2) return;
+	rec(cur$2.id).state[key] = value;
 	saveSoon();
 }
 function onEntry(f) {
-	subs$2.add(f);
-	return () => subs$2.delete(f);
+	subs$3.add(f);
+	return () => subs$3.delete(f);
 }
 //#endregion
 //#region web/ui/shell.jsx
@@ -5405,6 +5425,1341 @@ function useTranscript(fleet, project, name, live) {
 	};
 }
 //#endregion
+//#region web/ui/speakable.js
+var EN = {
+	code: "Code omitted.",
+	timestamp: "a timestamp",
+	id: "an id",
+	hex: "a hex id",
+	escape: "an escape code",
+	commit: "a commit",
+	link: "{label} link",
+	theLink: "the link",
+	line: "line",
+	goesOn: "… and it goes on."
+};
+var SPEAK_MAX = 2e4;
+var IDENT_EDGE = "(^|[^\\w./~@+-])";
+function sayIdentifiers(t, w) {
+	const pathSpoken = (p, line) => {
+		const base = p.replace(/\/+$/, "").split("/").pop() || p;
+		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
+	};
+	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
+	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
+	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
+	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
+	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
+	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
+	t = t.replace(/ \/ /g, ", ");
+	return t;
+}
+function speakable(text, w = EN) {
+	let t = String(text || "");
+	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
+	t = t.replace(/`([^`]*)`/g, "$1");
+	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
+	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
+	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
+	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
+	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
+	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
+	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
+	t = t.replace(/~~[^~\n]+~~/g, "");
+	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
+	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
+	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
+	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
+	t = t.replace(/__([^_\n]+)__/g, "$1");
+	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
+	t = sayIdentifiers(t, w);
+	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
+	t = t.replace(/\s+/g, " ").trim();
+	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
+}
+var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
+function sentencesOf(t) {
+	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
+	let from = 0, m;
+	while (m = re.exec(t)) {
+		if (!m[0].length) {
+			re.lastIndex++;
+			continue;
+		}
+		const end = m.index + m[0].length;
+		const piece = t.slice(from, m.index + m[0].length - m[1].length);
+		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
+		out.push(piece.trim());
+		from = end;
+	}
+	if (from < t.length) out.push(t.slice(from).trim());
+	return out.filter(Boolean);
+}
+function cutLong(x, max) {
+	const out = [];
+	while (x.length > max) {
+		let at = -1;
+		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
+			let m, best = -1;
+			mark.lastIndex = 0;
+			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
+			if (best >= max / 4) {
+				at = best;
+				break;
+			}
+		}
+		if (at < 0) {
+			const sp = x.indexOf(" ", max);
+			if (sp < 0) break;
+			at = sp;
+		}
+		out.push(x.slice(0, at).trim());
+		x = x.slice(at).trim();
+	}
+	if (x) out.push(x);
+	return out;
+}
+function speechChunks(text, max = 600) {
+	const t = String(text || "").replace(/\s+/g, " ").trim();
+	if (!t) return [];
+	const out = [];
+	let cur = "";
+	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
+		if (cur && cur.length + 1 + piece.length > max) {
+			out.push(cur);
+			cur = "";
+		}
+		cur = cur ? `${cur} ${piece}` : piece;
+	}
+	if (cur) out.push(cur);
+	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
+}
+//#endregion
+//#region web/ui/voice.js
+var B = {};
+function voiceBackend(adapter) {
+	B = adapter || {};
+	status = null;
+}
+var status = null;
+async function voiceStatus(force = false) {
+	if (status && !force) return status;
+	try {
+		status = B.voice ? await B.voice() : null;
+	} catch {
+		status = null;
+	}
+	status ||= {
+		hear: { ready: false },
+		speak: { ready: false }
+	};
+	return status;
+}
+function wav16k(chunks, rate) {
+	let n = 0;
+	for (const c of chunks) n += c.length;
+	const all = new Float32Array(n);
+	let o = 0;
+	for (const c of chunks) {
+		all.set(c, o);
+		o += c.length;
+	}
+	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
+	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+	const str = (off, s) => {
+		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
+	};
+	str(0, "RIFF");
+	v.setUint32(4, 36 + len * 2, true);
+	str(8, "WAVE");
+	str(12, "fmt ");
+	v.setUint32(16, 16, true);
+	v.setUint16(20, 1, true);
+	v.setUint16(22, 1, true);
+	v.setUint32(24, 16e3, true);
+	v.setUint32(28, 32e3, true);
+	v.setUint16(32, 2, true);
+	v.setUint16(34, 16, true);
+	str(36, "data");
+	v.setUint32(40, len * 2, true);
+	for (let i = 0; i < len; i++) {
+		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
+		let sum = 0;
+		for (let j = a; j < b; j++) sum += all[j];
+		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+	}
+	return new Blob([buf], { type: "audio/wav" });
+}
+var PAUSES = worded({
+	normal: { ms: 2500 },
+	larga: { ms: 4500 },
+	manual: { ms: 0 }
+}, "pause");
+var AUDIO = {
+	channelCount: 1,
+	echoCancellation: true,
+	noiseSuppression: true,
+	autoGainControl: true
+};
+var transcribe = async (blob) => {
+	if (!B.hear) throw new Error(t("voice.noHear"));
+	const j = await B.hear(blob);
+	return String(j?.text || "").trim();
+};
+var rmsOf = (d) => {
+	let s = 0;
+	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+	return Math.sqrt(s / d.length);
+};
+var micDenied = () => t("voice.micDenied");
+var VAD_DIR = "/vad-0.0.31/";
+var vad = null;
+var vadLoad = null;
+var vadBroken = false;
+var turn = null;
+function warmVad() {
+	if (vad || vadBroken) return Promise.resolve(vad);
+	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
+		model: "v5",
+		baseAssetPath: VAD_DIR,
+		onnxWASMBasePath: VAD_DIR,
+		startOnLoad: false,
+		ortConfig: (ort) => {
+			ort.env.logLevel = "error";
+			ort.env.wasm.numThreads = 1;
+		},
+		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		positiveSpeechThreshold: .5,
+		negativeSpeechThreshold: .35,
+		preSpeechPadMs: 600,
+		minSpeechMs: 250,
+		redemptionMs: PAUSES.normal.ms,
+		submitUserSpeechOnPause: true,
+		onFrameProcessed: (p, f) => turn?.frame(p, f),
+		onSpeechStart: () => turn?.start(),
+		onSpeechEnd: (a) => turn?.end(a),
+		onVADMisfire: () => turn?.misfire()
+	})).then((v) => vad = v, (e) => {
+		vadBroken = true;
+		console.warn("VAD did not load, using the loudness meter:", e);
+		return null;
+	}).finally(() => {
+		vadLoad = null;
+	});
+	return vadLoad;
+}
+function listenLocal(opts) {
+	let h = null, cancelled = false;
+	const pending = {
+		stop: () => {
+			if (h) h.stop();
+			else pending.stopAsked = true;
+		},
+		cancel: () => {
+			cancelled = true;
+			h?.cancel();
+		}
+	};
+	warmVad().then((v) => {
+		if (cancelled) return;
+		h = v ? listenVad(v, opts) : listenLoudness(opts);
+		if (pending.stopAsked) h.stop();
+	});
+	return pending;
+}
+function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let done = false, spoke = false;
+	const t0 = performance.now();
+	const end = async (audio) => {
+		if (done) return;
+		done = true;
+		turn = null;
+		clearInterval(watch);
+		try {
+			await v.pause();
+		} catch {}
+		onSpeaking?.(false);
+		if (!audio || audio.length < 4e3) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k([audio], 16e3)));
+		} catch (e) {
+			onError?.(t("voice.transcribeFailed", { why: e.message }));
+			onText?.("");
+		}
+	};
+	let got = null;
+	const me = turn = {
+		frame: (p, f) => {
+			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
+		},
+		start: () => {
+			spoke = true;
+			onSpeaking?.(true);
+		},
+		misfire: () => onSpeaking?.(false),
+		end: (audio) => {
+			got = audio;
+			if (pauseMs) end(audio);
+		}
+	};
+	v.setOptions({ redemptionMs: pauseMs || 6e5 });
+	const watch = setInterval(() => {
+		const t = performance.now() - t0;
+		if (!spoke && t > 15e3) cancel();
+		else if (t > maxMs) stop();
+	}, 500);
+	const stop = async () => {
+		if (done) return;
+		if (turn === me) try {
+			await v.pause();
+		} catch {}
+		end(got);
+	};
+	const cancel = () => {
+		got = null;
+		spoke = false;
+		end(null);
+	};
+	v.start().then(() => {
+		if (!done) onState?.("listening");
+	}, () => {
+		onError?.(micDenied());
+		cancel();
+	});
+	return {
+		stop,
+		cancel
+	};
+}
+function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
+	const chunks = [];
+	const t0 = performance.now();
+	const finish = async (send) => {
+		if (done) return;
+		done = true;
+		try {
+			node?.disconnect();
+			src?.disconnect();
+		} catch {}
+		try {
+			stream?.getTracks().forEach((x) => x.stop());
+		} catch {}
+		const rate = ctx?.sampleRate || 48e3;
+		try {
+			await ctx?.close();
+		} catch {}
+		onSpeaking?.(false);
+		if (!send || !spoke || !chunks.length) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k(chunks, rate)));
+		} catch (e) {
+			onError?.(t("voice.transcribeFailed", { why: e.message }));
+			onText?.("");
+		}
+	};
+	(async () => {
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+		} catch {
+			done = true;
+			onError?.(micDenied());
+			onText?.("");
+			return;
+		}
+		ctx = new AudioContext();
+		src = ctx.createMediaStreamSource(stream);
+		node = ctx.createScriptProcessor(4096, 1, 1);
+		let floor = .008;
+		node.onaudioprocess = (e) => {
+			if (done) return;
+			const d = e.inputBuffer.getChannelData(0);
+			chunks.push(new Float32Array(d));
+			const rms = rmsOf(d);
+			const now = performance.now();
+			const loud = rms > Math.max(.015, floor * 2.5);
+			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
+			onLevel?.(Math.min(1, rms * 12));
+			if (loud) {
+				if (!spoke) onSpeaking?.(true);
+				spoke = true;
+				quietSince = 0;
+			} else if (spoke && !quietSince) quietSince = now;
+			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
+			else if (now - t0 > maxMs) finish(true);
+			else if (!spoke && now - t0 > 15e3) finish(false);
+		};
+		src.connect(node);
+		node.connect(ctx.destination);
+		onState?.("listening");
+	})();
+	return {
+		stop: () => finish(true),
+		cancel: () => finish(false)
+	};
+}
+var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+var browserCanHear = !!Recognition;
+var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
+function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
+	const r = new Recognition();
+	r.lang = speech;
+	r.interimResults = true;
+	r.continuous = true;
+	let final = "", quiet = null;
+	const hush = () => {
+		clearTimeout(quiet);
+		if (pauseMs) quiet = setTimeout(() => {
+			try {
+				r.stop();
+			} catch {}
+		}, pauseMs);
+	};
+	r.onresult = (e) => {
+		let live = "";
+		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
+		else live += e.results[i][0].transcript;
+		onInterim?.((final + " " + live).trim());
+		hush();
+	};
+	r.onerror = (e) => {
+		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
+		else if (e.error === "network") onError?.(t("voice.needsNet"));
+		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
+	};
+	r.onend = () => {
+		clearTimeout(quiet);
+		onText?.(final.trim());
+	};
+	try {
+		r.start();
+		onState?.("listening");
+	} catch {
+		onText?.("");
+	}
+	return {
+		stop: () => {
+			try {
+				r.stop();
+			} catch {}
+		},
+		cancel: () => {
+			try {
+				r.abort();
+			} catch {}
+		}
+	};
+}
+var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
+function savedRate() {
+	let r = NaN;
+	try {
+		r = Number(localStorage.getItem("gf.rate"));
+	} catch {}
+	return Number.isFinite(r) && r >= .5 && r <= 2 ? r : 1.05;
+}
+var playing = null;
+function stopSpeaking() {
+	window.speechSynthesis?.cancel();
+	if (playing) {
+		playing.cancelled = true;
+		try {
+			playing.audio?.pause();
+		} catch {}
+		playing = null;
+	}
+}
+function utter(text, onEnd) {
+	const s = window.speechSynthesis;
+	if (!s) {
+		onEnd?.();
+		return;
+	}
+	const u = new SpeechSynthesisUtterance(text);
+	const all = s.getVoices();
+	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
+	if (v) u.voice = v;
+	u.lang = v?.lang || speechLang();
+	u.rate = savedRate();
+	u.onend = () => onEnd?.();
+	u.onerror = () => onEnd?.();
+	s.speak(u);
+}
+async function speakBrowser(chunks, job) {
+	for (const c of chunks) {
+		if (job.cancelled) return;
+		await new Promise((resolve) => utter(c, resolve));
+	}
+}
+function playSample(url, onEnd) {
+	stopSpeaking();
+	const job = {
+		cancelled: false,
+		audio: new Audio(url)
+	};
+	playing = job;
+	const done = () => {
+		if (!job.cancelled) {
+			playing = null;
+			onEnd?.();
+		}
+	};
+	job.audio.onended = done;
+	job.audio.onerror = done;
+	job.audio.play().catch(done);
+}
+var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
+async function speak(md, onEnd, voice = "") {
+	stopSpeaking();
+	const chunks = speechChunks(speakable(md, sayWords()));
+	if (!chunks.length) {
+		onEnd?.();
+		return;
+	}
+	const job = {
+		cancelled: false,
+		audio: null
+	};
+	playing = job;
+	const st = await voiceStatus();
+	if (job.cancelled) return;
+	let i = 0;
+	if (st.speak?.ready) try {
+		let next = B.speak(chunks[0], voice);
+		for (; i < chunks.length; i++) {
+			const r = await next;
+			if (job.cancelled) return;
+			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
+			next?.catch(() => {});
+			for (const s of r.sentences) {
+				if (job.cancelled) return;
+				const url = await B.speakAudio(s.id);
+				if (job.cancelled) return;
+				await new Promise((resolve) => {
+					const a = new Audio(url);
+					job.audio = a;
+					a.onended = resolve;
+					a.onerror = resolve;
+					a.play().catch(resolve);
+				});
+			}
+		}
+	} catch {}
+	if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
+	if (!job.cancelled) {
+		playing = null;
+		onEnd?.();
+	}
+}
+//#endregion
+//#region web/ui/resolve.js
+var norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+var phon = (s) => norm(s).replace(/qu/g, "k").replace(/q/g, "k").replace(/c([aou])/g, "k$1").replace(/c([ei])/g, "s$1").replace(/c\b/g, "k").replace(/ck/g, "k").replace(/z/g, "s").replace(/v/g, "b").replace(/w/g, "u").replace(/ll/g, "y").replace(/ph/g, "f").replace(/x/g, "ks").replace(/h/g, "").replace(/([a-z])\1+/g, "$1").replace(/\s+/g, " ").trim();
+var grams = (s) => {
+	const t = ` ${s} `;
+	const g = /* @__PURE__ */ new Map();
+	for (let i = 0; i < t.length - 1; i++) {
+		const k = t.slice(i, i + 2);
+		g.set(k, (g.get(k) || 0) + 1);
+	}
+	return g;
+};
+function dice(a, b) {
+	const A = grams(a), B = grams(b);
+	let both = 0, n = 0;
+	for (const [k, v] of A) {
+		n += v;
+		both += Math.min(v, B.get(k) || 0);
+	}
+	for (const v of B.values()) n += v;
+	return n ? 2 * both / n : 0;
+}
+var sim = (a, b) => phon(a) === phon(b) ? 1 : dice(phon(a), phon(b));
+function bestName(name, options) {
+	const n = norm(name);
+	if (!n) return null;
+	let hit = null, score = 0;
+	for (const o of options) {
+		const k = norm(o);
+		const s = k === n ? 2 : (k.startsWith(n) || n.startsWith(k)) && Math.min(k.length, n.length) >= 3 ? 1.5 : sim(k, n);
+		if (s > score) {
+			hit = o;
+			score = s;
+		}
+	}
+	return score >= .6 ? hit : null;
+}
+function command(text, projects, context) {
+	const t$7 = norm(text);
+	if (!t$7) return null;
+	const short = t$7.split(" ").length <= 9;
+	if (short && (/^(muestrame |abre |ve a |ir a |vamos a |llevame a )?(el )?mapa( en vivo)?$/.test(t$7) || /^(show me |open |go to |take me to )?(the )?(live )?map$/.test(t$7))) return {
+		go: "/map",
+		say: t("cmd.map")
+	};
+	if (short && (/^(ve |vamos |llevame |volver |vuelve )?(al )?inicio$/.test(t$7) || /^(go |take me |back )?(to )?(the )?home( page)?$|^go home$/.test(t$7))) return {
+		go: "/",
+		say: t("cmd.home")
+	};
+	if (short && (/^(muestrame |abre |ve a )?(la )?actividad$/.test(t$7) || /^(show me |open |go to )?(the )?activity$/.test(t$7))) return {
+		go: "/activity",
+		say: t("cmd.activity")
+	};
+	const m = /^(?:abre|ve a|vamos a|llevame a|muestrame|ensename|cambia a|pasa a|anda a) (?:la )?sesion (.+)$/.exec(t$7) || /^(?:open|go to|take me to|show me|switch to) (?:the )?session (.+)$/.exec(t$7);
+	if (m && short) {
+		const all = (projects || []).flatMap((p) => p.sessions.map((x) => ({
+			p: p.name,
+			s: x.name
+		})));
+		const inCtx = all.filter((x) => x.p === context);
+		const pick = (list) => {
+			const k = bestName(m[1], list.map((x) => x.s));
+			return k && list.find((x) => x.s === k);
+		};
+		const hit = pick(inCtx) || pick(all);
+		if (hit) return {
+			go: `/p/${encodeURIComponent(hit.p)}/s/${encodeURIComponent(hit.s)}`,
+			project: hit.p,
+			session: hit.s,
+			say: hit.p !== context ? t("cmd.openIn", {
+				session: hit.s,
+				project: hit.p
+			}) : t("cmd.open", { session: hit.s })
+		};
+		return {
+			go: null,
+			say: t("cmd.noSession", { name: m[1] })
+		};
+	}
+	return null;
+}
+//#endregion
+//#region web/ui/agent.js
+var store = {
+	get: (k, d) => {
+		try {
+			const v = localStorage.getItem(`gfw.${k}`);
+			return v == null ? d : JSON.parse(v);
+		} catch {
+			return d;
+		}
+	},
+	set: (k, v) => {
+		try {
+			localStorage.setItem(`gfw.${k}`, JSON.stringify(v));
+		} catch {}
+	}
+};
+var S = {
+	pin: store.get("pin", ""),
+	target: store.get("pin", "") || store.get("target", ""),
+	targetAt: 0,
+	feed: [],
+	phase: "idle",
+	level: 0,
+	interim: "",
+	cards: [],
+	focus: "master",
+	tasks: [],
+	deciding: [],
+	conversing: false,
+	voiceOut: store.get("voiceOut", true),
+	voice: store.get("voice", ""),
+	handsFree: store.get("handsFree", false),
+	follow: store.get("follow", true),
+	pause: PAUSES[store.get("pause", "normal")] ? store.get("pause", "normal") : "normal",
+	vs: null
+};
+var subs$2 = /* @__PURE__ */ new Set();
+function set(patch) {
+	Object.assign(S, patch);
+	for (const f of subs$2) f();
+}
+function useAgent() {
+	const [, tick] = d(0);
+	h(() => {
+		const f = () => tick((x) => x + 1);
+		subs$2.add(f);
+		return () => subs$2.delete(f);
+	}, []);
+	return S;
+}
+var ctx = null;
+var mic = null;
+var gen = 0;
+var timers = /* @__PURE__ */ new Set();
+var later = (ms, fn) => {
+	const t = setTimeout(() => {
+		timers.delete(t);
+		fn();
+	}, ms);
+	timers.add(t);
+};
+var push = (e) => set({ feed: [...S.feed.slice(-60), {
+	id: Math.random(),
+	at: Date.now(),
+	...e
+}] });
+var projects = () => ctx?.projects || [];
+var go = (to) => ctx?.go(to);
+var api = new Proxy({}, { get: (_, k) => ctx?.fleet?.[k] || (() => Promise.reject(new Error(t("agent.noServer")))) });
+var frame = (text, voice) => `${voice ? "[voice]" : "[typed]"} ${t(voice ? "agent.frame.voice" : "agent.frame.typed", {
+	name: ctx?.me?.name || t("agent.you"),
+	app: ctx?.app || "ghostfleet"
+})} ${t("agent.frame.ask")}\n\n${text}`;
+var FRAME_RE = /^(?:\[(?:voice|typed)\]|\u{1F399}\uFE0F?|\u{1F4AC})[^\n]*\n\n/u;
+var unframe = (t) => String(t || "").replace(FRAME_RE, "");
+function setOption(k, v) {
+	store.set(k, v);
+	set({ [k]: v });
+	if (k === "handsFree" && !v) set({ conversing: false });
+	if (k === "voiceOut" && !v) {
+		stopSpeaking();
+		if (S.phase === "speaking") set({ phase: "idle" });
+	}
+}
+function setPin(project) {
+	store.set("pin", project || "");
+	set({ pin: project || "" });
+	if (project) setTarget(project);
+}
+function setTarget(project, explicit = true) {
+	if (!project) return;
+	if (project !== S.target) {
+		store.set("target", project);
+		set({
+			target: project,
+			cards: [],
+			focus: "master"
+		});
+		resetWatch();
+	}
+	if (explicit) set({ targetAt: Date.now() });
+}
+var canHear = () => !!S.vs?.hear?.ready || browserCanHear;
+function talk() {
+	if (mic) {
+		mic.stop();
+		return;
+	}
+	set({ conversing: S.handsFree });
+	listen();
+}
+function listen() {
+	if (mic) return;
+	stopSpeaking();
+	set({
+		interim: "",
+		level: 0,
+		phase: "listening"
+	});
+	const my = gen;
+	const common = {
+		pauseMs: PAUSES[S.pause].ms,
+		onState: (s) => {
+			if (my === gen) set({ phase: s });
+		},
+		onError: (m) => {
+			if (my !== gen) return;
+			push({
+				kind: "event",
+				text: m,
+				bad: true
+			});
+			set({ conversing: false });
+		},
+		onText: (t$3) => {
+			if (my !== gen) return;
+			mic = null;
+			set({
+				level: 0,
+				interim: "",
+				phase: "idle"
+			});
+			if (t$3) heard(t$3, true);
+			else if (S.conversing) {
+				set({ conversing: false });
+				push({
+					kind: "event",
+					text: t("agent.heardNothing")
+				});
+			}
+		}
+	};
+	mic = S.vs?.hear?.ready ? listenLocal({
+		...common,
+		onLevel: (l) => {
+			if (my === gen) set({ level: l });
+		}
+	}) : listenBrowser({
+		...common,
+		onInterim: (t) => {
+			if (my === gen) set({ interim: t });
+		}
+	});
+}
+var again = () => {
+	const my = gen;
+	if (S.conversing && S.handsFree) later(450, () => {
+		if (my === gen && S.conversing) listen();
+	});
+};
+function stop() {
+	gen++;
+	set({ conversing: false });
+	for (const t of timers) clearTimeout(t);
+	timers.clear();
+	if (mic) {
+		const m = mic;
+		mic = null;
+		m.cancel();
+	}
+	stopSpeaking();
+	set({
+		phase: "idle",
+		interim: "",
+		level: 0
+	});
+}
+var busy = () => !!mic || S.phase === "speaking" || S.conversing;
+function say(text, then) {
+	if (!S.voiceOut) {
+		then?.();
+		return;
+	}
+	const my = gen;
+	set({ phase: "speaking" });
+	speak(text, () => {
+		if (my !== gen) return;
+		if (S.phase === "speaking") set({ phase: "idle" });
+		then?.();
+	}, S.voice);
+}
+var context = () => ctx?.route?.project || S.pin || (S.target && Date.now() - S.targetAt < 9e5 ? S.target : null);
+function submit(text, voice = false) {
+	const t = String(text || "").trim();
+	if (t) heard(t, voice);
+}
+async function place(task, project) {
+	try {
+		const t$4 = await api.taskPlace(task.id, project);
+		setTarget(project);
+		const who = await deliver(t$4);
+		say(who ? t("agent.passed", { who }) : t("task.missed", { project }), again);
+	} catch (e) {
+		push({
+			kind: "event",
+			text: t("agent.missed", { why: e.message }),
+			bad: true
+		});
+	}
+	pollTasks();
+}
+function tickOff(id) {
+	set({ tasks: S.tasks.filter((t) => id ? t.id !== id : t.status !== "replied") });
+	api.taskDone(id).catch(() => {});
+}
+var line = Promise.resolve();
+var lastSaid$1 = {
+	text: "",
+	at: 0
+};
+function heard(text, voice) {
+	push({
+		kind: "me",
+		text,
+		voice
+	});
+	const c = command(text, projects(), context());
+	if (c) {
+		if (c.go) go(c.go);
+		if (c.project) setTarget(c.project, false);
+		if (c.session) set({ focus: c.session });
+		push({
+			kind: "event",
+			text: c.say
+		});
+		say(c.say, again);
+		return;
+	}
+	if (text === lastSaid$1.text && Date.now() - lastSaid$1.at < 2e4) {
+		push({
+			kind: "event",
+			text: t("agent.dupe")
+		});
+		return;
+	}
+	lastSaid$1 = {
+		text,
+		at: Date.now()
+	};
+	const row = {
+		id: Math.random(),
+		text
+	};
+	set({ deciding: [...S.deciding, row] });
+	line = line.then(() => decide(text, voice)).catch(() => {}).then(() => set({ deciding: S.deciding.filter((d) => d !== row) }));
+}
+var spokenName = (p) => String(p).replace(/[-_]+/g, " ");
+var inWords = (l) => l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")}${t("common.and")}${l[l.length - 1]}`;
+async function decide(text, voice) {
+	const my = gen;
+	set({ phase: "routing" });
+	const page = ctx?.route?.project ? {
+		project: ctx.route.project,
+		session: ctx.route.session || ""
+	} : {
+		project: S.pin,
+		session: ""
+	};
+	const feed = S.feed.slice(0, -1).map(({ kind, text: t }) => ({
+		kind,
+		text: unframe(t)
+	}));
+	let r;
+	try {
+		r = await api.route({
+			text,
+			feed,
+			page,
+			voice
+		});
+	} catch (e) {
+		set({ phase: "idle" });
+		push({
+			kind: "event",
+			text: t("agent.routeFailed", {
+				text,
+				why: e.message
+			}),
+			bad: true
+		});
+		say(t("agent.routeFailedSay"), again);
+		return;
+	}
+	if (my !== gen) {
+		pollTasks();
+		return;
+	}
+	set({ phase: "idle" });
+	if (r.action === "ask") {
+		push({
+			kind: "event",
+			text: r.question,
+			ask: true
+		});
+		say(r.question, again);
+		return;
+	}
+	if (r.action === "go") {
+		setTarget(r.project);
+		go(`/p/${encodeURIComponent(r.project)}${r.session ? `/s/${encodeURIComponent(r.session)}` : ""}`);
+		const here = t("agent.here", { project: r.project });
+		push({
+			kind: "event",
+			text: here
+		});
+		say(here, again);
+		return;
+	}
+	const going = r.tasks.filter((t) => t.project), unsure = r.tasks.filter((t) => !t.project);
+	await pollTasks();
+	const reached = [], missed = [];
+	for (const t of going) {
+		if (going.length === 1) setTarget(t.project);
+		const who = await deliver(t, going.length > 1);
+		if (who) reached.push(going.length === 1 ? who : spokenName(t.project));
+		else missed.push(spokenName(t.project));
+	}
+	for (const t of unsure) push({
+		kind: "event",
+		text: `“${t.title}”: ${t.question}`,
+		ask: true
+	});
+	pollTasks();
+	const words = [
+		missed.length ? t("task.missed", { project: inWords(missed) }) : "",
+		!voice || !reached.length ? "" : reached.length === 1 ? t("agent.passed", { who: reached[0] }) : t("agent.noted", {
+			n: reached.length,
+			list: inWords(reached)
+		}),
+		unsure.length === 1 ? unsure[0].question : unsure.length ? t("agent.unsure", { n: unsure.length }) : ""
+	].filter(Boolean).join(" ");
+	if (words) say(words, again);
+	else again();
+}
+async function deliver(t$5, quiet = false) {
+	const { project, session, text, voice, context: earlier, why } = t$5;
+	const who = session ? t("agent.toSession", {
+		session,
+		project
+	}) : t("agent.toLead", { project });
+	if (!quiet && (!ctx?.route?.session || ctx.route.project !== project)) go(`/p/${encodeURIComponent(project)}`);
+	push({
+		kind: "event",
+		text: why ? t("agent.goingWhy", {
+			who,
+			why
+		}) : t("agent.going", { who })
+	});
+	set({
+		phase: "starting",
+		focus: session || "master"
+	});
+	const failed = (message) => {
+		set({ phase: "idle" });
+		push({
+			kind: "event",
+			text: message,
+			bad: true
+		});
+		api.taskSent({
+			id: t$5.id,
+			project,
+			error: message
+		}).catch(() => {});
+		return "";
+	};
+	let lead = session || "master";
+	if (!session) try {
+		const l = await api.lead(project);
+		if (l.started) push({
+			kind: "event",
+			text: l.started === "start" ? t("agent.leadStarted", { project }) : t("agent.leadWoke", { project })
+		});
+		lead = l.lead || "master";
+	} catch (e) {
+		return failed(t("agent.leadFailed", {
+			project,
+			why: e.message
+		}));
+	}
+	set({ phase: "sending" });
+	try {
+		sentAt = Math.floor(Date.now() / 1e3);
+		const words = earlier ? `${t("agent.earlier", { earlier })}\n\n${text}` : text;
+		const r = await api.act("fleet_send", {
+			project,
+			session: lead,
+			prompt: frame(words, voice)
+		});
+		if (r.queued) push({
+			kind: "event",
+			text: r.queued === "question" ? t("agent.queuedQ") : t("agent.queuedTurn")
+		});
+		set({ phase: "idle" });
+		await api.taskSent({
+			id: t$5.id,
+			project,
+			session: lead
+		});
+		return who;
+	} catch (e) {
+		return failed(t("agent.missedAt", {
+			project,
+			why: e.message
+		}));
+	}
+}
+var heardUpTo = null;
+var toRead = [];
+var lastTs = (t) => t.replies.reduce((n, r) => Math.max(n, r.ts), 0);
+async function pollTasks() {
+	let tasks;
+	try {
+		({tasks} = await api.tasks());
+	} catch {
+		return;
+	}
+	set({ tasks });
+	if (!heardUpTo) {
+		heardUpTo = new Map(tasks.map((t) => [t.id, lastTs(t)]));
+		return;
+	}
+	for (const t$6 of tasks) {
+		const news = t$6.replies.filter((r) => r.ts > (heardUpTo.get(t$6.id) || 0));
+		if (!news.length) continue;
+		heardUpTo.set(t$6.id, lastTs(t$6));
+		const sure = !t$6.hidden && tasks.filter((x) => !x.hidden && x.project === t$6.project && x.session === t$6.session).length === 1;
+		for (const r of news) push({
+			kind: "ai",
+			text: r.text,
+			project: t$6.project,
+			session: t$6.session,
+			title: sure ? t$6.title : ""
+		});
+		const from = sure ? t("agent.fromAbout", {
+			project: spokenName(t$6.project),
+			title: t$6.title
+		}) : t("agent.from", { project: spokenName(t$6.project) });
+		toRead = [...toRead.filter((x) => x.id !== t$6.id), {
+			id: t$6.id,
+			text: `${from} ${news[news.length - 1].text}`
+		}];
+	}
+	readNext();
+}
+function readNext() {
+	if (!toRead.length || mic || S.phase !== "idle" || document.hidden) return;
+	const [next, ...rest] = toRead;
+	toRead = rest;
+	say(next.text, () => {
+		again();
+		readNext();
+	});
+}
+var prev = null;
+var sentAt = 0;
+var lastGo = 0;
+var loop = null;
+var taskLoop = null;
+function resetWatch() {
+	prev = null;
+}
+async function tick() {
+	if (!S.target || document.hidden) return;
+	const project = S.target;
+	let g;
+	try {
+		g = await api.grid(project);
+	} catch {
+		return;
+	}
+	if (project !== S.target) return;
+	const list = g.cards || [];
+	set({ cards: list });
+	const before = prev;
+	prev = Object.fromEntries(list.map((c) => [c.name, statusOf(c)]));
+	if (before) for (const c of list) {
+		const now = statusOf(c), was = before[c.name];
+		if (was === now) continue;
+		const word = (STATUS[now] || STATUS.unknown).label.toLowerCase();
+		push({
+			kind: "event",
+			text: was == null ? t("agent.opened", { name: c.name }) : c.lead ? t("agent.leadIs", { word }) : `${c.name}: ${word}`,
+			session: c.name,
+			project
+		});
+		set({ focus: c.name });
+		if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1e3 - sentAt < 900 && ctx?.fleet?.assign && ctx.me?.id) ctx.fleet.assign(project, c.name, ctx.me.id).catch(() => {});
+		const worth = was == null || now === "need-you" || now === "working" && !c.lead;
+		if (S.follow && worth && !c.lead && Date.now() - lastGo > 3e3) {
+			lastGo = Date.now();
+			go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(c.name)}`);
+		}
+	}
+}
+function bind(next) {
+	if (next.fleet !== ctx?.fleet) voiceBackend(next.fleet);
+	ctx = next;
+	if (!loop) {
+		loop = setInterval(tick, 2500);
+		taskLoop = setInterval(pollTasks, 3e3);
+		pollTasks();
+		resetWatch();
+		voiceStatus(true).then((vs) => {
+			set({ vs });
+			if (vs.hear?.ready) warmVad();
+		});
+	}
+}
+function unbind() {
+	stop();
+	clearInterval(loop);
+	clearInterval(taskLoop);
+	loop = null;
+	heardUpTo = null;
+	toRead = [];
+	ctx = null;
+}
+//#endregion
+//#region web/ui/chatvoice.js
+var cur$1 = "";
+var subs$1 = /* @__PURE__ */ new Set();
+var note = (id) => {
+	cur$1 = id;
+	for (const f of subs$1) f();
+};
+function useReading() {
+	const [, n] = d(0);
+	h(() => {
+		const f = () => n((x) => x + 1);
+		subs$1.add(f);
+		return () => subs$1.delete(f);
+	}, []);
+	return cur$1;
+}
+var takeover = null;
+function unlockSpeech() {
+	try {
+		const u = new SpeechSynthesisUtterance(" ");
+		u.volume = 0;
+		window.speechSynthesis?.speak(u);
+	} catch {}
+}
+function toggleRead(id, md) {
+	if (cur$1 === id) {
+		stopSpeaking();
+		note("");
+		return;
+	}
+	takeover?.();
+	unlockSpeech();
+	note(id);
+	speak(md, () => {
+		if (cur$1 === id) note("");
+	}, S.voice);
+}
+function stopRead(scope) {
+	if (cur$1 && cur$1.startsWith(scope)) {
+		stopSpeaking();
+		note("");
+	}
+}
+var lastSaid = (page) => {
+	const m = [...page?.messages || []].reverse().find((x) => x.role !== "user" && x.role !== "tools" && x.text);
+	return m ? {
+		key: `${m.ts}|${String(m.text).slice(0, 200)}`,
+		text: m.text
+	} : null;
+};
+function useSpeakMode({ scope, send, page, status }) {
+	const [phase, setPhase] = d("off");
+	const R = A({
+		gen: 0,
+		mic: null,
+		seen: "",
+		phase: "off",
+		page: null,
+		off: null
+	});
+	R.current.page = page;
+	const go = (p) => {
+		R.current.phase = p;
+		setPhase(p);
+	};
+	const live = (g) => R.current.gen === g;
+	const off = (why) => {
+		const r = R.current;
+		r.gen++;
+		if (r.mic) {
+			const m = r.mic;
+			r.mic = null;
+			try {
+				m.cancel();
+			} catch {}
+		}
+		if (r.phase === "speaking") {
+			stopSpeaking();
+			if (cur$1.startsWith(scope)) note("");
+		}
+		if (takeover?.owner === R) takeover = null;
+		go("off");
+		if (why) toast(why, "bad");
+	};
+	R.current.off = off;
+	const listen = async (g) => {
+		go("listening");
+		const vs = await voiceStatus();
+		if (!live(g)) return;
+		const local = !!vs.hear?.ready;
+		if (!local && !browserCanHear) {
+			off(t("chat.speakNoMic"));
+			return;
+		}
+		stopSpeaking();
+		const common = {
+			pauseMs: PAUSES[S.pause]?.ms ?? PAUSES.normal.ms,
+			onState: (s) => {
+				if (live(g)) go(s);
+			},
+			onError: (m) => {
+				if (live(g)) off(m);
+			},
+			onText: (text) => {
+				if (!live(g)) return;
+				R.current.mic = null;
+				if (!text.trim()) {
+					off(t("agent.heardNothing"));
+					return;
+				}
+				sendIt(g, text.trim());
+			}
+		};
+		R.current.mic = local ? listenLocal(common) : listenBrowser(common);
+	};
+	const sendIt = async (g, text) => {
+		go("sending");
+		R.current.seen = lastSaid(R.current.page)?.key || "";
+		const ok = await send(`(spoken) ${text}`);
+		if (!live(g)) return;
+		if (!ok) {
+			off();
+			return;
+		}
+		go("waiting");
+	};
+	h(() => {
+		if (phase !== "waiting") return;
+		if (status === "working" || status === "starting") return;
+		const a = lastSaid(page);
+		if (!a || a.key === R.current.seen) return;
+		const g = R.current.gen;
+		go("speaking");
+		const id = `${scope}:speak`;
+		note(id);
+		speak(a.text, () => {
+			if (cur$1 === id) note("");
+			if (live(g)) listen(g);
+		}, S.voice);
+	}, [
+		phase,
+		page,
+		status
+	]);
+	h(() => {
+		if (phase !== "waiting") return void 0;
+		const g = R.current.gen;
+		const timer = setTimeout(() => {
+			if (live(g)) off();
+		}, 6e5);
+		return () => clearTimeout(timer);
+	}, [phase]);
+	h(() => () => off(), []);
+	const toggle = () => {
+		if (R.current.phase !== "off") {
+			off();
+			return;
+		}
+		unlockSpeech();
+		stopSpeaking();
+		note("");
+		takeover = Object.assign(() => R.current.off(), { owner: R });
+		const g = ++R.current.gen;
+		listen(g);
+	};
+	return {
+		phase,
+		on: phase !== "off",
+		toggle
+	};
+}
+//#endregion
 //#region web/ui/drafts.js
 var LS = "gfw.drafts";
 var DAYS = 30;
@@ -5578,6 +6933,17 @@ function PromptCard({ prompt, onAnswer, busy }) {
 		]
 	});
 }
+function ReadBtn({ on, onClick }) {
+	return /* @__PURE__ */ u("button", {
+		type: "button",
+		class: `read-btn${on ? " on" : ""}`,
+		"aria-pressed": on,
+		"aria-label": on ? t("chat.stopRead") : t("chat.read"),
+		title: on ? t("chat.stopRead") : t("chat.read"),
+		onClick,
+		children: /* @__PURE__ */ u(Icon, { name: on ? "stop" : "play" })
+	});
+}
 function Terminal({ pane }) {
 	const ref = A(null);
 	const stick = A(true);
@@ -5633,8 +6999,9 @@ function ChatLoading({ load }) {
 var OLDER_NEAR_PX = 240;
 var SWIPE_NEXT = 60;
 var EDGE = 24;
-function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const author = useSlot("author");
+	const reading = useReading();
 	const ref = A(null);
 	const stick = A(true);
 	const ours = A(-1);
@@ -5791,10 +7158,17 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 					class: `msg ${m.role === "user" ? "me" : "ai"}`,
 					children: [/* @__PURE__ */ u("div", {
 						class: "who",
-						children: [m.role === "user" ? /* @__PURE__ */ u(S$1, { children: author(m) || t("sess.instruction") }) : "Claude", /* @__PURE__ */ u("span", {
-							class: "when",
-							children: sinceTs(m.ts)
-						})]
+						children: [
+							m.role === "user" ? /* @__PURE__ */ u(S$1, { children: author(m) || t("sess.instruction") }) : "Claude",
+							/* @__PURE__ */ u("span", {
+								class: "when",
+								children: sinceTs(m.ts)
+							}),
+							/* @__PURE__ */ u(ReadBtn, {
+								on: reading === `${scope}:${k}`,
+								onClick: () => toggleRead(`${scope}:${k}`, m.text)
+							})
+						]
 					}), /* @__PURE__ */ u("div", {
 						class: "bubble",
 						children: m.role === "user" ? /* @__PURE__ */ u("p", {
@@ -5820,6 +7194,13 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 		]
 	});
 }
+var STATE_KEY = {
+	listening: "chat.speakListening",
+	hearing: "chat.speakHearing",
+	sending: "chat.speakSending",
+	waiting: "chat.speakWaiting",
+	speaking: "chat.speakReading"
+};
 var hhmm$1 = (at) => (/* @__PURE__ */ new Date(at * 1e3)).toLocaleString(locale(), {
 	weekday: "short",
 	hour: "2-digit",
@@ -5992,6 +7373,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 			setBusy(false);
 		}
 	};
+	const scope = `${project}/${name}`;
+	const speakMode = useSpeakMode({
+		scope,
+		page: tr.page,
+		status: st,
+		send: async (text) => {
+			const r = await act("fleet_send", { prompt: text });
+			if (r) sentAt.current = Date.now();
+			return !!r;
+		}
+	});
+	h(() => () => stopRead(scope), [scope]);
 	const answer = (text, noEnter) => act("fleet_answer", {
 		text,
 		no_enter: noEnter,
@@ -6305,6 +7698,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 				session: name,
 				kind: tool
 			}, tool) : tab === "chat" ? !tr.page ? /* @__PURE__ */ u(ChatLoading, { load: tr.load }) : /* @__PURE__ */ u(Chat, {
+				scope,
 				page: tr.page,
 				queued: tr.page.queued || [],
 				older: tr.older,
@@ -6430,6 +7824,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									}
 								}
 							}),
+							/* @__PURE__ */ u("button", {
+								type: "button",
+								class: `speak-btn${speakMode.on ? " on" : ""}`,
+								"aria-pressed": speakMode.on,
+								"aria-label": speakMode.on ? t("chat.speakOff") : t("chat.speak"),
+								title: speakMode.on ? t("chat.speakOff") : t("chat.speak"),
+								onClick: speakMode.toggle,
+								children: /* @__PURE__ */ u(Icon, {
+									name: "mic",
+									size: 24
+								})
+							}),
 							/* @__PURE__ */ u(Btn, {
 								kind: "primary",
 								type: "submit",
@@ -6437,6 +7843,12 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]
+					}),
+					/* @__PURE__ */ u("p", {
+						class: "speak-state muted small",
+						role: "status",
+						"aria-live": "polite",
+						children: speakMode.on ? t(STATE_KEY[speakMode.phase] || "chat.speakListening") : ""
 					})
 				]
 			}),
@@ -7457,7 +8869,7 @@ var saved = () => {
 var cur = saved() || pickLang(typeof navigator !== "undefined" ? navigator.language : "");
 setLangSource(() => cur);
 if (typeof document !== "undefined") document.documentElement.lang = cur;
-var subs$1 = /* @__PURE__ */ new Set();
+var subs = /* @__PURE__ */ new Set();
 function setLang(l) {
 	const v = normLang(l);
 	if (!v) return;
@@ -7467,13 +8879,13 @@ function setLang(l) {
 	if (v === cur) return;
 	cur = v;
 	if (typeof document !== "undefined") document.documentElement.lang = v;
-	for (const f of subs$1) f(v);
+	for (const f of subs) f(v);
 }
 function useLang() {
 	const [l, setL] = d(cur);
 	h(() => {
-		subs$1.add(setL);
-		return () => subs$1.delete(setL);
+		subs.add(setL);
+		return () => subs.delete(setL);
 	}, []);
 	return l;
 }
@@ -8869,9 +10281,9 @@ function Drop({ at, onAdd, onMove, last, empty }) {
 		children: empty ? t("phone.autos.dropEmpty") : last ? `＋ ${t("phone.autos.dropLast")}` : null
 	});
 }
-function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
+function TriggerBlock({ capabilities, t: t$1, projects, onChange, onType }) {
 	const [over, setOver] = d(false);
-	const sessions = (projects || []).find((p) => p.name === t$6.project)?.sessions || [];
+	const sessions = (projects || []).find((p) => p.name === t$1.project)?.sessions || [];
 	return /* @__PURE__ */ u("section", {
 		class: `node trigger${over ? " over" : ""}`,
 		onDragOver: (e) => {
@@ -8892,16 +10304,16 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 			}), /* @__PURE__ */ u("div", {
 				class: "seg",
 				children: [/* @__PURE__ */ u("button", {
-					class: t$6.type === "schedule" ? "on" : "",
-					onClick: () => t$6.type !== "schedule" && onType("schedule"),
+					class: t$1.type === "schedule" ? "on" : "",
+					onClick: () => t$1.type !== "schedule" && onType("schedule"),
 					children: [
 						/* @__PURE__ */ u(Icon, { name: "clock" }),
 						" ",
 						t("phone.autos.schedule")
 					]
 				}), /* @__PURE__ */ u("button", {
-					class: t$6.type === "event" ? "on" : "",
-					onClick: () => t$6.type !== "event" && onType("event"),
+					class: t$1.type === "event" ? "on" : "",
+					onClick: () => t$1.type !== "event" && onType("event"),
 					children: [
 						/* @__PURE__ */ u(Icon, { name: "bolt" }),
 						" ",
@@ -8909,30 +10321,30 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 					]
 				})]
 			})] }),
-			t$6.type === "schedule" ? /* @__PURE__ */ u("div", {
+			t$1.type === "schedule" ? /* @__PURE__ */ u("div", {
 				class: "node-body",
 				children: [
 					/* @__PURE__ */ u("div", {
 						class: "seg sm",
 						children: [
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "days" ? "on" : "",
+								class: t$1.mode === "days" ? "on" : "",
 								onClick: () => onChange({ mode: "days" }),
 								children: t("phone.autos.someDays")
 							}),
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "once" ? "on" : "",
+								class: t$1.mode === "once" ? "on" : "",
 								onClick: () => onChange({ mode: "once" }),
 								children: t("phone.autos.once")
 							}),
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "every" ? "on" : "",
+								class: t$1.mode === "every" ? "on" : "",
 								onClick: () => onChange({ mode: "every" }),
 								children: t("phone.autos.everySoOften")
 							})
 						]
 					}),
-					t$6.mode === "days" ? /* @__PURE__ */ u("div", {
+					t$1.mode === "days" ? /* @__PURE__ */ u("div", {
 						class: "days",
 						role: "group",
 						"aria-label": t("phone.autos.days"),
@@ -8945,30 +10357,30 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 							6,
 							0
 						].map((d) => /* @__PURE__ */ u("button", {
-							class: t$6.days.includes(d) ? "on" : "",
-							"aria-pressed": t$6.days.includes(d),
-							onClick: () => onChange({ days: t$6.days.includes(d) ? t$6.days.filter((x) => x !== d) : [...t$6.days, d] }),
+							class: t$1.days.includes(d) ? "on" : "",
+							"aria-pressed": t$1.days.includes(d),
+							onClick: () => onChange({ days: t$1.days.includes(d) ? t$1.days.filter((x) => x !== d) : [...t$1.days, d] }),
 							children: DAY_NAMES[d]
 						}, d))
 					}) : null,
-					t$6.mode === "once" ? /* @__PURE__ */ u("label", {
+					t$1.mode === "once" ? /* @__PURE__ */ u("label", {
 						class: "field",
 						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.date") }), /* @__PURE__ */ u("input", {
 							type: "date",
-							value: t$6.date,
+							value: t$1.date,
 							onInput: (e) => onChange({ date: e.currentTarget.value })
 						})]
 					}) : null,
-					t$6.mode !== "every" ? /* @__PURE__ */ u("label", {
+					t$1.mode !== "every" ? /* @__PURE__ */ u("label", {
 						class: "field",
 						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.time") }), /* @__PURE__ */ u("input", {
 							type: "time",
-							value: t$6.at,
+							value: t$1.at,
 							onInput: (e) => onChange({ at: e.currentTarget.value })
 						})]
 					}) : /* @__PURE__ */ u(Select, {
 						label: t("phone.autos.every"),
-						value: t$6.minutes,
+						value: t$1.minutes,
 						onChange: (v) => onChange({ minutes: Number(v) }),
 						options: EVERY.map((m) => ({
 							value: m,
@@ -8981,7 +10393,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 				children: [
 					/* @__PURE__ */ u(Select, {
 						label: t("phone.autos.whenSession"),
-						value: t$6.event,
+						value: t$1.event,
 						onChange: (v) => onChange({ event: v }),
 						options: Object.entries(EVENTS$1).filter(([k]) => !capabilities?.events || capabilities.events.includes(k)).map(([k, d]) => ({
 							value: k,
@@ -8993,7 +10405,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 						children: [/* @__PURE__ */ u(Select, {
 							field: "field grow",
 							label: t("phone.autos.whichProject"),
-							value: t$6.project,
+							value: t$1.project,
 							onChange: (v) => onChange({
 								project: v,
 								session: "*"
@@ -9008,9 +10420,9 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 						}), /* @__PURE__ */ u(Select, {
 							field: "field grow",
 							label: t("phone.autos.whichSession"),
-							value: t$6.session,
+							value: t$1.session,
 							onChange: (v) => onChange({ session: v }),
-							disabled: t$6.project === "*",
+							disabled: t$1.project === "*",
 							options: [{
 								value: "*",
 								label: t("phone.autos.any")
@@ -9026,7 +10438,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 							type: "number",
 							min: "1",
 							max: "1440",
-							value: t$6.cooldown,
+							value: t$1.cooldown,
 							onInput: (e) => onChange({ cooldown: Number(e.currentTarget.value) })
 						})]
 					})
@@ -9034,7 +10446,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 			}),
 			/* @__PURE__ */ u("p", {
 				class: "node-say",
-				children: describeTrigger(t$6)
+				children: describeTrigger(t$1)
 			})
 		]
 	});
@@ -9240,11 +10652,11 @@ function AIPanel({ draft, onDraft }) {
 		end.current?.scrollIntoView({ block: "end" });
 	}, [msgs, busy]);
 	const ask = async () => {
-		const t$7 = text.trim();
-		if (!t$7 || busy) return;
+		const t$2 = text.trim();
+		if (!t$2 || busy) return;
 		const next = [...msgs, {
 			role: "user",
-			text: t$7
+			text: t$2
 		}];
 		setMsgs(next);
 		setText("");
@@ -10453,1162 +11865,6 @@ function Search({ query = "" }) {
 			}) : null
 		]
 	});
-}
-//#endregion
-//#region web/ui/speakable.js
-var EN = {
-	code: "Code omitted.",
-	timestamp: "a timestamp",
-	id: "an id",
-	hex: "a hex id",
-	escape: "an escape code",
-	commit: "a commit",
-	link: "{label} link",
-	theLink: "the link",
-	line: "line",
-	goesOn: "… and it goes on."
-};
-var SPEAK_MAX = 2e4;
-var IDENT_EDGE = "(^|[^\\w./~@+-])";
-function sayIdentifiers(t, w) {
-	const pathSpoken = (p, line) => {
-		const base = p.replace(/\/+$/, "").split("/").pop() || p;
-		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
-	};
-	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
-	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
-	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
-	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
-	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
-	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
-	t = t.replace(/ \/ /g, ", ");
-	return t;
-}
-function speakable(text, w = EN) {
-	let t = String(text || "");
-	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
-	t = t.replace(/`([^`]*)`/g, "$1");
-	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
-	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
-	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
-	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
-	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
-	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
-	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
-	t = t.replace(/~~[^~\n]+~~/g, "");
-	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
-	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
-	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
-	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
-	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
-	t = t.replace(/__([^_\n]+)__/g, "$1");
-	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
-	t = sayIdentifiers(t, w);
-	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
-	t = t.replace(/\s+/g, " ").trim();
-	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
-}
-var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
-function sentencesOf(t) {
-	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
-	let from = 0, m;
-	while (m = re.exec(t)) {
-		if (!m[0].length) {
-			re.lastIndex++;
-			continue;
-		}
-		const end = m.index + m[0].length;
-		const piece = t.slice(from, m.index + m[0].length - m[1].length);
-		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
-		out.push(piece.trim());
-		from = end;
-	}
-	if (from < t.length) out.push(t.slice(from).trim());
-	return out.filter(Boolean);
-}
-function cutLong(x, max) {
-	const out = [];
-	while (x.length > max) {
-		let at = -1;
-		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
-			let m, best = -1;
-			mark.lastIndex = 0;
-			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
-			if (best >= max / 4) {
-				at = best;
-				break;
-			}
-		}
-		if (at < 0) {
-			const sp = x.indexOf(" ", max);
-			if (sp < 0) break;
-			at = sp;
-		}
-		out.push(x.slice(0, at).trim());
-		x = x.slice(at).trim();
-	}
-	if (x) out.push(x);
-	return out;
-}
-function speechChunks(text, max = 600) {
-	const t = String(text || "").replace(/\s+/g, " ").trim();
-	if (!t) return [];
-	const out = [];
-	let cur = "";
-	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
-		if (cur && cur.length + 1 + piece.length > max) {
-			out.push(cur);
-			cur = "";
-		}
-		cur = cur ? `${cur} ${piece}` : piece;
-	}
-	if (cur) out.push(cur);
-	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
-}
-//#endregion
-//#region web/ui/voice.js
-var B = {};
-function voiceBackend(adapter) {
-	B = adapter || {};
-	status = null;
-}
-var status = null;
-async function voiceStatus(force = false) {
-	if (status && !force) return status;
-	try {
-		status = B.voice ? await B.voice() : null;
-	} catch {
-		status = null;
-	}
-	status ||= {
-		hear: { ready: false },
-		speak: { ready: false }
-	};
-	return status;
-}
-function wav16k(chunks, rate) {
-	let n = 0;
-	for (const c of chunks) n += c.length;
-	const all = new Float32Array(n);
-	let o = 0;
-	for (const c of chunks) {
-		all.set(c, o);
-		o += c.length;
-	}
-	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
-	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
-	const str = (off, s) => {
-		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
-	};
-	str(0, "RIFF");
-	v.setUint32(4, 36 + len * 2, true);
-	str(8, "WAVE");
-	str(12, "fmt ");
-	v.setUint32(16, 16, true);
-	v.setUint16(20, 1, true);
-	v.setUint16(22, 1, true);
-	v.setUint32(24, 16e3, true);
-	v.setUint32(28, 32e3, true);
-	v.setUint16(32, 2, true);
-	v.setUint16(34, 16, true);
-	str(36, "data");
-	v.setUint32(40, len * 2, true);
-	for (let i = 0; i < len; i++) {
-		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
-		let sum = 0;
-		for (let j = a; j < b; j++) sum += all[j];
-		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
-		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
-	}
-	return new Blob([buf], { type: "audio/wav" });
-}
-var PAUSES = worded({
-	normal: { ms: 2500 },
-	larga: { ms: 4500 },
-	manual: { ms: 0 }
-}, "pause");
-var AUDIO = {
-	channelCount: 1,
-	echoCancellation: true,
-	noiseSuppression: true,
-	autoGainControl: true
-};
-var transcribe = async (blob) => {
-	if (!B.hear) throw new Error(t("voice.noHear"));
-	const j = await B.hear(blob);
-	return String(j?.text || "").trim();
-};
-var rmsOf = (d) => {
-	let s = 0;
-	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
-	return Math.sqrt(s / d.length);
-};
-var micDenied = () => t("voice.micDenied");
-var VAD_DIR = "/vad-0.0.31/";
-var vad = null;
-var vadLoad = null;
-var vadBroken = false;
-var turn = null;
-function warmVad() {
-	if (vad || vadBroken) return Promise.resolve(vad);
-	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
-		model: "v5",
-		baseAssetPath: VAD_DIR,
-		onnxWASMBasePath: VAD_DIR,
-		startOnLoad: false,
-		ortConfig: (ort) => {
-			ort.env.logLevel = "error";
-			ort.env.wasm.numThreads = 1;
-		},
-		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		positiveSpeechThreshold: .5,
-		negativeSpeechThreshold: .35,
-		preSpeechPadMs: 600,
-		minSpeechMs: 250,
-		redemptionMs: PAUSES.normal.ms,
-		submitUserSpeechOnPause: true,
-		onFrameProcessed: (p, f) => turn?.frame(p, f),
-		onSpeechStart: () => turn?.start(),
-		onSpeechEnd: (a) => turn?.end(a),
-		onVADMisfire: () => turn?.misfire()
-	})).then((v) => vad = v, (e) => {
-		vadBroken = true;
-		console.warn("VAD did not load, using the loudness meter:", e);
-		return null;
-	}).finally(() => {
-		vadLoad = null;
-	});
-	return vadLoad;
-}
-function listenLocal(opts) {
-	let h = null, cancelled = false;
-	const pending = {
-		stop: () => {
-			if (h) h.stop();
-			else pending.stopAsked = true;
-		},
-		cancel: () => {
-			cancelled = true;
-			h?.cancel();
-		}
-	};
-	warmVad().then((v) => {
-		if (cancelled) return;
-		h = v ? listenVad(v, opts) : listenLoudness(opts);
-		if (pending.stopAsked) h.stop();
-	});
-	return pending;
-}
-function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let done = false, spoke = false;
-	const t0 = performance.now();
-	const end = async (audio) => {
-		if (done) return;
-		done = true;
-		turn = null;
-		clearInterval(watch);
-		try {
-			await v.pause();
-		} catch {}
-		onSpeaking?.(false);
-		if (!audio || audio.length < 4e3) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k([audio], 16e3)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	let got = null;
-	const me = turn = {
-		frame: (p, f) => {
-			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
-		},
-		start: () => {
-			spoke = true;
-			onSpeaking?.(true);
-		},
-		misfire: () => onSpeaking?.(false),
-		end: (audio) => {
-			got = audio;
-			if (pauseMs) end(audio);
-		}
-	};
-	v.setOptions({ redemptionMs: pauseMs || 6e5 });
-	const watch = setInterval(() => {
-		const t = performance.now() - t0;
-		if (!spoke && t > 15e3) cancel();
-		else if (t > maxMs) stop();
-	}, 500);
-	const stop = async () => {
-		if (done) return;
-		if (turn === me) try {
-			await v.pause();
-		} catch {}
-		end(got);
-	};
-	const cancel = () => {
-		got = null;
-		spoke = false;
-		end(null);
-	};
-	v.start().then(() => {
-		if (!done) onState?.("listening");
-	}, () => {
-		onError?.(micDenied());
-		cancel();
-	});
-	return {
-		stop,
-		cancel
-	};
-}
-function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
-	const chunks = [];
-	const t0 = performance.now();
-	const finish = async (send) => {
-		if (done) return;
-		done = true;
-		try {
-			node?.disconnect();
-			src?.disconnect();
-		} catch {}
-		try {
-			stream?.getTracks().forEach((x) => x.stop());
-		} catch {}
-		const rate = ctx?.sampleRate || 48e3;
-		try {
-			await ctx?.close();
-		} catch {}
-		onSpeaking?.(false);
-		if (!send || !spoke || !chunks.length) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k(chunks, rate)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	(async () => {
-		try {
-			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-		} catch {
-			done = true;
-			onError?.(micDenied());
-			onText?.("");
-			return;
-		}
-		ctx = new AudioContext();
-		src = ctx.createMediaStreamSource(stream);
-		node = ctx.createScriptProcessor(4096, 1, 1);
-		let floor = .008;
-		node.onaudioprocess = (e) => {
-			if (done) return;
-			const d = e.inputBuffer.getChannelData(0);
-			chunks.push(new Float32Array(d));
-			const rms = rmsOf(d);
-			const now = performance.now();
-			const loud = rms > Math.max(.015, floor * 2.5);
-			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
-			onLevel?.(Math.min(1, rms * 12));
-			if (loud) {
-				if (!spoke) onSpeaking?.(true);
-				spoke = true;
-				quietSince = 0;
-			} else if (spoke && !quietSince) quietSince = now;
-			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
-			else if (now - t0 > maxMs) finish(true);
-			else if (!spoke && now - t0 > 15e3) finish(false);
-		};
-		src.connect(node);
-		node.connect(ctx.destination);
-		onState?.("listening");
-	})();
-	return {
-		stop: () => finish(true),
-		cancel: () => finish(false)
-	};
-}
-var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-var browserCanHear = !!Recognition;
-var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
-function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
-	const r = new Recognition();
-	r.lang = speech;
-	r.interimResults = true;
-	r.continuous = true;
-	let final = "", quiet = null;
-	const hush = () => {
-		clearTimeout(quiet);
-		if (pauseMs) quiet = setTimeout(() => {
-			try {
-				r.stop();
-			} catch {}
-		}, pauseMs);
-	};
-	r.onresult = (e) => {
-		let live = "";
-		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
-		else live += e.results[i][0].transcript;
-		onInterim?.((final + " " + live).trim());
-		hush();
-	};
-	r.onerror = (e) => {
-		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
-		else if (e.error === "network") onError?.(t("voice.needsNet"));
-		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
-	};
-	r.onend = () => {
-		clearTimeout(quiet);
-		onText?.(final.trim());
-	};
-	try {
-		r.start();
-		onState?.("listening");
-	} catch {
-		onText?.("");
-	}
-	return {
-		stop: () => {
-			try {
-				r.stop();
-			} catch {}
-		},
-		cancel: () => {
-			try {
-				r.abort();
-			} catch {}
-		}
-	};
-}
-var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
-var playing = null;
-function stopSpeaking() {
-	window.speechSynthesis?.cancel();
-	if (playing) {
-		playing.cancelled = true;
-		try {
-			playing.audio?.pause();
-		} catch {}
-		playing = null;
-	}
-}
-function utter(text, onEnd) {
-	const s = window.speechSynthesis;
-	if (!s) {
-		onEnd?.();
-		return;
-	}
-	const u = new SpeechSynthesisUtterance(text);
-	const all = s.getVoices();
-	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
-	if (v) u.voice = v;
-	u.lang = v?.lang || speechLang();
-	u.rate = 1.05;
-	u.onend = () => onEnd?.();
-	u.onerror = () => onEnd?.();
-	s.speak(u);
-}
-async function speakBrowser(chunks, job) {
-	for (const c of chunks) {
-		if (job.cancelled) return;
-		await new Promise((resolve) => utter(c, resolve));
-	}
-}
-function playSample(url, onEnd) {
-	stopSpeaking();
-	const job = {
-		cancelled: false,
-		audio: new Audio(url)
-	};
-	playing = job;
-	const done = () => {
-		if (!job.cancelled) {
-			playing = null;
-			onEnd?.();
-		}
-	};
-	job.audio.onended = done;
-	job.audio.onerror = done;
-	job.audio.play().catch(done);
-}
-var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
-async function speak(md, onEnd, voice = "") {
-	stopSpeaking();
-	const chunks = speechChunks(speakable(md, sayWords()));
-	if (!chunks.length) {
-		onEnd?.();
-		return;
-	}
-	const job = {
-		cancelled: false,
-		audio: null
-	};
-	playing = job;
-	const st = await voiceStatus();
-	if (job.cancelled) return;
-	let i = 0;
-	if (st.speak?.ready) try {
-		let next = B.speak(chunks[0], voice);
-		for (; i < chunks.length; i++) {
-			const r = await next;
-			if (job.cancelled) return;
-			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
-			next?.catch(() => {});
-			for (const s of r.sentences) {
-				if (job.cancelled) return;
-				const url = await B.speakAudio(s.id);
-				if (job.cancelled) return;
-				await new Promise((resolve) => {
-					const a = new Audio(url);
-					job.audio = a;
-					a.onended = resolve;
-					a.onerror = resolve;
-					a.play().catch(resolve);
-				});
-			}
-		}
-	} catch {}
-	if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
-	if (!job.cancelled) {
-		playing = null;
-		onEnd?.();
-	}
-}
-//#endregion
-//#region web/ui/resolve.js
-var norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-var phon = (s) => norm(s).replace(/qu/g, "k").replace(/q/g, "k").replace(/c([aou])/g, "k$1").replace(/c([ei])/g, "s$1").replace(/c\b/g, "k").replace(/ck/g, "k").replace(/z/g, "s").replace(/v/g, "b").replace(/w/g, "u").replace(/ll/g, "y").replace(/ph/g, "f").replace(/x/g, "ks").replace(/h/g, "").replace(/([a-z])\1+/g, "$1").replace(/\s+/g, " ").trim();
-var grams = (s) => {
-	const t = ` ${s} `;
-	const g = /* @__PURE__ */ new Map();
-	for (let i = 0; i < t.length - 1; i++) {
-		const k = t.slice(i, i + 2);
-		g.set(k, (g.get(k) || 0) + 1);
-	}
-	return g;
-};
-function dice(a, b) {
-	const A = grams(a), B = grams(b);
-	let both = 0, n = 0;
-	for (const [k, v] of A) {
-		n += v;
-		both += Math.min(v, B.get(k) || 0);
-	}
-	for (const v of B.values()) n += v;
-	return n ? 2 * both / n : 0;
-}
-var sim = (a, b) => phon(a) === phon(b) ? 1 : dice(phon(a), phon(b));
-function bestName(name, options) {
-	const n = norm(name);
-	if (!n) return null;
-	let hit = null, score = 0;
-	for (const o of options) {
-		const k = norm(o);
-		const s = k === n ? 2 : (k.startsWith(n) || n.startsWith(k)) && Math.min(k.length, n.length) >= 3 ? 1.5 : sim(k, n);
-		if (s > score) {
-			hit = o;
-			score = s;
-		}
-	}
-	return score >= .6 ? hit : null;
-}
-function command(text, projects, context) {
-	const t$5 = norm(text);
-	if (!t$5) return null;
-	const short = t$5.split(" ").length <= 9;
-	if (short && (/^(muestrame |abre |ve a |ir a |vamos a |llevame a )?(el )?mapa( en vivo)?$/.test(t$5) || /^(show me |open |go to |take me to )?(the )?(live )?map$/.test(t$5))) return {
-		go: "/map",
-		say: t("cmd.map")
-	};
-	if (short && (/^(ve |vamos |llevame |volver |vuelve )?(al )?inicio$/.test(t$5) || /^(go |take me |back )?(to )?(the )?home( page)?$|^go home$/.test(t$5))) return {
-		go: "/",
-		say: t("cmd.home")
-	};
-	if (short && (/^(muestrame |abre |ve a )?(la )?actividad$/.test(t$5) || /^(show me |open |go to )?(the )?activity$/.test(t$5))) return {
-		go: "/activity",
-		say: t("cmd.activity")
-	};
-	const m = /^(?:abre|ve a|vamos a|llevame a|muestrame|ensename|cambia a|pasa a|anda a) (?:la )?sesion (.+)$/.exec(t$5) || /^(?:open|go to|take me to|show me|switch to) (?:the )?session (.+)$/.exec(t$5);
-	if (m && short) {
-		const all = (projects || []).flatMap((p) => p.sessions.map((x) => ({
-			p: p.name,
-			s: x.name
-		})));
-		const inCtx = all.filter((x) => x.p === context);
-		const pick = (list) => {
-			const k = bestName(m[1], list.map((x) => x.s));
-			return k && list.find((x) => x.s === k);
-		};
-		const hit = pick(inCtx) || pick(all);
-		if (hit) return {
-			go: `/p/${encodeURIComponent(hit.p)}/s/${encodeURIComponent(hit.s)}`,
-			project: hit.p,
-			session: hit.s,
-			say: hit.p !== context ? t("cmd.openIn", {
-				session: hit.s,
-				project: hit.p
-			}) : t("cmd.open", { session: hit.s })
-		};
-		return {
-			go: null,
-			say: t("cmd.noSession", { name: m[1] })
-		};
-	}
-	return null;
-}
-//#endregion
-//#region web/ui/agent.js
-var store = {
-	get: (k, d) => {
-		try {
-			const v = localStorage.getItem(`gfw.${k}`);
-			return v == null ? d : JSON.parse(v);
-		} catch {
-			return d;
-		}
-	},
-	set: (k, v) => {
-		try {
-			localStorage.setItem(`gfw.${k}`, JSON.stringify(v));
-		} catch {}
-	}
-};
-var S = {
-	pin: store.get("pin", ""),
-	target: store.get("pin", "") || store.get("target", ""),
-	targetAt: 0,
-	feed: [],
-	phase: "idle",
-	level: 0,
-	interim: "",
-	cards: [],
-	focus: "master",
-	tasks: [],
-	deciding: [],
-	conversing: false,
-	voiceOut: store.get("voiceOut", true),
-	voice: store.get("voice", ""),
-	handsFree: store.get("handsFree", false),
-	follow: store.get("follow", true),
-	pause: PAUSES[store.get("pause", "normal")] ? store.get("pause", "normal") : "normal",
-	vs: null
-};
-var subs = /* @__PURE__ */ new Set();
-function set(patch) {
-	Object.assign(S, patch);
-	for (const f of subs) f();
-}
-function useAgent() {
-	const [, tick] = d(0);
-	h(() => {
-		const f = () => tick((x) => x + 1);
-		subs.add(f);
-		return () => subs.delete(f);
-	}, []);
-	return S;
-}
-var ctx = null;
-var mic = null;
-var gen = 0;
-var timers = /* @__PURE__ */ new Set();
-var later = (ms, fn) => {
-	const t = setTimeout(() => {
-		timers.delete(t);
-		fn();
-	}, ms);
-	timers.add(t);
-};
-var push = (e) => set({ feed: [...S.feed.slice(-60), {
-	id: Math.random(),
-	at: Date.now(),
-	...e
-}] });
-var projects = () => ctx?.projects || [];
-var go = (to) => ctx?.go(to);
-var api = new Proxy({}, { get: (_, k) => ctx?.fleet?.[k] || (() => Promise.reject(new Error(t("agent.noServer")))) });
-var frame = (text, voice) => `${voice ? "[voice]" : "[typed]"} ${t(voice ? "agent.frame.voice" : "agent.frame.typed", {
-	name: ctx?.me?.name || t("agent.you"),
-	app: ctx?.app || "ghostfleet"
-})} ${t("agent.frame.ask")}\n\n${text}`;
-var FRAME_RE = /^(?:\[(?:voice|typed)\]|\u{1F399}\uFE0F?|\u{1F4AC})[^\n]*\n\n/u;
-var unframe = (t) => String(t || "").replace(FRAME_RE, "");
-function setOption(k, v) {
-	store.set(k, v);
-	set({ [k]: v });
-	if (k === "handsFree" && !v) set({ conversing: false });
-	if (k === "voiceOut" && !v) {
-		stopSpeaking();
-		if (S.phase === "speaking") set({ phase: "idle" });
-	}
-}
-function setPin(project) {
-	store.set("pin", project || "");
-	set({ pin: project || "" });
-	if (project) setTarget(project);
-}
-function setTarget(project, explicit = true) {
-	if (!project) return;
-	if (project !== S.target) {
-		store.set("target", project);
-		set({
-			target: project,
-			cards: [],
-			focus: "master"
-		});
-		resetWatch();
-	}
-	if (explicit) set({ targetAt: Date.now() });
-}
-var canHear = () => !!S.vs?.hear?.ready || browserCanHear;
-function talk() {
-	if (mic) {
-		mic.stop();
-		return;
-	}
-	set({ conversing: S.handsFree });
-	listen();
-}
-function listen() {
-	if (mic) return;
-	stopSpeaking();
-	set({
-		interim: "",
-		level: 0,
-		phase: "listening"
-	});
-	const my = gen;
-	const common = {
-		pauseMs: PAUSES[S.pause].ms,
-		onState: (s) => {
-			if (my === gen) set({ phase: s });
-		},
-		onError: (m) => {
-			if (my !== gen) return;
-			push({
-				kind: "event",
-				text: m,
-				bad: true
-			});
-			set({ conversing: false });
-		},
-		onText: (t$1) => {
-			if (my !== gen) return;
-			mic = null;
-			set({
-				level: 0,
-				interim: "",
-				phase: "idle"
-			});
-			if (t$1) heard(t$1, true);
-			else if (S.conversing) {
-				set({ conversing: false });
-				push({
-					kind: "event",
-					text: t("agent.heardNothing")
-				});
-			}
-		}
-	};
-	mic = S.vs?.hear?.ready ? listenLocal({
-		...common,
-		onLevel: (l) => {
-			if (my === gen) set({ level: l });
-		}
-	}) : listenBrowser({
-		...common,
-		onInterim: (t) => {
-			if (my === gen) set({ interim: t });
-		}
-	});
-}
-var again = () => {
-	const my = gen;
-	if (S.conversing && S.handsFree) later(450, () => {
-		if (my === gen && S.conversing) listen();
-	});
-};
-function stop() {
-	gen++;
-	set({ conversing: false });
-	for (const t of timers) clearTimeout(t);
-	timers.clear();
-	if (mic) {
-		const m = mic;
-		mic = null;
-		m.cancel();
-	}
-	stopSpeaking();
-	set({
-		phase: "idle",
-		interim: "",
-		level: 0
-	});
-}
-var busy = () => !!mic || S.phase === "speaking" || S.conversing;
-function say(text, then) {
-	if (!S.voiceOut) {
-		then?.();
-		return;
-	}
-	const my = gen;
-	set({ phase: "speaking" });
-	speak(text, () => {
-		if (my !== gen) return;
-		if (S.phase === "speaking") set({ phase: "idle" });
-		then?.();
-	}, S.voice);
-}
-var context = () => ctx?.route?.project || S.pin || (S.target && Date.now() - S.targetAt < 9e5 ? S.target : null);
-function submit(text, voice = false) {
-	const t = String(text || "").trim();
-	if (t) heard(t, voice);
-}
-async function place(task, project) {
-	try {
-		const t$2 = await api.taskPlace(task.id, project);
-		setTarget(project);
-		const who = await deliver(t$2);
-		say(who ? t("agent.passed", { who }) : t("task.missed", { project }), again);
-	} catch (e) {
-		push({
-			kind: "event",
-			text: t("agent.missed", { why: e.message }),
-			bad: true
-		});
-	}
-	pollTasks();
-}
-function tickOff(id) {
-	set({ tasks: S.tasks.filter((t) => id ? t.id !== id : t.status !== "replied") });
-	api.taskDone(id).catch(() => {});
-}
-var line = Promise.resolve();
-var lastSaid = {
-	text: "",
-	at: 0
-};
-function heard(text, voice) {
-	push({
-		kind: "me",
-		text,
-		voice
-	});
-	const c = command(text, projects(), context());
-	if (c) {
-		if (c.go) go(c.go);
-		if (c.project) setTarget(c.project, false);
-		if (c.session) set({ focus: c.session });
-		push({
-			kind: "event",
-			text: c.say
-		});
-		say(c.say, again);
-		return;
-	}
-	if (text === lastSaid.text && Date.now() - lastSaid.at < 2e4) {
-		push({
-			kind: "event",
-			text: t("agent.dupe")
-		});
-		return;
-	}
-	lastSaid = {
-		text,
-		at: Date.now()
-	};
-	const row = {
-		id: Math.random(),
-		text
-	};
-	set({ deciding: [...S.deciding, row] });
-	line = line.then(() => decide(text, voice)).catch(() => {}).then(() => set({ deciding: S.deciding.filter((d) => d !== row) }));
-}
-var spokenName = (p) => String(p).replace(/[-_]+/g, " ");
-var inWords = (l) => l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")}${t("common.and")}${l[l.length - 1]}`;
-async function decide(text, voice) {
-	const my = gen;
-	set({ phase: "routing" });
-	const page = ctx?.route?.project ? {
-		project: ctx.route.project,
-		session: ctx.route.session || ""
-	} : {
-		project: S.pin,
-		session: ""
-	};
-	const feed = S.feed.slice(0, -1).map(({ kind, text: t }) => ({
-		kind,
-		text: unframe(t)
-	}));
-	let r;
-	try {
-		r = await api.route({
-			text,
-			feed,
-			page,
-			voice
-		});
-	} catch (e) {
-		set({ phase: "idle" });
-		push({
-			kind: "event",
-			text: t("agent.routeFailed", {
-				text,
-				why: e.message
-			}),
-			bad: true
-		});
-		say(t("agent.routeFailedSay"), again);
-		return;
-	}
-	if (my !== gen) {
-		pollTasks();
-		return;
-	}
-	set({ phase: "idle" });
-	if (r.action === "ask") {
-		push({
-			kind: "event",
-			text: r.question,
-			ask: true
-		});
-		say(r.question, again);
-		return;
-	}
-	if (r.action === "go") {
-		setTarget(r.project);
-		go(`/p/${encodeURIComponent(r.project)}${r.session ? `/s/${encodeURIComponent(r.session)}` : ""}`);
-		const here = t("agent.here", { project: r.project });
-		push({
-			kind: "event",
-			text: here
-		});
-		say(here, again);
-		return;
-	}
-	const going = r.tasks.filter((t) => t.project), unsure = r.tasks.filter((t) => !t.project);
-	await pollTasks();
-	const reached = [], missed = [];
-	for (const t of going) {
-		if (going.length === 1) setTarget(t.project);
-		const who = await deliver(t, going.length > 1);
-		if (who) reached.push(going.length === 1 ? who : spokenName(t.project));
-		else missed.push(spokenName(t.project));
-	}
-	for (const t of unsure) push({
-		kind: "event",
-		text: `“${t.title}”: ${t.question}`,
-		ask: true
-	});
-	pollTasks();
-	const words = [
-		missed.length ? t("task.missed", { project: inWords(missed) }) : "",
-		!voice || !reached.length ? "" : reached.length === 1 ? t("agent.passed", { who: reached[0] }) : t("agent.noted", {
-			n: reached.length,
-			list: inWords(reached)
-		}),
-		unsure.length === 1 ? unsure[0].question : unsure.length ? t("agent.unsure", { n: unsure.length }) : ""
-	].filter(Boolean).join(" ");
-	if (words) say(words, again);
-	else again();
-}
-async function deliver(t$3, quiet = false) {
-	const { project, session, text, voice, context: earlier, why } = t$3;
-	const who = session ? t("agent.toSession", {
-		session,
-		project
-	}) : t("agent.toLead", { project });
-	if (!quiet && (!ctx?.route?.session || ctx.route.project !== project)) go(`/p/${encodeURIComponent(project)}`);
-	push({
-		kind: "event",
-		text: why ? t("agent.goingWhy", {
-			who,
-			why
-		}) : t("agent.going", { who })
-	});
-	set({
-		phase: "starting",
-		focus: session || "master"
-	});
-	const failed = (message) => {
-		set({ phase: "idle" });
-		push({
-			kind: "event",
-			text: message,
-			bad: true
-		});
-		api.taskSent({
-			id: t$3.id,
-			project,
-			error: message
-		}).catch(() => {});
-		return "";
-	};
-	let lead = session || "master";
-	if (!session) try {
-		const l = await api.lead(project);
-		if (l.started) push({
-			kind: "event",
-			text: l.started === "start" ? t("agent.leadStarted", { project }) : t("agent.leadWoke", { project })
-		});
-		lead = l.lead || "master";
-	} catch (e) {
-		return failed(t("agent.leadFailed", {
-			project,
-			why: e.message
-		}));
-	}
-	set({ phase: "sending" });
-	try {
-		sentAt = Math.floor(Date.now() / 1e3);
-		const words = earlier ? `${t("agent.earlier", { earlier })}\n\n${text}` : text;
-		const r = await api.act("fleet_send", {
-			project,
-			session: lead,
-			prompt: frame(words, voice)
-		});
-		if (r.queued) push({
-			kind: "event",
-			text: r.queued === "question" ? t("agent.queuedQ") : t("agent.queuedTurn")
-		});
-		set({ phase: "idle" });
-		await api.taskSent({
-			id: t$3.id,
-			project,
-			session: lead
-		});
-		return who;
-	} catch (e) {
-		return failed(t("agent.missedAt", {
-			project,
-			why: e.message
-		}));
-	}
-}
-var heardUpTo = null;
-var toRead = [];
-var lastTs = (t) => t.replies.reduce((n, r) => Math.max(n, r.ts), 0);
-async function pollTasks() {
-	let tasks;
-	try {
-		({tasks} = await api.tasks());
-	} catch {
-		return;
-	}
-	set({ tasks });
-	if (!heardUpTo) {
-		heardUpTo = new Map(tasks.map((t) => [t.id, lastTs(t)]));
-		return;
-	}
-	for (const t$4 of tasks) {
-		const news = t$4.replies.filter((r) => r.ts > (heardUpTo.get(t$4.id) || 0));
-		if (!news.length) continue;
-		heardUpTo.set(t$4.id, lastTs(t$4));
-		const sure = !t$4.hidden && tasks.filter((x) => !x.hidden && x.project === t$4.project && x.session === t$4.session).length === 1;
-		for (const r of news) push({
-			kind: "ai",
-			text: r.text,
-			project: t$4.project,
-			session: t$4.session,
-			title: sure ? t$4.title : ""
-		});
-		const from = sure ? t("agent.fromAbout", {
-			project: spokenName(t$4.project),
-			title: t$4.title
-		}) : t("agent.from", { project: spokenName(t$4.project) });
-		toRead = [...toRead.filter((x) => x.id !== t$4.id), {
-			id: t$4.id,
-			text: `${from} ${news[news.length - 1].text}`
-		}];
-	}
-	readNext();
-}
-function readNext() {
-	if (!toRead.length || mic || S.phase !== "idle" || document.hidden) return;
-	const [next, ...rest] = toRead;
-	toRead = rest;
-	say(next.text, () => {
-		again();
-		readNext();
-	});
-}
-var prev = null;
-var sentAt = 0;
-var lastGo = 0;
-var loop = null;
-var taskLoop = null;
-function resetWatch() {
-	prev = null;
-}
-async function tick() {
-	if (!S.target || document.hidden) return;
-	const project = S.target;
-	let g;
-	try {
-		g = await api.grid(project);
-	} catch {
-		return;
-	}
-	if (project !== S.target) return;
-	const list = g.cards || [];
-	set({ cards: list });
-	const before = prev;
-	prev = Object.fromEntries(list.map((c) => [c.name, statusOf(c)]));
-	if (before) for (const c of list) {
-		const now = statusOf(c), was = before[c.name];
-		if (was === now) continue;
-		const word = (STATUS[now] || STATUS.unknown).label.toLowerCase();
-		push({
-			kind: "event",
-			text: was == null ? t("agent.opened", { name: c.name }) : c.lead ? t("agent.leadIs", { word }) : `${c.name}: ${word}`,
-			session: c.name,
-			project
-		});
-		set({ focus: c.name });
-		if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1e3 - sentAt < 900 && ctx?.fleet?.assign && ctx.me?.id) ctx.fleet.assign(project, c.name, ctx.me.id).catch(() => {});
-		const worth = was == null || now === "need-you" || now === "working" && !c.lead;
-		if (S.follow && worth && !c.lead && Date.now() - lastGo > 3e3) {
-			lastGo = Date.now();
-			go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(c.name)}`);
-		}
-	}
-}
-function bind(next) {
-	if (next.fleet !== ctx?.fleet) voiceBackend(next.fleet);
-	ctx = next;
-	if (!loop) {
-		loop = setInterval(tick, 2500);
-		taskLoop = setInterval(pollTasks, 3e3);
-		pollTasks();
-		resetWatch();
-		voiceStatus(true).then((vs) => {
-			set({ vs });
-			if (vs.hear?.ready) warmVad();
-		});
-	}
-}
-function unbind() {
-	stop();
-	clearInterval(loop);
-	clearInterval(taskLoop);
-	loop = null;
-	heardUpTo = null;
-	toRead = [];
-	ctx = null;
 }
 //#endregion
 //#region web/ui/voices.jsx

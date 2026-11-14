@@ -702,6 +702,12 @@ textarea { resize: vertical; }
 .composer-row { display: flex; gap: 10px; align-items: flex-end; }
 .composer textarea { flex: 1 1 auto; min-height: 46px; max-height: 220px; }
 .attach-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; font-size: 20px; cursor: pointer; }
+.read-btn { flex: none; width: 28px; height: 28px; margin: -6px 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--r); background: none; color: var(--dim); cursor: pointer; }
+.read-btn:hover, .read-btn.on { color: var(--cyan); background: var(--panel2); }
+.speak-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; color: var(--dim); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.speak-btn:hover { border-color: var(--cyan); }
+.speak-btn.on { border-color: var(--cyan); color: var(--cyan); background: rgba(95,215,215,.12); }
+.speak-state { margin: 0; min-height: 1.3em; }
 .attach-btn:hover { border-color: var(--cyan); background: rgba(95,215,215,.08); }
 .att-list { display: flex; flex-wrap: wrap; gap: 8px; }
 /* A draft's files that a reload could not keep (drafts.js): said above the box until it is read. */
