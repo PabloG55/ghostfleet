@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 23aa487142c9
+// CLIENT-HASH: e726c6c0627b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -475,7 +475,7 @@
 // v116 holds the phone's screen still (no zoom on a tap into a field, one size of composer
 // button, no page to drag), takes a conversation to its end on every send, and floats the
 // Assistant button 8px above the composer instead of over it.
-const VERSION = 'ghostfleet-v116';
+const VERSION = 'ghostfleet-v117';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
