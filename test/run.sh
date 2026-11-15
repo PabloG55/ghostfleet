@@ -25435,13 +25435,20 @@ if command -v jq >/dev/null 2>&1; then
     "'$VT/fakeagent' --resume 22222222-3333-4444-5555-666666666666" 2>/dev/null
   sleep 0.4
   rm -f "$CLAUDE_FLEET_DIR"/*.json
+  # What it is recovered OVER: the slot's record, naming a conversation the process is no
+  # longer in. A session with no record here at all is not this dir's to claim, and is given
+  # none ("hibernation judges only its own profile's fleets").
+  jq -n --arg cwd "$VT" '{session_id:"99999999-3333-4444-5555-666666666666",sock:"cf-toolbox",slot:"scratch",
+        cwd:$cwd,status:"ready",transcript:"",ts:0}' > "$CLAUDE_FLEET_DIR/99999999-3333-4444-5555-666666666666.json"
   is "veto: an id on the command line is recovered" "22222222-3333-4444-5555-666666666666" \
      "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null \
         | jq -r '.[] | select(.slot=="scratch") | .why' >/dev/null 2>&1; \
         jq -r '.session_id // empty' "$CLAUDE_FLEET_DIR"/22222222-3333-4444-5555-666666666666.json 2>/dev/null)"
   tmux -L cf-toolbox kill-session -t "=scratch" 2>/dev/null
-  # ...and a session that never had one keeps the veto rather than being given a guess.
+  # ...and a session that never had one keeps the veto rather than being given a guess: its
+  # record names the slot and no conversation.
   tmux -L cf-toolbox new-session -d -s billing-svc -c "$VT" -x 80 -y 24 "sleep 600" 2>/dev/null
+  jq -n --arg cwd "$VT" '{sock:"cf-toolbox",slot:"billing-svc",cwd:$cwd,status:"ready",ts:0}' > "$CLAUDE_FLEET_DIR/noid.json"
   sleep 0.4
   is "veto: no evidence means the veto stands" "yes" \
      "$(vyn grep -q 'no recorded conversation id' <<< "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null | jq -r '.[] | select(.slot=="billing-svc") | .why')")"
@@ -25531,6 +25538,9 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   prompt_at "$PD/$ARG.jsonl" 100
   touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$PD/$ARG.jsonl"
   tmux -L cf-acme-api new-session -d -s scratch -c "$LV/wt" -x 80 -y 24 "'$LV/fakeagent' --resume $ARG" 2>/dev/null
+  # The record its SessionStart writes. It names the same id and establishes nothing — the
+  # recorded id is never evidence (above) — but without one the session is not this dir's.
+  record cf-acme-api scratch "$ARG" "$PD/$ARG.jsonl"
   sleep 1.2
   is "live: --resume alone, nothing newer in the folder -> believed" "" "$(lwhy cf-acme-api scratch)"
   prompt_at "$PD/aaaaaaaa-4444-4444-4444-000000000004.jsonl" 0     # written after it started
@@ -25550,6 +25560,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   tmux -L cf-acme-web new-session -d -s master -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
   sleep 0.4
   record cf-acme-api master "$MSID" "$LV/lead.jsonl"
+  # Both leads are this dir's: another profile's `master` is no rival for the name.
+  record cf-acme-web master aaaaaaaa-7777-7777-7777-000000000007 "$LV/lead.jsonl"
   "$ROOT/test/helpers/live-session.sh" cf-acme-api master "$MSID" "$LV/wt" "$LV/lead.jsonl" >/dev/null
   is "lead: the threshold never takes a fleet's master"             "yes" \
      "$(lyn has_t 'never slept automatically' "$(lwhy cf-acme-api master)")"
@@ -25675,6 +25687,131 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$LP"
 else
   skip "a lead sleeps under memory pressure, behind its own switch" "tmux or jq missing"
+fi
+unset CLAUDE_FLEET_WAKE_GRACE
+
+# ── hibernation judges only its own profile's fleets ─────────────────────────
+# fleet-hibernate with no -s walks every fleet socket on the machine and reads its switches
+# and records from ONE fleet dir. Measured read-only on a machine with three profiles and the
+# leads switch on in one: a --pressure dry run from that profile offered the other two
+# profiles' leads for sleep, each `unknown` because its record was in its own dir — and the
+# dry run wrote a record for each into this dir, claiming them.
+#   Two profiles under one HOME, as the projects files describe them: the default profile owns
+# acme-api AND personal-scratch — a socket, cf-personal-scratch, that a test on the name
+# would hand to the personal profile — and the personal profile owns toolbox. Every lead is
+# idle 25h, past the 24h a lead switch defaults to; the switch is on in the personal dir only.
+# Everything runs as the personal profile. The agent is `sleep`; the launcher a wake would
+# start is a stub, so a wake that should have been refused starts nothing real.
+group "hibernation judges only its own profile's fleets"
+export CLAUDE_FLEET_WAKE_GRACE=0
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  OP="$(cd "$(mktemp -d "$TEST_RUNS.$$.ownp.XXXXXX")" && pwd -P)"
+  OPH="$OP/home"; OPW="$OPH/.claude"; OPP="$OPH/.claude-personal"
+  mkdir -p "$OPW/fleet" "$OPP/fleet" "$OPH/.config/ghostfleet" "$OP/wt" "$OP/bin"
+  printf 'acme-api\t%s\twork\npersonal-scratch\t%s\twork\n' "$OP/wt" "$OP/wt" > "$OPH/.config/ghostfleet/projects"
+  printf 'toolbox\t%s\tpersonal\n' "$OP/wt" > "$OPH/.config/ghostfleet/projects.personal"
+  for c in "$OPW" "$OPP"; do
+    jq -n --arg d "$OP/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$c/.claude.json"
+    touch "$c/fleet/hibernate.enabled"
+  done
+  touch "$OPP/fleet/hibernate-leads.enabled"
+  printf '#!/bin/sh\necho "$*" >> "%s/launched"\nexec sleep 600\n' "$OP" > "$OP/bin/agent-here"; chmod +x "$OP/bin/agent-here"
+  ophas() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  opyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  opup() { tmux -L "$1" has-session -t "=$2" 2>/dev/null && echo yes || echo no; }
+  # As the personal profile, from outside any fleet, with the stub launcher first on PATH.
+  op() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_PROFILE \
+             HOME="$OPH" PATH="$OP/bin:$PATH" CLAUDE_FLEET_DIR="$OPP/fleet" CLAUDE_CONFIG_DIR="$OPP" \
+             "$ROOT/bin/fleet-hibernate" "$@"; }
+  opj() {   # sock slot field [args...]: one field of that row in the JSON plan, run with no -s
+    local s="$1" l="$2" f="$3"; shift 3
+    op --json "$@" 2>/dev/null | jq -r --arg s "$s" --arg l "$l" --arg f "$f" \
+      '.[] | select(.sock==$s and .slot==$l) | .[$f] | tostring'
+  }
+  op_session() {   # sock slot id cfg-dir record-dir hours-idle
+    local tr="$OP/tr-$1-$2.jsonl"
+    node -e 'const [f,h]=process.argv.slice(1);require("fs").writeFileSync(f,JSON.stringify({type:"user",
+      message:{role:"user",content:"the last thing a person typed"},
+      timestamp:new Date(Date.now()-h*3600000).toISOString()})+"\n")' "$tr" "$6"
+    jq -n --arg id "$3" --arg s "$1" --arg l "$2" --arg tr "$tr" --arg cwd "$OP/wt" \
+      '{session_id:$id, sock:$s, slot:$l, cwd:$cwd, folder:"wt", branch:"main",
+        status:"ready", transcript:$tr, ts:0}' > "$5/$3.json"
+    PATH="$OP/bin:$PATH" tmux -L "$1" new-session -d -s "$2" -c "$OP/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    CLAUDE_CONFIG_DIR="$4" "$ROOT/test/helpers/live-session.sh" "$1" "$2" "$3" "$OP/wt" "$tr" >/dev/null
+  }
+  OPA=dddddddd-1111-1111-1111-000000000001; OPS=dddddddd-2222-2222-2222-000000000002
+  OPT=dddddddd-3333-3333-3333-000000000003; OPX=dddddddd-4444-4444-4444-000000000004
+  op_session cf-acme-api         master "$OPA" "$OPW" "$OPW/fleet" 25
+  op_session cf-personal-scratch master "$OPS" "$OPW" "$OPW/fleet" 25
+  op_session cf-personal-toolbox master "$OPT" "$OPP" "$OPP/fleet" 25
+  is "own: three fixture leads, two profiles" "yes:yes:yes" \
+     "$(opup cf-acme-api master):$(opup cf-personal-scratch master):$(opup cf-personal-toolbox master)"
+
+  # ── no -s: the other profile's leads are listed, never judged ──
+  is "own: another profile's lead idle 25h stays up under --pressure, with no -s" "false" \
+     "$(opj cf-acme-api master would_sleep --pressure --dry-run)"
+  is "...and the row says it is not this profile's" "yes" \
+     "$(opyn ophas "not this profile's fleet — its project's records and switches are in $OPW/fleet" "$(opj cf-acme-api master why --pressure --dry-run)")"
+  is "own: a default-profile socket named like a personal one stays up too" "false" \
+     "$(opj cf-personal-scratch master would_sleep --pressure --dry-run)"
+  is "own: this profile's own lead, past its threshold, still sleeps" "true" \
+     "$(opj cf-personal-toolbox master would_sleep --pressure --dry-run)"
+  op --pressure --dry-run > "$OP/dry" 2>&1
+  is "...in the text plan, as stays up" "yes" "$(opyn grep -q "^cf-acme-api  *master  *unknown .*stays up — not this profile's fleet" "$OP/dry")"
+  is "...and the count says some were someone else's" "yes" "$(opyn grep -qE "^[0-9]+ of those are not this profile's fleet" "$OP/dry")"
+  is "...with no file of theirs looked for in this dir" "no" "$(opyn grep -q "$OPP/fleet/cf-acme-api\." "$OP/dry")"
+  # The dry run must not have written a record claiming the other profile's sessions.
+  is "own: a dry run writes no record here for another profile's session" "0" \
+     "$(jq -r 'select(.sock=="cf-acme-api" or .sock=="cf-personal-scratch") | .sock' "$OPP"/fleet/*.json 2>/dev/null | grep -c .)"
+
+  # ── -s naming another profile's fleet is refused ──
+  op -s cf-acme-api --pressure --dry-run > "$OP/refused" 2>&1; oprc=$?
+  is "own: -s naming another profile's fleet is refused" "2" "$oprc"
+  is "...naming the dir whose rules would apply" "yes" "$(opyn grep -q "CLAUDE_FLEET_DIR=$OPW/fleet fleet-hibernate -s cf-acme-api" "$OP/refused")"
+  is "own: -s naming this profile's own fleet still runs" "true" \
+     "$(op -s cf-personal-toolbox --pressure --dry-run --json 2>/dev/null | jq -r '.[] | select(.slot=="master") | .would_sleep')"
+
+  # ── a session of this profile's fleet with no record in this dir ──
+  # Its record is in the other profile's dir: a session running with that profile's env.
+  op_session cf-personal-toolbox api-fix "$OPX" "$OPP" "$OPW/fleet" 60
+  is "own: a session with no record here stays up, even idle 60h" "false" \
+     "$(opj cf-personal-toolbox api-fix would_sleep --idle-hours 0)"
+  is "...and says so" "yes" \
+     "$(opyn ophas "not this profile's fleet — no record of this session in $OPP/fleet" "$(opj cf-personal-toolbox api-fix why --idle-hours 0)")"
+  is "...and is not given one by the plan" "0" \
+     "$(jq -r 'select(.slot=="api-fix") | .slot' "$OPP"/fleet/*.json 2>/dev/null | grep -c .)"
+
+  # ── the opt-out still wins over the switch ──
+  touch "$OPP/fleet/cf-personal-toolbox.lead-stays-up"
+  is "own: this profile's exempt lead stays up under --pressure" "yes" \
+     "$(opyn ophas 'exempt and stays up' "$(opj cf-personal-toolbox master why --pressure --dry-run)")"
+  rm -f "$OPP/fleet/cf-personal-toolbox.lead-stays-up"
+
+  # ── a wake of another profile's marker that a wrong-dir run left here ──
+  printf '%s\t%s\t%s\t25\n' "$(date +%s)" "$OPA" "$OP/wt" > "$OPP/fleet/cf-acme-api.docs-pass.asleep"
+  op --wake docs-pass --timeout 3 > "$OP/wake" 2>&1; oprc=$?
+  is "own: a wake of another profile's marker is refused" "2" "$oprc"
+  is "...says where the marker belongs" "yes" "$(opyn grep -q "move $OPP/fleet/cf-acme-api.docs-pass.asleep into $OPW/fleet/" "$OP/wake")"
+  op -s cf-acme-api --wake docs-pass --timeout 3 > "$OP/wake" 2>&1; oprc=$?
+  is "...and so is one that names its fleet with -s" "2:yes" "$oprc:$(opyn grep -q 'move ' "$OP/wake")"
+  is "...and neither launched anything" "no:no" "$([ -f "$OP/launched" ] && echo yes || echo no):$(opup cf-acme-api docs-pass)"
+  rm -f "$OPP/fleet/cf-acme-api.docs-pass.asleep"
+
+  # ── for real, last, because it ends panes ──
+  op --pressure > "$OP/press" 2>&1
+  is "own: a real --pressure leaves the other profile's leads up" "yes:yes" \
+     "$(opup cf-acme-api master):$(opup cf-personal-scratch master)"
+  is "...and the session with no record here" "yes" "$(opup cf-personal-toolbox api-fix)"
+  is "...and sleeps this profile's own lead" "no:yes" \
+     "$(opup cf-personal-toolbox master):$([ -f "$OPP/fleet/cf-personal-toolbox.master.asleep" ] && echo yes || echo no)"
+  is "...and leaves no marker here for another profile's fleet" "0" \
+     "$(find "$OPP/fleet" -name 'cf-acme-api.*.asleep' -o -name 'cf-personal-scratch.*.asleep' | grep -c .)"
+
+  for s in cf-acme-api cf-personal-scratch cf-personal-toolbox; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "$OP"
+else
+  skip "hibernation judges only its own profile's fleets" "tmux, jq or node missing"
 fi
 unset CLAUDE_FLEET_WAKE_GRACE
 
@@ -25993,6 +26130,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   tmux -L cf-toolbox new-session -d -s acme-api -c "$HB/wt" -x 80 -y 24 "'$HB/fakeagent' --resume $HA" 2>/dev/null
   sleep 1.2; hb_tr "$HBD/$HN.jsonl" 1
   rm -f "$CLAUDE_FLEET_DIR"/*.json
+  # Only the record its SessionStart writes, of the id it was launched with: the successor is
+  # found from the transcript, not from a record of it.
+  jq -n --arg id "$HA" --arg tr "$HBD/$HA.jsonl" --arg cwd "$HB/wt" \
+    '{session_id:$id, sock:"cf-toolbox", slot:"acme-api", cwd:$cwd, status:"ready", transcript:$tr, ts:1}' > "$CLAUDE_FLEET_DIR/$HA.json"
   is "--resume of a handed-off id is still established"    "yes" "$(hb_has 'h threshold' "$(hb_plan why)")"
   is "...as the successor"                                  "$HN" "$(hb_plan session_id)"
   hb_fixture
