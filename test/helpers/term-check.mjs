@@ -365,7 +365,11 @@ else {
   await typeText(`nvim --clean -n ${FILE}`); await key('Enter');
   const drawn = await until(() => screenText().then(t => t.split('\n').filter(l => /^~\s*$/.test(l)).length >= 5 && t), 10000);
   is('term-ui: nvim draws its screen in the browser (the ~ filler rows)', true, !!drawn);
-  is('...with the file name on it', true, !!drawn && drawn.includes(FILE));
+  // The `~` rows and the file name are not one frame: nvim paints the filler first and the
+  // status/message line that names the file in a later one, so the snapshot that satisfied the
+  // row above can be a screen the name is not on yet. Wait for the name itself, bounded.
+  const named = drawn && await until(() => screenText().then(t => t.includes(FILE)), 5000);
+  is('...with the file name on it', true, !!named);
   await shot('phone-nvim');
   await typeText('ihello from nvim');
   // Each step once the last one is ON SCREEN, as a person would, and the Esc's own effect
