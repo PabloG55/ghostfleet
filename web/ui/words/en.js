@@ -285,6 +285,7 @@ export default {
   'sess.remove': 'Remove {name}',
   'sess.attach': 'Attach files or images',
   'sess.drop': 'Drop the files here…',
+  'sess.pendingAbove': 'There is a pending request above; what you write is queued until it is answered.',
   'sess.answerRequest': 'Answer the request',
   'sess.viewRequest': 'View the request',
   'sess.viewLimit': 'View usage limit',

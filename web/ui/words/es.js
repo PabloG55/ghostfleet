@@ -283,6 +283,7 @@ export default {
   'sess.remove': 'Quitar {name}',
   'sess.attach': 'Adjuntar archivos o imágenes',
   'sess.drop': 'Suelta aquí los archivos…',
+  'sess.pendingAbove': 'Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.',
   'sess.answerRequest': 'Responder al pedido',
   'sess.viewRequest': 'Ver el pedido',
   'sess.viewLimit': 'Ver límite de uso',
