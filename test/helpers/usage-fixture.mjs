@@ -25,6 +25,7 @@ const decoy = { email: 'decoy-owner@example.com', org: 'Decoy Org Ltd', accessTo
 const win = (pct, resets, at) => ({ pct, resets, at });
 const acct = (o) => ({ id: 'id-' + Math.random().toString(16).slice(2, 10), added_at: NOW - 30 * 24 * H, ...decoy, ...o });
 
+put(path.join(home, '.config/ghostfleet/local-trust'), 'off\n');
 put(path.join(home, '.config/ghostfleet/projects'), 'acme-api\t~/src/acme-api\twork\ntoolbox\t~/src/toolbox\tpersonal\n');
 const sw = path.join(home, '.config/ghostfleet/accounts.enabled');
 put(sw, off ? 'off\n' : 'on\n');   // written either way: with no file, an install holding an accounts.json reads as on

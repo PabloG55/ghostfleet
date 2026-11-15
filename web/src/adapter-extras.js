@@ -5,6 +5,7 @@ import * as api from '../api.js';
 import * as passkey from '../passkey.js';
 import { ACTIONS, EVENTS, STATES, needsPasskey } from '../../lib/automations-model.mjs';
 async function assertion(purpose) {
+  if (api.localTrusted()) return null;
   if (!passkey.available() || !passkey.registered()) {
     if (passkey.bypassAllowed()) return null;
     throw new Error('Register a passkey before continuing');
