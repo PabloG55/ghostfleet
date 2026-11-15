@@ -121,9 +121,6 @@ MSG="$*"
   && printf 'child %s\n' $$ >> "$CLAUDE_FLEET_QUEUE_JOURNAL" 2>/dev/null
 [ -n "$SESSION" ] || [ "$MODE" = stranded ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
 [ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || [ "$MODE" = stranded ] || [ "$MODE" = probe ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
-# A stranded prompt outlives its session often enough: listing and discarding need none.
-[ "$MODE" = stranded ] || [ "$MODE" = discard ] || tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
-  || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 # A TAB IS NOT AN AGENT. fleet-tab's _term-*/_edit-* sessions live on this same socket
 # and run a shell, so a send would type the prompt at a shell prompt and press Enter —
 # the fleet would execute it, and the "answer" would never come because nothing here
@@ -170,6 +167,30 @@ if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
   [ -n "$_dir" ] && FLEET_DIR="$_dir"
 fi
 QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
+
+# ── A SESSION THE FLEET PUT TO SLEEP ─────────────────────────────────────────
+# Has no process (bin/fleet-hibernate), so it fails the check below — and a send to it used
+# to stop there, "no session", which to anyone looking at its card it plainly was not. It is
+# woken further down, once the checks that could refuse the send have run (see "a sleeping
+# session is woken first"); here it is only told apart from a session that does not exist.
+#   THE MARKER IS IN THE TARGET FLEET'S DIRECTORY, resolved just above; the caller's would
+# answer for a different profile. EXISTENCE BY `=`: a bare target matches by prefix, so a
+# sleeping `billing` would have been "found" as a live `billing-svc`, and typed into.
+#   What only reads does not wake: --would-queue says `asleep`, and --list-queue, --unqueue
+# and --requeue touch the queue file alone (a requeue's delivery is a --dequeue, which does).
+# A stranded prompt outlives its session often enough: listing and discarding need none.
+ASLEEP=0
+if [ "$MODE" != stranded ] && [ "$MODE" != discard ] \
+   && ! tmux -L "$SOCK" has-session -t "=$SESSION" 2>/dev/null && [ -f "$FLEET_DIR/$SOCK.$SESSION.asleep" ]; then
+  case "$MODE" in
+    probe) echo asleep; exit 0 ;;
+    list|unqueue|requeue) ;;
+    *) ASLEEP=1 ;;
+  esac
+elif [ "$MODE" != stranded ] && [ "$MODE" != discard ]; then
+  tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
+    || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+fi
 
 # WHAT BECAME OF A DISPATCH, on its row of <sock>.sent (see "what was actually sent"). The
 # row used to be written before delivery was even attempted, so it meant "attempted" and
@@ -267,18 +288,19 @@ _qrecover() {
 
 # --stranded: one line per stranded RECORD, \x1f between fields:
 #   <session> <id> <queued-at> <prompt bytes> <kind> <still queued: 1|0>
-# kind is tmp (left by the old drain or take-back), indoubt or refused. The prompt's LENGTH,
+# kind is tmp (left by the old drain or take-back), indoubt, refused, or unwoken (sent to a
+# sleeping session whose wake failed, by a sender nobody reads). The prompt's LENGTH,
 # never its words: this is printed into inboxes and transcripts, and a prompt is the
 # owner's. "Still queued" is a copy whose original is waiting anyway — re-queueing skips it.
 # --requeue <session> <id>: back to the HEAD of its queue, where it was, skipping a record
 #   already waiting; then delivered at once if the session is idle. --discard <session> <id>.
 _stranded_id() {
   case "$1" in *[!A-Za-z0-9.-]*|.*|*..*) return 1 ;; esac
-  case "$1" in *.tmp|*.indoubt|*.refused) return 0 ;; esac
+  case "$1" in *.tmp|*.indoubt|*.refused|*.unwoken) return 0 ;; esac
   return 1
 }
 if [ "$MODE" = stranded ]; then
-  for _f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused; do
+  for _f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused "$FLEET_DIR/$SOCK".*.queue.*.unwoken; do
     [ -f "$_f" ] || continue
     _n="${_f##*/}"; _n="${_n#"$SOCK".}"; _s="${_n%.queue.*}"; _id="${_n##*.queue.}"
     _stranded_id "$_id" || continue
@@ -392,6 +414,45 @@ if [ "$ANYWAY" != 1 ] && [ "$MODE" != dequeue ] && [ "$MODE" != probe ] && [ -z 
    && why="$("$(dirname "$0")/fleet-shipped" -s "$SOCK" "$SESSION" 2>/dev/null)"; then
   echo "fleet-send: '$SESSION' already finished a task that shipped ($why) — a new task is a new session: fleet-stop --reclaim $SESSION, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway" >&2
   exit 1
+fi
+
+# ── A SLEEPING SESSION IS WOKEN FIRST ────────────────────────────────────────
+# A send that would DELIVER wakes it with the wake the card uses — a success only once the
+# session is still up a few seconds after its first prompt — and then goes on exactly as a
+# send to an idle session does. Here, after everything that could refuse the send (a tab, a
+# shipped task) and BEFORE the agent, the busy pattern and the mod are read, because each of
+# those reads the live session and there is none until this has run.
+#   A FAILED WAKE IS AN ERROR TO THE SENDER, never a silence and never a paste into nothing:
+# nothing was typed, and it says why. A sender nobody reads (CLAUDE_FLEET_SEND_REPORT, as for
+# a delivery the mod could not submit) also has its prompt KEPT — moved aside as a stranded
+# prompt that fleet-inbox lists until a person re-queues it (which wakes it again) or discards
+# it — and the failure filed with its lead, since its words exist nowhere else. One whose
+# output IS read still has them, and a second copy would come back as a duplicate.
+#   The wake's own environment is the TARGET fleet's dir and no $TMUX, so it cannot pick the
+# caller's fleet for a name that is asleep in more than one.
+if [ "$ASLEEP" = 1 ]; then
+  echo "fleet-send: '$SESSION' is asleep — waking it first" >&2
+  if _wout="$(env -u TMUX CLAUDE_FLEET_DIR="$FLEET_DIR" "$(dirname "$0")/fleet-hibernate" -s "$SOCK" --wake "$SESSION" 2>&1)"; then
+    printf '%s\n' "$_wout" | sed 's/^fleet-hibernate: /fleet-send: note — /' >&2
+  else
+    _why="$(printf '%s' "$_wout" | tr '\n' ' ' | sed 's/fleet-hibernate: //g; s/  */ /g; s/ $//')"
+    _kept=""
+    if [ -n "${CLAUDE_FLEET_SEND_REPORT:-}" ] && [ -n "$MSG" ]; then
+      _kept="$(date +%s)-$$-$RANDOM.unwoken"
+      printf '%s\x1f\x1f\x1f\x1f%s\x1f%s\n' "$(date +%s)" "$(_b64 "$MSG")" "$KIND" > "$QUEUE.$_kept" 2>/dev/null || _kept=""
+    fi
+    if [ -n "$_kept" ]; then
+      echo "fleet-send: not delivered — '$SESSION' is asleep and did not wake: ${_why:-no reason given}. Nothing was typed; the prompt is kept as $_kept (fleet-send -s $SOCK --requeue $SESSION $_kept)" >&2
+      _ib="$FLEET_DIR/$SOCK.inbox"; _p="$(head -1 "$FLEET_DIR/$SOCK.$SESSION.parent" 2>/dev/null)"
+      case "$_p" in ''|master|*[!A-Za-z0-9._~-]*) _p="" ;; esac
+      [ -n "$_p" ] && tmux -L "$SOCK" has-session -t "=$_p" 2>/dev/null && _ib="$FLEET_DIR/$SOCK.$_p.inbox"
+      printf '%s\t%s\tfailed\t%s\n' "$(date +%s)" "$SESSION" \
+        "$(printf '%s' "$CLAUDE_FLEET_SEND_REPORT not delivered — asleep and did not wake; kept as $_kept" | tr '\t\r\n' '   ' | cut -c1-300)" >> "$_ib" 2>/dev/null || true
+    else
+      echo "fleet-send: not delivered — '$SESSION' is asleep and did not wake: ${_why:-no reason given}. Nothing was typed; send it again once it is awake (fleet-hibernate -s $SOCK --wake $SESSION)" >&2
+    fi
+    exit 1
+  fi
 fi
 
 # WHICH AGENT runs the target, resolved BEFORE the reply preamble is built and reused by

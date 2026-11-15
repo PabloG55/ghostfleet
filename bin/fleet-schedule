@@ -35,6 +35,33 @@ esac
 
 sleep "$delay"
 
+# The TARGET fleet's directory, which is where its mod looks (lib/fleet-env.mjs) and where
+# its asleep marker is.
+_pdir="$FLEET_DIR"
+if command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] \
+   && _env="$(node "$BIN_DIR/../lib/fleet-env.mjs" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+  IFS=$'\x1f' read -r _ _d _ <<< "$_env"
+  [ -n "$_d" ] && _pdir="$_d"
+fi
+_kind=""; [ "$MSG" = continue ] && _kind=nudge
+
+# ── A SESSION THAT FELL ASLEEP WHILE THIS WAITED ─────────────────────────────
+# A send scheduled hours out is the one most likely to find its session hibernated, and the
+# check below used to drop it in silence: no session, nothing typed, the marker removed as if
+# it had gone out. So a sleeping one is handed to fleet-send instead, which wakes it and then
+# delivers — the same wake and the same delivery as any other send, rather than a second copy
+# of either here. --now and --anyway keep what this script has always done (it pastes, and
+# it does not second-guess the person who scheduled it). Nobody reads this process's output,
+# so it says so: a wake that fails then KEEPS the prompt where fleet-inbox lists stranded
+# prompts and files the failure for the session's lead (bin/fleet-send).
+if ! tmux -L "$SOCK" has-session -t "=$SESSION" 2>/dev/null && [ -f "$_pdir/$SOCK.$SESSION.asleep" ]; then
+  _nf=(); [ "$_kind" = nudge ] && _nf=(--nudge)
+  CLAUDE_FLEET_SEND_REPORT="a scheduled prompt" CLAUDE_FLEET_DIR="$_pdir" \
+    "$BIN_DIR/fleet-send" -s "$SOCK" --now --anyway ${_nf[@]+"${_nf[@]}"} -- "$SESSION" "$MSG" </dev/null >/dev/null 2>&1
+  rm -f "$MARK" 2>/dev/null
+  exit 0
+fi
+
 # only send if the session is still around
 if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   # bracketed paste (multi-line safe) + a beat before Enter, else the Enter lands
@@ -42,14 +69,6 @@ if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   # Marked as the fleet's before it is pasted, as fleet-send marks a paste (its _paste_marker
   # says why): typed into the box, it would otherwise read as the person's own words. The
   # default "continue" is a wake (nudge) and makes no item; a message of its own is a brief.
-  # In the TARGET fleet's directory, which is where its mod looks (lib/fleet-env.mjs).
-  _pdir="$FLEET_DIR"
-  if command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] \
-     && _env="$(node "$BIN_DIR/../lib/fleet-env.mjs" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
-    IFS=$'\x1f' read -r _ _d _ <<< "$_env"
-    [ -n "$_d" ] && _pdir="$_d"
-  fi
-  _kind=""; [ "$MSG" = continue ] && _kind=nudge
   printf '%s\t%s\t0\t%s\n' "$(($(date +%s) * 1000))" "$_kind" "${#MSG}" >> "$_pdir/$SOCK.$SESSION.pasted" 2>/dev/null || true
   tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
   tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
