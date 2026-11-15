@@ -277,6 +277,15 @@ matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
 # holding the port, and the next group dies EADDRINUSE. Six groups skipped as "server did
 # not come up" while the daemon was up the whole time on a port nobody asked for.
 free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+# The provider's read-only profile request, stood in for (test/helpers/profile-stub.mjs), for
+# the accounts groups: who a login is comes from its token, and nothing in the suite may ask
+# the real provider. Starts one under <dir> on a port it picks and prints "<pid> <api url>";
+# the caller keeps the pid and kills exactly that one, never by pattern.
+profile_stub() {
+  node "$ROOT/test/helpers/profile-stub.mjs" "$1" >/dev/null 2>&1 </dev/null & local pid=$! i=0
+  while [ ! -s "$1/port" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  printf '%s http://127.0.0.1:%s\n' "$pid" "$(cat "$1/port" 2>/dev/null)"
+}
 
 # ── waiting for a condition, instead of sleeping at a guess ──────────────────
 # This file blocked for 334.9s of an 801.6s run inside fixed sleeps — 338 calls across 137
@@ -22702,7 +22711,7 @@ if command -v node >/dev/null 2>&1; then
   UA="$(cd "$(mktemp -d "$TEST_RUNS.$$.usage.XXXXXX")" && pwd -P)"; mkdir -p "$UA/home"
   UNOW=1793109600
   uenv() { env -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_PROFILE \
-             TZ=UTC HOME="$UA/home" CLAUDE_FLEET_ACCOUNTS_CLOCK="$1" "${@:2}"; }
+             TZ=UTC HOME="$UA/home" CLAUDE_FLEET_LOGIN_STORE=file CLAUDE_FLEET_ACCOUNTS_CLOCK="$1" "${@:2}"; }
   # the endpoint's own function, over the projects this HOME lists — what fleet-serve serves
   urep() { uenv "$1" node --no-warnings --input-type=module -e "
     import { usageReport } from '$ROOT/bin/fleet-serve.mjs'; import { projects } from '$ROOT/lib/projects.mjs';
@@ -22733,9 +22742,9 @@ if command -v node >/dev/null 2>&1; then
   is "...for the profiles fleet-serve lists, and not one only a stray state file names" "work,personal" \
      "$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).profiles.map(p => p.profile).join(",")) } catch { console.log("unparsed") }' "$UA/on.json")"
   is "each state is told apart: fresh, stale, out, needs-login, blocked, over the line; the pin; all exhausted" \
-     "work:main=active,backup=stale,spare=out,extra=needs-login,old=blocked pin=main@15:47 | personal:main=exhausted,backup=exhausted exhausted=17:00" \
+     "work:main=active,backup=stale,spare=out,extra=needs-login,old=blocked pin=main | personal:main=exhausted,backup=exhausted exhausted=17:00" \
      "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-        console.log(u.profiles.map(p => `${p.profile}:${p.accounts.map(a => a.name + "=" + a.kind).join(",")}${p.pin ? ` pin=${p.pin.account}@${p.pin.until_at}` : ""}${p.exhausted ? ` exhausted=${p.exhausted.until_at}` : ""}`).join(" | ")) } catch { console.log("unparsed") }' "$UA/on.json")"
+        console.log(u.profiles.map(p => `${p.profile}:${p.accounts.map(a => a.name + "=" + a.kind).join(",")}${p.pin ? ` pin=${p.pin.account}` : ""}${p.exhausted ? ` exhausted=${p.exhausted.until_at}` : ""}`).join(" | ")) } catch { console.log("unparsed") }' "$UA/on.json")"
   is "...and the line's short forms: 5h counts down, 7d names the day, a stale reading says how old" "2h10m Sat 8h ago 97" \
      "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), w = u.profiles[0].accounts;
         console.log(w[0].five_hour.left, w[0].seven_day.day, w[1].seven_day.read, u.threshold) } catch { console.log("unparsed") }' "$UA/on.json")"
@@ -27002,8 +27011,9 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
   AC_TMUX="$TMUX_TMPDIR/acct"; mkdir -p "$AC_TMUX"
   ASOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"
-  mkdir -p "$AH/.config/ghostfleet" "$AW/fleet" "$AC/stub" "$AC/src/acme-api"
+  mkdir -p "$AH/.config/ghostfleet" "$AW/fleet" "$AC/stub" "$AC/src/acme-api" "$AC/prof"
   printf 'acme-api\t%s\twork\n' "$AC/src/acme-api" > "$AH/.config/ghostfleet/projects"
+  read -r APID AAPI < <(profile_stub "$AC/prof")
   printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$AC" > "$AC/stub/agent-here"
   chmod +x "$AC/stub/agent-here"
   # THE GROUP'S OWN CLOCK. Every row here is about which second something fell in — a
@@ -27024,6 +27034,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$AH" TMUX_TMPDIR="$AC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$AC/kc" \
            CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
+           CLAUDE_FLEET_PROFILE_API="$AAPI" FAKE_PROFILE_DIR="$AC/prof" \
            CLAUDE_FLEET_ACCOUNTS_CLOCK="$(tnow)" PATH="$AC/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
   atick() { ax node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
   atmux() { TMUX_TMPDIR="$AC_TMUX" tmux "$@"; }
@@ -27119,6 +27130,18 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts on: a rate_limit failure keeps Claude's sentence beside the word, on one line" \
      "rate_limit|You've hit your weekly limit · resets Oct 29 at 1am (America/New_York) /upgrade" \
      "$(jq -r '"\(.failure.error)|\(.failure.message)"' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)"
+  # model_not_found keeps its sentence too: it is the only place the refused model is named.
+  # Watched red on the hook before: the word with no message.
+  jq -nc --arg id eeeeeeee-0000-4000-8000-0000000000f1 --arg cwd "$AC/src/acme-api/w2" \
+     '{hook_event_name:"StopFailure", session_id:$id, cwd:$cwd, error:"model_not_found",
+       last_assistant_message:"There\u0027s an issue with the selected model (claude-fable-5-2). It may not exist or you may not have access to it."}' \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_EXPERIMENTAL_DIR \
+          HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
+  is "accounts on: a model_not_found failure keeps the sentence that names the model" \
+     "model_not_found|claude-fable-5-2" \
+     "$(jq -r '.failure.message' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null | node --input-type=module -e "
+        import { modelRefused } from '$ROOT/lib/accounts.mjs'; let t = ''; process.stdin.on('data', d => t += d).on('end', () =>
+        console.log('$(jq -r .failure.error "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)|' + (modelRefused(t) || 'none')))" 2>&1)"
   rm -f "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json"
 
   # ── 5h at the threshold, and one point under it ───────────────────────────────
@@ -27388,39 +27411,71 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts: resets a second apart are one window, where the higher figure still wins" "40" \
      "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json")"
 
-  # ── a /login by hand to a login that is NOT saved ────────────────────────────────
-  # The owner logs the config dir into dave, whom no account holds. What dave reads is not
-  # backup's, from the last tick that still saw a saved login; and while dave is live the
-  # profile is the owner's: no failover, no park, nothing relaunched onto a saved login, and
-  # what the engine parked is let go — said once. dave's 99% sits in a window that resets
+  # ── a login nobody can say whose it is ───────────────────────────────────────────
+  # The config dir holds dave's login, and the provider refuses to say whose it is (as for a
+  # token Claude Code had just been handed). What it reads is not backup's, from the last tick
+  # that still saw a known login; and while it is live the profile is the owner's: no
+  # failover, no park, nothing written over it — it may be the only working copy of a login
+  # — and what the engine parked is let go, said once. Its 99% sits in a window that resets
   # AFTER backup's, so one-window-per-account alone would hand it to backup.
-  T="$(tnow)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
+  NOID='work: on a login it cannot identify (the provider refused its access token) — failover paused until it can'
+  T="$(tnow)"; rows0="$(inbox_n "$NOID")"
   jq --argjson t "$T" --argjson r1 "$R1" '.exhausted = {since:$t, until:$r1}' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   for s in w1 w2; do printf 'governor-accounts %s\n' "$T" > "$AW/fleet/$ASOCK.$s.parked"; done
-  ax node "$FL" set "$AW" dave D1
-  # Read BEFORE the tick that notices dave, as the first minute of a hand /login always is:
-  # the second between them is what makes "the span opens at the last saved tick" matter.
+  ax node "$FL" set "$AW" dave D1; ax node "$FL" forget D1
+  # Read BEFORE the tick that notices it, as the first minute of a hand /login always is:
+  # the second between them is what makes "the span opens at the last known tick" matter.
   arec w1 "$ID1" ready 99 10 "$(tnow)" "$((R2 + 1800))"; tadv
   out="$(atick; atick)"
-  is "accounts: on an unsaved login, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
+  is "accounts: on a login it cannot identify, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
      "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(livewho)"
   is "accounts: ...exhausted clears, the engine's parks are let go, nothing is relaunched" "null none none 0" \
      "$(jq -c .exhausted "$AW/fleet/accounts.json") $(for s in w1 w2; do cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none; done | paste -sd' ' -) $(grep -c relaunch <<< "$out" || true)"
   is "accounts: ...said once over two ticks, and the span is nobody's in the history" "1 \"\"" \
-     "$(( $(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
+     "$(( $(inbox_n "$NOID") - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
   is "accounts: ...and fleet-accounts list says so, rather than calling backup active" "yes" \
-     "$(grep -q 'ON A LOGIN THAT IS NOT SAVED, failover paused' <<< "$(ax "$ROOT/bin/fleet-accounts" list)" && echo yes || echo no)"
+     "$(grep -q 'ON A LOGIN IT CANNOT IDENTIFY, failover paused until it can' <<< "$(ax "$ROOT/bin/fleet-accounts" list)" && echo yes || echo no)"
+  out="$(ax "$ROOT/bin/fleet-accounts" use work main)"; rc=$?
+  is "accounts: ...and 'use' will not write over it, and says why" "1 yes dave" \
+     "$rc $(grep -q 'could not tell whose login ~/.claude holds (the provider refused its access token), so it was not replaced' <<< "$out" && echo yes || echo "no: $out") $(livewho)"
   # Back to a saved login by hand — the one already marked active — and the engine has it again.
   rows0="$(inbox_n 'work: now on backup (a /login by hand)')"
   ax node "$FL" set "$AW" bob B4
   atick >/dev/null
   is "accounts: a /login back to the active account is adopted again, readings and all" "backup 1 \"backup\"" \
      "$(active) $(( $(inbox_n 'work: now on backup (a /login by hand)') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
-  # ...and `use` of the account marked active, while an unsaved login is live, swaps it back in
-  # rather than answering that it is already there.
-  ax node "$FL" set "$AW" dave D2; atick >/dev/null
+
+  # ── a /login by hand to an account no slot is for ────────────────────────────────
+  # The owner's report: a hand /login was filed into the account in use, so that slot then
+  # held somebody else's login under its name. It is filed by who its token says it is, and
+  # no slot is dave's: it becomes a slot of its own, held there, and backup's copy is not
+  # touched. Watched red on the code before: backup's saved login became dave's.
+  NEWS="work: a /login to an account no slot is for — saved as 'login-1' and held there"
+  rows0="$(inbox_n "$NEWS")"
+  ax node "$FL" set "$AW" dave D2
+  arec w1 "$ID1" ready 99 10 "$(tnow)" "$((R2 + 1800))"; tadv
+  atick >/dev/null; atick >/dev/null
+  is "accounts: a /login no slot is for becomes a slot of its own, held there — never filed into the one in use" \
+     "login-1 login-1 dave at-D2 bob at-B4" \
+     "$(active) $(jq -r '.pin.account // "none"' "$AW/fleet/accounts.json") $(saved login-1) $(saved backup)"
+  is "accounts: ...the reading from before the tick that saw it is nobody's: backup keeps 40, login-1 has none" "40 none" \
+     "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(jq -r '.accounts["login-1"] | if . == null then "no-slot" else (.usage.five_hour // "none") end' "$AW/fleet/accounts.json")"
+  is "accounts: ...said once over two ticks" "1" "$(( $(inbox_n "$NEWS") - rows0 ))"
+  out="$(ax "$ROOT/bin/fleet-accounts" list work)"
+  is "accounts: ...list names where it came from and how to name it" "yes" \
+     "$(grep -q 'saved from a /login (fleet-accounts add names it)' <<< "$(grep -A1 -E '^  \* login-1 ' <<< "$out")" && echo yes || echo "no: $out")"
+  out="$(ax "$ROOT/bin/fleet-accounts" add work dave)"
+  is "accounts: ...and 'add' while it is live names it: the same slot, still held, the same login, no login-1 left" \
+     "main,backup,spare,dave dave dave dave at-D2 none" \
+     "$(jq -r '.order | join(",")' "$AW/fleet/accounts.json") $(active) $(jq -r '.pin.account // "none"' "$AW/fleet/accounts.json") $(saved dave) $(saved login-1 | grep . || echo none)"
+  # `use` of the account in use, while the config dir holds a login no slot is for: that login
+  # is kept first, under a slot of its own, and then the chosen one goes back in.
+  ax node "$FL" set "$AW" erin E1
+  out="$(ax "$ROOT/bin/fleet-accounts" use work dave)"
+  is "accounts: 'use' over a login no slot is for saves it first, then puts the chosen one back" "dave erin at-E1 yes" \
+     "$(livewho) $(saved login-1) $(grep -q "saved as 'login-1' first, so it is not lost" <<< "$out" && echo yes || echo "no: $out")"
   ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
-  is "accounts: 'use' of the active account over an unsaved login puts the saved one back" "bob" "$(livewho)"
+  ax "$ROOT/bin/fleet-accounts" remove work dave >/dev/null; ax "$ROOT/bin/fleet-accounts" remove work login-1 >/dev/null
 
   # ── `use` right after a /login by hand, before the tick has looked ──────────────────
   # spare is flagged NEEDS-LOGIN (a login that failed days ago). The owner logs the config dir
@@ -27465,7 +27520,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
 
   # ── the Linux store: 0600 files beside .credentials.json ─────────────────────────
   LH="$AC/lhome"; mkdir -p "$LH/.config/ghostfleet" "$LH/.claude/fleet"; printf 'on\n' > "$LH/.config/ghostfleet/accounts.enabled"
-  lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file "$@" 2>&1; }
+  lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file \
+           CLAUDE_FLEET_PROFILE_API="$AAPI" FAKE_PROFILE_DIR="$AC/prof" "$@" 2>&1; }
   lx node "$FL" set "$LH/.claude" alice L1; lx "$ROOT/bin/fleet-accounts" add work main >/dev/null
   lx node "$FL" set "$LH/.claude" bob L2;   lx "$ROOT/bin/fleet-accounts" add work backup >/dev/null
   lx "$ROOT/bin/fleet-accounts" use work main >/dev/null
@@ -27524,6 +27580,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts on: claude-here records the login the session starts on" "$(active)" "$(cut -f1 "$AW/fleet/$ASOCK.w9.account" 2>/dev/null)"
 
   atmux -L "$ASOCK" kill-server 2>/dev/null
+  kill "$APID" 2>/dev/null
   rm -rf "${AC:?}" "${AC_TMUX:?}"
 else
   skip "accounts: several logins per profile" "tmux, jq or node missing"
@@ -27552,13 +27609,15 @@ fi
 group "accounts planner: spend the allowance that expires first"
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.plan.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
-  PC_TMUX="$TMUX_TMPDIR/plan"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  PC_TMUX="$TMUX_TMPDIR/plan"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof"
   printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
   PSOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"; T=1900000000; H=3600; CLK=$T
   px() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$PH" TMUX_TMPDIR="$PC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$PC/kc" \
            CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE="${PGRACE:-0}" \
+           CLAUDE_FLEET_PROFILE_API="$PAPI" FAKE_PROFILE_DIR="$PC/prof" \
            CLAUDE_FLEET_ACCOUNTS_CLOCK="$CLK" PATH="$ROOT/bin:$PATH" "$@" 2>&1; }
   # ptick <clock> — one governor tick at that second; prints the account in use after it
   ptick() { CLK="$1" px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; pst '.active'; }
@@ -27625,15 +27684,22 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   r1="$(ptick $((T + 60)))"; rd backup 20 $((T + 24*H)) $((T - H))
   is "planner: a week ending 3h sooner is not worth a switch; one ending 6h sooner is" "main backup" "$r1 $(ptick $((T + 120)))"
 
-  # ── a by-hand `use` holds against the planner for two hours, but not past running out ──
+  # ── a by-hand `use` holds against the planner until it is handed back, not past running out ──
+  # The owner's "bro u switch me again, change it back": a choice by hand lasted two hours,
+  # and the planner then put the profile back where the owner had moved it from. It holds
+  # until that account reaches the line, or `fleet-accounts auto` hands it back. Watched red
+  # on the code before: main at 2h01m.
   fresh main backup
   prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T"; rd backup 20 $((T + 100*H)) $((T - H))
   ptick "$T" >/dev/null          # main's reading in, while main is the one it can be credited to
   CLK=$T px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
   out="$(CLK=$((T + 20*60)) px "$ROOT/bin/fleet-accounts" list work)"
-  is "planner: a by-hand 'use' is kept 2h (past the hold), then the earlier week wins again" "backup backup main" \
-     "$(pst .active) $(ptick $((T + 20*60))) $(ptick $((T + 2*H + 60)))"
-  is "planner: ...and list says it is pinned and until when" "yes" "$(grep -q "on 'backup' by hand until" <<< "$out" && echo yes || echo "no: $out")"
+  r="$(pst .active) $(ptick $((T + 20*60))) $(ptick $((T + 2*H + 60)))"
+  CLK=$((T + 2*H + 90)) px "$ROOT/bin/fleet-accounts" auto work >/dev/null
+  is "planner: a by-hand 'use' holds past two hours, and the earlier week wins once 'auto' hands it back" "backup backup backup main" \
+     "$r $(ptick $((T + 2*H + 120)))"
+  is "planner: ...and list says it is held, and how to hand it back" "yes" \
+     "$(grep -q "on 'backup' by hand — held there until it reaches the threshold or runs out (fleet-accounts auto work hands it back to the planner)" <<< "$out" && echo yes || echo "no: $out")"
   # A guard rather than a change (the code before also left an account at its limit): the
   # pin is a preference, so the account it holds still gives way when it runs out.
   CLK=$((T + 3*H)) px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
@@ -27682,6 +27748,7 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   jq --argjson at $((T + 600)) '.usage.at = $at' "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json"
   r2="$(ptick $((T + 660))) $(pst .accounts.main.blocked) $(pst .exhausted)"; r3="$(ptick $((T + 720))) $(pst .accounts.main.blocked)"
   is "planner: ...a reading on it afterwards clears BLOCKED and resumes, and the old failure stays spent" "main true|main null null|main null" "$r1|$r2|$r3"
+  kill "$PPID_STUB" 2>/dev/null
   rm -rf "${PC:?}"
 else
   skip "accounts planner" "jq or node missing"
@@ -27709,8 +27776,9 @@ group "accounts: never switch to an account that is out of usage"
 # needs: accounts planner: spend the allowance that expires first
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.out.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
-  PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof"
   printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
   CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
   # pfail <n> <at> <message> — session n's turn failed at <at> with rate_limit and that text,
   # as hooks/fleet-event.sh writes it
@@ -27859,9 +27927,225 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pfail 1 $((T + 60)) "You've hit your weekly limit"
   is "out: with no reset to read, out a day after the failure or until the stored 7d reset, whichever is later" \
      "backup $((T + 60 + 86400))|backup $((T + 30*H + 86400*2))" "$r1|$(ptick $((T + 120))) $(pst .accounts.main.out.until)"
+  kill "$PPID_STUB" 2>/dev/null
   rm -rf "${PC:?}"
 else
   skip "accounts: never switch to an account that is out of usage" "jq or node missing"
+fi
+
+# ── who a login is, and whose a reading is ───────────────────────────────────────
+# Four saved logins in different organizations, and an owner who could not tell which was
+# which: a hand /login filed into the slot in use, a write-back that copied one account's
+# tokens into another's slot, one account's week filed under another and kept there because
+# the later reset always won, a real early reset refused because the higher figure always
+# won, a move to an account that cannot run the model a session is on, a move to another
+# organization whose cost nobody was told, and a choice by hand undone two hours later. Who a
+# login is comes from its token now (the provider's read-only profile request, stood in for
+# by test/helpers/profile-stub.mjs), and a reading belongs to the login that took it.
+# WATCHED GOING RED on the code before this, every row below but the guard: the lie was
+# filed as backup and alice's tokens written into backup's slot; DUPLICATE, MISLABELLED and
+# "not checked" were never said, and backup was swapped in over both; 99 → 1 was refused
+# (max within a window) and the profile left main at 99; the 80% week stayed under main
+# because its reset was later; reset, models, exclude and include were unknown commands;
+# the fable session went onto backup; the org-2 account was chosen by its earlier week, and
+# planned onto; a one-account profile kept the login it was added with.
+group "accounts: a login is who its token says, and a reading is the login's that took it"
+# Runs on the planner's px, ptick, pst, pset, rd, prec and its clock (T, H): one setup.
+# needs: accounts planner: spend the allowance that expires first
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.who.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
+  PC_TMUX="$TMUX_TMPDIR/who"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof" "$PC/tr"
+  printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
+  CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  # fresh2 <name>=<who>[@<org>]… — the planner's fresh, with each login's organization named
+  fresh2() {
+    rm -rf "${PW:?}/fleet" "${PC:?}/kc"; mkdir -p "$PW/fleet"
+    local x; for x in "$@"; do
+      CLK=$((T - 3*H)) px node "$FL" set "$PW" "${x#*=}" "${x%%=*}1" >/dev/null
+      CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" add work "${x%%=*}" >/dev/null
+    done
+    CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" use work main >/dev/null
+    pset '.pin = null'; rm -f "$PW/fleet/accounts.notify" "$PW/fleet/accounts.log"
+  }
+  # obs <n> <at> <5h pct|-> <5h resets> <7d pct|-> <7d resets> [<model>] — session n's record as
+  # the mod writes it, carrying only the windows the binary still reported, and <model> as its
+  # transcript's last reply
+  obs() {
+    local id="eeeeeeee-0000-4000-8000-00000000020$1" tr="$PC/tr/$1.jsonl"
+    [ -n "${7:-}" ] && printf '{"type":"assistant","message":{"role":"assistant","model":"%s","content":[]}}\n' "$7" > "$tr"
+    jq -n --arg id "$id" --arg sock "$PSOCK" --arg slot "w$1" --arg tr "$tr" --argjson at "$2" \
+          --arg p5 "$3" --argjson r5 "$4" --arg p7 "$5" --argjson r7 "$6" \
+      '{session_id:$id, sock:$sock, slot:$slot, status:"ready", ts:$at, transcript:$tr,
+        usage:{at:$at, limits:({} + (if $p5 == "-" then {} else {five_hour:{pct:($p5|tonumber), resets:$r5}} end)
+                                  + (if $p7 == "-" then {} else {seven_day:{pct:($p7|tonumber), resets:$r7}} end))}}' > "$PW/fleet/$id.json"
+  }
+  fl() { CLK="${CLK:-$T}" px node "$FL" "$@"; }
+  fa() { px "$ROOT/bin/fleet-accounts" "$@"; }
+  wk() { pst ".accounts.$1.usage.seven_day // {} | \"\(.pct // \"-\") \(.resets // \"-\")\""; }
+  logn() { awk -v p="$1" 'index($0, p) {n++} END {print n+0}' < <(cat "$PW/fleet/accounts.log" 2>/dev/null); }
+
+  # ── who a login is: its token, never .claude.json ─────────────────────────────────
+  # Claude Code refreshed main's login (new tokens), and a session that started on backup
+  # wrote backup's account back into .claude.json: the file now names bob over alice's
+  # tokens. Filed by the file, backup was "adopted" and alice's tokens written into its slot
+  # — two copies of one login, and the next refresh of either retires the other's.
+  fresh2 main=alice backup=bob spare=carol
+  fl set "$PW" alice A7; fl lie "$PW" bob
+  r="$(ptick $((T + 60)))"
+  is "who: a refreshed login whose .claude.json names another account is filed by its token: main stays, and its slot gets the new tokens" \
+     "main alice at-A7" "$r $(fl saved work "$PW" main)"
+  is "who: ...backup's copy is not touched, and .claude.json is put right" "bob at-backup1 alice" \
+     "$(fl saved work "$PW" backup) $(fl live "$PW" | awk '{print $1}')"
+  # A slot whose saved copy is another slot's login: the shape the old write-back left.
+  fresh2 main=alice backup=bob spare=carol
+  fl plant work "$PW" backup alice A8
+  out="$(CLK=$((T + 60)) fa list work)"
+  is "who: a slot whose saved login answers as another slot's account is DUPLICATE, and list names the other and the fix" "yes yes" \
+     "$(grep -qE '^ +backup .* DUPLICATE$' <<< "$out" && echo yes || echo "no: $out") $(grep -qF "its saved login answers as main's account — two copies of one login, and using either retires the other's; out of rotation — fleet-accounts remove work backup, then" <<< "$out" && echo yes || echo no)"
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) $((T + 60)); rd backup 10 $((T + 20*H)) $((T - H)); rd spare 10 $((T + 90*H)) $((T - H))
+  is "who: ...and it is out of rotation: main at its limit goes to spare, though backup's week ends first" "spare at-spare1" \
+     "$(ptick $((T + 120))) $(fl live "$PW" | awk '{print $2}')"
+  # ...and one whose saved login is an account no slot is for, with no `list` before the tick:
+  # the swap itself asks first.
+  fresh2 main=alice backup=bob spare=carol
+  fl plant work "$PW" backup zoe Z1
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) $((T + 60)); rd backup 10 $((T + 20*H)) $((T - H)); rd spare 10 $((T + 90*H)) $((T - H))
+  r="$(ptick $((T + 120)))"
+  out="$(CLK=$((T + 180)) fa list work)"
+  is "who: a saved login that answers as nobody's account is never put in, even by a tick no list ran before — MISLABELLED" "spare yes" \
+     "$r $(grep -qE '^ +backup .* MISLABELLED$' <<< "$out" && echo yes || echo "no: $out")"
+  # Never refreshed to ask: an access token past its expiry is not sent, and list says so.
+  fresh2 main=alice backup=bob
+  fl plant work "$PW" backup bob B9 $(( $(date +%s) * 1000 - 60000 ))
+  out="$(CLK=$((T + 60)) fa list work)"
+  is "who: an expired access token is not asked about — list says so, and nothing was sent for it" "yes 0" \
+     "$(grep -qF 'not checked: its access token has expired' <<< "$(grep -A1 -E '^ +backup ' <<< "$out")" && echo yes || echo "no: $out") $(grep -c '^at-B9 ' "$PC/prof/requests.log" 2>/dev/null || true)"
+  is "who: ...and list names each slot's organization" "yes" \
+     "$(grep -qE '^ +org org-1 · checked ' <<< "$(grep -A1 -E '^ +\* main ' <<< "$out")" && echo yes || echo "no: $out")"
+
+  # ── readings: the login's that took them ──────────────────────────────────────────
+  # The week reset early, and the reset time stayed the same: 99 → 1 in one window. The
+  # higher figure always won within a window, so the profile left an account it had a whole
+  # week on.
+  fresh2 main=alice backup=bob
+  rd backup 20 $((T + 100*H)) $((T - H))
+  pset --argjson r $((T + 30*H)) --argjson at $((T - H)) '.accounts.main.usage = {seven_day:{pct:99, resets:$r, at:$at}}'
+  obs 1 "$T" 3 $((T + 4*H)) 1 $((T + 30*H))
+  is "readings: a week reset early (99 → 1, the same reset time) is believed, and main stays in use" "main 1" \
+     "$(ptick $((T + 60))) $(pst .accounts.main.usage.seven_day.pct)"
+  # ...and a session whose binary has not seen the reset goes on writing its 96%: no 5h window
+  # (its own has passed, so the binary dropped it), written after the reset was read. No 5h
+  # window while the account's own runs is a reading from before that window began.
+  obs 2 $((T + 600)) - 0 96 $((T + 30*H))
+  is "readings: ...and a stale 96% with no 5h window, first written after the reset, is refused" "main 1" \
+     "$(ptick $((T + 660))) $(pst .accounts.main.usage.seven_day.pct)"
+  # One account's week filed under another: a later reset than the account's own, and older.
+  fresh2 main=alice backup=bob
+  rd backup 20 $((T + 100*H)) $((T - H))
+  pset --argjson r $((T + 100*H)) --argjson at $((T - 2*H)) '.accounts.main.usage = {seven_day:{pct:80, resets:$r, at:$at}}'
+  obs 1 "$T" 3 $((T + 4*H)) 10 $((T + 30*H))
+  ptick $((T + 60)) >/dev/null
+  is "readings: a week filed under the wrong account gives way to the account's own newer reading, though its reset is later" \
+     "10 $((T + 30*H))" "$(wk main)"
+  fresh2 main=alice backup=bob
+  pset --argjson r $((T + 100*H)) --argjson at $((T - 2*H)) --arg id "$(pst .accounts.backup.id)" \
+       '.accounts.main.usage = {seven_day:{pct:80, resets:$r, at:$at, id:$id}}'
+  ptick $((T + 60)) >/dev/null
+  is "readings: ...and a window that says it was another login's is dropped, with nothing to replace it" "- -" "$(wk main)"
+  # A reset nobody saw, on an account no session is on: cleared by hand.
+  fresh2 main=alice backup=bob
+  pset --argjson r5 $((T + 3*H)) --argjson r7 $((T + 90*H)) --argjson at $((T - H)) \
+       '.accounts.backup.usage = {five_hour:{pct:99, resets:$r5, at:$at}, seven_day:{pct:50, resets:$r7, at:$at}}'
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  r1="$(ptick $((T + 60))) $(pst '.exhausted != null')"
+  out="$(CLK=$((T + 120)) fa reset work backup)"
+  is "reset: an inactive account's figures, cleared by hand, and the profile can move onto it" "main true|backup null|yes" \
+     "$r1|$(ptick $((T + 180))) $(pst .exhausted)|$(grep -q 'figures cleared' <<< "$out" && echo yes || echo "no: $out")"
+
+  # ── models ────────────────────────────────────────────────────────────────────────
+  # backup cannot run fable. A move onto it put a fable session on an account that refuses
+  # every one of its turns.
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2
+  r1="$(ptick $((T + 60)))"
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-opus-5-5
+  is "models: an account lacking a model a running session uses is passed over; with no session on that model it is not" "spare|backup" \
+     "$r1|$(ptick $((T + 60)))"
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 99 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2; obs 2 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2
+  is "models: ...but it is the last resort, not never: with nothing else it is used, and the line names who cannot run" "backup 1" \
+     "$(ptick $((T + 60))) $(logn 'switched from main to backup (5h at 98%) — backup cannot run fable: w1, w2 are on it')"
+  out="$(CLK=$((T + 120)) fa list work)"
+  is "models: ...and list says what it lacks" "yes" "$(grep -q 'lacks fable' <<< "$(grep -A1 -E '^ +\* backup ' <<< "$out")" && echo yes || echo "no: $out")"
+  # Learned from the refusal itself: the binary's sentence names the model.
+  fresh2 main=alice backup=bob spare=carol
+  rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa use work backup >/dev/null; CLK=$T fa auto work >/dev/null
+  obs 1 $((T + 1000)) 10 $((T + 4*H)) 10 $((T + 150*H)) claude-fable-5-2
+  jq --argjson at $((T + 1000)) '. + {failure:{error:"model_not_found", at:$at, message:"There'"'"'s an issue with the selected model (claude-fable-5-2). It may not exist or you may not have access to it. Run /model to pick a different model."}}' \
+     "$PW/fleet/eeeeeeee-0000-4000-8000-000000000201.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/eeeeeeee-0000-4000-8000-000000000201.json"
+  r="$(ptick $((T + 1060))) $(ptick $((T + 1120)))"
+  is "models: a turn refused for its model teaches the account it lacks it, said once, and the profile moves off it" "fable spare spare 1" \
+     "$(pst '(.accounts.backup.without // []) | map(.model) | join(",") | if . == "" then "none" else . end') $r $(logn 'work/backup cannot run claude-fable-5-2')"
+
+  # ── exclude and include ───────────────────────────────────────────────────────────
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa exclude work backup >/dev/null
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  r1="$(ptick $((T + 60)))"
+  out="$(CLK=$((T + 120)) fa list work)"
+  CLK=$((T + 120)) fa include work backup >/dev/null
+  is "exclude: an excluded account is never chosen; include puts it back, and its earlier week wins again" "spare|yes|backup" \
+     "$r1|$(grep -qE '^ +backup .*excluded \(fleet-accounts include work backup\)$' <<< "$out" && echo yes || echo "no: $out")|$(ptick $((T + 60 + 16*60)))"
+  CLK=$((T + 20*60)) fa exclude work backup >/dev/null
+  is "exclude: ...and the account in use, excluded, is left at the next tick" "spare" "$(ptick $((T + 21*60)))"
+
+  # ── organizations: the same one first ─────────────────────────────────────────────
+  # spare is in another organization: a session moved there loses its earlier thinking
+  # ("Claude can't use thinking from another organization"). Chosen by its earlier week
+  # alone, the profile crossed while backup, in the same organization, had room.
+  fresh2 main=alice backup=bob spare=carol@org-2
+  rd backup 20 $((T + 90*H)) $((T - H)); rd spare 20 $((T + 20*H)) $((T - H))
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)); obs 2 "$T" 98 $((T + 3*H)) 10 $((T + 150*H))
+  r1="$(ptick $((T + 60)))"
+  obs 1 $((T + 1200)) 98 $((T + 4*H)) 30 $((T + 90*H)); obs 2 $((T + 1200)) 98 $((T + 4*H)) 30 $((T + 90*H))
+  is "org: a failover stays in the organization in use while it has an account with room, though another's week ends first" "backup" "$r1"
+  is "org: ...and crosses only once those are spent, saying which sessions lose their earlier thinking" "spare 1" \
+     "$(ptick $((T + 1260))) $(logn 'switched from backup to spare (5h at 98%) — another organization: w1, w2 lose their earlier thinking')"
+  fresh2 main=alice spare=carol@org-2
+  rd spare 20 $((T + 20*H)) $((T - H))
+  obs 1 "$T" 10 $((T + 4*H)) 30 $((T + 100*H))
+  is "org: a planned move never crosses organizations, however much sooner the other's week ends" "main main" \
+     "$(ptick $((T + 60))) $(ptick $((T + 2*H)))"
+
+  # ── dying logins ──────────────────────────────────────────────────────────────────
+  # Proved from the code: a slot's copy dies when it falls behind its own login's rotations,
+  # and a copy falls behind when nothing writes the live login back into it. A profile with
+  # ONE account was never written back (the tick returned before it looked), so the first
+  # swap back onto it after a second was added met a retired refresh token.
+  fresh2 main=alice
+  fl set "$PW" alice A5
+  CLK=$((T + 60)) px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; rc=$?
+  is "dying: a profile with one account still writes its rotated login back, and stays unmanaged (exit 3)" "3 alice at-A5" \
+     "$rc $(fl saved work "$PW" main)"
+  # The only thing ever asked of the provider is the profile request, and it was asked: the
+  # stub answers 404 to any other path, a token endpoint included.
+  asked="$(grep -c ' 200$' "$PC/prof/requests.log" 2>/dev/null)"; other="$(grep -c ' 404$' "$PC/prof/requests.log" 2>/dev/null)"
+  is "who: the provider was asked only for profiles, never for a token" "yes 0" \
+     "$([ "${asked:-0}" -ge 1 ] && echo yes || echo no) ${other:-0}"
+  kill "$PPID_STUB" 2>/dev/null
+  rm -rf "${PC:?}"
+else
+  skip "accounts: a login is who its token says" "jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
