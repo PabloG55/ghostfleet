@@ -23666,6 +23666,11 @@ if [ -d "$ROOT/web" ]; then
   #     and Terminal/Editor navigated away instead of pausing and resuming inside a column.
   #   - realStackChecks: the real phone client left three rows red before the follow-up fixes:
   #     metadata spread across the row, no project at the scroll edge, and wrapped composer hints.
+  #   - a message sent from up a conversation (send-scroll.mjs): on the client before it, the
+  #     session's sent message sat "712 px from the top of a 504 px box" and the assistant's, in a
+  #     full feed, 2085 px down a 437 px one. A send that used scrollIntoView, with a frame tall
+  #     enough to scroll, turned "...it is the chat that scrolled, not the window or the frame" red
+  #     ("main 82"), and the box that stopped scrolling turned "in view" red through its on-screen half.
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?
@@ -23685,6 +23690,60 @@ if [ -d "$ROOT/web" ]; then
     done < "$PHC/out"
   fi
   rm -rf "$PHC"
+else
+  skip "phone client" "web/ not present"
+fi
+
+group "phone client: the screen holds still on a touch screen, in a real browser"
+if [ -d "$ROOT/web" ]; then
+  # ── no zoom on a tap into a field, a composer's buttons of one size, a page that cannot be dragged
+  # Reported from the installed iPhone app, all three at once: the page zoomed in when the chat box
+  # took the focus, Send and attach were different sizes, and the whole page could be dragged left,
+  # right, up and down. phone-check.mjs --fit-only drives web/ui's screens with TOUCH EMULATION on,
+  # which the group above leaves off, and test/helpers/phone-fit.mjs says what each row is for.
+  #   Watched red on the client as it was (HEAD's web/, before this change): every screen with a
+  # field under 16px (the projects' filter 13px, the chat box, the searches and the dialogs' fields
+  # 14px, the assistant's 15px), all four composers' Send at 61x33 beside 46x46 buttons, and a
+  # swipe up on the top bar that moved the page 302px. The rows that were green there were broken
+  # on purpose, on a copy of the built client, and watched going red:
+  #   - a Send that widens once it has text: "typing a message moves neither the composer nor its
+  #     box", on the session and the lead, and the assistant card's (where the form keeps its rect
+  #     and the box gives up the difference, which is why that row measures both).
+  #   - the inner scrollers' overflow undone: the table and the code block "scroll sideways in
+  #     their own box" ("box 0").
+  #   - the 16px given to a mouse as well: "with a mouse the composer keeps its 14px".
+  #   - no fixed shell and no net, with a top bar 480px wide: "the document is the screen's width"
+  #     (160 at 320, 91 at 390) and "nothing runs past the screen's edge" at all four widths.
+  #   - the assistant's Send a size of its own: "...and that size is the session's".
+  #   The swipes are raw touch points (Input.dispatchTouchEvent). The first driver was
+  #   Input.synthesizeScrollGesture, which pans a page on macOS and scrolls nothing at all under
+  #   Linux's headless Chrome: there the swipe rows were green on any code, and only the row that
+  #   swipes a page built to move said so, on the Linux leg. Measured on both since: the client
+  #   before this change is red on the same 18 rows under Debian's Chromium 156 and macOS's Chrome
+  #   157, the three swipe rows among them.
+  #   The Assistant button's rows (section 5 of phone-fit.mjs): on the client before the button
+  #   measured, it sat 24 px into the text box on every session at 320 and 390 (the words being
+  #   typed ran under it), on the stack's Speak mode and Send, and at a desk on the right column's
+  #   mic; with the keyboard up it stayed by the screen's foot, 437 px below the composer. The
+  #   newest-message rows were green there, the button being low; a chat that leaves 20 px under
+  #   its list turned 12 of them red ("under the button by 21 px").
+  #   SKIPPED where there is no Chrome, like the group above.
+  PFIT="$(mktemp -d "$TEST_RUNS.$$.fit.XXXXXX")"
+  node "$ROOT/test/helpers/phone-check.mjs" --fit-only > "$PFIT/out" 2> "$PFIT/err"
+  pfitrc=$?
+  if grep -q 'no chrome' "$PFIT/out" 2>/dev/null; then
+    skip "the phone app holding still" "no chrome to look in"
+  else
+    is "phone-check --fit-only ran"     "0" "$pfitrc"
+    is "...without complaining"         ""  "$(head -2 "$PFIT/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor: a browser that fails to start emits a row or two. 140 rows when it was written, 194
+    # with the Assistant button's.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 180 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PFIT/out"
+  fi
+  rm -rf "$PFIT"
 else
   skip "phone client" "web/ not present"
 fi

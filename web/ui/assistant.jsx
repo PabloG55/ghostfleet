@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn, usePoll, toast, Modal, useRequest } from './ui.jsx';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'preact/hooks';
+import { STATUS, StatusMark, statusOf, Btn, SendBtn, usePoll, toast, Modal, useRequest } from './ui.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -68,7 +68,7 @@ export function Console({ projects, big, foot }) {
       <form class="row" onSubmit={(e) => { e.preventDefault(); const said = typed; setTyped(''); submit(said, false); }}>
         <input class="grow" value={typed} onInput={(e) => setTyped(e.currentTarget.value)}
                placeholder={big ? t('as.typeBig') : t('as.type')} />
-        <Btn kind="primary" type="submit" disabled={!typed.trim()}>{t('common.send')}</Btn>
+        <SendBtn disabled={!typed.trim()} />
       </form>
       {foot ? <div class="console-foot">{foot}{voiceOpts(S, local)}</div> : voiceOpts(S, local)}
     </div>
@@ -104,7 +104,12 @@ export function Feed({ limit, empty }) {
   const S = useAgent();
   const ref = useRef(null);
   const rows = limit ? S.feed.slice(-limit) : S.feed;
-  useEffect(() => { const n = ref.current; if (n) n.scrollTop = n.scrollHeight; }, [S.feed.length, S.interim]);
+  // To the end on every new row: what was just said and its answer. Keyed on the newest row, not
+  // the count: the feed keeps its last 61 (agent.js push), so from the 61st on its length stopped
+  // changing, and a message sent in a long conversation went in below the fold with the feed held
+  // where the reader had left it.
+  const newest = rows.length ? rows[rows.length - 1].id : 0;
+  useEffect(() => { const n = ref.current; if (n) n.scrollTop = n.scrollHeight; }, [newest, S.interim]);
   return (
     <div class="as-feed" ref={ref}>
       {!rows.length && !S.interim ? empty : null}
@@ -243,15 +248,75 @@ export function HomeAgent({ projects }) {
 // beside it wherever the person is: one started on the home page used to go on listening after
 // the page moved to a project, with no Stop on screen. That used to be a bar of its own in the
 // middle of the page, with its own Open; with the button beside it, it read as a second assistant.
+// THE BUTTON FLOATS ABOVE A COMPOSER, NEVER ON IT. Its height over a composer was a number in
+// ui.css, a guess at the composer's height: the taller box a touch screen gets (16px, so iOS does
+// not zoom on the focus) put the button over the box's top-right corner, on the words being typed,
+// and at a desk over a stack column's mic; a keyboard moved the composer up and left the button
+// where it was. So the button measures. Its bottom edge goes GAP px above the top of the highest
+// composer under it, whatever that composer's height, keyboard up or down. `bottom` counts from
+// the foot of the box a fixed element is placed in, and that foot is read back from where the dock
+// IS rather than taken to be the window's: while the keyboard is up #app is pinned to the visible
+// area (viewport.js) and the window is not. --launch-b moves the toasts and the task chip with
+// the button; --launch-h is the room the chat leaves under its newest message (ui.css).
+const GAP = 8;
+function useAboveComposers(ref) {
+  useLayoutEffect(() => {
+    const dock = ref.current, app = dock?.closest('.app');
+    if (!dock || !app || typeof ResizeObserver === 'undefined') return undefined;
+    const watched = new WeakSet(), last = {};
+    const put = (k, v) => {
+      if (last[k] === v) return;
+      last[k] = v;
+      if (v == null) app.style.removeProperty(k); else app.style.setProperty(k, v);
+    };
+    let frame = 0;
+    const place = () => {
+      frame = 0;
+      const d = dock.getBoundingClientRect();
+      if (!d.height) return;
+      put('--launch-h', `${Math.round(d.height)}px`);
+      const under = [];
+      for (const c of app.querySelectorAll('.composer')) {
+        if (!watched.has(c)) { watched.add(c); ro.observe(c); }
+        const r = c.getBoundingClientRect();
+        if (r.height > 0 && r.left < d.right && r.right > d.left) under.push(r.top);
+      }
+      if (!under.length) { put('--launch-b', null); return; }
+      const now = parseFloat(getComputedStyle(dock).bottom) || 0;
+      put('--launch-b', `${Math.round(now + d.bottom - (Math.min(...under) - GAP))}px`);
+    };
+    const soon = () => { if (!frame) frame = requestAnimationFrame(place); };
+    const ro = new ResizeObserver(soon);
+    ro.observe(dock); ro.observe(app);
+    // A composer comes and goes with the route and the tab, and a stack's columns scroll sideways
+    // under the button; a keyboard resizes the app (viewport.js), which the observer above sees.
+    const mo = new MutationObserver(soon);
+    mo.observe(app, { childList: true, subtree: true });
+    const vv = globalThis.visualViewport;
+    addEventListener('resize', soon);
+    addEventListener('scroll', soon, true);
+    vv?.addEventListener?.('resize', soon);
+    place();
+    return () => {
+      cancelAnimationFrame(frame); ro.disconnect(); mo.disconnect();
+      removeEventListener('resize', soon); removeEventListener('scroll', soon, true);
+      vv?.removeEventListener?.('resize', soon);
+      app.style.removeProperty('--launch-b'); app.style.removeProperty('--launch-h');
+    };
+  }, []);
+}
+
 export function Launcher({ onOpen }) {
   const S = useAgent();
+  const dock = useRef(null);
+  useAboveComposers(dock);
   const state = shipStateOf(S);
   const live = LIVE.includes(S.phase) || S.conversing;
   const doing = working(state);
   const word = doing ? stateWord(S, state)
     : S.conversing ? `${t('as.name')} · ${t('as.conversing')}` : t('as.name');
   return (
-    <div class={`as-dock st-${state}`}>
+    <div class={`as-dock st-${state}`} ref={dock}>
       {S.phase === 'listening' && S.vs?.hear?.ready ? <span class="vb-meter"><i style={{ width: `${Math.round(S.level * 100)}%` }} /></span> : null}
       {S.phase === 'listening' ? <button class="vb-btn" onClick={talk}><Icon name="check" /> {t('as.done')}</button> : null}
       {live ? <button class="vb-stop" onClick={stop}><Icon name="stop" /> {t('sess.stop')}</button> : null}
