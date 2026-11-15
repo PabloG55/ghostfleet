@@ -59,7 +59,7 @@ import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '.
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
 import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
-import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
+import { startAccountLogin, finishAccountLogin, accountPaneLease, accountLoginNeeds } from '../lib/account-logins.mjs';
 import * as voice from '../lib/voice.mjs';
 import { connectingUid } from '../lib/local-trust.mjs';
 
@@ -2175,7 +2175,7 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status, pla
 let pushHeld = [];
 const loginSeen = new Set();
 async function loginPushEvents() {
-  const items = loginListKept(shownToPhone());
+  const items = loginListKept(shownToPhone(), { fresh: true });
   // The subscribed phone may belong only to this Linux host. Read its peer's pending
   // logins on the same signed, scoped channel the app uses, without a second hop.
   const fan = await loginFan({ client: { id: 'push' } }, 5000);
@@ -2633,38 +2633,47 @@ async function callPeer(peer, opts, { fan = false } = {}) {
   else markPeer(peer, true);
   return r;
 }
-// PENDING SIGN-INS, READ ONCE FOR EVERYONE WHO MAY SEE THE SAME ONES. The list costs a tmux
-// call per fleet and a pane capture per session (lib/logins.mjs), and it is asked for by every
-// open client, and every few seconds by a paired machine's scan: measured at about a second a
-// call on a machine with seventeen fleets. The answer is kept for LOGINS_TTL_MS under the SET
-// OF PROJECTS it was computed for, so a reader shown fewer projects is never handed a list made
-// for one shown more. What is kept is what the endpoint already returns; it lives in this Map
-// and nowhere else — not in a log line, not in a file. A write drops it (loginsDrop).
+// PENDING SIGN-INS: THE COSTLY HALF IS READ ONCE FOR EVERYONE WHO MAY SEE THE SAME ONES. An
+// account's need is a tmux call per fleet and a pane capture per session (lib/account-logins.mjs),
+// asked for by every open client and every few seconds by a paired machine's scan: measured at
+// about a second a call on a machine with seventeen fleets. That half is kept for LOGINS_TTL_MS
+// under the SET OF PROJECTS it was computed for, so a reader shown fewer projects is never handed
+// one made for a reader shown more. It lives in this Map and nowhere else, and a write drops it.
+//   The records are NOT kept: they are a directory read, and they are written by other processes
+// (a hook capturing a sign-in, a record marked used), which no write here sees. Kept whole, a
+// sign-in captured a moment after the last read was missing from the list for up to 3 s, and one
+// in a project just hidden from a paired machine was still on it.
+//   The push watch reads the costly half fresh on every tick and leaves what it read for the
+// clients: it is what notices an account that expired, recovered and expired again, and a state
+// that lasts a second is invisible through a 3 s keep. Its tick already paid for that read.
 const LOGINS_TTL_MS = 3000;
-const loginsKept = new Map();
-function loginListKept(shown) {
+const needsKept = new Map();
+function accountNeedsKept(shown, fresh) {
   const key = shown.map(t => `${t.cfg}\0${t.sock}\0${t.name}`).sort().join('\n');
-  const hit = loginsKept.get(key);
-  if (hit && Date.now() - hit.at < LOGINS_TTL_MS) return hit.items.map(x => ({ ...x }));
-  const items = loginList(shown);
-  loginsKept.set(key, { at: Date.now(), items });
-  for (const [k, v] of loginsKept) if (Date.now() - v.at >= LOGINS_TTL_MS) loginsKept.delete(k);
-  return items.map(x => ({ ...x }));
+  const hit = needsKept.get(key);
+  if (!fresh && hit && Date.now() - hit.at < LOGINS_TTL_MS) return hit.needs;
+  const needs = accountLoginNeeds(shown);
+  needsKept.set(key, { at: Date.now(), needs });
+  for (const [k, v] of needsKept) if (Date.now() - v.at >= LOGINS_TTL_MS) needsKept.delete(k);
+  return needs;
+}
+function loginListKept(shown, { fresh = false } = {}) {
+  return loginList(shown, Date.now(), (p) => accountNeedsKept(p, fresh)).map(x => ({ ...x }));
 }
 // The other machines' half of the same question, per client it is asked on behalf of (the peer
-// scopes its answer to that client). Concurrent askers share the call that is out.
+// scopes its answer to that client). Askers at the same moment share the call that is out, and
+// nothing is kept after it: each machine keeps its own costly half, and a second keep on top of
+// it doubled how late a change on that machine was seen here.
 const loginFans = new Map();
 function loginFan(req, timeout) {
   const key = String((req.client && req.client.id) || '');
-  const hit = loginFans.get(key);
-  if (hit && (hit.run || Date.now() - hit.at < LOGINS_TTL_MS)) return hit.run || Promise.resolve(hit.r);
-  const e = { at: 0, r: null, run: null };
-  e.run = fanOut('/api/logins', req, timeout).then((r) => { e.run = null; e.r = r; e.at = Date.now(); return r; },
-    (err) => { if (loginFans.get(key) === e) loginFans.delete(key); throw err; });
-  loginFans.set(key, e);
-  return e.run;
+  const out = loginFans.get(key);
+  if (out) return out;
+  const run = fanOut('/api/logins', req, timeout).finally(() => { if (loginFans.get(key) === run) loginFans.delete(key); });
+  loginFans.set(key, run);
+  return run;
 }
-function loginsDrop() { loginsKept.clear(); loginFans.clear(); }
+function loginsDrop() { needsKept.clear(); loginFans.clear(); }
 async function fanOut(pathq, req, timeout = 8000) {
   const v = peers();
   if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
@@ -3388,7 +3397,12 @@ function agentCatalogue() {
     const fan = req.client.pair ? null : loginFan(req, 5000);     // a paired request never fans out again
     const project = url.searchParams.get('project');
     const shown = shownTo(req).filter(t => !project || t.name === project);
-    const items = loginListKept(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
+    // A paired machine's push watch asks on behalf of 'push' (loginPushEvents), and is answered
+    // fresh for the reason its own half is: a keep here sat between it and every state shorter
+    // than 3 s, so an account that expired, recovered and expired again rang once. The name is in
+    // the signed canonical string, and all it can buy is a read this machine would do anyway.
+    const fresh = !!(req.client.pair && req.client.onBehalf === 'push');
+    const items = loginListKept(shown, { fresh }).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
     for (const { peer, r } of await fan || [])
       if (r.status === 200 && Array.isArray(r.json?.items))
         for (const item of r.json.items) if (!project || project === `${item.project}@${peer.key}`)
