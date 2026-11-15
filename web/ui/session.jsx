@@ -69,7 +69,7 @@ function PromptCard({ prompt, onAnswer, busy }) {
   );
 }
 
-// The ▶ on a message. Its slot is the same size playing or not (it swaps ▶ for ■), so a bubble never
+// The play button on a message. Its slot is the same size playing or not (it swaps play for stop), so a bubble never
 // moves when one is pressed.
 function ReadBtn({ on, onClick }) {
   return (
@@ -368,7 +368,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       return null;
     } finally { setBusy(false); }
   };
-  // Speak mode and the ▶ on messages (chatvoice.js). Leaving the session stops whichever of them is
+  // Speak mode and the play button on messages (chatvoice.js). Leaving the session stops whichever of them is
   // this session's, and only this session's: an embedded stack holds several of these at once.
   const scope = `${project}/${name}`;
   const speakMode = useSpeakMode({

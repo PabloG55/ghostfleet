@@ -1,8 +1,8 @@
-// A chat that talks: the ▶ on a message, and speak mode in the composer. Both ride web/ui/voice.js
+// A chat that talks: the play button on a message, and speak mode in the composer. Both ride web/ui/voice.js
 // (the Mac's voice when the server offers it, the browser's otherwise) and speakable.js — this file
 // is the control around them, not a second way to speak.
 //
-// ONE MESSAGE PLAYS AT A TIME, for the whole app: the player in voice.js is one, so a second ▶
+// ONE MESSAGE PLAYS AT A TIME, for the whole app: the player in voice.js is one, so a second play button
 // replaces the first, and `cur` names which bubble is lit. An id is `<project>/<session>:<key>`, so
 // a session leaving the screen stops its own voice and never one that belongs to another view.
 import { useState, useEffect, useRef } from 'preact/hooks';
@@ -20,7 +20,7 @@ export function useReading() {
   return cur;
 }
 
-// Speak mode hands over the moment the person presses a ▶ themselves: its loop would otherwise wait
+// Speak mode hands over the moment the person presses a play button themselves: its loop would otherwise wait
 // for a reply that was cut off, and an `onEnd` that a replaced voice never calls.
 let takeover = null;   // a function carrying the `owner` that set it
 
