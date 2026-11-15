@@ -27463,7 +27463,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts: ...said once over two ticks" "1" "$(( $(inbox_n "$NEWS") - rows0 ))"
   out="$(ax "$ROOT/bin/fleet-accounts" list work)"
   is "accounts: ...list names where it came from and how to name it" "yes" \
-     "$(grep -A1 -E '^  \* login-1 ' <<< "$out" | grep -q 'saved from a /login (fleet-accounts add names it)' && echo yes || echo "no: $out")"
+     "$(grep -q 'saved from a /login (fleet-accounts add names it)' <<< "$(grep -A1 -E '^  \* login-1 ' <<< "$out")" && echo yes || echo "no: $out")"
   out="$(ax "$ROOT/bin/fleet-accounts" add work dave)"
   is "accounts: ...and 'add' while it is live names it: the same slot, still held, the same login, no login-1 left" \
      "main,backup,spare,dave dave dave dave at-D2 none" \
@@ -28020,9 +28020,9 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   fl plant work "$PW" backup bob B9 $(( $(date +%s) * 1000 - 60000 ))
   out="$(CLK=$((T + 60)) fa list work)"
   is "who: an expired access token is not asked about — list says so, and nothing was sent for it" "yes 0" \
-     "$(grep -A1 -E '^ +backup ' <<< "$out" | grep -qF 'not checked: its access token has expired' && echo yes || echo "no: $out") $(grep -c '^at-B9 ' "$PC/prof/requests.log" 2>/dev/null || true)"
+     "$(grep -qF 'not checked: its access token has expired' <<< "$(grep -A1 -E '^ +backup ' <<< "$out")" && echo yes || echo "no: $out") $(grep -c '^at-B9 ' "$PC/prof/requests.log" 2>/dev/null || true)"
   is "who: ...and list names each slot's organization" "yes" \
-     "$(grep -A1 -E '^ +\* main ' <<< "$out" | grep -qE '^ +org org-1 · checked ' && echo yes || echo "no: $out")"
+     "$(grep -qE '^ +org org-1 · checked ' <<< "$(grep -A1 -E '^ +\* main ' <<< "$out")" && echo yes || echo "no: $out")"
 
   # ── readings: the login's that took them ──────────────────────────────────────────
   # The week reset early, and the reset time stayed the same: 99 → 1 in one window. The
@@ -28084,7 +28084,7 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "models: ...but it is the last resort, not never: with nothing else it is used, and the line names who cannot run" "backup 1" \
      "$(ptick $((T + 60))) $(logn 'switched from main to backup (5h at 98%) — backup cannot run fable: w1, w2 are on it')"
   out="$(CLK=$((T + 120)) fa list work)"
-  is "models: ...and list says what it lacks" "yes" "$(grep -A1 -E '^ +\* backup ' <<< "$out" | grep -q 'lacks fable' && echo yes || echo "no: $out")"
+  is "models: ...and list says what it lacks" "yes" "$(grep -q 'lacks fable' <<< "$(grep -A1 -E '^ +\* backup ' <<< "$out")" && echo yes || echo "no: $out")"
   # Learned from the refusal itself: the binary's sentence names the model.
   fresh2 main=alice backup=bob spare=carol
   rd spare 20 $((T + 90*H)) $((T - H))
