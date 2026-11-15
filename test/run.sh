@@ -19005,10 +19005,12 @@ printf 'busy-other\n' > "$SV/sessions.cf-other"
 chmod +x "$SV/bin/fleet-grid.mjs"
 # WHAT THE MASTERS HOLD FOR THE OWNER (/api/waiting): each fleet's master's ledger, read beside its
 # status record. Planted around the probe and removed after it. Four records, each a way the
-# list goes wrong: demo's master holds a waiting item and a closed one; a worker on demo holds
-# a waiting item of its own (its asks reach the owner through the master, never twice); an OLDER
-# master record on demo points at a ledger whose item is the restarted session's, not this
-# one's; and other's master has a ledger with nothing held.
+# list goes wrong: demo's master holds a request waiting on the owner, the step that says what
+# they must do for it, and a closed ask; a worker on demo asked the owner something of its own
+# (its asks reach the owner through the master, never twice); an OLDER master record on demo
+# points at a ledger whose question is the restarted session's, not this one's; and other's
+# master has a ledger with nothing for the owner. The request itself is the master's own work
+# and is not listed: its step is, saying what answering it unblocks.
 svw_rec() {   # $1=id $2=sock $3=slot $4=ts
   printf '{"session_id":"%s","sock":"%s","slot":"%s","status":"ready","ts":%s}\n' "$1" "$2" "$3" "$4" > "$SV/home/.claude/fleet/$1.json"
 }
@@ -19020,11 +19022,13 @@ svw_rec svw-other cf-other master "$svw_now"
 node -e '
   const fs = require("fs"), d = process.argv[1], now = Date.now()
   const w = (id, items) => fs.writeFileSync(`${d}/${id}.ledger`, JSON.stringify({ v: 1, seq: 9, items }))
-  const waiting = (id, text, reason) => ({ id, text, at: now - 3 * 3600e3, state: "waiting", source: "user", progress: { at: now - 2 * 3600e3, reason } })
-  w("svw-master", [waiting("7", "merge #12 or wait for the review", "waits on the person: pick merge now or wait"),
-                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" }])
-  w("svw-old", [waiting("1", "the old master ask", "waits on the person: x")])
-  w("svw-worker", [waiting("1", "the worker ask", "waits on the person: y")])
+  const asked = (id, text) => ({ id, text, at: now - 3 * 3600e3, state: "open", source: "question", turnId: "t1" })
+  w("svw-master", [{ id: "7", text: "merge #12 or wait for the review", at: now - 3 * 3600e3, state: "waiting", source: "user", awaits: ["9"],
+                     progress: { at: now - 2 * 3600e3, turnId: "t1", reason: "waits on the person: pick merge now or wait" } },
+                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" },
+                   { ...asked("9", "Pick merge now or wait"), via: "step", at: now - 2 * 3600e3 }])
+  w("svw-old", [asked("1", "the old master ask")])
+  w("svw-worker", [asked("1", "the worker ask")])
   w("svw-other", [{ id: "1", text: "the fresh other ask", at: now - 60e3, state: "open", source: "user" }])
 ' "$SV/home/.claude/fleet"
 if sv_start json; then
@@ -19032,8 +19036,8 @@ if sv_start json; then
   is "the grid's JSON is served"              "200" "$(pf grid reads)"
   is "the owner's list needs a live token"     "401" "$(pf waiting.noToken reads)"
   is "...and is served with one"              "200" "$(pf waiting reads)"
-  is "a master's waiting item is on it, with what the master said it needs" "1" \
-     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="7"&&i[0].state==="waiting"&&i[0].text==="merge #12 or wait for the review"&&i[0].reason==="waits on the person: pick merge now or wait"&&i[0].since>i[0].at?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
+  is "a master's request held on the owner is on it as what the master said it needs, naming what it unblocks" "1" \
+     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="9"&&i[0].state==="question"&&i[0].text==="Pick merge now or wait"&&i[0].reason==="unblocks: merge #12 or wait for the review"?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
   is "...and a worker's, a closed one, a restarted master's and a fresh ask are not" "0" \
      "$(pb waiting reads | grep -c 'worker ask\|done ask\|old master ask\|fresh other ask' || true)"
   # The accounts line's source: behind the same token as everything else, and with this HOME's

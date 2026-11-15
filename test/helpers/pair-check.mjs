@@ -129,11 +129,12 @@ async function stop(h) {
   try { process.kill(h.kid.pid, 'SIGKILL'); } catch {}
   for (let i = 0; i < 50 && h.kid.exitCode === null && h.kid.signalCode === null; i++) await sleep(50);
 }
-// A master holding one item for the owner, on that host's work fleet dir.
+// A master holding one item for the owner, on that host's work fleet dir: a question it asked
+// them, the one kind of item that is the owner's (ledger.js forYou).
 function plantWaiting(h, sock, sid, text, fd = path.join(h.home, '.claude', 'fleet')) {
   fs.writeFileSync(path.join(fd, `${sid}.json`), JSON.stringify({ session_id: sid, sock, slot: 'master', status: 'ready', ts: Math.floor(now / 1000) }) + '\n');
   fs.writeFileSync(path.join(fd, `${sid}.ledger`), JSON.stringify({ v: 1, seq: 2, items: [
-    { id: '1', text, at: now - 3 * 3600e3, state: 'waiting', source: 'user', progress: { at: now - 2 * 3600e3, reason: 'waits on the person: pick one' } }] }));
+    { id: '1', text, at: now - 3 * 3600e3, state: 'open', source: 'question', turnId: 't1' }] }));
 }
 
 const A = await host('a', [['acme-api', 'work'], ['scratch', 'personal']]);
