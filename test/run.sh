@@ -1375,6 +1375,66 @@ is "unknown agent is not written"  "0" "$(grep -c 'notreal' "$cf" || true)"
 is "unknown agent aborts the add"  "0" "$(awk -F'\t' '$1=="bad"' "$cf" | wc -l | tr -d ' ')"
 rm -rf "$T"
 
+# ── START: a registered project's lead, by NAME ─────────────────────────────
+# The phone reaches a machine through a paired one, and a paired machine must never choose a
+# folder this one runs code in — so `add --start`, which takes a path, could not bring up the
+# lead of a project the other machine already had. `start` takes the name, looks the project up
+# in this machine's own list, and starts it exactly as `add --start` does (one start_master).
+# It refuses what it cannot know: a name it does not have, a name in two profiles, a folder
+# that is gone, and a lead that is ASLEEP — a wake brings back its conversation, a start would
+# begin a new one over it. The agent is a stub that writes what it was started as and where.
+group "fleet-project start: a registered project's lead, by name, and nothing else"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$T/.config/ghostfleet" "$T/acme-api" "$T/scratch" "$T/toolbox" "$T/billing-svc" "$T/p9" "$T/p10" "$T/stub" "$T/.claude/fleet"
+  printf 'acme-api\t%s\twork\nscratch\t%s\tpersonal\ntoolbox\t%s\twork\nbilling-svc\t%s\twork\ngone\t%s\twork\n' \
+    "$T/acme-api" "$T/scratch" "$T/toolbox" "$T/billing-svc" "$T/nowhere" > "$T/.config/ghostfleet/projects"
+  printf 'toolbox\t%s\tpersonal\n' "$T/toolbox" > "$T/.config/ghostfleet/projects.personal"
+  cat > "$T/stub/agent-here" <<'STUBEOF'
+#!/bin/sh
+printf '%s %s %s\n' "$*" "$(pwd -P)" "${CLAUDE_FLEET_PROFILE:-}" >> "$FPS_STARTED"
+exec sleep 300
+STUBEOF
+  chmod +x "$T/stub/agent-here"
+  fps() { FPS_STARTED="$T/started" PATH="$T/stub:$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  started() { local i; for i in $(seq 1 50); do [ "$(wc -l < "$T/started" 2>/dev/null | tr -d ' ')" -ge "$1" ] && break; sleep 0.1; done; sed -n "${1}p" "$T/started" 2>/dev/null; }
+  up() { tmux -L "$1" has-session -t '=master' 2>/dev/null && echo up || echo down; }
+  out="$(fps start acme-api)"; rc=$?
+  is "start: a registered project's lead starts"                 "0" "$rc"
+  is "...as its agent, named master, in its folder, on its profile" "master $T/acme-api work" "$(started 1)"
+  is "...on the project's own fleet"                              "up" "$(up cf-acme-api)"
+  out="$(fps start acme-api)"; rc=$?
+  is "start: a lead already running is left alone"               "0 yes" "$rc $(grep -q 'already running' <<< "$out" && echo yes || echo no)"
+  is "...and no second agent was started"                        "1" "$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start scratch)"; rc=$?
+  is "start: a project on another profile starts on that profile's fleet" "0 up" "$rc $(up cf-personal-scratch)"
+  is "...with that profile"                                      "master $T/scratch personal" "$(started 2)"
+  n0="$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start nope)"; rc=$?
+  is "start: a name this machine does not have is refused"       "1 yes" "$rc $(grep -q "no project 'nope'.*registered project" <<< "$out" && echo yes || echo no)"
+  out="$(fps start "$T/acme-api")"; rc=$?
+  is "start: a path is not a name"                               "1 yes" "$rc $(grep -q 'bad name' <<< "$out" && echo yes || echo no)"
+  out="$(fps start toolbox)"; rc=$?
+  is "start: a name in two profiles is refused until one is named" "1 yes down" "$rc $(grep -q 'more than one profile' <<< "$out" && echo yes || echo no) $(up cf-toolbox)"
+  out="$(fps start gone)"; rc=$?
+  is "start: a project whose folder is gone is refused"          "1 yes" "$rc $(grep -q 'not a directory' <<< "$out" && echo yes || echo no)"
+  printf '%s\n' "$(date +%s) sid-1 $T/billing-svc 30" > "$T/.claude/fleet/cf-billing-svc.master.asleep"
+  out="$(fps start billing-svc)"; rc=$?
+  is "start: an asleep lead is refused, pointing at the wake"    "1 yes down" "$rc $(grep -q 'is asleep — wake it' <<< "$out" && echo yes || echo no) $(up cf-billing-svc)"
+  is "...and none of the refusals started anything"              "$n0" "$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start toolbox --profile personal)"; rc=$?
+  is "start: --profile picks the row"                            "0 up" "$rc $(up cf-personal-toolbox)"
+  # add shares the one start_master: a plain add still exits 0, and add --start still starts.
+  out="$(fps add "$T/p9" --name p9)"; rc=$?
+  is "add without --start still exits 0 and starts nothing"      "0 down" "$rc $(up cf-p9)"
+  out="$(fps add "$T/p10" --name p10 --start)"; rc=$?
+  is "add --start still starts the lead"                         "0 up" "$rc $(up cf-p10)"
+  for k in cf-acme-api cf-personal-scratch cf-personal-toolbox cf-p10 cf-p9 cf-toolbox cf-billing-svc; do tmux -L "$k" kill-server 2>/dev/null; done
+  rm -rf "$T"
+else
+  skip "fleet-project start" "tmux missing"
+fi
+
 # ── setting the agent AFTER the project exists ──────────────────────────────
 # "the master cant be selected as open code or codex". Everything downstream of the 4th
 # column could already READ it and nothing could write one after `add` — so every project
@@ -22698,6 +22758,34 @@ rm -rf "${ACL:?}"
 # and the rows staging passes — the ones about a machine on its own, and the refusals that
 # a daemon with no pairing gives for nothing — against copies of this one broken on purpose
 # (listed in the PR).
+# A LEAD COMES UP FROM THE PHONE IN EVERY STATE IT CAN BE DOWN IN — asleep (wake), parked
+# (resume), lost (reopen) and none (start, by name) — on the machine the phone is on AND on the
+# one it reaches through a pairing (test/helpers/pair-lead-check.mjs: two real daemons, the
+# phone's own lead.js, stub verbs that move a per-project lead state). After a reboot most
+# leads are lost, and the reopen was the one verb a pairing did not forward; a reopen refused
+# on either machine also came back as a 200, so the phone said the lead was ready. Each failure
+# has its reason asserted on the phone; a start refuses a lead that a wake, a reopen or a resume
+# would bring back; nothing a start takes can name a path or a hidden project; both audit logs
+# record it; and headless Chrome at a phone's size taps "Reopen the lead" on a lost lead through
+# the pairing. Watched red against staging's daemon and client (30 of 67 rows), and against this
+# tree with the start's lead check removed (9) and with a reopen's exit status dropped (5).
+group "fleet-serve: a lead comes up from the phone in every state, here and through a pairing"
+if command -v node >/dev/null 2>&1; then
+  PLC="$(mktemp -d "$TEST_RUNS.$$.pairlead.XXXXXX")"
+  node "$ROOT/test/helpers/pair-lead-check.mjs" > "$PLC/out" 2> "$PLC/err"
+  plcrc=$?
+  is "pair-lead-check ran"            "0" "$plcrc"
+  is "...without complaining"         ""  "$(head -2 "$PLC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(grep -c "$US" "$PLC/out")" -ge 60 ] && echo yes || echo "no: $(wc -l < "$PLC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; else is "$name" "$want" "$got"; fi
+  done < "$PLC/out"
+  rm -rf "$PLC"
+else
+  skip "a lead from the phone, through a pairing" "node missing"
+fi
+
 group "fleet-serve: two machines, paired — proxied, scoped, audited on both, unpaired on both"
 if command -v node >/dev/null 2>&1; then
   PRC="$(mktemp -d "$TEST_RUNS.$$.pair.XXXXXX")"

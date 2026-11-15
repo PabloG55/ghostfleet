@@ -132,7 +132,7 @@ export function phoneAdapter({ lock, go, place }) {
   const lead = makeLead({
     grid: (project) => guard(api.getGrid(project)),
     projects: () => api.getProjects(),
-    act, remote,
+    act,
     wait: (ms) => new Promise(r => setTimeout(r, ms)),
     noLead: (project) => new Error(t('phone.noLead', { project })),
   });

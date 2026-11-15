@@ -492,7 +492,7 @@ server to server, signed with a credential the two exchanged once, at pairing.
   not answer is still listed, as one card reading `offline · last seen 3h0m ago`. It is never
   left out. With one machine, nothing on any screen changes.
 - **What crosses:** the projects list, grids, a conversation (read and send), the pane, the
-  queue, usage, and wake, park and resume. Search covers both machines, because it searches
+  queue, usage, and wake, park, resume and reopen. Search covers both machines, because it searches
   the merged list. One read exists for the hosts themselves rather than for the phone:
   `/api/presence`, two fields saying how long since someone typed there, which each host's
   push hold asks the other ([§9](#9-push)).
@@ -507,8 +507,16 @@ server to server, signed with a credential the two exchanged once, at pairing.
   lived and single use; the home ticket is bound to the caller's exact session, and the
   remote ticket to the pairing and signed caller. Ending that session or removing the
   pairing closes access. Project sharing rules apply just as they do to chat.
+- **A lead comes up from the phone in any state, on either machine.** The project page's lead
+  button wakes an asleep lead, resumes a parked one, reopens a lost one on its own
+  conversation, and starts one for a project that has none. That last is `fleet_lead_start`,
+  which takes the project's *name* only: it starts a project the other machine already has
+  registered and shares, as that project's own agent in its own checkout, with no prompt. It
+  refuses a lead a wake or a reopen would bring back, and names the verb that would. A refusal
+  shows its reason on the phone.
 - **What does not cross:** any passkey verb (a passkey only verifies on the machine it was made on), and project
-  settings. Each is refused on the home host, by name.
+  settings. Adding a project does not cross either: it takes a path, and a paired machine
+  never chooses a folder the other one runs code in. Each is refused on the home host, by name.
 
 **Keeping a project to this machine.** Each project says what a paired machine may have of it,
 set on the machine that has the project:
