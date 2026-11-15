@@ -32,6 +32,7 @@ import * as X from '../lib/experimental.mjs';
 import { keyReader } from '../lib/keys.mjs';
 import { budgetFile, budgetIgnored } from '../lib/projects.mjs';
 import { matchIndices, stepMatch, matchSpan } from '../lib/grid-search.mjs';
+import { readLimit, limitFields, noteLimit, clearLimitNote } from '../lib/pane-limit.mjs';
 import { accountLoginReason } from '../lib/account-login-shape.mjs';
 import { accountPane, accountPanePrivate } from '../lib/account-logins.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
@@ -644,17 +645,11 @@ function paneInterrupted(sock, name) {
 }
 
 function paneLimit(sock, name) {
-  const src = agentField(agentOf(name), 'limit_re_js');
-  if (!src) return null;                     // this agent has no such signal
-  let re; try { re = new RegExp(src); } catch { return null; }
+  const agent = agentOf(name);
+  const f = limitFields(agent, (k) => agentField(agent, k));
+  if (!f.re || !f.fig) return null;          // this agent has no such signal
   try {
-    const txt = accountPane(sock, name, FLEET_DIR, false);
-    if (!txt.split('\n').some(line => re.test(line))) return null;
-    // the 5h account figure, same field the governor meters (see pct_of in fleet-governor)
-    const pcts = [...txt.matchAll(/[^:0-9](\d+)%\(/g)].map(m => Number(m[1]));
-    if (!pcts.length || pcts[pcts.length - 1] < 100) return null;
-    const at = /resets\s+(\d{1,2}:\d{2}\s*[ap]m)/i.exec(txt);
-    return at ? at[1].replace(/\s+/g, '') : 'soon';
+    return readLimit(accountPane(sock, name, FLEET_DIR, false), f);
   } catch { return null; }
 }
 
@@ -1154,10 +1149,19 @@ function gather({ lead = false, sub = '' } = {}) {
     // off: those two already describe it better. A limited session looks exactly like a
     // ready one — same input box, same prompt — so nothing but the pane can tell.
     let limitAt = null;
-    if (!busy && !gone && status !== 'parked') {
+    // A non-claude agent is asked even when it reads as working: its busy detector can match a
+    // spinner line still in the scrollback, and a spent codex accepts no prompt. The pane's two
+    // signals together (the agent's sentence AND its own figure at zero) are what make that safe.
+    if ((!busy || (!ms && agent !== 'claude')) && !gone && status !== 'parked') {
       // From the mod, the limit is the engine's own 5h figure and `interrupted` is
       // already the state; neither needs the pane.
       limitAt = ms ? modLimitAt(st) : paneLimit(SOCK, s.name);
+      // Claude's Notification hook files the inbox row for its own limit; an agent without that
+      // hook gets it from the first reader that sees the pane (once per episode).
+      if (!ms && agent !== 'claude') {
+        if (limitAt) noteLimit({ dir: FLEET_DIR, sock: SOCK, name: s.name, at: limitAt });
+        else clearLimitNote({ dir: FLEET_DIR, sock: SOCK, name: s.name });
+      }
       if (limitAt) status = 'limit';
       // Limit wins if both are showing: it says WHY the session is stuck and when it
       // comes back, where "interrupted" only says it stopped.
