@@ -743,7 +743,8 @@ try {
   try { await b?.close(); } catch {}
   try { srv?.close(); } catch {}
 }
-if (!served && !rows.some(r => r.includes('no chrome'))) {
+// Not in --fit-only: that is its own group, and the stacks are the main run's to report.
+if (!served && !fitOnly && !rows.some(r => r.includes('no chrome'))) {
   try { rows.push(...await stackChecks(), ...await realStackChecks()); }
   catch (e) { is('stack checks ran to the end', '', String(e.stack || e).split('\n').slice(0, 2).join(' ')); }
 }

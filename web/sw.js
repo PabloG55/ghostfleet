@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 72b693107d43
+// CLIENT-HASH: a35f8de8dcf2
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -470,7 +470,7 @@
 // v111 gives terminal and editor the chat session's access and opens direct localhost
 // without a lock once the server proves the request is local.
 // v113 keeps the stack picker controls pinned and each tool inside its column.
-const VERSION = 'ghostfleet-v113';
+const VERSION = 'ghostfleet-v114';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
