@@ -1096,9 +1096,13 @@ const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'startin
 // under the fastest poll there is.
 const GRID_TTL_MS = 2500;
 const gridKept = new Map();          // cfg \0 sock \0 sub -> { at, r, run }
-function gridJson(t, sub = '') {
+//   A READ THAT ACTS ON WHAT IT SEES ASKS FOR `fresh` (the phone bringing a lead up decides
+// between reopen, wake, resume and start from it). It runs now, shares no run that was already
+// out (that one may predate the change it is asking about), and what it reads replaces the kept
+// one. Through the keep, a lead lost a second ago read as up and nothing was done.
+function gridJson(t, sub = '', { fresh = false } = {}) {
   const key = `${t.cfg}\0${t.sock}\0${sub}`;
-  const hit = gridKept.get(key);
+  const hit = fresh ? null : gridKept.get(key);
   if (hit && hit.run) return hit.run;
   if (hit && Date.now() - hit.at < GRID_TTL_MS) return Promise.resolve(hit.r);
   const e = { at: 0, r: null, run: null };
@@ -3347,7 +3351,7 @@ function agentCatalogue() {
     if (sub && !/^[A-Za-z0-9._~-]+$/.test(sub)) return send(res, 400, { ok: false, text: `'${sub}' is not a session name` });
     if (sub && !gridHasFlag('--sub'))
       return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --sub flag (${GRID}) — it predates nested leads; cf-sync the runtime` });
-    const r = await gridJson(t, sub);
+    const r = await gridJson(t, sub, { fresh: url.searchParams.get('fresh') === '1' });
     // §4, verbatim — no wrapper. The client reads .cards/.counts/.project off the top
     // level and decides success from the HTTP status, so an envelope here would be a
     // second shape for the same payload.

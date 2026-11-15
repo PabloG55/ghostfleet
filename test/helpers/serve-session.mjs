@@ -148,6 +148,14 @@ if (gridLog) {
   await wait(100);
   await grid();
   is('a send to a fleet makes the next read run that fleet\'s grid again', 1, runs() - g0);
+  // A read that acts on what it sees (the phone bringing a lead up) cannot be handed a grid from
+  // before a change the daemon never saw: a lead that went lost read as up through the keep.
+  g0 = runs();
+  await grid();
+  const fresh = await request(base, 'GET', '/api/grid?project=demo&fresh=1', { headers: auth });
+  is('a fresh read inside the keep runs the grid again', [200, 1], [fresh.status, runs() - g0]);
+  await grid();
+  is('...and what it read is what the next plain read is handed', 1, runs() - g0);
 
   // ── the list without its rollup, and one digest for everyone asking ──────────────────
   // What the app's own poll asks every five seconds. The rollup is a grid per fleet, so the
