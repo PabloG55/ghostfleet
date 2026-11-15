@@ -498,7 +498,7 @@ try {
       await until(() => !!document.querySelector('.sess-tools .menu-wrap .btn'));
       await b.evaluate(() => document.querySelector('.sess-tools .menu-wrap .btn').click());
       await until(() => !!document.querySelector('.sess-tools .menu'));
-      const r = { menu: await texts('.sess-tools .menu button'), tools: await texts('.sess-tools > .btn') };
+      const r = { menu: await texts('.sess-tools .menu button'), tools: await texts('.sess-acts > .btn') };
       await b.evaluate(() => document.querySelector('.sess-tools .menu-wrap .btn').click());
       return r;
     };
@@ -804,29 +804,72 @@ try {
       // then grew a row and pushed the tabs and the conversation down, 28 px at 390 wide. It also
       // said "No data" for the length of every load, which is a finding about a session and not a
       // way to say one is being read.
-      await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
-      await sleep(200);
-      await b.evaluate(() => location.reload());
-      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
-      await clickText('.auth-card button', 'without a passkey');
-      await until(() => !!document.querySelector('.main .sess-head'));
-      await sleep(700);
-      const headNow = () => b.evaluate(() => {
-        const top = (q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top) : null; };
-        const head = document.querySelector('.main .sess-head');
-        return { shapes: head.querySelectorAll('.sk-ghost').length, words: /No data/.test(head.textContent), branch: !!head.querySelector('.branch:not(.sk-ghost)'),
-                 h: Math.round(head.getBoundingClientRect().height), under: `${top('.main .tabs')} ${top('.main .chat')}` };
-      });
-      const hm = await headNow();
-      is(`${w} session, its card held 2 s: the header is not read yet`, false, hm.branch);
-      is(`${w} session: ...its state, branch, PR and controls are drawn as shapes`, true, hm.shapes >= 4 ? true : `${hm.shapes} shapes`);
-      is(`${w} session: ...and it does not say "No data" of a session it has not read`, false, hm.words);
-      await until(() => !!document.querySelector('.main .sess-head .branch:not(.sk-ghost)'));
-      await sleep(150);
-      const he = await headNow();
-      is(`${w} session: when the card lands the shapes are gone`, 0, he.shapes);
-      is(`${w} session: ...the header is the height it was`, hm.h, he.h);
-      is(`${w} session: ...and the tabs and the conversation under it have not moved`, hm.under, he.under);
+      //   IN EVERY STATE, because each state draws a different header. A working session's
+      // Interrupt and Pause pushed More 97 px along when they landed, an idle lead has neither and
+      // pulled it 82 px back, and at 390 a lead on `main` fitted its title on the line the shapes
+      // had wrapped onto two, so its header shrank 28 px; a label and a schedule made it 5 px
+      // taller; and on a desk, the line after the state went along with the state's word. [session,
+      // fixture, what its header holds]
+      const HEADS = [['api-fix', '', 'working: Interrupt and Pause'], ['master', '', 'an idle lead: no controls, a short title'],
+                     ['types', '', 'a label and a schedule'], ['rate-limit', 'grid-degraded.json', 'parked: Resume'],
+                     ['csv-export', 'grid-degraded.json', 'interrupted, the widest state']];
+      for (const [s, fx, what] of HEADS) {
+        await b.evaluate(([x, f]) => { if (f) localStorage.setItem('gf.fixture', f); else localStorage.removeItem('gf.fixture'); location.hash = x; },
+          [`#/p/acme-api/s/${s}`, fx]);
+        await sleep(200);
+        await b.evaluate(() => location.reload());
+        await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+        await clickText('.auth-card button', 'without a passkey');
+        await until(() => !!document.querySelector('.main .sess-head'));
+        await sleep(700);
+        const headNow = () => b.evaluate(() => {
+          const top = (q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top) : null; };
+          const head = document.querySelector('.main .sess-head');
+          const more = head.querySelector('.sess-tools .menu-wrap > .btn')?.getBoundingClientRect();
+          return { shapes: head.querySelectorAll('.sk-ghost').length, words: /No data/.test(head.textContent), branch: !!head.querySelector('.branch:not(.sk-ghost)'),
+                   h: Math.round(head.getBoundingClientRect().height), under: `${top('.main .tabs')} ${top('.main .chat')}`,
+                   more: more ? [Math.round(more.left), Math.round(more.top)] : null };
+        });
+        const hm = await headNow();
+        // Every box the header has drawn by now, shapes aside, by where it stands. The ship is left
+        // out while it sails: it bobs a pixel on its own, card or no card.
+        await b.evaluate(() => {
+          const head = document.querySelector('.main .sess-head');
+          const sails = (e) => { for (let x = e; x && x !== head; x = x.parentElement) if (x.getAnimations().some(a => a.effect?.target === x && a.playState === 'running')) return true; return false; };
+          window.__head = [];
+          for (const e of head.querySelectorAll('*')) {
+            if (e.closest('.sk') || !e.getClientRects().length || sails(e)) continue;
+            const r = e.getBoundingClientRect();
+            window.__head.push([e, Math.round(r.left), Math.round(r.top), String(e.className?.baseVal ?? e.className ?? '').split(' ')[0] || e.tagName.toLowerCase()]);
+          }
+        });
+        is(`${w} session ${s}, its card held 2 s: the header is not read yet`, false, hm.branch);
+        is(`${w} session ${s}: ...its state, branch, PR and controls are drawn as shapes`, true, hm.shapes >= 4 ? true : `${hm.shapes} shapes`);
+        is(`${w} session ${s}: ...and it does not say "No data" of a session it has not read`, false, hm.words);
+        await until(() => !document.querySelector('.main .sess-head .sk-ghost') && !!document.querySelector('.main .sess-head .branch'));
+        await sleep(150);
+        const he = await headNow();
+        is(`${w} session ${s}: when the card lands the shapes are gone`, 0, he.shapes);
+        is(`${w} session ${s} (${what}): ...the header is the height it was`, hm.h, he.h);
+        is(`${w} session ${s} (${what}): ...the tabs and the conversation under it have not moved`, hm.under, he.under);
+        is(`${w} session ${s} (${what}): ...and More stands where it stood`, 'still',
+          !hm.more || !he.more ? 'no More' : hm.more[0] === he.more[0] && hm.more[1] === he.more[1] ? 'still'
+            : `${he.more[0] - hm.more[0]} px across, ${he.more[1] - hm.more[1]} px down`);
+        // ...and nor does anything else it had drawn. More is the one a thumb was on its way to, and
+        // not the only thing that can stand after a word the card decides: the line of the branch
+        // and the PR went 10 to 39 px along on a desk, once More had stopped moving, because the
+        // state's word stood before it and "Interrupted" is wider than its shape.
+        is(`${w} session ${s} (${what}): ...and nothing else it had drawn has moved`, 'none moved', await b.evaluate(() => {
+          const out = [];
+          for (const [e, x, y, what] of window.__head) {
+            if (!e.isConnected || !e.getClientRects().length) continue;
+            const r = e.getBoundingClientRect(), dx = Math.round(r.left) - x, dy = Math.round(r.top) - y;
+            if (Math.abs(dx) > 1 || Math.abs(dy) > 1) out.push(`${what} ${dx} px across, ${dy} px down`);
+          }
+          return out.slice(0, 3).join(', ') || 'none moved';
+        }));
+      }
+      await b.evaluate(() => localStorage.removeItem('gf.fixture'));
     }
     await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
     await b.viewport(390, 844);

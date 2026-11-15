@@ -653,7 +653,37 @@ textarea { resize: vertical; }
 .back-link:hover { color: var(--cyan); }
 .sess-head > .back-link { margin-bottom: -4px; }
 .split-name { font-family: var(--mono); font-size: 13px; text-decoration: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* THE TITLE IS TWO LINES THAT DO NOT WRAP (session.jsx): the name, and what the card says about
+   the session, its state, branch, PR, label and schedule (.sess-meta). On a desk the second runs
+   on after the first, as it always has; on a phone it is a line of its own under the name. How
+   many lines the title wrapped to used to be the card's to decide, and the card lands after the
+   header is drawn: a lead on `main` fitted beside its name at 390 and a branch with a PR did
+   not, so the header lost or gained 28 px when the card came. Now a long name ends in an
+   ellipsis, the branch gives way next, and then the line scrolls sideways rather than wrap, so
+   the schedule's × stays in reach. The line is a chip's height, the tallest thing it can hold,
+   so a bare branch on it stands as tall as a label, and its shapes as tall as either. */
+.sess-title { flex-wrap: nowrap; }
+.sess-name { display: flex; align-items: center; gap: .7em; flex: 0 1 auto; min-width: 0; }
+.sess-name > * { flex: none; }
+.sess-name > h1 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-meta { display: flex; align-items: center; gap: .7em; flex: 1 1 0; min-width: 0; min-height: 24px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.sess-meta::-webkit-scrollbar { display: none; }
+.sess-meta > *, .sess-meta > .sk-ghost-row > * { flex: none; }
+.sess-meta > .branch { flex: 0 1 auto; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .sess-head:not(.embedded) .sess-title { flex-direction: column; align-items: stretch; }
+  .sess-head:not(.embedded) .sess-name { align-self: flex-start; max-width: 100%; }
+  .sess-head:not(.embedded) .sess-meta { flex: none; }
+}
+/* More at the row's end and the state's controls in the room before it (session.jsx): More's
+   place is the row's width, which no state changes. The controls wrap inside their own box, so
+   in a narrow stack column it is they that take a second line and not More, which stays on the
+   first; aligned to the top, so a second line of them does not take More down half a line. The
+   menu already opened leftwards from More's right edge, which now is the header's. */
+.sess-tools { display: flex; gap: 8px; align-items: flex-start; }
+.sess-acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.sess-tools > .menu-wrap { flex: none; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
 .menu > button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }

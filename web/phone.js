@@ -7909,193 +7909,201 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 					embedded ? null : /* @__PURE__ */ u(BackLink, { parent: `/p/${encodeURIComponent(project)}` }),
 					/* @__PURE__ */ u("div", {
 						class: "sess-title",
-						children: [
-							embedded ? null : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Ship, {
+						children: [embedded ? null : /* @__PURE__ */ u("span", {
+							class: "sess-name",
+							children: [/* @__PURE__ */ u(Ship, {
 								state: waiting && !card ? "idle" : st,
 								size: 32
-							}), /* @__PURE__ */ u("h1", { children: name })] }),
-							waiting && !card ? /* @__PURE__ */ u("span", {
-								class: "sk sk-ghost-row",
-								role: "status",
-								"aria-label": t("common.loading"),
-								children: [
-									/* @__PURE__ */ u("span", {
-										class: "pill sk-ghost",
-										"aria-hidden": "true",
-										children: "Working"
-									}),
-									/* @__PURE__ */ u("span", {
-										class: "branch sk-ghost",
-										"aria-hidden": "true",
-										children: [/* @__PURE__ */ u(Icon, { name: "branch" }), " feat/a-branch-name"]
-									}),
-									/* @__PURE__ */ u("span", {
-										class: "tag pr sk-ghost",
-										"aria-hidden": "true",
-										children: "PR 0000"
-									})
-								]
-							}) : /* @__PURE__ */ u(StatusPill, { status: st }),
-							card?.branch ? /* @__PURE__ */ u("span", {
-								class: "branch",
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "branch" }),
-									" ",
-									card.branch
-								]
-							}) : null,
-							card?.pr ? /* @__PURE__ */ u("span", {
-								class: "tag pr",
-								children: ["PR ", card.pr]
-							}) : null,
-							card?.label ? can("gfw_label") ? /* @__PURE__ */ u("button", {
-								class: "chip-label",
-								title: t("sess.changeLabel"),
-								onClick: () => setLabelEdit(card.label),
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "tag" }),
-									" ",
-									card.label
-								]
-							}) : /* @__PURE__ */ u("span", {
-								class: "chip-label",
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "tag" }),
-									" ",
-									card.label
-								]
-							}) : null,
-							card?.sched ? /* @__PURE__ */ u("span", {
-								class: "chip-sched",
-								title: t("sess.schedMsg", { msg: card.sched.msg || "" }),
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "clock" }),
-									" ",
-									hhmm$1(card.sched.at),
-									" · “",
-									String(card.sched.msg || "").slice(0, 30),
-									"”",
-									can("gfw_unschedule") ? /* @__PURE__ */ u("button", {
-										"aria-label": t("sess.unsched"),
-										onClick: () => act("gfw_unschedule"),
-										children: /* @__PURE__ */ u(Icon, { name: "close" })
-									}) : null
-								]
-							}) : null
-						]
+							}), /* @__PURE__ */ u("h1", { children: name })]
+						}), /* @__PURE__ */ u("span", {
+							class: "sess-meta",
+							children: [
+								waiting && !card ? /* @__PURE__ */ u("span", {
+									class: "sk sk-ghost-row",
+									role: "status",
+									"aria-label": t("common.loading"),
+									children: [
+										/* @__PURE__ */ u("span", {
+											class: "pill sk-ghost",
+											"aria-hidden": "true",
+											children: "Working"
+										}),
+										/* @__PURE__ */ u("span", {
+											class: "branch sk-ghost",
+											"aria-hidden": "true",
+											children: [/* @__PURE__ */ u(Icon, { name: "branch" }), " feat/a-branch-name"]
+										}),
+										/* @__PURE__ */ u("span", {
+											class: "tag pr sk-ghost",
+											"aria-hidden": "true",
+											children: "PR 0000"
+										})
+									]
+								}) : /* @__PURE__ */ u(StatusPill, { status: st }),
+								card?.branch ? /* @__PURE__ */ u("span", {
+									class: "branch",
+									title: card.branch,
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "branch" }),
+										" ",
+										card.branch
+									]
+								}) : null,
+								card?.pr ? /* @__PURE__ */ u("span", {
+									class: "tag pr",
+									children: ["PR ", card.pr]
+								}) : null,
+								card?.label ? can("gfw_label") ? /* @__PURE__ */ u("button", {
+									class: "chip-label",
+									title: t("sess.changeLabel"),
+									onClick: () => setLabelEdit(card.label),
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "tag" }),
+										" ",
+										card.label
+									]
+								}) : /* @__PURE__ */ u("span", {
+									class: "chip-label",
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "tag" }),
+										" ",
+										card.label
+									]
+								}) : null,
+								card?.sched ? /* @__PURE__ */ u("span", {
+									class: "chip-sched",
+									title: t("sess.schedMsg", { msg: card.sched.msg || "" }),
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "clock" }),
+										" ",
+										hhmm$1(card.sched.at),
+										" · “",
+										String(card.sched.msg || "").slice(0, 30),
+										"”",
+										can("gfw_unschedule") ? /* @__PURE__ */ u("button", {
+											"aria-label": t("sess.unsched"),
+											onClick: () => act("gfw_unschedule"),
+											children: /* @__PURE__ */ u(Icon, { name: "close" })
+										}) : null
+									]
+								}) : null
+							]
+						})]
 					}),
 					/* @__PURE__ */ u("div", {
 						class: "sess-tools",
-						children: [
-							ownerPicker({
-								project,
-								name,
-								owner,
-								onChanged: () => {
-									onChanged();
-									tr.reload();
-								}
-							}),
-							waiting && !card ? /* @__PURE__ */ u("span", {
-								class: "sk",
-								"aria-hidden": "true",
-								children: /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm sk-ghost",
-									disabled: true,
-									tabIndex: -1,
-									icon: "pause",
-									children: t("sess.pause")
-								})
-							}) : null,
-							st === "working" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_interrupt"),
-								title: t("sess.interruptHint"),
-								icon: "hand",
-								children: t("sess.interrupt")
-							}) : null,
-							st === "asleep" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_wake"),
-								icon: "sun",
-								children: t("sess.wake")
-							}) : null,
-							st === "lost" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_reopen"),
-								icon: "refresh",
-								children: t("sess.reopen")
-							}) : null,
-							card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
-								icon: parked ? "play" : "pause",
-								children: parked ? t("sess.resume") : t("sess.pause")
-							}) : null,
-							/* @__PURE__ */ u("div", {
-								class: "menu-wrap",
-								ref: menuWrap,
-								children: [/* @__PURE__ */ u(Btn, {
+						children: [/* @__PURE__ */ u("div", {
+							class: "sess-acts",
+							children: [
+								ownerPicker({
+									project,
+									name,
+									owner,
+									onChanged: () => {
+										onChanged();
+										tr.reload();
+									}
+								}),
+								waiting && !card ? /* @__PURE__ */ u("span", {
+									class: "sk",
+									"aria-hidden": "true",
+									children: /* @__PURE__ */ u(Btn, {
+										kind: "ghost sm sk-ghost",
+										disabled: true,
+										tabIndex: -1,
+										icon: "pause",
+										children: t("sess.pause")
+									})
+								}) : null,
+								st === "working" ? /* @__PURE__ */ u(Btn, {
 									kind: "ghost sm",
-									onClick: () => setMenu((m) => !m),
-									"aria-haspopup": "true",
-									"aria-expanded": menu,
-									children: [t("sess.more"), " ▾"]
-								}), menu ? /* @__PURE__ */ u("div", {
-									class: "menu",
-									children: [
-										can("gfw_label") ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setLabelEdit(card?.label || "");
-											},
-											children: [
-												/* @__PURE__ */ u(Icon, { name: "tag" }),
-												" ",
-												t("sess.setLabel")
-											]
-										}) : null,
-										can("gfw_schedule") ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setSchedOpen(true);
-											},
-											children: [
-												/* @__PURE__ */ u(Icon, { name: "clock" }),
-												" ",
-												t("sess.schedule")
-											]
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setRename(name);
-											},
-											children: t("sess.renameMenu")
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												stop(false);
-											},
-											children: t("sess.stopMenu")
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											class: "danger",
-											onClick: () => {
-												setMenu(false);
-												stop(true);
-											},
-											children: t("sess.stopRmMenu")
-										}) : null
-									]
-								}) : null]
-							})
-						]
+									disabled: busy,
+									onClick: () => act("fleet_interrupt"),
+									title: t("sess.interruptHint"),
+									icon: "hand",
+									children: t("sess.interrupt")
+								}) : null,
+								st === "asleep" ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act("fleet_wake"),
+									icon: "sun",
+									children: t("sess.wake")
+								}) : null,
+								st === "lost" ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act("fleet_reopen"),
+									icon: "refresh",
+									children: t("sess.reopen")
+								}) : null,
+								card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
+									icon: parked ? "play" : "pause",
+									children: parked ? t("sess.resume") : t("sess.pause")
+								}) : null
+							]
+						}), /* @__PURE__ */ u("div", {
+							class: "menu-wrap",
+							ref: menuWrap,
+							children: [/* @__PURE__ */ u(Btn, {
+								kind: "ghost sm",
+								onClick: () => setMenu((m) => !m),
+								"aria-haspopup": "true",
+								"aria-expanded": menu,
+								children: [t("sess.more"), " ▾"]
+							}), menu ? /* @__PURE__ */ u("div", {
+								class: "menu",
+								children: [
+									can("gfw_label") ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setLabelEdit(card?.label || "");
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "tag" }),
+											" ",
+											t("sess.setLabel")
+										]
+									}) : null,
+									can("gfw_schedule") ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setSchedOpen(true);
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "clock" }),
+											" ",
+											t("sess.schedule")
+										]
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setRename(name);
+										},
+										children: t("sess.renameMenu")
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											stop(false);
+										},
+										children: t("sess.stopMenu")
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										class: "danger",
+										onClick: () => {
+											setMenu(false);
+											stop(true);
+										},
+										children: t("sess.stopRmMenu")
+									}) : null
+								]
+							}) : null]
+						})]
 					}),
 					presence(pane.data?.here || [])
 				]
