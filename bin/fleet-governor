@@ -346,6 +346,61 @@ resources() {
   fi
 }
 
+# ── AN EMPTY PRESSURE PASS IS NOT REPEATED ───────────────────────────────────
+# `fleet-hibernate --pressure` builds a plan for every session in the fleet, and that costs
+# roughly 250 new processes per pass (a sampler counted 233 under one governor in 8 s). On a
+# machine where every exec is also paid for by security and log daemons, seventeen governors
+# each doing that once a minute kept the load average in the twenties with a third of the
+# cores busy — and every pass logged "slept 0 session(s)", for days, because the fleets held
+# nothing sleepable (tabs, leads, trust vetoes, sessions with no conversation id).
+#   Re-asking is only worth it when the answer can have changed, which is: a session came or
+# went, a session's state file was rewritten (a Stop or a prompt moves it, so going idle and
+# waking both show), the hibernation switch moved, or enough time passed for a transcript to
+# age past the idle threshold. The fingerprint is ONE tmux call and ONE stat — two processes.
+HIB_EMPTY_FP=""; HIB_EMPTY_AT=0
+HIB_RECHECK="${CLAUDE_FLEET_GOV_HIB_RECHECK:-1800}"
+gov_now() {                      # injectable so a row can age the backoff without sleeping
+  if [ -n "${CLAUDE_FLEET_GOV_CLOCK:-}" ]; then cat "$CLAUDE_FLEET_GOV_CLOCK" 2>/dev/null || date +%s
+  elif [ -n "${EPOCHSECONDS:-}" ]; then printf '%s' "$EPOCHSECONDS"
+  else date +%s; fi
+}
+hib_fingerprint() {
+  local sess files
+  sess="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)"
+  # the state files are per profile, not per fleet, so another fleet's hook also moves this.
+  # That only costs a spurious re-look, never a missed one.
+  if [ "$(uname)" = Darwin ]; then
+    files="$(stat -f '%N %m' "$FLEET_DIR"/*.json "$FLEET_DIR/hibernate.enabled" "$FLEET_DIR/$SOCK".*.asleep 2>/dev/null)"
+  else
+    files="$(stat -c '%n %Y' "$FLEET_DIR"/*.json "$FLEET_DIR/hibernate.enabled" "$FLEET_DIR/$SOCK".*.asleep 2>/dev/null)"
+  fi
+  printf '%s|%s|%s' "${CLAUDE_FLEET_HIBERNATE:-}" "$sess" "$files"
+}
+# $1 = why, for the log; $2 = optional notification, sent only when a pass really runs.
+# Always returns 0.
+hibernate_pass() {
+  local why="$1" note="${2:-}" now fp out line
+  now="$(gov_now)"; fp="$(hib_fingerprint)"
+  if [ -n "$HIB_EMPTY_FP" ] && [ "$fp" = "$HIB_EMPTY_FP" ] && [ $(( now - HIB_EMPTY_AT )) -lt "$HIB_RECHECK" ]; then
+    return 0
+  fi
+  log "resources: ${why} -> hibernating idle worker(s), oldest first"
+  [ -n "$note" ] && notify "$note"
+  if [ "$DRY" = 1 ]; then
+    log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
+    return 0
+  fi
+  out="$("$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1)"
+  while IFS= read -r line; do [ -n "$line" ] && log "  $line"; done <<< "$out"
+  if grep -q 'slept [1-9]' <<< "$out"; then
+    HIB_EMPTY_FP=""
+  else
+    HIB_EMPTY_FP="$fp"; HIB_EMPTY_AT="$now"
+    log "  nothing sleepable — next look when the fleet changes or in $(( HIB_RECHECK / 60 ))m"
+  fi
+  return 0
+}
+
 # 0 = the machine ceiling is in force and the budget tick must be SKIPPED this pass.
 # 1 = nothing doing here, carry on to the budget ceiling.
 #
@@ -356,17 +411,17 @@ resource_tick() {
   local w="" active=() n=0 fp=""
   [ "$RESOURCE" = 1 ] || return 1
 
+  # READ FIRST, EVERY TICK. The swap branch below used to run on whatever the PREVIOUS tick's
+  # reading left behind and return before the one that refreshed it — so once swap crossed the
+  # line it was never read again, and the branch fired every minute whatever the machine did.
+  resources
+
   # SWAP ALONE: hibernate, then return 1 so the budget ceiling still gets its pass. This is
   # the branch that fires on a laptop deep in swap but below the kernel's own pressure level
   # — measured at 39.6/40.0 GB used with the level still reading 2, which is to say the
   # kernel calls it critical only once the machine is already unusable.
   if [ -z "$RES_WHY" ] && [ -n "${RES_SWAP_WHY:-}" ]; then
-    log "resources: ${RES_SWAP_WHY} -> hibernating idle worker(s), oldest first"
-    if [ "$DRY" != 1 ]; then
-      "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
-    else
-      log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
-    fi
+    hibernate_pass "$RES_SWAP_WHY"
     return 1
   fi
 
@@ -416,13 +471,7 @@ resource_tick() {
       #   It is a no-op until somebody switches hibernation on; fleet-hibernate refuses
       # --apply otherwise and says so, which is the behaviour wanted on a machine where
       # ending the wrong process costs a day's work.
-      log "resources: ${RES_WHY} -> hibernating idle worker(s), oldest first"
-      notify "machine under load (${RES_WHY}) — hibernating idle sessions"
-      if [ "$DRY" != 1 ]; then
-        "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
-      else
-        log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
-      fi
+      hibernate_pass "$RES_WHY" "machine under load (${RES_WHY}) — hibernating idle sessions"
     else
       log "resources: ${RES_WHY} — all workers parked, holding for recovery"
     fi
