@@ -528,6 +528,13 @@ var en_default = {
 	"project.leadReopen": "Reopen the lead",
 	"project.leadWake": "Wake the lead",
 	"project.leadResume": "Resume the lead",
+	"project.reopenAll": "Reopen all",
+	"project.reopenAllN": "Reopen all lost ({n})",
+	"project.reopenAllTitle": "Reopen {n} lost sessions?",
+	"project.reopenAllBody": "The machine closed these sessions (a crash or a restart). Each comes back on its own conversation, in its own folder, one after another.",
+	"project.reopening": "Reopening {at} of {of}…",
+	"project.reopenAllDone": "Reopened {n} sessions",
+	"project.reopenAllSome": "Reopened {ok} of {n}: {why}",
 	"project.newSession": "New session",
 	"project.new": "New",
 	"project.readFailed": "Could not read {project}'s fleet: {why}",
@@ -682,7 +689,7 @@ var en_default = {
 	"acct.off": "accounts are off",
 	"acct.none": "accounts: no profile has an account yet",
 	"acct.exhausted": "all accounts exhausted{until} — {workers}",
-	"acct.unsaved": "on a login that is not saved — failover paused",
+	"acct.unsaved": "on a login it cannot identify — failover paused",
 	"acct.noActive": "no account is active",
 	"acct.read": "read {when}",
 	"acct.never": "never",
@@ -690,11 +697,11 @@ var en_default = {
 	"acct.title": "Claude accounts",
 	"acct.threshold": "switch at {pct}% of the 5h or 7d limit, spending the week that ends first",
 	"acct.noProfile": "no profile has an account yet — fleet-accounts add <profile> <name>",
-	"acct.profUnsaved": " — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)",
+	"acct.profUnsaved": " — ON A LOGIN IT CANNOT IDENTIFY, failover paused until it can",
 	"acct.profExhausted": " — ALL EXHAUSTED{until}, {workers}",
 	"acct.noAccounts": "(no accounts)",
 	"acct.one": "one account: nothing to fail over to yet — add another",
-	"acct.pin": "on '{account}' by hand until {at} — the planner leaves it there unless it runs out",
+	"acct.pin": "on '{account}' by hand — held there until it reaches the threshold or runs out",
 	"acct.readOnly": "read only — an account is switched at the desk: fleet-accounts use <profile> <name>",
 	"acct.activeTag": " (active)",
 	"sess.uploading": "uploading…",
@@ -702,8 +709,21 @@ var en_default = {
 	"sess.remove": "Remove {name}",
 	"sess.attach": "Attach files or images",
 	"sess.drop": "Drop the files here…",
-	"sess.pendingAbove": "There is a pending request above; what you write is queued until it is answered.",
+	"sess.answerRequest": "Answer the request",
+	"sess.viewRequest": "View the request",
+	"sess.viewLimit": "View usage limit",
+	"sess.requestReadonly": "You can view this request. A project member must answer it.",
 	"sess.writeTo": "Write to {name}…  (attach or drag a file · Enter sends)",
+	"chat.read": "Read aloud",
+	"chat.stopRead": "Stop reading",
+	"chat.speak": "Speak mode",
+	"chat.speakOff": "Turn speak mode off",
+	"chat.speakListening": "Listening — speak, then pause to send",
+	"chat.speakHearing": "Hearing you…",
+	"chat.speakSending": "Sending…",
+	"chat.speakWaiting": "Waiting for the reply…",
+	"chat.speakReading": "Reading the reply…",
+	"chat.speakNoMic": "This browser cannot listen: no microphone or recogniser.",
 	"sess.uploadingBtn": "Uploading…",
 	"sess.labelTitle": "Session label",
 	"sess.labelWhy": "A short note to recognise it at a glance, like “client urgent” or “waiting on review”. It shows on the card and in the terminal. Empty removes it.",
@@ -943,6 +963,7 @@ var en_default = {
 	"say.theLink": "the link",
 	"say.line": "line",
 	"say.goesOn": "… and it goes on.",
+	"phone.localAccess": "Local access on this computer",
 	"phone.noSensor": "No passkey on this device",
 	"phone.lockNow": "Lock now",
 	"phone.forget": "Forget the passkey",
@@ -1267,6 +1288,23 @@ var en_default = {
 	"phone.reasonNeeded": "Flagged steps need a written reason",
 	"phone.queueState.waiting": "Waiting",
 	"phone.queueState.replied": "Replied",
+	"phone.queueState.question": "Question for you",
+	"phone.questionN": "question {num}",
+	"phone.explain": "Explain",
+	"phone.explained": "explained",
+	"phone.explainedBy": "explained by {session}",
+	"phone.explainAsking": "Asked {session} to explain it. The explanation appears here when it answers.",
+	"phone.explainQueued": "{session} is busy, so the request waits for its current turn to end and nothing is interrupted. The explanation appears here.",
+	"phone.explainFailed": "Could not ask: {why}",
+	"phone.explainRetry": "Try again",
+	"phone.explainAgain": "Ask for a new explanation",
+	"phone.explainGone": "This no longer waits on you: it was answered or closed.",
+	"phone.answerIt": "Your answer",
+	"phone.answerOwnWords": "Or answer in your own words",
+	"phone.answerWords": "Answer in your own words",
+	"phone.answered": "Answered",
+	"phone.answerNotMarked": "Sent, but the list could not mark it answered: {why}",
+	"phone.replyHintYours": "Sent to the session quoting this item, and it counts as your answer.",
 	"phone.cardHeld": "Held",
 	"phone.signInFailed": "Sign-in failed",
 	"phone.stackPlace": "Stacks",
@@ -1380,6 +1418,13 @@ var es_default = {
 	"project.leadReopen": "Reabrir el líder",
 	"project.leadWake": "Despertar al líder",
 	"project.leadResume": "Reanudar al líder",
+	"project.reopenAll": "Reabrir todas",
+	"project.reopenAllN": "Reabrir las perdidas ({n})",
+	"project.reopenAllTitle": "¿Reabrir {n} sesiones perdidas?",
+	"project.reopenAllBody": "La máquina cerró estas sesiones (un fallo o un reinicio). Cada una vuelve con su propia conversación, en su propia carpeta, una tras otra.",
+	"project.reopening": "Reabriendo {at} de {of}…",
+	"project.reopenAllDone": "Se reabrieron {n} sesiones",
+	"project.reopenAllSome": "Se reabrieron {ok} de {n}: {why}",
 	"project.newSession": "Nueva sesión",
 	"project.new": "Nueva",
 	"project.readFailed": "No se pudo leer la flota de {project}: {why}",
@@ -1534,7 +1579,7 @@ var es_default = {
 	"acct.off": "las cuentas están desactivadas",
 	"acct.none": "cuentas: ningún perfil tiene cuenta todavía",
 	"acct.exhausted": "todas las cuentas agotadas{until} — {workers}",
-	"acct.unsaved": "con un inicio de sesión no guardado — cambio automático en pausa",
+	"acct.unsaved": "con un inicio de sesión que no puede identificar — cambio automático en pausa",
 	"acct.noActive": "ninguna cuenta está activa",
 	"acct.read": "leído {when}",
 	"acct.never": "nunca",
@@ -1542,11 +1587,11 @@ var es_default = {
 	"acct.title": "Cuentas de Claude",
 	"acct.threshold": "cambia al {pct}% del límite de 5h o de 7d, gastando primero la semana que termina antes",
 	"acct.noProfile": "ningún perfil tiene cuenta todavía — fleet-accounts add <perfil> <nombre>",
-	"acct.profUnsaved": " — CON UN INICIO DE SESIÓN NO GUARDADO, cambio automático en pausa (fleet-accounts add para manejarlo)",
+	"acct.profUnsaved": " — CON UN INICIO DE SESIÓN QUE NO PUEDE IDENTIFICAR, cambio automático en pausa hasta que pueda",
 	"acct.profExhausted": " — TODAS AGOTADAS{until}, {workers}",
 	"acct.noAccounts": "(sin cuentas)",
 	"acct.one": "una sola cuenta: todavía no hay a cuál cambiar — agrega otra",
-	"acct.pin": "en '{account}' a mano hasta {at} — el planificador la deja ahí salvo que se agote",
+	"acct.pin": "en '{account}' a mano — se queda ahí hasta que llegue al umbral o se agote",
 	"acct.readOnly": "solo lectura — la cuenta se cambia en la computadora: fleet-accounts use <perfil> <nombre>",
 	"acct.activeTag": " (activa)",
 	"sess.uploading": "subiendo…",
@@ -1554,8 +1599,21 @@ var es_default = {
 	"sess.remove": "Quitar {name}",
 	"sess.attach": "Adjuntar archivos o imágenes",
 	"sess.drop": "Suelta aquí los archivos…",
-	"sess.pendingAbove": "Tiene un pedido pendiente arriba; lo que escribas queda en cola hasta responderlo.",
+	"sess.answerRequest": "Responder al pedido",
+	"sess.viewRequest": "Ver el pedido",
+	"sess.viewLimit": "Ver límite de uso",
+	"sess.requestReadonly": "Puedes ver este pedido. Debe responderlo un miembro del proyecto.",
 	"sess.writeTo": "Escríbele a {name}…  (adjunta o arrastra un archivo · Enter envía)",
+	"chat.read": "Leer en voz alta",
+	"chat.stopRead": "Dejar de leer",
+	"chat.speak": "Modo voz",
+	"chat.speakOff": "Apagar el modo voz",
+	"chat.speakListening": "Escuchando — habla y haz una pausa para enviar",
+	"chat.speakHearing": "Te escucho…",
+	"chat.speakSending": "Enviando…",
+	"chat.speakWaiting": "Esperando la respuesta…",
+	"chat.speakReading": "Leyendo la respuesta…",
+	"chat.speakNoMic": "Este navegador no puede escuchar: no hay micrófono ni reconocedor.",
 	"sess.uploadingBtn": "Subiendo…",
 	"sess.labelTitle": "Etiqueta de la sesión",
 	"sess.labelWhy": "Una nota corta para reconocerla de un vistazo, como “urgente cliente” o “esperando revisión”. Se ve en la tarjeta y en la terminal. Vacía la quita.",
@@ -1795,6 +1853,7 @@ var es_default = {
 	"say.theLink": "el enlace",
 	"say.line": "línea",
 	"say.goesOn": "… y sigue.",
+	"phone.localAccess": "Acceso local en este equipo",
 	"phone.noSensor": "Este dispositivo no tiene llave de acceso",
 	"phone.lockNow": "Bloquear ahora",
 	"phone.forget": "Olvidar la llave de acceso",
@@ -2119,6 +2178,23 @@ var es_default = {
 	"phone.reasonNeeded": "Los pasos con alertas necesitan una explicación escrita",
 	"phone.queueState.waiting": "Esperando",
 	"phone.queueState.replied": "Respondido",
+	"phone.queueState.question": "Pregunta para ti",
+	"phone.questionN": "pregunta {num}",
+	"phone.explain": "Explícame",
+	"phone.explained": "explicado",
+	"phone.explainedBy": "lo explicó {session}",
+	"phone.explainAsking": "Le pedí a {session} que lo explique. La explicación aparece aquí cuando responda.",
+	"phone.explainQueued": "{session} está ocupado, así que el pedido espera a que termine lo que está haciendo, sin interrumpirlo. La explicación aparece aquí.",
+	"phone.explainFailed": "No se pudo preguntar: {why}",
+	"phone.explainRetry": "Intentar de nuevo",
+	"phone.explainAgain": "Pedir otra explicación",
+	"phone.explainGone": "Esto ya no espera por ti: se respondió o se cerró.",
+	"phone.answerIt": "Tu respuesta",
+	"phone.answerOwnWords": "O responde con tus palabras",
+	"phone.answerWords": "Responde con tus palabras",
+	"phone.answered": "Respondido",
+	"phone.answerNotMarked": "Se envió, pero la lista no pudo marcarlo como respondido: {why}",
+	"phone.replyHintYours": "Se envía a la sesión citando esto, y cuenta como tu respuesta.",
 	"phone.cardHeld": "Retenido",
 	"phone.signInFailed": "Falló el inicio de sesión",
 	"phone.stackPlace": "Grupos de sesiones",
@@ -3151,7 +3227,61 @@ function ProjectName({ name }) {
 		children: [" · ", host]
 	})] }) : bare;
 }
-function Modal({ title, onClose, children, wide }) {
+var requestsSeen = /* @__PURE__ */ new Map();
+function useRequest(scope, key, active = true) {
+	const [opened, setOpened] = d(null);
+	h(() => {
+		if (key === void 0 || !active) return;
+		if (key === null) {
+			requestsSeen.delete(scope);
+			setOpened(null);
+			return;
+		}
+		if (requestsSeen.get(scope) !== key) {
+			requestsSeen.set(scope, key);
+			setOpened(key);
+		}
+	}, [
+		scope,
+		key,
+		active
+	]);
+	return {
+		open: !!key && opened === key && active,
+		close: () => setOpened(null),
+		show: () => setOpened(key)
+	};
+}
+function Modal({ title, onClose, children, wide, sheet = false }) {
+	const box = A(null);
+	_(() => {
+		if (!sheet) return;
+		const previous = document.activeElement;
+		const dialog = box.current;
+		const owner = dialog?.closest(".session, .proposal-slot");
+		dialog?.focus({ preventScroll: true });
+		const trap = (e) => {
+			if (e.key !== "Tab") return;
+			const items = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex=\"0\"]")].filter((n) => n.getClientRects().length);
+			const first = items[0], last = items[items.length - 1];
+			if (document.activeElement === dialog) {
+				e.preventDefault();
+				(e.shiftKey ? last : first)?.focus();
+			} else if (e.shiftKey && document.activeElement === first) {
+				e.preventDefault();
+				last?.focus();
+			} else if (!e.shiftKey && document.activeElement === last) {
+				e.preventDefault();
+				first?.focus();
+			}
+		};
+		dialog?.addEventListener("keydown", trap);
+		return () => {
+			dialog?.removeEventListener("keydown", trap);
+			const back = owner?.querySelector(".request-return, .proposal-return") || previous;
+			if (back?.isConnected && back.getClientRects().length && getComputedStyle(back).visibility !== "hidden") back.focus({ preventScroll: true });
+		};
+	}, [sheet]);
 	h(() => {
 		const k = (e) => {
 			if (e.key === "Escape") onClose();
@@ -3160,15 +3290,17 @@ function Modal({ title, onClose, children, wide }) {
 		return () => removeEventListener("keydown", k);
 	}, [onClose]);
 	return /* @__PURE__ */ u("div", {
-		class: "scrim",
+		class: `scrim${sheet ? " sheet-scrim" : ""}`,
 		onMouseDown: (e) => {
 			if (e.target === e.currentTarget) onClose();
 		},
 		children: /* @__PURE__ */ u("div", {
-			class: `modal${wide ? " wide" : ""}`,
+			ref: box,
+			class: `modal${wide ? " wide" : ""}${sheet ? " sheet" : ""}`,
 			role: "dialog",
 			"aria-modal": "true",
 			"aria-label": title,
+			tabIndex: sheet ? -1 : void 0,
 			children: [/* @__PURE__ */ u("header", { children: [/* @__PURE__ */ u("h2", { children: title }), /* @__PURE__ */ u("button", {
 				class: "x",
 				"aria-label": t("common.close"),
@@ -3415,13 +3547,13 @@ var MAX = 80;
 var SETTLE = 400;
 var GIVE_UP = 2e3;
 var started = false;
-var cur$1 = null;
+var cur$2 = null;
 var here = "#/";
 var pending = null;
 var store$1 = /* @__PURE__ */ new Map();
 var restoring = null;
 var saveTimer = 0;
-var subs$2 = /* @__PURE__ */ new Set();
+var subs$3 = /* @__PURE__ */ new Set();
 var route = (to) => "/" + String(to ?? "").replace(/^#?\/?/, "");
 var newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 var stampOf = () => {
@@ -3473,8 +3605,8 @@ function where$1(el) {
 function onScroll(e) {
 	const el = e.target;
 	const name = nameOf(el);
-	if (!name || !cur$1) return;
-	rec(cur$1.id).scroll[name] = where$1(el);
+	if (!name || !cur$2) return;
+	rec(cur$2.id).scroll[name] = where$1(el);
 	saveSoon();
 }
 var stopRestore = () => {
@@ -3515,8 +3647,8 @@ function restore(want) {
 			return;
 		}
 		restoring = null;
-		if (!cur$1) return;
-		for (const name of Object.keys(targets)) if (els[name]) rec(cur$1.id).scroll[name] = where$1(els[name]);
+		if (!cur$2) return;
+		for (const name of Object.keys(targets)) if (els[name]) rec(cur$2.id).scroll[name] = where$1(els[name]);
 		saveSoon();
 	};
 	requestAnimationFrame(step);
@@ -3532,13 +3664,13 @@ function startHistory() {
 	} catch {
 		store$1 = /* @__PURE__ */ new Map();
 	}
-	cur$1 = stampOf();
-	if (!cur$1) {
-		cur$1 = {
+	cur$2 = stampOf();
+	if (!cur$2) {
+		cur$2 = {
 			id: newId(),
 			from: null
 		};
-		stamp(cur$1);
+		stamp(cur$2);
 	}
 	here = location.hash || "#/";
 	addEventListener("scroll", onScroll, true);
@@ -3549,31 +3681,31 @@ function startHistory() {
 		"keydown"
 	]) addEventListener(ev, stopRestore, true);
 	addEventListener("pagehide", flush);
-	restore({ ...store$1.get(cur$1.id)?.scroll || {} });
+	restore({ ...store$1.get(cur$2.id)?.scroll || {} });
 }
 function arrive() {
 	if (!started) return startHistory();
 	if ((location.hash || "#/") === here) return;
 	const st = stampOf();
-	if (st) cur$1 = st;
+	if (st) cur$2 = st;
 	else {
-		cur$1 = {
+		cur$2 = {
 			id: newId(),
 			from: here
 		};
-		stamp(cur$1);
+		stamp(cur$2);
 	}
-	const fresh = cur$1.id === pending;
+	const fresh = cur$2.id === pending;
 	pending = null;
 	here = location.hash || "#/";
-	for (const f of subs$2) f();
-	restore(fresh ? {} : { ...store$1.get(cur$1.id)?.scroll || {} });
+	for (const f of subs$3) f();
+	restore(fresh ? {} : { ...store$1.get(cur$2.id)?.scroll || {} });
 }
 function go$1(to, { replace = false } = {}) {
 	startHistory();
 	const h = "#" + route(to);
 	if (h === (location.hash || "#/")) return;
-	const now = stampOf() || cur$1;
+	const now = stampOf() || cur$2;
 	const st = {
 		id: newId(),
 		from: replace ? now?.from ?? null : location.hash || "#/"
@@ -3584,26 +3716,26 @@ function go$1(to, { replace = false } = {}) {
 	pending = st.id;
 }
 function backTo(parent) {
-	const from = (stampOf() || cur$1)?.from;
+	const from = (stampOf() || cur$2)?.from;
 	return route(from != null ? from : parent);
 }
 function back(parent) {
 	startHistory();
-	if ((stampOf() || cur$1)?.from != null) history.back();
+	if ((stampOf() || cur$2)?.from != null) history.back();
 	else go$1(parent, { replace: true });
 }
 function kept$2(key, initial) {
-	const v = cur$1 ? store$1.get(cur$1.id)?.state?.[key] : void 0;
+	const v = cur$2 ? store$1.get(cur$2.id)?.state?.[key] : void 0;
 	return v === void 0 ? initial : v;
 }
 function setKept(key, value) {
-	if (!cur$1) return;
-	rec(cur$1.id).state[key] = value;
+	if (!cur$2) return;
+	rec(cur$2.id).state[key] = value;
 	saveSoon();
 }
 function onEntry(f) {
-	subs$2.add(f);
-	return () => subs$2.delete(f);
+	subs$3.add(f);
+	return () => subs$3.delete(f);
 }
 //#endregion
 //#region web/ui/shell.jsx
@@ -4955,7 +5087,6 @@ function Panel({ project, session, kind }) {
 			return;
 		}
 		if (s === 401) return say("signedOut");
-		if (s === 403 && e.needs === "enable") return say("off");
 		if (s === 403) {
 			let who;
 			try {
@@ -5371,6 +5502,1341 @@ function useTranscript(fleet, project, name, live) {
 	};
 }
 //#endregion
+//#region web/ui/speakable.js
+var EN = {
+	code: "Code omitted.",
+	timestamp: "a timestamp",
+	id: "an id",
+	hex: "a hex id",
+	escape: "an escape code",
+	commit: "a commit",
+	link: "{label} link",
+	theLink: "the link",
+	line: "line",
+	goesOn: "… and it goes on."
+};
+var SPEAK_MAX = 2e4;
+var IDENT_EDGE = "(^|[^\\w./~@+-])";
+function sayIdentifiers(t, w) {
+	const pathSpoken = (p, line) => {
+		const base = p.replace(/\/+$/, "").split("/").pop() || p;
+		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
+	};
+	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
+	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
+	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
+	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
+	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
+	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
+	t = t.replace(/ \/ /g, ", ");
+	return t;
+}
+function speakable(text, w = EN) {
+	let t = String(text || "");
+	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
+	t = t.replace(/`([^`]*)`/g, "$1");
+	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
+	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
+	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
+	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
+	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
+	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
+	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
+	t = t.replace(/~~[^~\n]+~~/g, "");
+	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
+	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
+	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
+	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
+	t = t.replace(/__([^_\n]+)__/g, "$1");
+	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
+	t = sayIdentifiers(t, w);
+	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
+	t = t.replace(/\s+/g, " ").trim();
+	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
+}
+var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
+function sentencesOf(t) {
+	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
+	let from = 0, m;
+	while (m = re.exec(t)) {
+		if (!m[0].length) {
+			re.lastIndex++;
+			continue;
+		}
+		const end = m.index + m[0].length;
+		const piece = t.slice(from, m.index + m[0].length - m[1].length);
+		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
+		out.push(piece.trim());
+		from = end;
+	}
+	if (from < t.length) out.push(t.slice(from).trim());
+	return out.filter(Boolean);
+}
+function cutLong(x, max) {
+	const out = [];
+	while (x.length > max) {
+		let at = -1;
+		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
+			let m, best = -1;
+			mark.lastIndex = 0;
+			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
+			if (best >= max / 4) {
+				at = best;
+				break;
+			}
+		}
+		if (at < 0) {
+			const sp = x.indexOf(" ", max);
+			if (sp < 0) break;
+			at = sp;
+		}
+		out.push(x.slice(0, at).trim());
+		x = x.slice(at).trim();
+	}
+	if (x) out.push(x);
+	return out;
+}
+function speechChunks(text, max = 600) {
+	const t = String(text || "").replace(/\s+/g, " ").trim();
+	if (!t) return [];
+	const out = [];
+	let cur = "";
+	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
+		if (cur && cur.length + 1 + piece.length > max) {
+			out.push(cur);
+			cur = "";
+		}
+		cur = cur ? `${cur} ${piece}` : piece;
+	}
+	if (cur) out.push(cur);
+	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
+}
+//#endregion
+//#region web/ui/voice.js
+var B = {};
+function voiceBackend(adapter) {
+	B = adapter || {};
+	status = null;
+}
+var status = null;
+async function voiceStatus(force = false) {
+	if (status && !force) return status;
+	try {
+		status = B.voice ? await B.voice() : null;
+	} catch {
+		status = null;
+	}
+	status ||= {
+		hear: { ready: false },
+		speak: { ready: false }
+	};
+	return status;
+}
+function wav16k(chunks, rate) {
+	let n = 0;
+	for (const c of chunks) n += c.length;
+	const all = new Float32Array(n);
+	let o = 0;
+	for (const c of chunks) {
+		all.set(c, o);
+		o += c.length;
+	}
+	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
+	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+	const str = (off, s) => {
+		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
+	};
+	str(0, "RIFF");
+	v.setUint32(4, 36 + len * 2, true);
+	str(8, "WAVE");
+	str(12, "fmt ");
+	v.setUint32(16, 16, true);
+	v.setUint16(20, 1, true);
+	v.setUint16(22, 1, true);
+	v.setUint32(24, 16e3, true);
+	v.setUint32(28, 32e3, true);
+	v.setUint16(32, 2, true);
+	v.setUint16(34, 16, true);
+	str(36, "data");
+	v.setUint32(40, len * 2, true);
+	for (let i = 0; i < len; i++) {
+		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
+		let sum = 0;
+		for (let j = a; j < b; j++) sum += all[j];
+		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+	}
+	return new Blob([buf], { type: "audio/wav" });
+}
+var PAUSES = worded({
+	normal: { ms: 2500 },
+	larga: { ms: 4500 },
+	manual: { ms: 0 }
+}, "pause");
+var AUDIO = {
+	channelCount: 1,
+	echoCancellation: true,
+	noiseSuppression: true,
+	autoGainControl: true
+};
+var transcribe = async (blob) => {
+	if (!B.hear) throw new Error(t("voice.noHear"));
+	const j = await B.hear(blob);
+	return String(j?.text || "").trim();
+};
+var rmsOf = (d) => {
+	let s = 0;
+	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+	return Math.sqrt(s / d.length);
+};
+var micDenied = () => t("voice.micDenied");
+var VAD_DIR = "/vad-0.0.31/";
+var vad = null;
+var vadLoad = null;
+var vadBroken = false;
+var turn = null;
+function warmVad() {
+	if (vad || vadBroken) return Promise.resolve(vad);
+	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
+		model: "v5",
+		baseAssetPath: VAD_DIR,
+		onnxWASMBasePath: VAD_DIR,
+		startOnLoad: false,
+		ortConfig: (ort) => {
+			ort.env.logLevel = "error";
+			ort.env.wasm.numThreads = 1;
+		},
+		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		positiveSpeechThreshold: .5,
+		negativeSpeechThreshold: .35,
+		preSpeechPadMs: 600,
+		minSpeechMs: 250,
+		redemptionMs: PAUSES.normal.ms,
+		submitUserSpeechOnPause: true,
+		onFrameProcessed: (p, f) => turn?.frame(p, f),
+		onSpeechStart: () => turn?.start(),
+		onSpeechEnd: (a) => turn?.end(a),
+		onVADMisfire: () => turn?.misfire()
+	})).then((v) => vad = v, (e) => {
+		vadBroken = true;
+		console.warn("VAD did not load, using the loudness meter:", e);
+		return null;
+	}).finally(() => {
+		vadLoad = null;
+	});
+	return vadLoad;
+}
+function listenLocal(opts) {
+	let h = null, cancelled = false;
+	const pending = {
+		stop: () => {
+			if (h) h.stop();
+			else pending.stopAsked = true;
+		},
+		cancel: () => {
+			cancelled = true;
+			h?.cancel();
+		}
+	};
+	warmVad().then((v) => {
+		if (cancelled) return;
+		h = v ? listenVad(v, opts) : listenLoudness(opts);
+		if (pending.stopAsked) h.stop();
+	});
+	return pending;
+}
+function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let done = false, spoke = false;
+	const t0 = performance.now();
+	const end = async (audio) => {
+		if (done) return;
+		done = true;
+		turn = null;
+		clearInterval(watch);
+		try {
+			await v.pause();
+		} catch {}
+		onSpeaking?.(false);
+		if (!audio || audio.length < 4e3) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k([audio], 16e3)));
+		} catch (e) {
+			onError?.(t("voice.transcribeFailed", { why: e.message }));
+			onText?.("");
+		}
+	};
+	let got = null;
+	const me = turn = {
+		frame: (p, f) => {
+			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
+		},
+		start: () => {
+			spoke = true;
+			onSpeaking?.(true);
+		},
+		misfire: () => onSpeaking?.(false),
+		end: (audio) => {
+			got = audio;
+			if (pauseMs) end(audio);
+		}
+	};
+	v.setOptions({ redemptionMs: pauseMs || 6e5 });
+	const watch = setInterval(() => {
+		const t = performance.now() - t0;
+		if (!spoke && t > 15e3) cancel();
+		else if (t > maxMs) stop();
+	}, 500);
+	const stop = async () => {
+		if (done) return;
+		if (turn === me) try {
+			await v.pause();
+		} catch {}
+		end(got);
+	};
+	const cancel = () => {
+		got = null;
+		spoke = false;
+		end(null);
+	};
+	v.start().then(() => {
+		if (!done) onState?.("listening");
+	}, () => {
+		onError?.(micDenied());
+		cancel();
+	});
+	return {
+		stop,
+		cancel
+	};
+}
+function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
+	const chunks = [];
+	const t0 = performance.now();
+	const finish = async (send) => {
+		if (done) return;
+		done = true;
+		try {
+			node?.disconnect();
+			src?.disconnect();
+		} catch {}
+		try {
+			stream?.getTracks().forEach((x) => x.stop());
+		} catch {}
+		const rate = ctx?.sampleRate || 48e3;
+		try {
+			await ctx?.close();
+		} catch {}
+		onSpeaking?.(false);
+		if (!send || !spoke || !chunks.length) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k(chunks, rate)));
+		} catch (e) {
+			onError?.(t("voice.transcribeFailed", { why: e.message }));
+			onText?.("");
+		}
+	};
+	(async () => {
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+		} catch {
+			done = true;
+			onError?.(micDenied());
+			onText?.("");
+			return;
+		}
+		ctx = new AudioContext();
+		src = ctx.createMediaStreamSource(stream);
+		node = ctx.createScriptProcessor(4096, 1, 1);
+		let floor = .008;
+		node.onaudioprocess = (e) => {
+			if (done) return;
+			const d = e.inputBuffer.getChannelData(0);
+			chunks.push(new Float32Array(d));
+			const rms = rmsOf(d);
+			const now = performance.now();
+			const loud = rms > Math.max(.015, floor * 2.5);
+			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
+			onLevel?.(Math.min(1, rms * 12));
+			if (loud) {
+				if (!spoke) onSpeaking?.(true);
+				spoke = true;
+				quietSince = 0;
+			} else if (spoke && !quietSince) quietSince = now;
+			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
+			else if (now - t0 > maxMs) finish(true);
+			else if (!spoke && now - t0 > 15e3) finish(false);
+		};
+		src.connect(node);
+		node.connect(ctx.destination);
+		onState?.("listening");
+	})();
+	return {
+		stop: () => finish(true),
+		cancel: () => finish(false)
+	};
+}
+var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+var browserCanHear = !!Recognition;
+var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
+function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
+	const r = new Recognition();
+	r.lang = speech;
+	r.interimResults = true;
+	r.continuous = true;
+	let final = "", quiet = null;
+	const hush = () => {
+		clearTimeout(quiet);
+		if (pauseMs) quiet = setTimeout(() => {
+			try {
+				r.stop();
+			} catch {}
+		}, pauseMs);
+	};
+	r.onresult = (e) => {
+		let live = "";
+		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
+		else live += e.results[i][0].transcript;
+		onInterim?.((final + " " + live).trim());
+		hush();
+	};
+	r.onerror = (e) => {
+		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
+		else if (e.error === "network") onError?.(t("voice.needsNet"));
+		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
+	};
+	r.onend = () => {
+		clearTimeout(quiet);
+		onText?.(final.trim());
+	};
+	try {
+		r.start();
+		onState?.("listening");
+	} catch {
+		onText?.("");
+	}
+	return {
+		stop: () => {
+			try {
+				r.stop();
+			} catch {}
+		},
+		cancel: () => {
+			try {
+				r.abort();
+			} catch {}
+		}
+	};
+}
+var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
+function savedRate() {
+	let r = NaN;
+	try {
+		r = Number(localStorage.getItem("gf.rate"));
+	} catch {}
+	return Number.isFinite(r) && r >= .5 && r <= 2 ? r : 1.05;
+}
+var playing = null;
+function stopSpeaking() {
+	window.speechSynthesis?.cancel();
+	if (playing) {
+		playing.cancelled = true;
+		try {
+			playing.audio?.pause();
+		} catch {}
+		playing = null;
+	}
+}
+function utter(text, onEnd) {
+	const s = window.speechSynthesis;
+	if (!s) {
+		onEnd?.();
+		return;
+	}
+	const u = new SpeechSynthesisUtterance(text);
+	const all = s.getVoices();
+	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
+	if (v) u.voice = v;
+	u.lang = v?.lang || speechLang();
+	u.rate = savedRate();
+	u.onend = () => onEnd?.();
+	u.onerror = () => onEnd?.();
+	s.speak(u);
+}
+async function speakBrowser(chunks, job) {
+	for (const c of chunks) {
+		if (job.cancelled) return;
+		await new Promise((resolve) => utter(c, resolve));
+	}
+}
+function playSample(url, onEnd) {
+	stopSpeaking();
+	const job = {
+		cancelled: false,
+		audio: new Audio(url)
+	};
+	playing = job;
+	const done = () => {
+		if (!job.cancelled) {
+			playing = null;
+			onEnd?.();
+		}
+	};
+	job.audio.onended = done;
+	job.audio.onerror = done;
+	job.audio.play().catch(done);
+}
+var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
+async function speak(md, onEnd, voice = "") {
+	stopSpeaking();
+	const chunks = speechChunks(speakable(md, sayWords()));
+	if (!chunks.length) {
+		onEnd?.();
+		return;
+	}
+	const job = {
+		cancelled: false,
+		audio: null
+	};
+	playing = job;
+	const st = await voiceStatus();
+	if (job.cancelled) return;
+	let i = 0;
+	if (st.speak?.ready) try {
+		let next = B.speak(chunks[0], voice);
+		for (; i < chunks.length; i++) {
+			const r = await next;
+			if (job.cancelled) return;
+			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
+			next?.catch(() => {});
+			for (const s of r.sentences) {
+				if (job.cancelled) return;
+				const url = await B.speakAudio(s.id);
+				if (job.cancelled) return;
+				await new Promise((resolve) => {
+					const a = new Audio(url);
+					job.audio = a;
+					a.onended = resolve;
+					a.onerror = resolve;
+					a.play().catch(resolve);
+				});
+			}
+		}
+	} catch {}
+	if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
+	if (!job.cancelled) {
+		playing = null;
+		onEnd?.();
+	}
+}
+//#endregion
+//#region web/ui/resolve.js
+var norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+var phon = (s) => norm(s).replace(/qu/g, "k").replace(/q/g, "k").replace(/c([aou])/g, "k$1").replace(/c([ei])/g, "s$1").replace(/c\b/g, "k").replace(/ck/g, "k").replace(/z/g, "s").replace(/v/g, "b").replace(/w/g, "u").replace(/ll/g, "y").replace(/ph/g, "f").replace(/x/g, "ks").replace(/h/g, "").replace(/([a-z])\1+/g, "$1").replace(/\s+/g, " ").trim();
+var grams = (s) => {
+	const t = ` ${s} `;
+	const g = /* @__PURE__ */ new Map();
+	for (let i = 0; i < t.length - 1; i++) {
+		const k = t.slice(i, i + 2);
+		g.set(k, (g.get(k) || 0) + 1);
+	}
+	return g;
+};
+function dice(a, b) {
+	const A = grams(a), B = grams(b);
+	let both = 0, n = 0;
+	for (const [k, v] of A) {
+		n += v;
+		both += Math.min(v, B.get(k) || 0);
+	}
+	for (const v of B.values()) n += v;
+	return n ? 2 * both / n : 0;
+}
+var sim = (a, b) => phon(a) === phon(b) ? 1 : dice(phon(a), phon(b));
+function bestName(name, options) {
+	const n = norm(name);
+	if (!n) return null;
+	let hit = null, score = 0;
+	for (const o of options) {
+		const k = norm(o);
+		const s = k === n ? 2 : (k.startsWith(n) || n.startsWith(k)) && Math.min(k.length, n.length) >= 3 ? 1.5 : sim(k, n);
+		if (s > score) {
+			hit = o;
+			score = s;
+		}
+	}
+	return score >= .6 ? hit : null;
+}
+function command(text, projects, context) {
+	const t$7 = norm(text);
+	if (!t$7) return null;
+	const short = t$7.split(" ").length <= 9;
+	if (short && (/^(muestrame |abre |ve a |ir a |vamos a |llevame a )?(el )?mapa( en vivo)?$/.test(t$7) || /^(show me |open |go to |take me to )?(the )?(live )?map$/.test(t$7))) return {
+		go: "/map",
+		say: t("cmd.map")
+	};
+	if (short && (/^(ve |vamos |llevame |volver |vuelve )?(al )?inicio$/.test(t$7) || /^(go |take me |back )?(to )?(the )?home( page)?$|^go home$/.test(t$7))) return {
+		go: "/",
+		say: t("cmd.home")
+	};
+	if (short && (/^(muestrame |abre |ve a )?(la )?actividad$/.test(t$7) || /^(show me |open |go to )?(the )?activity$/.test(t$7))) return {
+		go: "/activity",
+		say: t("cmd.activity")
+	};
+	const m = /^(?:abre|ve a|vamos a|llevame a|muestrame|ensename|cambia a|pasa a|anda a) (?:la )?sesion (.+)$/.exec(t$7) || /^(?:open|go to|take me to|show me|switch to) (?:the )?session (.+)$/.exec(t$7);
+	if (m && short) {
+		const all = (projects || []).flatMap((p) => p.sessions.map((x) => ({
+			p: p.name,
+			s: x.name
+		})));
+		const inCtx = all.filter((x) => x.p === context);
+		const pick = (list) => {
+			const k = bestName(m[1], list.map((x) => x.s));
+			return k && list.find((x) => x.s === k);
+		};
+		const hit = pick(inCtx) || pick(all);
+		if (hit) return {
+			go: `/p/${encodeURIComponent(hit.p)}/s/${encodeURIComponent(hit.s)}`,
+			project: hit.p,
+			session: hit.s,
+			say: hit.p !== context ? t("cmd.openIn", {
+				session: hit.s,
+				project: hit.p
+			}) : t("cmd.open", { session: hit.s })
+		};
+		return {
+			go: null,
+			say: t("cmd.noSession", { name: m[1] })
+		};
+	}
+	return null;
+}
+//#endregion
+//#region web/ui/agent.js
+var store = {
+	get: (k, d) => {
+		try {
+			const v = localStorage.getItem(`gfw.${k}`);
+			return v == null ? d : JSON.parse(v);
+		} catch {
+			return d;
+		}
+	},
+	set: (k, v) => {
+		try {
+			localStorage.setItem(`gfw.${k}`, JSON.stringify(v));
+		} catch {}
+	}
+};
+var S = {
+	pin: store.get("pin", ""),
+	target: store.get("pin", "") || store.get("target", ""),
+	targetAt: 0,
+	feed: [],
+	phase: "idle",
+	level: 0,
+	interim: "",
+	cards: [],
+	focus: "master",
+	tasks: [],
+	deciding: [],
+	conversing: false,
+	voiceOut: store.get("voiceOut", true),
+	voice: store.get("voice", ""),
+	handsFree: store.get("handsFree", false),
+	follow: store.get("follow", true),
+	pause: PAUSES[store.get("pause", "normal")] ? store.get("pause", "normal") : "normal",
+	vs: null
+};
+var subs$2 = /* @__PURE__ */ new Set();
+function set(patch) {
+	Object.assign(S, patch);
+	for (const f of subs$2) f();
+}
+function useAgent() {
+	const [, tick] = d(0);
+	h(() => {
+		const f = () => tick((x) => x + 1);
+		subs$2.add(f);
+		return () => subs$2.delete(f);
+	}, []);
+	return S;
+}
+var ctx = null;
+var mic = null;
+var gen = 0;
+var timers = /* @__PURE__ */ new Set();
+var later = (ms, fn) => {
+	const t = setTimeout(() => {
+		timers.delete(t);
+		fn();
+	}, ms);
+	timers.add(t);
+};
+var push = (e) => set({ feed: [...S.feed.slice(-60), {
+	id: Math.random(),
+	at: Date.now(),
+	...e
+}] });
+var projects = () => ctx?.projects || [];
+var go = (to) => ctx?.go(to);
+var api = new Proxy({}, { get: (_, k) => ctx?.fleet?.[k] || (() => Promise.reject(new Error(t("agent.noServer")))) });
+var frame = (text, voice) => `${voice ? "[voice]" : "[typed]"} ${t(voice ? "agent.frame.voice" : "agent.frame.typed", {
+	name: ctx?.me?.name || t("agent.you"),
+	app: ctx?.app || "ghostfleet"
+})} ${t("agent.frame.ask")}\n\n${text}`;
+var FRAME_RE = /^(?:\[(?:voice|typed)\]|\u{1F399}\uFE0F?|\u{1F4AC})[^\n]*\n\n/u;
+var unframe = (t) => String(t || "").replace(FRAME_RE, "");
+function setOption(k, v) {
+	store.set(k, v);
+	set({ [k]: v });
+	if (k === "handsFree" && !v) set({ conversing: false });
+	if (k === "voiceOut" && !v) {
+		stopSpeaking();
+		if (S.phase === "speaking") set({ phase: "idle" });
+	}
+}
+function setPin(project) {
+	store.set("pin", project || "");
+	set({ pin: project || "" });
+	if (project) setTarget(project);
+}
+function setTarget(project, explicit = true) {
+	if (!project) return;
+	if (project !== S.target) {
+		store.set("target", project);
+		set({
+			target: project,
+			cards: [],
+			focus: "master"
+		});
+		resetWatch();
+	}
+	if (explicit) set({ targetAt: Date.now() });
+}
+var canHear = () => !!S.vs?.hear?.ready || browserCanHear;
+function talk() {
+	if (mic) {
+		mic.stop();
+		return;
+	}
+	set({ conversing: S.handsFree });
+	listen();
+}
+function listen() {
+	if (mic) return;
+	stopSpeaking();
+	set({
+		interim: "",
+		level: 0,
+		phase: "listening"
+	});
+	const my = gen;
+	const common = {
+		pauseMs: PAUSES[S.pause].ms,
+		onState: (s) => {
+			if (my === gen) set({ phase: s });
+		},
+		onError: (m) => {
+			if (my !== gen) return;
+			push({
+				kind: "event",
+				text: m,
+				bad: true
+			});
+			set({ conversing: false });
+		},
+		onText: (t$3) => {
+			if (my !== gen) return;
+			mic = null;
+			set({
+				level: 0,
+				interim: "",
+				phase: "idle"
+			});
+			if (t$3) heard(t$3, true);
+			else if (S.conversing) {
+				set({ conversing: false });
+				push({
+					kind: "event",
+					text: t("agent.heardNothing")
+				});
+			}
+		}
+	};
+	mic = S.vs?.hear?.ready ? listenLocal({
+		...common,
+		onLevel: (l) => {
+			if (my === gen) set({ level: l });
+		}
+	}) : listenBrowser({
+		...common,
+		onInterim: (t) => {
+			if (my === gen) set({ interim: t });
+		}
+	});
+}
+var again = () => {
+	const my = gen;
+	if (S.conversing && S.handsFree) later(450, () => {
+		if (my === gen && S.conversing) listen();
+	});
+};
+function stop() {
+	gen++;
+	set({ conversing: false });
+	for (const t of timers) clearTimeout(t);
+	timers.clear();
+	if (mic) {
+		const m = mic;
+		mic = null;
+		m.cancel();
+	}
+	stopSpeaking();
+	set({
+		phase: "idle",
+		interim: "",
+		level: 0
+	});
+}
+var busy = () => !!mic || S.phase === "speaking" || S.conversing;
+function say(text, then) {
+	if (!S.voiceOut) {
+		then?.();
+		return;
+	}
+	const my = gen;
+	set({ phase: "speaking" });
+	speak(text, () => {
+		if (my !== gen) return;
+		if (S.phase === "speaking") set({ phase: "idle" });
+		then?.();
+	}, S.voice);
+}
+var context = () => ctx?.route?.project || S.pin || (S.target && Date.now() - S.targetAt < 9e5 ? S.target : null);
+function submit(text, voice = false) {
+	const t = String(text || "").trim();
+	if (t) heard(t, voice);
+}
+async function place(task, project) {
+	try {
+		const t$4 = await api.taskPlace(task.id, project);
+		setTarget(project);
+		const who = await deliver(t$4);
+		say(who ? t("agent.passed", { who }) : t("task.missed", { project }), again);
+	} catch (e) {
+		push({
+			kind: "event",
+			text: t("agent.missed", { why: e.message }),
+			bad: true
+		});
+	}
+	pollTasks();
+}
+function tickOff(id) {
+	set({ tasks: S.tasks.filter((t) => id ? t.id !== id : t.status !== "replied") });
+	api.taskDone(id).catch(() => {});
+}
+var line = Promise.resolve();
+var lastSaid$1 = {
+	text: "",
+	at: 0
+};
+function heard(text, voice) {
+	push({
+		kind: "me",
+		text,
+		voice
+	});
+	const c = command(text, projects(), context());
+	if (c) {
+		if (c.go) go(c.go);
+		if (c.project) setTarget(c.project, false);
+		if (c.session) set({ focus: c.session });
+		push({
+			kind: "event",
+			text: c.say
+		});
+		say(c.say, again);
+		return;
+	}
+	if (text === lastSaid$1.text && Date.now() - lastSaid$1.at < 2e4) {
+		push({
+			kind: "event",
+			text: t("agent.dupe")
+		});
+		return;
+	}
+	lastSaid$1 = {
+		text,
+		at: Date.now()
+	};
+	const row = {
+		id: Math.random(),
+		text
+	};
+	set({ deciding: [...S.deciding, row] });
+	line = line.then(() => decide(text, voice)).catch(() => {}).then(() => set({ deciding: S.deciding.filter((d) => d !== row) }));
+}
+var spokenName = (p) => String(p).replace(/[-_]+/g, " ");
+var inWords = (l) => l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")}${t("common.and")}${l[l.length - 1]}`;
+async function decide(text, voice) {
+	const my = gen;
+	set({ phase: "routing" });
+	const page = ctx?.route?.project ? {
+		project: ctx.route.project,
+		session: ctx.route.session || ""
+	} : {
+		project: S.pin,
+		session: ""
+	};
+	const feed = S.feed.slice(0, -1).map(({ kind, text: t }) => ({
+		kind,
+		text: unframe(t)
+	}));
+	let r;
+	try {
+		r = await api.route({
+			text,
+			feed,
+			page,
+			voice
+		});
+	} catch (e) {
+		set({ phase: "idle" });
+		push({
+			kind: "event",
+			text: t("agent.routeFailed", {
+				text,
+				why: e.message
+			}),
+			bad: true
+		});
+		say(t("agent.routeFailedSay"), again);
+		return;
+	}
+	if (my !== gen) {
+		pollTasks();
+		return;
+	}
+	set({ phase: "idle" });
+	if (r.action === "ask") {
+		push({
+			kind: "event",
+			text: r.question,
+			ask: true
+		});
+		say(r.question, again);
+		return;
+	}
+	if (r.action === "go") {
+		setTarget(r.project);
+		go(`/p/${encodeURIComponent(r.project)}${r.session ? `/s/${encodeURIComponent(r.session)}` : ""}`);
+		const here = t("agent.here", { project: r.project });
+		push({
+			kind: "event",
+			text: here
+		});
+		say(here, again);
+		return;
+	}
+	const going = r.tasks.filter((t) => t.project), unsure = r.tasks.filter((t) => !t.project);
+	await pollTasks();
+	const reached = [], missed = [];
+	for (const t of going) {
+		if (going.length === 1) setTarget(t.project);
+		const who = await deliver(t, going.length > 1);
+		if (who) reached.push(going.length === 1 ? who : spokenName(t.project));
+		else missed.push(spokenName(t.project));
+	}
+	for (const t of unsure) push({
+		kind: "event",
+		text: `“${t.title}”: ${t.question}`,
+		ask: true
+	});
+	pollTasks();
+	const words = [
+		missed.length ? t("task.missed", { project: inWords(missed) }) : "",
+		!voice || !reached.length ? "" : reached.length === 1 ? t("agent.passed", { who: reached[0] }) : t("agent.noted", {
+			n: reached.length,
+			list: inWords(reached)
+		}),
+		unsure.length === 1 ? unsure[0].question : unsure.length ? t("agent.unsure", { n: unsure.length }) : ""
+	].filter(Boolean).join(" ");
+	if (words) say(words, again);
+	else again();
+}
+async function deliver(t$5, quiet = false) {
+	const { project, session, text, voice, context: earlier, why } = t$5;
+	const who = session ? t("agent.toSession", {
+		session,
+		project
+	}) : t("agent.toLead", { project });
+	if (!quiet && (!ctx?.route?.session || ctx.route.project !== project)) go(`/p/${encodeURIComponent(project)}`);
+	push({
+		kind: "event",
+		text: why ? t("agent.goingWhy", {
+			who,
+			why
+		}) : t("agent.going", { who })
+	});
+	set({
+		phase: "starting",
+		focus: session || "master"
+	});
+	const failed = (message) => {
+		set({ phase: "idle" });
+		push({
+			kind: "event",
+			text: message,
+			bad: true
+		});
+		api.taskSent({
+			id: t$5.id,
+			project,
+			error: message
+		}).catch(() => {});
+		return "";
+	};
+	let lead = session || "master";
+	if (!session) try {
+		const l = await api.lead(project);
+		if (l.started) push({
+			kind: "event",
+			text: l.started === "start" ? t("agent.leadStarted", { project }) : t("agent.leadWoke", { project })
+		});
+		lead = l.lead || "master";
+	} catch (e) {
+		return failed(t("agent.leadFailed", {
+			project,
+			why: e.message
+		}));
+	}
+	set({ phase: "sending" });
+	try {
+		sentAt = Math.floor(Date.now() / 1e3);
+		const words = earlier ? `${t("agent.earlier", { earlier })}\n\n${text}` : text;
+		const r = await api.act("fleet_send", {
+			project,
+			session: lead,
+			prompt: frame(words, voice)
+		});
+		if (r.queued) push({
+			kind: "event",
+			text: r.queued === "question" ? t("agent.queuedQ") : t("agent.queuedTurn")
+		});
+		set({ phase: "idle" });
+		await api.taskSent({
+			id: t$5.id,
+			project,
+			session: lead
+		});
+		return who;
+	} catch (e) {
+		return failed(t("agent.missedAt", {
+			project,
+			why: e.message
+		}));
+	}
+}
+var heardUpTo = null;
+var toRead = [];
+var lastTs = (t) => t.replies.reduce((n, r) => Math.max(n, r.ts), 0);
+async function pollTasks() {
+	let tasks;
+	try {
+		({tasks} = await api.tasks());
+	} catch {
+		return;
+	}
+	set({ tasks });
+	if (!heardUpTo) {
+		heardUpTo = new Map(tasks.map((t) => [t.id, lastTs(t)]));
+		return;
+	}
+	for (const t$6 of tasks) {
+		const news = t$6.replies.filter((r) => r.ts > (heardUpTo.get(t$6.id) || 0));
+		if (!news.length) continue;
+		heardUpTo.set(t$6.id, lastTs(t$6));
+		const sure = !t$6.hidden && tasks.filter((x) => !x.hidden && x.project === t$6.project && x.session === t$6.session).length === 1;
+		for (const r of news) push({
+			kind: "ai",
+			text: r.text,
+			project: t$6.project,
+			session: t$6.session,
+			title: sure ? t$6.title : ""
+		});
+		const from = sure ? t("agent.fromAbout", {
+			project: spokenName(t$6.project),
+			title: t$6.title
+		}) : t("agent.from", { project: spokenName(t$6.project) });
+		toRead = [...toRead.filter((x) => x.id !== t$6.id), {
+			id: t$6.id,
+			text: `${from} ${news[news.length - 1].text}`
+		}];
+	}
+	readNext();
+}
+function readNext() {
+	if (!toRead.length || mic || S.phase !== "idle" || document.hidden) return;
+	const [next, ...rest] = toRead;
+	toRead = rest;
+	say(next.text, () => {
+		again();
+		readNext();
+	});
+}
+var prev = null;
+var sentAt = 0;
+var lastGo = 0;
+var loop = null;
+var taskLoop = null;
+function resetWatch() {
+	prev = null;
+}
+async function tick() {
+	if (!S.target || document.hidden) return;
+	const project = S.target;
+	let g;
+	try {
+		g = await api.grid(project);
+	} catch {
+		return;
+	}
+	if (project !== S.target) return;
+	const list = g.cards || [];
+	set({ cards: list });
+	const before = prev;
+	prev = Object.fromEntries(list.map((c) => [c.name, statusOf(c)]));
+	if (before) for (const c of list) {
+		const now = statusOf(c), was = before[c.name];
+		if (was === now) continue;
+		const word = (STATUS[now] || STATUS.unknown).label.toLowerCase();
+		push({
+			kind: "event",
+			text: was == null ? t("agent.opened", { name: c.name }) : c.lead ? t("agent.leadIs", { word }) : `${c.name}: ${word}`,
+			session: c.name,
+			project
+		});
+		set({ focus: c.name });
+		if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1e3 - sentAt < 900 && ctx?.fleet?.assign && ctx.me?.id) ctx.fleet.assign(project, c.name, ctx.me.id).catch(() => {});
+		const worth = was == null || now === "need-you" || now === "working" && !c.lead;
+		if (S.follow && worth && !c.lead && Date.now() - lastGo > 3e3) {
+			lastGo = Date.now();
+			go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(c.name)}`);
+		}
+	}
+}
+function bind(next) {
+	if (next.fleet !== ctx?.fleet) voiceBackend(next.fleet);
+	ctx = next;
+	if (!loop) {
+		loop = setInterval(tick, 2500);
+		taskLoop = setInterval(pollTasks, 3e3);
+		pollTasks();
+		resetWatch();
+		voiceStatus(true).then((vs) => {
+			set({ vs });
+			if (vs.hear?.ready) warmVad();
+		});
+	}
+}
+function unbind() {
+	stop();
+	clearInterval(loop);
+	clearInterval(taskLoop);
+	loop = null;
+	heardUpTo = null;
+	toRead = [];
+	ctx = null;
+}
+//#endregion
+//#region web/ui/chatvoice.js
+var cur$1 = "";
+var subs$1 = /* @__PURE__ */ new Set();
+var note = (id) => {
+	cur$1 = id;
+	for (const f of subs$1) f();
+};
+function useReading() {
+	const [, n] = d(0);
+	h(() => {
+		const f = () => n((x) => x + 1);
+		subs$1.add(f);
+		return () => subs$1.delete(f);
+	}, []);
+	return cur$1;
+}
+var takeover = null;
+function unlockSpeech() {
+	try {
+		const u = new SpeechSynthesisUtterance(" ");
+		u.volume = 0;
+		window.speechSynthesis?.speak(u);
+	} catch {}
+}
+function toggleRead(id, md) {
+	if (cur$1 === id) {
+		stopSpeaking();
+		note("");
+		return;
+	}
+	takeover?.();
+	unlockSpeech();
+	note(id);
+	speak(md, () => {
+		if (cur$1 === id) note("");
+	}, S.voice);
+}
+function stopRead(scope) {
+	if (cur$1 && cur$1.startsWith(scope)) {
+		stopSpeaking();
+		note("");
+	}
+}
+var lastSaid = (page) => {
+	const m = [...page?.messages || []].reverse().find((x) => x.role !== "user" && x.role !== "tools" && x.text);
+	return m ? {
+		key: `${m.ts}|${String(m.text).slice(0, 200)}`,
+		text: m.text
+	} : null;
+};
+function useSpeakMode({ scope, send, page, status }) {
+	const [phase, setPhase] = d("off");
+	const R = A({
+		gen: 0,
+		mic: null,
+		seen: "",
+		phase: "off",
+		page: null,
+		off: null
+	});
+	R.current.page = page;
+	const go = (p) => {
+		R.current.phase = p;
+		setPhase(p);
+	};
+	const live = (g) => R.current.gen === g;
+	const off = (why) => {
+		const r = R.current;
+		r.gen++;
+		if (r.mic) {
+			const m = r.mic;
+			r.mic = null;
+			try {
+				m.cancel();
+			} catch {}
+		}
+		if (r.phase === "speaking") {
+			stopSpeaking();
+			if (cur$1.startsWith(scope)) note("");
+		}
+		if (takeover?.owner === R) takeover = null;
+		go("off");
+		if (why) toast(why, "bad");
+	};
+	R.current.off = off;
+	const listen = async (g) => {
+		go("listening");
+		const vs = await voiceStatus();
+		if (!live(g)) return;
+		const local = !!vs.hear?.ready;
+		if (!local && !browserCanHear) {
+			off(t("chat.speakNoMic"));
+			return;
+		}
+		stopSpeaking();
+		const common = {
+			pauseMs: PAUSES[S.pause]?.ms ?? PAUSES.normal.ms,
+			onState: (s) => {
+				if (live(g)) go(s);
+			},
+			onError: (m) => {
+				if (live(g)) off(m);
+			},
+			onText: (text) => {
+				if (!live(g)) return;
+				R.current.mic = null;
+				if (!text.trim()) {
+					off(t("agent.heardNothing"));
+					return;
+				}
+				sendIt(g, text.trim());
+			}
+		};
+		R.current.mic = local ? listenLocal(common) : listenBrowser(common);
+	};
+	const sendIt = async (g, text) => {
+		go("sending");
+		R.current.seen = lastSaid(R.current.page)?.key || "";
+		const ok = await send(`(spoken) ${text}`);
+		if (!live(g)) return;
+		if (!ok) {
+			off();
+			return;
+		}
+		go("waiting");
+	};
+	h(() => {
+		if (phase !== "waiting") return;
+		if (status === "working" || status === "starting") return;
+		const a = lastSaid(page);
+		if (!a || a.key === R.current.seen) return;
+		const g = R.current.gen;
+		go("speaking");
+		const id = `${scope}:speak`;
+		note(id);
+		speak(a.text, () => {
+			if (cur$1 === id) note("");
+			if (live(g)) listen(g);
+		}, S.voice);
+	}, [
+		phase,
+		page,
+		status
+	]);
+	h(() => {
+		if (phase !== "waiting") return void 0;
+		const g = R.current.gen;
+		const timer = setTimeout(() => {
+			if (live(g)) off();
+		}, 6e5);
+		return () => clearTimeout(timer);
+	}, [phase]);
+	h(() => () => off(), []);
+	const toggle = () => {
+		if (R.current.phase !== "off") {
+			off();
+			return;
+		}
+		unlockSpeech();
+		stopSpeaking();
+		note("");
+		takeover = Object.assign(() => R.current.off(), { owner: R });
+		const g = ++R.current.gen;
+		listen(g);
+	};
+	return {
+		phase,
+		on: phase !== "off",
+		toggle
+	};
+}
+//#endregion
 //#region web/ui/drafts.js
 var LS = "gfw.drafts";
 var DAYS = 30;
@@ -5458,14 +6924,13 @@ function optionText(label) {
 		kind: ""
 	};
 }
-function PromptCard({ prompt, onAnswer, busy }) {
-	const [typed, setTyped] = d("");
+function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
 	if (prompt.kind === "permission") return /* @__PURE__ */ u("div", {
 		class: "ask permission",
 		children: [
 			/* @__PURE__ */ u("div", {
 				class: "ask-head",
-				children: [/* @__PURE__ */ u("b", { children: ["● ", t("sess.asksPermission")] }), /* @__PURE__ */ u("span", { children: prompt.tool || t("sess.aTool") })]
+				children: /* @__PURE__ */ u("b", { children: prompt.tool || t("sess.aTool") })
 			}),
 			prompt.command ? /* @__PURE__ */ u("pre", {
 				class: "ask-cmd",
@@ -5498,14 +6963,10 @@ function PromptCard({ prompt, onAnswer, busy }) {
 		children: [
 			/* @__PURE__ */ u("div", {
 				class: "ask-head",
-				children: [
-					/* @__PURE__ */ u("b", { children: ["● ", t("sess.asks")] }),
-					tabs.length > 1 ? /* @__PURE__ */ u("span", { children: t("sess.qOf", {
-						i: prompt.tab != null ? prompt.tab + 1 : "?",
-						n: tabs.length
-					}) }) : null,
-					prompt.submit ? /* @__PURE__ */ u("span", { children: t("sess.review") }) : null
-				]
+				children: [tabs.length > 1 ? /* @__PURE__ */ u("span", { children: t("sess.qOf", {
+					i: prompt.tab != null ? prompt.tab + 1 : "?",
+					n: tabs.length
+				}) }) : null, prompt.submit ? /* @__PURE__ */ u("span", { children: t("sess.review") }) : null]
 			}),
 			/* @__PURE__ */ u("p", {
 				class: "ask-q",
@@ -5519,6 +6980,7 @@ function PromptCard({ prompt, onAnswer, busy }) {
 				},
 				children: [/* @__PURE__ */ u("input", {
 					class: "grow",
+					disabled: busy,
 					value: typed,
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: t("sess.yourAnswer"),
@@ -5542,6 +7004,17 @@ function PromptCard({ prompt, onAnswer, busy }) {
 				}, o.n))
 			})
 		]
+	});
+}
+function ReadBtn({ on, onClick }) {
+	return /* @__PURE__ */ u("button", {
+		type: "button",
+		class: `read-btn${on ? " on" : ""}`,
+		"aria-pressed": on,
+		"aria-label": on ? t("chat.stopRead") : t("chat.read"),
+		title: on ? t("chat.stopRead") : t("chat.read"),
+		onClick,
+		children: /* @__PURE__ */ u(Icon, { name: on ? "stop" : "play" })
 	});
 }
 function Terminal({ pane }) {
@@ -5599,8 +7072,9 @@ function ChatLoading({ load }) {
 var OLDER_NEAR_PX = 240;
 var SWIPE_NEXT = 60;
 var EDGE = 24;
-function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const author = useSlot("author");
+	const reading = useReading();
 	const ref = A(null);
 	const stick = A(true);
 	const ours = A(-1);
@@ -5757,10 +7231,17 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 					class: `msg ${m.role === "user" ? "me" : "ai"}`,
 					children: [/* @__PURE__ */ u("div", {
 						class: "who",
-						children: [m.role === "user" ? /* @__PURE__ */ u(S$1, { children: author(m) || t("sess.instruction") }) : "Claude", /* @__PURE__ */ u("span", {
-							class: "when",
-							children: sinceTs(m.ts)
-						})]
+						children: [
+							m.role === "user" ? /* @__PURE__ */ u(S$1, { children: author(m) || t("sess.instruction") }) : "Claude",
+							/* @__PURE__ */ u("span", {
+								class: "when",
+								children: sinceTs(m.ts)
+							}),
+							/* @__PURE__ */ u(ReadBtn, {
+								on: reading === `${scope}:${k}`,
+								onClick: () => toggleRead(`${scope}:${k}`, m.text)
+							})
+						]
 					}), /* @__PURE__ */ u("div", {
 						class: "bubble",
 						children: m.role === "user" ? /* @__PURE__ */ u("p", {
@@ -5786,6 +7267,13 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
 		]
 	});
 }
+var STATE_KEY = {
+	listening: "chat.speakListening",
+	hearing: "chat.speakHearing",
+	sending: "chat.speakSending",
+	waiting: "chat.speakWaiting",
+	speaking: "chat.speakReading"
+};
 var hhmm$1 = (at) => (/* @__PURE__ */ new Date(at * 1e3)).toLocaleString(locale(), {
 	weekday: "short",
 	hour: "2-digit",
@@ -5904,6 +7392,18 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const [drag, setDrag] = d(false);
 	const picker = A(null);
 	const typing = A(!!draft);
+	const composer = A(null);
+	const lastComposerKey = A(-Infinity);
+	const typingPause = A(null);
+	const [composerFocused, setComposerFocused] = d(false);
+	const [composerRecent, setComposerRecent] = d(false);
+	const composerKey = () => {
+		lastComposerKey.current = performance.now();
+		setComposerRecent(true);
+		clearTimeout(typingPause.current);
+		typingPause.current = setTimeout(() => setComposerRecent(false), 2e3);
+	};
+	h(() => () => clearTimeout(typingPause.current), []);
 	const sentAt = A(0);
 	const statusNow = A("unknown");
 	const quietRef = A(quiet);
@@ -5934,6 +7434,21 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	statusNow.current = st;
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
+	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+	const held = !!prompt && composerFocused && composerRecent;
+	const request = useRequest(`session:${project}/${name}`, pane.data ? prompt?.fingerprint || null : void 0, available && !held);
+	const showRequest = () => {
+		clearTimeout(typingPause.current);
+		setComposerRecent(false);
+		request.show();
+	};
+	const quota = useRequest(`quota:${project}/${name}`, card ? st === "limit" ? String(card.limit_at || "limit") : null : void 0, available && !prompt);
+	const canAnswer = !fleet.canAnswer || fleet.canAnswer(project);
+	const [typedAnswer, setTypedAnswer] = d("");
+	h(() => {
+		setTypedAnswer("");
+	}, [prompt?.fingerprint]);
+	const answering = A(false);
 	const act = async (tool, args = {}, opts = {}) => {
 		setBusy(true);
 		try {
@@ -5958,11 +7473,54 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 			setBusy(false);
 		}
 	};
-	const answer = (text, noEnter) => act("fleet_answer", {
-		text,
-		no_enter: noEnter,
-		expect: prompt?.fingerprint
+	const answer = async (text, noEnter) => {
+		if (!canAnswer || answering.current || !prompt) return;
+		answering.current = true;
+		try {
+			if (await act("fleet_answer", {
+				text,
+				no_enter: noEnter,
+				expect: prompt.fingerprint
+			})) request.close();
+		} finally {
+			answering.current = false;
+		}
+	};
+	const requestOpenedAt = A(Infinity);
+	_(() => {
+		requestOpenedAt.current = request.open ? performance.now() : Infinity;
+	}, [request.open, prompt?.fingerprint]);
+	_(() => {
+		if (!request.open || !canAnswer || prompt?.typing) return;
+		const key = (e) => {
+			if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+			const now = performance.now();
+			if (now - requestOpenedAt.current < 600 || now - lastComposerKey.current <= 1500) return;
+			const o = prompt.options?.find((o) => String(o.n) === e.key);
+			if (o) {
+				e.preventDefault();
+				answer(String(o.n), prompt.kind !== "permission");
+			}
+		};
+		addEventListener("keydown", key);
+		return () => removeEventListener("keydown", key);
+	}, [
+		request.open,
+		prompt,
+		canAnswer
+	]);
+	const scope = `${project}/${name}`;
+	const speakMode = useSpeakMode({
+		scope,
+		page: tr.page,
+		status: st,
+		send: async (text) => {
+			const r = await act("fleet_send", { prompt: text });
+			if (r) sentAt.current = Date.now();
+			return !!r;
+		}
 	});
+	h(() => () => stopRead(scope), [scope]);
 	const addFiles = (list) => {
 		const picked = [...list || []].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
 		if (list?.length > picked.length) toast(t("sess.maxFiles", { n: fleet.attachPerMessage }), "");
@@ -5995,11 +7553,16 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	const uploading = files.some((f) => f.state === "up");
 	const ready = files.filter((f) => f.state === "ok");
 	const sendDraft = async () => {
+		if (prompt) {
+			showRequest();
+			return;
+		}
+		if (st === "limit") return;
 		const text = draft.trim();
 		if (!text && !ready.length || uploading) return;
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
-		const prompt = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
-		if (await act("fleet_send", { prompt })) {
+		const message = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
+		if (await act("fleet_send", { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -6200,48 +7763,68 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 					presence(pane.data?.here || [])
 				]
 			}),
-			st === "limit" ? /* @__PURE__ */ u("div", {
-				class: "ask limit",
-				children: [
-					/* @__PURE__ */ u("div", {
-						class: "ask-head",
-						children: [/* @__PURE__ */ u("b", { children: [
-							/* @__PURE__ */ u(Icon, { name: "hourglass" }),
-							" ",
-							t("status.limit.hint")
-						] }), card?.limit_at ? /* @__PURE__ */ u("span", { children: t("sess.quotaBack", { when: hhmm$1(card.limit_at) }) }) : null]
-					}),
-					/* @__PURE__ */ u("p", {
-						class: "muted small",
-						children: t("sess.limitWhy")
-					}),
-					card?.sched ? /* @__PURE__ */ u("p", { children: t("sess.alreadySched", { when: hhmm$1(card.sched.at) }) }) : !can("gfw_schedule") ? null : /* @__PURE__ */ u("div", {
-						class: "row wrap",
-						children: [/* @__PURE__ */ u(Btn, {
-							kind: "primary",
-							disabled: busy,
-							onClick: () => act("gfw_schedule", {
-								at: (card?.limit_at || Math.floor(Date.now() / 1e3) + 18e3) + 90,
-								msg: t("sess.continueMsg")
-							}),
-							children: [
-								/* @__PURE__ */ u(Icon, { name: "clock" }),
+			quota.open ? /* @__PURE__ */ u(Modal, {
+				sheet: true,
+				title: t("status.limit.hint"),
+				onClose: quota.close,
+				children: /* @__PURE__ */ u("div", {
+					class: "ask limit",
+					children: [
+						/* @__PURE__ */ u("div", {
+							class: "ask-head",
+							children: [/* @__PURE__ */ u("b", { children: [
+								/* @__PURE__ */ u(Icon, { name: "hourglass" }),
 								" ",
-								t("sess.resumeOnQuota")
-							]
-						}), /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setSchedOpen(true),
-							children: t("sess.otherTime")
-						})]
-					})
-				]
+								t("status.limit.hint")
+							] }), card?.limit_at ? /* @__PURE__ */ u("span", { children: t("sess.quotaBack", { when: hhmm$1(card.limit_at) }) }) : null]
+						}),
+						/* @__PURE__ */ u("p", {
+							class: "muted small",
+							children: t("sess.limitWhy")
+						}),
+						card?.sched ? /* @__PURE__ */ u("p", { children: t("sess.alreadySched", { when: hhmm$1(card.sched.at) }) }) : !can("gfw_schedule") ? null : /* @__PURE__ */ u("div", {
+							class: "row wrap",
+							children: [/* @__PURE__ */ u(Btn, {
+								kind: "primary",
+								disabled: busy,
+								onClick: async () => {
+									if (await act("gfw_schedule", {
+										at: (card?.limit_at || Math.floor(Date.now() / 1e3) + 18e3) + 90,
+										msg: t("sess.continueMsg")
+									})) quota.close();
+								},
+								children: [
+									/* @__PURE__ */ u(Icon, { name: "clock" }),
+									" ",
+									t("sess.resumeOnQuota")
+								]
+							}), /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => {
+									quota.close();
+									setSchedOpen(true);
+								},
+								children: t("sess.otherTime")
+							})]
+						})
+					]
+				})
 			}) : null,
-			prompt ? /* @__PURE__ */ u(PromptCard, {
-				prompt,
-				onAnswer: answer,
-				busy
-			}, prompt.fingerprint) : null,
+			request.open ? /* @__PURE__ */ u(Modal, {
+				sheet: true,
+				title: t(prompt.kind === "permission" ? "sess.asksPermission" : "sess.asks"),
+				onClose: request.close,
+				children: [/* @__PURE__ */ u(PromptCard, {
+					prompt,
+					onAnswer: answer,
+					busy: busy || !canAnswer,
+					typed: typedAnswer,
+					setTyped: setTypedAnswer
+				}, prompt.fingerprint), !canAnswer ? /* @__PURE__ */ u("p", {
+					class: "modal-body muted small",
+					children: t("sess.requestReadonly")
+				}) : null]
+			}) : null,
 			/* @__PURE__ */ u("div", {
 				class: "tabs",
 				role: "tablist",
@@ -6271,6 +7854,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 				session: name,
 				kind: tool
 			}, tool) : tab === "chat" ? !tr.page ? /* @__PURE__ */ u(ChatLoading, { load: tr.load }) : /* @__PURE__ */ u(Chat, {
+				scope,
 				page: tr.page,
 				queued: tr.page.queued || [],
 				older: tr.older,
@@ -6371,38 +7955,75 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									e.currentTarget.value = "";
 								}
 							}),
-							/* @__PURE__ */ u("textarea", {
-								rows: 2,
-								value: draft,
-								placeholder: drag ? t("sess.drop") : prompt ? t("sess.pendingAbove") : t("sess.writeTo", { name }),
-								onInput: (e) => {
-									setDraft(e.currentTarget.value);
-									typing.current = !!e.currentTarget.value;
-								},
-								onPaste: (e) => {
-									const fs = [...e.clipboardData?.files || []];
-									if (fs.length) {
-										e.preventDefault();
-										addFiles(fs);
+							/* @__PURE__ */ u("div", {
+								class: `composer-input${prompt && !held || st === "limit" ? " has-request" : ""}`,
+								children: [/* @__PURE__ */ u("textarea", {
+									ref: composer,
+									rows: 2,
+									value: draft,
+									placeholder: drag ? t("sess.drop") : t("sess.writeTo", { name }),
+									onFocus: () => setComposerFocused(true),
+									onBlur: () => setComposerFocused(false),
+									onInput: (e) => {
+										setDraft(e.currentTarget.value);
+										typing.current = !!e.currentTarget.value;
+										if (document.activeElement === composer.current) composerKey();
+									},
+									onPaste: (e) => {
+										const fs = [...e.clipboardData?.files || []];
+										if (fs.length) {
+											e.preventDefault();
+											addFiles(fs);
+										}
+									},
+									onKeyDown: (e) => {
+										composerKey();
+										if (e.key === "Escape" && !e.isComposing) {
+											e.preventDefault();
+											e.currentTarget.blur();
+										} else if (held && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
+											e.preventDefault();
+											showRequest();
+										} else if (sendsOnEnter(e)) {
+											e.preventDefault();
+											sendDraft();
+										}
 									}
-								},
-								onKeyDown: (e) => {
-									if (e.key === "Escape" && !e.isComposing) {
-										e.preventDefault();
-										e.currentTarget.blur();
-									} else if (sendsOnEnter(e)) {
-										e.preventDefault();
-										sendDraft();
-									}
-								}
+								}), prompt && !held || st === "limit" ? /* @__PURE__ */ u("button", {
+									type: "button",
+									class: "btn request-return",
+									onClick: prompt ? showRequest : quota.show,
+									children: [/* @__PURE__ */ u(Icon, {
+										name: prompt ? "question" : "hourglass",
+										size: 18
+									}), t(prompt ? canAnswer ? "sess.answerRequest" : "sess.viewRequest" : "sess.viewLimit")]
+								}) : null]
+							}),
+							/* @__PURE__ */ u("button", {
+								type: "button",
+								class: `speak-btn${speakMode.on ? " on" : ""}`,
+								"aria-pressed": speakMode.on,
+								"aria-label": speakMode.on ? t("chat.speakOff") : t("chat.speak"),
+								title: speakMode.on ? t("chat.speakOff") : t("chat.speak"),
+								onClick: speakMode.toggle,
+								children: /* @__PURE__ */ u(Icon, {
+									name: "mic",
+									size: 24
+								})
 							}),
 							/* @__PURE__ */ u(Btn, {
 								kind: "primary",
 								type: "submit",
-								disabled: busy || uploading || !draft.trim() && !ready.length,
+								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
 								children: uploading ? t("sess.uploadingBtn") : t("common.send")
 							})
 						]
+					}),
+					/* @__PURE__ */ u("p", {
+						class: "speak-state muted small",
+						role: "status",
+						"aria-live": "polite",
+						children: speakMode.on ? t(STATE_KEY[speakMode.phase] || "chat.speakListening") : ""
 					})
 				]
 			}),
@@ -6553,6 +8174,10 @@ function Card({ c, active, compact, onOpen }) {
 							c.branch || "—"
 						]
 					}),
+					c.agent && c.agent !== "claude" ? /* @__PURE__ */ u("span", {
+						class: "tag agent",
+						children: c.agent
+					}) : null,
 					c.pr ? /* @__PURE__ */ u("span", {
 						class: "tag pr",
 						children: ["PR ", c.pr]
@@ -6710,6 +8335,38 @@ function ProjectView({ project, session, tool = null }) {
 			setWaking(false);
 		}
 	};
+	const lostCards = (g?.cards || []).filter((c) => c.lost);
+	const [reopening, setReopening] = d(null);
+	const reopenAll = () => setConfirm({
+		title: t("project.reopenAllTitle", { n: lostCards.length }),
+		action: t("project.reopenAll"),
+		body: /* @__PURE__ */ u("p", { children: t("project.reopenAllBody") }),
+		onYes: async () => {
+			const names = [...lostCards.filter((c) => c.lead), ...lostCards.filter((c) => !c.lead)].map((c) => c.name);
+			const failed = [];
+			for (const [i, name] of names.entries()) {
+				setReopening({
+					at: i + 1,
+					of: names.length
+				});
+				try {
+					await fleet.act("fleet_reopen", {
+						project,
+						session: name
+					});
+				} catch (e) {
+					failed.push(`${name}: ${e.message}`);
+				}
+			}
+			setReopening(null);
+			toast(failed.length ? t("project.reopenAllSome", {
+				ok: names.length - failed.length,
+				n: names.length,
+				why: failed.join("; ")
+			}) : t("project.reopenAllDone", { n: names.length }), failed.length ? "bad" : "good");
+			reload();
+		}
+	});
 	const termWhy = typeof fleet.termWhy === "function" ? fleet.termWhy(project) : "";
 	const header = /* @__PURE__ */ u("header", {
 		class: "page-head proj-head",
@@ -6728,34 +8385,48 @@ function ProjectView({ project, session, tool = null }) {
 			}) : null
 		] }), /* @__PURE__ */ u("div", {
 			class: "row wrap",
-			children: [g && !leadUp ? /* @__PURE__ */ u(Btn, {
-				kind: "ghost",
-				disabled: waking,
-				onClick: wake,
-				title: t("project.leadIs"),
-				children: waking ? t("status.starting") + "…" : !lead ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "play" }),
-					" ",
-					t("project.leadStart")
-				] }) : lead.lost ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "refresh" }),
-					" ",
-					t("project.leadReopen")
-				] }) : lead.asleep ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "sun" }),
-					" ",
-					t("project.leadWake")
-				] }) : /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "play" }),
-					" ",
-					t("project.leadResume")
-				] })
-			}) : null, /* @__PURE__ */ u(Btn, {
-				kind: "primary",
-				icon: "plus",
-				onClick: () => setSpawn({}),
-				children: t("project.newSession")
-			})]
+			children: [
+				g && !leadUp ? /* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					disabled: waking,
+					onClick: wake,
+					title: t("project.leadIs"),
+					children: waking ? t("status.starting") + "…" : !lead ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "play" }),
+						" ",
+						t("project.leadStart")
+					] }) : lead.lost ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "refresh" }),
+						" ",
+						t("project.leadReopen")
+					] }) : lead.asleep ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "sun" }),
+						" ",
+						t("project.leadWake")
+					] }) : /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "play" }),
+						" ",
+						t("project.leadResume")
+					] })
+				}) : null,
+				lostCards.length > 1 || reopening ? /* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					disabled: !!reopening,
+					onClick: reopenAll,
+					title: t("status.lost.hint"),
+					children: reopening ? t("project.reopening", reopening) : /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "refresh" }),
+						" ",
+						t("project.reopenAllN", { n: lostCards.length })
+					] })
+				}) : null,
+				/* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					icon: "plus",
+					onClick: () => setSpawn({}),
+					children: t("project.newSession")
+				})
+			]
 		})]
 	});
 	const filters = filterChips({
@@ -7423,7 +9094,7 @@ var saved = () => {
 var cur = saved() || pickLang(typeof navigator !== "undefined" ? navigator.language : "");
 setLangSource(() => cur);
 if (typeof document !== "undefined") document.documentElement.lang = cur;
-var subs$1 = /* @__PURE__ */ new Set();
+var subs = /* @__PURE__ */ new Set();
 function setLang(l) {
 	const v = normLang(l);
 	if (!v) return;
@@ -7433,13 +9104,13 @@ function setLang(l) {
 	if (v === cur) return;
 	cur = v;
 	if (typeof document !== "undefined") document.documentElement.lang = v;
-	for (const f of subs$1) f(v);
+	for (const f of subs) f(v);
 }
 function useLang() {
 	const [l, setL] = d(cur);
 	h(() => {
-		subs$1.add(setL);
-		return () => subs$1.delete(setL);
+		subs.add(setL);
+		return () => subs.delete(setL);
 	}, []);
 	return l;
 }
@@ -7835,12 +9506,6 @@ function Settings() {
 				label: t("settings.pushLabel"),
 				icon: "bell",
 				part: s.push
-			}) : null,
-			s.terminal ? /* @__PURE__ */ u(SwitchSection, {
-				title: t("settings.terminal"),
-				label: t("settings.terminalLabel"),
-				icon: "term",
-				part: s.terminal
 			}) : null,
 			s.hosts ? /* @__PURE__ */ u(Hosts, { part: s.hosts }) : null,
 			s.device ? /* @__PURE__ */ u(Device, { part: s.device }) : null,
@@ -8835,9 +10500,9 @@ function Drop({ at, onAdd, onMove, last, empty }) {
 		children: empty ? t("phone.autos.dropEmpty") : last ? `＋ ${t("phone.autos.dropLast")}` : null
 	});
 }
-function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
+function TriggerBlock({ capabilities, t: t$1, projects, onChange, onType }) {
 	const [over, setOver] = d(false);
-	const sessions = (projects || []).find((p) => p.name === t$6.project)?.sessions || [];
+	const sessions = (projects || []).find((p) => p.name === t$1.project)?.sessions || [];
 	return /* @__PURE__ */ u("section", {
 		class: `node trigger${over ? " over" : ""}`,
 		onDragOver: (e) => {
@@ -8858,16 +10523,16 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 			}), /* @__PURE__ */ u("div", {
 				class: "seg",
 				children: [/* @__PURE__ */ u("button", {
-					class: t$6.type === "schedule" ? "on" : "",
-					onClick: () => t$6.type !== "schedule" && onType("schedule"),
+					class: t$1.type === "schedule" ? "on" : "",
+					onClick: () => t$1.type !== "schedule" && onType("schedule"),
 					children: [
 						/* @__PURE__ */ u(Icon, { name: "clock" }),
 						" ",
 						t("phone.autos.schedule")
 					]
 				}), /* @__PURE__ */ u("button", {
-					class: t$6.type === "event" ? "on" : "",
-					onClick: () => t$6.type !== "event" && onType("event"),
+					class: t$1.type === "event" ? "on" : "",
+					onClick: () => t$1.type !== "event" && onType("event"),
 					children: [
 						/* @__PURE__ */ u(Icon, { name: "bolt" }),
 						" ",
@@ -8875,30 +10540,30 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 					]
 				})]
 			})] }),
-			t$6.type === "schedule" ? /* @__PURE__ */ u("div", {
+			t$1.type === "schedule" ? /* @__PURE__ */ u("div", {
 				class: "node-body",
 				children: [
 					/* @__PURE__ */ u("div", {
 						class: "seg sm",
 						children: [
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "days" ? "on" : "",
+								class: t$1.mode === "days" ? "on" : "",
 								onClick: () => onChange({ mode: "days" }),
 								children: t("phone.autos.someDays")
 							}),
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "once" ? "on" : "",
+								class: t$1.mode === "once" ? "on" : "",
 								onClick: () => onChange({ mode: "once" }),
 								children: t("phone.autos.once")
 							}),
 							/* @__PURE__ */ u("button", {
-								class: t$6.mode === "every" ? "on" : "",
+								class: t$1.mode === "every" ? "on" : "",
 								onClick: () => onChange({ mode: "every" }),
 								children: t("phone.autos.everySoOften")
 							})
 						]
 					}),
-					t$6.mode === "days" ? /* @__PURE__ */ u("div", {
+					t$1.mode === "days" ? /* @__PURE__ */ u("div", {
 						class: "days",
 						role: "group",
 						"aria-label": t("phone.autos.days"),
@@ -8911,30 +10576,30 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 							6,
 							0
 						].map((d) => /* @__PURE__ */ u("button", {
-							class: t$6.days.includes(d) ? "on" : "",
-							"aria-pressed": t$6.days.includes(d),
-							onClick: () => onChange({ days: t$6.days.includes(d) ? t$6.days.filter((x) => x !== d) : [...t$6.days, d] }),
+							class: t$1.days.includes(d) ? "on" : "",
+							"aria-pressed": t$1.days.includes(d),
+							onClick: () => onChange({ days: t$1.days.includes(d) ? t$1.days.filter((x) => x !== d) : [...t$1.days, d] }),
 							children: DAY_NAMES[d]
 						}, d))
 					}) : null,
-					t$6.mode === "once" ? /* @__PURE__ */ u("label", {
+					t$1.mode === "once" ? /* @__PURE__ */ u("label", {
 						class: "field",
 						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.date") }), /* @__PURE__ */ u("input", {
 							type: "date",
-							value: t$6.date,
+							value: t$1.date,
 							onInput: (e) => onChange({ date: e.currentTarget.value })
 						})]
 					}) : null,
-					t$6.mode !== "every" ? /* @__PURE__ */ u("label", {
+					t$1.mode !== "every" ? /* @__PURE__ */ u("label", {
 						class: "field",
 						children: [/* @__PURE__ */ u("span", { children: t("phone.autos.time") }), /* @__PURE__ */ u("input", {
 							type: "time",
-							value: t$6.at,
+							value: t$1.at,
 							onInput: (e) => onChange({ at: e.currentTarget.value })
 						})]
 					}) : /* @__PURE__ */ u(Select, {
 						label: t("phone.autos.every"),
-						value: t$6.minutes,
+						value: t$1.minutes,
 						onChange: (v) => onChange({ minutes: Number(v) }),
 						options: EVERY.map((m) => ({
 							value: m,
@@ -8947,7 +10612,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 				children: [
 					/* @__PURE__ */ u(Select, {
 						label: t("phone.autos.whenSession"),
-						value: t$6.event,
+						value: t$1.event,
 						onChange: (v) => onChange({ event: v }),
 						options: Object.entries(EVENTS$1).filter(([k]) => !capabilities?.events || capabilities.events.includes(k)).map(([k, d]) => ({
 							value: k,
@@ -8959,7 +10624,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 						children: [/* @__PURE__ */ u(Select, {
 							field: "field grow",
 							label: t("phone.autos.whichProject"),
-							value: t$6.project,
+							value: t$1.project,
 							onChange: (v) => onChange({
 								project: v,
 								session: "*"
@@ -8974,9 +10639,9 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 						}), /* @__PURE__ */ u(Select, {
 							field: "field grow",
 							label: t("phone.autos.whichSession"),
-							value: t$6.session,
+							value: t$1.session,
 							onChange: (v) => onChange({ session: v }),
-							disabled: t$6.project === "*",
+							disabled: t$1.project === "*",
 							options: [{
 								value: "*",
 								label: t("phone.autos.any")
@@ -8992,7 +10657,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 							type: "number",
 							min: "1",
 							max: "1440",
-							value: t$6.cooldown,
+							value: t$1.cooldown,
 							onInput: (e) => onChange({ cooldown: Number(e.currentTarget.value) })
 						})]
 					})
@@ -9000,7 +10665,7 @@ function TriggerBlock({ capabilities, t: t$6, projects, onChange, onType }) {
 			}),
 			/* @__PURE__ */ u("p", {
 				class: "node-say",
-				children: describeTrigger(t$6)
+				children: describeTrigger(t$1)
 			})
 		]
 	});
@@ -9206,11 +10871,11 @@ function AIPanel({ draft, onDraft }) {
 		end.current?.scrollIntoView({ block: "end" });
 	}, [msgs, busy]);
 	const ask = async () => {
-		const t$7 = text.trim();
-		if (!t$7 || busy) return;
+		const t$2 = text.trim();
+		if (!t$2 || busy) return;
 		const next = [...msgs, {
 			role: "user",
-			text: t$7
+			text: t$2
 		}];
 		setMsgs(next);
 		setText("");
@@ -9977,10 +11642,14 @@ function Held({ row, project, id }) {
 //#endregion
 //#region web/ui/queue.jsx
 var replyText = (row, text) => `Re your ledger item ${row.id}: "${row.text}"\n\n${String(text || "").trim()}`;
+var yours = (r) => r.state === "question" || r.state === "waiting";
+var optionLine = (o) => `${o.key}) ${o.text}`;
+var PENDING_POLL_MS = 2e3;
 function Queue() {
 	const fleet = useFleet();
 	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, []);
 	const [row, setRow] = d(null), [drafts, setDrafts] = d({}), [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const [explaining, setExplaining] = d(null), [asked, setAsked] = d({});
 	const keyOf = (r) => `${r.project}/${r.id}`;
 	const text = row ? drafts[keyOf(row)] || "" : "";
 	const setText = (v) => {
@@ -9990,23 +11659,40 @@ function Queue() {
 			[k]: v
 		}));
 	};
+	const clearDraft = (r) => setDrafts((d) => {
+		const n = { ...d };
+		delete n[keyOf(r)];
+		return n;
+	});
+	const answer = async (r, said, option) => {
+		const session = r.session || "master";
+		await fleet.act("fleet_send", {
+			project: r.project,
+			session,
+			prompt: replyText(r, said)
+		});
+		if (!yours(r)) return;
+		try {
+			await fleet.act("fleet_ledger", {
+				project: r.project,
+				session,
+				verb: "answer",
+				id: String(r.id),
+				...option ? { option: option.key } : {},
+				text: said
+			});
+		} catch (e) {
+			toast(t("phone.answerNotMarked", { why: e.message }), "bad");
+		}
+	};
 	const send = async () => {
 		if (!text.trim() || busy) return;
 		setBusy(true);
 		setFailure("");
-		const k = keyOf(row);
 		try {
-			await fleet.act("fleet_send", {
-				project: row.project,
-				session: "master",
-				prompt: replyText(row, text)
-			});
+			await answer(row, text);
+			clearDraft(row);
 			setRow(null);
-			setDrafts((d) => {
-				const n = { ...d };
-				delete n[k];
-				return n;
-			});
 			reload();
 		} catch (e) {
 			setFailure(e.message);
@@ -10014,6 +11700,36 @@ function Queue() {
 			setBusy(false);
 		}
 	};
+	const explain = async (r) => {
+		setExplaining(r);
+		const live = r.explain || {};
+		if (live.text || live.askedAt && !live.failed) return;
+		try {
+			const out = await fleet.act("fleet_ledger", {
+				project: r.project,
+				session: r.session || "master",
+				verb: "explain",
+				id: String(r.id)
+			});
+			setAsked((a) => ({
+				...a,
+				[keyOf(r)]: {
+					at: Date.now(),
+					queued: !!(out && out.queued)
+				}
+			}));
+			reload();
+		} catch (e) {
+			setAsked((a) => ({
+				...a,
+				[keyOf(r)]: {
+					at: Date.now(),
+					failed: e.message
+				}
+			}));
+		}
+	};
+	const items = data?.items || [];
 	return /* @__PURE__ */ u(PhoneScreen, {
 		title: t("phone.queue"),
 		error,
@@ -10022,30 +11738,16 @@ function Queue() {
 			/* @__PURE__ */ u(PendingSignIns, {}),
 			/* @__PURE__ */ u("div", {
 				class: "extra-grid",
-				children: (data?.items || []).map((r) => r.state === "held" ? /* @__PURE__ */ u(HeldCard, { row: r }, `${r.project}/${r.id}`) : /* @__PURE__ */ u("article", {
-					class: "card extra-card s-yellow",
-					children: [
-						/* @__PURE__ */ u("span", {
-							class: "pill c-yellow",
-							children: ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state
-						}),
-						/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`) }),
-						/* @__PURE__ */ u("p", { children: r.text }),
-						/* @__PURE__ */ u("p", {
-							class: "muted",
-							children: joinMeta(r.host, typeof r.reason === "string" ? r.reason : r.reason?.text)
-						}),
-						/* @__PURE__ */ u(Btn, {
-							onClick: () => {
-								setRow(r);
-								setFailure("");
-							},
-							children: t("phone.reply")
-						})
-					]
-				}, `${r.project}/${r.id}`))
+				children: items.map((r) => r.state === "held" ? /* @__PURE__ */ u(HeldCard, { row: r }, keyOf(r)) : /* @__PURE__ */ u(ForYouCard, {
+					r,
+					onReply: () => {
+						setRow(r);
+						setFailure("");
+					},
+					onExplain: () => explain(r)
+				}, keyOf(r)))
 			}),
-			data && !data.items?.length ? /* @__PURE__ */ u("p", {
+			data && !items.length ? /* @__PURE__ */ u("p", {
 				class: "empty",
 				children: t("phone.nothingWaiting")
 			}) : null,
@@ -10056,7 +11758,7 @@ function Queue() {
 					/* @__PURE__ */ u("p", { children: row.text }),
 					/* @__PURE__ */ u("p", {
 						class: "muted",
-						children: t("phone.replyHint")
+						children: t(yours(row) ? "phone.replyHintYours" : "phone.replyHint")
 					}),
 					/* @__PURE__ */ u("label", {
 						class: "field",
@@ -10078,8 +11780,180 @@ function Queue() {
 						children: t("common.send")
 					})
 				]
+			}) : null,
+			explaining ? /* @__PURE__ */ u(ExplainSheet, {
+				row: items.find((x) => keyOf(x) === keyOf(explaining)) || null,
+				was: explaining,
+				asked: asked[keyOf(explaining)],
+				reload,
+				draft: drafts[keyOf(explaining)] || "",
+				setDraft: (v) => setDrafts((d) => ({
+					...d,
+					[keyOf(explaining)]: v
+				})),
+				onAnswer: async (said, option) => {
+					await answer(explaining, said, option);
+					clearDraft(explaining);
+					setExplaining(null);
+					reload();
+					toast(t("phone.answered"));
+				},
+				onAgain: () => {
+					setAsked((a) => ({
+						...a,
+						[keyOf(explaining)]: null
+					}));
+					explain({
+						...explaining,
+						explain: null
+					});
+				},
+				onClose: () => setExplaining(null)
 			}) : null
 		]
+	});
+}
+function ForYouCard({ r, onReply, onExplain }) {
+	const label = r.state === "question" ? t("phone.queueState.question") : ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state;
+	const reason = typeof r.reason === "string" ? r.reason : r.reason?.text;
+	return /* @__PURE__ */ u("article", {
+		class: "card extra-card s-yellow foryou-card",
+		children: [
+			/* @__PURE__ */ u("span", {
+				class: "pill c-yellow",
+				children: label
+			}),
+			/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`, r.n ? t("phone.questionN", { num: r.n }) : null) }),
+			/* @__PURE__ */ u("p", { children: r.text }),
+			r.options?.length ? /* @__PURE__ */ u("ul", {
+				class: "foryou-options",
+				children: r.options.map((o) => /* @__PURE__ */ u("li", { children: optionLine(o) }, o.key))
+			}) : null,
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: joinMeta(r.host, reason, r.since ? ago(Date.now() / 1e3 - r.since) : "", r.explain?.text ? t("phone.explained") : null)
+			}),
+			/* @__PURE__ */ u("div", {
+				class: "foryou-actions",
+				children: [yours(r) ? /* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					icon: "question",
+					onClick: onExplain,
+					children: t("phone.explain")
+				}) : null, /* @__PURE__ */ u(Btn, {
+					onClick: onReply,
+					children: t("phone.reply")
+				})]
+			})
+		]
+	});
+}
+function ExplainSheet({ row, was, asked, reload, draft, setDraft, onAnswer, onAgain, onClose }) {
+	const r = row || was, ex = row && row.explain || null;
+	const [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const session = r.session || "master";
+	const failed = asked && asked.failed || ex && ex.failed || "";
+	const pending = !failed && !(ex && ex.text) && !!row;
+	h(() => {
+		if (!pending) return void 0;
+		const iv = setInterval(() => {
+			if (!document.hidden) reload();
+		}, PENDING_POLL_MS);
+		return () => clearInterval(iv);
+	}, [pending, reload]);
+	const go = async (said, option) => {
+		if (busy || !String(said || "").trim()) return;
+		setBusy(true);
+		setFailure("");
+		try {
+			await onAnswer(String(said).trim(), option);
+		} catch (e) {
+			setFailure(e.message);
+		} finally {
+			setBusy(false);
+		}
+	};
+	const status = !row ? /* @__PURE__ */ u("p", {
+		class: "muted",
+		children: t("phone.explainGone")
+	}) : ex && ex.text ? /* @__PURE__ */ u("div", {
+		class: "explain-text",
+		children: [/* @__PURE__ */ u(Markdown, { text: ex.text }), /* @__PURE__ */ u("p", {
+			class: "muted",
+			children: joinMeta(t("phone.explainedBy", { session }), ex.at ? ago((Date.now() - ex.at) / 1e3) : "")
+		})]
+	}) : failed ? /* @__PURE__ */ u("div", {
+		class: "explain-wait",
+		children: [/* @__PURE__ */ u("p", {
+			class: "err",
+			role: "alert",
+			children: t("phone.explainFailed", { why: failed })
+		}), /* @__PURE__ */ u(Btn, {
+			onClick: onAgain,
+			children: t("phone.explainRetry")
+		})]
+	}) : /* @__PURE__ */ u("div", {
+		class: "explain-wait",
+		role: "status",
+		children: [/* @__PURE__ */ u("span", {
+			class: "explain-dots",
+			"aria-hidden": "true"
+		}), /* @__PURE__ */ u("p", { children: asked && asked.queued ? t("phone.explainQueued", { session }) : t("phone.explainAsking", { session }) })]
+	});
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		title: joinMeta(t("phone.explain"), splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`),
+		onClose: () => !busy && onClose(),
+		children: /* @__PURE__ */ u("div", {
+			class: "modal-body explain-sheet",
+			children: [
+				/* @__PURE__ */ u("blockquote", {
+					class: "explain-ask",
+					children: r.text
+				}),
+				status,
+				row && ex && ex.text ? /* @__PURE__ */ u("button", {
+					type: "button",
+					class: "link-btn",
+					onClick: onAgain,
+					children: t("phone.explainAgain")
+				}) : null,
+				row ? /* @__PURE__ */ u("section", {
+					class: "explain-answer",
+					"aria-label": t("phone.answerIt"),
+					children: [
+						/* @__PURE__ */ u("h4", { children: t("phone.answerIt") }),
+						r.options?.length ? /* @__PURE__ */ u("div", {
+							class: "explain-options",
+							children: r.options.map((o) => /* @__PURE__ */ u(Btn, {
+								disabled: busy,
+								onClick: () => go(optionLine(o), o),
+								children: optionLine(o)
+							}, o.key))
+						}) : null,
+						/* @__PURE__ */ u("label", {
+							class: "field",
+							children: [/* @__PURE__ */ u("span", { children: r.options?.length ? t("phone.answerOwnWords") : t("phone.answerWords") }), /* @__PURE__ */ u("textarea", {
+								rows: 3,
+								value: draft,
+								onInput: (e) => setDraft(e.currentTarget.value)
+							})]
+						}),
+						failure ? /* @__PURE__ */ u("p", {
+							class: "err",
+							role: "alert",
+							children: failure
+						}) : null,
+						/* @__PURE__ */ u(Btn, {
+							kind: "primary",
+							disabled: busy || !draft.trim(),
+							onClick: () => go(draft),
+							children: t("common.send")
+						})
+					]
+				}) : null
+			]
+		})
 	});
 }
 //#endregion
@@ -10210,1162 +12084,6 @@ function Search({ query = "" }) {
 			}) : null
 		]
 	});
-}
-//#endregion
-//#region web/ui/speakable.js
-var EN = {
-	code: "Code omitted.",
-	timestamp: "a timestamp",
-	id: "an id",
-	hex: "a hex id",
-	escape: "an escape code",
-	commit: "a commit",
-	link: "{label} link",
-	theLink: "the link",
-	line: "line",
-	goesOn: "… and it goes on."
-};
-var SPEAK_MAX = 2e4;
-var IDENT_EDGE = "(^|[^\\w./~@+-])";
-function sayIdentifiers(t, w) {
-	const pathSpoken = (p, line) => {
-		const base = p.replace(/\/+$/, "").split("/").pop() || p;
-		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
-	};
-	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
-	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
-	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
-	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
-	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
-	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
-	t = t.replace(/ \/ /g, ", ");
-	return t;
-}
-function speakable(text, w = EN) {
-	let t = String(text || "");
-	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
-	t = t.replace(/`([^`]*)`/g, "$1");
-	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
-	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
-	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
-	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
-	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
-	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
-	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
-	t = t.replace(/~~[^~\n]+~~/g, "");
-	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
-	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
-	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
-	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
-	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
-	t = t.replace(/__([^_\n]+)__/g, "$1");
-	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
-	t = sayIdentifiers(t, w);
-	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
-	t = t.replace(/\s+/g, " ").trim();
-	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
-}
-var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
-function sentencesOf(t) {
-	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
-	let from = 0, m;
-	while (m = re.exec(t)) {
-		if (!m[0].length) {
-			re.lastIndex++;
-			continue;
-		}
-		const end = m.index + m[0].length;
-		const piece = t.slice(from, m.index + m[0].length - m[1].length);
-		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
-		out.push(piece.trim());
-		from = end;
-	}
-	if (from < t.length) out.push(t.slice(from).trim());
-	return out.filter(Boolean);
-}
-function cutLong(x, max) {
-	const out = [];
-	while (x.length > max) {
-		let at = -1;
-		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
-			let m, best = -1;
-			mark.lastIndex = 0;
-			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
-			if (best >= max / 4) {
-				at = best;
-				break;
-			}
-		}
-		if (at < 0) {
-			const sp = x.indexOf(" ", max);
-			if (sp < 0) break;
-			at = sp;
-		}
-		out.push(x.slice(0, at).trim());
-		x = x.slice(at).trim();
-	}
-	if (x) out.push(x);
-	return out;
-}
-function speechChunks(text, max = 600) {
-	const t = String(text || "").replace(/\s+/g, " ").trim();
-	if (!t) return [];
-	const out = [];
-	let cur = "";
-	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
-		if (cur && cur.length + 1 + piece.length > max) {
-			out.push(cur);
-			cur = "";
-		}
-		cur = cur ? `${cur} ${piece}` : piece;
-	}
-	if (cur) out.push(cur);
-	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
-}
-//#endregion
-//#region web/ui/voice.js
-var B = {};
-function voiceBackend(adapter) {
-	B = adapter || {};
-	status = null;
-}
-var status = null;
-async function voiceStatus(force = false) {
-	if (status && !force) return status;
-	try {
-		status = B.voice ? await B.voice() : null;
-	} catch {
-		status = null;
-	}
-	status ||= {
-		hear: { ready: false },
-		speak: { ready: false }
-	};
-	return status;
-}
-function wav16k(chunks, rate) {
-	let n = 0;
-	for (const c of chunks) n += c.length;
-	const all = new Float32Array(n);
-	let o = 0;
-	for (const c of chunks) {
-		all.set(c, o);
-		o += c.length;
-	}
-	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
-	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
-	const str = (off, s) => {
-		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
-	};
-	str(0, "RIFF");
-	v.setUint32(4, 36 + len * 2, true);
-	str(8, "WAVE");
-	str(12, "fmt ");
-	v.setUint32(16, 16, true);
-	v.setUint16(20, 1, true);
-	v.setUint16(22, 1, true);
-	v.setUint32(24, 16e3, true);
-	v.setUint32(28, 32e3, true);
-	v.setUint16(32, 2, true);
-	v.setUint16(34, 16, true);
-	str(36, "data");
-	v.setUint32(40, len * 2, true);
-	for (let i = 0; i < len; i++) {
-		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
-		let sum = 0;
-		for (let j = a; j < b; j++) sum += all[j];
-		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
-		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
-	}
-	return new Blob([buf], { type: "audio/wav" });
-}
-var PAUSES = worded({
-	normal: { ms: 2500 },
-	larga: { ms: 4500 },
-	manual: { ms: 0 }
-}, "pause");
-var AUDIO = {
-	channelCount: 1,
-	echoCancellation: true,
-	noiseSuppression: true,
-	autoGainControl: true
-};
-var transcribe = async (blob) => {
-	if (!B.hear) throw new Error(t("voice.noHear"));
-	const j = await B.hear(blob);
-	return String(j?.text || "").trim();
-};
-var rmsOf = (d) => {
-	let s = 0;
-	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
-	return Math.sqrt(s / d.length);
-};
-var micDenied = () => t("voice.micDenied");
-var VAD_DIR = "/vad-0.0.31/";
-var vad = null;
-var vadLoad = null;
-var vadBroken = false;
-var turn = null;
-function warmVad() {
-	if (vad || vadBroken) return Promise.resolve(vad);
-	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
-		model: "v5",
-		baseAssetPath: VAD_DIR,
-		onnxWASMBasePath: VAD_DIR,
-		startOnLoad: false,
-		ortConfig: (ort) => {
-			ort.env.logLevel = "error";
-			ort.env.wasm.numThreads = 1;
-		},
-		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		positiveSpeechThreshold: .5,
-		negativeSpeechThreshold: .35,
-		preSpeechPadMs: 600,
-		minSpeechMs: 250,
-		redemptionMs: PAUSES.normal.ms,
-		submitUserSpeechOnPause: true,
-		onFrameProcessed: (p, f) => turn?.frame(p, f),
-		onSpeechStart: () => turn?.start(),
-		onSpeechEnd: (a) => turn?.end(a),
-		onVADMisfire: () => turn?.misfire()
-	})).then((v) => vad = v, (e) => {
-		vadBroken = true;
-		console.warn("VAD did not load, using the loudness meter:", e);
-		return null;
-	}).finally(() => {
-		vadLoad = null;
-	});
-	return vadLoad;
-}
-function listenLocal(opts) {
-	let h = null, cancelled = false;
-	const pending = {
-		stop: () => {
-			if (h) h.stop();
-			else pending.stopAsked = true;
-		},
-		cancel: () => {
-			cancelled = true;
-			h?.cancel();
-		}
-	};
-	warmVad().then((v) => {
-		if (cancelled) return;
-		h = v ? listenVad(v, opts) : listenLoudness(opts);
-		if (pending.stopAsked) h.stop();
-	});
-	return pending;
-}
-function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let done = false, spoke = false;
-	const t0 = performance.now();
-	const end = async (audio) => {
-		if (done) return;
-		done = true;
-		turn = null;
-		clearInterval(watch);
-		try {
-			await v.pause();
-		} catch {}
-		onSpeaking?.(false);
-		if (!audio || audio.length < 4e3) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k([audio], 16e3)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	let got = null;
-	const me = turn = {
-		frame: (p, f) => {
-			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
-		},
-		start: () => {
-			spoke = true;
-			onSpeaking?.(true);
-		},
-		misfire: () => onSpeaking?.(false),
-		end: (audio) => {
-			got = audio;
-			if (pauseMs) end(audio);
-		}
-	};
-	v.setOptions({ redemptionMs: pauseMs || 6e5 });
-	const watch = setInterval(() => {
-		const t = performance.now() - t0;
-		if (!spoke && t > 15e3) cancel();
-		else if (t > maxMs) stop();
-	}, 500);
-	const stop = async () => {
-		if (done) return;
-		if (turn === me) try {
-			await v.pause();
-		} catch {}
-		end(got);
-	};
-	const cancel = () => {
-		got = null;
-		spoke = false;
-		end(null);
-	};
-	v.start().then(() => {
-		if (!done) onState?.("listening");
-	}, () => {
-		onError?.(micDenied());
-		cancel();
-	});
-	return {
-		stop,
-		cancel
-	};
-}
-function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
-	const chunks = [];
-	const t0 = performance.now();
-	const finish = async (send) => {
-		if (done) return;
-		done = true;
-		try {
-			node?.disconnect();
-			src?.disconnect();
-		} catch {}
-		try {
-			stream?.getTracks().forEach((x) => x.stop());
-		} catch {}
-		const rate = ctx?.sampleRate || 48e3;
-		try {
-			await ctx?.close();
-		} catch {}
-		onSpeaking?.(false);
-		if (!send || !spoke || !chunks.length) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k(chunks, rate)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	(async () => {
-		try {
-			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-		} catch {
-			done = true;
-			onError?.(micDenied());
-			onText?.("");
-			return;
-		}
-		ctx = new AudioContext();
-		src = ctx.createMediaStreamSource(stream);
-		node = ctx.createScriptProcessor(4096, 1, 1);
-		let floor = .008;
-		node.onaudioprocess = (e) => {
-			if (done) return;
-			const d = e.inputBuffer.getChannelData(0);
-			chunks.push(new Float32Array(d));
-			const rms = rmsOf(d);
-			const now = performance.now();
-			const loud = rms > Math.max(.015, floor * 2.5);
-			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
-			onLevel?.(Math.min(1, rms * 12));
-			if (loud) {
-				if (!spoke) onSpeaking?.(true);
-				spoke = true;
-				quietSince = 0;
-			} else if (spoke && !quietSince) quietSince = now;
-			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
-			else if (now - t0 > maxMs) finish(true);
-			else if (!spoke && now - t0 > 15e3) finish(false);
-		};
-		src.connect(node);
-		node.connect(ctx.destination);
-		onState?.("listening");
-	})();
-	return {
-		stop: () => finish(true),
-		cancel: () => finish(false)
-	};
-}
-var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-var browserCanHear = !!Recognition;
-var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
-function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
-	const r = new Recognition();
-	r.lang = speech;
-	r.interimResults = true;
-	r.continuous = true;
-	let final = "", quiet = null;
-	const hush = () => {
-		clearTimeout(quiet);
-		if (pauseMs) quiet = setTimeout(() => {
-			try {
-				r.stop();
-			} catch {}
-		}, pauseMs);
-	};
-	r.onresult = (e) => {
-		let live = "";
-		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
-		else live += e.results[i][0].transcript;
-		onInterim?.((final + " " + live).trim());
-		hush();
-	};
-	r.onerror = (e) => {
-		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
-		else if (e.error === "network") onError?.(t("voice.needsNet"));
-		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
-	};
-	r.onend = () => {
-		clearTimeout(quiet);
-		onText?.(final.trim());
-	};
-	try {
-		r.start();
-		onState?.("listening");
-	} catch {
-		onText?.("");
-	}
-	return {
-		stop: () => {
-			try {
-				r.stop();
-			} catch {}
-		},
-		cancel: () => {
-			try {
-				r.abort();
-			} catch {}
-		}
-	};
-}
-var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
-var playing = null;
-function stopSpeaking() {
-	window.speechSynthesis?.cancel();
-	if (playing) {
-		playing.cancelled = true;
-		try {
-			playing.audio?.pause();
-		} catch {}
-		playing = null;
-	}
-}
-function utter(text, onEnd) {
-	const s = window.speechSynthesis;
-	if (!s) {
-		onEnd?.();
-		return;
-	}
-	const u = new SpeechSynthesisUtterance(text);
-	const all = s.getVoices();
-	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
-	if (v) u.voice = v;
-	u.lang = v?.lang || speechLang();
-	u.rate = 1.05;
-	u.onend = () => onEnd?.();
-	u.onerror = () => onEnd?.();
-	s.speak(u);
-}
-async function speakBrowser(chunks, job) {
-	for (const c of chunks) {
-		if (job.cancelled) return;
-		await new Promise((resolve) => utter(c, resolve));
-	}
-}
-function playSample(url, onEnd) {
-	stopSpeaking();
-	const job = {
-		cancelled: false,
-		audio: new Audio(url)
-	};
-	playing = job;
-	const done = () => {
-		if (!job.cancelled) {
-			playing = null;
-			onEnd?.();
-		}
-	};
-	job.audio.onended = done;
-	job.audio.onerror = done;
-	job.audio.play().catch(done);
-}
-var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
-async function speak(md, onEnd, voice = "") {
-	stopSpeaking();
-	const chunks = speechChunks(speakable(md, sayWords()));
-	if (!chunks.length) {
-		onEnd?.();
-		return;
-	}
-	const job = {
-		cancelled: false,
-		audio: null
-	};
-	playing = job;
-	const st = await voiceStatus();
-	if (job.cancelled) return;
-	let i = 0;
-	if (st.speak?.ready) try {
-		let next = B.speak(chunks[0], voice);
-		for (; i < chunks.length; i++) {
-			const r = await next;
-			if (job.cancelled) return;
-			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
-			next?.catch(() => {});
-			for (const s of r.sentences) {
-				if (job.cancelled) return;
-				const url = await B.speakAudio(s.id);
-				if (job.cancelled) return;
-				await new Promise((resolve) => {
-					const a = new Audio(url);
-					job.audio = a;
-					a.onended = resolve;
-					a.onerror = resolve;
-					a.play().catch(resolve);
-				});
-			}
-		}
-	} catch {}
-	if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
-	if (!job.cancelled) {
-		playing = null;
-		onEnd?.();
-	}
-}
-//#endregion
-//#region web/ui/resolve.js
-var norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-var phon = (s) => norm(s).replace(/qu/g, "k").replace(/q/g, "k").replace(/c([aou])/g, "k$1").replace(/c([ei])/g, "s$1").replace(/c\b/g, "k").replace(/ck/g, "k").replace(/z/g, "s").replace(/v/g, "b").replace(/w/g, "u").replace(/ll/g, "y").replace(/ph/g, "f").replace(/x/g, "ks").replace(/h/g, "").replace(/([a-z])\1+/g, "$1").replace(/\s+/g, " ").trim();
-var grams = (s) => {
-	const t = ` ${s} `;
-	const g = /* @__PURE__ */ new Map();
-	for (let i = 0; i < t.length - 1; i++) {
-		const k = t.slice(i, i + 2);
-		g.set(k, (g.get(k) || 0) + 1);
-	}
-	return g;
-};
-function dice(a, b) {
-	const A = grams(a), B = grams(b);
-	let both = 0, n = 0;
-	for (const [k, v] of A) {
-		n += v;
-		both += Math.min(v, B.get(k) || 0);
-	}
-	for (const v of B.values()) n += v;
-	return n ? 2 * both / n : 0;
-}
-var sim = (a, b) => phon(a) === phon(b) ? 1 : dice(phon(a), phon(b));
-function bestName(name, options) {
-	const n = norm(name);
-	if (!n) return null;
-	let hit = null, score = 0;
-	for (const o of options) {
-		const k = norm(o);
-		const s = k === n ? 2 : (k.startsWith(n) || n.startsWith(k)) && Math.min(k.length, n.length) >= 3 ? 1.5 : sim(k, n);
-		if (s > score) {
-			hit = o;
-			score = s;
-		}
-	}
-	return score >= .6 ? hit : null;
-}
-function command(text, projects, context) {
-	const t$5 = norm(text);
-	if (!t$5) return null;
-	const short = t$5.split(" ").length <= 9;
-	if (short && (/^(muestrame |abre |ve a |ir a |vamos a |llevame a )?(el )?mapa( en vivo)?$/.test(t$5) || /^(show me |open |go to |take me to )?(the )?(live )?map$/.test(t$5))) return {
-		go: "/map",
-		say: t("cmd.map")
-	};
-	if (short && (/^(ve |vamos |llevame |volver |vuelve )?(al )?inicio$/.test(t$5) || /^(go |take me |back )?(to )?(the )?home( page)?$|^go home$/.test(t$5))) return {
-		go: "/",
-		say: t("cmd.home")
-	};
-	if (short && (/^(muestrame |abre |ve a )?(la )?actividad$/.test(t$5) || /^(show me |open |go to )?(the )?activity$/.test(t$5))) return {
-		go: "/activity",
-		say: t("cmd.activity")
-	};
-	const m = /^(?:abre|ve a|vamos a|llevame a|muestrame|ensename|cambia a|pasa a|anda a) (?:la )?sesion (.+)$/.exec(t$5) || /^(?:open|go to|take me to|show me|switch to) (?:the )?session (.+)$/.exec(t$5);
-	if (m && short) {
-		const all = (projects || []).flatMap((p) => p.sessions.map((x) => ({
-			p: p.name,
-			s: x.name
-		})));
-		const inCtx = all.filter((x) => x.p === context);
-		const pick = (list) => {
-			const k = bestName(m[1], list.map((x) => x.s));
-			return k && list.find((x) => x.s === k);
-		};
-		const hit = pick(inCtx) || pick(all);
-		if (hit) return {
-			go: `/p/${encodeURIComponent(hit.p)}/s/${encodeURIComponent(hit.s)}`,
-			project: hit.p,
-			session: hit.s,
-			say: hit.p !== context ? t("cmd.openIn", {
-				session: hit.s,
-				project: hit.p
-			}) : t("cmd.open", { session: hit.s })
-		};
-		return {
-			go: null,
-			say: t("cmd.noSession", { name: m[1] })
-		};
-	}
-	return null;
-}
-//#endregion
-//#region web/ui/agent.js
-var store = {
-	get: (k, d) => {
-		try {
-			const v = localStorage.getItem(`gfw.${k}`);
-			return v == null ? d : JSON.parse(v);
-		} catch {
-			return d;
-		}
-	},
-	set: (k, v) => {
-		try {
-			localStorage.setItem(`gfw.${k}`, JSON.stringify(v));
-		} catch {}
-	}
-};
-var S = {
-	pin: store.get("pin", ""),
-	target: store.get("pin", "") || store.get("target", ""),
-	targetAt: 0,
-	feed: [],
-	phase: "idle",
-	level: 0,
-	interim: "",
-	cards: [],
-	focus: "master",
-	tasks: [],
-	deciding: [],
-	conversing: false,
-	voiceOut: store.get("voiceOut", true),
-	voice: store.get("voice", ""),
-	handsFree: store.get("handsFree", false),
-	follow: store.get("follow", true),
-	pause: PAUSES[store.get("pause", "normal")] ? store.get("pause", "normal") : "normal",
-	vs: null
-};
-var subs = /* @__PURE__ */ new Set();
-function set(patch) {
-	Object.assign(S, patch);
-	for (const f of subs) f();
-}
-function useAgent() {
-	const [, tick] = d(0);
-	h(() => {
-		const f = () => tick((x) => x + 1);
-		subs.add(f);
-		return () => subs.delete(f);
-	}, []);
-	return S;
-}
-var ctx = null;
-var mic = null;
-var gen = 0;
-var timers = /* @__PURE__ */ new Set();
-var later = (ms, fn) => {
-	const t = setTimeout(() => {
-		timers.delete(t);
-		fn();
-	}, ms);
-	timers.add(t);
-};
-var push = (e) => set({ feed: [...S.feed.slice(-60), {
-	id: Math.random(),
-	at: Date.now(),
-	...e
-}] });
-var projects = () => ctx?.projects || [];
-var go = (to) => ctx?.go(to);
-var api = new Proxy({}, { get: (_, k) => ctx?.fleet?.[k] || (() => Promise.reject(new Error(t("agent.noServer")))) });
-var frame = (text, voice) => `${voice ? "[voice]" : "[typed]"} ${t(voice ? "agent.frame.voice" : "agent.frame.typed", {
-	name: ctx?.me?.name || t("agent.you"),
-	app: ctx?.app || "ghostfleet"
-})} ${t("agent.frame.ask")}\n\n${text}`;
-var FRAME_RE = /^(?:\[(?:voice|typed)\]|\u{1F399}\uFE0F?|\u{1F4AC})[^\n]*\n\n/u;
-var unframe = (t) => String(t || "").replace(FRAME_RE, "");
-function setOption(k, v) {
-	store.set(k, v);
-	set({ [k]: v });
-	if (k === "handsFree" && !v) set({ conversing: false });
-	if (k === "voiceOut" && !v) {
-		stopSpeaking();
-		if (S.phase === "speaking") set({ phase: "idle" });
-	}
-}
-function setPin(project) {
-	store.set("pin", project || "");
-	set({ pin: project || "" });
-	if (project) setTarget(project);
-}
-function setTarget(project, explicit = true) {
-	if (!project) return;
-	if (project !== S.target) {
-		store.set("target", project);
-		set({
-			target: project,
-			cards: [],
-			focus: "master"
-		});
-		resetWatch();
-	}
-	if (explicit) set({ targetAt: Date.now() });
-}
-var canHear = () => !!S.vs?.hear?.ready || browserCanHear;
-function talk() {
-	if (mic) {
-		mic.stop();
-		return;
-	}
-	set({ conversing: S.handsFree });
-	listen();
-}
-function listen() {
-	if (mic) return;
-	stopSpeaking();
-	set({
-		interim: "",
-		level: 0,
-		phase: "listening"
-	});
-	const my = gen;
-	const common = {
-		pauseMs: PAUSES[S.pause].ms,
-		onState: (s) => {
-			if (my === gen) set({ phase: s });
-		},
-		onError: (m) => {
-			if (my !== gen) return;
-			push({
-				kind: "event",
-				text: m,
-				bad: true
-			});
-			set({ conversing: false });
-		},
-		onText: (t$1) => {
-			if (my !== gen) return;
-			mic = null;
-			set({
-				level: 0,
-				interim: "",
-				phase: "idle"
-			});
-			if (t$1) heard(t$1, true);
-			else if (S.conversing) {
-				set({ conversing: false });
-				push({
-					kind: "event",
-					text: t("agent.heardNothing")
-				});
-			}
-		}
-	};
-	mic = S.vs?.hear?.ready ? listenLocal({
-		...common,
-		onLevel: (l) => {
-			if (my === gen) set({ level: l });
-		}
-	}) : listenBrowser({
-		...common,
-		onInterim: (t) => {
-			if (my === gen) set({ interim: t });
-		}
-	});
-}
-var again = () => {
-	const my = gen;
-	if (S.conversing && S.handsFree) later(450, () => {
-		if (my === gen && S.conversing) listen();
-	});
-};
-function stop() {
-	gen++;
-	set({ conversing: false });
-	for (const t of timers) clearTimeout(t);
-	timers.clear();
-	if (mic) {
-		const m = mic;
-		mic = null;
-		m.cancel();
-	}
-	stopSpeaking();
-	set({
-		phase: "idle",
-		interim: "",
-		level: 0
-	});
-}
-var busy = () => !!mic || S.phase === "speaking" || S.conversing;
-function say(text, then) {
-	if (!S.voiceOut) {
-		then?.();
-		return;
-	}
-	const my = gen;
-	set({ phase: "speaking" });
-	speak(text, () => {
-		if (my !== gen) return;
-		if (S.phase === "speaking") set({ phase: "idle" });
-		then?.();
-	}, S.voice);
-}
-var context = () => ctx?.route?.project || S.pin || (S.target && Date.now() - S.targetAt < 9e5 ? S.target : null);
-function submit(text, voice = false) {
-	const t = String(text || "").trim();
-	if (t) heard(t, voice);
-}
-async function place(task, project) {
-	try {
-		const t$2 = await api.taskPlace(task.id, project);
-		setTarget(project);
-		const who = await deliver(t$2);
-		say(who ? t("agent.passed", { who }) : t("task.missed", { project }), again);
-	} catch (e) {
-		push({
-			kind: "event",
-			text: t("agent.missed", { why: e.message }),
-			bad: true
-		});
-	}
-	pollTasks();
-}
-function tickOff(id) {
-	set({ tasks: S.tasks.filter((t) => id ? t.id !== id : t.status !== "replied") });
-	api.taskDone(id).catch(() => {});
-}
-var line = Promise.resolve();
-var lastSaid = {
-	text: "",
-	at: 0
-};
-function heard(text, voice) {
-	push({
-		kind: "me",
-		text,
-		voice
-	});
-	const c = command(text, projects(), context());
-	if (c) {
-		if (c.go) go(c.go);
-		if (c.project) setTarget(c.project, false);
-		if (c.session) set({ focus: c.session });
-		push({
-			kind: "event",
-			text: c.say
-		});
-		say(c.say, again);
-		return;
-	}
-	if (text === lastSaid.text && Date.now() - lastSaid.at < 2e4) {
-		push({
-			kind: "event",
-			text: t("agent.dupe")
-		});
-		return;
-	}
-	lastSaid = {
-		text,
-		at: Date.now()
-	};
-	const row = {
-		id: Math.random(),
-		text
-	};
-	set({ deciding: [...S.deciding, row] });
-	line = line.then(() => decide(text, voice)).catch(() => {}).then(() => set({ deciding: S.deciding.filter((d) => d !== row) }));
-}
-var spokenName = (p) => String(p).replace(/[-_]+/g, " ");
-var inWords = (l) => l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")}${t("common.and")}${l[l.length - 1]}`;
-async function decide(text, voice) {
-	const my = gen;
-	set({ phase: "routing" });
-	const page = ctx?.route?.project ? {
-		project: ctx.route.project,
-		session: ctx.route.session || ""
-	} : {
-		project: S.pin,
-		session: ""
-	};
-	const feed = S.feed.slice(0, -1).map(({ kind, text: t }) => ({
-		kind,
-		text: unframe(t)
-	}));
-	let r;
-	try {
-		r = await api.route({
-			text,
-			feed,
-			page,
-			voice
-		});
-	} catch (e) {
-		set({ phase: "idle" });
-		push({
-			kind: "event",
-			text: t("agent.routeFailed", {
-				text,
-				why: e.message
-			}),
-			bad: true
-		});
-		say(t("agent.routeFailedSay"), again);
-		return;
-	}
-	if (my !== gen) {
-		pollTasks();
-		return;
-	}
-	set({ phase: "idle" });
-	if (r.action === "ask") {
-		push({
-			kind: "event",
-			text: r.question,
-			ask: true
-		});
-		say(r.question, again);
-		return;
-	}
-	if (r.action === "go") {
-		setTarget(r.project);
-		go(`/p/${encodeURIComponent(r.project)}${r.session ? `/s/${encodeURIComponent(r.session)}` : ""}`);
-		const here = t("agent.here", { project: r.project });
-		push({
-			kind: "event",
-			text: here
-		});
-		say(here, again);
-		return;
-	}
-	const going = r.tasks.filter((t) => t.project), unsure = r.tasks.filter((t) => !t.project);
-	await pollTasks();
-	const reached = [], missed = [];
-	for (const t of going) {
-		if (going.length === 1) setTarget(t.project);
-		const who = await deliver(t, going.length > 1);
-		if (who) reached.push(going.length === 1 ? who : spokenName(t.project));
-		else missed.push(spokenName(t.project));
-	}
-	for (const t of unsure) push({
-		kind: "event",
-		text: `“${t.title}”: ${t.question}`,
-		ask: true
-	});
-	pollTasks();
-	const words = [
-		missed.length ? t("task.missed", { project: inWords(missed) }) : "",
-		!voice || !reached.length ? "" : reached.length === 1 ? t("agent.passed", { who: reached[0] }) : t("agent.noted", {
-			n: reached.length,
-			list: inWords(reached)
-		}),
-		unsure.length === 1 ? unsure[0].question : unsure.length ? t("agent.unsure", { n: unsure.length }) : ""
-	].filter(Boolean).join(" ");
-	if (words) say(words, again);
-	else again();
-}
-async function deliver(t$3, quiet = false) {
-	const { project, session, text, voice, context: earlier, why } = t$3;
-	const who = session ? t("agent.toSession", {
-		session,
-		project
-	}) : t("agent.toLead", { project });
-	if (!quiet && (!ctx?.route?.session || ctx.route.project !== project)) go(`/p/${encodeURIComponent(project)}`);
-	push({
-		kind: "event",
-		text: why ? t("agent.goingWhy", {
-			who,
-			why
-		}) : t("agent.going", { who })
-	});
-	set({
-		phase: "starting",
-		focus: session || "master"
-	});
-	const failed = (message) => {
-		set({ phase: "idle" });
-		push({
-			kind: "event",
-			text: message,
-			bad: true
-		});
-		api.taskSent({
-			id: t$3.id,
-			project,
-			error: message
-		}).catch(() => {});
-		return "";
-	};
-	let lead = session || "master";
-	if (!session) try {
-		const l = await api.lead(project);
-		if (l.started) push({
-			kind: "event",
-			text: l.started === "start" ? t("agent.leadStarted", { project }) : t("agent.leadWoke", { project })
-		});
-		lead = l.lead || "master";
-	} catch (e) {
-		return failed(t("agent.leadFailed", {
-			project,
-			why: e.message
-		}));
-	}
-	set({ phase: "sending" });
-	try {
-		sentAt = Math.floor(Date.now() / 1e3);
-		const words = earlier ? `${t("agent.earlier", { earlier })}\n\n${text}` : text;
-		const r = await api.act("fleet_send", {
-			project,
-			session: lead,
-			prompt: frame(words, voice)
-		});
-		if (r.queued) push({
-			kind: "event",
-			text: r.queued === "question" ? t("agent.queuedQ") : t("agent.queuedTurn")
-		});
-		set({ phase: "idle" });
-		await api.taskSent({
-			id: t$3.id,
-			project,
-			session: lead
-		});
-		return who;
-	} catch (e) {
-		return failed(t("agent.missedAt", {
-			project,
-			why: e.message
-		}));
-	}
-}
-var heardUpTo = null;
-var toRead = [];
-var lastTs = (t) => t.replies.reduce((n, r) => Math.max(n, r.ts), 0);
-async function pollTasks() {
-	let tasks;
-	try {
-		({tasks} = await api.tasks());
-	} catch {
-		return;
-	}
-	set({ tasks });
-	if (!heardUpTo) {
-		heardUpTo = new Map(tasks.map((t) => [t.id, lastTs(t)]));
-		return;
-	}
-	for (const t$4 of tasks) {
-		const news = t$4.replies.filter((r) => r.ts > (heardUpTo.get(t$4.id) || 0));
-		if (!news.length) continue;
-		heardUpTo.set(t$4.id, lastTs(t$4));
-		const sure = !t$4.hidden && tasks.filter((x) => !x.hidden && x.project === t$4.project && x.session === t$4.session).length === 1;
-		for (const r of news) push({
-			kind: "ai",
-			text: r.text,
-			project: t$4.project,
-			session: t$4.session,
-			title: sure ? t$4.title : ""
-		});
-		const from = sure ? t("agent.fromAbout", {
-			project: spokenName(t$4.project),
-			title: t$4.title
-		}) : t("agent.from", { project: spokenName(t$4.project) });
-		toRead = [...toRead.filter((x) => x.id !== t$4.id), {
-			id: t$4.id,
-			text: `${from} ${news[news.length - 1].text}`
-		}];
-	}
-	readNext();
-}
-function readNext() {
-	if (!toRead.length || mic || S.phase !== "idle" || document.hidden) return;
-	const [next, ...rest] = toRead;
-	toRead = rest;
-	say(next.text, () => {
-		again();
-		readNext();
-	});
-}
-var prev = null;
-var sentAt = 0;
-var lastGo = 0;
-var loop = null;
-var taskLoop = null;
-function resetWatch() {
-	prev = null;
-}
-async function tick() {
-	if (!S.target || document.hidden) return;
-	const project = S.target;
-	let g;
-	try {
-		g = await api.grid(project);
-	} catch {
-		return;
-	}
-	if (project !== S.target) return;
-	const list = g.cards || [];
-	set({ cards: list });
-	const before = prev;
-	prev = Object.fromEntries(list.map((c) => [c.name, statusOf(c)]));
-	if (before) for (const c of list) {
-		const now = statusOf(c), was = before[c.name];
-		if (was === now) continue;
-		const word = (STATUS[now] || STATUS.unknown).label.toLowerCase();
-		push({
-			kind: "event",
-			text: was == null ? t("agent.opened", { name: c.name }) : c.lead ? t("agent.leadIs", { word }) : `${c.name}: ${word}`,
-			session: c.name,
-			project
-		});
-		set({ focus: c.name });
-		if (was == null && !c.lead && !c.owner && sentAt && Date.now() / 1e3 - sentAt < 900 && ctx?.fleet?.assign && ctx.me?.id) ctx.fleet.assign(project, c.name, ctx.me.id).catch(() => {});
-		const worth = was == null || now === "need-you" || now === "working" && !c.lead;
-		if (S.follow && worth && !c.lead && Date.now() - lastGo > 3e3) {
-			lastGo = Date.now();
-			go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(c.name)}`);
-		}
-	}
-}
-function bind(next) {
-	if (next.fleet !== ctx?.fleet) voiceBackend(next.fleet);
-	ctx = next;
-	if (!loop) {
-		loop = setInterval(tick, 2500);
-		taskLoop = setInterval(pollTasks, 3e3);
-		pollTasks();
-		resetWatch();
-		voiceStatus(true).then((vs) => {
-			set({ vs });
-			if (vs.hear?.ready) warmVad();
-		});
-	}
-}
-function unbind() {
-	stop();
-	clearInterval(loop);
-	clearInterval(taskLoop);
-	loop = null;
-	heardUpTo = null;
-	toRead = [];
-	ctx = null;
 }
 //#endregion
 //#region web/ui/voices.jsx
@@ -11890,11 +12608,13 @@ function Proposals() {
 	const { data, reload } = usePoll(() => has ? fleet.proposals() : Promise.resolve([]), has ? 15e3 : 0, [has]);
 	const [busyId, setBusyId] = d("");
 	const list = Array.isArray(data) ? data : [];
-	if (!has || !list.length) return null;
+	const request = useRequest("proposals", data == null ? void 0 : list.map((p) => `${p.id}:${!!p.granted}`).join("|") || null);
+	if (!has) return null;
 	const answer = async (p, yes) => {
 		setBusyId(p.id);
 		try {
 			await fleet.answerProposal(p, yes);
+			request.close();
 			toast(t(yes ? "as.proposalYesDone" : "as.proposalNoDone", { summary: p.summary }), "good");
 		} catch (e) {
 			toast(String(e && e.message || e), "bad");
@@ -11903,36 +12623,48 @@ function Proposals() {
 			reload();
 		}
 	};
-	return /* @__PURE__ */ u("ul", {
-		class: "as-asks",
-		"aria-label": t("as.proposals"),
-		children: list.map((p) => /* @__PURE__ */ u("li", {
-			class: "as-ask",
-			children: [/* @__PURE__ */ u("span", {
-				class: "grow",
-				children: [
-					t(p.granted ? "as.proposalGranted" : "as.proposal", { summary: p.summary }),
-					" ",
-					/* @__PURE__ */ u("small", {
-						class: "muted",
-						children: p.id
-					})
-				]
-			}), p.granted ? null : /* @__PURE__ */ u("span", {
-				class: "as-ask-btns",
-				children: [/* @__PURE__ */ u(Btn, {
-					kind: "primary sm",
-					disabled: busyId === p.id,
-					onClick: () => answer(p, true),
-					children: t("as.proposalYes")
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "sm",
-					disabled: busyId === p.id,
-					onClick: () => answer(p, false),
-					children: t("as.proposalNo")
-				})]
-			})]
-		}, p.id))
+	return /* @__PURE__ */ u("div", {
+		class: "proposal-slot",
+		children: [list.length ? /* @__PURE__ */ u(Btn, {
+			kind: "sm proposal-return",
+			onClick: request.show,
+			children: t("sess.answerRequest")
+		}) : null, request.open ? /* @__PURE__ */ u(Modal, {
+			sheet: true,
+			title: t("as.proposals"),
+			onClose: request.close,
+			children: /* @__PURE__ */ u("ul", {
+				class: "as-asks modal-body",
+				"aria-label": t("as.proposals"),
+				children: list.map((p) => /* @__PURE__ */ u("li", {
+					class: "as-ask",
+					children: [/* @__PURE__ */ u("span", {
+						class: "grow",
+						children: [
+							t(p.granted ? "as.proposalGranted" : "as.proposal", { summary: p.summary }),
+							" ",
+							/* @__PURE__ */ u("small", {
+								class: "muted",
+								children: p.id
+							})
+						]
+					}), p.granted ? null : /* @__PURE__ */ u("span", {
+						class: "as-ask-btns",
+						children: [/* @__PURE__ */ u(Btn, {
+							kind: "primary sm",
+							disabled: busyId === p.id,
+							onClick: () => answer(p, true),
+							children: t("as.proposalYes")
+						}), /* @__PURE__ */ u(Btn, {
+							kind: "sm",
+							disabled: busyId === p.id,
+							onClick: () => answer(p, false),
+							children: t("as.proposalNo")
+						})]
+					})]
+				}, p.id))
+			})
+		}) : null]
 	});
 }
 function HomeAgent({ projects }) {
@@ -12181,10 +12913,7 @@ function AccountsDialog({ u: u$2, onClose }) {
 					p.accounts.length < 2 ? /* @__PURE__ */ u("p", { children: t("acct.one") }) : null,
 					p.pin ? /* @__PURE__ */ u("p", {
 						class: "u-pin",
-						children: t("acct.pin", {
-							account: p.pin.account,
-							at: p.pin.until_at
-						})
+						children: t("acct.pin", { account: p.pin.account })
 					}) : null,
 					p.accounts.map((a) => /* @__PURE__ */ u("div", {
 						class: `u-acct u-${hue(a)}`,
@@ -12988,6 +13717,7 @@ var needsPasskey = (a) => (a?.steps || []).some((s) => own(ACTIONS, s.action) &&
 //#endregion
 //#region web/src/adapter-extras.js
 async function assertion(purpose) {
+	if (api$1.localTrusted()) return null;
 	if (!passkey.available() || !passkey.registered()) {
 		if (passkey.bypassAllowed()) return null;
 		throw new Error("Register a passkey before continuing");
@@ -13131,6 +13861,7 @@ var NOT_SERVED = /* @__PURE__ */ new Set([
 var devKind = () => /Mac/.test(passkey.device().noun) ? "mac" : "phone";
 var remote = (project) => /@[^@]+$/.test(String(project || ""));
 function assertFor(purpose) {
+	if (api$1.localTrusted()) return Promise.resolve(null);
 	if (!passkey.available() || !passkey.registered()) {
 		if (passkey.bypassAllowed()) return Promise.resolve(null);
 		return Promise.reject(new Error(t("lock.noPasskey", { why: passkey.unavailableReason() || t("lock.enrolHint") })));
@@ -13173,26 +13904,6 @@ function phoneAdapter({ lock, go, place }) {
 		throw e;
 	};
 	api$1.getAutomations().catch(noted("automations")).catch(() => {});
-	let termOn = null, termAsked = false, termReading = null;
-	const readTerm = () => {
-		termAsked = true;
-		return termReading ||= api$1.getTerm().then((j) => {
-			termOn = !!j.enabled;
-		}, () => {}).finally(() => {
-			termReading = null;
-		});
-	};
-	const termOff = () => Object.assign(new Error(t("term.off")), {
-		status: 403,
-		needs: "enable"
-	});
-	const openTerm = (project, kind, size) => {
-		const asking = passkey.available() && passkey.registered() ? passkey.freshNow(`${kind === "edit" ? "editor" : "terminal"} ${project}`) : Promise.resolve(null);
-		return guard(asking.then((a) => api$1.termOpen(project, size, a, kind))).catch((e) => {
-			if (e && e.needs === "enable") termOn = false;
-			throw e;
-		});
-	};
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -13303,11 +14014,8 @@ function phoneAdapter({ lock, go, place }) {
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,
 		lead,
-		canTerm: (project) => {
-			if (server() && !termAsked) readTerm();
-			return server() && !remote(project);
-		},
-		termWhy: (project) => remote(project) ? t("phone.noTermRemote", { host: String(project).split("@").pop() }) : "",
+		canTerm: () => server(),
+		termWhy: () => "",
 		proposals: async () => {
 			if (jarvisOff) return [];
 			try {
@@ -13322,14 +14030,7 @@ function phoneAdapter({ lock, go, place }) {
 			}
 		},
 		answerProposal: async (p, yes) => guard(api$1.jarvisConfirm(p.id, yes ? "yes" : "no", yes ? await assertFor(`jarvis yes ${p.id}`) : null)),
-		termOpen: (project, kind, size) => {
-			if (termReading) return termReading.then(() => termOn === false ? Promise.reject(termOff()) : openTerm(project, kind, size));
-			if (termOn === false) {
-				readTerm();
-				return Promise.reject(termOff());
-			}
-			return openTerm(project, kind, size);
-		},
+		termOpen: (project, kind, size) => guard(api$1.termOpen(project, size, null, kind)),
 		termSocket: api$1.termSocket,
 		go,
 		place: (to) => screenPlace(to) || place?.(to) || null,
@@ -13364,38 +14065,13 @@ function phoneAdapter({ lock, go, place }) {
 				state: () => state(t),
 				set: (on) => on ? enable(t) : disable()
 			},
-			terminal: {
-				state: async () => {
-					if (!server()) return {
-						ready: false,
-						why: t("phone.termFixtures")
-					};
-					try {
-						termOn = !!(await guard(api$1.getTerm())).enabled;
-						return {
-							ready: true,
-							on: termOn,
-							why: termOn ? t("phone.termOn") : ""
-						};
-					} catch (e) {
-						return {
-							ready: false,
-							why: e.status === 404 ? t("phone.termOld") : e.message
-						};
-					}
-				},
-				set: async (on) => {
-					const a = on && passkey.registered() ? await passkey.fresh("terminal on") : null;
-					await guard(api$1.termEnable(on, a));
-					termOn = !!on;
-				}
-			},
 			hosts: {
 				list: async () => (await guard(api$1.getProjects())).hosts || [],
 				unpair: (key) => guard(api$1.unpairHost(key))
 			},
 			device: {
 				state: () => {
+					if (api$1.localTrusted()) return { text: t("phone.localAccess") };
 					const k = devKind();
 					if (!passkey.available()) return {
 						text: t("phone.noSensor"),
@@ -13406,7 +14082,7 @@ function phoneAdapter({ lock, go, place }) {
 						detail: t(`dev.${k}.enrol`)
 					};
 				},
-				actions: () => [{
+				actions: () => api$1.localTrusted() ? [] : [{
 					id: "lock",
 					label: t("phone.lockNow"),
 					run: () => lock()
@@ -13515,11 +14191,11 @@ function Lock({ onIn, connection }) {
 		api$1.ready().then(redraw);
 	}, []);
 	h(() => {
-		if (probing || !passkey.available() || !passkey.registered()) return;
+		if (probing || api$1.localTrusted() || !passkey.available() || !passkey.registered()) return;
 		if (!passkey.prepared() && !passkey.preparing() && !passkey.prepareError()) passkey.prepare().then(redraw, (e) => setErr(passkey.describe(e)));
 	});
 	h(() => {
-		if (!server || !passkey.available() || passkey.registered()) return;
+		if (!server || api$1.localTrusted() || !passkey.available() || passkey.registered()) return;
 		passkey.enrolmentState().then(setWindow, (e) => setWindow({ error: String(e && e.message || e) }));
 	}, [server]);
 	const unlock = () => {
@@ -13807,7 +14483,7 @@ function Root() {
 			}
 			if (!hidByCeremony) passkey.arm();
 			hidByCeremony = false;
-			if (!api$1.haveToken()) {
+			if (!api$1.haveAccess()) {
 				if (!locked) lock();
 				else tryAuto();
 			}
@@ -13825,7 +14501,7 @@ function Root() {
 		} catch {}
 		setVer((v) => v + 1);
 		setLocked(false);
-		passkey.prepareFresh().catch(() => {});
+		if (!api$1.localTrusted()) passkey.prepareFresh().catch(() => {});
 	};
 	const tryAuto = () => {
 		if (document.hidden) return;
@@ -13835,7 +14511,7 @@ function Root() {
 	};
 	h(() => {
 		passkey.arm();
-		passkey.resume().then((r) => {
+		api$1.ready().then(() => api$1.localTrusted() ? "ok" : passkey.resume()).then((r) => {
 			if (r === "ok") {
 				linkPlace = true;
 				landed();
@@ -13860,7 +14536,7 @@ if ("serviceWorker" in navigator) {
 	navigator.serviceWorker.addEventListener("message", (ev) => {
 		const to = ev?.data?.open === "jarvis" ? "/" : ev?.data?.open === "waiting" ? "/queue" : null;
 		if (to) {
-			if (api$1.haveToken()) go$1(to);
+			if (api$1.haveAccess()) go$1(to);
 			else wantPlace = to;
 		}
 	});

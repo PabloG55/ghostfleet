@@ -10,10 +10,9 @@
 // own register endpoint (serve-client.mjs), and the same private key is then installed in
 // Chrome's virtual authenticator (CDP WebAuthn) — so web/passkey.js runs its real
 // navigator.credentials.get(), Chrome signs a real challenge the server issued, and the
-// server verifies it. That is what lets "the terminal opens only after the passkey step" be
-// asserted in both directions: the authenticator is told to refuse user verification, the
-// terminal must not open, and nothing must have been asked of tmux; then it is told to
-// allow it, and the terminal must open.
+// server verifies it. The app lock uses that ceremony. After chat is unlocked,
+// user verification is disabled and the terminal and editor must still open without
+// advancing the authenticator's signature counter.
 //
 // What it cannot be is an iPhone: the on-screen keyboard is CDP's Input.insertText and a
 // touch is CDP's touch emulation. The PR says which halves that leaves unchecked.
@@ -232,52 +231,14 @@ await goTo(`/p/${P}`);
 const tabs = await until(() => evaluate(() => { const r = [...document.querySelectorAll('.page-tabs a')].map(a => a.textContent.trim()); return r.length > 1 && r.join(' '); }), 8000);
 is('term-ui: the project page has its Sessions, Terminal and Editor tabs', 'Sessions Terminal Editor', tabs || '');
 
-// ── 1. OFF FOR THIS DEVICE: the screen says so, nothing was opened, and no passkey was asked ──
-// The server checks the device before the assertion so that a device with the terminal off is
-// told what to do rather than asked for a fingerprint it cannot use; the counter of the virtual
-// authenticator is how "it was not asked" is seen, since it moves on every signature.
+// Chat is already unlocked. Opening a terminal must not touch the authenticator.
 const signs0 = await signs();
-await tap('.page-tabs a', 'Terminal');
-is('term-ui: the Terminal tab opens the terminal screen', true, !!(await until(() => evaluate(() => !!document.querySelector('.tool.k-term')), 6000)));
-const offMsg = await until(() => termMsg().then(t => /^n-off /.test(t) && t), 6000);
-is('term-ui: a disabled device is told the terminal is off', true, !!offMsg);
-await shot('phone-off');
-is('...without asking for the passkey', signs0, await signs());
-is('...and no socket was opened', 0, await wsCount());
-is('...and the server was never asked to open one', 0, openCount());
-is('...and no tab exists on the fleet', false, hasTab());
-
-// ── 2. switched on in settings, with the passkey ─────────────────────────────────────
-const ALLOW = 'Allow a terminal and an editor from this device';
-await tap('.tool-note button', 'Settings');
-is('term-ui: the notice takes the device to its settings', '#/settings', await until(() => evaluate(() => location.hash === '#/settings' && location.hash), 5000) || await evaluate(() => location.hash));
-await until(() => rectOf('.set-row', ALLOW), 8000);
-await tap('.set-row', ALLOW);
-const onLine = await until(() => evaluate((a) => {
-  const r = [...document.querySelectorAll('.set-row')].find(x => x.textContent.includes(a));
-  return r && r.querySelector('input').checked && /^On: opening one/.test((r.querySelector('small') || {}).textContent || '') && r.textContent;
-}, ALLOW), 8000);
-is('term-ui: settings turned it on', true, !!onLine);
-const cfgPath = process.env.GHOSTFLEET_SERVE_CONFIG || '';
-const recorded = (() => { try { const c = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); return (c.clients.find(x => x.id === reg.json.client_id) || {}).terminal || null; } catch { return null; } })();
-is('...and the server recorded it on THIS device\'s enrolment', true, !!(recorded && recorded.on && recorded.at > 0));
-
-// ── 3. ONLY AFTER THE PASSKEY STEP ───────────────────────────────────────────────────
-// Back to the tab, as the back gesture goes: it opens by itself, and with a passkey that does
-// not verify it must open nothing and offer to try again.
 await userVerified(false);
-await evaluate(() => history.back());
-const refused = await until(() => termMsg().then(t => /^n-failed /.test(t) && t), 8000);
-await sleep(500);
-is('term-ui: a passkey that does not verify opens nothing', true, !!refused);
-is('...and says it can be opened again', true, await evaluate(() => [...document.querySelectorAll('.tool-note button')].some(b => b.textContent.trim() === 'Open again')));
-is('...no socket', 0, await wsCount());
-is('...no open request reached the server', 0, openCount());
-is('...and no tab on the fleet', false, hasTab());
-await userVerified(true);
-await tap('.tool-note button', 'Open again');
+await tap('.page-tabs a', 'Terminal');
 const opened = await until(() => toolOpen(), 10000);
-is('term-ui: with the passkey, the terminal opens', true, !!opened);
+is('term-ui: chat access opens the terminal without another passkey', true, !!opened);
+is('term-ui: opening the terminal makes no assertion', signs0, await signs());
+await userVerified(true);
 const prompt = await until(() => screenText().then(t => /\$ *$/m.test(t)), 8000);
 is('...showing the shell', true, !!prompt);
 // Counted once the shell is up: xterm is mounted while the open request is still in flight,
@@ -490,9 +451,7 @@ is('...the control client is gone', 0, await until(() => controlClients() === 0 
 is('...and the tab stays for the desk', true, hasTab());
 
 // ── 9. THE EDITOR: the terminal's screen and gates, the other tab ───────────────────
-// The desk's Ctrl-n, through the same request with kind 'edit'. The device is already switched
-// on (section 2), so what is left to prove is the per-open passkey — refused, then allowed —
-// and that what opens is the EDITOR tab, not the shell again.
+// The desk's Ctrl-n, through the same request with kind 'edit', without another assertion.
 const ETAB = `_edit-${PROJECT}`;
 const hasEdit = () => { try { execFileSync('tmux', ['-L', SOCK, 'has-session', '-t', `=${ETAB}`], { stdio: 'ignore' }); return true; } catch { return false; } };
 const opensBefore = openCount();
@@ -500,20 +459,14 @@ await userVerified(false);
 await tap('.page-tabs a', 'Editor');
 is('term-ui: the Editor tab opens the editor screen', true,
    !!(await until(() => evaluate(() => !!document.querySelector('.tool.k-edit') && /editor/.test(document.querySelector('.tool-cap').textContent)), 6000)));
-const edRefused = await until(() => termMsg().then(t => /^n-failed /.test(t) && t), 8000);
-await sleep(500);
-is('term-ui: an editor whose passkey does not verify opens nothing', true, !!edRefused);
-is('...no open request reached the server', opensBefore, openCount());
-is('...and no editor tab on the fleet', false, hasEdit());
-await userVerified(true);
-await tap('.tool-note button', 'Open again');
+is('term-ui: opening the editor makes no assertion', signs0, await signs());
 if (!hasNvim) {
   const said = await until(() => termMsg().then(t => /^n-noEditor /.test(t) && t), 8000);
   is('term-ui: with no editor installed, the screen says so', true, !!said);
   is('...and no editor tab exists', false, hasEdit());
 } else {
   const edOpen = await until(() => toolOpen(), 10000);
-  is('term-ui: with the passkey, the editor opens', true, !!edOpen);
+  is('term-ui: chat access opens the editor', true, !!edOpen);
   is('...through one more open request, the terminal\'s own', opensBefore + 1, await until(() => openCount() === opensBefore + 1 && openCount(), 4000) || openCount());
   is('...on the project\'s editor tab', true, hasEdit());
   is('...running nvim with the copy-on-select Lua, as the desk\'s Ctrl-n does', true,
@@ -545,7 +498,7 @@ await goTo(`/p/${P}/s/master`);
 await until(() => evaluate(() => !!document.querySelector('.main .tool-tab')), 8000);
 await key('a', CTRL); await key('t');
 const deskOpen = await until(() => toolOpen(), 10000);
-is('term-ui (desk): Ctrl-a t opens the terminal, after the passkey', true, !!deskOpen);
+is('term-ui (desk): Ctrl-a t opens the terminal with chat access', true, !!deskOpen);
 is('...at the session\'s own address, so back returns to it', `#/p/${P}/s/master/term`, await evaluate(() => location.hash));
 is('...inside the page, with the sidebar beside it', true,
    await evaluate(() => !!document.querySelector('.main .tool') && getComputedStyle(document.querySelector('.side')).display !== 'none' && document.querySelector('.side').getBoundingClientRect().width > 0));

@@ -562,8 +562,31 @@ accounts; switch at 97% of the 5h or 7d limit, spending the week that ends first
 
 work  (~/.claude)
     main    5h  97% (resets 14:00, read 10m ago)         7d  30% (resets Tue 09:00, read 10m ago)     exhausted until 14:00
+      org acme · checked 2d ago
   * backup  5h —                                         7d  90% (resets Fri 15:00, read 2d ago)      active
+      org acme · checked 1h ago
 ```
+
+**Who a login is comes from its token.** `add`, `list` and every governor tick ask the
+provider's own read-only profile request — the one Claude Code itself makes at startup — whose
+account and organization the token belongs to. `.claude.json`'s `oauthAccount` is not believed:
+a running session writes back the account *it* started on, so it can name one account over
+another's tokens. Nothing is ever refreshed to ask. An access token past its expiry is simply not
+checked, and `list` says so (`not checked: its access token has expired`). An answer is kept per
+token, so a login is asked about once, not every tick. What follows from it:
+
+- A `/login` by hand is filed under the account its token answers as. If no slot is for that
+  account it becomes a new slot, `login-1`, and the profile is held there; `fleet-accounts add
+  <profile> <name>` while it is live names it. It is never written into a slot of another
+  account.
+- The live login is copied back only into the slot of the same account.
+- `list` shows each slot's organization. A slot whose saved login answers as another slot's
+  account is `DUPLICATE` (two copies of one login, and the next refresh of either retires the
+  other's), and one that answers as an account no slot is for is `MISLABELLED`. Either is out of
+  rotation, and the fix line says to remove it and `/login` again.
+- A login it cannot identify (the provider refused the token, or did not answer) pauses failover
+  until it can: nothing is written over it, because it may be the only working copy of a login,
+  and `use` says so instead of replacing it.
 
 **Which account it runs on: the allowance that expires first.** What is left of a weekly window
 when it resets is lost, so of the accounts under the threshold on **both** the 5-hour and the
@@ -581,10 +604,24 @@ profile is also **held for 15 minutes after any switch**, long enough for the ne
 read, so the next choice is made on a real figure. Neither rule applies when the account in use is
 over the threshold or unusable; then it moves at once.
 
-**By hand.** `fleet-accounts use <profile> <name>` switches now and **pins** that account for
-**2 hours**: the planner leaves it there, unless it reaches the threshold or stops working. A
-`/login` by hand to a saved account is adopted and pinned the same way. `fleet-accounts list`
-shows the pin and when it ends.
+**By hand.** `fleet-accounts use <profile> <name>` switches now and **holds** the profile on that
+account: the planner leaves it there until it reaches the threshold or stops working, or until
+`fleet-accounts auto <profile>` hands the choice back. A `/login` by hand is held the same way.
+`fleet-accounts list` shows the hold. `fleet-accounts exclude <profile> <name>` keeps an account
+out of rotation without forgetting its login (the profile leaves it at the next tick if another
+can run), and `include` puts it back.
+
+**Organizations.** A session moved to an account in another organization loses its earlier
+thinking ("Claude can't use thinking from another organization"). So a failover tries the
+accounts of the organization in use first, by the rules above, and crosses only when those are
+spent; its notice names the sessions that lose their thinking. A planned move never crosses.
+
+**Models.** `fleet-accounts models <profile> <name> --without fable` records that an account
+cannot run a model family (fable, opus, sonnet, haiku; `--with` takes it back). It is also learned
+from the refusal itself: a turn that ends in `model_not_found` keeps Claude's sentence, which names
+the model. An account lacking a model a running session uses is the **last resort**: chosen only
+when nothing else has room, and its notice names the sessions on that model. The account in use
+is left for a better one when it lacks such a model, unless it is held there by hand.
 
 **Readings are only as fresh as the last turn on that login.** Figures come from the mod's session
 records (`usage.limits.five_hour` / `seven_day`), so only the account in use is ever read. Nothing
@@ -597,6 +634,15 @@ is used only as a **failover**, when the account in use cannot run, because a st
 stopping. The cost of trusting an old figure is not bounded the way it looks: a turn refused at the
 limit carries no usage figures, so it never becomes a reading. An account read three days ago at
 0% can have hit its weekly limit since, and nothing in its figures says so.
+
+**A reading belongs to the login that took it.** Each window is stored with the login it was
+read on and when it was read, and a window recorded as another login's is dropped. Within one
+window a figure normally only rises, but a week can be reset early with its reset time unchanged:
+a drop of more than 5 points read later is believed, and nothing read before it counts again. A
+session whose binary has not seen the reset keeps writing its old figure; a record with no 5-hour
+window while the account's own 5-hour window runs was read before that window began, and is
+dated so. For a reset on an account no session is on, `fleet-accounts reset <profile> <name>`
+clears its stored figures, and nothing read before then is believed for it again.
 
 **A turn refused at the limit is a reading.** When a turn fails with Claude's own usage-limit
 message, `You've hit your weekly limit · resets Oct 29 at 1am (America/New_York)` (or `session
@@ -678,10 +724,12 @@ desk.
 and who it belongs to in `.claude.json`'s `oauthAccount`. ghostfleet keeps each *saved* account
 only in the same place: a Keychain item of its own (`ghostfleet-claude-login`, account
 `<profile>.<name>`) or a 0600 file beside `.credentials.json`. `accounts.json` in the profile's
-`fleet/` dir holds the order, the readings and a one-way id per login — never a token — and
-nothing here prints or logs one. Tokens that Claude Code refreshes while an account is in use are
-copied back into its slot on every governor tick and at the moment of switching away, and an
-older saved copy is never written over a newer live one.
+`fleet/` dir holds the order, the readings, a one-way id per login and per organization, the
+organization's name, and a one-way fingerprint of the tokens each answer was for — never a token
+or an address — and nothing here prints or logs one. Tokens that Claude Code refreshes are copied
+back into the slot of the account they answer as on every governor tick (with one account saved
+too) and at the moment of switching away, and an older saved copy is never written over a newer
+live one.
 
 `fleet-accounts remove <profile> <name>` forgets one (not the one in use — switch first).
 Codex, opencode, agy and cursor keep their single login and are not touched.
@@ -1400,7 +1448,7 @@ never written, and nobody finds out until they go looking. So does "I'll merge w
 green", said once and never done. The mod holds both to account from inside the session.
 
 ```
-ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
+ledger · 2 open · 3 for you · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
 ```
 
 The ledger is a hybrid. **The agent closes its own items** as it finishes them, through
@@ -1561,6 +1609,58 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   `~/.claude-*/fleet`, `$CLAUDE_FLEET_DIR`, each once by real path), beside the state of every
   item and the age and sender of everything still owed. Counts only: no text, session,
   branch or path. A ledger written before the counter is reported `untallied`.
+- **Two directions: what the agent owes, and what is for you.** `N open` is what the agent
+  owes: the person's asks, a lead's briefs, its own promises. One it holds `waiting` on the
+  person is still the agent's: `/ledger` lists it as waiting, with what it waits on, and it is
+  never counted for you. `M for you` is what the agent asked OF the person, and only that
+  (`source: question`), one item per thing:
+  - each numbered question a turn ends on, its options kept as `a`, `b`, `1`, `2`;
+  - each line of a waiting-on-you list anywhere in the final text, under a heading such as
+    "Waiting on you", "Needs you", "Your call", "For you", "Pendiente tuyo", "Para ti",
+    "Te toca" or "Esperando tu …", alone on its line or with a colon (a sentence that merely
+    starts with the words is prose);
+  - a closing choice whose options sit in the line itself ("¿Sigo con 1 (…), 2 (…) o 3 (…)?"),
+    one item that "2" answers;
+  - what the judge reads as asked of the person (`"by":"person"`);
+  - and, for a request held on the person, its **step**: what they must do to unblock it, from
+    the judge's note, unless the turn's own questions already say it. Answering the step hands
+    the request back to the agent; a step whose request moved on closes by itself.
+
+  Measured before the split: a lead ended a turn on 20 numbered questions to the owner while its
+  band read `3 open`, and those three were the agent's own work. Measured before the lists: a
+  status turn's "Waiting on you" over four bullets, mid-turn, read as nothing at all, and the
+  queue showed the agent's own requests because they were held on the owner. **Once:** one item
+  per thing per session. Two sources that find it are one item; a later list that says it in
+  other words is that item, its words updated and its id kept (by shared words and anchors such
+  as `#212`, a code span or a hyphenated name; past what the words can tell, the judge pairs
+  them); a turn's list replaces the one before, and a line the new list no longer carries
+  closes `dropped`, "no longer listed", never deleted. A turn with no list leaves them alone. An
+  answer in the chat settles the question it names ("1", "sí al 3", "5: no, use JSON"; a lone
+  number picks that option of the one question that has it, or of the turn's closing choice),
+  and the judge can never close a for-you item as `done`, because what it lacks is the person's
+  answer, not the agent's work. **A prompt the fleet pasted is never the person's**: `fleet-send`
+  (and so `fleet-spawn --prompt`) and `fleet-schedule` write `<sock>.<session>.pasted` before
+  they paste, and the mod spends that mark at submit time: the item is the sender's
+  (`source: fleet`), owed to it, and never listed as waiting on the owner; what that turn asks
+  is the lead's to answer. The marker is the test, by time and length, never the wording.
+  **What is pending shows on deploy:** the first start of this code on a ledger it has never
+  read takes that session's last turn from its transcript, once, and stamps the file
+  (`forYouV`), so a master's last list shows without waiting for its next turn; a worker's
+  turns answer its lead, so it only gets the steps of its held requests. Nothing is rewritten
+  or deleted. One list everywhere: the band, `/ledger`, the phone's "waiting on you", the
+  briefing's WAITING ON THE OWNER and `fleet-know waiting` all read `forYou()`; `fleet-know`
+  reads it from each request's source, so an older event that called a held request the
+  owner's is read as the session's.
+- **Explain it to me.** `fleet-ledger [session] explain <id>`, `/ledger explain <id>` and the
+  Explain button on every for-you card (phone, desk and the team app, through
+  `fleet_ledger`) ask the session that raised the item to explain that one item in plain words:
+  what is being decided, what each option causes, and which it recommends, in the person's
+  language. It goes as a prompt (`fleet-send --explain`), so a session mid-turn takes it when
+  that turn ends and nothing is interrupted; the sheet says so meanwhile. The explanation is
+  kept on the item, shown in a sheet on a phone and a dialog at a desk, never inline, with the
+  item's options beside it: choosing one sends the answer to the session, quoting the item, and
+  `fleet_ledger answer` records it. The explanation comes from the session that asked, not
+  from a second model.
 - **Waiting on the person.** An item the judge reports `in-progress` because it waits on
   the person ("waits on the person: their pick between A and B") leaves the open list and the
   gate as `waiting`, and comes back when the person's message speaks to it. A reply like
@@ -1568,10 +1668,13 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   message started** (typed, or marked as the owner's; never a nudge, the gate's re-prompt
   or a lead's brief) shows the judge that session's waiting items, newest first, ten at
   most, mentioned or not: done closes one, in progress reopens it, and one the turn did not
-  address stays waiting. **A waiting item untouched for 24 hours expires**: off the phone's
-  queue and the status note at once, written `expired` at the next judged turn, still in
-  `/ledger all` and still closable. Measured before it: of 35 waiting items within a week,
-  34 were over a day old and 27 had three or more messages from the person since. A master's
+  address stays waiting. **An item waiting on the person never expires**: it stays until they
+  answer or drop it. One waiting on anything else (a lead's brief held for a deploy, a
+  registry) **expires after 24 hours untouched**: off the phone's queue and the status note at
+  once, written `expired` at the next judged turn, still in `/ledger all` and still closable.
+  Measured before the expiry: of 35 waiting items within a week, 34 were over a day old and 27
+  had three or more messages from the person since; it retired the person's questions with the
+  rest, which is why it now spares them. A master's
   waiting items are what an unattended run ends up holding, so they leave the session two
   ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
   and profile it lists; workers' items reach the owner through their master), Projects
@@ -1605,8 +1708,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   session, without a turn. `fleet-ledger [session] drop-carried <worker> "<reason>"` drops
   every item still owed that was carried from one stopped worker, with one reason: the
   person's or the lead's call after reading them, never run on anyone's behalf. `clear` closes every open item and keeps the history; `all` shows
-  who closed each and the proof or reason. Items older than 7 days drop off the band and
-  the gate; the file keeps the newest 200.
+  who closed each and the proof or reason. Items the agent owes drop off the band and the gate
+  after 7 days; what is for the person stays until they answer it. The file keeps the newest
+  200, and a for-you item is never what the trim takes.
 - **A stopped worker's unfinished items go to its lead.** `fleet-stop` (with or without
   `--reclaim`, and the MCP `fleet_stop`, which runs it) hands each item still `open`,
   `waiting` or `not-done` to the lead's ledger: its sub-lead's when it has one, else

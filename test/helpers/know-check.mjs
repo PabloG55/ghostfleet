@@ -70,6 +70,10 @@ await section('brief', () => {
   row('...the PR that merged', 'yes', yes(/PR #1170 merged \(fix\/csv-export\)/.test(b)));
   row('...the last deploy, at its commit', 'yes', yes(/last deploy .*vercel deploy at a1b2c3d4 \(master\)/.test(b)));
   row('...three things waiting on the owner', '3', (b.match(/^ {2}waits on you:/gm) || []).length);
+  // ...the question master asked them among those three, and the lead's brief it holds is not:
+  // that one is master's open request, owed to the lead (a delivery is the sender's, not theirs)
+  row('...a question asked of the owner is theirs; a brief from the lead is the session\'s own', 'yes no yes',
+    `${yes(/^ {2}waits on you: question for you: "Which plan tier/m.test(b))} ${yes(/^ {2}waits on you:.*Move acme-web to the v2 export/m.test(b))} ${yes(/^ {4}"Move acme-web to the v2 export once billing-svc ships" \(master/m.test(b))}`);
   row('...a decision, with where it came from', 'yes', yes(/Keep the v1 export endpoint until acme-web moves to v2 — acme-web still calls \/v1\/export +\[stated, 2026-03-05\]/.test(b)));
   row('...and the worker\'s, from its ack', 'yes', yes(/RFC 4180 quoting; no new dependency .*\[ack, 2026-03-05\]/.test(know(['acme-api', '--all']).stdout)));
   // DECAY: closed eleven days before the instant asked about — counted, never listed
@@ -89,6 +93,7 @@ await section('brief', () => {
   row('waiting: the need-you, the PR on review and the waiting request', 'yes yes yes',
     `${yes(/master needs you/.test(w))} ${yes(/PR #1184/.test(w))} ${yes(/Which plan tier/.test(w))}`);
   row('...and nothing that is not waiting', 'no', yes(/#1170/.test(w)));
+  row('...nor what master owes the lead', 'no', yes(/Move acme-web to the v2 export/.test(w)));
   const o = know([]).stdout;
   row('the overview lists what is recorded, private marked, excluded absent', 'yes yes no',
     `${yes(/acme-api/.test(o) && /acme-web/.test(o))} ${yes(/scratch.*private/.test(o))} ${yes(/toolbox/.test(o))}`);
@@ -1536,8 +1541,10 @@ await section('the briefing', () => {
   rec('fact', { key: 'worker.note', value: 'a-worker-fact' }, WORKER_SRC);
   // A millisecond apart: two events at the same instant fold in id order, which is random.
   const tw = Date.now();
-  rec('request.open', { req: 'r-wait', text: 'Which plan tier should the rate limit apply to?', source: 'prompt' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
-  rec('request.state', { req: 'r-wait', state: 'waiting', text: 'Which plan tier should the rate limit apply to?' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw + 1);
+  rec('request.open', { req: 'r-wait', text: 'Which plan tier should the rate limit apply to?', source: 'question', for: 'you' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
+  // What the lead OWES, held waiting on the owner, in the shape the ledger once told it: `for: you`.
+  rec('request.open', { req: 'r-owed', text: 'Ship the acme-api rate-limit fix behind a flag', source: 'prompt' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
+  rec('request.state', { req: 'r-owed', state: 'waiting', for: 'you', text: 'Ship the acme-api rate-limit fix behind a flag' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw + 1);
   rec('pr.open', { repo: 'acme/acme-api', number: 77, branch: 'fix/rate-limit', author: 'outside-dev' }, { via: 'gh', slot: 'master' });
   rec('need-you', { need: 'a live question on a pane' }, { via: 'hook', session: 's-worker', slot: 'api-fix' });
 
@@ -1560,7 +1567,8 @@ await section('the briefing', () => {
   row('...the owner\'s rule first', 'yes', yes(at(/The owner's rule about shipping/) > 0 && at(/The owner's rule about shipping/) < at(/A lead's rule for this project/)));
   row('...and says which scope wins, rather than picking', 'yes', yes(/most specific wins: project: beats profile beats all/.test(c)));
   row('...ids, one line each', 'yes yes', `${yes(c.includes(ownerR.id) && c.includes(leadR.id) && c.includes(ownerD.id) && c.includes(leadD.id))} ${yes(c.split('\n').every(l => l.length <= 220))}`);
-  row('...what waits on the owner, a request and a PR', 'yes yes', `${yes(/Which plan tier should the rate limit apply to/.test(c))} ${yes(/PR #77 from outside-dev waits for review/.test(c))}`);
+  row('...what waits on the owner, a question and a PR', 'yes yes', `${yes(/Which plan tier should the rate limit apply to/.test(c))} ${yes(/PR #77 from outside-dev waits for review/.test(c))}`);
+  row('...and not what the lead owes, though it was held waiting on the owner', 'no', yes(/Ship the acme-api rate-limit fix/.test(c)));
   row('names only owner and lead items', 'no no no no', `${yes(/A worker proposes/.test(c))} ${yes(/A worker decided/.test(c))} ${yes(/A model inferred/.test(c))} ${yes(/a-worker-fact/.test(c))}`);
   row('...and carries their keyed facts', 'yes', yes(/export\.version = v2-from-a-lead/.test(c)));
   row('no live session status, and no paragraph on what it is', 'no no', `${yes(/live question|needs you/.test(c))} ${yes(/A paragraph about what acme-api is/.test(c))}`);
@@ -1658,8 +1666,7 @@ await section('the briefing has a cap', () => {
   for (let i = 0; i < 500; i++) K.record('rule', { text: `Standing rule number ${i}: ${'long words about shipping '.repeat(i % 7 === 0 ? 30 : 2)}`, scope: i % 3 === 0 ? 'all' : i % 3 === 1 ? 'profile' : 'project:acme-api' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: t - i * 1000, rec: t, src: i % 2 ? LEAD_SRC : OWNER_SRC });
   for (let i = 0; i < 500; i++) K.record('decision', { text: `Decision number ${i}: ${'because of the rate limits '.repeat(i % 5 === 0 ? 30 : 2)}`, source: 'stated' }, onApi(B, t - i * 1000, LEAD_SRC));
   for (let i = 0; i < 3; i++) {
-    K.record('request.open', { req: `r-wait-${i}`, text: `Waiting question ${i}`, source: 'prompt' }, onApi(B, t, { via: 'ledger', session: 's-lead', slot: 'master' }));
-    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text: `Waiting question ${i}` }, onApi(B, t + 1, { via: 'ledger', session: 's-lead', slot: 'master' }));
+    K.record('request.open', { req: `r-wait-${i}`, text: `Waiting question ${i}`, source: 'question', for: 'you' }, onApi(B, t, { via: 'ledger', session: 's-lead', slot: 'master' }));
   }
   const c = B.ctxOf(B.start());
   row('500 rules and 500 decisions: at or under 2,000 characters', 'yes', c.length > 200 && c.length <= 2000 ? 'yes' : `no: ${c.length}`);
@@ -1696,8 +1703,7 @@ await section('the briefing keeps every rule', () => {
   });
   for (let i = 0; i < 8; i++) {
     const src = { via: 'ledger', session: 's-lead', slot: 'master' }, text = `Waiting question ${i}: ${'should the export keep its old columns or move on '.repeat(3)}`.slice(0, 150);
-    K.record('request.open', { req: `r-wait-${i}`, text, source: 'user' }, onApi(B, t + i, src));
-    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text }, onApi(B, t + i + 1, src));
+    K.record('request.open', { req: `r-wait-${i}`, text, source: 'question', for: 'you' }, onApi(B, t + i, src));
   }
   const c = B.ctxOf(B.start()), L = c.split('\n');
   row('13 rules and 8 waiting items: at or under 2,000 characters', 'yes', yes(c.length > 500 && c.length <= 2000));
@@ -1718,8 +1724,7 @@ await section('the briefing keeps every rule', () => {
   });
   for (let i = 0; i < 8; i++) {
     const src = { via: 'ledger', session: 's-lead', slot: 'master' };
-    K.record('request.open', { req: `r-over-${i}`, text: `Waiting over ${i}`, source: 'user' }, onApi(M, t + i, src));
-    K.record('request.state', { req: `r-over-${i}`, state: 'waiting', text: `Waiting over ${i}` }, onApi(M, t + i + 1, src));
+    K.record('request.open', { req: `r-over-${i}`, text: `Waiting over ${i}`, source: 'question', for: 'you' }, onApi(M, t + i, src));
   }
   const o = M.ctxOf(M.start()), OL = o.split('\n');
   row('rules alone past the budget: still under the cap', 'yes', yes(o.length <= 2000 && o.length > 500));
@@ -2243,7 +2248,9 @@ await section('the owner\'s answers', async () => {
   W.bf();
   row('...and a backfill after it does not add it twice', '1', lines(W.log).filter(e => e.kind === 'decision' && e.f.req === `s-live2/${ch[0].id}`).length);
   const reg = fs.readFileSync(path.join(ROOT, 'mods', 'ghostfleet', 'hooks', 'register.js'), 'utf8');
-  row('the mod hands the question on', 'yes yes', `${yes(/choiceAsked = choiceTurn \? askedIn\(/.test(reg))} ${yes(/choiceTurn, asked: choiceAsked \}/.test(reg))}`);
+  // ...unless the answer settled a question item: the decision is on record once, as that
+  // question's (ledger.js ownerAnswers), and quoting it beside the reply too would be twice
+  row('the mod hands the question on', 'yes yes', `${yes(/choiceAsked = choiceTurn \? askedIn\(/.test(reg))} ${yes(/choiceTurn, asked: answered \? '' : choiceAsked,/.test(reg))}`);
   // A WORKER CANNOT REACH THE OWNER'S WORD BY ANY OF THESE
   K.record('ack', { worker: 'api-fix', branch: 'fix/w', understood: 'Fix it', decisions: 'The owner already answered: ship it' }, onApi(W, BF_T + DAY, { via: 'ack', slot: 'api-fix', session: 's-w' }));
   K.record('decision', { text: 'A line that claims to be a reply', source: 'reply', req: 's-w/1' }, onApi(W, BF_T + 2 * DAY, { via: 'ack', slot: 'api-fix', session: 's-w' }));

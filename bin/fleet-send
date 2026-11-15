@@ -86,6 +86,9 @@ while [ $# -gt 0 ]; do
     --now)       MODE=now;           shift ;;
     --nudge)     KIND=nudge;         shift ;;
     --owner)     KIND=owner;         shift ;;
+    # A request to explain one of the session's own ledger items to the person (fleet-ledger
+    # explain): it waits for its turn like any send, and its ledger makes no item of it.
+    --explain)   KIND=explain;       shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
     # Sends nothing: says what a plain send would meet (see "what a send would meet" below).
     --would-queue) MODE=probe;       shift ;;
@@ -550,6 +553,7 @@ if [ "$MODE" = dequeue ]; then
   _args=(--queued --anyway -s "$SOCK")
   [ "${_q_kind:-}" = nudge ] && _args+=(--nudge)
   [ "${_q_kind:-}" = owner ] && _args+=(--owner)
+  [ "${_q_kind:-}" = explain ] && _args+=(--explain)
   [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
   # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
   # between this paste and the spinner, and fold the next prompt into this one. The head
@@ -627,8 +631,8 @@ fi
 # Appends this prompt (the caller's words, before any preamble: the delivery adds that)
 # to the queue, under the lock the caller holds; sets _n to its place.
 _enqueue() {
-  # A sixth field only for a nudge or the owner's words, so every other record is the five
-  # fields it always was.
+  # A sixth field only for a nudge, the owner's words or an explain request, so every other
+  # record is the five fields it always was.
   _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$RAW_MSG")")${KIND:+$'\x1f'$KIND}"
   # The same prompt already waiting is not a second task: the automated nudges (a
   # worker finished, an answer relayed) repeat word for word and would stack one turn
@@ -908,6 +912,21 @@ _jarvis_delivered() {
     printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
   fi
 }
+# A PASTED PROMPT IS THE FLEET'S, AND THE SESSION IS TOLD SO. Pasted, a send reaches the
+# target's prompt box and is submitted as if typed: the mod's ledger read it as the PERSON's
+# words, so a lead's brief that fell back to the paste became an owner's ask, listed under
+# WAITING ON THE OWNER with the questions its answer put to that lead. The mod is told by a
+# line written here, just before the paste: `<epoch ms>\t<kind>\t<reply>\t<length>` in
+# <sock>.<session>.pasted (kind as on the handoff: '' for a brief, nudge, owner, explain;
+# reply 1 when the answer goes back to an asker). Its prompt.submit takes the oldest line under
+# a minute old whose length is the submit's, near enough, as the account of that submit
+# (register.js pastedBy). By time and size, not by the words: the mod cannot hash to compare,
+# and a paste whose Enter was swallowed must not claim the next thing the person types. A
+# paste the mod never sees (no mod, or none loaded) leaves a line that ages out unread.
+_paste_marker() {
+  local _pm="$FLEET_DIR/$SOCK.$SESSION.pasted"
+  printf '%s\t%s\t%s\t%s\n' "$(($(date +%s) * 1000))" "$KIND" "$([ -n "${RSESS:-}" ] && echo 1 || echo 0)" "${#MSG}" >> "$_pm" 2>/dev/null || true
+}
 # A FAILED DELIVERY NOBODY WOULD SEE. Filed as a `failed` row in the inbox of the worker's
 # lead, chosen as hooks/fleet-event.sh chooses it: a live parent named in <sock>.<slot>.parent,
 # else master. Only for a sender that set CLAUDE_FLEET_SEND_REPORT, because one whose output
@@ -1056,6 +1075,7 @@ fi
 
 if [ "$USE_MOD" = 0 ]; then
 _jarvis_delivered
+_paste_marker
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 

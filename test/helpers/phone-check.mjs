@@ -30,11 +30,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { launch, serveDir, sleep } from '../../lib/browser.mjs';
+import { requestArrivals } from './request-arrival.mjs';
+import { requestTyping } from './request-typing.mjs';
 
 const ROOT = path.resolve(new URL('../..', import.meta.url).pathname);
 const argv = process.argv.slice(2);
 const served = argv[0] === '--served' ? argv[1] : '';
-const WEB = path.resolve(!served && argv[0] ? argv[0] : path.join(ROOT, 'web'));
+const arrivalOnly = argv[0] === '--arrival-only';
+const typingOnly = argv[0] === '--typing-only';
+const WEB = path.resolve((arrivalOnly || typingOnly ? argv[1] : !served && argv[0]) || path.join(ROOT, 'web'));
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
@@ -57,7 +61,24 @@ const STUBS = `(() => {
   }
   const play = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { note('play'); return play.call(this); };
-  try { const s = window.speechSynthesis; if (s) { const sp = s.speak.bind(s); s.speak = (u) => { note('speak'); return sp(u); }; } } catch {}
+  // A voice and an ear this file controls: every utterance is written down and held until the test
+  // ends it (__finish), and the recogniser hears whatever __heard holds, after 400 ms, or nothing.
+  window.__said = []; window.__cancels = 0; window.__rec = { starts: 0, aborts: 0 }; window.__heard = '';
+  let curU = null;
+  const fake = { speaking: false, getVoices: () => [], cancel: () => { window.__cancels++; curU = null; },
+    speak: (u) => { note('speak'); window.__said.push(u.text); curU = u; } };
+  try { Object.defineProperty(window, 'speechSynthesis', { get: () => fake, configurable: true }); } catch {}
+  window.SpeechSynthesisUtterance = function (text) { this.text = text; };
+  window.__finish = () => { const u = curU; curU = null; if (u && u.onend) u.onend(); };
+  window.SpeechRecognition = window.webkitSpeechRecognition = function () {
+    const r = this; let dead = false;
+    r.start = () => { window.__rec.starts++; setTimeout(() => {
+      if (dead) return;
+      if (window.__heard) r.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: window.__heard }], { isFinal: true })] });
+      setTimeout(() => { if (!dead) r.onend(); }, 30);
+    }, 400); };
+    r.stop = () => {}; r.abort = () => { dead = true; window.__rec.aborts++; };
+  };
   try { const md = navigator.mediaDevices; if (md) { const g = md.getUserMedia.bind(md); md.getUserMedia = (c) => { note('getUserMedia'); return g(c); }; } } catch {}
   try { if (navigator.audioSession) { const a = navigator.audioSession; Object.defineProperty(a, 'type', { set: (v) => note('audioSession=' + v), get: () => 'auto' }); } } catch {}
 })();`;
@@ -107,6 +128,15 @@ try {
     await open(390, 844);
     await b.call('Page.navigate', { url: srv.base + '/' });
 
+    if (arrivalOnly || typingOnly) {
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      if (typingOnly) await requestTyping({ b, is, shots: process.env.REQUEST_TYPING_SHOTS || '' });
+      else await requestArrivals({ b, is, shots: process.env.REQUEST_SHOTS || '', go: async () => {
+        await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+        await until(() => !!document.querySelector('.composer'));
+      } });
+    } else {
     // ── the lock, in fixture mode ──────────────────────────────────────────────
     is('the lock is drawn', true, !!(await until(() => !!document.querySelector('.auth-card'))));
     const bypass = await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
@@ -387,12 +417,11 @@ try {
     // The fixture holds one proposal. A No costs no passkey, so it can be pressed here; the Yes is
     // the adapter's assertFor, the same path as every passkey verb.
     await b.evaluate(() => { location.hash = '#/'; });
+    await until(() => !!document.querySelector('.home-agent .proposal-return'));
+    await clickText('.home-agent .proposal-return', '');
     const ask = await until(() => { const r = document.querySelector('.home-agent .as-ask'); return r && [r.querySelector('.grow'), ...r.querySelectorAll('button')].map(n => n.textContent.replace(/\s+/g, ' ').trim()).join(' | '); });
     is('the home card lists what Jarvis waits on a yes for', 'Jarvis asks: stop acme-api/docs-pass and remove its worktree? K7Q2 | Yes | No', ask);
-    is('...above the place to talk', true, await b.evaluate(() => {
-      const a = document.querySelector('.home-agent .as-asks'), c = document.querySelector('.home-agent .console');
-      return !!(a && c && (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING));
-    }));
+    is('...in the app dialog', true, await b.evaluate(() => !!document.querySelector('.home-agent [role=dialog] .as-asks')));
     await clickText('.home-agent .as-ask button', '^No$');
     is('...a No answers it, and it leaves the list', true, !!(await until(() => !document.querySelector('.home-agent .as-ask'))));
     is('...saying what will not happen', true, !!(await until(() => /Jarvis will not stop acme-api\/docs-pass/.test(document.querySelector('.toasts')?.textContent || ''))));
@@ -412,10 +441,10 @@ try {
               { ...base, laterAt: now - day }, { ...base, laterAt: now - 4 * day }, { ...base, on: true }]
         .map(c => offerWanted(c) ? 'yes' : 'no').join(' ');
     }));
-    await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+    await b.evaluate(() => { location.hash = '#/p/acme-api/s/master'; });
 
-    // ── a poll does not take the keyboard away ────────────────────────────────
-    await until(() => !!document.querySelector('.composer textarea'));
+    // ── a poll does not take the keyboard away (a session with no pending request) ──
+    await until(() => document.querySelector('.sess-title h1')?.textContent === 'master' && !!document.querySelector('.composer textarea'));
     await b.evaluate(() => { const ta = document.querySelector('.composer textarea'); ta.__mark = 1; ta.focus(); });
     await b.call('Input.insertText', { text: 'half a sentence' });
     await sleep(6500);                                   // past one 5 s poll, and its answer
@@ -452,7 +481,7 @@ try {
     is('nothing on the way through claimed the audio session', '', (await b.evaluate(() => window.__audio)).join(','));
 
     // ── a draft per session (web/ui/drafts.js) ────────────────────────────────
-    // api-fix's box holds "half a sentence" from above. Each session's box is its own, and the
+    // master's box holds "half a sentence" from above. Each session's box is its own, and the
     // words come back after leaving, after a reload, and go only when a send of them succeeds.
     const boxOf = async (hash) => {
       await b.evaluate((x) => { location.hash = x; }, hash);
@@ -460,27 +489,27 @@ try {
       await sleep(300);
       return b.evaluate(() => document.querySelector('.composer textarea').value);
     };
-    is('another session\'s box is its own', '', await boxOf('#/p/acme-api/s/docs-pass'));
-    is('...and the draft is there on coming back', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    is('another session\'s box is its own', '', await boxOf('#/p/acme-api/s/api-fix'));
+    is('...and the draft is there on coming back', 'half a sentence', await boxOf('#/p/acme-api/s/master'));
     // The files a draft had cannot survive a reload; the draft remembers how many, and says so.
     await b.evaluate(() => {
       const o = JSON.parse(localStorage.getItem('gfw.drafts') || '{}');
-      o['acme-api\x1fapi-fix'] = { ...o['acme-api\x1fapi-fix'], files: 2 };
+      o['acme-api\x1fmaster'] = { ...o['acme-api\x1fmaster'], files: 2 };
       localStorage.setItem('gfw.drafts', JSON.stringify(o));
       location.reload();
     });
     await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
     await clickText('.auth-card button', 'without a passkey');
     await until(() => !!document.querySelector('.app'));
-    is('...and after a reload', 'half a sentence', await boxOf('#/p/acme-api/s/api-fix'));
+    is('...and after a reload', 'half a sentence', await boxOf('#/p/acme-api/s/master'));
     is('...saying how many of its files the reload dropped', '2 files attached to this draft did not survive the reload. Attach them again. OK',
        (await texts('.composer .att-lost')).join(' ').replace(/\s+/g, ' '));
     await clickText('.composer .att-lost button', '^OK$');
     is('...until that has been read', 0, (await texts('.composer .att-lost')).length);
     await clickText('.composer button[type=submit]', 'Send');
     is('a send that succeeds empties the box', true, !!(await until(() => document.querySelector('.composer textarea')?.value === '')));
-    is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/docs-pass') + await boxOf('#/p/acme-api/s/api-fix'));
-    is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fapi-fix' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));
+    is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/api-fix') + await boxOf('#/p/acme-api/s/master'));
+    is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fmaster' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));
 
     // ── a reload keeps its place ──────────────────────────────────────────────
     // The place is the address (web/ui/history.js): a reload, a link opened or a desk tab whose
@@ -493,6 +522,7 @@ try {
     await until(() => !!document.querySelector('.app'));
     await sleep(600);
     is('...and lands where it was', '#/p/acme-web', await b.evaluate(() => location.hash));
+    await until(() => /acme-web/.test(document.querySelector('.main h1')?.textContent || ''));
     is('...drawing that project', true, await b.evaluate(() => /acme-web/.test(document.querySelector('.main h1')?.textContent || '')));
 
     // ── an address changed the moment the app appears ─────────────────────────
@@ -572,6 +602,100 @@ try {
     await sleep(300);
     is('390 session, opened cold from its link: the newest message clears the Assistant button', 'clear', await clear());
 
+    // ── a chat that talks: the ▶ on every message, and speak mode in the composer ──
+    // The voice and the ear are the stubs above. The session is one the fixture has no transcript
+    // for, so its messages come from a fetch answer this block controls, and a reply can "arrive".
+    {
+      const { speakable, speechChunks } = await import(new URL('../../web/ui/speakable.js', import.meta.url).href);
+      const { EN } = await import(new URL('../../web/ui/speakable.js', import.meta.url).href);
+      const spoken = (md) => speechChunks(speakable(md, EN)).join(' ');
+      const nowS = Math.floor(Date.now() / 1000);
+      const A1 = 'Pinned `retry.ts` and added **429** handling.', U1 = 'Please check the backoff.';
+      await b.viewport(390, 844);
+      await b.evaluate((a1, u1, n) => {
+        window.__types = [{ ts: n - 300, role: 'user', text: u1 }, { ts: n - 200, role: 'assistant', text: a1 }];
+        if (!window.__realFetch) {
+          window.__realFetch = window.fetch;
+          window.fetch = (u, o) => String(u).includes('session-acme-api-types.json')
+            ? Promise.resolve(new Response(JSON.stringify({ project: 'acme-api', session: 'types', agent: 'claude', status: 'ready', total: window.__types.length, messages: window.__types }), { status: 200 }))
+            : window.__realFetch(u, o);
+        }
+        location.hash = '#/p/acme-api/s/types';
+      }, A1, U1, nowS);
+      is('a chat with two messages is drawn', 2, await until(() => { const n = document.querySelectorAll('.chat .msg').length; return n === 2 ? n : 0; }));
+      const bubbles = () => b.evaluate(() => [...document.querySelectorAll('.chat .msg')].map(m => { const r = m.querySelector('.read-btn'); return { me: m.classList.contains('me'), label: r && r.getAttribute('aria-label'), top: Math.round(m.getBoundingClientRect().top) }; }));
+      const before = await bubbles();
+      is('every message has a ▶, named for a screen reader: the person\'s and the agent\'s', 'true:Read aloud,false:Read aloud',
+         before.map(x => `${x.me}:${x.label}`).join(','));
+      const said = () => b.evaluate(() => window.__said.filter(x => x.trim()));
+      const press = (i) => b.evaluate((k) => document.querySelectorAll('.chat .msg .read-btn')[k].click(), i);
+      await press(1);
+      is('pressing it speaks what speakable() makes of the message', spoken(A1), (await said()).join(' '));
+      is('...which is not the markdown as written', true, spoken(A1) !== A1 && !/\*\*/.test(spoken(A1)));
+      const during = await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(','));
+      is('...and its button says Stop, and the other still says Read aloud', 'Read aloud/false,Stop reading/true', during);
+      is('...with no message moving', JSON.stringify(before.map(x => x.top)), JSON.stringify((await bubbles()).map(x => x.top)));
+      const cStop = await b.evaluate(() => window.__cancels);
+      await press(1);
+      is('a second press stops it: the voice is cancelled', true, (await b.evaluate(() => window.__cancels)) > cStop);
+      is('...and the button is back to Read aloud', 'Read aloud/false,Read aloud/false',
+         await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(',')));
+      await press(1); await press(0);
+      is('only one message plays at a time: the second press replaces the first', 'Read aloud/false,Stop reading/true'.split(',').reverse().join(','),
+         await b.evaluate(() => [...document.querySelectorAll('.chat .msg .read-btn')].map(x => `${x.getAttribute('aria-label')}/${x.getAttribute('aria-pressed')}`).join(',')));
+      is('...and the person\'s own words were spoken', true, (await said()).pop() === spoken(U1));
+      // Leaving the session stops it.
+      const c0 = await b.evaluate(() => window.__cancels);
+      await b.evaluate(() => { location.hash = '#/'; });
+      await sleep(500);
+      is('leaving the session stops a message that is playing', true, (await b.evaluate(() => window.__cancels)) > c0);
+
+      // ── speak mode: listen → send → (the turn ends) → speak → listen ──
+      const sends = () => b.evaluate(async () => (await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'fleet_send' && r.args.session === 'types').map(r => r.args.prompt));
+      const reply = (text) => b.evaluate(async (tx, n) => {
+        window.__types = [...window.__types, { ts: n, role: 'assistant', text: tx }];
+        await (await import('./api.js')).verb('fleet_resume', { project: 'acme-api', session: 'types' });
+      }, text, Math.floor(Date.now() / 1000) + 5);
+      const open = async () => { await b.evaluate(() => { location.hash = '#/p/acme-api/s/types'; }); await until(() => !!document.querySelector('.speak-btn')); };
+      await open();
+      is('no page error in the chat so far', '', errors.join(' | '));
+      is('the composer offers speak mode, named', 'Speak mode', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      await b.evaluate(() => { window.__heard = 'run the tests'; window.__said.length = 0; document.querySelector('.speak-btn').click(); });
+      is('...turned on, it listens (the ear was opened)', true, !!(await until(() => window.__rec.starts >= 1)));
+      is('...and says so', 'Turn speak mode off', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      is('the transcript is sent to the session', true, !!(await until(async () => (await (await import('./api.js')).getAudit()).rows.some(r => r.verb === 'fleet_send' && r.args.session === 'types'))));
+      is('...as it was heard, marked as spoken', '(spoken) run the tests', (await sends())[0]);
+      await sleep(1500);
+      is('...and nothing is read while the turn is still going', 0, (await said()).length);
+      const R1 = 'All done: **the tests pass**.';
+      await reply(R1);
+      is('when the turn ends the reply is read aloud, through speakable()', spoken(R1), await (async () => { await until(() => window.__said.some(x => x.trim())); return (await said()).join(' '); })());
+      is('...and the ear is not open while it speaks', 1, await b.evaluate(() => window.__rec.starts));
+      await b.evaluate(() => { window.__heard = ''; window.__finish(); });
+      is('...then it listens again', true, !!(await until(() => window.__rec.starts >= 2)));
+      await sleep(900);
+      is('a silence is never sent as a message', 1, (await sends()).length);
+      is('...and ends speak mode, rather than listening to nothing for good', 'Speak mode', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
+      // The toggle turns it off by hand.
+      await b.evaluate(() => { window.__heard = 'later'; const n = window.__rec.starts; document.querySelector('.speak-btn').click(); window.__n0 = n; });
+      await sleep(100);
+      await b.evaluate(() => document.querySelector('.speak-btn').click());
+      await sleep(900);
+      is('the toggle turns it off, and what was said after is not sent', 1, (await sends()).length);
+      is('...the ear is let go', true, (await b.evaluate(() => window.__rec.aborts)) >= 1);
+      // Leaving the screen while it speaks stops the voice and the loop.
+      await b.evaluate(() => { window.__heard = 'one more'; window.__said.length = 0; document.querySelector('.speak-btn').click(); });
+      await until(async () => (await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'fleet_send' && r.args.session === 'types').length >= 2);
+      await reply('Second answer.');
+      await until(() => window.__said.some(x => x.trim()));
+      const c1 = await b.evaluate(() => ({ cancels: window.__cancels, starts: window.__rec.starts }));
+      await b.evaluate(() => { location.hash = '#/'; });
+      await sleep(900);
+      const c2 = await b.evaluate(() => ({ cancels: window.__cancels, starts: window.__rec.starts }));
+      is('leaving the screen while it speaks stops the voice', true, c2.cancels > c1.cancels);
+      is('...and it does not listen again afterwards', c1.starts, c2.starts);
+    }
+
     // ── one answer to "is this run done": the client's state against the server's ──
     // The phone works a recorded run's state out the moment a verdict is tapped (and fixture mode
     // never asks a server at all), so web/api.js's copy must say what lib/shots.mjs says, which is
@@ -594,7 +718,13 @@ try {
     const server = CASES.map(([m, v]) => runState(m, v));
     is('the phone\'s run state matches the server\'s, case by case', JSON.stringify(server), JSON.stringify(client));
     is('...and the cases are not all one answer', true, new Set(server.map(s => JSON.stringify(s))).size >= 3);
+    await requestArrivals({ b, is, go: async () => {
+      await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+      await until(() => !!document.querySelector('.composer'));
+    } });
+    await requestTyping({ b, is });
     is('no page error, anywhere on the way', '', errors.join(' | '));
+    }
   }
 } catch (e) {
   is('phone-check ran to the end', '', String((e && e.stack) || e).split('\n').slice(0, 2).join(' '));

@@ -114,7 +114,7 @@ function Root() {
       if (document.hidden) { hidByCeremony = pk.busy(); return; }   // the Face ID sheet hides the page too
       if (!hidByCeremony) pk.arm();
       hidByCeremony = false;
-      if (!api.haveToken()) { if (!locked) lock(); else tryAuto(); }
+      if (!api.haveAccess()) { if (!locked) lock(); else tryAuto(); }
     };
     document.addEventListener('visibilitychange', vis);
     return () => document.removeEventListener('visibilitychange', vis);
@@ -129,7 +129,7 @@ function Root() {
     if (to) { try { history.replaceState(null, '', location.pathname + location.search + '#' + to); } catch {} }
     setVer(v => v + 1);
     setLocked(false);
-    pk.prepareFresh().catch(() => {});
+    if (!api.localTrusted()) pk.prepareFresh().catch(() => {});
   };
   const tryAuto = () => {
     if (document.hidden) return;
@@ -139,7 +139,7 @@ function Root() {
   // that goes back to where it was. A cold launch has none and gets one automatic attempt.
   useEffect(() => {
     pk.arm();
-    pk.resume().then((r) => {
+    api.ready().then(() => api.localTrusted() ? 'ok' : pk.resume()).then((r) => {
       if (r === 'ok') { linkPlace = true; landed(); return; }
       if (r !== 'offline') tryAuto();
     }).catch(() => {});
@@ -158,7 +158,7 @@ if ('serviceWorker' in navigator) {
   push.askShellVersion();
   navigator.serviceWorker.addEventListener('message', (ev) => {
     const to = ev?.data?.open === 'jarvis' ? '/' : ev?.data?.open === 'waiting' ? '/queue' : null;
-    if (to) { if (api.haveToken()) go(to); else wantPlace = to; }
+    if (to) { if (api.haveAccess()) go(to); else wantPlace = to; }
   });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) { hadController = true; return; }
