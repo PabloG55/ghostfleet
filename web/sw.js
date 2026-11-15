@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: bb566b795f18
+// CLIENT-HASH: 7b9a779bbccd
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -475,12 +475,14 @@
 // v116 holds the phone's screen still (no zoom on a tap into a field, one size of composer
 // button, no page to drag), takes a conversation to its end on every send, and floats the
 // Assistant button 8px above the composer instead of over it.
-// v117 draws every wait as the shape of what is coming, at its size (web/ui/skeleton.jsx): the
+// v117 brings a lead up from any state on either machine of a pairing: a project with no lead
+// is started by name (fleet_lead_start), and a reopen or start that fails says why.
+// v118 draws every wait as the shape of what is coming, at its size (web/ui/skeleton.jsx): the
 // session's header is its final height before its card lands, Settings and the Live map keep
 // the height they had last time, and the menu no longer loses a link a moment after it opens.
-// The app's own poll asks for the project list without its per-fleet rollup. A phone on v116
+// The app's own poll asks for the project list without its per-fleet rollup. A phone on v117
 // works as before against this daemon; it only goes on paying for the rollup until relaunched.
-const VERSION = 'ghostfleet-v117';
+const VERSION = 'ghostfleet-v118';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

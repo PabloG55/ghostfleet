@@ -554,7 +554,11 @@ async function submitTurn(t, body, address, isVoice = false) {
   // Check again after the asynchronous probe, immediately before handing off.
   const w = wiring(t);
   if (!w.ok) throw new Refused(`${w.why}. At the desk: ${w.fix}`);
-  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${address}`, '--reply-dir', DIR, t.session, prompt], envFor(t));
+  // Long enough for a WAKE: a send to a hibernated session wakes it first (bin/fleet-send), and
+  // that can take fleet-hibernate's whole wake timeout before anything is typed. Killed at the
+  // old minute, the relay answered "Not delivered" over a session that was still coming up.
+  const wakeMs = ((Number(process.env.CLAUDE_FLEET_WAKE_TIMEOUT) || 300) + (Number(process.env.CLAUDE_FLEET_WAKE_SETTLE) || 5) + 60) * 1000;
+  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${address}`, '--reply-dir', DIR, t.session, prompt], envFor(t), wakeMs);
   return { r, probe, prompt, fold };
 }
 

@@ -223,7 +223,8 @@ export function ProjectView({ project, session, tool = null }) {
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current} waiting={!g && !error} tool={tool}
-                     onChanged={reload} onGone={sessionBack} onStep={step} />
+                     onChanged={reload} onGone={sessionBack} onStep={step}
+                     startLead={g && !lead && session === 'master' && !waking ? wake : null} />
         {modals}
       </div>
     );

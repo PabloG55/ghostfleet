@@ -278,8 +278,25 @@ const theirSrc = basePresent ? git('show', `${BASE}:web/sw.js`) : null;
 // Compare the PR to its fork point, not to staging's tip: the latter includes
 // client updates that landed on staging after this branch was cut. Unknown
 // ancestry/diffs retain the ordering guard. --no-renames includes deleted paths.
-const fork = !pushCI && refPresent ? git('merge-base', 'HEAD', REF)?.trim() : null;
-const changed = fork ? git('diff', '--name-only', '--no-renames', '-z', fork, 'HEAD') : null;
+//   IN A PULL-REQUEST RUN THE MERGE-BASE CANNOT BE TRUSTED TO EXIST. The checkout is
+// GitHub's merge commit (refs/pull/N/merge) at depth 2, and origin/staging is fetched at
+// depth 1 at its CURRENT tip. When staging moved after GitHub built that merge, the two
+// shallow histories share no commit, `merge-base` finds nothing, the diff is unknown, and a
+// PR that never touched the client was held to the ordering check (seen twice in one day,
+// each told "v115 is BELOW staging's v116"). The merge commit carries the answer itself:
+// against its first parent (the staging it was merged onto, always inside depth 2) it IS
+// the PR's change. HEAD^2 is what says HEAD is a merge — without it HEAD^1 is just the
+// previous commit, not the PR, so that shape falls through to the merge-base path.
+const prCI = process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'pull_request';
+const isMerge = prCI && git('rev-parse', '--verify', '--quiet', 'HEAD^2^{commit}') != null &&
+  git('rev-parse', '--verify', '--quiet', 'HEAD^1^{commit}') != null;
+let changed = null;
+if (isMerge) {
+  changed = git('diff', '--name-only', '--no-renames', '-z', 'HEAD^1', 'HEAD');
+} else if (!pushCI && refPresent) {
+  const fork = git('merge-base', 'HEAD', REF)?.trim();
+  changed = fork ? git('diff', '--name-only', '--no-renames', '-z', fork, 'HEAD') : null;
+}
 const state = {
   ours: versionOf(ourSrc),
   theirs: versionOf(theirSrc),
@@ -289,7 +306,7 @@ const state = {
   headInBase,
   pushCI,
   clientChanged: touchesClient(changed == null ? null : changed.split('\0').filter(Boolean), ourSrc),
-  prCI: process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'pull_request',
+  prCI,
 };
 const v = verdict(state);
 if (v.kind === 'skip') skipGroup('the client version is above staging\'s', v.reason);

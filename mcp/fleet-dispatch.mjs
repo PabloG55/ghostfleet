@@ -229,6 +229,12 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, reclaim: { type: 'boolean', description: "also remove its git worktree when it is safe to (PR merged or fully pushed, clean, no other session)" }, force: { type: 'boolean', description: "with reclaim: remove the worktree ANYWAY, past those gates. Destroys uncommitted work — the deliberate second step after a reclaim was declined" }, children: { type: 'boolean', description: "the session is a SUB-LEAD (it spawned workers of its own): stop and reclaim its workers first, then it. Without this a stop of a sub-lead that still has workers is REFUSED and names them — ask the owner before passing it" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_rename', description: "Rename a worker's session AND move its worktree folder (git worktree move) in one step, so the two never drift apart. Migrates its state record (so fleet_read, the grid and the phone keep finding its conversation), its pause/notify-lead/schedule/agent/exited/asleep markers, reply addresses, fleet_worktrees manifest row, its slot in the grid's card order, and its _term-/_edit- tabs to the new name. Refuses on a live-session/path collision or a dirty worktree git won't move. Can't rename 'master'.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'current session name' }, new_name: { type: 'string', description: 'new name for both the session and its worktree folder' } }, required: ['session', 'new_name'], additionalProperties: false } },
+  // A REGISTERED PROJECT'S LEAD, STARTED BY NAME — the narrow half of fleet_project_add. It takes
+  // no path, so it cannot register anything: the project must already be in the projects file
+  // (fleet-project start looks it up there). What the phone's lead button sends for a project
+  // with no lead, on its own machine and through a paired one (bin/fleet-serve.mjs PAIR_VERBS).
+  { name: 'fleet_lead_start', description: "Start the lead (master) of a project that is ALREADY registered (see fleet_projects) and has no lead running. Takes the project's name only — never a path, so it cannot add a project (that is fleet_project_add). Starts the project's own agent in its main checkout with no prompt. Refuses a lead that is asleep (fleet_wake brings back its own conversation; a start would begin a new one); a lead already running is left alone and said so.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: 'the registered project whose lead to start (name from fleet_projects)' } }, required: ['project'], additionalProperties: false } },
   { name: 'fleet_project_add', description: "Register a NEW project (its own fleet) from a path — the CLI form of the Projects screen's '+ add project'. Use this when work belongs to a repo that is NOT part of any existing fleet: registering it and starting its master is correct, whereas spawning a worker inside your own fleet would put it on the wrong socket and under the wrong project. start:true boots its master immediately so you can fleet_send to it.",
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, agent: { type: 'string', description: "default coding CLI for this project's master and its workers (fleet-agent list; omit for claude)" }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master switches too: at once when idle, after its current turn when not; switching back to an agent it ran before resumes that agent's own conversation (codex, which cannot resume, starts fresh). Running workers keep their agent.",
@@ -375,6 +381,10 @@ export function plan(name, a = {}) {
     // Empty/absent CLEARS. `--none` rather than an empty argument, so the intent is in
     // the argv a user can read back out of a log — an empty string there is
     // indistinguishable from an argument that got lost on the way.
+    // No -s: fleet-project takes a subcommand first, and finds the fleet from the name and
+    // profile itself — the same two columns target() read the project from.
+    case 'fleet_lead_start':
+      return run('fleet-project', ['start', t.name, '--profile', t.profile || 'work']);
     case 'fleet_project_agent':
       return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
     // `default` rather than an empty argument, for the reason `--none` is above.
@@ -490,8 +500,8 @@ export function plan(name, a = {}) {
       return run('fleet-answer', args, t);
     }
     case 'fleet_wake': {
-      // No lead guard: a lead can be hibernated (only by name — never by the threshold or
-      // --pressure), and waking one is the opposite of the thing notTheLead exists to
+      // No lead guard: a lead can be hibernated (by name, or by --pressure behind the leads
+      // switch — never by the threshold), and waking one is the opposite of the thing notTheLead exists to
       // prevent. No -s without a target either: fleet-hibernate resolves the caller's own
       // fleet from $TMUX, and refuses a name asleep in several rather than picking one.
       return run('fleet-hibernate', ['--wake', String(a.session)], t);
