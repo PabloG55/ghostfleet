@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn, usePoll, toast } from './ui.jsx';
+import { STATUS, StatusMark, statusOf, Btn, usePoll, toast, Modal, useRequest } from './ui.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -185,17 +185,22 @@ export function Proposals() {
   const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has]);
   const [busyId, setBusyId] = useState('');
   const list = Array.isArray(data) ? data : [];
-  if (!has || !list.length) return null;
+  const request = useRequest('proposals', data == null ? undefined : list.map(p => `${p.id}:${!!p.granted}`).join('|') || null);
+  if (!has) return null;
   const answer = async (p, yes) => {
     setBusyId(p.id);
     try {
       await fleet.answerProposal(p, yes);
+      request.close();
       toast(t(yes ? 'as.proposalYesDone' : 'as.proposalNoDone', { summary: p.summary }), 'good');
     } catch (e) { toast(String((e && e.message) || e), 'bad'); }
     finally { setBusyId(''); reload(); }
   };
   return (
-    <ul class="as-asks" aria-label={t('as.proposals')}>
+    <div class="proposal-slot">
+    {list.length ? <Btn kind="sm proposal-return" onClick={request.show}>{t('sess.answerRequest')}</Btn> : null}
+    {request.open ? <Modal sheet title={t('as.proposals')} onClose={request.close}>
+    <ul class="as-asks modal-body" aria-label={t('as.proposals')}>
       {list.map(p => (
         <li key={p.id} class="as-ask">
           <span class="grow">{t(p.granted ? 'as.proposalGranted' : 'as.proposal', { summary: p.summary })} <small class="muted">{p.id}</small></span>
@@ -204,7 +209,8 @@ export function Proposals() {
             <Btn kind="sm" disabled={busyId === p.id} onClick={() => answer(p, false)}>{t('as.proposalNo')}</Btn>
           </span>}
         </li>))}
-    </ul>
+    </ul></Modal> : null}
+    </div>
   );
 }
 

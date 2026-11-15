@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 9c88299686ea
+// CLIENT-HASH: 7751a4a0020e
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -466,9 +466,10 @@
 // v109 keeps what waits on the person apart from what the agent owes: each question a turn
 // ended on is its own card, numbered, with its options and an Explain sheet. A phone on v108
 // lists the same items without the numbering or the Explain button until it is relaunched.
-// v110 gives terminal and editor the chat session's access and opens direct localhost
+// v110 keeps arriving requests above the page alongside chat playback and speak mode.
+// v111 gives terminal and editor the chat session's access and opens direct localhost
 // without a lock once the server proves the request is local.
-const VERSION = 'ghostfleet-v110';
+const VERSION = 'ghostfleet-v111';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
