@@ -5,10 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { launch, serveDir, sleep } from '../../lib/browser.mjs';
 const WEB = new URL('../../web/', import.meta.url).pathname;
-export async function realStackChecks(shots = '') {
+export async function realStackChecks(shots = '', web = WEB) {
   const rows = [], errors = [];
   const is = (name, want, got) => rows.push([name, JSON.stringify(want), JSON.stringify(got)].join('\x1f'));
-  const server = await serveDir(WEB);
+  const server = await serveDir(web);
   let b;
   try {
     b = await launch({ width:1280, height:900, scale:2 });
@@ -27,12 +27,13 @@ export async function realStackChecks(shots = '') {
     await b.call('Page.navigate',{url:server.base+'/#/stack-picker'});
     await until(()=>[...document.querySelectorAll('.auth-card button')].some(n=>/without a passkey/i.test(n.textContent)));
     await b.evaluate(()=>[...document.querySelectorAll('.auth-card button')].find(n=>/without a passkey/i.test(n.textContent)).click());
-    await until(()=>document.querySelectorAll('.stack-group').length>0);
+    await until(()=>document.querySelectorAll('.stack-choice').length>0);
     await b.evaluate(()=>document.fonts.ready.then(()=>0));
-    await b.evaluate(()=>document.querySelector('.stack-group summary').click());
+    await b.evaluate(()=>document.querySelector('.stack-group summary')?.click());
     await sleep(150);
     const compact=await b.evaluate(()=>{
       const row=document.querySelector('.stack-choice'), name=row.querySelector('.stack-name'), pill=row.querySelector('.pill'), branch=row.querySelector('.stack-branch');
+      if(!name || !pill || !branch) return false;
       const n=name.getBoundingClientRect(),p=pill.getBoundingClientRect(),r=branch.getBoundingClientRect();
       return n.width<280 && p.left-n.right<=16 && r.left-p.right<=16 && getComputedStyle(branch).textAlign==='left';
     });
@@ -41,17 +42,18 @@ export async function realStackChecks(shots = '') {
     await b.viewport(390,844);
     await b.evaluate(()=>document.querySelectorAll('.stack-group').forEach(g=>g.open=true));
     await sleep(100);
-    await b.evaluate(()=>{const l=document.querySelector('.stack-list');l.scrollTop=l.scrollHeight;});
+    await b.evaluate(()=>{const l=document.querySelector('.stack-list');if(l) l.scrollTop=l.scrollHeight;});
     await sleep(100);
     const pinned=await b.evaluate(()=>{
-      const list=document.querySelector('.stack-list'), top=list.getBoundingClientRect().top;
+      const list=document.querySelector('.stack-list'); if(!list) return false; const top=list.getBoundingClientRect().top;
       const summary=[...list.querySelectorAll('summary')].find(s=>Math.abs(s.getBoundingClientRect().top-top)<2);
       return !!summary && getComputedStyle(summary).position==='sticky' && getComputedStyle(summary).backgroundColor!=='rgba(0, 0, 0, 0)' && document.elementFromPoint(list.getBoundingClientRect().left+80,top+2)?.closest('summary')===summary;
     });
     is('real 390 picker: the project covers clipped rows at the list top',true,pinned);
     // Which text was clipped into a stray mark before the sticky summary covered it.
     const clipped=await b.evaluate(()=>{
-      const l=document.querySelector('.stack-list').getBoundingClientRect(),out=[];
+      const list=document.querySelector('.stack-list');if(!list)return [];
+      const l=list.getBoundingClientRect(),out=[];
       for(const el of document.querySelectorAll('.stack-choice span')) {
         const r=el.getBoundingClientRect(); if(r.top<l.top && r.bottom>l.top) out.push({text:el.textContent,cls:el.className,visible:Math.round(r.bottom-l.top)});
       }
@@ -74,7 +76,7 @@ export async function realStackChecks(shots = '') {
     await b.evaluate(()=>document.querySelector('.stack-column .tool-tab').click());
     await until(()=>document.querySelector('.tool-host .xterm'));
     await sleep(200);
-    const short=await b.evaluate(()=>[...document.querySelectorAll('.stack-column .composer textarea')].every(ta=>{
+    const short=await b.evaluate(()=>document.querySelectorAll('.stack-column .composer textarea').length===2 && [...document.querySelectorAll('.stack-column .composer textarea')].every(ta=>{
       const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d'),s=getComputedStyle(ta);ctx.font=s.font;
       return /^Write to [^\n]+…$/.test(ta.placeholder) && !/attach|drag/.test(ta.placeholder) && ctx.measureText(ta.placeholder).width<=ta.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight) && ta.rows===1;
     }));
@@ -84,4 +86,4 @@ export async function realStackChecks(shots = '') {
   } finally {await b?.close();server.close();}
   return rows;
 }
-if(process.argv[1]===new URL(import.meta.url).pathname) console.log((await realStackChecks(process.argv[2])).join('\n'));
+if(process.argv[1]===new URL(import.meta.url).pathname) console.log((await realStackChecks(process.argv[2], process.argv[3])).join('\n'));
