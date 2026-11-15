@@ -5548,8 +5548,8 @@ STUB
       skip "mod: its harness" "mods not available in this claude: $(grep -o 'the rollout switch[^:]*' <<< "$mdt" | head -1)"
     else
     is "mod: its harness runs and nothing fails" "0" "$(grep -oE '^ *[0-9]+ fail$' <<< "$mdt" | grep -oE '[0-9]+')"
-    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 62 ] && ok "mod: ...and all 62 tests ran" \
-      || bad "mod: ...and all 62 tests ran" ">= 62 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
+    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 188 ] && ok "mod: ...and all 188 tests ran" \
+      || bad "mod: ...and all 188 tests ran" ">= 188 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
     fi
   else
     skip "mod: claude plugin validate/test" "no claude with plugin test"
@@ -6108,9 +6108,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
   # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
   # Its four briefs from the lead the judge read as done stay open, answered with no proof:
-  # before that rule all four closed as judge-done and "open now" read 1.
+  # before that rule all four closed as judge-done and "open now" read 1. Its one request held
+  # on the person has its step, what the person must do (ledger.js linkSteps): 19 items, not 18.
   is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
-     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
+     "items 19|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
      "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
@@ -16197,7 +16198,11 @@ const w = { ...L.emptyLedger(), seq: 3, items: [
   { id: '3', text: 'fix the login redirect', at: now - h, state: 'open', source: 'user' },
 ] }
 out.push('held ' + L.heldItems(w, now).map(r => r.id).join(','))
-out.push('count ' + (L.listing(w, now).match(/for you \((\d+)\)/) || [, '0'])[1])
+// Requests the agent holds: its own, so none is the person's until the upgrade gives each its
+// step (upgradeForYou, the first read after the deploy), and then each step is
+const up = L.upgradeForYou(w, '', { at: now })
+out.push('count ' + [w, up].map(x => (L.listing(x, now).match(/for you \((\d+)\)/) || [, '0'])[1]).join('>')
+  + ' ' + L.forYouItems(up, now).map(r => r.reason.replace(/^unblocks: /, '')).join(';'))
 const ex = L.expireDormant(w, now)
 out.push('expire ' + (ex ? ex.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
 // ...while one waiting on SOMEONE ELSE (a brief from the lead, held for a deploy) still retires after a day
@@ -16269,8 +16274,9 @@ NODE
   lfv() { grep "^$1 " <<< "$lf" | head -1 | cut -d' ' -f2-; }
   is "a delivery is the person's only when marked as the owner's; a nudge is nothing; any other mark is a brief" \
      "user fleet null fleet fleet" "$(lfv source)"
-  is "a waiting item a day old is still on the queue, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
-  is "...and on /ledger's for-you count" "2" "$(lfv count)"
+  is "a waiting item a day old is still held, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
+  is "...and on /ledger's for-you count once the upgrade gives each its step, none before: they are the agent's" \
+     "0>2 open the app to load the new version;pick CSV or JSON for the export" "$(lfv count)"
   is "...and no judged turn retires it" "none" "$(lfv expire)"
   is "...while one a day old that waits on someone else does retire, and only it" "1:expired,2:waiting" "$(lfv expire-lead)"
   is "...still listed by all, still closable" "yes listed" "$(lfv closable)"
@@ -22670,9 +22676,11 @@ else
 fi
 
 # ── what a master holds for the owner reaches the phone ──────────────────────
-# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner in state
-# `waiting`; fleet-serve reads them (heldScan) for /api/waiting and rings once when one is
-# NEW. Through the real exported functions against a real fleet dir, in both directions.
+# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner as open
+# `question` items (forYou); fleet-serve reads them (heldScan) for /api/waiting and rings once
+# when one is NEW. Through the real exported functions against a real fleet dir, in both
+# directions. (A request the agent holds waiting on the owner is the agent's own, not one of
+# these: what the owner must do for it is its step, a question like any other.)
 group "push: a master's new waiting item rings once per project, and says nothing it should not"
 if command -v node >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$WT/home/.claude/fleet"
@@ -22682,7 +22690,7 @@ if command -v node >/dev/null 2>&1; then
     const d = '$WT/home/.claude/fleet', now = Date.now();
     const rec = (id, sock, slot, ts) => fs.writeFileSync(d + '/' + id + '.json', JSON.stringify({ session_id: id, sock, slot, status: 'ready', ts }));
     const led = (id, items) => fs.writeFileSync(d + '/' + id + '.ledger', JSON.stringify({ v: 1, seq: 9, items }));
-    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'waiting', source: 'user', progress: { at: now - 3600e3, reason: 'waits on the person: a pick' } });
+    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'open', source: 'question', turnId: 't1' });
     rec('ma', 'cf-acme-api', 'master', 1); rec('mw', 'cf-acme-web', 'master', 1); rec('wk', 'cf-acme-api', 'api-fix', 5);
     led('ma', [W('1', 'the first ask')]); led('mw', []); led('wk', [W('1', 'a worker ask')]);
     const list = [{ name: 'acme-api', profile: 'work', sock: 'cf-acme-api', cfg: '$WT/home/.claude' },
@@ -22700,8 +22708,8 @@ if command -v node >/dev/null 2>&1; then
     // the worker's own new item: not the owner's, so no bell
     led('wk', [W('1', 'a worker ask'), W('2', 'another worker ask')]);
     out.push(tick().length);
-    // answered (open again) then waiting again HAS newly entered waiting
-    led('mw', [{ ...W('1', 'a web ask'), state: 'open', woke: now }]);
+    // answered, then on the list again (asked again), HAS newly entered waiting
+    led('mw', [{ ...W('1', 'a web ask'), state: 'done', closedBy: 'person' }]);
     out.push(tick().length);
     led('mw', [W('1', 'a web ask')]);
     out.push(tick().length);
