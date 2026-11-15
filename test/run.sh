@@ -1043,6 +1043,28 @@ is "...not ready"                                  "0" "$(has "$crd" "$FIX/curso
 is "...not busy, though it says ctrl+c to stop"    "0" "$(has "$cre" "$FIX/cursor-skip.txt")"
 is "cursor busy_re holds in the C locale"          "1" "$([ "$(LC_ALL=C grep -cE -- "$cre" "$FIX/cursor-busy-30col.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
 
+group "governor: empty pressure passes wait for a reason to retry"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  GI="$(mktemp -d "$TEST_RUNS.$$.govidle.XXXXXX")"
+  node "$ROOT/test/helpers/governor-idle.mjs" > "$GI/rows" 2> "$GI/err"
+  is "idle governor harness ran" "0" "$?"
+  is "idle governor harness had no errors" "" "$(cat "$GI/err")"
+  is "idle governor emitted every row" "23" "$(wc -l < "$GI/rows" | tr -d ' ')"
+  while IFS=$'\t' read -r label want got; do is "$label" "$want" "$got"; done < "$GI/rows"
+  if command -v tmux >/dev/null 2>&1; then
+    node "$ROOT/test/helpers/governor-idle.mjs" "$ROOT/bin/fleet-governor" --measure > "$GI/measure" 2> "$GI/measure.err"
+    is "idle tick measurement ran" "0" "$?"
+    is "idle tick measurement had no errors" "" "$(cat "$GI/measure.err")"
+    is "an empty tick spawns about ten processes, including heal" "true" "$(jq '.execs <= 12' "$GI/measure")"
+    is "heal still stamps all three live sessions" "acme-web,billing-svc,master" "$(jq -r '.aliveSlots | join(",")' "$GI/measure")"
+  else
+    skip "idle tick process count" "tmux missing"
+  fi
+  rm -rf "$GI"
+else
+  skip "idle governor" "node or jq missing"
+fi
+
 # The governor scrapes the 5h usage % out of the same pane, and Claude TRUNCATES its
 # status line rather than wrapping it — so below ~100 columns the figure is simply not
 # there. This is a LIMITATION, asserted so it stays a known one: if a stacked session
@@ -7238,12 +7260,20 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   git -C "$BS/repo" worktree add -q "$BS/api-fix" -b api-fix 2>/dev/null
   tmux -L cf-acme-api kill-server 2>/dev/null
   tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
+  # new-session returns before its child has necessarily chdir'd. Until then the
+  # nonempty pane_current_path is the server's cwd, so rename tries to move THAT
+  # checkout. A delayed chdir on tmux 3.4 reproduces all five missing-marker rows.
+  wait_for 5 "the boundary fixture pane to enter its checkout" \
+    '[ "$(tmux -L cf-acme-api display-message -p -t api-fix "#{pane_current_path}" 2>/dev/null)" = "$BS/api-fix" ]'
+  is "fixture pane entered its worktree" "$BS/api-fix" \
+    "$(tmux -L cf-acme-api display-message -p -t api-fix '#{pane_current_path}' 2>/dev/null)"
   : > "$BSF/cf-acme-api.api-fix.workers-merge"
   : > "$BSF/cf-acme-api.api-fix.review-gate-off"
   # The model pin (bin/fleet-model) lives the same life: a per-session marker, so it moves with
   # a rename and goes with a stop, or a worker reborn under the name would start on it.
   printf 'haiku\n' > "$BSF/cf-acme-api.api-fix.model"
-  env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
+  bs_rename_out="$(env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry 2>&1)"; bs_rename_rc=$?
+  is "rename succeeds (exit $bs_rename_rc: $bs_rename_out)" "0" "$bs_rename_rc"
   is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
   is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
   is "...and the review-gate override"            "1" "$([ -f "$BSF/cf-acme-api.api-retry.review-gate-off" ] && echo 1 || echo 0)"
