@@ -21655,8 +21655,8 @@ else
   phagent bad; phasleep; : > "$PH/typed"
   out="$(ph_send "$(ph_cli enroll phone-wake2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "check the acme-web build")"
   is "phone wake: a failed wake is refused, not a 200"   "false" "$(jq -r '.ok' <<< "$out" 2>/dev/null || echo "$out")"
-  is "...as not delivered"                               "yes" "$(jq -r '.status' <<< "$out" 2>/dev/null | grep -qE '^4[0-9][0-9]$' && echo yes || echo no)"
-  is "...saying it did not wake, and why"                "yes" "$(jq -r '.text' <<< "$out" 2>/dev/null | grep -q 'asleep and did not wake: .*could not start' && echo yes || echo no)"
+  is "...as not delivered"                               "yes" "$(grep -qE '^4[0-9][0-9]$' <<< "$(jq -r '.status' <<< "$out" 2>/dev/null)" && echo yes || echo no)"
+  is "...saying it did not wake, and why"                "yes" "$(grep -q 'asleep and did not wake: .*could not start' <<< "$(jq -r '.text' <<< "$out" 2>/dev/null)" && echo yes || echo no)"
   is "...nothing was typed, and it is still asleep"      ":yes" "$(cat "$PH/typed"):$([ -f "$PHF/cf-acme-api.billing-svc.asleep" ] && echo yes || echo no)"
 fi
 kill "$PH_PID" 2>/dev/null; wait "$PH_PID" 2>/dev/null
