@@ -350,11 +350,13 @@ WAITING ON THE OWNER
   observed state rather than anybody's word, so it has no authority to filter on. Ids and one line
   each. An excluded project gets nothing; a private one is told to its own lead with the private
   warning.
-- **Whose a request is:** the ledger's own answer, carried on each `request.*` event as `for`. A
-  question a session put to the owner, and a request it holds until they decide, are `for: you` and
-  listed under WAITING ON THE OWNER; what the session owes, including a brief a lead sent it, is
-  `for: model` and stays an open request of that session. An event written before `for` existed is
-  read by the same rule: a lead's brief (`source: fleet`) or a promise is never the owner's.
+- **Whose a request is:** the ledger's own rule, read from the source each request was opened with.
+  What a session asked OF the owner (`source: question`: a numbered question, a line of a
+  waiting-on-you list, a closing choice, the step a held request waits on) is listed under WAITING
+  ON THE OWNER; everything the session owes, a brief a lead sent it and a request it holds waiting on
+  the owner included, stays an open request of that session. Events carry the same answer as
+  `for`, but older ones called a held request `for: you`, which filled the owner's list with the
+  session's own work, so the source decides; a request with no source falls back to `for`.
 - **At most 2,000 characters**, whatever the log holds. Claude Code turns hook output over 10,000 into
   a file the model is not asked to read, so a log that grew past that would quietly brief nobody.
 - **A rule is the last thing cut.** A rule the lead was not told about is one it breaks, and a waiting

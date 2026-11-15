@@ -1541,8 +1541,10 @@ await section('the briefing', () => {
   rec('fact', { key: 'worker.note', value: 'a-worker-fact' }, WORKER_SRC);
   // A millisecond apart: two events at the same instant fold in id order, which is random.
   const tw = Date.now();
-  rec('request.open', { req: 'r-wait', text: 'Which plan tier should the rate limit apply to?', source: 'prompt' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
-  rec('request.state', { req: 'r-wait', state: 'waiting', text: 'Which plan tier should the rate limit apply to?' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw + 1);
+  rec('request.open', { req: 'r-wait', text: 'Which plan tier should the rate limit apply to?', source: 'question', for: 'you' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
+  // What the lead OWES, held waiting on the owner, in the shape the ledger once told it: `for: you`.
+  rec('request.open', { req: 'r-owed', text: 'Ship the acme-api rate-limit fix behind a flag', source: 'prompt' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw);
+  rec('request.state', { req: 'r-owed', state: 'waiting', for: 'you', text: 'Ship the acme-api rate-limit fix behind a flag' }, { via: 'ledger', session: 's-lead', slot: 'master' }, tw + 1);
   rec('pr.open', { repo: 'acme/acme-api', number: 77, branch: 'fix/rate-limit', author: 'outside-dev' }, { via: 'gh', slot: 'master' });
   rec('need-you', { need: 'a live question on a pane' }, { via: 'hook', session: 's-worker', slot: 'api-fix' });
 
@@ -1565,7 +1567,8 @@ await section('the briefing', () => {
   row('...the owner\'s rule first', 'yes', yes(at(/The owner's rule about shipping/) > 0 && at(/The owner's rule about shipping/) < at(/A lead's rule for this project/)));
   row('...and says which scope wins, rather than picking', 'yes', yes(/most specific wins: project: beats profile beats all/.test(c)));
   row('...ids, one line each', 'yes yes', `${yes(c.includes(ownerR.id) && c.includes(leadR.id) && c.includes(ownerD.id) && c.includes(leadD.id))} ${yes(c.split('\n').every(l => l.length <= 220))}`);
-  row('...what waits on the owner, a request and a PR', 'yes yes', `${yes(/Which plan tier should the rate limit apply to/.test(c))} ${yes(/PR #77 from outside-dev waits for review/.test(c))}`);
+  row('...what waits on the owner, a question and a PR', 'yes yes', `${yes(/Which plan tier should the rate limit apply to/.test(c))} ${yes(/PR #77 from outside-dev waits for review/.test(c))}`);
+  row('...and not what the lead owes, though it was held waiting on the owner', 'no', yes(/Ship the acme-api rate-limit fix/.test(c)));
   row('names only owner and lead items', 'no no no no', `${yes(/A worker proposes/.test(c))} ${yes(/A worker decided/.test(c))} ${yes(/A model inferred/.test(c))} ${yes(/a-worker-fact/.test(c))}`);
   row('...and carries their keyed facts', 'yes', yes(/export\.version = v2-from-a-lead/.test(c)));
   row('no live session status, and no paragraph on what it is', 'no no', `${yes(/live question|needs you/.test(c))} ${yes(/A paragraph about what acme-api is/.test(c))}`);
@@ -1663,8 +1666,7 @@ await section('the briefing has a cap', () => {
   for (let i = 0; i < 500; i++) K.record('rule', { text: `Standing rule number ${i}: ${'long words about shipping '.repeat(i % 7 === 0 ? 30 : 2)}`, scope: i % 3 === 0 ? 'all' : i % 3 === 1 ? 'profile' : 'project:acme-api' }, { fleetDir: B.fl, project: K.NO_PROJECT, t: t - i * 1000, rec: t, src: i % 2 ? LEAD_SRC : OWNER_SRC });
   for (let i = 0; i < 500; i++) K.record('decision', { text: `Decision number ${i}: ${'because of the rate limits '.repeat(i % 5 === 0 ? 30 : 2)}`, source: 'stated' }, onApi(B, t - i * 1000, LEAD_SRC));
   for (let i = 0; i < 3; i++) {
-    K.record('request.open', { req: `r-wait-${i}`, text: `Waiting question ${i}`, source: 'prompt' }, onApi(B, t, { via: 'ledger', session: 's-lead', slot: 'master' }));
-    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text: `Waiting question ${i}` }, onApi(B, t + 1, { via: 'ledger', session: 's-lead', slot: 'master' }));
+    K.record('request.open', { req: `r-wait-${i}`, text: `Waiting question ${i}`, source: 'question', for: 'you' }, onApi(B, t, { via: 'ledger', session: 's-lead', slot: 'master' }));
   }
   const c = B.ctxOf(B.start());
   row('500 rules and 500 decisions: at or under 2,000 characters', 'yes', c.length > 200 && c.length <= 2000 ? 'yes' : `no: ${c.length}`);
@@ -1701,8 +1703,7 @@ await section('the briefing keeps every rule', () => {
   });
   for (let i = 0; i < 8; i++) {
     const src = { via: 'ledger', session: 's-lead', slot: 'master' }, text = `Waiting question ${i}: ${'should the export keep its old columns or move on '.repeat(3)}`.slice(0, 150);
-    K.record('request.open', { req: `r-wait-${i}`, text, source: 'user' }, onApi(B, t + i, src));
-    K.record('request.state', { req: `r-wait-${i}`, state: 'waiting', text }, onApi(B, t + i + 1, src));
+    K.record('request.open', { req: `r-wait-${i}`, text, source: 'question', for: 'you' }, onApi(B, t + i, src));
   }
   const c = B.ctxOf(B.start()), L = c.split('\n');
   row('13 rules and 8 waiting items: at or under 2,000 characters', 'yes', yes(c.length > 500 && c.length <= 2000));
@@ -1723,8 +1724,7 @@ await section('the briefing keeps every rule', () => {
   });
   for (let i = 0; i < 8; i++) {
     const src = { via: 'ledger', session: 's-lead', slot: 'master' };
-    K.record('request.open', { req: `r-over-${i}`, text: `Waiting over ${i}`, source: 'user' }, onApi(M, t + i, src));
-    K.record('request.state', { req: `r-over-${i}`, state: 'waiting', text: `Waiting over ${i}` }, onApi(M, t + i + 1, src));
+    K.record('request.open', { req: `r-over-${i}`, text: `Waiting over ${i}`, source: 'question', for: 'you' }, onApi(M, t + i, src));
   }
   const o = M.ctxOf(M.start()), OL = o.split('\n');
   row('rules alone past the budget: still under the cap', 'yes', yes(o.length <= 2000 && o.length > 500));
