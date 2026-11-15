@@ -462,7 +462,10 @@ save it with `fleet-accounts add <profile> <name>`. The profile runs on the acco
 allowance expires first, moves off it at 97% of its 5-hour or weekly limit, and comes back once
 that 5-hour window resets. A turn refused with Claude's "You've hit your … limit" marks that account
 out until the reset it names, and the profile leaves it at once. A planned move is never made on a
-reading older than 6 hours. Like a `/login` by hand,
+reading older than 6 hours. A login is filed by the account its token answers as, a failover
+stays in the organization in use while it can, and an account lacking a model a session runs is
+the last resort. `fleet-accounts use` holds an account until it runs out or `fleet-accounts auto`.
+Like a `/login` by hand,
 that restarts nothing: each running session picks the new login up by itself. When all are
 spent the workers are parked until the earliest reset, then told to continue. Rotating accounts to get past usage limits may conflict
 with Anthropic's terms of service; that is your responsibility. Details, and what happens when a

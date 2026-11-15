@@ -172,12 +172,13 @@ export function act(tool, args) {
     // Only an answer approves the dialog a person read. A send must retain its sender's
     // provenance: the dispatcher turns human:true into fleet-send --owner.
     const out = await dispatch.callToolAsync(tool, args,
-      { timeout: 15 * 60 * 1000, human: tool === 'fleet_answer', status: tool === 'fleet_send' });
+      { timeout: 15 * 60 * 1000, human: tool === 'fleet_answer', status: tool === 'fleet_send' || tool === 'fleet_ledger' });
     const text = toText(out);
-    const undelivered = tool === 'fleet_send' && typeof out === 'object' && !out.isError && out.code !== 0;
+    // fleet-ledger exits 1 with its reason (no such item, an explain that could not be sent).
+    const undelivered = (tool === 'fleet_send' || tool === 'fleet_ledger') && typeof out === 'object' && !out.isError && out.code !== 0;
     const refused = undelivered || (typeof out === 'object' && out.isError === true);
     const changed = tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text);
-    const queued = !refused && tool === 'fleet_send'
+    const queued = !refused && (tool === 'fleet_send' || tool === 'fleet_ledger')
       ? (/queued #\d+ behind a question/.test(text) ? 'question' : /queued #\d+/.test(text) ? 'turn' : undefined)
       : undefined;
     return { ok: !refused && !changed, text, changed, queued };

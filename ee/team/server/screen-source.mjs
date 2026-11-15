@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as shots from '../../../lib/shots.mjs';
 import { fleetDirs, masterRecords } from '../../../lib/fleet-scan.mjs';
-import { ledgerFile, parseLedger, heldItems } from '../../../mods/ghostfleet/hooks/ledger.js';
+import { ledgerFile, parseLedger, forYouItems } from '../../../mods/ghostfleet/hooks/ledger.js';
 import { loginList, loginRecords, finishLogin } from '../../../lib/logins.mjs';
 import { startAccountLogin, finishAccountLogin } from '../../../lib/account-logins.mjs';
 import * as peers from '../../../lib/peers.mjs';
@@ -36,7 +36,8 @@ export function createScreenSource({ configs, peerList = () => [], requestPeer =
       const list = configs(), bySock = new Map(list.map(t => [t.sock,t])), dirs = fleetDirs(list), items = [];
       for(const m of masterRecords(dirs)) {
         const t = bySock.get(m.sock); if(!t) continue;
-        for(const i of heldItems(parseLedger(read(ledgerFile(m.dir,m.sessionId))),Date.now())) items.push({project:t.name,profile:t.profile,session:'master',...i,at:Math.floor(i.at/1000),since:Math.floor(i.since/1000)});
+        // What waits on a person, by the ledger's one rule (forYouItems), as the phone reads it.
+        for(const i of forYouItems(parseLedger(read(ledgerFile(m.dir,m.sessionId))),Date.now())) items.push({project:t.name,profile:t.profile,session:'master',...i,at:Math.floor(i.at/1000),since:Math.floor(i.since/1000)});
       }
       const held = new Map();
       for(const t of list) {

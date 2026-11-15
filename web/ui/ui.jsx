@@ -132,15 +132,17 @@ export function ProjectName({ name }) {
   return host ? <>{bare}<small class="at"> · {host}</small></> : bare;
 }
 
-export function Modal({ title, onClose, children, wide }) {
+// `sheet`: on a phone's width the dialog rises from the bottom edge, full width, within the
+// thumb's reach; at a desk it is the same centred dialog as any other (ui.css, .modal.sheet).
+export function Modal({ title, onClose, children, wide, sheet }) {
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
     addEventListener('keydown', k);
     return () => removeEventListener('keydown', k);
   }, [onClose]);
   return (
-    <div class="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+    <div class={`scrim${sheet ? ' sheet-scrim' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div class={`modal${wide ? ' wide' : ''}${sheet ? ' sheet' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <header><h2>{title}</h2><button class="x" aria-label={t('common.close')} onClick={onClose}><Icon name="close" /></button></header>
         {children}
       </div>
