@@ -196,7 +196,18 @@ const INIT = () => `(() => {
   // What the chat's status line SAID, whenever it said it: the row reads this, not whatever it
   // happened to sample, so a runner that gets to the row late cannot miss a line that was up and gone.
   window.__said = [];
-  new MutationObserver(() => { const l = document.querySelector('.chat .loading'); const x = l && l.textContent; if (x && window.__said[window.__said.length - 1] !== x) window.__said.push(x); })
+  window.__pauseTiming = { keyAt: null, openedAt: null };
+  for (const type of ['keydown', 'input']) addEventListener(type, e => {
+    if (e.target.matches?.('.composer textarea')) window.__pauseTiming.keyAt = performance.now();
+  }, true);
+  let dialog = null;
+  new MutationObserver(() => {
+    const l = document.querySelector('.chat .loading'); const x = l && l.textContent;
+    if (x && window.__said[window.__said.length - 1] !== x) window.__said.push(x);
+    const next = document.querySelector('.session [role=dialog] .ask');
+    if (next && next !== dialog) window.__pauseTiming.openedAt = performance.now();
+    dialog = next;
+  })
     .observe(document, { subtree: true, childList: true, characterData: true });
   let hidden = false;
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
@@ -277,14 +288,20 @@ const visibleDraft = b => b.evaluate(() => {
   return [getComputedStyle(n).visibility === 'visible', n.value];
 });
 async function pauseAndAnswer(b) {
-  const started = Date.now();
+  // CHAT_LANDS_PAUSE_DELAY=2500: inspection starts after the legitimate typing
+  // pause has elapsed, as it can after the preceding checks on a slow runner.
+  if (+process.env.CHAT_LANDS_PAUSE_DELAY) await sleep(+process.env.CHAT_LANDS_PAUSE_DELAY);
   const opened = await until(() => b.evaluate(() => !!document.querySelector('.session [role=dialog] .ask')), 5000);
-  const waited = Date.now() - started;
+  const timing = await b.evaluate(() => window.__pauseTiming);
+  // Measure the actual pause in the page. The preceding assertions (or the
+  // seam above) may use up some or all of it before this helper starts waiting.
+  const paused = timing.keyAt != null && timing.openedAt != null ? timing.openedAt - timing.keyAt : null;
+  if (process.env.CHAT_LANDS_DEBUG) console.error('typing pause timing', JSON.stringify({ opened: !!opened, paused, ...timing }));
   if (opened) {
     await b.evaluate(() => document.querySelector('.session .ask .opt:last-child').click());
     await until(() => b.evaluate(() => !document.querySelector('.session .request-return')), 5000);
   }
-  return !!opened && waited >= 1800;
+  return !!opened && paused != null && paused >= 1800 ? true : { opened: !!opened, paused, ...timing };
 }
 
 const SCENARIOS = [
