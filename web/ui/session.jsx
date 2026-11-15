@@ -398,6 +398,11 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
 
   const st = card ? statusOf(card) : (tr.page?.status || 'unknown');
   statusNow.current = st;
+  // THE HEADER IS A SHAPE UNTIL THE CARD LANDS, its controls included. With no card the state
+  // above is the conversation's own read, which can land first: a working session then drew
+  // Interrupt beside the controls' shape, and when the card came the shape went and Interrupt
+  // slid 82 px back along the row (two loads in six, at either width).
+  const shaped = waiting && !card;
   const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
   const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
@@ -517,7 +522,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
               grew a row when the card answered: 28 px at 390 wide, under which the tabs and the
               whole conversation went down. The same elements are drawn as shapes (ui.css
               .sk-ghost) where the real ones will stand. */}
-          {embedded ? null : <span class="sess-name"><Ship state={waiting && !card ? 'idle' : st} size={32} /><h1>{name}</h1></span>}
+          {embedded ? null : <span class="sess-name"><Ship state={shaped ? 'idle' : st} size={32} /><h1>{name}</h1></span>}
           {/* ...BUT HOW MANY LINES THEY TOOK, AND HOW WIDE, WAS THE CARD'S TO SAY. The shapes were
               one guess, a branch and a PR after the name, and at 390 wide that wrapped to two
               lines; a lead on `main` with no PR fits on one, so its header lost a row when the
@@ -530,7 +535,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
               again, the shape 62. Anything drawn after it before the card came would stand
               wherever the word ended, and the branch's line did, 10 to 39 px along on a desk. */}
           <span class="sess-meta">
-            {waiting && !card ? <span class="sk sk-ghost-row" role="status" aria-label={t('common.loading')}>
+            {shaped ? <span class="sk sk-ghost-row" role="status" aria-label={t('common.loading')}>
               <span class="pill sk-ghost" aria-hidden="true">Working</span>
               <span class="branch sk-ghost" aria-hidden="true"><Icon name="branch" /> feat/a-branch-name</span>
               <span class="tag pr sk-ghost" aria-hidden="true">PR 0000</span>
@@ -555,10 +560,10 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
         <div class="sess-tools">
           <div class="sess-acts">
           {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
-          {waiting && !card ? <span class="sk" aria-hidden="true"><Btn kind="ghost sm sk-ghost" disabled tabIndex={-1} icon="pause">{t('sess.pause')}</Btn></span> : null}
-          {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
-          {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
-          {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
+          {shaped ? <span class="sk" aria-hidden="true"><Btn kind="ghost sm sk-ghost" disabled tabIndex={-1} icon="pause">{t('sess.pause')}</Btn></span> : null}
+          {st === 'working' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
+          {st === 'asleep' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
+          {st === 'lost' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
           {card && !card.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
           </div>

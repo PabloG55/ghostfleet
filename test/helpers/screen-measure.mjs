@@ -148,20 +148,23 @@ try {
       });
       await until(() => window.__m.paint > 0);
       await sleep(Math.min(HOLD, 250));
-      await shot(`${w}-${name.replace(/ /g, '-')}-loading`);
+      // Before the picture, which takes long enough for a 300 ms read to land while it is taken.
       await b.evaluate(() => {
-        // Everything on the screen now, bar the shapes standing in for data and whatever is inside
-        // a scroller (it moves when the scroller does, which is not the page moving).
+        // Everything on the screen now, bar the shapes standing in for data, whatever is inside
+        // a scroller (it moves when the scroller does, which is not the page moving), and whatever
+        // is on its way in (a sheet sliding up is not where it will stand, and was not moved).
         const main = document.querySelector('.app .main');
         const scrolls = (el) => { for (let p = el.parentElement; p && p !== main; p = p.parentElement) {
           const o = getComputedStyle(p).overflowY; if (o === 'auto' || o === 'scroll') return true; } return false; };
+        const moving = (el) => { for (let e = el; e; e = e.parentElement) if (e.getAnimations().some(a => a.playState === 'running' && a.effect?.target === e)) return true; return false; };
         window.__held = [];
         for (const el of main ? main.querySelectorAll('*') : []) {
-          if (el.closest('.sk') || !el.getClientRects().length || scrolls(el)) continue;
+          if (el.closest('.sk') || !el.getClientRects().length || scrolls(el) || moving(el)) continue;
           const r = el.getBoundingClientRect();
           window.__held.push([el, Math.round(r.left), Math.round(r.top), (typeof el.className === 'string' && el.className) || el.tagName]);
         }
       });
+      await shot(`${w}-${name.replace(/ /g, '-')}-loading`);
       const t = Date.now();
       await until(() => window.__m.data > 0);
       await sleep(Math.max(0, 10000 - (Date.now() - t)));

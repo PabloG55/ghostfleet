@@ -7733,6 +7733,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	}, [project, name]);
 	const st = card ? statusOf(card) : tr.page?.status || "unknown";
 	statusNow.current = st;
+	const shaped = waiting && !card;
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
 	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
@@ -7912,13 +7913,13 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 						children: [embedded ? null : /* @__PURE__ */ u("span", {
 							class: "sess-name",
 							children: [/* @__PURE__ */ u(Ship, {
-								state: waiting && !card ? "idle" : st,
+								state: shaped ? "idle" : st,
 								size: 32
 							}), /* @__PURE__ */ u("h1", { children: name })]
 						}), /* @__PURE__ */ u("span", {
 							class: "sess-meta",
 							children: [
-								waiting && !card ? /* @__PURE__ */ u("span", {
+								shaped ? /* @__PURE__ */ u("span", {
 									class: "sk sk-ghost-row",
 									role: "status",
 									"aria-label": t("common.loading"),
@@ -8004,7 +8005,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 										tr.reload();
 									}
 								}),
-								waiting && !card ? /* @__PURE__ */ u("span", {
+								shaped ? /* @__PURE__ */ u("span", {
 									class: "sk",
 									"aria-hidden": "true",
 									children: /* @__PURE__ */ u(Btn, {
@@ -8015,7 +8016,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 										children: t("sess.pause")
 									})
 								}) : null,
-								st === "working" ? /* @__PURE__ */ u(Btn, {
+								st === "working" && !shaped ? /* @__PURE__ */ u(Btn, {
 									kind: "ghost sm",
 									disabled: busy,
 									onClick: () => act("fleet_interrupt"),
@@ -8023,14 +8024,14 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 									icon: "hand",
 									children: t("sess.interrupt")
 								}) : null,
-								st === "asleep" ? /* @__PURE__ */ u(Btn, {
+								st === "asleep" && !shaped ? /* @__PURE__ */ u(Btn, {
 									kind: "ghost sm",
 									disabled: busy,
 									onClick: () => act("fleet_wake"),
 									icon: "sun",
 									children: t("sess.wake")
 								}) : null,
-								st === "lost" ? /* @__PURE__ */ u(Btn, {
+								st === "lost" && !shaped ? /* @__PURE__ */ u(Btn, {
 									kind: "ghost sm",
 									disabled: busy,
 									onClick: () => act("fleet_reopen"),

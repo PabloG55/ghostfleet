@@ -713,7 +713,9 @@ try {
       const f0 = window.fetch.bind(window);
       window.fetch = async (u, o) => {
         const ms = window.__holdMs == null ? Number(sessionStorage.getItem('gf.test.hold') || 0) : window.__holdMs;
-        if (ms && /fixtures\\//.test(String((u && u.url) || u))) await new Promise(r => setTimeout(r, ms));
+        const at = String((u && u.url) || u);
+        const more = /fixtures\\/grid-/.test(at) ? Number(sessionStorage.getItem('gf.test.holdgrid') || 0) : 0;
+        if (ms && /fixtures\\//.test(at)) await new Promise(r => setTimeout(r, ms + more));
         return f0(u, o);
       };
     })();` });
@@ -813,9 +815,12 @@ try {
       const HEADS = [['api-fix', '', 'working: Interrupt and Pause'], ['master', '', 'an idle lead: no controls, a short title'],
                      ['types', '', 'a label and a schedule'], ['rate-limit', 'grid-degraded.json', 'parked: Resume'],
                      ['csv-export', 'grid-degraded.json', 'interrupted, the widest state']];
+      //   The cards are held 1.5 s longer than the rest, as a slow grid holds them on a daemon: the
+      // conversation answers first, with a state of its own, and until the card comes the header
+      // has to go on being the card's shape rather than draw controls beside it.
       for (const [s, fx, what] of HEADS) {
-        await b.evaluate(([x, f]) => { if (f) localStorage.setItem('gf.fixture', f); else localStorage.removeItem('gf.fixture'); location.hash = x; },
-          [`#/p/acme-api/s/${s}`, fx]);
+        await b.evaluate(([x, f]) => { if (f) localStorage.setItem('gf.fixture', f); else localStorage.removeItem('gf.fixture');
+          sessionStorage.setItem('gf.test.holdgrid', '1500'); location.hash = x; }, [`#/p/acme-api/s/${s}`, fx]);
         await sleep(200);
         await b.evaluate(() => location.reload());
         await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
@@ -831,14 +836,15 @@ try {
                    more: more ? [Math.round(more.left), Math.round(more.top)] : null };
         });
         const hm = await headNow();
-        // Every box the header has drawn by now, shapes aside, by where it stands. The ship is left
-        // out while it sails: it bobs a pixel on its own, card or no card.
+        // Every box the header has drawn by now, shapes aside, by where it stands. The ship counts
+        // as its box (.fship): inside it the hull is the state's pose, and an interrupted one lists
+        // 2 px (skin.css m-list), and while it sails it bobs a pixel on its own, card or no card.
         await b.evaluate(() => {
           const head = document.querySelector('.main .sess-head');
           const sails = (e) => { for (let x = e; x && x !== head; x = x.parentElement) if (x.getAnimations().some(a => a.effect?.target === x && a.playState === 'running')) return true; return false; };
           window.__head = [];
           for (const e of head.querySelectorAll('*')) {
-            if (e.closest('.sk') || !e.getClientRects().length || sails(e)) continue;
+            if (e.closest('.sk') || e.parentElement?.closest('.fship') || !e.getClientRects().length || sails(e)) continue;
             const r = e.getBoundingClientRect();
             window.__head.push([e, Math.round(r.left), Math.round(r.top), String(e.className?.baseVal ?? e.className ?? '').split(' ')[0] || e.tagName.toLowerCase()]);
           }
@@ -846,6 +852,15 @@ try {
         is(`${w} session ${s}, its card held 2 s: the header is not read yet`, false, hm.branch);
         is(`${w} session ${s}: ...its state, branch, PR and controls are drawn as shapes`, true, hm.shapes >= 4 ? true : `${hm.shapes} shapes`);
         is(`${w} session ${s}: ...and it does not say "No data" of a session it has not read`, false, hm.words);
+        // the conversation's answer is in, the card's is not
+        await sleep(1700);
+        is(`${w} session ${s}: ...and with the conversation in and the card not, it is still the shape, with no control beside it`,
+          'shape', await b.evaluate(() => {
+            const head = document.querySelector('.main .sess-head');
+            if (head.querySelector('.branch:not(.sk-ghost)')) return 'the card came first';
+            const real = [...head.querySelectorAll('.sess-tools .btn')].filter(e => !e.closest('.sk') && !e.closest('.menu-wrap')).map(e => e.textContent.trim());
+            return real.length ? `drew ${real.join(', ')}` : head.querySelector('.sk-ghost') ? 'shape' : 'no shape';
+          }));
         await until(() => !document.querySelector('.main .sess-head .sk-ghost') && !!document.querySelector('.main .sess-head .branch'));
         await sleep(150);
         const he = await headNow();
@@ -869,7 +884,7 @@ try {
           return out.slice(0, 3).join(', ') || 'none moved';
         }));
       }
-      await b.evaluate(() => localStorage.removeItem('gf.fixture'));
+      await b.evaluate(() => { localStorage.removeItem('gf.fixture'); sessionStorage.removeItem('gf.test.holdgrid'); });
     }
     await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
     await b.viewport(390, 844);
