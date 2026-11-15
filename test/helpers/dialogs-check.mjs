@@ -57,13 +57,24 @@ try {
   }
   await b.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await b.call('Network.setBypassServiceWorker', { bypass: true });
+  // A slow runner, on demand: GF_CPU_THROTTLE=5 makes this laptop lose the way a loaded CI box does.
+  if (+process.env.GF_CPU_THROTTLE > 1) await b.call('Emulation.setCPUThrottlingRate', { rate: +process.env.GF_CPU_THROTTLE });
   await b.call('DOM.enable');
   await b.call('Accessibility.enable');
   await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
     const real = window.fetch.bind(window);
-    window.fetch = (url, opts) => String(url).includes('/fixtures/waiting.json')
+    const lag = ${+process.env.GF_FETCH_DELAY || 0};
+    window.fetch = (url, opts) => lag ? new Promise(r => setTimeout(r, lag * Math.random())).then(() => real(url, opts)) : String(url).includes('/fixtures/waiting.json')
       ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(WAITING))}, { status: 200 }))
       : real(url, opts);` });
+  // GF_COVER_MS=1500: a fixed layer over the whole phone for that long after every load and route change, as a toast or
+  // a half-drawn sheet is on a slow runner. The tap has to wait for the control to be hittable.
+  if (+process.env.GF_COVER_MS) await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    const cv = document.createElement('div'); let t0 = 0;
+    cv.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:transparent';
+    const arm = () => { t0 = Date.now(); document.documentElement.appendChild(cv); };
+    addEventListener('DOMContentLoaded', arm); addEventListener('hashchange', arm);
+    setInterval(() => { if (Date.now() - t0 > ${+process.env.GF_COVER_MS}) cv.remove(); }, 50);` });
   b.onEvent((m, p) => {
     if (m === 'Runtime.exceptionThrown') console.error('page threw:', ((p.exceptionDetails && (p.exceptionDetails.exception?.description || p.exceptionDetails.text)) || '').split('\n')[0]);
   });
@@ -109,7 +120,13 @@ try {
     if (!n) return null;
     n.scrollIntoView({ block: 'nearest' });
     const r = n.getBoundingClientRect();
-    return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    if (!r.width || !r.height) return null;
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    // A press lands on whatever is topmost at the point, not on the control that is there: a toast,
+    // the floating Assistant or a half-drawn sheet over it eats the tap and nothing opens. Not
+    // pressable until the control itself is what a finger would hit.
+    const top = document.elementFromPoint(x, y);
+    return top && (top === n || n.contains(top)) ? { x, y } : null;
   }, sel, text);
   async function tap(sel, text = '') {
     let p = await until(() => centreOf(sel, text), 4000);

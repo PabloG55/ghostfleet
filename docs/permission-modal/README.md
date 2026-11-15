@@ -4,7 +4,7 @@ Permission requests, agent questions, assistant approvals and quota notices use 
 
 ## Arrival proof
 
-The arrival row was run against the old inline card first. At 390px the tabs moved from y=209.92 to y=596.73; at 320px from y=225.92 to y=677.17; at 1280px from y=136.63 to y=490.19. The old client opened no dialog. The same row was also run against a team build loading the old session component: at 390px the tabs moved from y=228.92 to y=598.48, and the 320px and 1280px arrival rows failed too. The replacement keeps the tabs, chat and composer rectangles identical before arrival, after arrival and after dismissal.
+The arrival row was run against the old inline card first. At 390px the tabs moved from y=209.92 to y=596.73; at 320px from y=225.92 to y=677.17; at 1280px from y=136.63 to y=490.19. The old client opened no dialog. The same row was also run against a team build loading the old session component: at 390px the tabs moved from y=228.92 to y=598.48, and the 320px and 1280px arrival rows failed too. The replacement keeps the tabs, chat, composer, speak toggle and Send button rectangles identical before arrival, after arrival and after dismissal. The return button fills the input’s reserved box; the speak toggle keeps its own 46px slot. Every existing chat bubble keeps its play button. The added voice checks were run against the pre-merge bundle at 390, 320 and 1280 and failed at all three widths before passing on the merged bundle.
 
 `node test/helpers/phone-check.mjs --arrival-only` runs the focused rows. The normal phone browser group includes them. `node --test ee/team/test/request-arrival.test.mjs` runs the same arrival sequence against the built team demo for an admin and a project viewer, with data under the system temp directory.
 
@@ -18,7 +18,7 @@ A request arriving during composer activity waits for a 2 s typing pause or blur
 
 Every image below was opened and read. Only fixture/demo data is shown. Digests are recorded in `test/helpers/name-sweep.mjs`. The numbered choices and their colours intentionally retain the existing content, including all three choices on desktop.
 
-Only these four PNGs are retained in git. Every width and state, including 320px and both team roles, was shot and read; the remaining captures are held in the review temp directory.
+These five PNGs were re-shot after merging staging through #178 and opened for visual review. The arrival helpers also exercise 320px and both team roles; only the views below are retained in git. Sheet captures wait for staging’s shared slide-in animation to finish.
 
 | View | Screenshot |
 |---|---|
@@ -26,6 +26,7 @@ Only these four PNGs are retained in git. Every width and state, including 320px
 | Phone 390, dismissed (re-shot) | [phone-390-closed.png](phone-390-closed.png) |
 | Desktop 1280, open | [phone-1280-open.png](phone-1280-open.png) |
 | Team viewer 390, open | [team-390-readonly-open.png](team-390-readonly-open.png) |
+| Phone 390, pending request with play buttons and speak toggle | [phone-390-pending-voice.png](phone-390-pending-voice.png) |
 
 Choices fill one column in every view, the dialog container receives automatic focus without a keyboard ring, and Tab gives the X its keyboard ring. The return button uses the request's yellow, an icon and a pointer cursor, fills exactly the input's reserved box, and leaves Send disabled beside it. The arrival rows assert each behavior.
 

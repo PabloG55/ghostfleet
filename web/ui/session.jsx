@@ -10,6 +10,7 @@ import { ToolTabs, ToolPanel } from './terminal.jsx';
 import { useLayer } from './select.jsx';
 import { BackLink } from './back.jsx';
 import { useTranscript } from './transcript.js';
+import { useReading, toggleRead, stopRead, useSpeakMode } from './chatvoice.js';
 import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
@@ -67,6 +68,15 @@ function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
   );
 }
 
+// The play button on a message. Its slot is the same size playing or not (it swaps play for stop), so a bubble never
+// moves when one is pressed.
+function ReadBtn({ on, onClick }) {
+  return (
+    <button type="button" class={`read-btn${on ? ' on' : ''}`} aria-pressed={on} aria-label={on ? t('chat.stopRead') : t('chat.read')}
+            title={on ? t('chat.stopRead') : t('chat.read')} onClick={onClick}><Icon name={on ? 'stop' : 'play'} /></button>
+  );
+}
+
 function Terminal({ pane }) {
   const ref = useRef(null);
   const stick = useRef(true);
@@ -112,8 +122,9 @@ const OLDER_NEAR_PX = 240;
 const SWIPE_NEXT = 60, EDGE = 24;
 
 // `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
-function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
   const author = useSlot('author');
+  const reading = useReading();
   const ref = useRef(null);
   const stick = useRef(true);
   const ours = useRef(-1);            // the scrollTop this chat last set itself (below)
@@ -209,6 +220,7 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
                 ? <>{author(m) || t('sess.instruction')}</>
                 : 'Claude'}
               <span class="when">{sinceTs(m.ts)}</span>
+              <ReadBtn on={reading === `${scope}:${k}`} onClick={() => toggleRead(`${scope}:${k}`, m.text)} />
             </div>
             <div class="bubble">{m.role === 'user' ? <p class="plain">{m.text}</p> : <Markdown text={m.text} />}</div>
           </div>
@@ -224,6 +236,7 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   );
 }
 
+const STATE_KEY = { listening: 'chat.speakListening', hearing: 'chat.speakHearing', sending: 'chat.speakSending', waiting: 'chat.speakWaiting', speaking: 'chat.speakReading' };
 const hhmm = (at) => new Date(at * 1000).toLocaleString(locale(), { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const localInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
@@ -404,6 +417,14 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
     addEventListener('keydown', key);
     return () => removeEventListener('keydown', key);
   }, [request.open, prompt, canAnswer]);
+  // Speak mode and the play button on messages (chatvoice.js). Leaving the session stops whichever of them is
+  // this session's, and only this session's: an embedded stack holds several of these at once.
+  const scope = `${project}/${name}`;
+  const speakMode = useSpeakMode({
+    scope, page: tr.page, status: st,
+    send: async (text) => { const r = await act('fleet_send', { prompt: text }); if (r) sentAt.current = Date.now(); return !!r; },
+  });
+  useEffect(() => () => stopRead(scope), [scope]);
   // Each file goes up as soon as it is picked, so "Send" only sends the words that name them.
   const addFiles = (list) => {
     const picked = [...(list || [])].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
@@ -517,7 +538,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       </div>
       {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
         ? (!tr.page ? <ChatLoading load={tr.load} />
-            : <Chat page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
+            : <Chat scope={scope} page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
                     onRetryOlder={tr.retryOlder} onStep={onStep} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
@@ -564,8 +585,12 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
             {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
           </button> : null}
           </div>
+          <button type="button" class={`speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
+                  aria-label={speakMode.on ? t('chat.speakOff') : t('chat.speak')} title={speakMode.on ? t('chat.speakOff') : t('chat.speak')}
+                  onClick={speakMode.toggle}><Icon name="mic" size={24} /></button>
           <Btn kind="primary" type="submit" disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
         </div>
+        <p class="speak-state muted small" role="status" aria-live="polite">{speakMode.on ? t(STATE_KEY[speakMode.phase] || 'chat.speakListening') : ''}</p>
       </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}

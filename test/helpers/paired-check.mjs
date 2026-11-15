@@ -210,7 +210,9 @@ try {
     await step(`${at}: the queue names the machine`, async () => {
       await fresh({ ...size, paired: 'online', hash: '#/queue' });
       s = await settle(x => x.queue.some(q => /rotate|billing-svc/.test(q)) || x.queue.length > 1);
-      const vm = s.queue.filter(q => /\| vm · /.test(q));
+      // How long it has waited ends the line ("· 2 h ago"): a clock reading, not the machine's,
+      // so it is cut before comparing, and only when there is one to cut.
+      const vm = s.queue.filter(q => /\| vm · /.test(q)).map(q => q.replace(/ · [^·]* ago$/, ''));
       is(`${at}: the queue is merged — the vm's master's item is here, saying the machine`, ['billing-svc · #4 | vm · waits on the person: pick now or after'], vm);
     });
 

@@ -8,7 +8,7 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     for (let i = 0; i < 80; i++) { if (await b.evaluate(fn, ...args)) return true; await sleep(100); }
     return false;
   };
-  const rects = () => b.evaluate(() => ['.session > .tabs', '.session > .chat', '.session > .composer'].map(s => {
+  const rects = () => b.evaluate(() => ['.session > .tabs', '.session > .chat', '.session > .composer', '.composer .speak-btn', '.composer button[type=submit]'].map(s => {
     const r = document.querySelector(s)?.getBoundingClientRect();
     return r ? [r.x, r.y, r.width, r.height].map(x => Math.round(x * 100) / 100) : null;
   }));
@@ -75,13 +75,22 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     const inputBox = await b.evaluate(() => { const r = document.querySelector('.composer textarea').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; });
     const sentAtStart = await count();
     const n = `${app} ${w}${readonly ? ' read-only' : ''}: request arrival`;
-    is(`${n}: starts with the three measured surfaces`, true, before.every(Boolean));
+    is(`${n}: starts with the measured surfaces and fixed speak and Send slots`, true, before.every(Boolean));
     is(`${n}: starts with no pending request`, false, await b.evaluate(() => !!document.querySelector('.session .request-return, .session [role=dialog]')));
     await shot(w, 'before');
     await b.evaluate(() => { window.__arrive = { ...window.__originalPrompt, fingerprint: window.__originalPrompt.fingerprint }; });
     const opened = await until(() => !!document.querySelector('[role=dialog] .ask'));
     is(`${n}: opens a dialog`, true, opened);
-    is(`${n}: tabs, chat and composer stay put`, before, await rects());
+    // Staging's shared sheet slides in. Measure and photograph its settled position.
+    if (opened) await b.evaluate(async () => {
+      await Promise.all(document.querySelector('[role=dialog]').getAnimations().map(a => a.finished));
+      return true;
+    });
+    is(`${n}: tabs, chat, composer, speak and Send stay put`, before, await rects());
+    is(`${n}: every chat bubble retains its play button`, true, await b.evaluate(() => {
+      const messages = [...document.querySelectorAll('.chat .msg')];
+      return messages.length > 0 && messages.every(n => !!n.querySelector('.read-btn'));
+    }));
     await shot(w, 'open');
     if (!opened) { await b.evaluate(() => { window.__arrive = null; }); continue; }
     is(`${n}: choices share both edges in one column`, true, await b.evaluate(() => {
@@ -117,6 +126,15 @@ export async function requestArrivals({ b, is, go, app = 'phone', readonly = fal
     }));
     is(`${n}: pending requests disable Send even with a draft`, true, await b.evaluate(() => document.querySelector('.composer button[type=submit]').disabled));
     await shot(w, 'closed');
+    if (shots && app === 'phone' && w === 390) {
+      const scroll = await b.evaluate(() => {
+        const chat = document.querySelector('.chat'), previous = chat.scrollTop;
+        chat.scrollTop = 0;
+        return previous;
+      });
+      await shot(w, 'pending-voice');
+      await b.evaluate(top => { document.querySelector('.chat').scrollTop = top; }, scroll);
+    }
     await sleep(2800);
     is(`${n}: the same poll does not reopen it`, false, await b.evaluate(() => !!document.querySelector('[role=dialog]')));
     const route = await b.evaluate(() => location.hash);

@@ -421,6 +421,7 @@ async function rollup(project) {
 // so "waited 2h" stays 2h however long after the file was written the demo is run. A reply
 // sent in fixture mode turns its item `replied`, as the daemon's would once the master's
 // ledger read the message (ledger.js wakeWaiting); nothing closes it, since only a master can.
+const FIXTURE_EXPLAIN_MS = 2500;
 export async function getWaiting() {
   if ((await ready()).mode === 'server') {
     try { return await get('/api/waiting'); }
@@ -431,8 +432,17 @@ export async function getWaiting() {
   const pr = await pairedFixture();
   const peerItems = pr && pr.mode === 'online'
     ? pr.j.waiting.map(i => ({ ...i, project: `${i.project}@${pr.j.peer.key}`, host: pr.peerLabel })) : [];
-  const items = [...(j.items || []).map(i => (pr ? { ...i, host: pr.label } : i)), ...peerItems].map(({ since_ago, at_ago, ...i }) => {
+  // EXPLÍCAME IN FIXTURE MODE: a tap asks (fleet_ledger explain) and the fixture's
+  // `explain_demo` arrives a few seconds later, as a session's turn would. One marked
+  // `busy_demo` belongs to a session mid-turn: the ask is queued behind that turn, as
+  // fleet-send queues it, and its answer does not come while the demo runs. An option tapped
+  // (fleet_ledger answer) takes the item off the list, as the master's ledger does.
+  const items = [...(j.items || []).map(i => (pr ? { ...i, host: pr.label } : i)), ...peerItems]
+    .filter(i => !overlay.ledgerAnswered.has(`${i.project}#${i.id}`)).map(({ since_ago, at_ago, explain_demo, busy_demo, ...i }) => {
+    if (busy_demo) overlay.explainBusy.add(`${i.project}#${i.id}`);
     const row = { ...i, since: nowS - (Number(since_ago) || 0), at: nowS - (Number(at_ago) || 0) };
+    const ex = overlay.explain.get(`${i.project}#${i.id}`);
+    if (ex) row.explain = explain_demo && Date.now() - ex.askedAt >= FIXTURE_EXPLAIN_MS ? { ...ex, at: ex.askedAt + FIXTURE_EXPLAIN_MS, text: explain_demo } : ex;
     const replied = overlay.replied.get(`${i.project}#${i.id}`);
     return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
   });
@@ -1113,6 +1123,7 @@ export async function verb(tool, args, assertion = null) {
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
 const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), projModel: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
+                  explain: new Map(), ledgerAnswered: new Set(), explainBusy: new Set(),
                   shots: new Map(), unpaired: false, relabel: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
@@ -1189,6 +1200,18 @@ function fixtureVerb(tool, a) {
       list.push({ ts: Math.floor(Date.now() / 1000), role: 'user', text: String(a.prompt || '') });
       overlay.sent.set(a.session, list);
       return ok(`sent to '${a.session}'`);
+    }
+    // The ledger's two writes from the list of what waits on the owner (fleet-serve fleet_ledger).
+    case 'fleet_ledger': {
+      const k = `${a.project}#${a.id}`;
+      if (a.verb === 'explain') {
+        overlay.explain.set(k, { askedAt: Date.now(), lang: 'en' });
+        return overlay.explainBusy.has(k)
+          ? { ...ok(`asked ${a.session} to explain ${a.id}; it is busy, so the request waits for its turn to end (queued #1)`), queued: 'turn' }
+          : ok(`asked ${a.session} to explain ${a.id}`);
+      }
+      if (a.verb === 'answer') { overlay.ledgerAnswered.add(k); return ok(`ledger: ${a.id} answered`); }
+      return ok('ledger: nothing open');
     }
     // Taken back out of the queue, or refused as delivered — the two answers the daemon has.
     case 'fleet_unqueue': {

@@ -177,8 +177,8 @@ export function Modal({ title, onClose, children, wide, sheet = false }) {
     return () => removeEventListener('keydown', k);
   }, [onClose]);
   return (
-    <div class={`scrim${sheet ? ' sheet' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={box} class={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={sheet ? -1 : undefined}>
+    <div class={`scrim${sheet ? ' sheet-scrim' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} class={`modal${wide ? ' wide' : ''}${sheet ? ' sheet' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={sheet ? -1 : undefined}>
         <header><h2>{title}</h2><button class="x" aria-label={t('common.close')} onClick={onClose}><Icon name="close" /></button></header>
         {children}
       </div>

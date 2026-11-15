@@ -217,6 +217,8 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_unqueue', description: "Take a prompt back OUT of a session's queue before it is delivered — the first waiting one whose text is exactly `prompt`. Refused, saying so, when it is no longer there: it has already been typed into the session and can no longer be edited.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session', 'prompt'], additionalProperties: false } },
+  { name: 'fleet_ledger', description: "A session's request LEDGER, in its two directions: what the session still owes (the asks made of it, its own promises) and what waits on the OWNER (the questions it asked them, the requests it holds until they decide). verb `list` (the default) prints both. `explain` asks the session to explain item `id` to the owner in plain words and in their language — sent as a prompt that waits for a running turn to end and never interrupts it; the explanation is kept on the item (the phone's list shows it). `answer` records the owner's answer to item `id` (`text`, or `option` for one of the item's options) — the ledger's half only: the session is not told, so send it the answer too.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, verb: { type: 'string', enum: ['list', 'explain', 'answer'] }, id: { type: 'string', description: 'the item id (explain, answer)' }, text: { type: 'string', description: "answer: the owner's words" }, option: { type: 'string', description: "answer: the key of the item's option the owner picked (a, b, 1, 2…)" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Succeeds only once the session is still up a few seconds after its first prompt; fails loudly, with the pane's last lines, if it exits before that, if the folder was never trusted, or if the transcript does not replay inside the timeout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_reopen', description: "Reopen a LOST session: one the machine killed (a crash or reboot took its tmux server) that left its status record and conversation behind, shown as `lost` by fleet_list, fleet_digest and the grid. Starts it again under the same name, resuming ITS OWN conversation by id, in its recorded folder, as its recorded agent (fleet-restart --reopen) — never the newest conversation in the folder. To forget a lost session instead, fleet_stop it; its transcript is kept either way.",
@@ -539,6 +541,25 @@ export function plan(name, a = {}) {
       return run('fleet-send', ['--list-queue', String(a.session)], t);
     case 'fleet_unqueue':
       return run('fleet-send', ['--unqueue', String(a.session), String(a.prompt)], t);
+    case 'fleet_ledger': {
+      const verb = a.verb || 'list';
+      if (!['list', 'explain', 'answer'].includes(verb)) return { kind: 'fail', ...fail(`fleet_ledger: verb must be list, explain or answer, not '${verb}'`) };
+      // fleet-ledger reads its session as the first bare word, so a name that is a flag or one
+      // of its verbs would be read as that instead: refused rather than reinterpreted.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$/.test(String(a.session)) || ['list', 'all', 'clear', 'close', 'drop', 'add', 'explain', 'answer', 'drop-carried'].includes(String(a.session)))
+        return { kind: 'fail', ...fail(`fleet_ledger: '${String(a.session).slice(0, 64)}' is not a session name`) };
+      const args = [String(a.session), verb];
+      if (verb !== 'list') {
+        if (!/^\d{1,6}$/.test(String(a.id ?? ''))) return { kind: 'fail', ...fail(`fleet_ledger: ${verb} needs the item's id (a number)`) };
+        args.push(String(a.id));
+      }
+      if (verb === 'answer') {
+        if (!a.text && !a.option) return { kind: 'fail', ...fail('fleet_ledger: answer needs text or option') };
+        if (a.option) args.push('--option', String(a.option));
+        args.push('--', String(a.text || ''));
+      }
+      return run('fleet-ledger', args, t);
+    }
     case 'fleet_resume': {
       const args = [String(a.session)];
       if (a.prompt) args.push(String(a.prompt));

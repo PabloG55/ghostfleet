@@ -31,8 +31,10 @@ let replyText = null;
 try { replyText = lifted ? eval(lifted) : null; } catch {}
 is('...and its reply is testable', 'function', typeof replyText);
 // ...and it is what the screen SENDS: a reply built one way and sent another is the same silence.
-is('...and it is what the screen sends to the master', true,
-   /act\('fleet_send', \{ project: row\.project, session: 'master', prompt: replyText\(row, text\) \}\)/.test(src));
+// To the session that holds the item, which is the master unless the row names another.
+is('...and it is what the screen sends to the session that holds the item', true,
+   /act\('fleet_send', \{ project: r\.project, session, prompt: replyText\(r, said\) \}\)/.test(src)
+   && /const session = r\.session \|\| 'master'/.test(src));
 
 const L = await import(new URL('../../mods/ghostfleet/hooks/ledger.js', import.meta.url).href);
 const row = { project: 'acme-api', profile: 'work', session: 'master', id: '7', text: 'merge #12 now, or wait for the billing-svc review?',
@@ -53,6 +55,23 @@ is('delivered, the reply makes ITS item replied, and leaves the other waiting', 
    L.heldItems(after, now).map(i => `${i.id}:${i.state}`).join(','));
 const closed = { ...after, items: after.items.map(i => (i.id === '7' ? { ...i, state: 'done', closedBy: 'agent', proof: 'merged #12' } : i)) };
 is('...and once the master closes it, it is off the list', '8:waiting', L.heldItems(closed, now).map(i => `${i.id}:${i.state}`).join(','));
+
+// A QUESTION FOR YOU is answered by the same message: its head names the item, so the mod settles
+// THAT question from it, whatever turn the person answers in, and an option's key is the pick.
+const q = { project: 'acme-api', session: 'master', id: '9', text: 'Which store should billing-svc use for the webhook log?', state: 'question',
+            options: [{ key: 'a', text: 'sqlite' }, { key: 'b', text: 'postgres' }] };
+const asked = { v: 1, seq: 10, prompt: 4, window: 4, items: [
+  { id: '9', text: q.text, at: now - H, state: 'open', source: 'question', n: 3, turnId: 't7', options: q.options },
+  { id: '10', text: 'Keep the old --legacy flag one more release?', at: now - H, state: 'open', source: 'question', n: 4, turnId: 't7' },
+] };
+const said = replyText ? replyText(q, 'b) postgres') : '';
+const settled = L.settleQuestions(asked, said, { at: now, choiceTurn: '' })
+const st = (l) => l ? l.items.map(i => `${i.id}:${i.state}${i.answer && i.answer.option ? '/' + i.answer.option : ''}`).join(',') : 'nothing settled';
+is('a reply to a question settles that question, with its option, and no other', '9:done/b,10:open', st(settled && settled.ledger));
+is('...and the screen marks it answered in the ledger too', true,
+   /act\('fleet_ledger', \{ project: r\.project, session, verb: 'answer', id: String\(r\.id\)/.test(src));
+const other = L.settleQuestions(asked, replyText ? replyText({ ...q, id: '77' }, 'b') : '', { at: now, choiceTurn: '' });
+is('...while a reply naming no open question settles nothing', 'nothing settled', st(other && other.ledger));
 
 process.stdout.write(rows.join('\n') + '\n');
 process.exit(0);
