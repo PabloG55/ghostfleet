@@ -190,8 +190,21 @@ export async function phoneFit({ b, is, shots = '' }) {
   // shell holds even with something in it taller and wider than the screen, put where the frame
   // puts what it draws outside .main (the app's `after`, the desk's keys): that is what made the
   // document scrollable before, and a page with nothing in it would pass either way.
+  // A finger: down at (x, y), twelve moves to (x+dx, y+dy), up. Raw touch points, not
+  // Input.synthesizeScrollGesture: on Linux a synthesized touch scroll delivers its pointer and
+  // touch events and scrolls NOTHING, not even a page built to move, so every "moves nothing" row
+  // below passed there on whatever code it was given. It is also never cancelled, so the chat's
+  // own swipe read the gesture as a step to the next session. Raw touch points pan a page and
+  // scroll a box on Linux and macOS alike, and the browser cancels the pointer as a real pan does.
+  // The end may lie past the screen's edge: a finger leaving the screen is tracked on both.
   const swipe = async (x, y, dx, dy) => {
-    await b.call('Input.synthesizeScrollGesture', { x, y, xDistance: dx, yDistance: dy, gestureSourceType: 'touch', speed: 1200, preventFling: true });
+    const n = 12;
+    await b.call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let i = 1; i <= n; i++) {
+      await b.call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * i / n, y: y + dy * i / n }] });
+      await sleep(16);
+    }
+    await b.call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await sleep(250);
   };
   // Where the page is, read by the browser rather than the page: phone-check stands its own
@@ -220,19 +233,30 @@ export async function phoneFit({ b, is, shots = '' }) {
     await b.evaluate(() => document.getElementById('fit-big')?.remove());
     is(`${W} ${name}: a swipe each way moves nothing, with something too big for the screen in it`, '', moved.join('; '));
   }
-  // ...and the measurement is not blind: the same swipe on a page that CAN move says it moved.
+  // ...and the measurement is not blind: the same swipes on a page that CAN move say it moved, on
+  // each axis, each from a page measured still first. This is the row that found the swipes blind
+  // on Linux; without it the rows above read green there on any code.
   await open('#/');
-  const blind = await b.evaluate(() => {
-    const s = document.createElement('style'); s.id = 'fit-undo';
-    s.textContent = '#app { position: static !important; overflow: visible !important; height: auto !important; } html, body { overflow: visible !important; height: auto !important; } .app { height: auto !important; grid-template-columns: 1fr !important; }';
-    document.head.append(s);
-    const d = document.createElement('div'); d.id = 'fit-big'; d.style.cssText = 'width:1400px;height:2600px'; document.querySelector('.app').appendChild(d);
-    return true;
-  });
-  await swipe(200, 24, 0, -300);
-  const sawIt = (await where()) !== STILL;
-  await b.evaluate(() => { document.getElementById('fit-undo')?.remove(); document.getElementById('fit-big')?.remove(); scrollTo(0, 0); });
-  is('...and a swipe on a page that can move is seen moving it', true, blind && sawIt);
+  const saw = [];
+  for (const [label, x, y, dx, dy] of [['up on the top bar', 200, 24, 0, -300], ['left on the page', 200, 420, -250, 0]]) {
+    await b.evaluate(() => {
+      const s = document.createElement('style'); s.id = 'fit-undo';
+      // The shell undone, and the scrollers' `contain` with it: a finger inside .main chains to
+      // the page only when nothing between them holds the pan.
+      s.textContent = '#app { position: static !important; overflow: visible !important; height: auto !important; } html, body { overflow: visible !important; height: auto !important; } .app { height: auto !important; grid-template-columns: 1fr !important; } *, html, body { overscroll-behavior: auto !important; }';
+      document.head.append(s);
+      const d = document.createElement('div'); d.id = 'fit-big'; d.style.cssText = 'width:1400px;height:2600px'; document.querySelector('.app').appendChild(d);
+    });
+    await sleep(100);
+    const from = await where();
+    await swipe(x, y, dx, dy);
+    const to = await where();
+    if (from !== STILL || to === STILL) saw.push(`${label}: ${from} → ${to}`);
+    await b.evaluate(() => { document.getElementById('fit-undo')?.remove(); document.getElementById('fit-big')?.remove(); scrollTo(0, 0); });
+    await b.call('Emulation.setPageScaleFactor', { pageScaleFactor: 1 }).catch(() => {});
+    await sleep(150);
+  }
+  is('...and a swipe on a page that can move is seen moving it, on each axis', '', saw.join('; '));
 
   // ── 4. wide content still scrolls inside its own box ──────────────────────
   // The session's table is the fixture's; a code block is drawn into a message of the chat by the

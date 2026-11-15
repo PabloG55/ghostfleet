@@ -23680,6 +23680,12 @@ if [ -d "$ROOT/web" ]; then
   #   - no fixed shell and no net, with a top bar 480px wide: "the document is the screen's width"
   #     (160 at 320, 91 at 390) and "nothing runs past the screen's edge" at all four widths.
   #   - the assistant's Send a size of its own: "...and that size is the session's".
+  #   The swipes are raw touch points (Input.dispatchTouchEvent). The first driver was
+  #   Input.synthesizeScrollGesture, which pans a page on macOS and scrolls nothing at all under
+  #   Linux's headless Chrome: there the swipe rows were green on any code, and only the row that
+  #   swipes a page built to move said so, on the Linux leg. Measured on both since: the client
+  #   before this change is red on the same 18 rows under Debian's Chromium 156 and macOS's Chrome
+  #   157, the three swipe rows among them.
   #   SKIPPED where there is no Chrome, like the group above.
   PFIT="$(mktemp -d "$TEST_RUNS.$$.fit.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" --fit-only > "$PFIT/out" 2> "$PFIT/err"
