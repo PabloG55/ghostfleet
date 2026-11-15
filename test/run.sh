@@ -1049,7 +1049,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   node "$ROOT/test/helpers/governor-idle.mjs" > "$GI/rows" 2> "$GI/err"
   is "idle governor harness ran" "0" "$?"
   is "idle governor harness had no errors" "" "$(cat "$GI/err")"
-  is "idle governor emitted every row" "23" "$(wc -l < "$GI/rows" | tr -d ' ')"
+  is "idle governor emitted every row" "30" "$(wc -l < "$GI/rows" | tr -d ' ')"
   while IFS=$'\t' read -r label want got; do is "$label" "$want" "$got"; done < "$GI/rows"
   if command -v tmux >/dev/null 2>&1; then
     node "$ROOT/test/helpers/governor-idle.mjs" "$ROOT/bin/fleet-governor" --measure > "$GI/measure" 2> "$GI/measure.err"
@@ -1396,6 +1396,66 @@ is "no --agent stays 3 columns"    "3" "$(awk -F'\t' '$1=="a3"{print NF}' "$cf")
 is "unknown agent is not written"  "0" "$(grep -c 'notreal' "$cf" || true)"
 is "unknown agent aborts the add"  "0" "$(awk -F'\t' '$1=="bad"' "$cf" | wc -l | tr -d ' ')"
 rm -rf "$T"
+
+# ── START: a registered project's lead, by NAME ─────────────────────────────
+# The phone reaches a machine through a paired one, and a paired machine must never choose a
+# folder this one runs code in — so `add --start`, which takes a path, could not bring up the
+# lead of a project the other machine already had. `start` takes the name, looks the project up
+# in this machine's own list, and starts it exactly as `add --start` does (one start_master).
+# It refuses what it cannot know: a name it does not have, a name in two profiles, a folder
+# that is gone, and a lead that is ASLEEP — a wake brings back its conversation, a start would
+# begin a new one over it. The agent is a stub that writes what it was started as and where.
+group "fleet-project start: a registered project's lead, by name, and nothing else"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$T/.config/ghostfleet" "$T/acme-api" "$T/scratch" "$T/toolbox" "$T/billing-svc" "$T/p9" "$T/p10" "$T/stub" "$T/.claude/fleet"
+  printf 'acme-api\t%s\twork\nscratch\t%s\tpersonal\ntoolbox\t%s\twork\nbilling-svc\t%s\twork\ngone\t%s\twork\n' \
+    "$T/acme-api" "$T/scratch" "$T/toolbox" "$T/billing-svc" "$T/nowhere" > "$T/.config/ghostfleet/projects"
+  printf 'toolbox\t%s\tpersonal\n' "$T/toolbox" > "$T/.config/ghostfleet/projects.personal"
+  cat > "$T/stub/agent-here" <<'STUBEOF'
+#!/bin/sh
+printf '%s %s %s\n' "$*" "$(pwd -P)" "${CLAUDE_FLEET_PROFILE:-}" >> "$FPS_STARTED"
+exec sleep 300
+STUBEOF
+  chmod +x "$T/stub/agent-here"
+  fps() { FPS_STARTED="$T/started" PATH="$T/stub:$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  started() { local i; for i in $(seq 1 50); do [ "$(wc -l < "$T/started" 2>/dev/null | tr -d ' ')" -ge "$1" ] && break; sleep 0.1; done; sed -n "${1}p" "$T/started" 2>/dev/null; }
+  up() { tmux -L "$1" has-session -t '=master' 2>/dev/null && echo up || echo down; }
+  out="$(fps start acme-api)"; rc=$?
+  is "start: a registered project's lead starts"                 "0" "$rc"
+  is "...as its agent, named master, in its folder, on its profile" "master $T/acme-api work" "$(started 1)"
+  is "...on the project's own fleet"                              "up" "$(up cf-acme-api)"
+  out="$(fps start acme-api)"; rc=$?
+  is "start: a lead already running is left alone"               "0 yes" "$rc $(grep -q 'already running' <<< "$out" && echo yes || echo no)"
+  is "...and no second agent was started"                        "1" "$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start scratch)"; rc=$?
+  is "start: a project on another profile starts on that profile's fleet" "0 up" "$rc $(up cf-personal-scratch)"
+  is "...with that profile"                                      "master $T/scratch personal" "$(started 2)"
+  n0="$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start nope)"; rc=$?
+  is "start: a name this machine does not have is refused"       "1 yes" "$rc $(grep -q "no project 'nope'.*registered project" <<< "$out" && echo yes || echo no)"
+  out="$(fps start "$T/acme-api")"; rc=$?
+  is "start: a path is not a name"                               "1 yes" "$rc $(grep -q 'bad name' <<< "$out" && echo yes || echo no)"
+  out="$(fps start toolbox)"; rc=$?
+  is "start: a name in two profiles is refused until one is named" "1 yes down" "$rc $(grep -q 'more than one profile' <<< "$out" && echo yes || echo no) $(up cf-toolbox)"
+  out="$(fps start gone)"; rc=$?
+  is "start: a project whose folder is gone is refused"          "1 yes" "$rc $(grep -q 'not a directory' <<< "$out" && echo yes || echo no)"
+  printf '%s\n' "$(date +%s) sid-1 $T/billing-svc 30" > "$T/.claude/fleet/cf-billing-svc.master.asleep"
+  out="$(fps start billing-svc)"; rc=$?
+  is "start: an asleep lead is refused, pointing at the wake"    "1 yes down" "$rc $(grep -q 'is asleep — wake it' <<< "$out" && echo yes || echo no) $(up cf-billing-svc)"
+  is "...and none of the refusals started anything"              "$n0" "$(wc -l < "$T/started" | tr -d ' ')"
+  out="$(fps start toolbox --profile personal)"; rc=$?
+  is "start: --profile picks the row"                            "0 up" "$rc $(up cf-personal-toolbox)"
+  # add shares the one start_master: a plain add still exits 0, and add --start still starts.
+  out="$(fps add "$T/p9" --name p9)"; rc=$?
+  is "add without --start still exits 0 and starts nothing"      "0 down" "$rc $(up cf-p9)"
+  out="$(fps add "$T/p10" --name p10 --start)"; rc=$?
+  is "add --start still starts the lead"                         "0 up" "$rc $(up cf-p10)"
+  for k in cf-acme-api cf-personal-scratch cf-personal-toolbox cf-p10 cf-p9 cf-toolbox cf-billing-svc; do tmux -L "$k" kill-server 2>/dev/null; done
+  rm -rf "$T"
+else
+  skip "fleet-project start" "tmux missing"
+fi
 
 # ── setting the agent AFTER the project exists ──────────────────────────────
 # "the master cant be selected as open code or codex". Everything downstream of the 4th
@@ -21638,6 +21698,88 @@ while IFS=$'\x1f' read -r name want got; do
 done < "$AQ/out"
 rm -rf "${AQ:?}"
 
+# ── 4a10c12a4. fleet-serve: a phone send wakes a sleeping session first ─────
+# The phone's send is POST /api/verb fleet_send, which reaches the same fleet-send as every
+# other sender — so the wake is fleet-send's, and what this proves is the rest of the path:
+# that the daemon waits for it (its verbs run for up to 15 minutes, a wake for up to five),
+# that a woken session's prompt arrives, and that a wake that failed comes back as the
+# not-delivered refusal the phone already draws, never as a 200 over a message that went
+# nowhere. A scratch daemon on its own port, its own HOME and its own fleet.
+group "fleet-serve: a phone send wakes a sleeping session first"
+# needs: free_port answers in digits
+if [ -z "$SV" ] || ! command -v jq >/dev/null 2>&1; then
+  skip "fleet-serve: a phone send wakes a sleeping session first" "node or jq missing"
+else
+PH="$(cd "$(mktemp -d "$TEST_RUNS.$$.phwake.XXXXXX")" && pwd -P)"
+mkdir -p "$PH/home/.config/ghostfleet" "$PH/repo" "$PH/bin" "$PH/home/.claude/fleet"
+printf 'off\n' > "$PH/home/.config/ghostfleet/local-trust"
+printf 'acme-api\t%s\twork\n' "$PH/repo" > "$PH/home/.config/ghostfleet/projects"
+PHF="$PH/home/.claude/fleet"
+cat > "$PH/bin/_screen" <<STUB
+#!/bin/sh
+last=""
+draw() { printf '\033[2J\033[H%s\n────────\n❯ \0337\n────────\n  ctx:3%%  auto mode on\0338' "\$last"; }
+draw
+while IFS= read -r line; do printf '%s\n' "\$line" >> "$PH/typed"; last="\$line"; draw; done
+STUB
+printf '#!/bin/sh\nexec "%s/bin/_screen"\n' "$PH" > "$PH/bin/agent-here.ok"
+printf '#!/bin/sh\necho "agent-here: could not start"\nexit 1\n' > "$PH/bin/agent-here.bad"
+chmod +x "$PH/bin/_screen" "$PH/bin/agent-here.ok" "$PH/bin/agent-here.bad"
+phagent() { ln -sf "$PH/bin/agent-here.$1" "$PH/bin/agent-here"; }
+PHID="eeeeeeee-1111-1111-1111-000000000001"
+PHPD="$PH/home/.claude/projects/$(printf '%s' "$PH/repo" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PHPD"
+printf '{"type":"user","message":{"role":"user","content":"x"}}\n' > "$PHPD/$PHID.jsonl"
+phasleep() { printf '%s\t%s\t%s\t%s\n' 0 "$PHID" "$PH/repo" 30 > "$PHF/cf-acme-api.billing-svc.asleep"; }
+phup() { tmux -L cf-acme-api has-session -t '=billing-svc' 2>/dev/null && echo yes || echo no; }
+PHPORT="$(free_port)"; PHPORT="${PHPORT:-18797}"
+PHBASE="http://localhost:$PHPORT"
+ph_env() { env -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u TMUX_PANE \
+               GHOSTFLEET_SERVE_CONFIG="$PH/serve.json" GHOSTFLEET_SERVE_AUDIT="$PH/audit.jsonl" \
+               HOME="$PH/home" TMUX= PATH="$PH/bin:$PATH" CLAUDE_FLEET_AWAKE=off CLAUDE_FLEET_WAKE_SETTLE=1 "$@"; }
+ph_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB" >&2; return 2; }
+           ph_env node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
+ph_cli init --bind 127.0.0.1 --port "$PHPORT" >/dev/null 2>&1
+is "phone wake: the helper wrote its own config" "$PHPORT" \
+   "$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port)}catch(e){console.log("no config")}' "$PH/serve.json")"
+node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PH/serve.json"
+# The fleet's server, as a fleet has one, with the stub agent on its PATH.
+ph_env tmux -L cf-acme-api new-session -d -s scratch -x 80 -y 24 "sleep 600" 2>/dev/null
+ph_env node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$PH/log" 2>&1 &
+PH_PID=$!
+SERVE_PIDS="$SERVE_PIDS $PH_PID"
+sv_reg "${PH_PID}"
+i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$PHBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
+if [ "$up" != yes ]; then
+  bad "the phone-wake daemon comes up" "listening on $PHBASE" "$(tr '\n' ' ' < "$PH/log" 2>/dev/null | cut -c1-180)"
+else
+  ph_send() { node --input-type=module -e "
+    import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+    const a = new Authenticator({ rpId: new URL('$PHBASE').hostname, origin: '$PHBASE' });
+    const e = await a.enroll('$PHBASE', process.argv[1]);
+    if (e.status !== 200) { console.log(JSON.stringify({ enrol: e.status })); process.exit(0); }
+    const r = await a.verb('$PHBASE', 'fleet_send', { project: 'acme-api', session: 'billing-svc', prompt: process.argv[2] });
+    console.log(JSON.stringify({ status: r.status, ok: r.json && r.json.ok, text: r.json && r.json.text }));" "$1" "$2"; }
+
+  phagent ok; phasleep; : > "$PH/typed"
+  out="$(ph_send "$(ph_cli enroll phone-wake | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the acme-api routes")"
+  is "phone wake: a send to a sleeping session is a 200"  "200:true" "$(jq -r '"\(.status):\(.ok)"' <<< "$out" 2>/dev/null || echo "$out")"
+  is "...the session is up, its marker consumed"         "yes:no" "$(phup):$([ -f "$PHF/cf-acme-api.billing-svc.asleep" ] && echo yes || echo no)"
+  i=0; while [ "$i" -lt 30 ] && ! grep -qF 'list the acme-api routes' "$PH/typed" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "...and the prompt landed in the woken pane"        "yes" "$(grep -qF 'list the acme-api routes' "$PH/typed" 2>/dev/null && echo yes || echo no)"
+
+  tmux -L cf-acme-api kill-session -t '=billing-svc' 2>/dev/null
+  phagent bad; phasleep; : > "$PH/typed"
+  out="$(ph_send "$(ph_cli enroll phone-wake2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "check the acme-web build")"
+  is "phone wake: a failed wake is refused, not a 200"   "false" "$(jq -r '.ok' <<< "$out" 2>/dev/null || echo "$out")"
+  is "...as not delivered"                               "yes" "$(grep -qE '^4[0-9][0-9]$' <<< "$(jq -r '.status' <<< "$out" 2>/dev/null)" && echo yes || echo no)"
+  is "...saying it did not wake, and why"                "yes" "$(grep -q 'asleep and did not wake: .*could not start' <<< "$(jq -r '.text' <<< "$out" 2>/dev/null)" && echo yes || echo no)"
+  is "...nothing was typed, and it is still asleep"      ":yes" "$(cat "$PH/typed"):$([ -f "$PHF/cf-acme-api.billing-svc.asleep" ] && echo yes || echo no)"
+fi
+kill "$PH_PID" 2>/dev/null; wait "$PH_PID" 2>/dev/null
+tmux -L cf-acme-api kill-server 2>/dev/null
+rm -rf "$PH"
+fi
+
 rm -rf "$SV"
 fi
 serve_stop
@@ -22732,6 +22874,34 @@ rm -rf "${ACL:?}"
 # and the rows staging passes — the ones about a machine on its own, and the refusals that
 # a daemon with no pairing gives for nothing — against copies of this one broken on purpose
 # (listed in the PR).
+# A LEAD COMES UP FROM THE PHONE IN EVERY STATE IT CAN BE DOWN IN — asleep (wake), parked
+# (resume), lost (reopen) and none (start, by name) — on the machine the phone is on AND on the
+# one it reaches through a pairing (test/helpers/pair-lead-check.mjs: two real daemons, the
+# phone's own lead.js, stub verbs that move a per-project lead state). After a reboot most
+# leads are lost, and the reopen was the one verb a pairing did not forward; a reopen refused
+# on either machine also came back as a 200, so the phone said the lead was ready. Each failure
+# has its reason asserted on the phone; a start refuses a lead that a wake, a reopen or a resume
+# would bring back; nothing a start takes can name a path or a hidden project; both audit logs
+# record it; and headless Chrome at a phone's size taps "Reopen the lead" on a lost lead through
+# the pairing. Watched red against staging's daemon and client (30 of 67 rows), and against this
+# tree with the start's lead check removed (9) and with a reopen's exit status dropped (5).
+group "fleet-serve: a lead comes up from the phone in every state, here and through a pairing"
+if command -v node >/dev/null 2>&1; then
+  PLC="$(mktemp -d "$TEST_RUNS.$$.pairlead.XXXXXX")"
+  node "$ROOT/test/helpers/pair-lead-check.mjs" > "$PLC/out" 2> "$PLC/err"
+  plcrc=$?
+  is "pair-lead-check ran"            "0" "$plcrc"
+  is "...without complaining"         ""  "$(head -2 "$PLC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(grep -c "$US" "$PLC/out")" -ge 60 ] && echo yes || echo "no: $(wc -l < "$PLC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; else is "$name" "$want" "$got"; fi
+  done < "$PLC/out"
+  rm -rf "$PLC"
+else
+  skip "a lead from the phone, through a pairing" "node missing"
+fi
+
 group "fleet-serve: two machines, paired — proxied, scoped, audited on both, unpaired on both"
 if command -v node >/dev/null 2>&1; then
   PRC="$(mktemp -d "$TEST_RUNS.$$.pair.XXXXXX")"
@@ -25403,6 +25573,351 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$LV"
 else
   skip "hibernation reads the live conversation" "tmux or jq missing"
+fi
+unset CLAUDE_FLEET_WAKE_GRACE
+
+# ── 4a10c12a. a lead sleeps under memory pressure, behind its own switch ─────
+# The owner's call, made for one machine's memory: a lead idle more than a day may be slept,
+# but only by the governor's --pressure pass, only where its profile turned the rule on
+# (<fleet dir>/hibernate-leads.enabled, whose first line is the hours, 24 by default), and
+# never in a fleet that opted out (<fleet dir>/<sock>.lead-stays-up). Three answers, and the
+# row says which one decided it: "never" (the switch is off), "not this fleet" (the opt-out),
+# "not now" (no pressure). The fixture is the "reads the live conversation" lead — proven
+# conversation, trusted, nothing typed — idle 25h, so the only things that differ between the
+# rows are the switch, the opt-out and the mode.
+group "a lead sleeps under memory pressure, behind its own switch"
+export CLAUDE_FLEET_WAKE_GRACE=0
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  LP="$(cd "$(mktemp -d "$TEST_RUNS.$$.leadp.XXXXXX")" && pwd -P)"
+  lphas() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  lpyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  lpup() { tmux -L "$1" has-session -t "=$2" 2>/dev/null && echo yes || echo no; }
+  export CLAUDE_FLEET_DIR="$LP/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$LP/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR" "$LP/wt"
+  jq -n --arg d "$LP/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  # From outside any fleet: the suite may itself run inside a fleet pane.
+  lp() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK "$ROOT/bin/fleet-hibernate" "$@"; }
+  lpj() {   # sock field [args...]: one field of that fleet's master row in the JSON plan
+    local s="$1" f="$2"; shift 2
+    lp -s "$s" --json "$@" 2>/dev/null | jq -r --arg f "$f" '.[] | select(.slot=="master") | .[$f] | tostring'
+  }
+  lp_master() {   # sock id
+    local tr="$LP/tr-$1.jsonl"
+    node -e 'const [f,h]=process.argv.slice(1);require("fs").writeFileSync(f,JSON.stringify({type:"user",
+      message:{role:"user",content:"the last thing a person typed"},
+      timestamp:new Date(Date.now()-h*3600000).toISOString()})+"\n")' "$tr" 25
+    jq -n --arg id "$2" --arg s "$1" --arg tr "$tr" --arg cwd "$LP/wt" \
+      '{session_id:$id, sock:$s, slot:"master", cwd:$cwd, folder:"wt", branch:"main",
+        status:"ready", transcript:$tr, ts:0}' > "$CLAUDE_FLEET_DIR/$2.json"
+    tmux -L "$1" new-session -d -s master -c "$LP/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    "$ROOT/test/helpers/live-session.sh" "$1" master "$2" "$LP/wt" "$tr" >/dev/null
+  }
+  LPA=bbbbbbbb-1111-1111-1111-000000000001; LPW=bbbbbbbb-2222-2222-2222-000000000002
+  lp_master cf-acme-api "$LPA"; lp_master cf-acme-web "$LPW"
+  is "lead: both fixture leads are up" "yes:yes" "$(lpup cf-acme-api master):$(lpup cf-acme-web master)"
+
+  # ── off: today's answer, and it names the switch that would change it ──
+  is "lead: switch off — a lead idle 25h stays up under --pressure" "false" \
+     "$(lpj cf-acme-api would_sleep --pressure --dry-run)"
+  is "...with today's reason"                  "yes" "$(lpyn lphas 'never slept automatically' "$(lpj cf-acme-api why --pressure --dry-run)")"
+  is "...naming the switch that is off"        "yes" "$(lpyn lphas "the leads switch is off: $CLAUDE_FLEET_DIR/hibernate-leads.enabled" "$(lpj cf-acme-api why --pressure --dry-run)")"
+
+  # ── on ──
+  touch "$CLAUDE_FLEET_DIR/hibernate-leads.enabled"
+  is "lead: switch on — the same lead is sleepable under --pressure" "true" \
+     "$(lpj cf-acme-api would_sleep --pressure --dry-run)"
+  is "...and the row says what let it"         "yes" "$(lpyn lphas 'a lead, under memory pressure' "$(lpj cf-acme-api note --pressure --dry-run)")"
+  lp -s cf-acme-api --pressure --dry-run > "$LP/dry" 2>&1
+  is "...in the text plan too"                 "yes" "$(lpyn grep -q 'master .*WOULD SLEEP — a lead, under memory pressure' "$LP/dry")"
+  is "...and a dry run slept nothing"          "yes" "$(lpup cf-acme-api master)"
+  # Not pressure: the threshold never takes a lead, whatever its age and whatever the switch.
+  is "lead: switch on, no pressure — the threshold still never takes it" "yes" \
+     "$(lpyn lphas 'only under memory pressure' "$(lpj cf-acme-api why --idle-hours 0)")"
+  # The hours are the switch file's: 48 keeps a lead idle 25h up.
+  printf '48\n' > "$CLAUDE_FLEET_DIR/hibernate-leads.enabled"
+  is "lead: the switch's hours are the lead's threshold" "yes" \
+     "$(lpyn lphas "under the lead's 48h threshold" "$(lpj cf-acme-api why --pressure --dry-run)")"
+  : > "$CLAUDE_FLEET_DIR/hibernate-leads.enabled"
+  # A lead that said it is working stays up at ANY age — a worker's stale word is not believed
+  # past the hour, a lead's is.
+  jq '.status = "working"' "$CLAUDE_FLEET_DIR/$LPA.json" > "$LP/r" && mv "$LP/r" "$CLAUDE_FLEET_DIR/$LPA.json"
+  is "lead: a lead that said working, 25h ago, stays up" "yes" \
+     "$(lpyn lphas 'a lead that is working is never slept' "$(lpj cf-acme-api why --pressure --dry-run)")"
+  jq '.status = "ready"' "$CLAUDE_FLEET_DIR/$LPA.json" > "$LP/r" && mv "$LP/r" "$CLAUDE_FLEET_DIR/$LPA.json"
+  # A prompt waiting for it: asked of fleet-send, the same answer a send would get.
+  printf '%s\x1f\x1f\x1f\x1f%s\x1f\n' "$(date +%s)" "$(printf 'check the acme-web build' | base64 | tr -d '\n')" \
+    > "$CLAUDE_FLEET_DIR/cf-acme-api.master.queue"
+  is "lead: a lead with a prompt queued stays up" "yes" \
+     "$(lpyn lphas 'prompts queued' "$(lpj cf-acme-api why --pressure --dry-run)")"
+  rm -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.queue"
+
+  # ── the opt-out ──
+  touch "$CLAUDE_FLEET_DIR/cf-acme-web.lead-stays-up"
+  is "lead: an exempt fleet's lead stays up under --pressure" "false" \
+     "$(lpj cf-acme-web would_sleep --pressure --dry-run)"
+  is "...naming the exemption, not the switch" "yes" \
+     "$(lpyn lphas "exempt and stays up — $CLAUDE_FLEET_DIR/cf-acme-web.lead-stays-up" "$(lpj cf-acme-web why --pressure --dry-run)")"
+  is "...while the other fleet's is still sleepable" "true" "$(lpj cf-acme-api would_sleep --pressure --dry-run)"
+
+  # ── for real, last, because it ends the pane ──
+  lp -s cf-acme-api --pressure > "$LP/press" 2>&1
+  is "lead: --pressure sleeps the lead"        "no:yes" \
+     "$(lpup cf-acme-api master):$([ -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.asleep" ] && echo yes || echo no)"
+  is "...on its own conversation"              "$LPA" "$(cut -f2 "$CLAUDE_FLEET_DIR/cf-acme-api.master.asleep" 2>/dev/null)"
+  is "...and logs why"                         "yes" "$(lpyn grep -q 'a lead, under memory pressure' "$LP/press")"
+  lp -s cf-acme-web --pressure > "$LP/press" 2>&1
+  is "lead: ...and the exempt one is still up" "yes" "$(lpup cf-acme-web master)"
+
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-acme-web kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$LP"
+else
+  skip "a lead sleeps under memory pressure, behind its own switch" "tmux or jq missing"
+fi
+unset CLAUDE_FLEET_WAKE_GRACE
+
+# ── 4a10c12a2. a send to a sleeping session wakes it first ──────────────────
+# A hibernated session has no process, and every path that delivers a prompt ended at the
+# same check: no session, nothing typed. From the sender's side that was "no session
+# 'billing-svc'" about a card that plainly said asleep — and from a sender nobody reads (a
+# scheduled prompt) it was nothing at all. Now fleet-send wakes it with the card's own wake
+# (up, and still up a few seconds later), and then delivers as it would to an idle session.
+# The agent is a stub that draws a composer and writes down every line typed into it, so
+# "the prompt landed in the woken pane" is asserted on what the pane received.
+group "a send to a sleeping session wakes it first"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WS="$(cd "$(mktemp -d "$TEST_RUNS.$$.wsend.XXXXXX")" && pwd -P)"
+  wsyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  wsup() { tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo yes || echo no; }
+  export CLAUDE_FLEET_DIR="$WS/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$WS/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR" "$WS/wt" "$WS/bin"
+  cat > "$WS/bin/_screen" <<STUB
+#!/bin/sh
+last=""
+draw() { printf '\033[2J\033[H%s\n────────\n❯ \0337\n────────\n  ctx:3%%  auto mode on\0338' "\$last"; }
+draw
+while IFS= read -r line; do printf '%s\n' "\$line" >> "$WS/typed"; last="\$line"; draw; done
+STUB
+  # The agent the wake starts: it notes which conversation it was asked to resume.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$CLAUDE_FLEET_RESUME" >> "%s/resumed"\nexec "%s/bin/_screen"\n' "$WS" "$WS" \
+    > "$WS/bin/agent-here.ok"
+  # ...and one that cannot start: the wake that fails.
+  printf '#!/bin/sh\necho "agent-here: could not start"\nexit 1\n' > "$WS/bin/agent-here.bad"
+  chmod +x "$WS/bin/_screen" "$WS/bin/agent-here.ok" "$WS/bin/agent-here.bad"
+  wsagent() { ln -sf "$WS/bin/agent-here.$1" "$WS/bin/agent-here"; }
+  OLDPATH="$PATH"; export PATH="$WS/bin:$PATH"
+  WSID="dddddddd-1111-1111-1111-000000000001"
+  # The conversation the marker names, where the wake looks for it.
+  WSPD="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$WS/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$WSPD"
+  printf '{"type":"user","message":{"role":"user","content":"x"}}\n' > "$WSPD/$WSID.jsonl"
+  wsasleep() { printf '%s\t%s\t%s\t%s\n' 0 "$WSID" "$WS/wt" 30 > "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep"; }
+  ws() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK CLAUDE_FLEET_WAKE_SETTLE=1 "$@"; }
+  # A server for the fleet, as a fleet has one; the sleeping session is the one with no pane.
+  tmux -L cf-acme-web new-session -d -s scratch -x 80 -y 24 "sleep 600" 2>/dev/null
+
+  # ── the wake, then the prompt ──
+  wsagent ok; wsasleep; : > "$WS/typed"
+  ws "$ROOT/bin/fleet-send" -s cf-acme-web billing-svc "list the acme-api routes" > "$WS/out" 2> "$WS/err"
+  is "send: a send to a sleeping session exits 0"  "0"   "$?"
+  is "...saying it woke it first"                  "yes" "$(wsyn grep -q "'billing-svc' is asleep — waking it first" "$WS/err")"
+  is "...the session is up"                        "yes" "$(wsup)"
+  is "...its asleep marker consumed"               "no"  "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo yes || echo no)"
+  is "...on the conversation it slept on"          "$WSID" "$(tail -1 "$WS/resumed" 2>/dev/null)"
+  i=0; while [ "$i" -lt 30 ] && ! grep -qF 'list the acme-api routes' "$WS/typed" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "...and the prompt landed in the woken pane"  "yes" "$(wsyn grep -qF 'list the acme-api routes' "$WS/typed")"
+  # What only reads does not wake: --would-queue answers for the card as it is.
+  tmux -L cf-acme-web kill-session -t '=billing-svc' 2>/dev/null; wsasleep
+  is "send: --would-queue says asleep, and wakes nothing" "asleep:no" \
+     "$(ws "$ROOT/bin/fleet-send" -s cf-acme-web --would-queue billing-svc 2>/dev/null):$(wsup)"
+  # A name that is not a session at all is still "no session": the wake is for a marker.
+  ws "$ROOT/bin/fleet-send" -s cf-acme-web billing "list the acme-api routes" > /dev/null 2> "$WS/err"
+  is "send: a prefix of a sleeping name is not woken" "1:yes" "$?:$(wsyn grep -q "no session 'billing'" "$WS/err")"
+
+  # ── a wake that fails is the sender's error, and nothing was typed ──
+  wsagent bad; : > "$WS/typed"
+  ws "$ROOT/bin/fleet-send" -s cf-acme-web billing-svc "check the acme-web build" > "$WS/out" 2> "$WS/err"
+  is "send: a failed wake exits non-zero"          "1"   "$?"
+  is "...saying it was not delivered, and why"     "yes" "$(wsyn grep -q "not delivered — 'billing-svc' is asleep and did not wake: .*could not start" "$WS/err")"
+  is "...nothing was typed"                        ""    "$(cat "$WS/typed")"
+  is "...and it is still asleep, to try again"     "no:yes" "$(wsup):$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo yes || echo no)"
+  # A sender who reads the error still has the words; a second copy would come back later
+  # as a duplicate.
+  is "...and a read sender's prompt is not copied" "" \
+     "$(ws "$ROOT/bin/fleet-send" -s cf-acme-web --stranded 2>/dev/null)"
+  # ── ...and a sender nobody reads has its prompt KEPT, and the failure filed ──
+  ws env CLAUDE_FLEET_SEND_REPORT="a scheduled prompt" "$ROOT/bin/fleet-send" -s cf-acme-web billing-svc "check the acme-web build" > /dev/null 2> "$WS/err"
+  is "send: an unread sender's failed wake exits non-zero" "1" "$?"
+  WSK="$(ws "$ROOT/bin/fleet-send" -s cf-acme-web --stranded 2>/dev/null | tr '\037' '\t')"
+  is "...its prompt is kept as a stranded prompt"  "billing-svc unwoken 24" "$(printf '%s' "$WSK" | awk -F'\t' '{print $1, $5, $4}')"
+  is "...which the inbox lists, and why"           "yes" \
+     "$(wsyn grep -q 'asleep and did not wake' <<< "$(ws "$ROOT/bin/fleet-inbox" -s cf-acme-web 2>&1)")"
+  is "...and the failure is filed for its lead"    "yes" \
+     "$(wsyn grep -q $'\tbilling-svc\tfailed\ta scheduled prompt not delivered — asleep and did not wake' "$CLAUDE_FLEET_DIR/cf-acme-web.inbox")"
+  # Re-queued once the agent can start: woken again, and delivered.
+  wsagent ok; : > "$WS/typed"
+  ws "$ROOT/bin/fleet-send" -s cf-acme-web --requeue billing-svc "$(printf '%s' "$WSK" | cut -f2)" > /dev/null 2> "$WS/err"
+  is "send: --requeue of the kept prompt wakes it again" "yes" "$(wsup)"
+  i=0; while [ "$i" -lt 30 ] && ! grep -qF 'check the acme-web build' "$WS/typed" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "...and delivers it"                          "yes" "$(wsyn grep -qF 'check the acme-web build' "$WS/typed")"
+  is "...and it is no longer stranded"             ""    "$(ws "$ROOT/bin/fleet-send" -s cf-acme-web --stranded 2>/dev/null)"
+
+  # ── a scheduled prompt that finds its session asleep ──
+  # It used to drop it: no session, nothing typed, the schedule marker cleared as if sent.
+  tmux -L cf-acme-web kill-session -t '=billing-svc' 2>/dev/null; wsasleep; : > "$WS/typed"
+  ws env CLAUDE_FLEET_AWAKE=off "$ROOT/bin/fleet-schedule" cf-acme-web billing-svc "$(date +%s)" "check the billing-svc invoices" > /dev/null 2>&1
+  is "send: a scheduled prompt wakes its sleeping session" "yes" "$(wsup)"
+  i=0; while [ "$i" -lt 30 ] && ! grep -qF 'check the billing-svc invoices' "$WS/typed" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "...and is delivered"                         "yes" "$(wsyn grep -qF 'check the billing-svc invoices' "$WS/typed")"
+
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  export PATH="$OLDPATH"
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$WS"
+else
+  skip "a send to a sleeping session wakes it first" "tmux or jq missing"
+fi
+
+# ── 4a10c12a3. a codex session sleeps and wakes on its own conversation ─────
+# Hibernation could sleep and wake only Claude: a codex session read as "no recorded
+# conversation id" and stayed up whatever its age. Now its conversation is the one
+# lib/codex-rollout.mjs says the pane is in (the process's open rollout, else the watcher's
+# record), its idle clock is the rollout's last USER turn, its folder must be trusted in its
+# own CODEX_HOME (codex 0.167.1 asks "Trust this folder?" in a git repo with no record, the
+# bypass flag notwithstanding), and the wake is `codex resume <that id>` with the fleet's own
+# codex flags, under that home, through the same launcher a fresh codex session uses.
+#   The agent is a stub `codex` that writes down its argv and the CODEX_HOME it was given,
+# and draws codex's composer: the placeholder dim, as the real one draws it, so a typed
+# draft and an empty box differ the way they do on a real pane. The server is started with a
+# DECOY CODEX_HOME, so a wake that took its home from the server instead of from the marker
+# is caught rather than passing by inheritance.
+group "a codex session sleeps and wakes on its own conversation"
+export CLAUDE_FLEET_WAKE_GRACE=0
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  CX="$(cd "$(mktemp -d "$TEST_RUNS.$$.cxhib.XXXXXX")" && pwd -P)"
+  cxyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  cxhas() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  cxup() { tmux -L cf-acme-api has-session -t "=$1" 2>/dev/null && echo yes || echo no; }
+  mkdir -p "$CX/fleet" "$CX/cfg" "$CX/home" "$CX/bin" "$CX/sys" "$CX/codexhome" "$CX/decoy"
+  touch "$CX/fleet/hibernate.enabled"
+  # A repo trusted at its root (codex-here writes exactly this stanza), a folder under it, a
+  # linked worktree of it, and a second repo nobody trusted.
+  git init -q "$CX/repo" && git -C "$CX/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+  mkdir -p "$CX/repo/sub"
+  git -C "$CX/repo" worktree add -q "$CX/repo-wt" -b wt 2>/dev/null
+  git init -q "$CX/other"
+  printf '[tui]\nscreen_reader_detection_done = true\n\n[projects."%s"]\ntrust_level = "trusted"\n' "$CX/repo" \
+    > "$CX/codexhome/config.toml"
+  cat > "$CX/bin/codex" <<STUB
+#!/bin/sh
+case "\$1" in --help) echo "      --no-daemon   run without the background daemon"; exit 0 ;; esac
+printf '%s\n' "\$*" >> "$CX/argv"
+printf '%s\n' "\${CODEX_HOME:-}" >> "$CX/home-seen"
+if [ -f "$CX/codex-trust" ]; then
+  printf '\033[2J\033[H  Do you trust the contents of this directory?\n\n› 1. Trust and continue\n  2. Quit\n'
+  exec sleep 600
+fi
+last=""
+draw() { printf '\033[2J\033[H%s\n\n\033[1m›\033[0m \0337\033[2mAsk Codex to do anything\033[0m\n\n  model · Context 0%% used\0338' "\$last"; }
+draw
+while IFS= read -r line; do printf '%s\n' "\$line" >> "$CX/typed"; last="\$line"; draw; done
+STUB
+  chmod +x "$CX/bin/codex"
+  # ONLY THE TOOLS, LINKED ONE BY ONE, so no real codex beside them can answer instead.
+  for t in tmux jq node git; do ln -s "$(command -v "$t")" "$CX/sys/$t"; done
+  cxpath="$CX/bin:$ROOT/bin:$CX/sys:/usr/bin:/bin:/usr/sbin:/sbin"
+  cx() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CODEX_HOME \
+             HOME="$CX/home" PATH="$cxpath" CLAUDE_FLEET_DIR="$CX/fleet" CLAUDE_CONFIG_DIR="$CX/cfg" \
+             CLAUDE_FLEET_WAKE_SETTLE=1 "$@"; }
+  # Per-run ids: codex-here refuses a conversation another live process holds, by reading
+  # every process's argv on the machine, so a sibling run's fixed id would refuse this one's.
+  cxuid() { printf '%s-1111-2222-3333-%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
+  cxiso() { node -e 'process.stdout.write(new Date(Date.now()-process.argv[1]*3600000).toISOString())' "$1"; }
+  mk_cx() {   # slot cwd id hours-since-the-last-user-turn
+    local d="$CX/codexhome/sessions/2026/11/14" f
+    mkdir -p "$d"; f="$d/rollout-2026-11-14T10-00-00-$3.jsonl"
+    { printf '{"timestamp":"%s","type":"session_meta","payload":{"id":"%s","cwd":"%s","timestamp":"%s"}}\n' "$(cxiso 40)" "$3" "$2" "$(cxiso 40)"
+      printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_trigger":"user"}}}\n' "$(cxiso "$4")"
+      printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete"}}\n' "$(cxiso "$4")"; } > "$f"
+    # The file itself is fresh: the idle clock must come from the turn, not the mtime.
+    jq -n --arg id "$3" --arg slot "$1" --arg cwd "$2" --arg tr "$f" --argjson ts "$(date +%s)" \
+      '{session_id:$id, agent:"codex", sock:"cf-acme-api", slot:$slot, cwd:$cwd, status:"ready", transcript:$tr, ts:$ts}' \
+      > "$CX/fleet/$3.json"
+    printf 'codex\n' > "$CX/fleet/cf-acme-api.$1.agent"
+    cx tmux -L cf-acme-api new-session -d -s "$1" -c "$2" -x 100 -y 24 "exec '$CX/bin/codex'"
+  }
+  cxj() {   # slot field: one field of that session's row in the plan
+    cx "$ROOT/bin/fleet-hibernate" -s cf-acme-api --idle-hours 24 --json 2>/dev/null \
+      | jq -r --arg s "$1" --arg f "$2" '.[] | select(.slot==$s) | .[$f] | tostring'
+  }
+  # The fleet's server, started the way a fleet's is — and holding the decoy home.
+  cx env CODEX_HOME="$CX/decoy" CLAUDE_FLEET_CODEX_RECORD=0 tmux -L cf-acme-api new-session -d -s scratch-0 -x 80 -y 24 "sleep 600"
+  CXT="$(cxuid cccccccc)"; CXW="$(cxuid cccccccd)"; CXO="$(cxuid cccccccf)"
+  mk_cx toolbox  "$CX/repo/sub" "$CXT" 30
+  mk_cx acme-web "$CX/repo-wt"  "$CXW" 30
+  mk_cx scratch  "$CX/other"    "$CXO" 30
+  i=0; while [ "$i" -lt 40 ] && ! grep -q 'Context 0% used' <<< "$(tmux -L cf-acme-api capture-pane -p -t toolbox 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
+
+  # ── the plan ──
+  is "codex: a codex session idle 30h is sleepable"        "codex:true" "$(cxj toolbox agent):$(cxj toolbox would_sleep)"
+  is "...on its idle clock, the last USER turn, not the file's age" "30" "$(cxj toolbox idle_hours | cut -d. -f1)"
+  is "...its conversation, from the rollout lookup"        "$CXT" "$(cxj toolbox session_id)"
+  # TRUST, both directions: a trusted ancestor and a linked worktree of a trusted repo count;
+  # a repo with no record would sit on codex's trust dialog, so it is never slept.
+  is "codex: a folder under a trusted repo counts as trusted"  "true" "$(cxj toolbox would_sleep)"
+  is "codex: a linked worktree of a trusted repo counts too"   "true" "$(cxj acme-web would_sleep)"
+  is "codex: an untrusted folder stays up"                     "false" "$(cxj scratch would_sleep)"
+  is "...saying codex would ask, and where the record would be" "yes" \
+     "$(cxyn cxhas "no trust record in $CX/codexhome/config.toml" "$(cxj scratch why)")"
+  # A DRAFT: typed into the box and not sent. The placeholder is dim and is not one.
+  tmux -L cf-acme-api send-keys -t toolbox -l 'fix the flaky test'; sleep 0.3
+  is "codex: something typed and unsent keeps it up"       "yes" "$(cxyn cxhas 'typed and unsent' "$(cxj toolbox why)")"
+  tmux -L cf-acme-api send-keys -t toolbox Enter; sleep 0.3
+  is "...and the empty box, placeholder and all, does not"  "true" "$(cxj toolbox would_sleep)"
+
+  # ── sleep it ──
+  cx "$ROOT/bin/fleet-hibernate" -s cf-acme-api --idle-hours 24 --apply > "$CX/apply" 2>&1
+  is "codex: --apply sleeps it"                            "no" "$(cxup toolbox)"
+  is "...with a marker naming the conversation, the agent and its home" "$CXT codex $CX/codexhome" \
+     "$(awk -F'\t' '{print $2, $5, $6}' "$CX/fleet/cf-acme-api.toolbox.asleep" 2>/dev/null)"
+  is "...and the untrusted one is still up"               "yes" "$(cxup scratch)"
+
+  # ── wake it ──
+  : > "$CX/argv"; : > "$CX/home-seen"
+  cx "$ROOT/bin/fleet-hibernate" -s cf-acme-api --wake toolbox --timeout 20 > "$CX/wake" 2>&1
+  is "codex: --wake exits 0"                               "0" "$?"
+  is "...the pane is back, the marker consumed"            "yes:no" \
+     "$(cxup toolbox):$([ -f "$CX/fleet/cf-acme-api.toolbox.asleep" ] && echo yes || echo no)"
+  is "...running codex resume on the SAME conversation, with the fleet's codex flags" \
+     "resume $CXT --dangerously-bypass-approvals-and-sandbox --no-daemon -c check_for_update_on_startup=false" \
+     "$(tail -1 "$CX/argv")"
+  is "...under the CODEX_HOME it slept in, not the server's" "$CX/codexhome" "$(tail -1 "$CX/home-seen")"
+  is "...in the folder it slept in"                        "$CX/repo/sub" \
+     "$(tmux -u -L cf-acme-api display-message -p -t toolbox '#{pane_current_path}' 2>/dev/null)"
+
+  # ── a send to a sleeping codex session wakes it the same way ──
+  cx "$ROOT/bin/fleet-hibernate" -s cf-acme-api --idle-hours 24 --apply toolbox > /dev/null 2>&1
+  : > "$CX/argv"; : > "$CX/typed"
+  cx "$ROOT/bin/fleet-send" -s cf-acme-api toolbox "list the toolbox scripts" > /dev/null 2> "$CX/send"
+  is "codex: a send to it wakes it first"                  "0:yes" "$?:$(cxyn grep -q 'is asleep — waking it first' "$CX/send")"
+  is "...on the same conversation"                         "yes" "$(cxyn grep -q "^resume $CXT " "$CX/argv")"
+  i=0; while [ "$i" -lt 30 ] && ! grep -qF 'list the toolbox scripts' "$CX/typed" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "...and the prompt lands in the woken pane"           "yes" "$(cxyn grep -qF 'list the toolbox scripts' "$CX/typed")"
+
+  # ── a wake that meets codex's trust dialog says so, and stays asleep ──
+  tmux -L cf-acme-api kill-session -t '=scratch' 2>/dev/null; touch "$CX/codex-trust"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' 0 "$CXO" "$CX/other" 30 codex "$CX/codexhome" > "$CX/fleet/cf-acme-api.scratch.asleep"
+  cx "$ROOT/bin/fleet-hibernate" -s cf-acme-api --wake scratch --timeout 10 > "$CX/stall" 2>&1
+  is "codex: a wake that meets the trust dialog fails"     "1" "$?"
+  is "...naming the dialog and the config it records in"   "yes" \
+     "$(cxyn grep -q "codex's folder-trust dialog.*$CX/codexhome/config.toml" "$CX/stall")"
+  is "...and the marker is KEPT"                           "yes" "$([ -f "$CX/fleet/cf-acme-api.scratch.asleep" ] && echo yes || echo no)"
+
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$CX"
+else
+  skip "a codex session sleeps and wakes on its own conversation" "tmux, jq or git missing"
 fi
 unset CLAUDE_FLEET_WAKE_GRACE
 

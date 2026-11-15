@@ -308,7 +308,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 // pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
 // of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
 export const QUIET_PANE_MS = 15000;
-export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
+export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
@@ -527,6 +527,13 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
           {card && !card.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
+          {/* A LEAD IS NEVER PAUSED HERE, but a parked one has to come back from here: the pair
+              above is a worker's, so a lead parked by an older build or by hand had no way up
+              from its own screen. Only Resume, never Pause (fleet_pause refuses a lead). */}
+          {card?.lead && parked ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_resume')} icon="play">{t('sess.resume')}</Btn> : null}
+          {/* ...and a project with NO lead, opened at its lead's name: the project page's own
+              start (startLead, fleet.lead), so both places start one the same way. */}
+          {!card && startLead ? <Btn kind="ghost sm" disabled={busy} onClick={startLead} icon="play">{t('project.leadStart')}</Btn> : null}
           <div class="menu-wrap" ref={menuWrap}>
             <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
             {menu ? (

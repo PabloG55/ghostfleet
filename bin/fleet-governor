@@ -380,7 +380,13 @@ hib_fingerprint() {
     | {session_id, slot, pane, status, state, source, cwd, transcript, nested_under}]
     | sort_by(.slot, .session_id, .pane)' "$FLEET_DIR"/*.json 2>/dev/null)"
   printf '%s|%s|%s' "${CLAUDE_FLEET_HIBERNATE:-}" "$sess" "$records"
-  for f in "$FLEET_DIR/hibernate.enabled" "$FLEET_DIR/$SOCK".*.asleep "$FLEET_DIR/$SOCK".*.parked; do
+  # The leads switch and this fleet's lead exemption decide whether a lead is sleepable at
+  # all, so flipping either is a reason to retry now. The switch's first line is the lead's
+  # threshold, read here like the rest, so changing the hours re-arms too. A lead crossing
+  # that threshold is not in here: a clock would re-arm every tick, and the 30-minute retry
+  # already covers a lead that became old enough while nothing else changed.
+  for f in "$FLEET_DIR/hibernate.enabled" "$FLEET_DIR/hibernate-leads.enabled" "$FLEET_DIR/$SOCK.lead-stays-up" \
+           "$FLEET_DIR/$SOCK".*.asleep "$FLEET_DIR/$SOCK".*.parked; do
     [ -f "$f" ] || continue
     value=""; read -r value < "$f" || true
     printf '|%s:%s' "$f" "$value"

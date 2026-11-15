@@ -8,9 +8,14 @@
 #                                     it is still up --settle N seconds (default 5) after its
 #                                     first prompt, else FAILED with the pane's last lines
 #     fleet-hibernate --pressure      governor mode: oldest-idle first until pressure clears
+#     fleet-hibernate --pressure --dry-run
+#                                     what --pressure WOULD sleep, leads included; changes nothing
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
 #     fleet-hibernate --json          the same plan, machine-readable
 #     -s SOCK                         one fleet instead of all of them
+#   A fleet's lead sleeps only under --pressure, and only when <fleet dir>/hibernate-leads.enabled
+#   exists (its content, if any, is the lead's idle threshold in hours; default 24).
+#   <fleet dir>/<sock>.lead-stays-up keeps that one fleet's lead up whatever the switch says.
 #     fleet-hibernate --resolve SOCK SLOT
 #                                     which conversation that session's process is in:
 #                                     prints id<US>transcript<US>how, corrects the record,
@@ -68,6 +73,7 @@ case "${FLEET_DIR:-}" in
 esac
 IDLE_HOURS="${CLAUDE_FLEET_HIBERNATE_HOURS:-48}"
 MODE=plan; ONLY_SOCK=""; WAKE_SLOT=""; NAMED=""; JSON=no; WAKE_TIMEOUT="${CLAUDE_FLEET_WAKE_TIMEOUT:-300}"
+PRESSURE=no; DRY=no
 # How long a woken session must stay up after its first prompt before the wake is called a
 # success, and how long a session that has just started is left alone by the rules. Both are
 # explained where they are used (wake_one, veto_for).
@@ -80,8 +86,8 @@ while [ $# -gt 0 ]; do
     # `--apply --idle-hours 0` still parses the way it always did.
     --apply)      MODE=apply
                   case "${2:-}" in ""|-*) shift ;; *) NAMED="$2"; shift 2 ;; esac ;;
-    --dry-run)    MODE=plan; shift ;;
-    --pressure)   MODE=pressure; shift ;;
+    --dry-run)    MODE=plan; DRY=yes; shift ;;
+    --pressure)   MODE=pressure; PRESSURE=yes; shift ;;
     --wake)       MODE=wake; WAKE_SLOT="${2:?--wake needs a session name}"; shift 2 ;;
     --idle-hours) IDLE_HOURS="${2:?}"; shift 2 ;;
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
@@ -90,16 +96,45 @@ while [ $# -gt 0 ]; do
     --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
     --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,21p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,27p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
+# ── --dry-run WINS, IN EITHER ORDER ──────────────────────────────────────────
+# The last mode flag used to decide, so `--dry-run --pressure` slept sessions and
+# `--pressure --dry-run` printed a plan with the lead rule of a run that was not --pressure.
+# The one question a person asks before trusting the governor with a lead is "what would
+# --pressure take", and it has to be answerable without taking anything: so a dry run is a
+# plan whatever comes after it, and --pressure still decides which rules that plan applies.
+[ "$DRY" = yes ] && case "$MODE" in apply|pressure) MODE=plan ;; esac
 
 # ── the switch ────────────────────────────────────────────────────────────────
 # A file rather than only an environment variable: the governor runs as a daemon and does
 # not inherit the shell that would export one, so an env-only switch would be on for a human
 # and off for the thing that actually needs it — the worst possible split.
 enabled() { [ -f "${FLEET_DIR:?}/hibernate.enabled" ] || [ "${CLAUDE_FLEET_HIBERNATE:-}" = 1 ]; }
+
+# ── A FLEET'S LEAD, UNDER MEMORY PRESSURE ONLY, AND ONLY WHEN SWITCHED ON ────
+# A lead used to be slept by name and nothing else, which on a machine deep in swap meant the
+# sessions holding the most memory for the longest were exactly the ones the governor could
+# not touch: leads idle for days, every one of them a full agent process. So a lead may now be
+# slept like a worker — oldest idle first — but only by --pressure, the governor's path, and
+# only past its own threshold, which is shorter than a worker's because a lead idle a day is
+# a lead nobody is using. The threshold alone never takes one: a dry run or a plain --apply
+# still leaves every lead up, so the only thing that changed for a fleet that is not under
+# pressure is nothing.
+#   PER PROFILE, AND OFF UNTIL SOMEBODY TURNS IT ON, in the fleet dir beside hibernate.enabled
+# and for the same reason that one is a file: the governor is a daemon and inherits no shell.
+# Its content, when there is any, is the lead's threshold in hours.
+#   ONE FLEET'S LEAD CAN STAY UP WHATEVER THE SWITCH SAYS: <sock>.lead-stays-up, beside it.
+# Two parts, sock and kind, so nothing that reads <sock>.<slot>.<kind> mistakes it for a
+# session's marker — and nothing that stops or renames `master` sweeps it away with them.
+LEADS_SWITCH="${FLEET_DIR:?}/hibernate-leads.enabled"
+leads_on() { [ -f "$LEADS_SWITCH" ]; }
+lead_exempt_file() { printf '%s/%s.lead-stays-up' "${FLEET_DIR:?}" "$1"; }
+# A number or nothing: an empty switch, or one that says something else, is the default.
+LEAD_HOURS="$(head -1 "$LEADS_SWITCH" 2>/dev/null | tr -d '[:space:]')"
+case "$LEAD_HOURS" in ''|*[!0-9.]*|*.*.*|.) LEAD_HOURS=24 ;; esac
 
 now() { date +%s; }
 
@@ -200,8 +235,23 @@ slot_by_sid() {    # sock sid -> slot
 # prompt, so the worst it does is make a session look busier than it is and keep it awake.
 TAIL_SMALL="${CLAUDE_FLEET_TAIL_SMALL:-262144}"
 TAIL_BIG="${CLAUDE_FLEET_TAIL_BIG:-4194304}"
+# ── AND IN A CODEX ROLLOUT, A TURN SOMEBODY STARTED ──────────────────────────
+# codex writes no "type":"user" record. Measured on codex-cli 0.167.1, one typed prompt is
+# three lines: a `response_item` with role "user" — which the session's opening environment
+# block ALSO is, so it cannot be the clock — then `event_msg` task_started whose
+# turn_attribution.turn_trigger is "user", then an item_completed carrying the words. Older
+# builds wrote an `event_msg` user_message instead. Either of those two is a turn a person (or
+# a send) began; a turn codex started on its own is not, and neither is anything it wrote.
 last_prompt_ts() {
-  local tr="$1" bytes ts
+  local tr="$1" agent="${2:-claude}" bytes ts pat sel
+  if [ "$agent" = codex ]; then
+    pat='"user_message"|"turn_trigger":"user"'
+    sel='select(.type == "event_msg" and (.payload.type == "user_message"
+                or (.payload.type == "task_started" and .payload.turn_attribution.turn_trigger == "user")))'
+  else
+    pat='"type":"user"'
+    sel='select((.message.content | type) == "string")'
+  fi
   [ -s "$tr" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local size
@@ -222,8 +272,8 @@ last_prompt_ts() {
     # mtime for exactly the sessions whose prompt was easiest to find.
     local skip=2; [ "$size" -le "$bytes" ] && skip=1
     ts="$(tail -c "$bytes" "$tr" 2>/dev/null | tail -n +$skip \
-          | grep '"type":"user"' 2>/dev/null \
-          | jq -r 'select((.message.content | type) == "string") | .timestamp // empty
+          | grep -E "$pat" 2>/dev/null \
+          | jq -r "$sel"' | .timestamp // empty
                    | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch empty' 2>/dev/null \
           | tail -1)"
     case "$ts" in ''|*[!0-9]*) ;; *) printf '%s' "$ts"; return 0 ;; esac
@@ -231,10 +281,10 @@ last_prompt_ts() {
   return 1
 }
 
-idle_hours() {
+idle_hours() {   # transcript [agent]
   local tr="$1" m
   [ -n "$tr" ] || { printf ''; return; }
-  m="$(last_prompt_ts "$tr")" || m="$(mtime "$tr")"
+  m="$(last_prompt_ts "$tr" "${2:-claude}")" || m="$(mtime "$tr")"
   # Checked again here rather than trusting the source: this number decides whether a process
   # is killed, and an earlier failure was invisible precisely because a non-number reached
   # arithmetic and came out looking like an answer. An unreadable date must produce NOTHING,
@@ -325,7 +375,108 @@ while [ -L "$_src" ]; do
 done
 UNDIM="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/undim.awk"
 FLEET_ENV="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+ROLLOUT="${FLEET_ENV%/*}/codex-rollout.mjs"
+BIN_DIR="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)"
 undim() { LC_ALL=C awk -f "$UNDIM"; }
+
+# ── WHICH AGENT A SESSION RUNS ───────────────────────────────────────────────
+# The marker fleet-spawn and an agent switch write (bin/fleet-agent), read the way
+# fleet-restart's agent_for reads it. No marker is claude, as everywhere else.
+agent_of_slot() {   # sock slot
+  local a=""
+  a="$(tr -d '[:space:]' < "${FLEET_DIR:?}/$1.$2.agent" 2>/dev/null)"
+  printf '%s' "${a:-claude}"
+}
+
+# ── A CODEX SESSION: ITS CONVERSATION, ITS HOME, ITS ROLLOUT ─────────────────
+# Neither of live_sid's sources can answer for codex: it writes no note about itself under a
+# config dir, and it is resumed as `codex resume <id>`, a subcommand, not a --resume flag. The
+# answer is the one fleet-send's codex queue already asks for (lib/codex-rollout.mjs thread):
+# the rollout the pane's process holds open, else what the watcher beside it recorded for the
+# slot. The home comes from the rollout's own path, never from this caller's environment — a
+# governor's CODEX_HOME is not the session's, and a resume under the wrong home finds nothing.
+CX_ID=""; CX_HOME=""; CX_HOW=""; CX_FILE=""
+codex_thread() {   # sock slot -> CX_*, or 1
+  local out pid
+  CX_ID=""; CX_HOME=""; CX_HOW=""; CX_FILE=""
+  command -v node >/dev/null 2>&1 && [ -f "$ROLLOUT" ] || return 1
+  pid="$(pane_pid_of "$1" "$2")"
+  out="$(node "$ROLLOUT" thread --pid "${pid:-0}" --sock "$1" --slot "$2" --fleet-dir "${FLEET_DIR:?}" --with-file 2>/dev/null)" || return 1
+  IFS=$'\x1f' read -r CX_ID CX_HOME CX_HOW CX_FILE <<< "$out"
+  [ -n "$CX_ID" ] && [ -n "$CX_HOME" ] && [ -n "$CX_FILE" ]
+}
+
+# ── WOULD CODEX ASK WHETHER TO TRUST THE FOLDER? ─────────────────────────────
+# Measured on codex-cli 0.167.1 in a scratch CODEX_HOME, because whether the fleet's codex
+# launch can be asked at all decides whether this check is needed:
+#   - in a git checkout with no record it draws "Trust this folder?" — WITH
+#     --dangerously-bypass-approvals-and-sandbox as well as without it, so the flag that lets
+#     a Claude session skip this check does not exist for codex;
+#   - a record on the repository's root answers for every folder under it, AND for a linked
+#     worktree of that repository in a sibling directory: codex asks of the main checkout,
+#     not of the path;
+#   - outside any git checkout it never asked. That is one build's behaviour, so it is not
+#     relied on: a session there with no record stays up, which costs memory and never work.
+# So the record is codex's own: [projects."<path>"] trust_level = "trusted" in the session's
+# $CODEX_HOME/config.toml, which is exactly what answering the dialog writes and what
+# bin/codex-here pre-records under yolo. Asked of the nearest trusted ancestor, of the path as
+# recorded and as resolved (codex keys the table by the physical path), and of the main
+# checkout's root when the folder is a worktree.
+codex_trusted_dirs() {   # codex home -> one trusted folder per line
+  awk -v q="'" '
+    /^[ \t]*\[/ {
+      cur = ""; inproj = 0; h = $0
+      sub(/^[ \t]*\[[ \t]*/, "", h); sub(/[ \t]*\][ \t]*(#.*)?$/, "", h)
+      if (h == "projects") inproj = 1
+      else if (substr(h, 1, 9) == "projects.") {
+        k = substr(h, 10); c = substr(k, 1, 1)
+        if ((c == "\"" || c == q) && length(k) > 2 && substr(k, length(k), 1) == c) cur = substr(k, 2, length(k) - 2)
+      }
+      next
+    }
+    cur != "" && /^[ \t]*trust_level[ \t]*=[ \t]*"trusted"/ { print cur; next }
+    inproj && /^[ \t]*"[^"]*"[ \t]*=.*trust_level[ \t]*=[ \t]*"trusted"/ {
+      k = $0; sub(/^[ \t]*"/, "", k); sub(/".*/, "", k); print k
+    }' "$1/config.toml" 2>/dev/null
+}
+codex_trusted() {   # cwd codex-home
+  local cwd="$1" list p c root=""
+  [ -n "$cwd" ] && [ -n "$2" ] || return 1
+  list="$(codex_trusted_dirs "$2")"
+  [ -n "$list" ] || return 1
+  if command -v git >/dev/null 2>&1; then
+    root="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    case "$root" in */.git) root="${root%/.git}" ;; *) root="" ;; esac
+  fi
+  for c in "$cwd" "$(cd "$cwd" 2>/dev/null && pwd -P)" "$root" "$( [ -n "$root" ] && cd "$root" 2>/dev/null && pwd -P)"; do
+    p="$c"
+    while [ -n "$p" ] && [ "$p" != / ]; do
+      printf '%s\n' "$list" | grep -qxF -- "$p" && return 0
+      p="$(dirname "$p")"
+    done
+  done
+  return 1
+}
+
+# ── A CODEX DRAFT ────────────────────────────────────────────────────────────
+# codex draws no box: its composer is the LAST line that starts with its glyph, above the
+# footer. Measured on 0.167.1: empty, it is the glyph and a placeholder drawn DIM ("Ask Codex
+# to do anything"); with a draft, the glyph and the words at normal weight. So the same undim
+# that hides Claude's suggestion hides codex's placeholder, and what is left after the glyph
+# is the draft. Every prompt already sent is drawn above it with the same glyph — history,
+# which a sleep cannot lose — and a dialog's numbered choices are a menu, not words.
+codex_has_draft() {   # sock slot
+  local pane line nbsp
+  pane="$(tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null)" || return 1
+  [ -n "$pane" ] || return 1
+  pane="$(printf '%s\n' "$pane" | undim)"
+  nbsp="$(printf '\302\240')"; pane="${pane//$nbsp/ }"
+  line="$(printf '%s\n' "$pane" | grep -E '^› ' | tail -1)"
+  [ -n "$line" ] || return 1
+  line="${line#› }"
+  grep -qE '^[0-9]+\. ' <<< "$line" && return 1
+  grep -q '[^[:space:]]' <<< "$line"
+}
 
 has_draft() {
   local sock="$1" slot="$2" pane composer
@@ -363,9 +514,10 @@ has_draft() {
 # truncated away: the rules span whatever width there is. The footer phrases stay as extra
 # signals — including the one that was missing — because a second way to say yes costs
 # nothing, and only their ABSENCE was ever the bug.
-is_ready() {
+is_ready() {   # pane [the agent's own ready pattern]
   local pane="$1"
   [ -n "$pane" ] || return 1
+  [ -n "${2:-}" ] && grep -qE -- "$2" <<< "$pane" && return 0
   composer_lines "$pane" >/dev/null 2>&1 && return 0
   printf '%s\n' "$pane" | grep -qE 'mode on|permissions on|ctx:[0-9]|esc to interrupt|for shortcuts'
 }
@@ -662,7 +814,8 @@ BG_VETO='its conversation is running in a background process:'
 # Returns a reason, or nothing when the session may sleep. Every entry is a way for
 # hibernation to destroy something rather than defer it.
 veto_for() {
-  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" live="$8" created="${9:-}" age_h up
+  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" live="$8" created="${9:-}"
+  local agent="${10:-claude}" home="${11:-}" age_h up lead=no th probe
   # The tab check leads: a `_`-prefixed session is an editor or terminal pane, it never had
   # a conversation, and reporting it as "no recorded conversation id" is true but useless —
   # on a real fleet that was two thirds of the list, every row saying the same wrong thing.
@@ -673,15 +826,41 @@ veto_for() {
   # nothing else is up. Which fleet is Jarvis is the marker's sock (lib/jarvis.mjs), never a
   # name spelled here. Ahead of the lead rule so the reason printed is the one that holds.
   if is_jarvis "$sock" "$slot"; then jarvis_always_on "$sock"; return; fi
-  # ── A FLEET'S LEAD IS NEVER SLEPT BY A RULE ─────────────────────────────────
-  # Neither the threshold nor --pressure may take it; only `--apply master` naming it. The
-  # lead is the session a person comes back to, and the one measured case of hibernation
-  # getting it wrong was a lead in active use. Fixing the stale id alone would still leave
-  # the lead to a clock, and a clock is exactly what was wrong about it.
+  # ── A FLEET'S LEAD IS SLEPT BY A RULE ONLY UNDER PRESSURE, AND ONLY IF SWITCHED ON ──
+  # The threshold never takes it; `--apply master` naming it always could. The lead is the
+  # session a person comes back to, and the one measured case of hibernation getting it wrong
+  # was a lead in active use — so the rule that may now take one (LEADS_SWITCH, above) is
+  # narrower than a worker's, not the same rule with a different number: --pressure only, a
+  # fleet can opt out, and the checks below that keep it up are the stricter ones. Each row
+  # says which of those decided it, because "never" and "not this fleet" and "not now" are
+  # three different answers to the person reading the plan.
   if [ "$slot" = master ] && [ "$NAMED" != master ]; then
-    printf "a fleet's lead is never slept automatically — fleet-hibernate --apply master -s %s" "$sock"; return
+    if ! leads_on; then
+      printf "a fleet's lead is never slept automatically — fleet-hibernate --apply master -s %s (the leads switch is off: %s)" "$sock" "$LEADS_SWITCH"; return
+    fi
+    if [ -f "$(lead_exempt_file "$sock")" ]; then
+      printf "this fleet's lead is exempt and stays up — %s" "$(lead_exempt_file "$sock")"; return
+    fi
+    if [ "$PRESSURE" != yes ]; then
+      printf "a fleet's lead sleeps only under memory pressure (--pressure), never on the threshold — %s" "$LEADS_SWITCH"; return
+    fi
+    lead=yes
   fi
-  [ -n "$id" ] || { printf 'no recorded conversation id — it could not be woken'; return; }
+  # ── ONLY AGENTS A WAKE CAN BRING BACK ───────────────────────────────────────
+  # A wake is a resume by id, and only claude's and codex's are known here. Anything else
+  # slept is a card that cannot come back as it was.
+  case "$agent" in
+    claude|codex) ;;
+    *) printf 'a %s session — hibernation can wake only claude and codex' "$agent"; return ;;
+  esac
+  if [ -z "$id" ]; then
+    if [ "$agent" = codex ]; then
+      printf 'a codex session — it cannot be woken yet: no rollout says which conversation it is in'
+    else
+      printf 'no recorded conversation id — it could not be woken'
+    fi
+    return
+  fi
   [ -f "${FLEET_DIR:?}/$sock.$slot.asleep" ] && { printf 'already asleep'; return; }
   # Ahead of every clock: a conversation a bg process is running is not idle whatever its
   # transcript says, and ending the pane ends it (bg_runner).
@@ -691,11 +870,39 @@ veto_for() {
   # had not moved in 26.8 days. Vetoing on the word alone would pin its memory forever, so
   # the veto needs the status to be BOTH busy and recent.
   age_h="$(awk -v n="$(now)" -v t="${ts:-0}" 'BEGIN{printf "%.2f", (n-t)/3600}')"
+  # ── A LEAD IS HELD TO THE WORD, THE PANE AND THE QUEUE ──────────────────────
+  # A worker's stale `working` is not believed past the hour (below), because one measured
+  # stuck for 26.8 days and would have pinned its memory forever. A lead is the other trade:
+  # one wrongly kept up costs memory, one wrongly slept loses the person's place — a question
+  # it is waiting on, a turn it is in, prompts waiting for it. So for the lead the word is
+  # enough at any age, and fleet-send itself is asked what a send would meet (its
+  # --would-queue: a turn on the pane, a question, its queue, or a prompt handed to its mod
+  # and not yet started), so this and the delivery path cannot disagree about "busy".
+  if [ "$lead" = yes ]; then
+    case "$st" in
+      working|need-you) printf 'a lead that is %s is never slept (it said so %.1fh ago)' "$st" "$age_h"; return ;;
+    esac
+    probe="$(CLAUDE_FLEET_DIR="${FLEET_DIR:?}" "$BIN_DIR/fleet-send" -s "$sock" --would-queue "$slot" 2>/dev/null | tail -1)"
+    case "$probe" in
+      working)  printf 'a lead whose pane shows a turn running is never slept'; return ;;
+      need-you) printf 'a lead waiting on a question is never slept'; return ;;
+      backlog)  printf 'a lead with prompts queued or handed to it and not yet started is never slept'; return ;;
+    esac
+  fi
   case "$st" in
     working|need-you|limit|interrupted)
       awk -v a="$age_h" 'BEGIN{exit !(a < 1)}' && { printf '%s, and said so within the hour' "$st"; return; } ;;
   esac
-  has_draft "$sock" "$slot" && { printf 'something is typed and unsent'; return; }
+  # ── A PROMPT WAITING IN THE QUEUE IS A PROMPT A SLEEP WOULD STRAND ──────────
+  # The queue is drained by the session's own Stop (hooks/fleet-event.sh), and a slept session
+  # has none: the prompt would sit there until somebody woke it and it then finished a turn.
+  # Any session, not only a lead — the file is the evidence, and it is one test.
+  [ -s "${FLEET_DIR:?}/$sock.$slot.queue" ] && { printf 'a prompt is queued for it — %s' "${FLEET_DIR:?}/$sock.$slot.queue"; return; }
+  if [ "$agent" = codex ]; then
+    codex_has_draft "$sock" "$slot" && { printf 'something is typed and unsent'; return; }
+  else
+    has_draft "$sock" "$slot" && { printf 'something is typed and unsent'; return; }
+  fi
   master_with_live_workers "$sock" "$slot" && { printf 'a lead with workers still running'; return; }
   # ── TRUST ONLY MATTERS IF A DIALOG CAN ACTUALLY APPEAR ──────────────────────
   # The veto exists because a resumed session in an untrusted folder stops on "Is this a
@@ -711,15 +918,26 @@ veto_for() {
   #   Belt and braces either way — the wake polls for the dialog and fails loudly with the
   # marker kept, so a folder that does turn out to be untrusted costs one manual step and
   # never the conversation.
-  if ! skips_trust_dialog "$sock" "$slot"; then
+  if [ "$agent" = codex ]; then
+    # codex has no flag that skips its dialog (codex_trusted says what was measured).
+    codex_trusted "$cwd" "$home" \
+      || { printf 'a codex session — it cannot be woken yet: its folder has no trust record in %s/config.toml, and codex would ask' "$(tilde "$home")"; return; }
+  elif ! skips_trust_dialog "$sock" "$slot"; then
     is_trusted "$cwd" || { printf 'its folder has no trust record and its agent would be asked'; return; }
   fi
   # Late in the list on purpose: the vetoes above are about the pane and the folder and
   # answer the same whichever conversation is live, so they report the more useful reason.
   [ "$live" = yes ] || { printf "its live conversation could not be established — the recorded id may be stale"; return; }
   [ -n "$idle" ] || { printf 'no transcript to date it by'; return; }
-  awk -v i="$idle" -v t="$IDLE_HOURS" 'BEGIN{exit !(i < t)}' \
-    && { printf 'idle %.1fh, under the %sh threshold' "$idle" "$IDLE_HOURS"; return; }
+  th="$IDLE_HOURS"; [ "$lead" = yes ] && th="$LEAD_HOURS"
+  if awk -v i="$idle" -v t="$th" 'BEGIN{exit !(i < t)}'; then
+    if [ "$lead" = yes ]; then
+      printf "idle %.1fh, under the lead's %sh threshold (%s)" "$idle" "$th" "$LEADS_SWITCH"
+    else
+      printf 'idle %.1fh, under the %sh threshold' "$idle" "$th"
+    fi
+    return
+  fi
   # ── A SESSION THAT HAS JUST COME BACK IS NOT TAKEN STRAIGHT BACK DOWN ───────
   # The idle clock is the last prompt a person typed, and waking types nothing: a session idle
   # 50h before its wake is idle 50h a second after it. So the governor, which runs --pressure
@@ -743,7 +961,7 @@ veto_for() {
 # ── the plan ──────────────────────────────────────────────────────────────────
 PLAN=""
 build_plan() {
-  local sock slot created st ts id cwd tr idle why live _rs
+  local sock slot created st ts id cwd tr idle why live _rs agent home note
   while IFS= read -r sock; do
     [ -n "$sock" ] || continue
     while IFS=$'\t' read -r slot created; do
@@ -757,8 +975,18 @@ build_plan() {
       # When the process answers, its conversation replaces the recorded one for the id AND
       # the idle clock, and the record is corrected so the grid and the next plan agree.
       # When it cannot, the recorded values stay for display and the veto list refuses.
-      live=no; _rs=""
+      live=no; _rs=""; home=""; note=""
+      agent=claude; case "$slot" in _*) ;; *) agent="$(agent_of_slot "$sock" "$slot")" ;; esac
       case "$slot" in _*) ;; *)
+        if [ "$agent" = codex ]; then
+          # The rollout is the transcript and the evidence at once; a codex session's id is
+          # never followed through Claude's hand-off lines, which a rollout does not have.
+          id=""; tr=""
+          if codex_thread "$sock" "$slot"; then
+            live=yes; id="$CX_ID"; tr="$CX_FILE"; home="$CX_HOME"
+          fi
+          [ -n "$cwd" ] || cwd="$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+        else
         live_sid "$sock" "$slot" && live=yes
         # A RENAMED SESSION'S RECORD IS FILED UNDER ITS OLD NAME. Until the hook learned to
         # ask tmux for the pane's current name, it wrote the name the agent was launched
@@ -781,13 +1009,19 @@ build_plan() {
           [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}" "$FOLLOW_PREV"
           # the live transcript or none: falling back to the recorded one is the bug itself
           id="$LIVE_ID"; tr="$LIVE_TR"
+        fi
         fi ;;
       esac
       # A recorded id the process could not confirm is still followed, so what is printed —
       # and dated — is the newest conversation, never a dead predecessor.
-      follow_continued "$id" "$tr"; id="$FOLLOW_ID"; tr="$FOLLOW_TR"
-      idle="$(idle_hours "$tr")"
-      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live" "$created")"
+      if [ "$agent" != codex ]; then follow_continued "$id" "$tr"; id="$FOLLOW_ID"; tr="$FOLLOW_TR"; fi
+      idle="$(idle_hours "$tr" "$agent")"
+      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live" "$created" "$agent" "$home")"
+      # What let a lead go, said on its row and in the governor's log: the one sleep a person
+      # will ask about afterwards is the lead's, and the answer is a file they can remove.
+      # Here and not in veto_for, which runs in a subshell and can hand back only its reason.
+      [ -z "$why" ] && [ "$slot" = master ] && [ "$NAMED" != master ] \
+        && note="a lead, under memory pressure: $LEADS_SWITCH is on (threshold ${LEAD_HOURS}h)"
       # ── \x1f, NOT A TAB, and this row is exactly why CLAUDE.md says so ──────
       # Three of these seven columns are optional: a session with no transcript has no idle,
       # one that never registered has no id and no cwd. Tab is IFS-whitespace, so three
@@ -795,7 +1029,10 @@ build_plan() {
       # shifts left. Observed here before the fix: the JSON came out with the VETO REASON
       # in idle_hours and an empty why — a record that parsed as a number until jq refused
       # it, and would have read as "this session may sleep".
-      PLAN="$PLAN$sock$slot${st:-unknown}${idle:-}${id}${cwd}${why}
+      #   note, agent and home go AFTER why, and every reader names all ten: the leftover
+      # lands on the last variable (CLAUDE.md), and a reader that stopped at why would have
+      # read the note as part of the reason a session stays up.
+      PLAN="$PLAN$sock$slot${st:-unknown}${idle:-}${id}${cwd}${why}${note}${agent}${home}
 "
     # A TAB between the two, and nothing else will do: tmux <= 3.5 escapes \x1f in -F output
     # (CLAUDE.md), and a session name cannot hold a tab.
@@ -807,10 +1044,19 @@ build_plan() {
 # The marker is written BEFORE the kill. A crash between the two leaves a marker for a
 # session that is still up, which the next plan corrects; the other order leaves a killed
 # session with no record of how to bring it back, which nothing can correct.
+#   A CODEX SESSION'S MARKER SAYS SO, and where its conversation lives: two more columns,
+# agent and CODEX_HOME, after the four every reader already takes. A claude marker is the
+# four it always was, so nothing that reads one (the grid, the phone, fleet-restart) moves;
+# the wake reads the fifth to know it must run `codex resume` under that home, which the
+# agent marker alone could not promise — it is a different file, with a different life.
 sleep_one() {
-  local sock="$1" slot="$2" id="$3" cwd="$4" idle="$5"
+  local sock="$1" slot="$2" id="$3" cwd="$4" idle="$5" agent="${6:-claude}" home="${7:-}"
   mkdir -p "${FLEET_DIR:?}" 2>/dev/null
-  printf '%s\t%s\t%s\t%s\n' "$(now)" "$id" "$cwd" "$idle" > "${FLEET_DIR:?}/$sock.$slot.asleep"
+  if [ "$agent" = codex ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(now)" "$id" "$cwd" "$idle" codex "$home" > "${FLEET_DIR:?}/$sock.$slot.asleep"
+  else
+    printf '%s\t%s\t%s\t%s\n' "$(now)" "$id" "$cwd" "$idle" > "${FLEET_DIR:?}/$sock.$slot.asleep"
+  fi
   tmux -L "$sock" kill-session -t "=$slot" 2>/dev/null
 }
 
@@ -926,7 +1172,7 @@ _wake_one() {
   # Two statements, not one: `local` expands its whole command line BEFORE it assigns any
   # of it, so `local a="$1" b="$a/x"` reads the OUTER a — unset here, which under `set -u`
   # aborted the wake with "sock: unbound variable" at the moment somebody tapped the card.
-  local sock="$1" slot="$2" id="" cwd=""
+  local sock="$1" slot="$2" id="" cwd="" agent="" home=""
   local marker="${FLEET_DIR:?}/$sock.$slot.asleep"
   if [ ! -f "$marker" ]; then
     # A WAKE OF A SESSION THAT IS AWAKE HAS NOTHING LEFT TO DO, which is success. The second
@@ -939,8 +1185,9 @@ _wake_one() {
     echo "fleet-hibernate: '$slot' is not asleep on $sock" >&2
     return 1
   fi
-  IFS=$'\t' read -r _ id cwd _ < "$marker"
+  IFS=$'\t' read -r _ id cwd _ agent home _ < "$marker"
   [ -n "$cwd" ] || cwd="$HOME"
+  [ "$agent" = codex ] || { agent=claude; home=""; }
   # ── A SESSION OF THAT NAME IS ALREADY THERE ─────────────────────────────────
   # "could not start a pane" was this: new-session refuses a name that exists. A marker
   # outlives the sleep whenever the session comes back some other way — reopened by hand
@@ -989,7 +1236,27 @@ _wake_one() {
   # one it is found in. That is fleet-open's rule as well: a transcript only resumes under its
   # own config dir, whichever fleet runs it.
   local launch_cfg="${fe_cfg:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}" mtr="" c tr_cfg
-  if is_uuid "$id"; then
+  local -a cx_e=()
+  local ready_re="" blocked_re=""
+  if [ "$agent" = codex ]; then
+    # ── A CODEX CONVERSATION LIVES UNDER ITS CODEX_HOME, AND NOWHERE ELSE ──────
+    # `codex resume <id>` looks in one home's sessions/, and a rollout id is UUID-shaped, so
+    # the Claude lookup below would have searched every profile's projects/ for it, found
+    # nothing, and woken the session on some other conversation. Asked of the rollout lookup
+    # the plan used instead (lib/codex-rollout.mjs, rolloutById), under the home the marker
+    # recorded. The launch is agent-here, as for claude: codex-here then runs
+    # `codex resume <id>` with the fleet's own codex flags, so a woken session and a fresh one
+    # cannot be started two different ways. The agent and the home are said out loud for the
+    # reason fleet-restart gives: a server this starts takes the caller's environment.
+    if [ -n "$id" ] && ! node "$ROLLOUT" byid --id "$id" --home "$home" >/dev/null 2>&1; then
+      echo "fleet-hibernate: '$slot' was asleep on codex conversation $id, whose rollout is gone from $(tilde "$home") — waking it on this folder's own conversation instead"
+      id=""
+    fi
+    cx_e=(-e "CLAUDE_FLEET_AGENT=codex")
+    [ -n "$home" ] && cx_e+=(-e "CODEX_HOME=$home")
+    ready_re="$("$BIN_DIR/fleet-agent" field codex ready_re 2>/dev/null)"
+    blocked_re="$("$BIN_DIR/fleet-agent" field codex blocked_re 2>/dev/null)"
+  elif is_uuid "$id"; then
     while IFS= read -r c; do
       [ -n "$c" ] || continue
       [ -f "$(proj_dir "$c" "$cwd")/$id.jsonl" ] && { mtr="$(proj_dir "$c" "$cwd")/$id.jsonl"; break; }
@@ -1033,7 +1300,7 @@ _wake_one() {
   # new-session, which tmux runs to the end before it handles the child's exit, so there is no
   # window in which the pane can die unheld. Unset once the wake has settled.
   err="$(env ${fe_env[@]+"${fe_env[@]}"} tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
-    ${fe_e[@]+"${fe_e[@]}"} ${cfg_e[@]+"${cfg_e[@]}"} \
+    ${fe_e[@]+"${fe_e[@]}"} ${cfg_e[@]+"${cfg_e[@]}"} ${cx_e[@]+"${cx_e[@]}"} \
     -e "CLAUDE_FLEET_SOCK=$sock" -e "CLAUDE_FLEET_RESUME=$id" -e "CLAUDE_FLEET_WAKING=1" \
     "exec agent-here \"$slot\"" \; set-option -w -t "$slot" remain-on-exit on 2>&1)" \
     || { echo "fleet-hibernate: could not start a pane for '$slot': $err" >&2; return 1; }
@@ -1058,7 +1325,18 @@ _wake_one() {
     # a session woken in manual mode draws "⏸ manual mode on" — ready, at a prompt, and
     # invisible to the check, so the wake would have timed out on a session that was already
     # waiting for input. Matched on the part that does not vary.
-    [ -z "$ready_at" ] && is_ready "$pane" && ready_at="$waited"
+    # A codex dialog is asked about BEFORE readiness: its trust screen draws no composer, but
+    # a pattern loose enough to find codex's footer is not to be trusted to stay silent on it.
+    if [ -z "$ready_at" ] && [ -n "$blocked_re" ] && grep -qE -- "$blocked_re" <<< "$pane"; then
+      tmux -L "$sock" set-option -w -u -t "$slot" remain-on-exit 2>/dev/null
+      if grep -qiE 'trust (this folder|and continue)|do you trust' <<< "$pane"; then
+        echo "fleet-hibernate: '$slot' stalled on codex's folder-trust dialog — trust it once by hand (it is recorded in $(tilde "${home:-$HOME/.codex}")/config.toml), then wake again" >&2
+      else
+        echo "fleet-hibernate: '$slot' stalled on a codex dialog — answer it in the pane. Its last lines: $(pane_tail "$pane")" >&2
+      fi
+      return 1
+    fi
+    [ -z "$ready_at" ] && is_ready "$pane" "$ready_re" && ready_at="$waited"
     if [ -n "$ready_at" ] && [ $((waited - ready_at)) -ge "$WAKE_SETTLE" ]; then
       rm -f "$marker" 2>/dev/null
       tmux -L "$sock" set-option -w -u -t "$slot" remain-on-exit 2>/dev/null
@@ -1091,30 +1369,32 @@ _wake_one() {
 
 # ── output ────────────────────────────────────────────────────────────────────
 print_plan() {
-  local sock slot st idle id cwd why n_sleep=0 n_keep=0
+  local sock slot st idle id cwd why note agent home n_sleep=0 n_keep=0
   if [ "$JSON" = yes ]; then
     printf '['
     local first=1
-    while IFS=$'\x1f' read -r sock slot st idle id cwd why; do
+    while IFS=$'\x1f' read -r sock slot st idle id cwd why note agent home; do
       [ -n "$sock" ] || continue
       [ "$first" = 1 ] || printf ','
       first=0
-      printf '{"sock":"%s","slot":"%s","status":"%s","session_id":"%s","idle_hours":%s,"would_sleep":%s,"why":"%s"}' \
-        "$sock" "$slot" "$st" "$id" "${idle:-null}" "$([ -z "$why" ] && echo true || echo false)" "$why"
+      printf '{"sock":"%s","slot":"%s","agent":"%s","status":"%s","session_id":"%s","idle_hours":%s,"would_sleep":%s,"why":"%s","note":"%s"}' \
+        "$sock" "$slot" "${agent:-claude}" "$st" "$id" "${idle:-null}" "$([ -z "$why" ] && echo true || echo false)" "$why" "$note"
     done <<< "$PLAN"
     printf ']\n'
     return
   fi
   printf '%-18s %-22s %-11s %8s  %s\n' FLEET SESSION STATUS IDLE_H ''
-  while IFS=$'\x1f' read -r sock slot st idle id cwd why; do
+  while IFS=$'\x1f' read -r sock slot st idle id cwd why note agent home; do
     [ -n "$sock" ] || continue
     if [ -z "$why" ]; then n_sleep=$((n_sleep+1))
-      printf '%-18s %-22s %-11s %8s  WOULD SLEEP\n' "$sock" "$slot" "$st" "${idle:-?}"
+      printf '%-18s %-22s %-11s %8s  WOULD SLEEP%s\n' "$sock" "$slot" "$st" "${idle:-?}" "${note:+ — $note}"
     else n_keep=$((n_keep+1))
       printf '%-18s %-22s %-11s %8s  stays up — %s\n' "$sock" "$slot" "$st" "${idle:-?}" "$why"
     fi
   done <<< "$PLAN"
-  printf '\n%s would sleep, %s stay up (threshold %sh idle)\n' "$n_sleep" "$n_keep" "$IDLE_HOURS"
+  printf '\n%s would sleep, %s stay up (threshold %sh idle' "$n_sleep" "$n_keep" "$IDLE_HOURS"
+  if leads_on && [ "$PRESSURE" = yes ]; then printf "; a lead's %sh, under --pressure" "$LEAD_HOURS"; fi
+  printf ')\n'
   enabled || printf 'hibernation is OFF — --apply will refuse. Turn it on: touch %s/hibernate.enabled\n' "${FLEET_DIR:?}"
 }
 
@@ -1187,12 +1467,12 @@ case "$MODE" in
     # OLDEST IDLE FIRST. Under pressure the useful order is the one least likely to be
     # wanted next, and that is the session nobody has touched for longest.
     slept=0
-    while IFS=$'\x1f' read -r sock slot st idle id cwd why; do
+    while IFS=$'\x1f' read -r sock slot st idle id cwd why note agent home; do
       [ -n "$sock" ] || continue
       case "$why" in "$BG_VETO"*) echo "fleet-hibernate: kept $sock/$slot up — $why" ;; esac
       [ -z "$why" ] || continue
-      sleep_one "$sock" "$slot" "$id" "$cwd" "$idle"
-      echo "fleet-hibernate: slept $sock/$slot (idle ${idle}h)"
+      sleep_one "$sock" "$slot" "$id" "$cwd" "$idle" "$agent" "$home"
+      echo "fleet-hibernate: slept $sock/$slot (idle ${idle}h)${note:+ — $note}"
       slept=$((slept+1))
       # In pressure mode, stop as soon as the machine says it is no longer under pressure.
       if [ "$MODE" = pressure ] && [ "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)" -lt 2 ]; then
