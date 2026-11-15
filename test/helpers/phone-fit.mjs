@@ -154,9 +154,17 @@ export async function phoneFit({ b, is, shots = '' }) {
   await touch(false);
   await open('#/p/acme-api/s/master');
   is('with a mouse the composer keeps its 14px', '14px', await b.evaluate(() => getComputedStyle(document.querySelector('.composer textarea')).fontSize));
-  // ...and its whole hint, file and ⏎ included: the short one is the touch screen's (section 2b).
-  is('...and its whole hint, dragging a file and ⏎ included', true,
-     await b.evaluate(() => /Enter sends/.test(document.querySelector('.composer textarea').placeholder)));
+  // ...and its whole hint, file and ⏎ included, wherever ⏎ sends: a mouse, the same question
+  // keys.js asks. The short one is the touch screen's (section 2b). Asked as agreement, not as
+  // "full": a headless browser on Linux has no pointer at all, matches neither (hover: hover) nor
+  // (pointer: fine), and there ⏎ is a new line, so the full hint would promise what ⏎ will not do.
+  // Where a mouse is (the macOS leg, a desk), this is the full hint.
+  is('...and its whole hint, dragging a file and ⏎ included, where a mouse makes ⏎ send', 'agrees',
+     await b.evaluate(() => {
+       const fine = matchMedia('(hover: hover) and (pointer: fine)').matches;
+       const full = /Enter sends/.test(document.querySelector('.composer textarea').placeholder);
+       return fine === full ? 'agrees' : fine ? 'a mouse, and the short hint' : 'no mouse, and a hint that says ⏎ sends';
+     }));
   await touch(true);
   await sleep(200);
 
