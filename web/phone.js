@@ -2614,6 +2614,20 @@ var ROWS = {
 		".....###....",
 		"............"
 	],
+	send: [
+		".....##.....",
+		"....####....",
+		"...######...",
+		"..###..###..",
+		".###....###.",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		"............"
+	],
 	chat: [
 		"............",
 		".##########.",
@@ -3097,6 +3111,21 @@ function Btn({ kind = "", icon, children, ...rest }) {
 		class: `btn ${kind}`,
 		...rest,
 		children: [icon ? /* @__PURE__ */ u(Icon, { name: icon }) : null, children]
+	});
+}
+function SendBtn({ busy = false, ...rest }) {
+	const name = busy ? t("sess.uploadingBtn") : t("common.send");
+	return /* @__PURE__ */ u("button", {
+		type: "submit",
+		class: "cbtn send",
+		"aria-label": name,
+		title: name,
+		"aria-busy": busy ? "true" : void 0,
+		...rest,
+		children: /* @__PURE__ */ u(Icon, {
+			name: busy ? "hourglass" : "send",
+			size: 24
+		})
 	});
 }
 function Logo({ size = 28 }) {
@@ -6985,12 +7014,7 @@ function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: t("sess.yourAnswer"),
 					autoFocus: true
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "primary",
-					type: "submit",
-					disabled: busy || !typed.trim(),
-					children: t("common.send")
-				})]
+				}), /* @__PURE__ */ u(SendBtn, { disabled: busy || !typed.trim() })]
 			}) : /* @__PURE__ */ u("div", {
 				class: "ask-opts",
 				children: (prompt.options || []).map((o) => /* @__PURE__ */ u("button", {
@@ -7936,7 +7960,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 						children: [
 							/* @__PURE__ */ u("button", {
 								type: "button",
-								class: "attach-btn",
+								class: "cbtn attach-btn",
 								onClick: () => picker.current?.click(),
 								title: t("sess.attach"),
 								"aria-label": t("sess.attach"),
@@ -8001,7 +8025,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 							}),
 							/* @__PURE__ */ u("button", {
 								type: "button",
-								class: `speak-btn${speakMode.on ? " on" : ""}`,
+								class: `cbtn speak-btn${speakMode.on ? " on" : ""}`,
 								"aria-pressed": speakMode.on,
 								"aria-label": speakMode.on ? t("chat.speakOff") : t("chat.speak"),
 								title: speakMode.on ? t("chat.speakOff") : t("chat.speak"),
@@ -8011,11 +8035,9 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									size: 24
 								})
 							}),
-							/* @__PURE__ */ u(Btn, {
-								kind: "primary",
-								type: "submit",
-								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
-								children: uploading ? t("sess.uploadingBtn") : t("common.send")
+							/* @__PURE__ */ u(SendBtn, {
+								busy: uploading,
+								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length
 							})
 						]
 					}),
@@ -12368,12 +12390,7 @@ function Console({ projects, big, foot }) {
 					value: typed,
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: big ? t("as.typeBig") : t("as.type")
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "primary",
-					type: "submit",
-					disabled: !typed.trim(),
-					children: t("common.send")
-				})]
+				}), /* @__PURE__ */ u(SendBtn, { disabled: !typed.trim() })]
 			}),
 			foot ? /* @__PURE__ */ u("div", {
 				class: "console-foot",

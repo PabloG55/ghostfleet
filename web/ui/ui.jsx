@@ -44,6 +44,19 @@ export function Btn({ kind = '', icon, children, ...rest }) {
   return <button type="button" class={`btn ${kind}`} {...rest}>{icon ? <Icon name={icon} /> : null}{children}</button>;
 }
 
+// A composer's Send: the same square as the attach and voice buttons beside it (ui.css .cbtn),
+// so the row is a box and its controls. A word would make it the one control in the row whose
+// width is its text's: "Send" was 61 x 33 beside two 46 x 46 buttons, "Uploading…" wider still,
+// and the box beside it gave up the difference mid-message. Its name is the label a reader hears.
+export function SendBtn({ busy = false, ...rest }) {
+  const name = busy ? t('sess.uploadingBtn') : t('common.send');
+  return (
+    <button type="submit" class="cbtn send" aria-label={name} title={name} aria-busy={busy ? 'true' : undefined} {...rest}>
+      <Icon name={busy ? 'hourglass' : 'send'} size={24} />
+    </button>
+  );
+}
+
 // The app icon, drawn from its own pixels so it stays crisp at any size: the ghost ship on
 // its dark tile, with a faint glow because it is a ghost.
 export function Logo({ size = 28 }) {

@@ -27,10 +27,30 @@
   --px: Silkscreen, var(--mono);
   /* square, or nearly: a terminal has no rounded corners */
   --r: 2px;
+  /* A thumb's target: every composer's attach, voice and send buttons, and the box's least height. */
+  --tap: 46px;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+/* ══ THE PAGE NEVER MOVES: one fixed screen, and only its regions scroll ════════════════════
+   Reported from the installed iPhone app, as the old client had reported it before: the whole
+   page could be dragged left, right, up and down. Three things, each kept by a rule here:
+     - THE SHELL IS THE VIEWPORT. #app is pinned to it and clips what it holds, so the document
+       has nothing in flow to scroll; the page's regions (.main, the chat, the drawer's list, the
+       gate) scroll inside it. While the keyboard is up viewport.js pins it to the visible area
+       instead (html.kb, below), and that rule still wins: it comes later with more weight.
+     - NO RUBBER BAND. iOS bounces the root scroller even when nothing overflows; `none` on the
+       root stops it, and `contain` on each region stops a drag at its end from chaining out to
+       the page (the list of them is beside .main).
+     - NOTHING SLIDES SIDEWAYS. `clip`, not `hidden`: hidden makes the element a scroll container,
+       which iOS can still scroll to reveal a focused field, where clip forbids the scroll. This is
+       the net and not the fix: what overflows is still a bug, and phone-check looks for the
+       element itself, under the net, at four phone widths.
+   `-webkit-text-size-adjust` keeps iOS from enlarging text on its own when the phone turns. */
+html, body { overflow-x: clip; overscroll-behavior: none; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+#app { position: fixed; inset: 0; overflow: hidden; overflow: clip; }
 /* A tap answers with the control's own states. WebKit's default answer is a translucent black
    box over whatever was tapped, which on this dark ground reads as a focus box; the phone
    client turns it off the same way (web/app.css). */
@@ -57,7 +77,6 @@ html { cursor: default; -webkit-user-select: none; user-select: none; }
    the card opens the session on a press, and a drag to select it ended in that press. */
 :where(:is(.msg .bubble, .md, pre, code, .err, .notice, .ask-cmd, .tip-said):not(:is(a[href], button, summary, [role=button], [role=option], [role=menuitem], .card) *)) {
   cursor: auto; -webkit-user-select: text; user-select: text; }
-#app { height: 100%; }
 a { color: var(--cyan); }
 code, pre { font-family: var(--mono); }
 code { background: var(--panel2); border: 1px solid var(--hair); border-radius: var(--r); padding: 0 .3em; font-size: .92em; }
@@ -69,6 +88,22 @@ input, textarea, .select {
   outline: none; transition: border-color .15s;
 }
 input:focus, textarea:focus, :where(:root:not(.by-pointer)) .select:focus-visible, .select[aria-expanded="true"] { border-color: var(--cyan); }
+/* 16px ON A TOUCH SCREEN, AND IT IS NOT A TYPOGRAPHY CHOICE. iOS zooms the page onto a text field
+   whose computed size is under 16px the moment it takes the focus: the visual viewport scales up
+   and pans, the right of every row goes off the screen, and the page can be dragged every way
+   while nothing overflows at all. That is how "it zooms in when you chat" and "you can scroll
+   the whole page" arrived as one report. Every field here inherits the root's 14px through
+   `font: inherit`, so no rule carried a number to notice; the sidebar's filter was 13px, the
+   chat's box and the search 14px, the assistant's box 15px.
+     A floor, `!important`, because it is the platform's threshold and not a style: a later, more
+   specific `.thing input { font-size: 13px }` would bring the zoom back without a word, and the
+   field rules in this file and the apps' own come after it. `max(16px, 1em)` keeps a field that
+   is set larger at its parent's size. NOT `maximum-scale` or `user-scalable=no` on the viewport
+   meta: those take pinch-zoom from everyone, and the owner pinches. A desk keeps its 14px. */
+@media (pointer: coarse) {
+  :is(input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=button], [type=submit], [type=reset], [type=image], [type=hidden]),
+      textarea, select, [contenteditable]:not([contenteditable=false])) { font-size: max(16px, 1em) !important; }
+}
 /* the select's button (select.jsx): a field that opens a list; its value is cut, not wrapped.
    Its label presses it, as a <label> presses the button it is for. */
 .select-label { cursor: pointer; }
@@ -159,6 +194,12 @@ textarea { resize: vertical; }
 .side-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 1px; }
 .side-foot { display: flex; align-items: center; gap: .5em; border-top: 1px solid var(--hair); padding: 10px 6px 0; margin-top: 6px; }
 .main { overflow-y: auto; min-width: 0; position: relative; display: flex; flex-direction: column; }
+/* The page's regions, each its own scroller inside the fixed shell (THE PAGE NEVER MOVES, at the
+   top). `contain` keeps a region's own bounce and stops a drag that reaches its end from carrying
+   on into whatever holds it: the chat into .main, .main into the page. .main never scrolls
+   sideways either; wide content (code, a table, the pane, the terminal's keys) has a box of its own. */
+:is(.main, .chat, .term, .side-list, .split-list, .as-feed, .as-voices, .tk-list, .ticker, .modal, .auth, .ai-msgs) { overscroll-behavior: contain; }
+.main { overflow-x: hidden; }
 .main > .page { flex: none; width: 100%; }
 .topbar { display: none; }
 
@@ -376,15 +417,23 @@ textarea { resize: vertical; }
 .composer-input .request-return { position: absolute; inset: 0; width: 100%; height: 100%; white-space: normal;
   display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--yellow);
   border-color: color-mix(in srgb, var(--yellow) 55%, var(--line)); cursor: pointer; }
-.composer textarea { flex: 1 1 auto; min-height: 46px; max-height: 220px; }
-.attach-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; font-size: 20px; cursor: pointer; }
+.composer textarea { flex: 1 1 auto; min-height: var(--tap); max-height: 220px; }
+/* A COMPOSER'S BUTTONS ARE ONE SIZE: attach, voice and send, in the session's composer, a
+   question's answer row and the assistant's. Reported from the phone as "the buttons of the chat
+   send and attachment are different sizes": attach and voice were 46 x 46 and Send was a word,
+   61 x 33, whose width was its label's, so "Uploading…" pushed the box beside it narrower while
+   a message was being written. One square, the token's size, none of them shrinking, the icon
+   centred; what each one is goes in its label (ui.jsx SendBtn). */
+.cbtn { flex: none; width: var(--tap); height: var(--tap); padding: 0; display: inline-grid; place-items: center;
+  border-radius: var(--r); border: 1px solid var(--line); background: var(--gf-abyss); color: var(--dim); cursor: pointer; }
+.cbtn:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.cbtn:disabled { opacity: .45; }
+.cbtn.send { background: var(--cyan); border-color: var(--cyan); color: var(--gf-teal-ink); }
+.cbtn.send:hover:not(:disabled) { background: var(--gf-teal-hover); border-color: var(--gf-teal-hover); color: var(--gf-teal-ink); }
+.cbtn.on { border-color: var(--cyan); color: var(--cyan); background: rgba(95,215,215,.12); }
 .read-btn { flex: none; width: 28px; height: 28px; margin: -6px 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--r); background: none; color: var(--dim); cursor: pointer; }
 .read-btn:hover, .read-btn.on { color: var(--cyan); background: var(--panel2); }
-.speak-btn { flex: none; width: 46px; height: 46px; border-radius: var(--r); border: 1px solid var(--hair); background: #12171d; color: var(--dim); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
-.speak-btn:hover { border-color: var(--cyan); }
-.speak-btn.on { border-color: var(--cyan); color: var(--cyan); background: rgba(95,215,215,.12); }
 .speak-state { margin: 0; min-height: 1.3em; }
-.attach-btn:hover { border-color: var(--cyan); background: rgba(95,215,215,.08); }
 .att-list { display: flex; flex-wrap: wrap; gap: 8px; }
 /* A draft's files that a reload could not keep (drafts.js): said above the box until it is read. */
 .att-lost { margin: 0 0 8px; font-size: 13px; color: var(--yellow); }
@@ -462,7 +511,9 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
      padding back, and the link sits over the title's top edge so the box is all its own */
   .back-link { position: relative; padding: 13px 24px 13px 0; margin-block: -13px; }
   .sess-head > .back-link { margin-bottom: -17px; }
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  /* minmax(0, 1fr), not 1fr: a bare 1fr is minmax(auto, 1fr), so the one column grows to its
+     widest child's least width and anything unbreakable widens the whole app past the screen. */
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--hair); background: var(--panel); }
   .side { position: fixed; z-index: 60; inset: 0 auto 0 0; width: 280px; transform: translateX(-100%); transition: transform .2s; }
   .side.open { transform: none; }
@@ -806,7 +857,7 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .as-dock.st-listening .as-launch { border-color: rgba(255,95,95,.6); }
 @media (max-width: 1200px) { .app.with-as { grid-template-columns: 220px 1fr 360px; } }
 @media (max-width: 900px) {
-  .app.with-as { grid-template-columns: 1fr; }
+  .app.with-as { grid-template-columns: minmax(0, 1fr); }
   .assistant { position: fixed; inset: 0; z-index: 70; }
   .app { --launch-b: 14px; }
   .as-dock { right: 14px; max-width: calc(100vw - 28px); }
@@ -949,7 +1000,7 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
   .app.with-rail.with-as .rail { position: fixed; top: 0; bottom: 0; right: 360px; width: 280px; z-index: 45; box-shadow: -10px 0 30px rgba(0,0,0,.45); }
 }
 @media (max-width: 900px) {
-  .app.with-rail, .app.with-rail.with-as { grid-template-columns: 1fr; }
+  .app.with-rail, .app.with-rail.with-as { grid-template-columns: minmax(0, 1fr); }
   .rail, .app.with-rail.with-as .rail { position: fixed; inset: 0; width: auto; z-index: 75; }
   .tk-chip.floating { right: 14px; }
 }
@@ -966,7 +1017,9 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .set-row small { font-size: 12.5px; }
 
 /* ══ the gate (gate.jsx): the team's sign-in and the phone's lock are one card ══════════ */
-.auth { min-height: 100%; display: grid; place-items: center; padding: 24px 16px;
+/* Its own scroller: the shell (#app) is the screen and clips, so a card taller than a short phone
+   with its keyboard up scrolls here. A grid's track grows with the card, so its top stays reachable. */
+.auth { height: 100%; overflow-y: auto; display: grid; place-items: center; padding: 24px 16px;
   background: radial-gradient(1200px 500px at 50% -10%, rgba(95,215,215,.08), transparent 60%), var(--bg); }
 .auth-card { position: relative; width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); padding: 28px; display: flex; flex-direction: column; gap: 14px; }
 .auth-card h1 { font-size: 20px; }

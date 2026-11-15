@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
-import { STATUS, StatusMark, statusOf, Btn, usePoll, toast, Modal, useRequest } from './ui.jsx';
+import { STATUS, StatusMark, statusOf, Btn, SendBtn, usePoll, toast, Modal, useRequest } from './ui.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -68,7 +68,7 @@ export function Console({ projects, big, foot }) {
       <form class="row" onSubmit={(e) => { e.preventDefault(); const said = typed; setTyped(''); submit(said, false); }}>
         <input class="grow" value={typed} onInput={(e) => setTyped(e.currentTarget.value)}
                placeholder={big ? t('as.typeBig') : t('as.type')} />
-        <Btn kind="primary" type="submit" disabled={!typed.trim()}>{t('common.send')}</Btn>
+        <SendBtn disabled={!typed.trim()} />
       </form>
       {foot ? <div class="console-foot">{foot}{voiceOpts(S, local)}</div> : voiceOpts(S, local)}
     </div>

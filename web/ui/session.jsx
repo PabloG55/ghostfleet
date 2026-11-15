@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
+import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
@@ -53,7 +53,7 @@ function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
       {prompt.typing ? (
         <form class="row" onSubmit={(e) => { e.preventDefault(); if (typed.trim()) onAnswer(typed.trim(), false); }}>
           <input class="grow" disabled={busy} value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
-          <Btn kind="primary" type="submit" disabled={busy || !typed.trim()}>{t('common.send')}</Btn>
+          <SendBtn disabled={busy || !typed.trim()} />
         </form>
       ) : (
         <div class="ask-opts">
@@ -564,7 +564,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           </div>
         ) : null}
         <div class="composer-row">
-          <button type="button" class="attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
+          <button type="button" class="cbtn attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
           <div class={`composer-input${(prompt && !held) || st === 'limit' ? ' has-request' : ''}`}>
           <textarea ref={composer} rows={2} value={draft} placeholder={drag ? t('sess.drop') : t('sess.writeTo', { name })}
@@ -585,10 +585,10 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
             {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
           </button> : null}
           </div>
-          <button type="button" class={`speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
+          <button type="button" class={`cbtn speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
                   aria-label={speakMode.on ? t('chat.speakOff') : t('chat.speak')} title={speakMode.on ? t('chat.speakOff') : t('chat.speak')}
                   onClick={speakMode.toggle}><Icon name="mic" size={24} /></button>
-          <Btn kind="primary" type="submit" disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
+          <SendBtn busy={uploading} disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)} />
         </div>
         <p class="speak-state muted small" role="status" aria-live="polite">{speakMode.on ? t(STATE_KEY[speakMode.phase] || 'chat.speakListening') : ''}</p>
       </form>}

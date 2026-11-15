@@ -4,6 +4,7 @@
 //
 //     node test/helpers/phone-check.mjs [web-dir]          fixture mode, every screen
 //     node test/helpers/phone-check.mjs --served <base>    the lock, against a running fleet-serve
+//     node test/helpers/phone-check.mjs --fit-only [web-dir]  a phone's screen holding still (phone-fit.mjs)
 //
 // One "name <US> want <US> got" row per check; test/run.sh does the comparing. `web-dir`
 // defaults to this checkout's web/; a copy with one thing broken in it is how each row was
@@ -32,13 +33,17 @@ import path from 'node:path';
 import { launch, serveDir, sleep } from '../../lib/browser.mjs';
 import { requestArrivals } from './request-arrival.mjs';
 import { requestTyping } from './request-typing.mjs';
+import { phoneFit } from './phone-fit.mjs';
 
 const ROOT = path.resolve(new URL('../..', import.meta.url).pathname);
 const argv = process.argv.slice(2);
 const served = argv[0] === '--served' ? argv[1] : '';
 const arrivalOnly = argv[0] === '--arrival-only';
 const typingOnly = argv[0] === '--typing-only';
-const WEB = path.resolve((arrivalOnly || typingOnly ? argv[1] : !served && argv[0]) || path.join(ROOT, 'web'));
+// Its own run, because it turns touch emulation on and every row of the main run was measured
+// with a mouse: `(pointer: coarse)` moves more than the fields it is there for.
+const fitOnly = argv[0] === '--fit-only';
+const WEB = path.resolve((arrivalOnly || typingOnly || fitOnly ? argv[1] : !served && argv[0]) || path.join(ROOT, 'web'));
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
@@ -128,10 +133,14 @@ try {
     await open(390, 844);
     await b.call('Page.navigate', { url: srv.base + '/' });
 
-    if (arrivalOnly || typingOnly) {
+    if (arrivalOnly || typingOnly || fitOnly) {
       await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
       await clickText('.auth-card button', 'without a passkey');
-      if (typingOnly) await requestTyping({ b, is, shots: process.env.REQUEST_TYPING_SHOTS || '' });
+      if (fitOnly) {
+        await until(() => !!document.querySelector('.app'));
+        await phoneFit({ b, is, shots: process.env.PHONE_FIT_SHOTS || '' });
+        is('no page error, anywhere on the way', '', errors.join(' | '));
+      } else if (typingOnly) await requestTyping({ b, is, shots: process.env.REQUEST_TYPING_SHOTS || '' });
       else await requestArrivals({ b, is, shots: process.env.REQUEST_SHOTS || '', go: async () => {
         await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
         await until(() => !!document.querySelector('.composer'));
@@ -506,7 +515,7 @@ try {
        (await texts('.composer .att-lost')).join(' ').replace(/\s+/g, ' '));
     await clickText('.composer .att-lost button', '^OK$');
     is('...until that has been read', 0, (await texts('.composer .att-lost')).length);
-    await clickText('.composer button[type=submit]', 'Send');
+    await b.evaluate(() => document.querySelector('.composer button[type=submit]')?.click());
     is('a send that succeeds empties the box', true, !!(await until(() => document.querySelector('.composer textarea')?.value === '')));
     is('...and the draft goes with it', '', await boxOf('#/p/acme-api/s/api-fix') + await boxOf('#/p/acme-api/s/master'));
     is('...from storage too', false, await b.evaluate(() => 'acme-api\x1fmaster' in JSON.parse(localStorage.getItem('gfw.drafts') || '{}')));

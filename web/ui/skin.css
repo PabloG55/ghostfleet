@@ -167,8 +167,6 @@ input:is([type=checkbox], [type=radio]):not(.switch > input):disabled { cursor: 
 .tag { border-radius: var(--r); font-family: var(--mono); }
 .chips button, .quiet-toggle, .chip-label, .chip-sched, .lg { border-radius: var(--r); }
 .tabs button { font-weight: 500; }
-.attach-btn { border-radius: var(--r); display: grid; place-items: center; color: var(--dim); background: var(--gf-abyss); }
-.attach-btn:hover { color: var(--cyan); }
 .att-ico { color: var(--dim); }
 
 /* ── surfaces: flat, hairline, no soft gradients ────── */
