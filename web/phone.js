@@ -3789,8 +3789,69 @@ var profileGroups = (items, order = []) => {
 		items
 	}];
 };
+var FOLD_KEY = "ghostfleet.side.folded";
+var readFolds = () => {
+	try {
+		const v = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}");
+		return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+	} catch {
+		return {};
+	}
+};
+function useFolds() {
+	const [folds, setFolds] = d(readFolds);
+	const toggle = (k) => setFolds((f) => {
+		const n = { ...f };
+		if (n[k]) delete n[k];
+		else n[k] = 1;
+		try {
+			localStorage.setItem(FOLD_KEY, JSON.stringify(n));
+		} catch {}
+		return n;
+	});
+	return [folds, toggle];
+}
+function Fold({ cls, k, shut, onToggle, items, label, dot, children }) {
+	const need = needOf(items), total = items.reduce((n, p) => n + p.counts.total, 0);
+	return /* @__PURE__ */ u("button", {
+		type: "button",
+		class: `side-fold ${cls}${shut ? " shut" : ""}`,
+		"aria-expanded": !shut,
+		onClick: () => onToggle(k),
+		children: [
+			/* @__PURE__ */ u("span", {
+				class: "chev",
+				"aria-hidden": "true",
+				children: "▾"
+			}),
+			shut ? /* @__PURE__ */ u(Led, {
+				state: topLight(items.flatMap((p) => p.sessions.map((x) => x.status))),
+				size: 8
+			}) : dot ? /* @__PURE__ */ u(Led, {
+				state: dot,
+				size: 8
+			}) : null,
+			/* @__PURE__ */ u("span", {
+				class: "grow ellipsis",
+				children: label
+			}),
+			children,
+			shut ? need ? /* @__PURE__ */ u("span", {
+				class: "badge need",
+				children: need
+			}) : total ? /* @__PURE__ */ u("span", {
+				class: "n",
+				children: total
+			}) : null : cls === "side-prof" && need ? /* @__PURE__ */ u("span", {
+				class: "badge need",
+				children: need
+			}) : null
+		]
+	});
+}
 function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below, foot }) {
 	const [q, setQ] = d("");
+	const [folds, toggle] = useFolds();
 	const list = (projects || []).filter((p) => !q || p.name.toLowerCase().includes(q.toLowerCase())).sort((a, b) => b.counts.need_you - a.counts.need_you || b.counts.total - a.counts.total || a.name.localeCompare(b.name));
 	const groups = hostGroups(list, hosts);
 	const profOrder = (projects || []).map(profOf);
@@ -3858,29 +3919,23 @@ function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below,
 				children: [projects == null ? /* @__PURE__ */ u("p", {
 					class: "muted pad",
 					children: t("common.loading")
-				}) : null, groups.map(({ h, items }) => /* @__PURE__ */ u(S$1, { children: [h ? /* @__PURE__ */ u("div", {
-					class: `side-host${hostDown(h) ? " down" : ""}`,
-					children: [
-						/* @__PURE__ */ u(Led, {
-							state: hostDown(h) ? "off" : "idle",
-							size: 8
-						}),
-						/* @__PURE__ */ u("span", {
-							class: "grow ellipsis",
-							children: h.label || h.key
-						}),
-						hostDown(h) ? /* @__PURE__ */ u("small", { children: t("settings.hostOffline") }) : h.self ? /* @__PURE__ */ u("small", { children: t("settings.hostThis") }) : null
-					]
-				}) : null, profileGroups(items, profOrder).map(({ n, items: mine }) => /* @__PURE__ */ u(S$1, { children: [n ? /* @__PURE__ */ u("div", {
-					class: "side-prof",
-					children: [/* @__PURE__ */ u("span", {
-						class: "grow ellipsis",
-						children: n
-					}), needOf(mine) ? /* @__PURE__ */ u("span", {
-						class: "badge need",
-						children: needOf(mine)
-					}) : null]
-				}) : null, mine.map((p) => /* @__PURE__ */ u(NavLink, {
+				}) : null, groups.map(({ h, items }) => /* @__PURE__ */ u(S$1, { children: [h ? /* @__PURE__ */ u(Fold, {
+					cls: `side-host${hostDown(h) ? " down" : ""}`,
+					k: `h:${h.key}`,
+					shut: !q && !!folds[`h:${h.key}`],
+					onToggle: toggle,
+					items,
+					dot: hostDown(h) ? "off" : "idle",
+					label: h.label || h.key,
+					children: hostDown(h) ? /* @__PURE__ */ u("small", { children: t("settings.hostOffline") }) : h.self ? /* @__PURE__ */ u("small", { children: t("settings.hostThis") }) : null
+				}) : null, !(h && !q && folds[`h:${h.key}`]) ? profileGroups(items, profOrder).map(({ n, items: mine }) => /* @__PURE__ */ u(S$1, { children: [n ? /* @__PURE__ */ u(Fold, {
+					cls: "side-prof",
+					k: `g:${h ? h.key : ""}:${n}`,
+					shut: !q && !!folds[`g:${h ? h.key : ""}:${n}`],
+					onToggle: toggle,
+					items: mine,
+					label: n
+				}) : null, !(n && !q && folds[`g:${h ? h.key : ""}:${n}`]) ? mine.map((p) => /* @__PURE__ */ u(NavLink, {
 					to: `/p/${encodeURIComponent(p.name)}`,
 					active: route.view === "project" && route.project === p.name,
 					onClick: onClose,
@@ -3901,7 +3956,7 @@ function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below,
 							children: p.counts.total
 						}) : null
 					]
-				}, p.name))] }, n || "one"))] }, h ? `h:${h.key}` : "all"))]
+				}, p.name)) : null] }, n || "one")) : null] }, h ? `h:${h.key}` : "all"))]
 			}),
 			below,
 			foot ? foot(onClose) : null
@@ -13845,18 +13900,28 @@ function phoneAdapter({ lock, go, place }) {
 		const hit = peerGrids.get(name);
 		if (hit && Date.now() - hit.at < 15e3) return hit.sessions;
 		let sessions = hit ? hit.sessions : [];
-		try {
-			sessions = fromCards((await api$1.getGrid(name)).cards);
-		} catch {}
+		const g = await within(api$1.getGrid(name), null);
+		if (g) sessions = fromCards(g.cards);
 		peerGrids.set(name, {
 			at: Date.now(),
 			sessions
 		});
 		return sessions;
 	}
+	const SIDE_READ_MS = 8e3;
+	const within = (p, fallback) => new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(fallback), SIDE_READ_MS);
+		Promise.resolve(p).then((v) => {
+			clearTimeout(timer);
+			resolve(v);
+		}, () => {
+			clearTimeout(timer);
+			resolve(fallback);
+		});
+	});
 	async function projects() {
 		const j = await guard(api$1.getProjects());
-		const digest = await api$1.getDigest().catch(() => null);
+		const digest = await within(api$1.getDigest(), null);
 		const local = new Map((digest?.projects || []).map((p) => [p.name, p]));
 		return {
 			projects: await Promise.all((j.projects || []).map(async (p) => {
@@ -13866,7 +13931,7 @@ function phoneAdapter({ lock, go, place }) {
 					status: s.status,
 					ts: s.ts,
 					lead: !!s.lead
-				})) : p.host_key ? await peerSessions(p.name) : fromCards((await api$1.getGrid(p.name).catch(() => ({ cards: [] }))).cards);
+				})) : p.host_key ? await peerSessions(p.name) : fromCards((await within(api$1.getGrid(p.name), { cards: [] })).cards);
 				return {
 					name: p.name,
 					path: p.path,
