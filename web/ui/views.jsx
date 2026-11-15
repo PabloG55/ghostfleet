@@ -14,7 +14,7 @@ import { t, lang, LANGS, LANG_NAMES, words } from './i18n.js';
 import { setLang } from './lang.js';
 import { Icon } from './icon.jsx';
 import { Led } from './fleet.jsx';
-import { Skeleton, AsOf } from './skeleton.jsx';
+import { Skeleton, AsOf, useRoom } from './skeleton.jsx';
 
 // "Ana <verb> acme-api": the verb reads right before the subject in either language.
 const VERBS = words(['fleet_send', 'attach', 'fleet_answer', 'fleet_interrupt', 'fleet_pause', 'fleet_resume', 'fleet_wake', 'fleet_reopen',
@@ -86,12 +86,17 @@ function SwitchSection({ title, part, label, icon }) {
     try { await part.set(on); } catch (e) { toast(e.message, 'bad'); }
     setBusy(false); load();
   };
+  // A switch, or a line saying why there is none: two heights, and which one is this server's
+  // is known from the last time the page was open (skeleton.jsx useRoom).
+  const room = useRoom(`set.${icon}`, st == null);
   return (
     <section class="panel">
       <h2><Icon name={icon} /> {title}</h2>
+      <div ref={room.ref} style={room.style}>
       {st == null ? <Skeleton shape="toggle" n={1} />
         : st.ready === false ? <p class="muted">{st.why}</p>
         : <Toggle label={label} hint={st.why} on={st.on} busy={busy} onChange={flip} />}
+      </div>
     </section>
   );
 }
@@ -102,9 +107,11 @@ function Hosts({ part }) {
   const { data, error, reload } = usePoll(() => part.list(), 15000, []);
   const [asking, setAsking] = useState('');
   const hosts = data || [];
+  const room = useRoom('set.hosts', !data && !error);
   return (
     <section class="panel">
       <h2><Icon name="map" /> {t('settings.hosts')}</h2>
+      <div class="stack-room" ref={room.ref} style={room.style}>
       {error ? <p class="err">{error.message}</p> : null}
       {data && !hosts.length ? <p class="muted">{t('settings.hostsNone')}</p> : null}
       {!data && !error ? <Skeleton shape="rows" n={1} /> : null}
@@ -119,6 +126,7 @@ function Hosts({ part }) {
               : <Btn kind="ghost" onClick={() => setAsking(h.key)}>{t('settings.unpairQ')}</Btn>}
           </div>
         ))}
+      </div>
       </div>
     </section>
   );

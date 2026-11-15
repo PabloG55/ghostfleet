@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'preact/hooks';
 import { STATUS, StatusMark, sinceTs } from './ui.jsx';
-import { Skeleton } from './skeleton.jsx';
+import { Skeleton, useRoom } from './skeleton.jsx';
 import { GhostShip as Ship, Ship as Boat } from './fleet.jsx';
 import { t } from './i18n.js';
 import { useFleet, useSlot } from './adapter.jsx';
@@ -71,6 +71,7 @@ export function FleetMap({ projects }) {
   const shown = showIdle ? [...active, ...idle] : active;
   const fs = focus && (projects || []).find(p => p.name === focus.project)?.sessions.find(s => s.name === focus.session);
 
+  const room = useRoom('map', projects == null);
   return (
     <div class="page map-page">
       <header class="page-head">
@@ -78,7 +79,9 @@ export function FleetMap({ projects }) {
         <label class="toggle-inline"><input type="checkbox" checked={showIdle} onChange={(e) => setShowIdle(e.currentTarget.checked)} /> {t('map.showIdle', { n: idle.length })}</label>
       </header>
       <div class="map-wrap">
-        <div class="ocean" ref={sea}>
+        {/* On a phone the ticker is UNDER the sea, so the sea's height is where the ticker stands:
+            while the fleet is being read the sea keeps the height it had last time here. */}
+        <div class="ocean" ref={(el) => { sea.current = el; room.ref.current = el; }} style={room.style}>
           {projects == null ? <Skeleton shape="fleets" box="sk-isles" n={3} /> : null}
           {projects && !shown.length ? <p class="muted pad">{t('map.none')}</p> : null}
           {shown.map(p => (

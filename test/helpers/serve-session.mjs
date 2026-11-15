@@ -3,7 +3,7 @@
 // real fleet-serve running the real fleet-read over a large transcript.
 //
 //     node serve-session.mjs build <fleet-dir> <transcript> <sock> <session>
-//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log> [grid-run-log]
+//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log> [grid-run-log] [digest-run-log]
 //
 // `probe` prints one "name <US> want <US> got" row per check; test/run.sh compares them.
 //
@@ -55,7 +55,7 @@ if (mode === 'build') {
 
 if (mode !== 'probe') { console.error('usage: serve-session.mjs build|probe …'); process.exit(2); }
 const { Authenticator, request } = await import('./serve-client.mjs');
-const [base, code, transcript, spawnLog, gridLog] = rest;
+const [base, code, transcript, spawnLog, gridLog, digestLog] = rest;
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const a = new Authenticator({ rpId: new URL(base).hostname, origin: base });
@@ -148,6 +148,31 @@ if (gridLog) {
   await wait(100);
   await grid();
   is('a send to a fleet makes the next read run that fleet\'s grid again', 1, runs() - g0);
+
+  // ── the list without its rollup, and one digest for everyone asking ──────────────────
+  // What the app's own poll asks every five seconds. The rollup is a grid per fleet, so the
+  // list asked for WITHOUT it must start none, measured after the kept grid has aged so that
+  // "none" cannot be the kept one answering; and the same list WITH it must start one, or the
+  // first row would pass on a daemon that never ran a grid at all.
+  await wait(2700);
+  g0 = runs();
+  const bare = await request(base, 'GET', '/api/projects?rollup=0', { headers: auth });
+  is('the project list without its rollup is answered', true, bare.status === 200 && Array.isArray(bare.json?.projects) && bare.json.projects.length === 1);
+  is('...and runs no grid', 0, runs() - g0);
+  await request(base, 'GET', '/api/projects', { headers: auth });
+  is('...where the list with it runs one', 1, runs() - g0);
+  if (digestLog) {
+    const druns = () => { try { return fs.readFileSync(digestLog, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
+    const digest = () => request(base, 'GET', '/api/digest', { headers: auth });
+    let d0 = druns();
+    const three = await Promise.all([digest(), digest(), digest()]);
+    is('three clients asking for the digest at once all get it', 3, three.filter(r => r.status === 200 && r.json && r.json.ok).length);
+    is('...from ONE run of fleet-digest', 1, druns() - d0);
+    await wait(2700);
+    d0 = druns();
+    await digest();
+    is('a digest asked for after the kept one has aged is run again', 1, druns() - d0);
+  }
 }
 
 console.log(rows.join('\n'));

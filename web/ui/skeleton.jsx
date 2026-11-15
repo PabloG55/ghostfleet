@@ -73,7 +73,7 @@ export function AsOf({ at, stale }) {
 // height the block had is remembered, per block and per window width, and held while the next
 // answer is out. A number of pixels is all that is stored, never what was in them.
 //   const room = useRoom('usage', waiting);  <div ref={room.ref} style={room.style}>…</div>
-// The same node carries the ref waiting and loaded. A block that loads to nothing (`gone`)
+// The same node carries the ref waiting and loaded, and nothing but the block's own content is in it. A block that loads to nothing (`gone`)
 // forgets its height, so a line switched off does not leave a hole on the next launch.
 export function useRoom(name, waiting, gone = false) {
   const ref = useRef(null);
@@ -88,5 +88,9 @@ export function useRoom(name, waiting, gone = false) {
   });
   let h = 0;
   if (waiting) { try { h = Number(localStorage.getItem(key)) || 0; } catch {} }
-  return { ref, style: h ? { minHeight: `${h}px` } : undefined, h };
+  // The height itself, not a floor under it: what stands in the block while it waits is a
+  // skeleton of a guessed number of rows, and where the guess is taller than what came last time
+  // (one machine paired, where the skeleton draws a row and the answer is a line of words) a floor
+  // would let the guess win and the block shrink when the answer lands.
+  return { ref, style: h ? { height: `${h}px`, overflow: 'hidden' } : undefined, h };
 }

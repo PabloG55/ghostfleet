@@ -1085,6 +1085,22 @@ function gridJson(t, sub = '') {
 function gridDrop(sock = '') {
   for (const k of [...gridKept.keys()]) if (!sock || k.split('\0')[1] === sock) gridKept.delete(k);
 }
+// THE DIGEST THE SAME WAY: one run for everyone asking at once, kept for as long as a grid is,
+// dropped by any write. It is the same answer for every reader (it takes nothing from the
+// request), and every open client asks for it every five seconds: three devices were three
+// runs of fleet-digest where one had just finished. A failure is never kept.
+let digestKept = null;
+function digestOnce() {
+  const hit = digestKept;
+  if (hit && hit.run) return hit.run;
+  if (hit && Date.now() - hit.at < GRID_TTL_MS) return Promise.resolve(hit.out);
+  const e = { at: 0, out: null, run: null };
+  e.run = callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 }).then(
+    (out) => { e.run = null; e.out = out; e.at = Date.now(); return out; },
+    (err) => { if (digestKept === e) digestKept = null; throw err; });
+  digestKept = e;
+  return e.run;
+}
 function gridRun(t, sub = '') {
   return new Promise((resolve) => {
     // --sub is only passed when the grid knows it: an unknown flag is ignored by --json
@@ -3428,7 +3444,7 @@ function agentCatalogue() {
   // tool runs is the one the phone reads; a second implementation of "what is the fleet"
   // is the drift docs/mobile.md §3 forbids.
   if (p === '/api/digest' && req.method === 'GET') {
-    const out = await callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const out = await digestOnce();
     const text = typeof out === 'string' ? out : String(out.text);
     let j;
     try { j = JSON.parse(text); } catch { return send(res, 502, { ok: false, text: `fleet-digest did not return JSON: ${text.trim().slice(0, 200)}` }); }
@@ -3676,6 +3692,7 @@ function agentCatalogue() {
       const t = named ? projects().find(x => x.name === named) : null;
       gridDrop(t ? t.sock : '');
       loginsDrop();
+      digestKept = null;
     });
   }
   if (p === '/api/term' || p === '/api/term/enable' || p === '/api/term/open') return termRoutes(p, req, res, body, c, ip);

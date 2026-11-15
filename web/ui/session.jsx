@@ -309,7 +309,10 @@ function ScheduleModal({ name, onClose, onSave }) {
 // pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
 // of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
 export const QUIET_PANE_MS = 15000;
-export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
+// `waiting` is the parent saying its read of the cards has not answered yet, which is not the
+// same as a session with no card: the first is drawn as the header's shape (below), the second
+// as "No data", which is a finding and was being shown for the length of every load.
+export function SessionView({ project, name, card, waiting = false, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
@@ -509,8 +512,17 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         {/* where the person came from, by name; opened by a link, the session's project */}
         {embedded ? null : <BackLink parent={`/p/${encodeURIComponent(project)}`} />}
         <div class="sess-title">
-          {embedded ? null : <><Ship state={st} size={32} /><h1>{name}</h1></>}
-          <StatusPill status={st} />
+          {embedded ? null : <><Ship state={waiting && !card ? 'idle' : st} size={32} /><h1>{name}</h1></>}
+          {/* THE HEADER AT ITS FINAL SIZE BEFORE ITS CARD HAS LANDED. Its state, branch, PR and
+              controls all come with the card, so the header used to be a name and "More", and
+              grew a row when the card answered: 28 px at 390 wide, under which the tabs and the
+              whole conversation went down. The same elements are drawn as shapes (ui.css
+              .sk-ghost), so they wrap where the real ones will. */}
+          {waiting && !card ? <span class="sk sk-ghost-row" role="status" aria-label={t('common.loading')}>
+            <span class="pill sk-ghost" aria-hidden="true">Working</span>
+            <span class="branch sk-ghost" aria-hidden="true"><Icon name="branch" /> feat/a-branch-name</span>
+            <span class="tag pr sk-ghost" aria-hidden="true">PR 0000</span>
+          </span> : <StatusPill status={st} />}
           {card?.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
           {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
           {card?.label ? (can('gfw_label')
@@ -523,6 +535,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         </div>
         <div class="sess-tools">
           {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
+          {waiting && !card ? <span class="sk" aria-hidden="true"><Btn kind="ghost sm sk-ghost" disabled tabIndex={-1} icon="pause">{t('sess.pause')}</Btn></span> : null}
           {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
           {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
           {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}

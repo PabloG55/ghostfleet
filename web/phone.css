@@ -754,6 +754,11 @@ textarea { resize: vertical; }
 .sk-toggle span { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .sk-line { display: inline-flex; align-items: center; max-width: 100%; vertical-align: bottom; }
 .sk-line .sk-bar { display: inline-block; }
+/* A REAL ELEMENT DRAWN AS ITS OWN SHAPE: the pill, chip or button keeps its box (its padding,
+ * its font, its border width), so what replaces it is the same size, and only its ink is gone. */
+.sk .sk-ghost, .sk .btn.sk-ghost:disabled { color: transparent; background: var(--line); border-color: transparent; box-shadow: none; opacity: 1; pointer-events: none; user-select: none; }
+.sk-ghost > * { visibility: hidden; }
+.sk-ghost-row { display: contents; }
 .sk-rows, .sk-lines { display: flex; flex-direction: column; gap: 4px; }
 .sk-lines { gap: 9px; padding: .6em 0; }
 .sk-isles { display: flex; flex-wrap: wrap; gap: 22px; }
@@ -763,7 +768,7 @@ textarea { resize: vertical; }
 .sk-late .msg.skel { animation: sk-show 0s linear 180ms both; }
 .as-of { margin: 0 0 8px; }
 @media (prefers-reduced-motion: no-preference) {
-  .sk .sk-bar, .sk .sk-sea { animation: skel 1.6s ease-in-out infinite; }
+  .sk .sk-bar, .sk .sk-sea, .sk .sk-ghost { animation: skel 1.6s ease-in-out infinite; }
 }
 .chat > .older, .chat > .start { font-size: 12px; margin: 0 auto; }
 .chat > .older { display: flex; flex-wrap: wrap; gap: .3em .8em; justify-content: center; align-items: baseline; }
@@ -862,6 +867,8 @@ textarea { resize: vertical; }
    column stretched it: "Reset demo data" ran the width of Settings, its label at the left edge
    of a bordered box, and read as a text field. */
 .panel > .btn { align-self: flex-start; }
+/* a panel's read-dependent part, kept as one block so its height can be held (skeleton.jsx useRoom) */
+.stack-room { display: flex; flex-direction: column; gap: 12px; }
 
 /* ── modal, toast ────────────────────────────────────── */
 .scrim, .side-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: grid; place-items: center; padding: 16px; }

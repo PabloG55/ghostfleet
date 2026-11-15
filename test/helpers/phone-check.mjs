@@ -472,13 +472,11 @@ try {
     // always beside the page.
     {
       const hung = await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
-        // The fixture backend reads each project's grid once itself (api.js rollup) before the adapter
-        // reads it again for the sessions: the first read after each projects.json passes, the
-        // adapter's never answers.
-        const f = window.fetch.bind(window); window.__hung = 0; let pass = 0;
+        // The adapter asks for the list without its rollup (api.js getProjects), so the only read of
+        // this grid on the way to the list is the adapter's own, for the sessions. It never answers.
+        const f = window.fetch.bind(window); window.__hung = 0;
         window.fetch = (u, ...r) => { const s = String(u && u.url || u);
-          if (/fixtures\\/projects\\.json/.test(s)) pass = 1;
-          if (/fixtures\\/grid-acme-api\\.json/.test(s)) { if (pass) { pass = 0; return f(u, ...r); } window.__hung++; return new Promise(() => {}); }
+          if (/fixtures\\/grid-acme-api\\.json/.test(s)) { window.__hung++; return new Promise(() => {}); }
           return f(u, ...r); };
       })()` });
       await b.viewport(1280, 900);
@@ -799,6 +797,36 @@ try {
       is(`${w} ...with no skeleton`, false, back.sk);
       is(`${w} ...and dated`, true, /as of/.test(back.asOf));
       is(`${w} ...until the read lands, when the date goes`, true, !!(await until(() => !document.querySelector('.main .as-of') && document.querySelectorAll('.main .cards .card').length > 0)));
+
+      // THE SESSION'S HEADER IS ITS FINAL SIZE BEFORE ITS CARD LANDS. Opened cold from its link (a
+      // reload, so no grid is kept to paint the card from): the state, the branch, the PR and the
+      // controls all come with the card, and the header used to be a name and "More" until it did,
+      // then grew a row and pushed the tabs and the conversation down, 28 px at 390 wide. It also
+      // said "No data" for the length of every load, which is a finding about a session and not a
+      // way to say one is being read.
+      await b.evaluate(() => { location.hash = '#/p/acme-api/s/api-fix'; });
+      await sleep(200);
+      await b.evaluate(() => location.reload());
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      await until(() => !!document.querySelector('.main .sess-head'));
+      await sleep(700);
+      const headNow = () => b.evaluate(() => {
+        const top = (q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top) : null; };
+        const head = document.querySelector('.main .sess-head');
+        return { shapes: head.querySelectorAll('.sk-ghost').length, words: /No data/.test(head.textContent), branch: !!head.querySelector('.branch:not(.sk-ghost)'),
+                 h: Math.round(head.getBoundingClientRect().height), under: `${top('.main .tabs')} ${top('.main .chat')}` };
+      });
+      const hm = await headNow();
+      is(`${w} session, its card held 2 s: the header is not read yet`, false, hm.branch);
+      is(`${w} session: ...its state, branch, PR and controls are drawn as shapes`, true, hm.shapes >= 4 ? true : `${hm.shapes} shapes`);
+      is(`${w} session: ...and it does not say "No data" of a session it has not read`, false, hm.words);
+      await until(() => !!document.querySelector('.main .sess-head .branch:not(.sk-ghost)'));
+      await sleep(150);
+      const he = await headNow();
+      is(`${w} session: when the card lands the shapes are gone`, 0, he.shapes);
+      is(`${w} session: ...the header is the height it was`, hm.h, he.h);
+      is(`${w} session: ...and the tabs and the conversation under it have not moved`, hm.under, he.under);
     }
     await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
     await b.viewport(390, 844);

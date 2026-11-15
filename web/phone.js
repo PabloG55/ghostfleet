@@ -3550,7 +3550,10 @@ function useRoom(name, waiting, gone = false) {
 	} catch {}
 	return {
 		ref,
-		style: h ? { minHeight: `${h}px` } : void 0,
+		style: h ? {
+			height: `${h}px`,
+			overflow: "hidden"
+		} : void 0,
 		h
 	};
 }
@@ -7646,7 +7649,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
+function SessionView({ project, name, card, waiting = false, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
@@ -7908,10 +7911,31 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 						class: "sess-title",
 						children: [
 							embedded ? null : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Ship, {
-								state: st,
+								state: waiting && !card ? "idle" : st,
 								size: 32
 							}), /* @__PURE__ */ u("h1", { children: name })] }),
-							/* @__PURE__ */ u(StatusPill, { status: st }),
+							waiting && !card ? /* @__PURE__ */ u("span", {
+								class: "sk sk-ghost-row",
+								role: "status",
+								"aria-label": t("common.loading"),
+								children: [
+									/* @__PURE__ */ u("span", {
+										class: "pill sk-ghost",
+										"aria-hidden": "true",
+										children: "Working"
+									}),
+									/* @__PURE__ */ u("span", {
+										class: "branch sk-ghost",
+										"aria-hidden": "true",
+										children: [/* @__PURE__ */ u(Icon, { name: "branch" }), " feat/a-branch-name"]
+									}),
+									/* @__PURE__ */ u("span", {
+										class: "tag pr sk-ghost",
+										"aria-hidden": "true",
+										children: "PR 0000"
+									})
+								]
+							}) : /* @__PURE__ */ u(StatusPill, { status: st }),
 							card?.branch ? /* @__PURE__ */ u("span", {
 								class: "branch",
 								children: [
@@ -7972,6 +7996,17 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									tr.reload();
 								}
 							}),
+							waiting && !card ? /* @__PURE__ */ u("span", {
+								class: "sk",
+								"aria-hidden": "true",
+								children: /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm sk-ghost",
+									disabled: true,
+									tabIndex: -1,
+									icon: "pause",
+									children: t("sess.pause")
+								})
+							}) : null,
 							st === "working" ? /* @__PURE__ */ u(Btn, {
 								kind: "ghost sm",
 								disabled: busy,
@@ -8797,6 +8832,7 @@ function ProjectView({ project, session, tool = null }) {
 				project,
 				name: session,
 				card: current,
+				waiting: !g && !error,
 				tool,
 				onChanged: reload,
 				onGone: sessionBack,
@@ -9271,6 +9307,7 @@ function FleetMap({ projects }) {
 	const idle = (projects || []).filter((p) => !p.sessions.length);
 	const shown = showIdle ? [...active, ...idle] : active;
 	const fs = focus && (projects || []).find((p) => p.name === focus.project)?.sessions.find((s) => s.name === focus.session);
+	const room = useRoom("map", projects == null);
 	return /* @__PURE__ */ u("div", {
 		class: "page map-page",
 		children: [/* @__PURE__ */ u("header", {
@@ -9295,7 +9332,11 @@ function FleetMap({ projects }) {
 			children: [
 				/* @__PURE__ */ u("div", {
 					class: "ocean",
-					ref: sea,
+					ref: (el) => {
+						sea.current = el;
+						room.ref.current = el;
+					},
+					style: room.style,
 					children: [
 						projects == null ? /* @__PURE__ */ u(Skeleton, {
 							shape: "fleets",
@@ -9612,24 +9653,29 @@ function SwitchSection({ title, part, label, icon }) {
 		setBusy(false);
 		load();
 	};
+	const room = useRoom(`set.${icon}`, st == null);
 	return /* @__PURE__ */ u("section", {
 		class: "panel",
 		children: [/* @__PURE__ */ u("h2", { children: [
 			/* @__PURE__ */ u(Icon, { name: icon }),
 			" ",
 			title
-		] }), st == null ? /* @__PURE__ */ u(Skeleton, {
-			shape: "toggle",
-			n: 1
-		}) : st.ready === false ? /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: st.why
-		}) : /* @__PURE__ */ u(Toggle, {
-			label,
-			hint: st.why,
-			on: st.on,
-			busy,
-			onChange: flip
+		] }), /* @__PURE__ */ u("div", {
+			ref: room.ref,
+			style: room.style,
+			children: st == null ? /* @__PURE__ */ u(Skeleton, {
+				shape: "toggle",
+				n: 1
+			}) : st.ready === false ? /* @__PURE__ */ u("p", {
+				class: "muted",
+				children: st.why
+			}) : /* @__PURE__ */ u(Toggle, {
+				label,
+				hint: st.why,
+				on: st.on,
+				busy,
+				onChange: flip
+			})
 		})]
 	});
 }
@@ -9637,72 +9683,77 @@ function Hosts({ part }) {
 	const { data, error, reload } = usePoll(() => part.list(), 15e3, []);
 	const [asking, setAsking] = d("");
 	const hosts = data || [];
+	const room = useRoom("set.hosts", !data && !error);
 	return /* @__PURE__ */ u("section", {
 		class: "panel",
-		children: [
-			/* @__PURE__ */ u("h2", { children: [
-				/* @__PURE__ */ u(Icon, { name: "map" }),
-				" ",
-				t("settings.hosts")
-			] }),
-			error ? /* @__PURE__ */ u("p", {
-				class: "err",
-				children: error.message
-			}) : null,
-			data && !hosts.length ? /* @__PURE__ */ u("p", {
-				class: "muted",
-				children: t("settings.hostsNone")
-			}) : null,
-			!data && !error ? /* @__PURE__ */ u(Skeleton, {
-				shape: "rows",
-				n: 1
-			}) : null,
-			/* @__PURE__ */ u("div", {
-				class: "rows",
-				children: hosts.map((h) => /* @__PURE__ */ u("div", {
-					class: "row-item static",
-					children: [
-						/* @__PURE__ */ u(Led, {
-							state: h.self || h.online !== false ? "idle" : "off",
-							size: 8
-						}),
-						/* @__PURE__ */ u("span", {
-							class: "grow",
-							children: [
-								/* @__PURE__ */ u("b", { children: h.label || h.key }),
-								" ",
-								/* @__PURE__ */ u("small", {
-									class: "muted",
-									children: h.self ? t("settings.hostThis") : h.online === false ? t("settings.hostOffline") : t("settings.hostOnline")
-								})
-							]
-						}),
-						h.self ? null : asking === h.key ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
-							kind: "danger",
-							onClick: async () => {
-								try {
-									await part.unpair(h.key);
-									toast(t("settings.unpaired", { name: h.label || h.key }), "good");
-								} catch (e) {
-									toast(e.message, "bad");
-								}
-								setAsking("");
-								reload();
-							},
-							children: t("settings.unpair")
-						}), /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setAsking(""),
-							children: t("common.cancel")
-						})] }) : /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setAsking(h.key),
-							children: t("settings.unpairQ")
-						})
-					]
-				}, h.key))
-			})
-		]
+		children: [/* @__PURE__ */ u("h2", { children: [
+			/* @__PURE__ */ u(Icon, { name: "map" }),
+			" ",
+			t("settings.hosts")
+		] }), /* @__PURE__ */ u("div", {
+			class: "stack-room",
+			ref: room.ref,
+			style: room.style,
+			children: [
+				error ? /* @__PURE__ */ u("p", {
+					class: "err",
+					children: error.message
+				}) : null,
+				data && !hosts.length ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("settings.hostsNone")
+				}) : null,
+				!data && !error ? /* @__PURE__ */ u(Skeleton, {
+					shape: "rows",
+					n: 1
+				}) : null,
+				/* @__PURE__ */ u("div", {
+					class: "rows",
+					children: hosts.map((h) => /* @__PURE__ */ u("div", {
+						class: "row-item static",
+						children: [
+							/* @__PURE__ */ u(Led, {
+								state: h.self || h.online !== false ? "idle" : "off",
+								size: 8
+							}),
+							/* @__PURE__ */ u("span", {
+								class: "grow",
+								children: [
+									/* @__PURE__ */ u("b", { children: h.label || h.key }),
+									" ",
+									/* @__PURE__ */ u("small", {
+										class: "muted",
+										children: h.self ? t("settings.hostThis") : h.online === false ? t("settings.hostOffline") : t("settings.hostOnline")
+									})
+								]
+							}),
+							h.self ? null : asking === h.key ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
+								kind: "danger",
+								onClick: async () => {
+									try {
+										await part.unpair(h.key);
+										toast(t("settings.unpaired", { name: h.label || h.key }), "good");
+									} catch (e) {
+										toast(e.message, "bad");
+									}
+									setAsking("");
+									reload();
+								},
+								children: t("settings.unpair")
+							}), /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => setAsking(""),
+								children: t("common.cancel")
+							})] }) : /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => setAsking(h.key),
+								children: t("settings.unpairQ")
+							})
+						]
+					}, h.key))
+				})
+			]
+		})]
 	});
 }
 function Connection({ part, onChange }) {
@@ -11656,7 +11707,7 @@ function StackPicker({ members = [], onOpen }) {
 				};
 			}
 		}));
-	}, 5e3, []);
+	}, 15e3, []);
 	const toggle = (m) => setSelected((items) => items.some((x) => keyOf(x) === keyOf(m)) ? items.filter((x) => keyOf(x) !== keyOf(m)) : [...items, m]);
 	const open = () => selected.length && (onOpen ? onOpen(selected) : fleet.go(`/stack/${encodeURIComponent(JSON.stringify(selected))}`));
 	useKeys((key) => {
@@ -11816,6 +11867,7 @@ function StackView({ members = [] }) {
 					})]
 				}), narrow && i !== active ? null : /* @__PURE__ */ u(SessionView, {
 					card: cards.data?.[m.project]?.find((c) => c.name === m.session),
+					waiting: cards.data == null && !cards.error,
 					embedded: true,
 					quiet: i !== active,
 					project: m.project,
@@ -13000,6 +13052,7 @@ function Proposals() {
 	const [busyId, setBusyId] = d("");
 	const list = Array.isArray(data) ? data : [];
 	const request = useRequest("proposals", data == null ? void 0 : list.map((p) => `${p.id}:${!!p.granted}`).join("|") || null);
+	const room = useRoom("proposals", has && data == null, !list.length);
 	if (!has) return null;
 	const answer = async (p, yes) => {
 		setBusyId(p.id);
@@ -13016,6 +13069,8 @@ function Proposals() {
 	};
 	return /* @__PURE__ */ u("div", {
 		class: "proposal-slot",
+		ref: room.ref,
+		style: room.style,
 		children: [list.length ? /* @__PURE__ */ u(Btn, {
 			kind: "sm proposal-return",
 			onClick: request.show,
@@ -14378,12 +14433,29 @@ function phoneAdapter({ lock, go, place }) {
 		if (e instanceof api$1.AuthError) lock();
 		throw e;
 	});
-	const off = /* @__PURE__ */ new Set();
+	const OFF_KEY = "gf.off";
+	const off = new Set((() => {
+		try {
+			return JSON.parse(localStorage.getItem(OFF_KEY) || "[]");
+		} catch {
+			return [];
+		}
+	})());
+	const keepOff = () => {
+		try {
+			localStorage.setItem(OFF_KEY, JSON.stringify([...off]));
+		} catch {}
+	};
 	const noted = (view) => (e) => {
-		if (e?.status === 404) off.add(view);
+		if (e?.status === 404) {
+			off.add(view);
+			keepOff();
+		}
 		throw e;
 	};
-	api$1.getAutomations().catch(noted("automations")).catch(() => {});
+	api$1.getAutomations().then(() => {
+		if (off.delete("automations")) keepOff();
+	}).catch(noted("automations")).catch(() => {});
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -14409,7 +14481,7 @@ function phoneAdapter({ lock, go, place }) {
 		});
 	});
 	async function projects() {
-		const [j, digest] = await Promise.all([guard(api$1.getProjects()), within(api$1.getDigest(), null)]);
+		const [j, digest] = await Promise.all([guard(api$1.getProjects({ rollup: false })), within(api$1.getDigest(), null)]);
 		const local = new Map((digest?.projects || []).map((p) => [p.name, p]));
 		return {
 			projects: await Promise.all((j.projects || []).map(async (p) => {
@@ -14467,7 +14539,7 @@ function phoneAdapter({ lock, go, place }) {
 		noLead: (project) => new Error(t("phone.noLead", { project }))
 	});
 	const tasks = createTasks({
-		projects: async () => ((await api$1.getProjects()).projects || []).map((p) => p.name),
+		projects: async () => ((await api$1.getProjects({ rollup: false })).projects || []).map((p) => p.name),
 		jarvis: jarvisProject,
 		session: (project, name) => api$1.getSession(project, name),
 		grid: (project) => api$1.getGrid(project)
@@ -14555,7 +14627,7 @@ function phoneAdapter({ lock, go, place }) {
 				set: (on) => on ? enable(t) : disable()
 			},
 			hosts: {
-				list: async () => (await guard(api$1.getProjects())).hosts || [],
+				list: async () => (await guard(api$1.getProjects({ rollup: false }))).hosts || [],
 				unpair: (key) => guard(api$1.unpairHost(key))
 			},
 			device: {

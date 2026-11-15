@@ -374,9 +374,14 @@ async function fixture(file) {
 }
 
 // ── reads ─────────────────────────────────────────────────────────────────
-export async function getProjects() {
+// `rollup: false` asks for the list alone, with no `sessions` on its rows. The rollup is what
+// makes this read dear: the daemon runs a grid for every fleet to count its cards, and a caller
+// that takes its sessions from the digest (the app's own poll, every 5 s) was paying for a
+// count it never looked at. Measured on a daemon with five small fleets and three devices
+// open: 68 grid runs a minute, about fifty processes each, nearly all of them for this.
+export async function getProjects({ rollup: counts = true } = {}) {
   if ((await ready()).mode === 'server') {
-    const j = await get('/api/projects');
+    const j = await get(counts ? '/api/projects' : '/api/projects?rollup=0');
     setHome(j.home || '');
     return j;
   }
@@ -390,7 +395,7 @@ export async function getProjects() {
   // screen must not tell. On a server the daemon computes it from sessionStatuses,
   // which is where the `sessions` field in the fixture comes from.
   const projects = [];
-  for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
+  for (const p of j.projects || []) projects.push({ ...p, sessions: counts ? await rollup(p.name) : undefined,
     agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent,
     model: overlay.projModel.has(p.name) ? overlay.projModel.get(p.name) : (p.model ?? null) });
   const pr = await pairedFixture();

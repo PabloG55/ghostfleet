@@ -19803,6 +19803,10 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   mv "$CS/bin/fleet-read" "$CS/bin/fleet-read.real"
   printf '#!/bin/sh\necho x >> "%s/spawns"\nexec "$(dirname "$0")/fleet-read.real" "$@"\n' "$CS" > "$CS/bin/fleet-read"
   chmod +x "$CS/bin/fleet-read"
+  # The digest counted the same way, and slowed, so three reads "at once" really overlap.
+  mv "$CS/bin/fleet-digest" "$CS/bin/fleet-digest.real"
+  printf '#!/bin/sh\necho x >> "%s/digestruns"\nsleep 0.3\nexec "$(dirname "$0")/fleet-digest.real" "$@"\n' "$CS" > "$CS/bin/fleet-digest"
+  chmod +x "$CS/bin/fleet-digest"
   # A stand-in grid that counts its runs: what is being measured is how many times the daemon
   # STARTS one, and a real grid would need a fleet. It names '--json' because the daemon reads
   # the file for the flag before it will run it, and waits so two reads at once overlap.
@@ -19830,9 +19834,9 @@ GRIDSTUB
     i=$((i+1)); sleep 0.1
   done
   if curl -s -m1 "$CBASE/healthz" >/dev/null 2>&1; then
-    node "$ROOT/test/helpers/serve-session.mjs" probe "$CBASE" "$ccode" "$CST" "$CS/spawns" "$CS/gridruns" > "$CS/out" 2> "$CS/err"
+    node "$ROOT/test/helpers/serve-session.mjs" probe "$CBASE" "$ccode" "$CST" "$CS/spawns" "$CS/gridruns" "$CS/digestruns" > "$CS/out" 2> "$CS/err"
     is "serve-session ran"                "" "$(head -2 "$CS/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$CS/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$CS/out") rows")"
+    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$CS/out")" -ge 26 ] && echo yes || echo "no: $(wc -l < "$CS/out") rows")"
     while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$CS/out"
   else
     bad "the daemon comes up (chat read)" "listening on $CBASE" "$(tr '\n' ' ' < "$CS/log" 2>/dev/null | cut -c1-180)"
@@ -23708,7 +23712,7 @@ if [ -d "$ROOT/web" ]; then
     # 278 rows when the rebuilt features above were added, 283 with the empty pages, 286 with
     # the session's tab row, 296 with the chat's end and the project's header, 297 with the
     # row that says the cold open is a load of its own.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 380 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 590 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PHC/out"
