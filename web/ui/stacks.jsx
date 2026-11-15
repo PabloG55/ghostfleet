@@ -6,6 +6,7 @@ import { usePoll, Btn, StatusPill, splitAddr } from './ui.jsx';
 import { SessionView } from './session.jsx';
 import { useKeys } from './keyboard.jsx';
 import { t } from './i18n.js';
+import { Icon } from './icon.jsx';
 import { PhoneScreen, joinMeta, sessionRoute } from './phone-screen.jsx';
 // A paired machine's project is `<name>@<key>` and also carries `host`: drawn as both it read
 // `acme-api@vm · vm`. The heading takes the bare name beside the host; a member's label keeps
@@ -31,7 +32,7 @@ export function StackPicker({ members = [], onOpen }) {
         const isOpen = search ? true : (expanded[p.name] ?? !!count);
         return cards.length ? <details class="stack-group" key={p.name} open={isOpen}
           onToggle={e => { const open = e.currentTarget.open; if (!search && open !== isOpen) setExpanded(v => ({ ...v, [p.name]: open })); }}>
-          <summary><h2>{joinMeta(splitAddr(p.name)[0], p.host)}</h2><span class="muted">{t('phone.stackCount', { n: sessions.length, selected: count })}</span></summary>
+          <summary><Icon name="chevron" class="chev" /><h2>{joinMeta(splitAddr(p.name)[0], p.host)}</h2><span class="muted">{t('phone.stackCount', { n: sessions.length, selected: count })}</span></summary>
           <div>{cards.map(c => { const m = { project: p.name, session: c.name }; return <label class="stack-choice" key={c.name}>
             <input type="checkbox" checked={selected.some(x => keyOf(x) === keyOf(m))} onChange={() => toggle(m)} />
             <span class="stack-name">{c.name}</span><StatusPill status={c.status} small /><span class="muted stack-branch">{c.branch}</span>

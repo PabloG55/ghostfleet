@@ -88,21 +88,32 @@ export function phoneAdapter({ lock, go, place }) {
     const hit = peerGrids.get(name);
     if (hit && Date.now() - hit.at < 15000) return hit.sessions;
     let sessions = hit ? hit.sessions : [];
-    try { sessions = fromCards((await api.getGrid(name)).cards); } catch {}
+    const g = await within(api.getGrid(name), null);
+    if (g) sessions = fromCards(g.cards);
     peerGrids.set(name, { at: Date.now(), sessions });
     return sessions;
   }
 
+  // A read that never answers must not hold the whole list: one stalled grid read (a paired machine
+  // that stopped replying, a project whose fleet is wedged) kept `Promise.all` pending for ever, so
+  // the sidebar sat on "Loading..." while the rest of the app, which polls its own routes, had loaded.
+  // Past the limit the side read is taken as empty and the next poll asks again.
+  const SIDE_READ_MS = 8000;
+  const within = (p, fallback) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), SIDE_READ_MS);
+    Promise.resolve(p).then(v => { clearTimeout(timer); resolve(v); }, () => { clearTimeout(timer); resolve(fallback); });
+  });
+
   // Projects, in the shape every shared screen reads, with the machine each one is on.
   async function projects() {
     const j = await guard(api.getProjects());
-    const digest = await api.getDigest().catch(() => null);
+    const digest = await within(api.getDigest(), null);
     const local = new Map((digest?.projects || []).map(p => [p.name, p]));
     const rows = await Promise.all((j.projects || []).map(async (p) => {
       const d = !p.host_key && local.get(p.name);
       const sessions = d ? (d.sessions || []).map(s => ({ name: s.name, status: s.status, ts: s.ts, lead: !!s.lead }))
         : p.host_key ? await peerSessions(p.name)
-        : fromCards((await api.getGrid(p.name).catch(() => ({ cards: [] }))).cards);
+        : fromCards((await within(api.getGrid(p.name), { cards: [] })).cards);
       return { name: p.name, path: p.path, profile: p.profile, agent: p.agent || null, model: p.model || null,
                host: p.host || '', host_key: p.host_key || '', sched: p.sched || null, counts: counted(sessions), sessions };
     }));

@@ -392,7 +392,91 @@ try {
        (await texts('.side.open .side-list .nav .grow')).sort().join(','));
     is('...under a heading per profile, in the projects file\'s order', 'work,personal', (await texts('.side.open .side-prof .grow')).join(','));
     is('...with no machine headings for one machine', 0, (await texts('.side.open .side-host')).length);
+    // ── the drawer folds: a button per heading, the rows go with it, the rollup stays ──
+    const profBtn = (name) => b.evaluate((nm) => { const x = [...document.querySelectorAll('.side.open button.side-fold.side-prof')].find(e => e.textContent.includes(nm)); return x ? x.getAttribute('aria-expanded') : null; }, name);
+    is('each profile heading is a button that says whether it is open', 'true,true',
+       [await profBtn('work'), await profBtn('personal')].join(','));
+    // A load locks the app again; the demo way past it comes back each time.
+    const reenter = async () => {
+      await b.call('Page.navigate', { url: 'about:blank' });
+      await until(() => location.href === 'about:blank');
+      await b.call('Page.navigate', { url: srv.base + '/' });
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      await until(() => !!document.querySelector('.topbar .icon-btn'));
+      await sleep(600);
+    };
+    const rowsNow = async () => (await texts('.side.open .side-list a.nav .grow')).sort().join(',');
+    const clickProf = (name) => b.evaluate((nm) => [...document.querySelectorAll('.side.open button.side-fold.side-prof')].find(e => e.textContent.includes(nm)).click(), name);
+    const workSum = await b.evaluate(() => [...document.querySelectorAll('.side.open .side-list a.nav')].filter(a => ['acme-api', 'acme-web', 'toolbox', 'billing-svc'].includes(a.querySelector('.grow').textContent.trim()))
+      .reduce((n, a) => n + (Number((a.querySelector('.badge,.n') || {}).textContent) || 0), 0));
+    const profH = () => b.evaluate(() => { const x = [...document.querySelectorAll('.side.open button.side-fold.side-prof')].find(e => e.textContent.includes('work')); return x.getBoundingClientRect().height; });
+    const hOpen = await profH();
+    await clickProf('work');
+    await sleep(200);
+    is('a heading keeps its height whether open or closed', hOpen, await profH());
+    is('a tap folds the profile, and its rows leave the page', 'scratch', await rowsNow());
+    is('...the heading says it is closed', 'false', await profBtn('work'));
+    is('...and now carries the summed count and a light', `${workSum} true`, await b.evaluate(() => {
+      const x = [...document.querySelectorAll('.side.open button.side-fold.side-prof')].find(e => e.textContent.includes('work'));
+      return `${Number((x.querySelector('.badge,.n') || {}).textContent) || 0} ${!!x.querySelector('.led')}`; }));
+    is('...kept in this browser for the next load', '1', await b.evaluate(() => { try { return String(Object.keys(JSON.parse(localStorage.getItem('ghostfleet.side.folded'))).length); } catch { return 'none'; } }));
+    await reenter();
+    await b.evaluate(() => document.querySelector('.topbar .icon-btn')?.click());
+    await until(() => !!document.querySelector('.side.open .side-prof'));
+    is('...and still folded after a reload', 'scratch', await rowsNow());
+    await b.evaluate(() => { const i = document.querySelector('.side.open .search'); i.value = 'toolbox'; i.dispatchEvent(new Event('input', { bubbles: true })); });
+    await sleep(200);
+    is('a search finds a project inside the folded group', 'toolbox', await rowsNow());
+    await b.evaluate(() => { const i = document.querySelector('.side.open .search'); i.value = ''; i.dispatchEvent(new Event('input', { bubbles: true })); });
+    await sleep(200);
+    is('...and clearing it puts the fold back', 'scratch', await rowsNow());
+    await clickProf('work');
+    await sleep(200);
+    is('a second tap opens it again', 'acme-api,acme-web,billing-svc,scratch,toolbox', await rowsNow());
     await b.evaluate(() => document.querySelector('.side-scrim')?.click());
+
+    // Storage that throws: the list still draws, every group open, and a tap still folds for the session.
+    const denied = await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const t = () => { throw new Error('denied'); };
+      try { Object.defineProperty(window, 'localStorage', { get: t, configurable: true }); } catch {} })()` });
+    await reenter();
+    await b.evaluate(() => document.querySelector('.topbar .icon-btn')?.click());
+    await until(() => !!document.querySelector('.side.open .side-prof'));
+    is('with storage refused the list still draws, all open', 'acme-api,acme-web,billing-svc,scratch,toolbox', await rowsNow());
+    await clickProf('work');
+    await sleep(200);
+    is('...and a tap still folds', 'scratch', await rowsNow());
+    await b.evaluate(() => document.querySelector('.side-scrim')?.click());
+    // The stand-in is for this block only: left in, every later load throws on the first storage read.
+    await b.call('Page.removeScriptToEvaluateOnNewDocument', { identifier: denied.identifier });
+
+    // One project's grid read that never answers must not hold the whole list on "Loading...": the
+    // old adapter waited on every grid with no deadline. The list draws once the read is given up
+    // (8 s), and a later poll asks for that grid again. The page is the desk's, where the list is
+    // always beside the page.
+    {
+      const hung = await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+        // The fixture backend reads each project's grid once itself (api.js rollup) before the adapter
+        // reads it again for the sessions: the first read after each projects.json passes, the
+        // adapter's never answers.
+        const f = window.fetch.bind(window); window.__hung = 0; let pass = 0;
+        window.fetch = (u, ...r) => { const s = String(u && u.url || u);
+          if (/fixtures\\/projects\\.json/.test(s)) pass = 1;
+          if (/fixtures\\/grid-acme-api\\.json/.test(s)) { if (pass) { pass = 0; return f(u, ...r); } window.__hung++; return new Promise(() => {}); }
+          return f(u, ...r); };
+      })()` });
+      await b.viewport(1280, 900);
+      await reenter();
+      await sleep(11000);
+      is('a grid read that never answers leaves the list drawn, not on Loading...', 'acme-api,acme-web,billing-svc,scratch,toolbox false',
+         await b.evaluate(() => [[...document.querySelectorAll('.side-list a.nav .grow')].map(x => x.textContent.trim()).sort().join(','),
+                                  /Loading/.test(document.querySelector('.side-list')?.textContent || '')].join(' ')));
+      await sleep(4000);
+      is('...and a later poll asks for it again', true, (await b.evaluate(() => window.__hung)) >= 2);
+      await b.call('Page.removeScriptToEvaluateOnNewDocument', { identifier: hung.identifier });
+      await b.viewport(390, 844);
+      await reenter();
+    }
 
     // ── the lead's actions, and the verbs this server refuses ─────────────────
     const menuOf = async (hash) => {
