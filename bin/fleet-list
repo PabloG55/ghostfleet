@@ -288,6 +288,20 @@ while IFS= read -r name; do
   # (Tested before read: `tr < missing 2>/dev/null` silences tr, not the shell's redirect.)
   _ag=""; [ -f "$FLEET_DIR/$SOCK.$name.agent" ] && { IFS= read -r -d '' _ag < "$FLEET_DIR/$SOCK.$name.agent"; _ag="${_ag//[[:space:]]/}"; }
   case "$name" in _*) _ag=shell ;; esac
+  # A SPENT ACCOUNT, read off the pane: the hook status above is the last thing the session
+  # SAID, and a worker stopped at its usage limit said "working" and then nothing. Two signals
+  # (lib/pane-limit.mjs), so a pane that merely quotes the sentence is left alone. Not for a
+  # parked, dead or shell row, which already say something better.
+  #   Claude is not asked here: its Notification hook already says need-you at its limit, and a
+  # pane read per Claude row would make this list's cost grow with the fleet (a test pins it).
+  case "$st:$name:${_ag:-claude}" in parked:*|dead:*|*:_*|*:"$SELF":*|*:claude|*:shell) ;; *)
+    if [ -f "$LIB_DIR/pane-limit.mjs" ] && command -v node >/dev/null 2>&1; then
+      _lpane="$(tmux -u -L "$SOCK" capture-pane -p -t "$name" 2>/dev/null)"
+      if _lat="$(node "$LIB_DIR/pane-limit.mjs" "${_ag:-claude}" <<< "$_lpane" 2>/dev/null)"; then
+        st="limit"; mark="resets $_lat"
+      fi
+    fi ;;
+  esac
   _la="${LAUNCH[$_i]-}"; [ "${LAUNCH[$_i]+x}" = x ] || _la="-"
   ROWS="$ROWS$name"$'\x1f'"${st:-?}"$'\x1f'"${_ag:-claude}"$'\x1f'"$mark"$'\n'
   BATCH="$BATCH$name"$'\t'"${_tr:--}"$'\t'"${_la:--}"$'\n'
