@@ -682,7 +682,7 @@ var en_default = {
 	"acct.off": "accounts are off",
 	"acct.none": "accounts: no profile has an account yet",
 	"acct.exhausted": "all accounts exhausted{until} — {workers}",
-	"acct.unsaved": "on a login that is not saved — failover paused",
+	"acct.unsaved": "on a login it cannot identify — failover paused",
 	"acct.noActive": "no account is active",
 	"acct.read": "read {when}",
 	"acct.never": "never",
@@ -690,11 +690,11 @@ var en_default = {
 	"acct.title": "Claude accounts",
 	"acct.threshold": "switch at {pct}% of the 5h or 7d limit, spending the week that ends first",
 	"acct.noProfile": "no profile has an account yet — fleet-accounts add <profile> <name>",
-	"acct.profUnsaved": " — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)",
+	"acct.profUnsaved": " — ON A LOGIN IT CANNOT IDENTIFY, failover paused until it can",
 	"acct.profExhausted": " — ALL EXHAUSTED{until}, {workers}",
 	"acct.noAccounts": "(no accounts)",
 	"acct.one": "one account: nothing to fail over to yet — add another",
-	"acct.pin": "on '{account}' by hand until {at} — the planner leaves it there unless it runs out",
+	"acct.pin": "on '{account}' by hand — held there until it reaches the threshold or runs out",
 	"acct.readOnly": "read only — an account is switched at the desk: fleet-accounts use <profile> <name>",
 	"acct.activeTag": " (active)",
 	"sess.uploading": "uploading…",
@@ -1561,7 +1561,7 @@ var es_default = {
 	"acct.off": "las cuentas están desactivadas",
 	"acct.none": "cuentas: ningún perfil tiene cuenta todavía",
 	"acct.exhausted": "todas las cuentas agotadas{until} — {workers}",
-	"acct.unsaved": "con un inicio de sesión no guardado — cambio automático en pausa",
+	"acct.unsaved": "con un inicio de sesión que no puede identificar — cambio automático en pausa",
 	"acct.noActive": "ninguna cuenta está activa",
 	"acct.read": "leído {when}",
 	"acct.never": "nunca",
@@ -1569,11 +1569,11 @@ var es_default = {
 	"acct.title": "Cuentas de Claude",
 	"acct.threshold": "cambia al {pct}% del límite de 5h o de 7d, gastando primero la semana que termina antes",
 	"acct.noProfile": "ningún perfil tiene cuenta todavía — fleet-accounts add <perfil> <nombre>",
-	"acct.profUnsaved": " — CON UN INICIO DE SESIÓN NO GUARDADO, cambio automático en pausa (fleet-accounts add para manejarlo)",
+	"acct.profUnsaved": " — CON UN INICIO DE SESIÓN QUE NO PUEDE IDENTIFICAR, cambio automático en pausa hasta que pueda",
 	"acct.profExhausted": " — TODAS AGOTADAS{until}, {workers}",
 	"acct.noAccounts": "(sin cuentas)",
 	"acct.one": "una sola cuenta: todavía no hay a cuál cambiar — agrega otra",
-	"acct.pin": "en '{account}' a mano hasta {at} — el planificador la deja ahí salvo que se agote",
+	"acct.pin": "en '{account}' a mano — se queda ahí hasta que llegue al umbral o se agote",
 	"acct.readOnly": "solo lectura — la cuenta se cambia en la computadora: fleet-accounts use <perfil> <nombre>",
 	"acct.activeTag": " (activa)",
 	"sess.uploading": "subiendo…",
@@ -12680,10 +12680,7 @@ function AccountsDialog({ u: u$2, onClose }) {
 					p.accounts.length < 2 ? /* @__PURE__ */ u("p", { children: t("acct.one") }) : null,
 					p.pin ? /* @__PURE__ */ u("p", {
 						class: "u-pin",
-						children: t("acct.pin", {
-							account: p.pin.account,
-							at: p.pin.until_at
-						})
+						children: t("acct.pin", { account: p.pin.account })
 					}) : null,
 					p.accounts.map((a) => /* @__PURE__ */ u("div", {
 						class: `u-acct u-${hue(a)}`,

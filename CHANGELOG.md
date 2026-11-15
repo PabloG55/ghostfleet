@@ -6,6 +6,29 @@ the detail, and every entry here names the PR that carries the argument.
 
 ## Unreleased
 
+**Several Claude accounts (experimental): a login is who its token says, and a reading is that
+login's.** With several saved logins in different organizations, the accounts engine filed a
+`/login` by hand into the account in use, copied one account's tokens into another's slot, kept
+one account's week under another, refused a real early reset, moved a session onto an account
+that cannot run its model or into another organization without saying what that costs, and undid
+a choice by hand after two hours. Now:
+
+- Who a login is comes from its token (the provider's read-only profile request, the one Claude
+  Code makes), never from `.claude.json`, and nothing is refreshed to ask. A `/login` to an
+  account no slot is for becomes a new slot (`login-1`; `add` names it). `list` shows each
+  slot's organization and flags a `DUPLICATE` or `MISLABELLED` slot, which is out of rotation.
+- A reading is kept with the login that took it; an early reset is believed and a stale report
+  after it is refused. `fleet-accounts reset <profile> <name>` clears an account's figures.
+- A failover stays in the organization in use while it can, and says which sessions lose their
+  earlier thinking when it crosses. A planned move never crosses.
+- `fleet-accounts models <profile> <name> --without <model>`, also learned from a
+  `model_not_found` refusal: such an account is the last resort while a session runs that model.
+- **A choice by hand now holds** until that account reaches the threshold or stops working, or
+  until the new `fleet-accounts auto <profile>`. `exclude`/`include` take an account out of
+  rotation and back.
+- A profile with one saved account has its login copied back too, so the copy no longer falls
+  behind the live login and dies on the first swap back.
+
 **A project can be kept from paired machines, one project or one profile at a time.**
 `fleet-project set <name> pair hide`, or `fleet-project set --profile <p> pair hide` for a
 profile's default, with a project's own value beating its profile's. A hidden project is absent

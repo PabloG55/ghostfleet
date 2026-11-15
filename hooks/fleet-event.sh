@@ -135,14 +135,17 @@ fi
 # sentence goes in too (`failure.message`): "You've hit your weekly limit · resets Oct 29 at
 # 1am (America/New_York)" is what says which, and until when. It is the turn's own text
 # (`last_assistant_message`; the raw API error when there is none), one line, capped.
+#   `model_not_found` keeps its sentence for the same reason: "There's an issue with the
+# selected model (<id>)…" is the only place the refused model is named, and the account that
+# refused it is then the last resort while a session runs that model.
 FAILURE="" FAILURE_MSG=""
 if [ "$EVENT" = "StopFailure" ]; then
   grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" \
     || { _dbg "exit: StopFailure with the accounts switch off"; exit 0; }
   FAILURE="$(printf '%s' "$input" | jq -r '.error // "unknown"' 2>/dev/null | tr -cd 'a-z_')"
   [ -n "$FAILURE" ] || FAILURE=unknown
-  [ "$FAILURE" = rate_limit ] && FAILURE_MSG="$(printf '%s' "$input" \
-    | jq -r '(.last_assistant_message // .error_details // "") | tostring | gsub("[[:cntrl:]]+"; " ") | .[0:300]' 2>/dev/null)"
+  case "$FAILURE" in rate_limit|model_not_found) FAILURE_MSG="$(printf '%s' "$input" \
+    | jq -r '(.last_assistant_message // .error_details // "") | tostring | gsub("[[:cntrl:]]+"; " ") | .[0:300]' 2>/dev/null)" ;; esac
 fi
 
 # --- derive identity ---------------------------------------------------------
