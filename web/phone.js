@@ -2624,6 +2624,20 @@ var ROWS = {
 		".....###....",
 		"............"
 	],
+	send: [
+		".....##.....",
+		"....####....",
+		"...######...",
+		"..###..###..",
+		".###....###.",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		".....##.....",
+		"............"
+	],
 	chat: [
 		"............",
 		".##########.",
@@ -3121,6 +3135,21 @@ function Btn({ kind = "", icon, children, ...rest }) {
 		class: `btn ${kind}`,
 		...rest,
 		children: [icon ? /* @__PURE__ */ u(Icon, { name: icon }) : null, children]
+	});
+}
+function SendBtn({ busy = false, ...rest }) {
+	const name = busy ? t("sess.uploadingBtn") : t("common.send");
+	return /* @__PURE__ */ u("button", {
+		type: "submit",
+		class: "cbtn send",
+		"aria-label": name,
+		title: name,
+		"aria-busy": busy ? "true" : void 0,
+		...rest,
+		children: /* @__PURE__ */ u(Icon, {
+			name: busy ? "hourglass" : "send",
+			size: 24
+		})
 	});
 }
 function Logo({ size = 28 }) {
@@ -4192,7 +4221,7 @@ function useFollow(open, place, inside) {
 	}, [open]);
 }
 var EDGE$1 = 8;
-var GAP = 4;
+var GAP$1 = 4;
 function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW = Infinity, prefer = "down" } = {}) {
 	const r = anchor.getBoundingClientRect();
 	const vw = document.documentElement.clientWidth, vh = innerHeight;
@@ -4201,11 +4230,11 @@ function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW 
 	box.style.minWidth = `${Math.min(minWidth, vw - 16)}px`;
 	box.style.maxHeight = "none";
 	const full = box.offsetHeight;
-	const below = vh - r.bottom - GAP - EDGE$1, above = r.top - GAP - EDGE$1;
+	const below = vh - r.bottom - GAP$1 - EDGE$1, above = r.top - GAP$1 - EDGE$1;
 	const up = prefer === "up" ? !(full > above && below > above) : full > below && above > below;
 	const h = Math.min(full, maxH, Math.max(0, up ? above : below));
 	box.style.maxHeight = `${h}px`;
-	box.style.top = `${up ? r.top - GAP - h : r.bottom + GAP}px`;
+	box.style.top = `${up ? r.top - GAP$1 - h : r.bottom + GAP$1}px`;
 	const w = box.offsetWidth;
 	let left = align === "end" ? r.right - w : align === "center" ? r.left + (r.width - w) / 2 : r.left;
 	left = Math.max(EDGE$1, Math.min(left, vw - EDGE$1 - w));
@@ -7079,12 +7108,7 @@ function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: t("sess.yourAnswer"),
 					autoFocus: true
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "primary",
-					type: "submit",
-					disabled: busy || !typed.trim(),
-					children: t("common.send")
-				})]
+				}), /* @__PURE__ */ u(SendBtn, { disabled: busy || !typed.trim() })]
 			}) : /* @__PURE__ */ u("div", {
 				class: "ask-opts",
 				children: (prompt.options || []).map((o) => /* @__PURE__ */ u("button", {
@@ -7166,7 +7190,7 @@ function ChatLoading({ load }) {
 var OLDER_NEAR_PX = 240;
 var SWIPE_NEXT = 60;
 var EDGE = 24;
-function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent = 0 }) {
 	const author = useSlot("author");
 	const reading = useReading();
 	const ref = A(null);
@@ -7196,6 +7220,12 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 		const n = ref.current;
 		if (n && stick.current) toEnd(n);
 	}, [last, queued.length]);
+	h(() => {
+		const n = ref.current;
+		if (!sent || !n) return;
+		stick.current = true;
+		toEnd(n);
+	}, [sent]);
 	_(() => {
 		const box = ref.current;
 		if (!box || typeof ResizeObserver === "undefined") return;
@@ -7527,6 +7557,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	};
 	h(() => () => clearTimeout(typingPause.current), []);
 	const sentAt = A(0);
+	const [sends, setSends] = d(0);
 	const statusNow = A("unknown");
 	const quietRef = A(quiet);
 	quietRef.current = quiet;
@@ -7638,7 +7669,10 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 		status: st,
 		send: async (text) => {
 			const r = await act("fleet_send", { prompt: text });
-			if (r) sentAt.current = Date.now();
+			if (r) {
+				sentAt.current = Date.now();
+				setSends((n) => n + 1);
+			}
 			return !!r;
 		}
 	});
@@ -7687,6 +7721,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 		if (await act("fleet_send", { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
+			setSends((n) => n + 1);
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
 			sentDraft(dkey);
 			setDraftState("");
@@ -7999,7 +8034,8 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 				older: tr.older,
 				onOlder: tr.loadOlder,
 				onRetryOlder: tr.retryOlder,
-				onStep
+				onStep,
+				sent: sends
 			}) : /* @__PURE__ */ u(Terminal, { pane: pane.data?.pane ?? null }),
 			!tool && /* @__PURE__ */ u("form", {
 				class: `composer${drag ? " drag" : ""}`,
@@ -8075,7 +8111,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 						children: [
 							/* @__PURE__ */ u("button", {
 								type: "button",
-								class: "attach-btn",
+								class: "cbtn attach-btn",
 								onClick: () => picker.current?.click(),
 								title: t("sess.attach"),
 								"aria-label": t("sess.attach"),
@@ -8140,7 +8176,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 							}),
 							/* @__PURE__ */ u("button", {
 								type: "button",
-								class: `speak-btn${speakMode.on ? " on" : ""}`,
+								class: `cbtn speak-btn${speakMode.on ? " on" : ""}`,
 								"aria-pressed": speakMode.on,
 								"aria-label": speakMode.on ? t("chat.speakOff") : t("chat.speak"),
 								title: speakMode.on ? t("chat.speakOff") : t("chat.speak"),
@@ -8150,11 +8186,9 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 									size: 24
 								})
 							}),
-							/* @__PURE__ */ u(Btn, {
-								kind: "primary",
-								type: "submit",
-								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length,
-								children: uploading ? t("sess.uploadingBtn") : t("common.send")
+							/* @__PURE__ */ u(SendBtn, {
+								busy: uploading,
+								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length
 							})
 						]
 					}),
@@ -12543,12 +12577,7 @@ function Console({ projects, big, foot }) {
 					value: typed,
 					onInput: (e) => setTyped(e.currentTarget.value),
 					placeholder: big ? t("as.typeBig") : t("as.type")
-				}), /* @__PURE__ */ u(Btn, {
-					kind: "primary",
-					type: "submit",
-					disabled: !typed.trim(),
-					children: t("common.send")
-				})]
+				}), /* @__PURE__ */ u(SendBtn, { disabled: !typed.trim() })]
 			}),
 			foot ? /* @__PURE__ */ u("div", {
 				class: "console-foot",
@@ -12626,10 +12655,11 @@ function Feed({ limit, empty }) {
 	const S = useAgent();
 	const ref = A(null);
 	const rows = limit ? S.feed.slice(-limit) : S.feed;
+	const newest = rows.length ? rows[rows.length - 1].id : 0;
 	h(() => {
 		const n = ref.current;
 		if (n) n.scrollTop = n.scrollHeight;
-	}, [S.feed.length, S.interim]);
+	}, [newest, S.interim]);
 	return /* @__PURE__ */ u("div", {
 		class: "as-feed",
 		ref,
@@ -12872,14 +12902,79 @@ function HomeAgent({ projects }) {
 		]
 	});
 }
+var GAP = 8;
+function useAboveComposers(ref) {
+	_(() => {
+		const dock = ref.current, app = dock?.closest(".app");
+		if (!dock || !app || typeof ResizeObserver === "undefined") return void 0;
+		const watched = /* @__PURE__ */ new WeakSet(), last = {};
+		const put = (k, v) => {
+			if (last[k] === v) return;
+			last[k] = v;
+			if (v == null) app.style.removeProperty(k);
+			else app.style.setProperty(k, v);
+		};
+		let frame = 0;
+		const place = () => {
+			frame = 0;
+			const d = dock.getBoundingClientRect();
+			if (!d.height) return;
+			put("--launch-h", `${Math.round(d.height)}px`);
+			const under = [];
+			for (const c of app.querySelectorAll(".composer")) {
+				if (!watched.has(c)) {
+					watched.add(c);
+					ro.observe(c);
+				}
+				const r = c.getBoundingClientRect();
+				if (r.height > 0 && r.left < d.right && r.right > d.left) under.push(r.top);
+			}
+			if (!under.length) {
+				put("--launch-b", null);
+				return;
+			}
+			const now = parseFloat(getComputedStyle(dock).bottom) || 0;
+			put("--launch-b", `${Math.round(now + d.bottom - (Math.min(...under) - GAP))}px`);
+		};
+		const soon = () => {
+			if (!frame) frame = requestAnimationFrame(place);
+		};
+		const ro = new ResizeObserver(soon);
+		ro.observe(dock);
+		ro.observe(app);
+		const mo = new MutationObserver(soon);
+		mo.observe(app, {
+			childList: true,
+			subtree: true
+		});
+		const vv = globalThis.visualViewport;
+		addEventListener("resize", soon);
+		addEventListener("scroll", soon, true);
+		vv?.addEventListener?.("resize", soon);
+		place();
+		return () => {
+			cancelAnimationFrame(frame);
+			ro.disconnect();
+			mo.disconnect();
+			removeEventListener("resize", soon);
+			removeEventListener("scroll", soon, true);
+			vv?.removeEventListener?.("resize", soon);
+			app.style.removeProperty("--launch-b");
+			app.style.removeProperty("--launch-h");
+		};
+	}, []);
+}
 function Launcher({ onOpen }) {
 	const S = useAgent();
+	const dock = A(null);
+	useAboveComposers(dock);
 	const state = shipStateOf(S);
 	const live = LIVE.includes(S.phase) || S.conversing;
 	const doing = working(state);
 	const word = doing ? stateWord(S, state) : S.conversing ? `${t("as.name")} · ${t("as.conversing")}` : t("as.name");
 	return /* @__PURE__ */ u("div", {
 		class: `as-dock st-${state}`,
+		ref: dock,
 		children: [
 			S.phase === "listening" && S.vs?.hear?.ready ? /* @__PURE__ */ u("span", {
 				class: "vb-meter",

@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
+import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
@@ -53,7 +53,7 @@ function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
       {prompt.typing ? (
         <form class="row" onSubmit={(e) => { e.preventDefault(); if (typed.trim()) onAnswer(typed.trim(), false); }}>
           <input class="grow" disabled={busy} value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
-          <Btn kind="primary" type="submit" disabled={busy || !typed.trim()}>{t('common.send')}</Btn>
+          <SendBtn disabled={busy || !typed.trim()} />
         </form>
       ) : (
         <div class="ask-opts">
@@ -122,7 +122,7 @@ const OLDER_NEAR_PX = 240;
 const SWIPE_NEXT = 60, EDGE = 24;
 
 // `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
-function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent = 0 }) {
   const author = useSlot('author');
   const reading = useReading();
   const ref = useRef(null);
@@ -141,6 +141,13 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
     reader.current = n ? { node: n, top: n.getBoundingClientRect().top, scroll: box.scrollTop } : null;
   };
   useEffect(() => { const n = ref.current; if (n && stick.current) toEnd(n); }, [last, queued.length]);
+  // A SEND TAKES THE CHAT TO ITS END, wherever the reader had scrolled to. The end used to follow
+  // only a reader already at it (`stick`), so a message sent while reading older turns went in
+  // below the fold and the chat stayed where it was, with nothing on screen to say it had gone.
+  // The send puts the reader back at the end, and the jump above and the size watch below then
+  // keep them there when the message lands, a moment later, from the transcript's next read or
+  // as a queued bubble. The chat's own box scrolls; the window never does (viewport.js).
+  useEffect(() => { const n = ref.current; if (!sent || !n) return; stick.current = true; toEnd(n); }, [sent]);
   // A CHAT AT ITS END STAYS AT ITS END. It jumped there when a message arrived, and its end moves
   // without one: the box shrinks when a permission card or a keyboard comes up, and a message grows
   // when its font lands. Under a permission card at 390x844 it sat 29 px short as opened, and the
@@ -365,6 +372,8 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   // The transcript on its own poll (transcript.js), LIVE while an answer is owed: the session
   // working, or a message sent in the last two minutes.
   const sentAt = useRef(0);
+  // How many messages this screen has sent: each one takes the chat to its end (Chat's `sent`).
+  const [sends, setSends] = useState(0);
   const statusNow = useRef('unknown');
   const quietRef = useRef(quiet); quietRef.current = quiet;
   const tr = useTranscript(fleet, project, name, () => !quietRef.current &&
@@ -445,7 +454,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const scope = `${project}/${name}`;
   const speakMode = useSpeakMode({
     scope, page: tr.page, status: st,
-    send: async (text) => { const r = await act('fleet_send', { prompt: text }); if (r) sentAt.current = Date.now(); return !!r; },
+    send: async (text) => { const r = await act('fleet_send', { prompt: text }); if (r) { sentAt.current = Date.now(); setSends(n => n + 1); } return !!r; },
   });
   useEffect(() => () => stopRead(scope), [scope]);
   // Each file goes up as soon as it is picked, so "Send" only sends the words that name them.
@@ -475,7 +484,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
     const r = await act('fleet_send', { prompt: message });
     if (r) {
-      sentAt.current = Date.now(); typing.current = false;
+      sentAt.current = Date.now(); typing.current = false; setSends(n => n + 1);
       for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
       sentDraft(dkey); setDraftState(''); setLost(0);
       if (mounted.current) setFilesState([]);
@@ -569,7 +578,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} quiet={quiet} onUnavailable={embedded ? () => setLocalTool(null) : null} /> : tab === 'chat'
         ? (!tr.page ? <ChatLoading load={tr.load} />
             : <Chat scope={scope} page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
-                    onRetryOlder={tr.retryOlder} onStep={onStep} />)
+                    onRetryOlder={tr.retryOlder} onStep={onStep} sent={sends} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
       {/* The composer is the agent's; a Terminal or Editor tab has the keyboard to itself. */}
@@ -594,7 +603,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           </div>
         ) : null}
         <div class="composer-row">
-          <button type="button" class="attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
+          <button type="button" class="cbtn attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
           <div class={`composer-input${(prompt && !held) || st === 'limit' ? ' has-request' : ''}`}>
           <textarea ref={composer} rows={embedded ? 1 : 2} value={draft} placeholder={drag ? t('sess.drop') : embedded ? t('sess.writeToShort', { name }) : t('sess.writeTo', { name })}
@@ -615,10 +624,10 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
             {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
           </button> : null}
           </div>
-          <button type="button" class={`speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
+          <button type="button" class={`cbtn speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
                   aria-label={speakMode.on ? t('chat.speakOff') : t('chat.speak')} title={speakMode.on ? t('chat.speakOff') : t('chat.speak')}
                   onClick={speakMode.toggle}><Icon name="mic" size={24} /></button>
-          <Btn kind="primary" type="submit" disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
+          <SendBtn busy={uploading} disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)} />
         </div>
         <p class="speak-state muted small" role="status" aria-live="polite">{speakMode.on ? t(STATE_KEY[speakMode.phase] || 'chat.speakListening') : ''}</p>
       </form>}
