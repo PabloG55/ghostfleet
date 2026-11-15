@@ -68,6 +68,12 @@ try {
   }
   await b.call('Network.enable');
   await b.call('Network.setBypassServiceWorker', { bypass: true });
+  // These navigation scenarios start with no assistant approval covering the controls.
+  await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    const real = window.fetch.bind(window);
+    window.fetch = (u, o) => String(u).includes('fixtures/jarvis.json')
+      ? real(u, o).then(async r => new Response(JSON.stringify({ ...await r.json(), pending: [] }), { status: 200 }))
+      : real(u, o);` });
   const base = srv.base;
   const goto = async (u) => { await b.call('Page.navigate', { url: u }); await sleep(600); };
   async function until(cond, ms = 8000) {
