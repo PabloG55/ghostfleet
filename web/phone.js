@@ -7173,6 +7173,7 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const stick = A(true);
 	const ours = A(-1);
 	const anchor = A(null);
+	const reader = A(null);
 	const swipe = A(null);
 	const msgs = page.messages || [];
 	const rows = keyed(msgs);
@@ -7180,6 +7181,16 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 	const toEnd = (n) => {
 		n.scrollTop = n.scrollHeight;
 		ours.current = n.scrollTop;
+		reader.current = null;
+	};
+	const rememberReader = (box) => {
+		const top = box.getBoundingClientRect().top;
+		const n = !stick.current && [...box.children].find((c) => c.dataset.k && c.getBoundingClientRect().bottom > top);
+		reader.current = n ? {
+			node: n,
+			top: n.getBoundingClientRect().top,
+			scroll: box.scrollTop
+		} : null;
 	};
 	h(() => {
 		const n = ref.current;
@@ -7190,7 +7201,20 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 		if (!box || typeof ResizeObserver === "undefined") return;
 		const seen = /* @__PURE__ */ new WeakSet();
 		const ro = new ResizeObserver(() => {
-			if (stick.current && !anchor.current) toEnd(box);
+			if (anchor.current) return;
+			if (stick.current) {
+				toEnd(box);
+				return;
+			}
+			const a = reader.current;
+			if (a && box.contains(a.node)) {
+				const d = a.node.getBoundingClientRect().top - a.top;
+				if (Math.abs(d) > .5) {
+					box.scrollTop += d;
+					ours.current = box.scrollTop;
+					a.scroll = box.scrollTop;
+				}
+			}
 		});
 		const watch = () => {
 			for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== "DETAILS") {
@@ -7266,6 +7290,7 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 			if (Math.abs(n.scrollTop - ours.current) > 1) {
 				ours.current = -1;
 				stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+				if (stick.current || !reader.current || Math.abs(n.scrollTop - reader.current.scroll) > 1) rememberReader(n);
 			}
 			nearTop(n);
 		},

@@ -84,6 +84,7 @@ async function fakeDaemon() {
     olderFails: 0,               // how many older-page reads to fail before answering
     holdPane: false,             // typing starts before the fixture's pending request arrives
     answered: false,
+    holdGrid: false,              // history scrolls before the session metadata arrives
   };
   const json = (res, code, j, extra = {}) => {
     const body = JSON.stringify(j);
@@ -119,7 +120,12 @@ async function fakeDaemon() {
     if (p === '/api/projects') return reply(200, { ...fx('projects.json'), jarvis_enabled: false });
     if (p === '/api/grid') {
       st.busy++; st.maxBusy = Math.max(st.maxBusy, st.busy);
-      return setTimeout(() => { st.busy--; reply(200, fx(`grid-${PROJECT}.json`)); }, st.slowAll);
+      const deliver = () => {
+        if (res.destroyed) { st.busy--; return; }
+        if (st.holdGrid) return setTimeout(deliver, 25);
+        st.busy--; reply(200, fx(`grid-${PROJECT}.json`));
+      };
+      return setTimeout(deliver, st.slowAll);
     }
     if (p === '/api/settings') return reply(200, { global_nudge: false, sessions: {} });
     // The two reads the real daemon serves that every screen of the app makes besides these: the
@@ -205,8 +211,9 @@ const INIT = () => `(() => {
 const until = async (fn, ms) => { const t0 = Date.now(); let v; while (Date.now() - t0 < ms) { v = await fn(); if (v) return v; await sleep(100); } return v; };
 
 // One Chrome and one daemon per scenario, so no scenario can see another's state.
-async function scenario(name, run, { desktop = false, wide = false, open = null, history = 0 } = {}) {
+async function scenario(name, run, { desktop = false, wide = false, open = null, history = 0, holdGrid = false } = {}) {
   const d = await fakeDaemon();
+  d.st.holdGrid = holdGrid;
   d.st.holdPane = name === 'typing' || !!open;
   // A longer conversation than the fixture's, written BEFORE it: three more pages to scroll up
   // through, each message tall enough that a page fills a screen.
@@ -474,7 +481,13 @@ const SCENARIOS = [
   // WHERE THE READER IS is the message on screen, not the scroll offset: a list that loses a
   // message above them keeps its scrollTop and still moves them by that message's height. So both
   // are asked — the offset, and the message at the top of the screen staying where it was drawn.
-  ['history', async ({ b, has, say }) => {
+  ['history', async ({ b, st, has, say }) => {
+    const shot = async (state) => {
+      if (!process.env.CHAT_LANDS_SHOTS) return;
+      fs.mkdirSync(process.env.CHAT_LANDS_SHOTS, { recursive: true });
+      const { data } = await b.call('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(path.join(process.env.CHAT_LANDS_SHOTS, `history-${state}.png`), Buffer.from(data, 'base64'));
+    };
     const up = await b.evaluate(() => {
       const c = document.querySelector('.chat');
       c.scrollTop = Math.max(0, Math.floor((c.scrollHeight - c.clientHeight) / 3));
@@ -482,23 +495,42 @@ const SCENARIOS = [
       const top = c.getBoundingClientRect().top;
       const m = [...c.querySelectorAll('[data-k]')].find(n => n.getBoundingClientRect().bottom > top + 1);
       if (m) m.__gfAnchor = 1;
-      return { top: c.scrollTop, end: c.scrollHeight - c.clientHeight, y: m ? m.getBoundingClientRect().top : null };
+      const read = (event) => ({ event, at: performance.now(), top: c.scrollTop,
+        end: c.scrollHeight - c.clientHeight, y: m ? m.getBoundingClientRect().top : null,
+        box: c.getBoundingClientRect().top, height: c.clientHeight, fonts: document.fonts.status });
+      window.__historyScroll = [read('fixture')];
+      c.addEventListener('scroll', () => window.__historyScroll.push(read('scroll')));
+      new ResizeObserver(() => window.__historyScroll.push(read('resize'))).observe(c);
+      document.fonts.ready.then(() => window.__historyScroll.push(read('fonts ready')));
+      return read('fixture');
     });
     const at = () => b.evaluate(() => {
       const c = document.querySelector('.chat'), m = [...c.querySelectorAll('[data-k]')].find(n => n.__gfAnchor);
-      return { top: c.scrollTop, y: m ? m.getBoundingClientRect().top : null };
+      return { top: c.scrollTop, y: m ? m.getBoundingClientRect().top : null, box: c.getBoundingClientRect().top };
     });
-    const still = (now) => now.top === up.top && now.y != null && up.y != null && Math.abs(now.y - up.y) <= 1;
+    // The header can grow after the reader scrolls. Holding the message at its
+    // screen position then requires increasing scrollTop by that same growth.
+    const still = (now) => Math.abs(now.top - (up.top + now.box - up.box)) <= 1 &&
+      now.y != null && up.y != null && Math.abs(now.y - up.y) <= 1;
+    const diagnostic = (now) => b.evaluate((initial, now) => ({ initial, now, events: window.__historyScroll }), up, now);
     is('history: fixture: the chat is scrolled up, away from the end', true, up.top > 0 && up.top < up.end - 50 && up.y != null);
+    await shot('before-metadata');
+    // Release only after the reader's position is recorded: no runner speed can
+    // make this miss the late header layout that used to move them once.
+    st.holdGrid = false;
+    if (!await until(() => b.evaluate(() => !!document.querySelector('.sess-title .branch')), 8000)) throw new Error('history metadata did not arrive');
     await sleep(6500);
     const a1 = await at();
-    is('history: a poll leaves the reader where they were', true, still(a1) || a1);
+    is('history: a poll leaves the reader where they were', true, still(a1) || await diagnostic(a1));
+    await shot('after-poll');
     say(REPLY);
     await until(() => has(REPLY), 9000);
     await sleep(500);
     const a2 = await at();
-    is('history: ...and so does a new message', true, still(a2) || a2);
-  }],
+    is('history: ...and so does a new message', true, still(a2) || await diagnostic(a2));
+    await shot('after-message');
+    if (process.env.CHAT_LANDS_DEBUG) console.error('history scroll trace', JSON.stringify(await b.evaluate(() => window.__historyScroll)));
+  }, { holdGrid: true }],
 
   // ── opening a chat: it loads, whatever the first read does ──────────────────────────
   // "Sometimes opening a chat shows nothing until I SEND a message." The first read of the
