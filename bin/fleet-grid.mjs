@@ -39,8 +39,8 @@ import { accountPane, accountPanePrivate } from '../lib/account-logins.mjs';
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
 // is a worse bug than a lost card that is not drawn, so a missing lib means no lost cards
 // and everything else as before. cf-sync stages lib/ beside bin/, so the real install has it.
-let lostSessions = () => [], serverStart = () => 0;
-try { ({ lostSessions, serverStart } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
+let lostSessions = () => [], serverStart = () => 0, profileDirs = (own) => [own];
+try { ({ lostSessions, serverStart, profileDirs } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
@@ -53,8 +53,11 @@ const HOME = os.homedir();
 // is the answer only for a socket no project owns. Loaded, not imported, for the reason the
 // fleet-scan import above is: a copy of this file run from a temp directory has no ../lib,
 // and then the env is all there is — which is exactly what this did before.
-let OWN = null;
-try { OWN = (await import(new URL('../lib/projects.mjs', import.meta.url))).projectForSock(process.argv[2]); } catch {}
+let OWN = null, ALL_PROJECTS = [];
+try {
+  const pm = await import(new URL('../lib/projects.mjs', import.meta.url));
+  OWN = pm.projectForSock(process.argv[2]); ALL_PROJECTS = pm.projects();
+} catch {}
 const CFG = OWN?.cfg || process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const FLEET_DIR = OWN ? path.join(OWN.cfg, 'fleet') : (process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet'));
 // ...and everything this starts (a reopen, a stop, a spawn) is told the same account.
@@ -64,6 +67,7 @@ const PROJECTS = path.join(CFG, 'projects');
 // default the binary uses). Nothing about it is reachable from PROJECTS above.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const PROFILE = OWN?.profile || process.env.CLAUDE_FLEET_PROFILE || 'work';
+const LOST_DIRS = profileDirs(FLEET_DIR, ALL_PROJECTS);
 // TWO WIRES, TWO SEPARATORS, and conflating them cost 122 red assertions.
 //
 // US is OUR OWN protocol: the chosen action this file prints on stdout for the bash
@@ -1077,11 +1081,13 @@ function allLiveNames() {
 }
 function lostCards(liveNames, { lead = false, sub = '' } = {}) {
   const names = new Set([...allLiveNames(), ...liveNames]);
-  return lostSessions({ dir: FLEET_DIR, sock: SOCK, live: names, panes: livePanes(), cfg: CFG, started: serverStart(SOCK, CONF) })
+  // Every profile's dir, strict on the socket (lib/fleet-scan.mjs): a session whose process
+  // ran with another profile's fleet dir left its records there, and only this looks.
+  return lostSessions({ dir: FLEET_DIR, dirs: LOST_DIRS, sock: SOCK, live: names, panes: livePanes(), cfg: CFG, started: serverStart(SOCK, CONF) })
     // The lead follows the same rule the live list does: the TUI is drawn from inside it,
     // and only --json (the phone) carries its card.
     .filter(l => !isLead(l.name) || (lead && !sub))
-    .map(l => ({ name: l.name, cwd: l.cwd, attached: false, lostAt: l.at, lostId: l.id, lostTranscript: l.transcript }));
+    .map(l => ({ name: l.name, cwd: l.cwd, attached: false, lostAt: l.at, lostId: l.id, lostTranscript: l.transcript, lostAgent: l.agent }));
 }
 
 function gather({ lead = false, sub = '' } = {}) {
@@ -1103,7 +1109,9 @@ function gather({ lead = false, sub = '' } = {}) {
   return nestRows(sessions.map(s => {
     const gone = !!(s.asleepAt || s.lostAt || accountPanePrivate(FLEET_DIR, SOCK, s.name));
     const st = fleet.get(s.name) || (gone ? undefined : recordOfPane(s.name) || undefined);
-    const agent = agentOf(s.name);
+    // A lost card's agent is its conversation's (codex's is a rollout, Claude's a transcript),
+    // which the scan found; the marker is absent for a session no switch ever touched.
+    const agent = s.lostAgent || agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
     // Dispatched on the agent, not tried in turn: newestTranscript() keys purely off the
@@ -2099,6 +2107,9 @@ let agentSel = 0;            // selection on the agent screen (only shown if >1 
 // explicit "+ new session" flow. Attach straight in with the worktree's own name.
 function freeWtChoice(w) { return `new${US}${w.path}${US}${path.basename(w.path)}`; }
 let confirmKill = null;      // session name awaiting kill confirmation
+// R: the lost cards to reopen, in the order the grid draws them, while the ask is up.
+// Taken when R is pressed and not re-read on y, so what is reopened is what was asked about.
+let confirmReopen = null;
 let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
 let timer;                   // refresh interval (session grid / projects)
@@ -2137,6 +2148,26 @@ function reopenLost(name) {
     wtRmMsg = `could not reopen '${name}': ${String(e.stderr || e.message || '').trim().replace(/^fleet-restart: /, '')}`;
     return false;
   }
+}
+// R, THE WHOLE FLEET BACK AFTER A REBOOT, and nothing more than ⏎ on each card in turn:
+// the same fleet-restart --reopen, so each session comes back on its own conversation by
+// id, never "the newest in this folder". One at a time, in the order the grid draws them:
+// reopenLost waits for its fleet-restart, so the next starts only once the last has its
+// pane, and a fleet of twelve does not start twelve agents in the same second. Nothing
+// does this by itself after a reboot; it is a key, behind a y.
+function reopenAllLost(names) {
+  let ok = 0;
+  const failed = [];
+  for (const [i, name] of names.entries()) {
+    // Each reopen waits for its fleet-restart, so the screen says which one it is on: a
+    // terminal write is synchronous, and without it twelve reopens are a frozen grid.
+    wtRmMsg = `reopening ${i + 1} of ${names.length}: ${name}…`; render();
+    wtRmMsg = '';
+    if (reopenLost(name)) ok++; else failed.push(wtRmMsg || `could not reopen '${name}'`);
+  }
+  wtRmMsg = `reopened ${ok} of ${names.length} lost session${names.length === 1 ? '' : 's'}` +
+    (failed.length ? ` — ${failed.join('; ')}` : '');
+  return ok;
 }
 function cardChoice(card) {
   if (card.lost && !reopenLost(card.name)) return null;
@@ -2249,7 +2280,10 @@ function renderGrid() {
       (parked ? ` · ${C.grey}${parked} parked${C.reset}` : ''),
   ]) ?? (header + '\x1b[K\n');
   const killW = confirmKill ? cards.find(c => c.name === confirmKill)?.workers : null;
-  if (confirmKill && killW?.total)
+  if (confirmReopen)
+    buf += `${C.yellow}${C.bold} reopen all ${confirmReopen.length} lost session${confirmReopen.length === 1 ? '' : 's'} in this fleet?${C.reset}` +
+           `${C.yellow} each on its own conversation, one at a time · y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmKill && killW?.total)
     // THE ASK. A sub-lead does not go alone: its workers are stopped with it and their
     // worktrees reclaimed where fleet-clean's gates say that is safe (fleet-stop --children).
     buf += `${C.red}${C.bold} stop sub-lead '${confirmKill}' AND its ${killW.total} worker${killW.total === 1 ? '' : 's'} (worktrees reclaimed where safe)?${C.reset}` +
@@ -2302,6 +2336,8 @@ function renderGrid() {
   // `x` means two different things depending on what's selected, so the footer says
   // which one it means RIGHT NOW rather than making you find out by pressing it.
   const xVerb = items[sel]?.freeWt ? 'x remove wt' : 'x kill';
+  // Only when there is something to reopen: a key nobody can use is a word the eye skips.
+  const rVerb = cards.some(c => c.lost) ? 'R reopen all lost · ' : '';
   // N EARNS ITS OWN ENTRY, next to `n`, for the same reason `p pause · P resume` has two:
   // the shift variant is not guessable from the base one. It was bound and documented on
   // the picker's own header and nowhere a person looks BEFORE pressing something —
@@ -2313,10 +2349,10 @@ function renderGrid() {
   // line between 93 and 106 columns and none above; at 80 the banner was already being
   // pushed off by the footer as it stood, which is its own problem and not this one.
   buf += SUB
-    ? `${C.dim} ↑↓←→/hjkl move · / find · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
+    ? `${C.dim} ↑↓←→/hjkl move · / find · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · ${rVerb}, settings · ` +
       `Ctrl-t term · Ctrl-n edit · Ctrl-f jump · Ctrl-p/Q projects · q/\` up to the top grid${C.reset}\x1b[K\n`
     : `${C.dim} ↑↓←→/hjkl move · / find · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
-         `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
+         `s sched · p pause · P resume · ${xVerb} · ${rVerb}, settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
@@ -2898,7 +2934,7 @@ function cardAt(x, y, nc) {
 function onKey(key) {
   const mev = parseMouse(key);
   if (mev) {
-    if (mode === 'grid' && mev.press && mev.button === 0 && !confirmKill && !confirmWt) {
+    if (mode === 'grid' && mev.press && mev.button === 0 && !confirmKill && !confirmWt && !confirmReopen) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < items.length) {
         sel = idx;
@@ -2932,6 +2968,11 @@ function onKey(key) {
         if (n) { labelFor = n; labelInput = labelOf(n); mode = 'label'; gSettings = false; }
       }
       render(); return;
+    }
+    if (confirmReopen) {
+      if (key === 'y' || key === 'Y') reopenAllLost(confirmReopen);
+      confirmReopen = null;
+      buildItems(); render(); return;
     }
     if (confirmKill) {
       if (key === 'y' || key === 'Y') {
@@ -3042,6 +3083,12 @@ function onKey(key) {
         if (it.freeWt.removing) wtRmMsg = `already removing '${path.basename(it.freeWt.path)}' — it will disappear when git finishes`;
         else confirmWt = { path: it.freeWt.path, branch: it.freeWt.branch, msg: '', force: false };
       }
+    }
+    // R: every lost card in this fleet back, each on its own conversation (see reopenAllLost).
+    else if (key === 'R') {
+      const lost = cards.filter(c => c.lost).map(c => c.name);
+      if (lost.length) confirmReopen = lost;
+      else wtRmMsg = 'no lost sessions in this fleet — R reopens the ones a crash or a shutdown took';
     }
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }

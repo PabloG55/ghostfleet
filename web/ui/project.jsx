@@ -146,6 +146,30 @@ export function ProjectView({ project, session, tool = null }) {
     catch (e) { toast(t('project.leadFailed', { why: e.message }), 'bad'); }
     finally { setWaking(false); }
   };
+  // REOPEN ALL LOST, the grid's R: after a reboot every session the machine killed is a card,
+  // and this is ⏎ on each in turn, lead first and then in the order the list draws them. Each
+  // is fleet_reopen, so each comes back on ITS OWN conversation by id, and one at a time: the
+  // next starts once the last has answered, so a fleet of twelve does not start twelve agents
+  // in the same second. Never by itself; it is a button, behind a yes.
+  const lostCards = (g?.cards || []).filter(c => c.lost);
+  const [reopening, setReopening] = useState(null);
+  const reopenAll = () => setConfirm({
+    title: t('project.reopenAllTitle', { n: lostCards.length }), action: t('project.reopenAll'),
+    body: <p>{t('project.reopenAllBody')}</p>,
+    onYes: async () => {
+      const names = [...lostCards.filter(c => c.lead), ...lostCards.filter(c => !c.lead)].map(c => c.name);
+      const failed = [];
+      for (const [i, name] of names.entries()) {
+        setReopening({ at: i + 1, of: names.length });
+        try { await fleet.act('fleet_reopen', { project, session: name }); }
+        catch (e) { failed.push(`${name}: ${e.message}`); }
+      }
+      setReopening(null);
+      toast(failed.length ? t('project.reopenAllSome', { ok: names.length - failed.length, n: names.length, why: failed.join('; ') })
+                          : t('project.reopenAllDone', { n: names.length }), failed.length ? 'bad' : 'good');
+      reload();
+    },
+  });
   const termWhy = typeof fleet.termWhy === 'function' ? fleet.termWhy(project) : '';
   const header = (
     <header class="page-head proj-head">
@@ -159,6 +183,12 @@ export function ProjectView({ project, session, tool = null }) {
         {g && !leadUp ? (
           <Btn kind="ghost" disabled={waking} onClick={wake} title={t('project.leadIs')}>
             {waking ? t('status.starting') + '…' : !lead ? <><Icon name="play" /> {t('project.leadStart')}</> : lead.lost ? <><Icon name="refresh" /> {t('project.leadReopen')}</> : lead.asleep ? <><Icon name="sun" /> {t('project.leadWake')}</> : <><Icon name="play" /> {t('project.leadResume')}</>}
+          </Btn>
+        ) : null}
+        {/* From two: one lost session is its own card's reopen (or the lead's button above) */}
+        {lostCards.length > 1 || reopening ? (
+          <Btn kind="ghost" disabled={!!reopening} onClick={reopenAll} title={t('status.lost.hint')}>
+            {reopening ? t('project.reopening', reopening) : <><Icon name="refresh" /> {t('project.reopenAllN', { n: lostCards.length })}</>}
           </Btn>
         ) : null}
         <Btn kind="primary" icon="plus" onClick={() => setSpawn({})}>{t('project.newSession')}</Btn>

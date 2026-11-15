@@ -3911,6 +3911,180 @@ else
   skip "lost codex reopen" "tmux, jq and node needed"
 fi
 
+group "after a shutdown every session the machine killed has a card: codex, another profile's dir, idle"
+# Three ways a session the machine killed came back with no card at all, measured on one
+# shutdown: 4 of 13 records were codex conversations (their rollout is under the codex home,
+# and the scan looked for a Claude transcript); several records of a class-profile fleet sat
+# in the personal profile's fleet dir, where that fleet's readers never looked; and sessions
+# that had sat idle for more than a week were past a window counted from their last write,
+# though they were alive until the shutdown. Every row below went red on the code before:
+# the scan found none of the five cards, no stamp was written, the record landed in the
+# other profile's dir, and R did nothing.
+#   The fleet is acme-api on the `class` profile; acme-web is a `personal` one whose dir the
+# misplaced records sit in. Fake HOME, config dirs and codex home; stub agents log the argv
+# they were launched with, so a reopen is seen and nothing real runs.
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  LR="$(cd "$(mktemp -d "$TEST_RUNS.$$.lost.XXXXXX")" && pwd -P)"; H="$LR/home"
+  LS=cf-class-acme-api; LW=cf-personal-acme-web
+  CD="$H/.claude-class/fleet"; PD="$H/.claude-personal/fleet"; LC="$LR/codex-home"
+  mkdir -p "$H/.config/ghostfleet" "$H/.claude/fleet" "$CD" "$PD" "$LR/bin" "$LR/sys" "$LR/count" "$LR/hookstub" \
+           "$LR/src/acme-api" "$LR/src/acme-web"
+  printf 'acme-api\t%s\tclass\nacme-web\t%s\tpersonal\n' "$LR/src/acme-api" "$LR/src/acme-web" > "$H/.config/ghostfleet/projects"
+  NOW=$(date +%s); DAY=86400
+  for a in claude codex; do      # one log for both, so the ORDER of reopens is on it
+    printf '#!/bin/sh\n[ "$1" = agents ] && exit 0\n[ "$1" = --help ] && exit 0\nprintf "%%s %%s %%s\\n" %s "$(tmux display-message -p "#S" 2>/dev/null)" "$*" >> "%s/argv"\nexec sleep 120\n' "$a" "$LR" > "$LR/bin/$a"
+    chmod +x "$LR/bin/$a"
+  done
+  for t in tmux jq node; do ln -s "$(command -v "$t")" "$LR/sys/$t"; done
+  printf '#!/bin/sh\necho "$*" >> "%s/tmux.calls"\nexec "%s" "$@"\n' "$LR" "$(command -v tmux)" > "$LR/count/tmux"; chmod +x "$LR/count/tmux"
+  lre() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT \
+            -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_PROFILE \
+            HOME="$H" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" CODEX_HOME="$LC" \
+            CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off "$@" 2>&1; }
+  lrec() {    # <dir> <id> <sock> <slot> <ts> <transcript> [agent] [pane]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","cwd":"%s","status":"ready","transcript":"%s","ts":%s%s%s}\n' \
+      "$2" "$3" "$4" "$LR/src/acme-api" "$6" "$5" "${7:+,\"agent\":\"$7\"}" "${8:+,\"pane\":\"$8\"}" > "$1/$2.json"
+  }
+  lost() { lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost) | "\(.name):\(.agent)"' 2>/dev/null | sort | tr '\n' ' '; }
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+
+  # ── codex: a rollout under the codex home is its conversation ───────────────
+  CX1=0198aa01-0000-7000-8000-000000000001; CX2=0198aa02-0000-7000-8000-000000000002
+  CX3=0198aa03-0000-7000-8000-000000000003; CL1=11111111-0000-4000-8000-0000000000c1
+  RCD="$LC/sessions/$(date +%Y/%m/%d)"
+  cx_rollout "$RCD/rollout-a-$CX1.jsonl" "$CX1" "$LR/src/acme-api" 900 task_complete
+  cx_rollout "$RCD/rollout-b-$CX2.jsonl" "$CX2" "$LR/src/acme-api" 900 task_complete
+  # the shape a hook older than the bridge's own fields left: no agent, no transcript
+  lrec "$CD" "$CX1" "$LS" billing-svc $((NOW - 3600)) ""
+  # ...and the record that names the fleet-side copy of codex's replies, not its rollout
+  lrec "$CD" "$CX2" "$LS" scratch $((NOW - 7200)) "$CD/$LS.scratch.codex.jsonl" codex
+  lrec "$CD" "$CX3" "$LS" nocx $((NOW - 7200)) "" codex          # no rollout anywhere: no card
+  # ── another profile's dir: this fleet's record, in the personal fleet's dir ──
+  CLT="$H/.claude-personal/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl"
+  mkdir -p "$(dirname "$CLT")"; printf '{"type":"user"}\n' > "$CLT"
+  lrec "$PD" "$CL1" "$LS" toolbox $((NOW - 3 * DAY)) "$CLT"
+  lrec "$PD" 22222222-0000-4000-8000-0000000000c2 "$LW" master $((NOW - 60)) "$CLT"   # that fleet's own
+
+  # ── the writer: a server whose env names ANOTHER fleet ───────────────────────
+  # The shape that put records in the wrong dir: a server started from the personal fleet's
+  # pane carries that fleet's socket and dirs in its global env, and a session opened on it
+  # with no -e of its own resolved its fleet dir from that socket.
+  cat > "$LR/hookstub/claude-here" <<STUB
+#!/usr/bin/env bash
+slot="\$1"; sid="fe-\$slot"; tr="$LR/\$sid.jsonl"; : > "\$tr"
+printf '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "\$sid" "\$PWD" "\$tr" \\
+  | "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+exec sleep 600
+STUB
+  chmod +x "$LR/hookstub/claude-here"
+  env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_AGENT HOME="$H" CODEX_HOME="$LC" \
+      CLAUDE_FLEET_SOCK="$LW" CLAUDE_CONFIG_DIR="$H/.claude-personal" CLAUDE_FLEET_DIR="$PD" CLAUDE_FLEET_PROFILE=personal \
+      CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off CLAUDE_FLEET_SLOTS="$LR/slots" \
+      PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s _scratch -c "$LR/src/acme-api" 'sleep 600'
+  PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s fresh -c "$LR/src/acme-api" 'exec agent-here fresh'
+  wait_for 10 "fresh's first record" 'ls "$CD/fe-fresh.json" "$PD/fe-fresh.json" >/dev/null 2>&1'
+  is "lost: a session opened on a server whose env names another fleet writes into its OWN fleet's dir" \
+     "$LS|0" "$(jq -r .sock "$CD/fe-fresh.json" 2>/dev/null)|$(ls "$PD" | grep -c '^fe-fresh' || true)"
+
+  # ── the governor's tick: who is alive, from the reads it already makes ───────
+  tmux -L "$LS" new-session -d -s idle -c "$LR/src/acme-api" 'sleep 600'
+  heal() { : > "$LR/tmux.calls"; lre env PATH="$LR/count:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" node "$ROOT/lib/fleet-env.mjs" heal "$LS" >/dev/null; wc -l < "$LR/tmux.calls" | tr -d ' '; }
+  heal >/dev/null
+  is "lost: the governor puts the server's socket right, as it does its dirs" \
+     "CLAUDE_FLEET_SOCK=$LS" "$(tmux -L "$LS" show-environment -g CLAUDE_FLEET_SOCK 2>/dev/null)"
+  n3="$(heal)"
+  for i in 1 2 3 4 5; do tmux -L "$LS" new-session -d -s "w$i" 'sleep 600'; done
+  heal >/dev/null; n8="$(heal)"
+  ST="$(ls "$CD/alive/$LS".*.json 2>/dev/null | head -1)"
+  is "lost: each tick writes down who is alive on this server, tabs left out" "7 0" \
+     "$(jq -r '.panes | length' "$ST" 2>/dev/null) $(jq -r '[.panes[] | select(startswith("_"))] | length' "$ST" 2>/dev/null)"
+  is "...at the same number of tmux calls for 3 sessions as for 8, and fewer than the 6 a tick made before" "yes" \
+     "$([ -n "$n3" ] && [ "$n3" = "$n8" ] && [ "$n3" -lt 6 ] && echo yes || echo "no: $n3 then $n8")"
+  # Then the server dies. The stamp is aged to say the server started twelve days ago and was
+  # last seen half an hour ago, and the records written as long ago as each row needs.
+  IDP="$(tmux -L "$LS" display-message -p -t idle '#{pane_id}@#{pid}' 2>/dev/null)"
+  SPID="${IDP#*@}"
+  for s in w1 w2 w3 w4 w5; do tmux -L "$LS" kill-session -t "$s" 2>/dev/null; done
+  tmux -L "$LS" kill-server 2>/dev/null
+  rm -f "$CD/fe-fresh.json"           # the writer's row is done; it would only be a fifth card
+  jq --argjson s $((NOW - 12 * DAY)) --argjson z $((NOW - 1800)) '.start = $s | .seen = $z' "$ST" > "$ST.t" && mv "$ST.t" "$ST"
+  ID1=33333333-0000-4000-8000-0000000000d1; ID2=33333333-0000-4000-8000-0000000000d2; ID3=33333333-0000-4000-8000-0000000000d3
+  for id in "$ID1" "$ID2" "$ID3"; do
+    t="$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$id.jsonl"; mkdir -p "$(dirname "$t")"; printf '{"type":"user"}\n' > "$t"
+  done
+  lrec "$CD" "$ID1" "$LS" idle   $((NOW - 10 * DAY)) "" "" "$IDP"          # idle ten days, alive until the end
+  lrec "$CD" "$ID2" "$LS" gone   $((NOW - 10 * DAY)) "" "" "%99@$SPID"     # stopped ten days ago: no stamp has it
+  lrec "$CD" "$ID3" "$LS" reused $((NOW - 13 * DAY)) "" "" "$IDP"          # older than the server that reused its pane id
+
+  L="$(lost)"
+  for want in billing-svc:codex scratch:codex toolbox:claude idle:claude; do
+    case "$want" in
+      billing-svc:*) why="lost: a codex record naming no agent and no rollout gets a card, as codex, from the rollout under its id" ;;
+      scratch:*)     why="...and one whose record names the fleet-side copy of its replies" ;;
+      toolbox:*)     why="lost: this fleet's record left in another profile's dir shows on this fleet's grid" ;;
+      idle:*)        why="lost: a session idle ten days and alive when its server died gets a card" ;;
+    esac
+    is "$why" "yes" "$(grep -qE "(^| )$want( |$)" <<< "$L" && echo yes || echo "no: $L")"
+  done
+  for not in nocx master gone reused; do
+    case "$not" in
+      nocx)   why="lost: a codex record with no rollout anywhere gets none" ;;
+      master) why="...nor another fleet's record in that same dir" ;;
+      gone)   why="...nor a session that stopped ten days ago" ;;
+      reused) why="...nor one whose pane id a later server reused" ;;
+    esac
+    is "$why" "no" "$(grep -qE "(^| )$not:" <<< "$L" && echo yes || echo no)"
+  done
+  # with the fleet's own profile in the env, the way the MCP asks another fleet (invocation())
+  fl="$(lre env CLAUDE_CONFIG_DIR="$H/.claude-class" CLAUDE_FLEET_DIR="$CD" "$ROOT/bin/fleet-list" -s "$LS")"
+  is "lost: fleet-list lists the same four" "billing-svc idle scratch toolbox" \
+     "$(sed -nE 's/^([a-z-]+) +lost.*/\1/p' <<< "$fl" | sort | tr '\n' ' ' | sed 's/ $//')"
+  is "lost: a dry-run reopen of the codex record that never said codex is not refused" "yes" \
+     "$(grep -q "would reopen 'billing-svc'" <<< "$(lre "$ROOT/bin/fleet-restart" -s "$LS" --reopen billing-svc --dry-run)" && echo yes || echo no)"
+
+  # ── R on the grid: every lost card back, once each, in the order drawn ─────
+  ORDER="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost and (.lead | not)) | .name' 2>/dev/null | tr '\n' ' ')"
+  cat > "$LR/grid.sh" <<SH
+#!/bin/sh
+exec env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_PROFILE \\
+  HOME="$H" CODEX_HOME="$LC" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" TMUX_TMPDIR="$TMUX_TMPDIR" \\
+  CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off node "$ROOT/bin/fleet-grid.mjs" "$LS"
+SH
+  chmod +x "$LR/grid.sh"
+  tmux -L lrview new-session -d -x 200 -y 50 "'$LR/grid.sh'; sleep 60"
+  gcap() { tmux -L lrview capture-pane -p 2>/dev/null; }
+  wait_for 15 "the grid's lost cards" 'grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: the grid offers R while something is lost" "yes" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  tmux -L lrview send-keys -l R
+  wait_for 10 "the ask" 'grep -q "reopen all 4 lost sessions" <<< "$(gcap)"'
+  is "lost: R asks first, naming how many" "yes" "$(grep -q 'reopen all 4 lost sessions in this fleet' <<< "$(gcap)" && echo yes || echo no)"
+  is "...and nothing is reopened before the yes" "no" "$([ -s "$LR/argv" ] && echo yes || echo no)"
+  tmux -L lrview send-keys -l y
+  wait_for 60 "four reopens" '[ "$(wc -l < "$LR/argv" 2>/dev/null | tr -d " ")" -ge 4 ] && grep -q "reopened 4 of 4" <<< "$(gcap)"'
+  sleep 1
+  # The order is the grid's (newest death first), and pinned: an empty log equals an empty
+  # order, which is how this row passed on the code before, where nothing was lost at all.
+  is "lost: y reopens each lost session once, in the order the grid draws them" \
+     "idle billing-svc scratch toolbox |idle billing-svc scratch toolbox " \
+     "$ORDER|$(awk '{print $2}' "$LR/argv" 2>/dev/null | tr '\n' ' ')"
+  is "...codex's with codex resume <id>, the agent-less record's too" "yes yes" \
+     "$(grep -q "^codex billing-svc resume $CX1" "$LR/argv" && echo yes || echo no) $(grep -q "^codex scratch resume $CX2" "$LR/argv" && echo yes || echo no)"
+  is "...claude's with --resume <id>" "yes yes" \
+     "$(grep -q "^claude toolbox .*--resume $CL1" "$LR/argv" && echo yes || echo no) $(grep -q "^claude idle .*--resume $ID1" "$LR/argv" && echo yes || echo no)"
+  is "...the one kept under another profile's account copied to this fleet's, the original left" "yes yes" \
+     "$([ -f "$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl" ] && echo yes || echo no) $([ -f "$CLT" ] && echo yes || echo no)"
+  is "...and none is lost any more: each is a session again" "|billing-svc idle scratch toolbox " \
+     "$(lost)|$(tmux -L "$LS" list-sessions -F '#{session_name}' 2>/dev/null | sort | tr '\n' ' ')"
+  wait_for 5 "the footer to drop R" '! grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: with nothing lost, the footer does not offer R" "no" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  for s in "$LS" lrview; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "${LR:?}"
+else
+  skip "lost cards after a shutdown" "tmux, jq and node needed"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
