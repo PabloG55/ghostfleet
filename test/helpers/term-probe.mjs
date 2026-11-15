@@ -101,51 +101,25 @@ const H = (assertion) => ({ headers: assertion ? { 'x-fleet-assertion': JSON.str
 const open = async (assertion, body = { project: PROJECT, cols: 90, rows: 25 }) => a.api(BASE, 'POST', '/api/term/open', body, H(assertion));
 const TAB = `_term-${PROJECT}`;
 
-// ── 1. OFF BY DEFAULT, PER DEVICE ───────────────────────────────────────────────
+// Terminal authorization is exactly the chat session, with no per-device grant.
 const st0 = await a.api(BASE, 'GET', '/api/term');
-is('term: a new device has the terminal off', false, st0.json && st0.json.enabled);
-const offOpen = await open(await a.fresh(BASE, 'terminal'));
-is('term: a disabled device is refused, with a fresh passkey in hand', 403, offOpen.status);
-is('...and told the thing to do about it', 'enable', offOpen.json && offOpen.json.needs);
-is('...and no tab was made for it', false, hasTab(TAB));
-// Switching ON is a grant: it takes a fresh passkey. Without one, refused and still off.
-const enNo = await a.api(BASE, 'POST', '/api/term/enable', { on: true });
-is('term: switching it on without a fresh passkey is refused', 401, enNo.status);
-is('...and it stays off', false, (await a.api(BASE, 'GET', '/api/term')).json.enabled);
-const enYes = await a.api(BASE, 'POST', '/api/term/enable', { on: true }, H(await a.fresh(BASE, 'terminal on')));
-is('term: switching it on with one works', 200, enYes.status);
-is('...and the server says so', true, (await a.api(BASE, 'GET', '/api/term')).json.enabled);
-
-// ── 2. A FRESH ASSERTION, EVERY OPEN ────────────────────────────────────────────
-const noA = await open(null);
-is('term: an open with no fresh passkey is refused', 401, noA.status);
-is('...naming the passkey as what is missing', 'passkey', noA.json && noA.json.needs);
-const used = await a.fresh(BASE, 'terminal');
-const first = await open(used);
-is('term: an open with a fresh passkey is allowed', 200, first.status);
-is('...and it names the project\'s terminal tab', TAB, first.json && first.json.session);
-is('...which exists on the fleet\'s own server', true, hasTab(TAB));
-const replay = await open(used);
-is('term: the same assertion a second time is refused (single-use challenge)', 401, replay.status);
+is('term: chat access includes the terminal', true, st0.json?.enabled);
+const first = await open(null);
+is('term: an open needs no fresh assertion', 200, first.status);
+is('...and names the fleet tab', TAB, first.json?.session);
+is('...which exists on the fleet server', true, hasTab(TAB));
 
 // ── 2b. THE EDITOR IS THE SAME REQUEST, AND THE SAME GATES ───────────────────────
-// kind 'edit' is the desk's Ctrl-n tab (bin/fleet-tab edit). Nothing about the gates moves:
-// no passkey is still 401, before any tab exists; a kind the server does not know is a 400
-// and makes nothing; and with a fresh passkey it is the project's editor tab, made by
-// fleet-tab, running the editor with the copy-on-select Lua — or, with no editor installed,
-// a refusal that says so rather than one that blames fleet-tab.
+// The editor uses the terminal's chat authorization and its own fleet tab.
 const ETAB = `_edit-${PROJECT}`;
 const ed = (assertion, kind = 'edit') => open(assertion, { project: PROJECT, cols: 90, rows: 25, kind });
-const edNo = await ed(null);
-is('term: the editor with no fresh passkey is refused', [401, 'passkey'], [edNo.status, edNo.json && edNo.json.needs]);
-is('...and no editor tab was made', false, hasTab(ETAB));
 const edOdd = await ed(await a.fresh(BASE, 'editor'), 'emacs-daemon');
 is('term: a kind that is neither term nor edit is refused', 400, edOdd.status);
 is('...and makes no tab of any name', false, hasTab(ETAB) || hasTab(`_emacs-daemon-${PROJECT}`));
 const hasNvim = (() => { try { execFileSync('nvim', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
-const edYes = await ed(await a.fresh(BASE, 'editor'));
+const edYes = await ed(null);
 if (hasNvim) {
-  is('term: the editor with a fresh passkey opens', 200, edYes.status);
+  is('term: the editor without another passkey opens', 200, edYes.status);
   is('...naming the project\'s editor tab, not the terminal', ETAB, edYes.json && edYes.json.session);
   is('...which runs nvim with the copy-on-select Lua, as the desk\'s does', true,
      /nvim .*nvim-copy-on-select\.lua/.test(tmux('display-message', '-p', '-t', ETAB, '#{pane_start_command}')));
@@ -220,19 +194,14 @@ await until(() => drop.msgs.some(m => m.t === 'ready'));
 drop.sock.destroy();
 is('term: a dropped socket also takes its control client with it', 0, await until(() => clients() === 0 && 0, 4000) ?? clients());
 
-// ── 7. SWITCHED OFF WHILE OPEN ───────────────────────────────────────────────────
-const r6 = await open(await a.fresh(BASE, 'terminal'));
-const live = await wsOpen(tk(r6));
-await until(() => live.msgs.some(m => m.t === 'ready'));
-const off = await a.api(BASE, 'POST', '/api/term/enable', { on: false });
-is('term: switching it off needs no passkey', 200, off.status);
-await until(() => live.closed, 4000);
-is('...and closes the terminal that was open', 4003, live.closeCode);
-const offAgain = await open(await a.fresh(BASE, 'terminal'));
-is('...and the next open is refused again', 403, offAgain.status);
+// ── 7. THE TICKET BELONGS TO THE EXACT CHAT SESSION ───────────────────────────
+const r6 = await open(null);
+await a.api(BASE, 'POST', '/api/auth/end', {});
+const ended = await wsOpen(tk(r6));
+is('term: ending the chat session invalidates its unspent ticket', 401, ended.status);
+await a.assert(BASE);
 
 // ── 8. THE IDLE CLOSE (the suite sets terminal_idle low) ─────────────────────────
-await a.api(BASE, 'POST', '/api/term/enable', { on: true }, H(await a.fresh(BASE, 'terminal on')));
 const r7 = await open(await a.fresh(BASE, 'terminal'));
 const idle = await wsOpen(tk(r7));
 await until(() => idle.msgs.some(m => m.t === 'ready'));
