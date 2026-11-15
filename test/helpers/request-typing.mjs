@@ -28,15 +28,21 @@ export async function requestTyping({ b, is, shots = '' }) {
     for (const type of ['mousePressed', 'mouseReleased']) await b.call('Input.dispatchMouseEvent', { type, ...p, button: 'left', clickCount: 1 });
     await sleep(60); return true;
   };
-  await b.evaluate(() => {
+  await b.evaluate((approvalDelay) => {
     if (window.__typingFetch) return;
     const real = window.fetch.bind(window); window.__typingFetch = true;
     window.__typingPrompt = null; window.__typingDelivered = '';
     window.fetch = async (u, o) => {
+      const approvalRead = window.__typingApprovalRead;
       const r = await real(u, o);
       if (String(u).includes('fixtures/jarvis.json') && window.__typingApprovals) {
+        // GF_APPROVAL_DELAY_MS=17000: the fresh proposal arrives after both of
+        // the old eight-second DOM polls. Only this fixture read is delayed.
+        if (approvalDelay) await new Promise(ok => setTimeout(ok, approvalDelay));
         const j = await r.json();
-        return new Response(JSON.stringify({ ...j, pending: (j.pending || []).map(p => ({ ...p, id: `typing-${p.id}` })) }), { status: r.status });
+        const pending = (j.pending || []).map(p => ({ ...p, id: `typing-${p.id}` }));
+        approvalRead?.(pending);
+        return new Response(JSON.stringify({ ...j, pending }), { status: r.status });
       }
       if (!String(u).includes('fixtures/pane-acme-api-api-fix.json')) return r;
       const j = await r.json(); window.__typingOriginal = j.prompt || window.__originalPrompt || window.__typingOriginal;
@@ -50,7 +56,7 @@ export async function requestTyping({ b, is, shots = '' }) {
     addEventListener('keydown', e => {
       if (e.target.matches?.('.composer textarea')) window.__typingLastKey = performance.now();
     }, true);
-  });
+  }, +process.env.GF_APPROVAL_DELAY_MS || 0);
   const clear = async () => {
     await b.evaluate(() => { window.__typingPrompt = null; });
     if (!await until(() => !document.querySelector('.session [role=dialog], .session .request-return'))) {
@@ -149,17 +155,38 @@ export async function requestTyping({ b, is, shots = '' }) {
   // A pending approval is the same request after a trip away from Home.
   await clear();
   // The broader phone check has answered the original proposal. Deliver a fresh fixture ID.
+  const homeWithApproval = async () => {
+    await b.evaluate(() => {
+      window.__typingApprovalReady = new Promise(ok => { window.__typingApprovalRead = ok; });
+      location.hash = '#/';
+    });
+    // Await the fixture read this navigation starts BEFORE measuring the UI. The
+    // old ignored timeout could spend both DOM polls before the data arrived,
+    // miss the only click, then pass the absence checks against an empty Home.
+    const pending = await b.evaluate(() => window.__typingApprovalReady);
+    if (!pending.length) throw new Error('the assistant approval fixture is empty');
+    if (!await until(() => !!document.querySelector('.home-agent .proposal-return'))) {
+      throw new Error('the delivered assistant approval did not render');
+    }
+    // Preact's effects run after paint. Read dismissal only after the new Home
+    // has rendered its response and had a chance to auto-open the same request.
+    await b.evaluate(() => new Promise(ok => requestAnimationFrame(() => requestAnimationFrame(ok))));
+  };
   await b.evaluate(() => { window.__typingApprovals = true; });
-  await b.evaluate(() => { location.hash = '#/'; });
-  await until(() => !!document.querySelector('.proposal-return'));
+  await homeWithApproval();
   if (!await b.evaluate(() => !!document.querySelector('.proposal-slot [role=dialog]'))) await click('.proposal-return');
   is('the assistant approval opens before dismissal', true, await until(() => !!document.querySelector('.proposal-slot [role=dialog]')));
+  await b.evaluate(async () => {
+    const dialog = document.querySelector('.proposal-slot [role=dialog]');
+    if (dialog) await Promise.all(dialog.getAnimations().map(a => a.finished));
+  });
+  await shot(1280, 'approval-open');
   await click('.proposal-slot .modal .x');
-  is('the assistant approval closes without answering', false, await b.evaluate(() => !!document.querySelector('.proposal-slot [role=dialog]')));
+  is('the assistant approval closes without answering', true, await until(() => !document.querySelector('.proposal-slot [role=dialog]')));
+  await shot(1280, 'approval-dismissed');
   await b.evaluate(() => { location.hash = '#/settings'; });
   is('navigation leaves the assistant approval screen', true, await until(() => document.querySelector('.page-head h1')?.textContent === 'Settings' && !document.querySelector('.proposal-slot')));
-  await b.evaluate(() => { location.hash = '#/'; });
-  await until(() => !!document.querySelector('.proposal-return'));
-  await sleep(300);
+  await homeWithApproval();
   is('a dismissed assistant approval stays closed after leaving Home and returning', false, await b.evaluate(() => !!document.querySelector('.proposal-slot [role=dialog]')));
+  await shot(1280, 'approval-returned');
 }
