@@ -129,11 +129,17 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent 
   const stick = useRef(true);
   const ours = useRef(-1);            // the scrollTop this chat last set itself (below)
   const anchor = useRef(null);
+  const reader = useRef(null);
   const swipe = useRef(null);
   const msgs = page.messages || [];
   const rows = keyed(msgs);
   const last = rows.length ? rows[rows.length - 1][0] : '';
-  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; };
+  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; reader.current = null; };
+  const rememberReader = (box) => {
+    const top = box.getBoundingClientRect().top;
+    const n = !stick.current && [...box.children].find(c => c.dataset.k && c.getBoundingClientRect().bottom > top);
+    reader.current = n ? { node: n, top: n.getBoundingClientRect().top, scroll: box.scrollTop } : null;
+  };
   useEffect(() => { const n = ref.current; if (n && stick.current) toEnd(n); }, [last, queued.length]);
   // A SEND TAKES THE CHAT TO ITS END, wherever the reader had scrolled to. The end used to follow
   // only a reader already at it (`stick`), so a message sent while reading older turns went in
@@ -157,7 +163,17 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent 
     const box = ref.current;
     if (!box || typeof ResizeObserver === 'undefined') return;
     const seen = new WeakSet();
-    const ro = new ResizeObserver(() => { if (stick.current && !anchor.current) toEnd(box); });
+    const ro = new ResizeObserver(() => {
+      if (anchor.current) return;
+      if (stick.current) { toEnd(box); return; }
+      // Late header metadata or a row's font can move the message the reader
+      // scrolled to without firing a scroll event. Keep that message on screen.
+      const a = reader.current;
+      if (a && box.contains(a.node)) {
+        const d = a.node.getBoundingClientRect().top - a.top;
+        if (Math.abs(d) > 0.5) { box.scrollTop += d; ours.current = box.scrollTop; a.scroll = box.scrollTop; }
+      }
+    });
     const watch = () => { for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== 'DETAILS') { seen.add(c); ro.observe(c); } };
     watch();
     const mo = new MutationObserver(watch);
@@ -199,7 +215,12 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent 
     <div class="chat" ref={ref} data-keep-scroll="chat" onPointerDown={down} onPointerUp={up} onPointerCancel={() => { swipe.current = null; }}
          onScroll={(e) => {
            const n = e.currentTarget;
-           if (Math.abs(n.scrollTop - ours.current) > 1) { ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }
+           if (Math.abs(n.scrollTop - ours.current) > 1) {
+             ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+             // A queued scroll event can arrive after layout moved the box.
+             // If the offset did not change, it is still the same reading spot.
+             if (stick.current || !reader.current || Math.abs(n.scrollTop - reader.current.scroll) > 1) rememberReader(n);
+           }
            nearTop(n);
          }}>
       {page.next_before

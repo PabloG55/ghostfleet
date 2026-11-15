@@ -7238,12 +7238,20 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   git -C "$BS/repo" worktree add -q "$BS/api-fix" -b api-fix 2>/dev/null
   tmux -L cf-acme-api kill-server 2>/dev/null
   tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
+  # new-session returns before its child has necessarily chdir'd. Until then the
+  # nonempty pane_current_path is the server's cwd, so rename tries to move THAT
+  # checkout. A delayed chdir on tmux 3.4 reproduces all five missing-marker rows.
+  wait_for 5 "the boundary fixture pane to enter its checkout" \
+    '[ "$(tmux -L cf-acme-api display-message -p -t api-fix "#{pane_current_path}" 2>/dev/null)" = "$BS/api-fix" ]'
+  is "fixture pane entered its worktree" "$BS/api-fix" \
+    "$(tmux -L cf-acme-api display-message -p -t api-fix '#{pane_current_path}' 2>/dev/null)"
   : > "$BSF/cf-acme-api.api-fix.workers-merge"
   : > "$BSF/cf-acme-api.api-fix.review-gate-off"
   # The model pin (bin/fleet-model) lives the same life: a per-session marker, so it moves with
   # a rename and goes with a stop, or a worker reborn under the name would start on it.
   printf 'haiku\n' > "$BSF/cf-acme-api.api-fix.model"
-  env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
+  bs_rename_out="$(env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry 2>&1)"; bs_rename_rc=$?
+  is "rename succeeds (exit $bs_rename_rc: $bs_rename_out)" "0" "$bs_rename_rc"
   is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
   is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
   is "...and the review-gate override"            "1" "$([ -f "$BSF/cf-acme-api.api-retry.review-gate-off" ] && echo 1 || echo 0)"
