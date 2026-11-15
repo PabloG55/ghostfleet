@@ -1610,24 +1610,47 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   item and the age and sender of everything still owed. Counts only: no text, session,
   branch or path. A ledger written before the counter is reported `untallied`.
 - **Two directions: what the agent owes, and what is for you.** `N open` is what the agent
-  owes: the person's asks, a lead's briefs, its own promises. `M for you` is what waits on the
-  person: a question the agent put to them, and a request it holds until they decide. Measured
-  before the split: a lead ended a turn on 20 numbered questions to the owner while its band
-  read `3 open`, and those three were the agent's own work. So the judge lists each question a
-  turn ends on as an item of its own (`source: question`, its options kept as `a`, `b`, `1`, `2`),
-  one per numbered question; a request held `waiting` in the same turn **awaits** those
-  questions and is not counted a second time, and it is the agent's again once they are
-  answered. An answer in the chat settles the question it names ("1", "sí al 3", "5: no, use
-  JSON"; a lone number picks that option of the one question that has it), and the judge can
-  never close a for-you item as `done`, because what it lacks is the person's answer, not the
-  agent's work. **A prompt the fleet pasted is never the person's**: `fleet-send` (and so
-  `fleet-spawn --prompt`) and `fleet-schedule` write `<sock>.<session>.pasted` before they paste,
-  and the mod spends that mark at submit time: the item is the sender's (`source: fleet`), owed
-  to it, and never listed as waiting on the owner. The marker is the test, by time and length,
-  never the wording. An item written before directions existed is read by the same rule:
-  nothing is rewritten or deleted. One list everywhere: the band, `/ledger`, the phone's
-  "waiting on you", the briefing's WAITING ON THE OWNER and `fleet-know waiting` all read
-  `forYou()`.
+  owes: the person's asks, a lead's briefs, its own promises. One it holds `waiting` on the
+  person is still the agent's: `/ledger` lists it as waiting, with what it waits on, and it is
+  never counted for you. `M for you` is what the agent asked OF the person, and only that
+  (`source: question`), one item per thing:
+  - each numbered question a turn ends on, its options kept as `a`, `b`, `1`, `2`;
+  - each line of a waiting-on-you list anywhere in the final text, under a heading such as
+    "Waiting on you", "Needs you", "Your call", "For you", "Pendiente tuyo", "Para ti",
+    "Te toca" or "Esperando tu …", alone on its line or with a colon (a sentence that merely
+    starts with the words is prose);
+  - a closing choice whose options sit in the line itself ("¿Sigo con 1 (…), 2 (…) o 3 (…)?"),
+    one item that "2" answers;
+  - what the judge reads as asked of the person (`"by":"person"`);
+  - and, for a request held on the person, its **step**: what they must do to unblock it, from
+    the judge's note, unless the turn's own questions already say it. Answering the step hands
+    the request back to the agent; a step whose request moved on closes by itself.
+
+  Measured before the split: a lead ended a turn on 20 numbered questions to the owner while its
+  band read `3 open`, and those three were the agent's own work. Measured before the lists: a
+  status turn's "Waiting on you" over four bullets, mid-turn, read as nothing at all, and the
+  queue showed the agent's own requests because they were held on the owner. **Once:** one item
+  per thing per session. Two sources that find it are one item; a later list that says it in
+  other words is that item, its words updated and its id kept (by shared words and anchors such
+  as `#212`, a code span or a hyphenated name; past what the words can tell, the judge pairs
+  them); a turn's list replaces the one before, and a line the new list no longer carries
+  closes `dropped`, "no longer listed", never deleted. A turn with no list leaves them alone. An
+  answer in the chat settles the question it names ("1", "sí al 3", "5: no, use JSON"; a lone
+  number picks that option of the one question that has it, or of the turn's closing choice),
+  and the judge can never close a for-you item as `done`, because what it lacks is the person's
+  answer, not the agent's work. **A prompt the fleet pasted is never the person's**: `fleet-send`
+  (and so `fleet-spawn --prompt`) and `fleet-schedule` write `<sock>.<session>.pasted` before
+  they paste, and the mod spends that mark at submit time: the item is the sender's
+  (`source: fleet`), owed to it, and never listed as waiting on the owner; what that turn asks
+  is the lead's to answer. The marker is the test, by time and length, never the wording.
+  **What is pending shows on deploy:** the first start of this code on a ledger it has never
+  read takes that session's last turn from its transcript, once, and stamps the file
+  (`forYouV`), so a master's last list shows without waiting for its next turn; a worker's
+  turns answer its lead, so it only gets the steps of its held requests. Nothing is rewritten
+  or deleted. One list everywhere: the band, `/ledger`, the phone's "waiting on you", the
+  briefing's WAITING ON THE OWNER and `fleet-know waiting` all read `forYou()`; `fleet-know`
+  reads it from each request's source, so an older event that called a held request the
+  owner's is read as the session's.
 - **Explain it to me.** `fleet-ledger [session] explain <id>`, `/ledger explain <id>` and the
   Explain button on every for-you card (phone, desk and the team app, through
   `fleet_ledger`) ask the session that raised the item to explain that one item in plain words:

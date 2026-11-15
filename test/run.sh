@@ -3911,6 +3911,183 @@ else
   skip "lost codex reopen" "tmux, jq and node needed"
 fi
 
+group "after a shutdown every session the machine killed has a card: codex, another profile's dir, idle"
+# Three ways a session the machine killed came back with no card at all, measured on one
+# shutdown: 4 of 13 records were codex conversations (their rollout is under the codex home,
+# and the scan looked for a Claude transcript); several records of a class-profile fleet sat
+# in the personal profile's fleet dir, where that fleet's readers never looked; and sessions
+# that had sat idle for more than a week were past a window counted from their last write,
+# though they were alive until the shutdown. Every row below went red on the code before:
+# the scan found none of the five cards, no stamp was written, the record landed in the
+# other profile's dir, and R did nothing.
+#   The fleet is acme-api on the `class` profile; acme-web is a `personal` one whose dir the
+# misplaced records sit in. Fake HOME, config dirs and codex home; stub agents log the argv
+# they were launched with, so a reopen is seen and nothing real runs.
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  LR="$(cd "$(mktemp -d "$TEST_RUNS.$$.lost.XXXXXX")" && pwd -P)"; H="$LR/home"
+  LS=cf-class-acme-api; LW=cf-personal-acme-web
+  CD="$H/.claude-class/fleet"; PD="$H/.claude-personal/fleet"; LC="$LR/codex-home"
+  mkdir -p "$H/.config/ghostfleet" "$H/.claude/fleet" "$CD" "$PD" "$LR/bin" "$LR/sys" "$LR/count" "$LR/hookstub" \
+           "$LR/src/acme-api" "$LR/src/acme-web"
+  printf 'acme-api\t%s\tclass\nacme-web\t%s\tpersonal\n' "$LR/src/acme-api" "$LR/src/acme-web" > "$H/.config/ghostfleet/projects"
+  NOW=$(date +%s); DAY=86400
+  for a in claude codex; do      # one log for both, so the ORDER of reopens is on it
+    printf '#!/bin/sh\n[ "$1" = agents ] && exit 0\n[ "$1" = --help ] && exit 0\nprintf "%%s %%s %%s\\n" %s "$(tmux display-message -p "#S" 2>/dev/null)" "$*" >> "%s/argv"\nexec sleep 120\n' "$a" "$LR" > "$LR/bin/$a"
+    chmod +x "$LR/bin/$a"
+  done
+  for t in tmux jq node; do ln -s "$(command -v "$t")" "$LR/sys/$t"; done
+  printf '#!/bin/sh\necho "$*" >> "%s/tmux.calls"\nexec "%s" "$@"\n' "$LR" "$(command -v tmux)" > "$LR/count/tmux"; chmod +x "$LR/count/tmux"
+  lre() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT \
+            -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_PROFILE \
+            HOME="$H" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" CODEX_HOME="$LC" \
+            CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off "$@" 2>&1; }
+  lrec() {    # <dir> <id> <sock> <slot> <ts> <transcript> [agent] [pane]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","cwd":"%s","status":"ready","transcript":"%s","ts":%s%s%s}\n' \
+      "$2" "$3" "$4" "$LR/src/acme-api" "$6" "$5" "${7:+,\"agent\":\"$7\"}" "${8:+,\"pane\":\"$8\"}" > "$1/$2.json"
+  }
+  lost() { lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost) | "\(.name):\(.agent)"' 2>/dev/null | sort | tr '\n' ' '; }
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+
+  # ── codex: a rollout under the codex home is its conversation ───────────────
+  CX1=0198aa01-0000-7000-8000-000000000001; CX2=0198aa02-0000-7000-8000-000000000002
+  CX3=0198aa03-0000-7000-8000-000000000003; CL1=11111111-0000-4000-8000-0000000000c1
+  RCD="$LC/sessions/$(date +%Y/%m/%d)"
+  cx_rollout "$RCD/rollout-a-$CX1.jsonl" "$CX1" "$LR/src/acme-api" 900 task_complete
+  cx_rollout "$RCD/rollout-b-$CX2.jsonl" "$CX2" "$LR/src/acme-api" 900 task_complete
+  # the shape a hook older than the bridge's own fields left: no agent, no transcript
+  lrec "$CD" "$CX1" "$LS" billing-svc $((NOW - 3600)) ""
+  # ...and the record that names the fleet-side copy of codex's replies, not its rollout
+  lrec "$CD" "$CX2" "$LS" scratch $((NOW - 7200)) "$CD/$LS.scratch.codex.jsonl" codex
+  lrec "$CD" "$CX3" "$LS" nocx $((NOW - 7200)) "" codex          # no rollout anywhere: no card
+  # ── another profile's dir: this fleet's record, in the personal fleet's dir ──
+  CLT="$H/.claude-personal/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl"
+  mkdir -p "$(dirname "$CLT")"; printf '{"type":"user"}\n' > "$CLT"
+  lrec "$PD" "$CL1" "$LS" toolbox $((NOW - 3 * DAY)) "$CLT"
+  lrec "$PD" 22222222-0000-4000-8000-0000000000c2 "$LW" master $((NOW - 60)) "$CLT"   # that fleet's own
+
+  # ── the writer: a server whose env names ANOTHER fleet ───────────────────────
+  # The shape that put records in the wrong dir: a server started from the personal fleet's
+  # pane carries that fleet's socket and dirs in its global env, and a session opened on it
+  # with no -e of its own resolved its fleet dir from that socket.
+  cat > "$LR/hookstub/claude-here" <<STUB
+#!/usr/bin/env bash
+slot="\$1"; sid="fe-\$slot"; tr="$LR/\$sid.jsonl"; : > "\$tr"
+printf '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "\$sid" "\$PWD" "\$tr" \\
+  | "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+exec sleep 600
+STUB
+  chmod +x "$LR/hookstub/claude-here"
+  env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_AGENT HOME="$H" CODEX_HOME="$LC" \
+      CLAUDE_FLEET_SOCK="$LW" CLAUDE_CONFIG_DIR="$H/.claude-personal" CLAUDE_FLEET_DIR="$PD" CLAUDE_FLEET_PROFILE=personal \
+      CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off CLAUDE_FLEET_SLOTS="$LR/slots" \
+      PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s _scratch -c "$LR/src/acme-api" 'sleep 600'
+  PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s fresh -c "$LR/src/acme-api" 'exec agent-here fresh'
+  wait_for 10 "fresh's first record" 'ls "$CD/fe-fresh.json" "$PD/fe-fresh.json" >/dev/null 2>&1'
+  is "lost: a session opened on a server whose env names another fleet writes into its OWN fleet's dir" \
+     "$LS|0" "$(jq -r .sock "$CD/fe-fresh.json" 2>/dev/null)|$(ls "$PD" | grep -c '^fe-fresh' || true)"
+
+  # ── the governor's tick: who is alive, from the reads it already makes ───────
+  tmux -L "$LS" new-session -d -s idle -c "$LR/src/acme-api" 'sleep 600'
+  heal() { : > "$LR/tmux.calls"; lre env PATH="$LR/count:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" node "$ROOT/lib/fleet-env.mjs" heal "$LS" >/dev/null; wc -l < "$LR/tmux.calls" | tr -d ' '; }
+  heal >/dev/null
+  is "lost: the governor puts the server's socket right, as it does its dirs" \
+     "CLAUDE_FLEET_SOCK=$LS" "$(tmux -L "$LS" show-environment -g CLAUDE_FLEET_SOCK 2>/dev/null)"
+  n3="$(heal)"
+  for i in 1 2 3 4 5; do tmux -L "$LS" new-session -d -s "w$i" 'sleep 600'; done
+  heal >/dev/null; n8="$(heal)"
+  ST="$(ls "$CD/alive/$LS".*.json 2>/dev/null | head -1)"
+  is "lost: each tick writes down who is alive on this server, tabs left out" "7 0" \
+     "$(jq -r '.panes | length' "$ST" 2>/dev/null) $(jq -r '[.panes[] | select(startswith("_"))] | length' "$ST" 2>/dev/null)"
+  is "...at the same number of tmux calls for 3 sessions as for 8, and fewer than the 6 a tick made before" "yes" \
+     "$([ -n "$n3" ] && [ "$n3" = "$n8" ] && [ "$n3" -lt 6 ] && echo yes || echo "no: $n3 then $n8")"
+  # Then the server dies. The stamp is aged to say the server started twelve days ago and was
+  # last seen half an hour ago, and the records written as long ago as each row needs.
+  IDP="$(tmux -L "$LS" display-message -p -t idle '#{pane_id}@#{pid}' 2>/dev/null)"
+  SPID="${IDP#*@}"
+  for s in w1 w2 w3 w4 w5; do tmux -L "$LS" kill-session -t "$s" 2>/dev/null; done
+  tmux -L "$LS" kill-server 2>/dev/null
+  rm -f "$CD/fe-fresh.json"           # the writer's row is done; it would only be a fifth card
+  jq --argjson s $((NOW - 12 * DAY)) --argjson z $((NOW - 1800)) '.start = $s | .seen = $z' "$ST" > "$ST.t" && mv "$ST.t" "$ST"
+  ID1=33333333-0000-4000-8000-0000000000d1; ID2=33333333-0000-4000-8000-0000000000d2; ID3=33333333-0000-4000-8000-0000000000d3
+  for id in "$ID1" "$ID2" "$ID3"; do
+    t="$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$id.jsonl"; mkdir -p "$(dirname "$t")"; printf '{"type":"user"}\n' > "$t"
+  done
+  lrec "$CD" "$ID1" "$LS" idle   $((NOW - 10 * DAY)) "" "" "$IDP"          # idle ten days, alive until the end
+  lrec "$CD" "$ID2" "$LS" gone   $((NOW - 10 * DAY)) "" "" "%99@$SPID"     # stopped ten days ago: no stamp has it
+  lrec "$CD" "$ID3" "$LS" reused $((NOW - 13 * DAY)) "" "" "$IDP"          # older than the server that reused its pane id
+
+  L="$(lost)"
+  for want in billing-svc:codex scratch:codex toolbox:claude idle:claude; do
+    case "$want" in
+      billing-svc:*) why="lost: a codex record naming no agent and no rollout gets a card, as codex, from the rollout under its id" ;;
+      scratch:*)     why="...and one whose record names the fleet-side copy of its replies" ;;
+      toolbox:*)     why="lost: this fleet's record left in another profile's dir shows on this fleet's grid" ;;
+      idle:*)        why="lost: a session idle ten days and alive when its server died gets a card" ;;
+    esac
+    is "$why" "yes" "$(grep -qE "(^| )$want( |$)" <<< "$L" && echo yes || echo "no: $L")"
+  done
+  for not in nocx master gone reused; do
+    case "$not" in
+      nocx)   why="lost: a codex record with no rollout anywhere gets none" ;;
+      master) why="...nor another fleet's record in that same dir" ;;
+      gone)   why="...nor a session that stopped ten days ago" ;;
+      reused) why="...nor one whose pane id a later server reused" ;;
+    esac
+    is "$why" "no" "$(grep -qE "(^| )$not:" <<< "$L" && echo yes || echo no)"
+  done
+  # with the fleet's own profile in the env, the way the MCP asks another fleet (invocation())
+  IA="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.name == "idle") | .age' 2>/dev/null)"
+  is "...and its card says it died half an hour ago, not that it went quiet ten days ago" "yes" \
+     "$([ -n "$IA" ] && [ "$IA" -ge 1700 ] && [ "$IA" -le 2400 ] && echo yes || echo "no: age ${IA:-none}")"
+  fl="$(lre env CLAUDE_CONFIG_DIR="$H/.claude-class" CLAUDE_FLEET_DIR="$CD" "$ROOT/bin/fleet-list" -s "$LS")"
+  is "lost: fleet-list lists the same four" "billing-svc idle scratch toolbox" \
+     "$(sed -nE 's/^([a-z-]+) +lost.*/\1/p' <<< "$fl" | sort | tr '\n' ' ' | sed 's/ $//')"
+  is "lost: a dry-run reopen of the codex record that never said codex is not refused" "yes" \
+     "$(grep -q "would reopen 'billing-svc'" <<< "$(lre "$ROOT/bin/fleet-restart" -s "$LS" --reopen billing-svc --dry-run)" && echo yes || echo no)"
+
+  # ── R on the grid: every lost card back, once each, in the order drawn ─────
+  ORDER="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost and (.lead | not)) | .name' 2>/dev/null | tr '\n' ' ')"
+  cat > "$LR/grid.sh" <<SH
+#!/bin/sh
+exec env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_PROFILE \\
+  HOME="$H" CODEX_HOME="$LC" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" TMUX_TMPDIR="$TMUX_TMPDIR" \\
+  CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off node "$ROOT/bin/fleet-grid.mjs" "$LS"
+SH
+  chmod +x "$LR/grid.sh"
+  tmux -L lrview new-session -d -x 200 -y 50 "'$LR/grid.sh'; sleep 60"
+  gcap() { tmux -L lrview capture-pane -p 2>/dev/null; }
+  wait_for 15 "the grid's lost cards" 'grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: the grid offers R while something is lost" "yes" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  tmux -L lrview send-keys -l R
+  wait_for 10 "the ask" 'grep -q "reopen all 4 lost sessions" <<< "$(gcap)"'
+  is "lost: R asks first, naming how many" "yes" "$(grep -q 'reopen all 4 lost sessions in this fleet' <<< "$(gcap)" && echo yes || echo no)"
+  is "...and nothing is reopened before the yes" "no" "$([ -s "$LR/argv" ] && echo yes || echo no)"
+  tmux -L lrview send-keys -l y
+  wait_for 60 "four reopens" '[ "$(wc -l < "$LR/argv" 2>/dev/null | tr -d " ")" -ge 4 ] && grep -q "reopened 4 of 4" <<< "$(gcap)"'
+  sleep 1
+  # The order is the grid's (newest death first), and pinned: an empty log equals an empty
+  # order, which is how this row passed on the code before, where nothing was lost at all.
+  is "lost: y reopens each lost session once, in the order the grid draws them" \
+     "idle billing-svc scratch toolbox |idle billing-svc scratch toolbox " \
+     "$ORDER|$(awk '{print $2}' "$LR/argv" 2>/dev/null | tr '\n' ' ')"
+  is "...codex's with codex resume <id>, the agent-less record's too" "yes yes" \
+     "$(grep -q "^codex billing-svc resume $CX1" "$LR/argv" && echo yes || echo no) $(grep -q "^codex scratch resume $CX2" "$LR/argv" && echo yes || echo no)"
+  is "...claude's with --resume <id>" "yes yes" \
+     "$(grep -q "^claude toolbox .*--resume $CL1" "$LR/argv" && echo yes || echo no) $(grep -q "^claude idle .*--resume $ID1" "$LR/argv" && echo yes || echo no)"
+  is "...the one kept under another profile's account copied to this fleet's, the original left" "yes yes" \
+     "$([ -f "$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl" ] && echo yes || echo no) $([ -f "$CLT" ] && echo yes || echo no)"
+  is "...and none is lost any more: each is a session again" "|billing-svc idle scratch toolbox " \
+     "$(lost)|$(tmux -L "$LS" list-sessions -F '#{session_name}' 2>/dev/null | sort | tr '\n' ' ')"
+  wait_for 5 "the footer to drop R" '! grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: with nothing lost, the footer does not offer R" "no" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  for s in "$LS" lrview; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "${LR:?}"
+else
+  skip "lost cards after a shutdown" "tmux, jq and node needed"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
@@ -5548,8 +5725,8 @@ STUB
       skip "mod: its harness" "mods not available in this claude: $(grep -o 'the rollout switch[^:]*' <<< "$mdt" | head -1)"
     else
     is "mod: its harness runs and nothing fails" "0" "$(grep -oE '^ *[0-9]+ fail$' <<< "$mdt" | grep -oE '[0-9]+')"
-    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 62 ] && ok "mod: ...and all 62 tests ran" \
-      || bad "mod: ...and all 62 tests ran" ">= 62 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
+    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 188 ] && ok "mod: ...and all 188 tests ran" \
+      || bad "mod: ...and all 188 tests ran" ">= 188 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
     fi
   else
     skip "mod: claude plugin validate/test" "no claude with plugin test"
@@ -6108,9 +6285,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
   # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
   # Its four briefs from the lead the judge read as done stay open, answered with no proof:
-  # before that rule all four closed as judge-done and "open now" read 1.
+  # before that rule all four closed as judge-done and "open now" read 1. Its one request held
+  # on the person has its step, what the person must do (ledger.js linkSteps): 19 items, not 18.
   is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
-     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
+     "items 19|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
      "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
@@ -16198,7 +16376,11 @@ const w = { ...L.emptyLedger(), seq: 3, items: [
   { id: '3', text: 'fix the login redirect', at: now - h, state: 'open', source: 'user' },
 ] }
 out.push('held ' + L.heldItems(w, now).map(r => r.id).join(','))
-out.push('count ' + (L.listing(w, now).match(/for you \((\d+)\)/) || [, '0'])[1])
+// Requests the agent holds: its own, so none is the person's until the upgrade gives each its
+// step (upgradeForYou, the first read after the deploy), and then each step is
+const up = L.upgradeForYou(w, '', { at: now })
+out.push('count ' + [w, up].map(x => (L.listing(x, now).match(/for you \((\d+)\)/) || [, '0'])[1]).join('>')
+  + ' ' + L.forYouItems(up, now).map(r => r.reason.replace(/^unblocks: /, '')).join(';'))
 const ex = L.expireDormant(w, now)
 out.push('expire ' + (ex ? ex.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
 // ...while one waiting on SOMEONE ELSE (a brief from the lead, held for a deploy) still retires after a day
@@ -16270,8 +16452,9 @@ NODE
   lfv() { grep "^$1 " <<< "$lf" | head -1 | cut -d' ' -f2-; }
   is "a delivery is the person's only when marked as the owner's; a nudge is nothing; any other mark is a brief" \
      "user fleet null fleet fleet" "$(lfv source)"
-  is "a waiting item a day old is still on the queue, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
-  is "...and on /ledger's for-you count" "2" "$(lfv count)"
+  is "a waiting item a day old is still held, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
+  is "...and on /ledger's for-you count once the upgrade gives each its step, none before: they are the agent's" \
+     "0>2 open the app to load the new version;pick CSV or JSON for the export" "$(lfv count)"
   is "...and no judged turn retires it" "none" "$(lfv expire)"
   is "...while one a day old that waits on someone else does retire, and only it" "1:expired,2:waiting" "$(lfv expire-lead)"
   is "...still listed by all, still closable" "yes listed" "$(lfv closable)"
@@ -19001,10 +19184,12 @@ printf 'busy-other\n' > "$SV/sessions.cf-other"
 chmod +x "$SV/bin/fleet-grid.mjs"
 # WHAT THE MASTERS HOLD FOR THE OWNER (/api/waiting): each fleet's master's ledger, read beside its
 # status record. Planted around the probe and removed after it. Four records, each a way the
-# list goes wrong: demo's master holds a waiting item and a closed one; a worker on demo holds
-# a waiting item of its own (its asks reach the owner through the master, never twice); an OLDER
-# master record on demo points at a ledger whose item is the restarted session's, not this
-# one's; and other's master has a ledger with nothing held.
+# list goes wrong: demo's master holds a request waiting on the owner, the step that says what
+# they must do for it, and a closed ask; a worker on demo asked the owner something of its own
+# (its asks reach the owner through the master, never twice); an OLDER master record on demo
+# points at a ledger whose question is the restarted session's, not this one's; and other's
+# master has a ledger with nothing for the owner. The request itself is the master's own work
+# and is not listed: its step is, saying what answering it unblocks.
 svw_rec() {   # $1=id $2=sock $3=slot $4=ts
   printf '{"session_id":"%s","sock":"%s","slot":"%s","status":"ready","ts":%s}\n' "$1" "$2" "$3" "$4" > "$SV/home/.claude/fleet/$1.json"
 }
@@ -19016,11 +19201,13 @@ svw_rec svw-other cf-other master "$svw_now"
 node -e '
   const fs = require("fs"), d = process.argv[1], now = Date.now()
   const w = (id, items) => fs.writeFileSync(`${d}/${id}.ledger`, JSON.stringify({ v: 1, seq: 9, items }))
-  const waiting = (id, text, reason) => ({ id, text, at: now - 3 * 3600e3, state: "waiting", source: "user", progress: { at: now - 2 * 3600e3, reason } })
-  w("svw-master", [waiting("7", "merge #12 or wait for the review", "waits on the person: pick merge now or wait"),
-                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" }])
-  w("svw-old", [waiting("1", "the old master ask", "waits on the person: x")])
-  w("svw-worker", [waiting("1", "the worker ask", "waits on the person: y")])
+  const asked = (id, text) => ({ id, text, at: now - 3 * 3600e3, state: "open", source: "question", turnId: "t1" })
+  w("svw-master", [{ id: "7", text: "merge #12 or wait for the review", at: now - 3 * 3600e3, state: "waiting", source: "user", awaits: ["9"],
+                     progress: { at: now - 2 * 3600e3, turnId: "t1", reason: "waits on the person: pick merge now or wait" } },
+                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" },
+                   { ...asked("9", "Pick merge now or wait"), via: "step", at: now - 2 * 3600e3 }])
+  w("svw-old", [asked("1", "the old master ask")])
+  w("svw-worker", [asked("1", "the worker ask")])
   w("svw-other", [{ id: "1", text: "the fresh other ask", at: now - 60e3, state: "open", source: "user" }])
 ' "$SV/home/.claude/fleet"
 if sv_start json; then
@@ -19028,8 +19215,8 @@ if sv_start json; then
   is "the grid's JSON is served"              "200" "$(pf grid reads)"
   is "the owner's list needs a live token"     "401" "$(pf waiting.noToken reads)"
   is "...and is served with one"              "200" "$(pf waiting reads)"
-  is "a master's waiting item is on it, with what the master said it needs" "1" \
-     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="7"&&i[0].state==="waiting"&&i[0].text==="merge #12 or wait for the review"&&i[0].reason==="waits on the person: pick merge now or wait"&&i[0].since>i[0].at?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
+  is "a master's request held on the owner is on it as what the master said it needs, naming what it unblocks" "1" \
+     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="9"&&i[0].state==="question"&&i[0].text==="Pick merge now or wait"&&i[0].reason==="unblocks: merge #12 or wait for the review"?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
   is "...and a worker's, a closed one, a restarted master's and a fresh ask are not" "0" \
      "$(pb waiting reads | grep -c 'worker ask\|done ask\|old master ask\|fresh other ask' || true)"
   # The accounts line's source: behind the same token as everything else, and with this HOME's
@@ -22676,9 +22863,11 @@ else
 fi
 
 # ── what a master holds for the owner reaches the phone ──────────────────────
-# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner in state
-# `waiting`; fleet-serve reads them (heldScan) for /api/waiting and rings once when one is
-# NEW. Through the real exported functions against a real fleet dir, in both directions.
+# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner as open
+# `question` items (forYou); fleet-serve reads them (heldScan) for /api/waiting and rings once
+# when one is NEW. Through the real exported functions against a real fleet dir, in both
+# directions. (A request the agent holds waiting on the owner is the agent's own, not one of
+# these: what the owner must do for it is its step, a question like any other.)
 group "push: a master's new waiting item rings once per project, and says nothing it should not"
 if command -v node >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$WT/home/.claude/fleet"
@@ -22688,7 +22877,7 @@ if command -v node >/dev/null 2>&1; then
     const d = '$WT/home/.claude/fleet', now = Date.now();
     const rec = (id, sock, slot, ts) => fs.writeFileSync(d + '/' + id + '.json', JSON.stringify({ session_id: id, sock, slot, status: 'ready', ts }));
     const led = (id, items) => fs.writeFileSync(d + '/' + id + '.ledger', JSON.stringify({ v: 1, seq: 9, items }));
-    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'waiting', source: 'user', progress: { at: now - 3600e3, reason: 'waits on the person: a pick' } });
+    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'open', source: 'question', turnId: 't1' });
     rec('ma', 'cf-acme-api', 'master', 1); rec('mw', 'cf-acme-web', 'master', 1); rec('wk', 'cf-acme-api', 'api-fix', 5);
     led('ma', [W('1', 'the first ask')]); led('mw', []); led('wk', [W('1', 'a worker ask')]);
     const list = [{ name: 'acme-api', profile: 'work', sock: 'cf-acme-api', cfg: '$WT/home/.claude' },
@@ -22706,8 +22895,8 @@ if command -v node >/dev/null 2>&1; then
     // the worker's own new item: not the owner's, so no bell
     led('wk', [W('1', 'a worker ask'), W('2', 'another worker ask')]);
     out.push(tick().length);
-    // answered (open again) then waiting again HAS newly entered waiting
-    led('mw', [{ ...W('1', 'a web ask'), state: 'open', woke: now }]);
+    // answered, then on the list again (asked again), HAS newly entered waiting
+    led('mw', [{ ...W('1', 'a web ask'), state: 'done', closedBy: 'person' }]);
     out.push(tick().length);
     led('mw', [W('1', 'a web ask')]);
     out.push(tick().length);

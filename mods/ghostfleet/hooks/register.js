@@ -50,8 +50,9 @@ import {
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn, countJudge, adoptLedger,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, promptNotes, TOOL,
   revisitTurn, expireDormant, endsOnChoice, askedIn, proofTargets, proofPrompt, markProofAsked, settleTurn, closedInTurn,
-  deliverySource, ledgerChanges, turnQuestions, addQuestions, settleQuestions, QUESTION, explainOf,
+  deliverySource, ledgerChanges, settleQuestions, QUESTION, explainOf,
   explainPrompt, markExplainAsked, setExplanation, personLang,
+  turnForYou, captureForYou, resolveRelist, settleSteps, upgradeForYou, lastTurnText, forYou, FOR_YOU_V,
 } from './ledger.js'
 import { inferFacts, INFER_MODEL, INFER_TOKENS, INFER_MS } from './know-shape.js'
 import {
@@ -1305,8 +1306,10 @@ async function applyLedger($, change) {
   if (!file) return null
   const cur = await readLedger($, file)
   if (!cur) return null
-  const next = change(cur)
-  if (!next) return null
+  const changed = change(cur)
+  if (!changed) return null
+  // Every write also closes the steps whose request moved on (ledger.js settleSteps).
+  const next = settleSteps(changed, await $.clock.now())
   const dir = file.slice(0, file.lastIndexOf('/'))
   const tmp = `${dir}/.${file.slice(dir.length + 1)}.tmp`
   await $.fs.write(tmp, JSON.stringify(next))
@@ -1414,8 +1417,36 @@ async function ledgerRefresh($) {
   if (!cfg.on) return
   const file = await ledgerPath($)
   if (file && adoptedFor !== file) { adoptedFor = file; await bounded($, adoptMoved($, file), IO_MS * 6, null) }
+  if (file && upgradedFor !== file) { upgradedFor = file; await bounded($, upgradeLedger($, file), IO_MS * 4, null) }
   const l = file ? await readLedger($, file) : null
   if (l) await showLedger($, l)
+}
+
+// WHAT IS PENDING NOW SHOWS ON DEPLOY (ledger.js upgradeForYou): the first start of this code on a
+// ledger it has never read takes the session's last turn from its transcript, once, and stamps the
+// file. A reload is a start, so a deploy that reloads the fleet's sessions shows what each last
+// turn asked without waiting for its next one, and nobody runs a script against a ledger. A
+// worker's turns answer its lead, whose questions those are: it only gets its held requests'
+// steps. A transcript that cannot be read leaves the file unstamped, for the next start. A turn
+// that ends under this code stamps the file too (captureForYou), so a new one is never read back.
+// A session with no ledger yet gets one only when its last turn asked the person something.
+let upgradedFor = ''
+async function upgradeLedger($, file) {
+  const l = await readLedger($, file)
+  if (!l || Number(l.forYouV) >= FOR_YOU_V) return
+  const there = (await bounded($, $.fs.exists(file), IO_MS, false)) === true
+  const who = await identity($, await ownRecord($))
+  const own = !who.slot || who.slot === 'master'
+  if (!there && !own) return
+  const msgs = own ? await bounded($, $.session.messages(), IO_MS, null) : []
+  if (!Array.isArray(msgs)) return
+  const last = lastTurnText(msgs)
+  if (!there) {
+    const f = last ? turnForYou(last) : null
+    if (!f || !(f.asks.length || (f.list && f.list.length))) return
+  }
+  const at = await $.clock.now()
+  await changeLedger($, cur => upgradeForYou(cur, last, { at }))
 }
 
 // WHAT THIS SESSION LEFT UNDER ANOTHER PROFILE, BROUGHT HERE (ledger.js adoptLedger). Asked
@@ -1709,22 +1740,28 @@ async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), gener
     await settleOf($, e.turnId, generation)
     return
   }
-  // WHAT THE TURN ASKED THE PERSON, one item each (ledger.js turnQuestions). Not a turn a
-  // lead's brief started: it answers that lead, and its questions are the lead's to answer.
-  const qs = e.reason === 'answer' && !(started && started.kind === '') ? turnQuestions(last) : []
-  if (qs.length) {
-    await changeLedger($, l => { const r = addQuestions(l, qs, { at, turnId: e.turnId }); return r ? r.ledger : null })
-    askTurn = e.turnId
-  } else if (e.reason === 'answer' && endsOnChoice(last)) askTurn = ''
-  choiceTurn = e.reason === 'answer' && (qs.length || endsOnChoice(last)) ? e.turnId : ''
-  choiceAsked = choiceTurn ? askedIn(last) : ''
+  // WHAT THE TURN ASKED THE PERSON, one item each, once (ledger.js turnForYou, captureForYou):
+  // its numbered questions, its waiting-on-you list, its closing choice. Not a turn a lead's brief
+  // started: it answers that lead, and its questions are the lead's to answer. A list the words
+  // cannot pair with the one before is held for this turn's judge (`hold`), which runs next.
+  const leadTurn = Boolean(started && started.kind === '')
+  const found = e.reason === 'answer' && !leadTurn ? turnForYou(last) : { list: null, asks: [] }
+  const asks = found.asks.length + (found.list ? found.list.length : 0)
+  if (e.reason === 'answer' && !leadTurn) {
+    await changeLedger($, l => { const r = captureForYou(l, found, { at, turnId: e.turnId, hold: true }); return r ? r.ledger : null })
+  }
+  if (asks) askTurn = e.turnId
+  else if (e.reason === 'answer' && endsOnChoice(last)) askTurn = ''
+  choiceTurn = e.reason === 'answer' && (asks || endsOnChoice(last)) ? e.turnId : ''
+  const choice = found.asks.find(a => a.via === 'choice')
+  choiceAsked = choiceTurn ? askedIn(last) || (choice ? choice.text : '') : ''
   if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
   if (e.reason !== 'answer') { await settleOf($, e.turnId, generation); return }
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
   try {
-    await judgeTurn($, cfg, e, blocks, at, generation)
+    await judgeTurn($, cfg, e, blocks, at, generation, leadTurn)
   } catch (err) {
     void $.ui.log(`ghostfleet ledger: judge threw (${String(err && err.message || err)}); failing open`, { to: 'debug' })
   } finally {
@@ -1749,7 +1786,21 @@ async function settleOf($, turnId, generation) {
 
 // `blocks`: every text block the turn wrote. `generation`: how many turns had started when
 // this one ended.
-async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
+// A list held for this turn's judge (ledger.js captureForYou `hold`) is settled whatever the judge
+// did: by its pairs when it gave them (applyVerdict), else by the words alone, here. Left held, its
+// new lines would wait for the next turn to be seen.
+async function judgeTurn($, cfg, e, blocks, nowMs, generation, leadTurn = false) {
+  try {
+    await judgeTurnOnce($, cfg, e, blocks, nowMs, generation, leadTurn)
+  } finally {
+    await changeLedger($, l => (l.relist && l.relist.turnId === e.turnId ? resolveRelist(l, [], { at: nowMs }) : null))
+  }
+}
+
+// A turn that asks the person for something in prose, which only the judge reads ("by":"person").
+const ASKS_PERSON = /\b(?:waiting\s+(?:on|for)\s+(?:you|your)|needs?\s+(?:you|your)\b|your\s+(?:call|ok|okay|go-ahead|pick|review|approval|decision)|(?:can|could|would)\s+you\s+(?:please\s+)?(?:review|merge|approve|pick|decide|confirm|rotate|check|run|send|share)|te\s+toca|pendientes?\s+tuy[oa]s?|esperando\s+(?:tu|tus|por\s+ti)|necesito\s+(?:que|de\s+ti|tu|tus))/i
+
+async function judgeTurnOnce($, cfg, e, blocks, nowMs, generation, leadTurn) {
   const surfaces = await bounded($, $.session.surfaces(), IO_MS, null)
   if (!surfaces || !surfaces.length) return                  // -p, the SDK: nobody to nag
   const file = await ledgerPath($)
@@ -1769,7 +1820,10 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // A stale or waiting item this turn mentions is judged with them, and on a turn the person's
   // own message started, every waiting item still inside its day (ledger.js revisitTurn).
   const back = revisitTurn(cur, nowMs, blocks.join('\n'), { person: personTurns.includes(e.turnId) })
-  if (!open.length && !back.length && (closedOwn || !promises)) return  // nothing to judge: no call
+  // A list held for pairing, and a turn that asks the person something in prose, are read too.
+  const relist = cur.relist && cur.relist.turnId === e.turnId ? cur.relist : null
+  const asksPerson = cfg.promises !== 'off' && !leadTurn && ASKS_PERSON.test(e.answer)
+  if (!open.length && !back.length && (closedOwn || !promises) && !relist && !asksPerson) return  // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
   // answered.
@@ -1783,6 +1837,13 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // The first call reads the turn's promises, so it is shown every open one to name the one a
   // phrase restates, whichever batch that promise is judged in.
   const openPromises = judgeBatches(open.filter(i => i.source === 'promise'))[0] || []
+  // The first call is also shown what is already waiting on the person, to name a line it reads
+  // as asked of them again, and the held list to pair (ledger.js judgePrompt).
+  const forPerson = leadTurn ? [] : cur.items.filter(forYou).slice(-12)
+  const relistView = relist ? {
+    items: relist.items,
+    old: relist.old.map(id => cur.items.find(i => i.id === id)).filter(i => i && forYou(i)).map(i => ({ id: i.id, text: i.text })),
+  } : null
   let after = null
   const failed = []
   let answered = 0
@@ -1790,7 +1851,8 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const usage = []         // each call's `usage`, as the host reports it (ledger.js countJudge)
   for (const [k, batch] of batches.entries()) {
     const r = await $.model.complete({
-      model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
+      model: cfg.model,
+      prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises, forPerson: k ? [] : forPerson, relist: k ? null : relistView }),
       maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
     })
     if (r && r.usage) usage.push(r.usage)
@@ -1803,8 +1865,11 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
     if (verdict.partial) failed.push(`reply cut off after ${verdict.items.length} of ${batch.length} items`)
     answered += verdict.items.length
     waitingOnPerson = waitingOnPerson || verdict.waitingOnPerson
-    after = await changeLedger($, l => applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: k ? 'off' : cfg.promises })) || after
+    after = await changeLedger($, l => applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: k ? 'off' : cfg.promises, relist: !k, forPerson: !leadTurn })) || after
   }
+  // What the judge added for the person (a step, a "by":"person" line) is answered by number or
+  // a yes as the turn's own questions are, unless a turn has started since.
+  if (after && !leadTurn && turnsStarted === generation && askTurn !== e.turnId && after.items.some(i => forYou(i) && i.turnId === e.turnId)) askTurn = e.turnId
   const judge = failed.length
     ? { at: nowMs, ok: false, why: failed[0], items: answered, calls: batches.length, failedCalls: failed.length }
     : { at: nowMs, ok: true, items: answered, calls: batches.length }

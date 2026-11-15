@@ -528,6 +528,13 @@ var en_default = {
 	"project.leadReopen": "Reopen the lead",
 	"project.leadWake": "Wake the lead",
 	"project.leadResume": "Resume the lead",
+	"project.reopenAll": "Reopen all",
+	"project.reopenAllN": "Reopen all lost ({n})",
+	"project.reopenAllTitle": "Reopen {n} lost sessions?",
+	"project.reopenAllBody": "The machine closed these sessions (a crash or a restart). Each comes back on its own conversation, in its own folder, one after another.",
+	"project.reopening": "Reopening {at} of {of}…",
+	"project.reopenAllDone": "Reopened {n} sessions",
+	"project.reopenAllSome": "Reopened {ok} of {n}: {why}",
 	"project.newSession": "New session",
 	"project.new": "New",
 	"project.readFailed": "Could not read {project}'s fleet: {why}",
@@ -1416,6 +1423,13 @@ var es_default = {
 	"project.leadReopen": "Reabrir el líder",
 	"project.leadWake": "Despertar al líder",
 	"project.leadResume": "Reanudar al líder",
+	"project.reopenAll": "Reabrir todas",
+	"project.reopenAllN": "Reabrir las perdidas ({n})",
+	"project.reopenAllTitle": "¿Reabrir {n} sesiones perdidas?",
+	"project.reopenAllBody": "La máquina cerró estas sesiones (un fallo o un reinicio). Cada una vuelve con su propia conversación, en su propia carpeta, una tras otra.",
+	"project.reopening": "Reabriendo {at} de {of}…",
+	"project.reopenAllDone": "Se reabrieron {n} sesiones",
+	"project.reopenAllSome": "Se reabrieron {ok} de {n}: {why}",
 	"project.newSession": "Nueva sesión",
 	"project.new": "Nueva",
 	"project.readFailed": "No se pudo leer la flota de {project}: {why}",
@@ -8192,6 +8206,10 @@ function Card({ c, active, compact, onOpen }) {
 							c.branch || "—"
 						]
 					}),
+					c.agent && c.agent !== "claude" ? /* @__PURE__ */ u("span", {
+						class: "tag agent",
+						children: c.agent
+					}) : null,
 					c.pr ? /* @__PURE__ */ u("span", {
 						class: "tag pr",
 						children: ["PR ", c.pr]
@@ -8349,6 +8367,38 @@ function ProjectView({ project, session, tool = null }) {
 			setWaking(false);
 		}
 	};
+	const lostCards = (g?.cards || []).filter((c) => c.lost);
+	const [reopening, setReopening] = d(null);
+	const reopenAll = () => setConfirm({
+		title: t("project.reopenAllTitle", { n: lostCards.length }),
+		action: t("project.reopenAll"),
+		body: /* @__PURE__ */ u("p", { children: t("project.reopenAllBody") }),
+		onYes: async () => {
+			const names = [...lostCards.filter((c) => c.lead), ...lostCards.filter((c) => !c.lead)].map((c) => c.name);
+			const failed = [];
+			for (const [i, name] of names.entries()) {
+				setReopening({
+					at: i + 1,
+					of: names.length
+				});
+				try {
+					await fleet.act("fleet_reopen", {
+						project,
+						session: name
+					});
+				} catch (e) {
+					failed.push(`${name}: ${e.message}`);
+				}
+			}
+			setReopening(null);
+			toast(failed.length ? t("project.reopenAllSome", {
+				ok: names.length - failed.length,
+				n: names.length,
+				why: failed.join("; ")
+			}) : t("project.reopenAllDone", { n: names.length }), failed.length ? "bad" : "good");
+			reload();
+		}
+	});
 	const termWhy = typeof fleet.termWhy === "function" ? fleet.termWhy(project) : "";
 	const header = /* @__PURE__ */ u("header", {
 		class: "page-head proj-head",
@@ -8367,34 +8417,48 @@ function ProjectView({ project, session, tool = null }) {
 			}) : null
 		] }), /* @__PURE__ */ u("div", {
 			class: "row wrap",
-			children: [g && !leadUp ? /* @__PURE__ */ u(Btn, {
-				kind: "ghost",
-				disabled: waking,
-				onClick: wake,
-				title: t("project.leadIs"),
-				children: waking ? t("status.starting") + "…" : !lead ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "play" }),
-					" ",
-					t("project.leadStart")
-				] }) : lead.lost ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "refresh" }),
-					" ",
-					t("project.leadReopen")
-				] }) : lead.asleep ? /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "sun" }),
-					" ",
-					t("project.leadWake")
-				] }) : /* @__PURE__ */ u(S$1, { children: [
-					/* @__PURE__ */ u(Icon, { name: "play" }),
-					" ",
-					t("project.leadResume")
-				] })
-			}) : null, /* @__PURE__ */ u(Btn, {
-				kind: "primary",
-				icon: "plus",
-				onClick: () => setSpawn({}),
-				children: t("project.newSession")
-			})]
+			children: [
+				g && !leadUp ? /* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					disabled: waking,
+					onClick: wake,
+					title: t("project.leadIs"),
+					children: waking ? t("status.starting") + "…" : !lead ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "play" }),
+						" ",
+						t("project.leadStart")
+					] }) : lead.lost ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "refresh" }),
+						" ",
+						t("project.leadReopen")
+					] }) : lead.asleep ? /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "sun" }),
+						" ",
+						t("project.leadWake")
+					] }) : /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "play" }),
+						" ",
+						t("project.leadResume")
+					] })
+				}) : null,
+				lostCards.length > 1 || reopening ? /* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					disabled: !!reopening,
+					onClick: reopenAll,
+					title: t("status.lost.hint"),
+					children: reopening ? t("project.reopening", reopening) : /* @__PURE__ */ u(S$1, { children: [
+						/* @__PURE__ */ u(Icon, { name: "refresh" }),
+						" ",
+						t("project.reopenAllN", { n: lostCards.length })
+					] })
+				}) : null,
+				/* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					icon: "plus",
+					onClick: () => setSpawn({}),
+					children: t("project.newSession")
+				})
+			]
 		})]
 	});
 	const filters = filterChips({
