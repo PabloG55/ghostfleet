@@ -36,9 +36,9 @@
 #                  is not live — after an account/team switch every pane keeps
 #                  reporting the OLD window until Claude next repaints it.
 #   --mem-level L  act when kern.memorystatus_vm_pressure_level reaches L
-#   --swap-pct P   ...or when swap is P% used (default 90), which moves sooner than the
-#                  kernel's own level does
-#                  (1 normal, 2 warning, 4 critical; default 2)
+#                  (1 normal, 2 warning, 4 critical; default 4)
+#   --swap-pct P   hibernate at P% swap used (default 90) with live memory pressure:
+#                  macOS level >=2; Linux MemAvailable <=10% of MemTotal
 #   --proc-pct P   park when the process table is P% of kern.maxproc (default 60)
 #   --no-resource  budget ceiling only — do not watch machine resources
 #   --once         run one tick and exit (for testing / cron)
@@ -209,19 +209,20 @@ BUDGET_FROM=""
 # Sets BUDGET_PCT and BUDGET_FROM (the session and age of the reading); leaves both
 # empty when no record carries a live figure, and the pane scrape below runs as before.
 mod_budget() {
-  local now f best=""
-  now="$(date +%s)"
-  best="$(for f in "$FLEET_DIR"/*.json; do
-      jq -r --argjson now "$now" '.usage as $u | ($u.limits.five_hour // empty) as $w
-        | select(($w.pct | type) == "number")
-        | select(if $w.resets then $w.resets > $now else (($u.at // 0) > $now - 600) end)
-        | [($w.pct | floor), (.slot // .session_id // "?"), ($now - ($u.at // $now)), ($w.resets // 0)] | @tsv' "$f" 2>/dev/null
-    done | sort -t$'\t' -k1,1nr -k3,3n | head -1)"
+  local now best=""
+  now="$(gov_now)"
+  best="$(jq -rs --argjson now "$now" '[.[] | . as $r | .usage as $u
+      | ($u.limits.five_hour // empty) as $w
+      | select(($w.pct | type) == "number")
+      | select(if $w.resets then $w.resets > $now else (($u.at // 0) > $now - 600) end)
+      | [($w.pct | floor), ($r.slot // $r.session_id // "?"), ($now - ($u.at // $now)), ($w.resets // 0)]]
+      | sort_by([-(.[0]), .[2]]) | .[0] // empty | @tsv' "$FLEET_DIR"/*.json 2>/dev/null)"
   [ -n "$best" ] || return 1
   local pct who age resets
   IFS=$'\t' read -r pct who age resets <<< "$best"
   BUDGET_PCT="$pct"
   BUDGET_FROM="from the mod: $who, read ${age}s ago$([ "$resets" != 0 ] && printf ', window resets %s' "$(date -r "$resets" +%H:%M 2>/dev/null || date -d "@$resets" +%H:%M 2>/dev/null)")"
+  return 0
 }
 budget() {
   local p="" s="" w=""
@@ -262,6 +263,18 @@ gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked
 # 'governor-resource'.
 budget_parked() { is_parked "$1" && grep -q '^governor '          "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
 res_parked()    { is_parked "$1" && grep -q '^governor-resource ' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
+# Recovery has nothing to release on most ticks. Check the few marker files in-shell
+# before enumerating workers and consulting their adapters.
+has_parks() {
+  local f owner rest
+  for f in "$FLEET_DIR/$SOCK".*.parked; do
+    [ -f "$f" ] || continue
+    owner=""; read -r owner rest < "$f" || true
+    [ "$owner" = "$1" ] && return 0
+  done
+  return 1
+}
+
 
 # Resume every worker THIS governor parked (never a hand-paused one). Reports the
 # count in $RELEASED — NOT on stdout, because this function also logs there and a
@@ -276,6 +289,7 @@ RELEASED=0
 release_gov_parked() {
   local w cap="${2:-}"
   RELEASED=0
+  has_parks governor || return 0
   for w in $(workers_newest_first); do
     [ -n "$cap" ] && [ "$RELEASED" -ge "$cap" ] && break
     if budget_parked "$w"; then
@@ -300,50 +314,102 @@ release_gov_parked() {
 # that never parked it at all. Linux has no kern.maxproc, so pid_max stands in.
 RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""; RES_SWAP_WHY=""
 resources() {
-  local maxproc=""
-  RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""; RES_SWAP_WHY=""
-
-  # 1 normal / 2 warning / 4 critical — the kernel's own jetsam signal
-  RES_LEVEL="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
-  case "$RES_LEVEL" in ''|*[!0-9]*) RES_LEVEL=1 ;; esac
-
-  RES_PROCS="$(ps ax 2>/dev/null | wc -l | tr -d ' ')"
-  case "$RES_PROCS" in ''|*[!0-9]*) RES_PROCS=0 ;; esac
-  maxproc="$(sysctl -n kern.maxproc 2>/dev/null || cat /proc/sys/kernel/pid_max 2>/dev/null)"
-  case "$maxproc" in ''|*[!0-9]*) maxproc=0 ;; esac
-  [ "$maxproc" -gt 0 ] && RES_PROC_PCT=$(( RES_PROCS * 100 / maxproc ))
-
-  # ── SWAP, BECAUSE THE PRESSURE LEVEL ALONE IS A LAGGING SIGNAL ──────────────
-  # Measured on the machine that asked for this: 39.6 of 40.0 GB of swap in use, 169 MB of
-  # RAM unused, load in the twenties — and kern.memorystatus_vm_pressure_level still reading
-  # 2, not 4. Waiting for the kernel to call it critical means acting after the machine is
-  # already unusable, which is where the eighty-minute OOM fight in this file's header came
-  # from. Swap percentage says the same thing earlier and in a number a person recognises.
-  RES_SWAP_PCT=0
-  swapline="$(sysctl -n vm.swapusage 2>/dev/null)"
-  if [ -n "$swapline" ]; then
-    RES_SWAP_PCT="$(printf '%s' "$swapline" | awk '{
-      for (i=1;i<=NF;i++) { if ($i=="total") t=$(i+2)+0; if ($i=="used") u=$(i+2)+0 }
-      if (t>0) printf "%d", u*100/t; else print 0 }')"
-  elif [ -r /proc/meminfo ]; then
-    RES_SWAP_PCT="$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{ if (t>0) printf "%d", (t-f)*100/t; else print 0 }' /proc/meminfo)"
+  local maxproc="" swapline="" reading="" total=0 used=0 key value rest
+  RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""; RES_SWAP_WHY=""; RES_SWAP_PCT=0
+  # One sysctl exec for all three counters. Named output lets a missing key stay unknown
+  # without shifting the remaining values into the wrong counter.
+  if [[ "$OSTYPE" == darwin* ]]; then
+    reading="$(sysctl kern.memorystatus_vm_pressure_level kern.maxproc vm.swapusage 2>/dev/null)"
+    while IFS= read -r value; do
+      case "$value" in
+        kern.memorystatus_vm_pressure_level:*) RES_LEVEL="${value#*: }" ;;
+        kern.maxproc:*) maxproc="${value#*: }" ;;
+        vm.swapusage:*) swapline="${value#*: }" ;;
+      esac
+    done <<< "$reading"
+    # sysctl reports both swap values in MiB. Bash arithmetic needs integers; dropping
+    # their fractional MiB is immaterial at this percentage threshold.
+    read -r key rest total key rest used rest <<< "$swapline"
+    total="${total%%.*}"; used="${used%%.*}"
+    case "$total:$used" in *[!0-9:]*|:*|*:) total=0; used=0 ;; esac
+    [ "$total" -gt 0 ] && RES_SWAP_PCT=$(( used * 100 / total ))
+  else
+    # Swap is historical on Linux too. MemAvailable measures headroom NOW, including
+    # reclaimable cache; require <=10% alongside high swap instead of treating cache as used.
+    local mt=0 ma="" st=0 sf=0
+    while read -r key value rest; do
+      case "$key" in MemTotal:) mt="$value" ;; MemAvailable:) ma="$value" ;;
+        SwapTotal:) st="$value" ;; SwapFree:) sf="$value" ;; esac
+    done < "${CLAUDE_FLEET_GOV_MEMINFO:-/proc/meminfo}"
+    [ "$st" -gt 0 ] && RES_SWAP_PCT=$(( (st - sf) * 100 / st ))
+    [ -n "$ma" ] && [ "$mt" -gt 0 ] && [ $(( ma * 100 / mt )) -le 10 ] && RES_LEVEL=2
+    [ -r /proc/sys/kernel/pid_max ] && read -r maxproc < /proc/sys/kernel/pid_max || maxproc=""
   fi
-  case "$RES_SWAP_PCT" in ''|*[!0-9]*) RES_SWAP_PCT=0 ;; esac
-
+  case "$RES_LEVEL" in ''|*[!0-9]*) RES_LEVEL=1 ;; esac
+  case "$maxproc" in ''|*[!0-9]*) maxproc=0 ;; esac
+  # Count in the shell: ps | wc | tr used to create three execs for this one number.
+  while IFS= read -r value; do [ -n "$value" ] && RES_PROCS=$(( RES_PROCS + 1 )); done < <(ps -e -o pid= 2>/dev/null)
+  [ "$maxproc" -gt 0 ] && RES_PROC_PCT=$(( RES_PROCS * 100 / maxproc ))
   [ "$RES_LEVEL" -ge "$MEM_LEVEL" ] && RES_WHY="memory pressure level ${RES_LEVEL}"
-  # ── SWAP IS ITS OWN SIGNAL AND DELIBERATELY NOT PART OF RES_WHY ─────────────
-  # RES_WHY does two jobs: it names the ceiling, and a non-empty one SUPPRESSES the budget
-  # tick for the pass. Folding swap into it made both fire together, and on a machine sitting
-  # at 96% swap — the one that asked for this feature — that is permanent: the fleet would
-  # stop managing its token budget for as long as the laptop was swapping, which is exactly
-  # when it can least afford to. Measured as seven pre-existing governor rows going red.
-  #   So swap gets its own name. It is enough to start hibernating, which gives memory back,
-  # and it is not enough to stop the budget ceiling from working.
-  RES_SWAP_WHY=""
-  [ "$RES_SWAP_PCT" -ge "$SWAP_PCT" ] && RES_SWAP_WHY="swap ${RES_SWAP_PCT}%"
+  # Keep this separate: a swap-assisted hibernation must still allow budget enforcement.
+  [ "$RES_LEVEL" -ge 2 ] && [ "$RES_SWAP_PCT" -ge "$SWAP_PCT" ] && RES_SWAP_WHY="swap ${RES_SWAP_PCT}%"
   if [ "$RES_PROC_PCT" -ge "$PROC_PCT" ]; then
     RES_WHY="${RES_WHY:+$RES_WHY, }process table ${RES_PROC_PCT}% (${RES_PROCS}/${maxproc})"
   fi
+}
+
+# Empty plans used to rebuild every minute for days. Recheck on a fleet/state/switch
+# change or after 30 minutes (idle thresholds and veto expiry can change with time alone).
+HIB_EMPTY_FP=""; HIB_EMPTY_AT=0
+HIB_RECHECK=1800
+GOV_STARTED="$(date +%s)"
+gov_now() {                      # injectable clock, without a process per cached tick
+  local now
+  if [ -n "${CLAUDE_FLEET_GOV_CLOCK:-}" ] && read -r now < "$CLAUDE_FLEET_GOV_CLOCK"; then
+    printf '%s' "$now"
+  else printf '%s' "$(( GOV_STARTED + SECONDS ))"; fi
+}
+hib_fingerprint() {
+  local sess records f value
+  if [ "${GOV_SESSIONS+x}" = x ]; then sess="$GOV_SESSIONS"
+  else sess="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}:#{session_created}' 2>/dev/null)"; fi
+  # One jq plus one tmux. Project semantic state, not mtimes: mod heartbeats and usage
+  # writes must not re-arm an empty plan. Keep the projection here easy to extend when
+  # sleepability gains another input. Another fleet's records do not change this one.
+  records="$(jq -sc --arg sock "$SOCK" '[.[] | select(.sock == $sock)
+    | {session_id, slot, pane, status, state, source, cwd, transcript, nested_under}]
+    | sort_by(.slot, .session_id, .pane)' "$FLEET_DIR"/*.json 2>/dev/null)"
+  printf '%s|%s|%s' "${CLAUDE_FLEET_HIBERNATE:-}" "$sess" "$records"
+  for f in "$FLEET_DIR/hibernate.enabled" "$FLEET_DIR/$SOCK".*.asleep "$FLEET_DIR/$SOCK".*.parked; do
+    [ -f "$f" ] || continue
+    value=""; read -r value < "$f" || true
+    printf '|%s:%s' "$f" "$value"
+  done
+}
+hibernate_pass_due() {
+  HIB_NOW="$(gov_now)"; HIB_FP="$(hib_fingerprint)"
+  [ -n "$HIB_EMPTY_FP" ] && [ "$HIB_FP" = "$HIB_EMPTY_FP" ] \
+    && [ $(( HIB_NOW - HIB_EMPTY_AT )) -lt "$HIB_RECHECK" ] && return 1
+  return 0
+}
+# $1 = why; $2 = optional notification. Called only after hibernate_pass_due.
+hibernate_pass() {
+  local why="$1" note="${2:-}" out line
+  log "resources: ${why} -> hibernating idle worker(s), oldest first"
+  [ -n "$note" ] && notify "$note"
+  if [ "$DRY" = 1 ]; then
+    log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
+    return 0
+  fi
+  out="$("$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1)"
+  while IFS= read -r line; do [ -n "$line" ] && log "  $line"; done <<< "$out"
+  if [[ "$out" =~ slept\ [1-9][0-9]*\ session\(s\) ]]; then
+    HIB_EMPTY_FP=""
+  else
+    HIB_EMPTY_FP="$HIB_FP"; HIB_EMPTY_AT="$HIB_NOW"
+    log "  nothing sleepable — next look when the fleet changes or in $(( HIB_RECHECK / 60 ))m"
+  fi
+  return 0
 }
 
 # 0 = the machine ceiling is in force and the budget tick must be SKIPPED this pass.
@@ -356,17 +422,21 @@ resource_tick() {
   local w="" active=() n=0 fp=""
   [ "$RESOURCE" = 1 ] || return 1
 
-  # SWAP ALONE: hibernate, then return 1 so the budget ceiling still gets its pass. This is
-  # the branch that fires on a laptop deep in swap but below the kernel's own pressure level
-  # — measured at 39.6/40.0 GB used with the level still reading 2, which is to say the
-  # kernel calls it critical only once the machine is already unusable.
+  # READ FIRST, EVERY TICK. The swap branch below used to run on whatever the PREVIOUS tick's
+  # reading left behind and return before the one that refreshed it — so once swap crossed the
+  # line it was never read again, and the branch fired every minute whatever the machine did.
+  resources
+  # Skip expensive worker enumeration and spike confirmation as well as the plan itself.
+  # A critical ceiling still suppresses budget recovery while this empty plan is cached.
+  if { [ -n "$RES_WHY" ] || [ -n "$RES_SWAP_WHY" ]; } && ! hibernate_pass_due; then
+    [ -z "$RES_WHY" ] && return 1
+    [ ! -f "$FLEET_DIR/$SOCK.resource-off" ] && return 0
+  fi
+
+  # High swap plus live memory pressure can hibernate below the critical ceiling;
+  # the budget ceiling still gets its pass. Swap without pressure never triggers.
   if [ -z "$RES_WHY" ] && [ -n "${RES_SWAP_WHY:-}" ]; then
-    log "resources: ${RES_SWAP_WHY} -> hibernating idle worker(s), oldest first"
-    if [ "$DRY" != 1 ]; then
-      "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
-    else
-      log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
-    fi
+    hibernate_pass "$RES_SWAP_WHY"
     return 1
   fi
 
@@ -383,7 +453,6 @@ resource_tick() {
     return 1
   fi
 
-  resources
   if [ -n "$RES_WHY" ]; then
     active=()
     for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
@@ -416,13 +485,7 @@ resource_tick() {
       #   It is a no-op until somebody switches hibernation on; fleet-hibernate refuses
       # --apply otherwise and says so, which is the behaviour wanted on a machine where
       # ending the wrong process costs a day's work.
-      log "resources: ${RES_WHY} -> hibernating idle worker(s), oldest first"
-      notify "machine under load (${RES_WHY}) — hibernating idle sessions"
-      if [ "$DRY" != 1 ]; then
-        "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
-      else
-        log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
-      fi
+      hibernate_pass "$RES_WHY" "machine under load (${RES_WHY}) — hibernating idle sessions"
     else
       log "resources: ${RES_WHY} — all workers parked, holding for recovery"
     fi
@@ -430,7 +493,7 @@ resource_tick() {
   fi
 
   # RECOVERED -> hand back one worker per tick, newest first
-  if [ "$RES_LEVEL" -lt "$MEM_LEVEL" ] && [ "$RES_PROC_PCT" -lt $(( PROC_PCT - 10 )) ]; then
+  if [ "$RES_LEVEL" -lt "$MEM_LEVEL" ] && [ "$RES_PROC_PCT" -lt $(( PROC_PCT - 10 )) ] && has_parks governor-resource; then
     for w in $(workers_newest_first); do
       if res_parked "$w"; then
         log "resources recovered (level ${RES_LEVEL}, procs ${RES_PROC_PCT}%) -> resume $w"
@@ -533,7 +596,7 @@ tick() {
     # 1,024 events. Ramping means the next reading is taken with one more worker running,
     # which is the question actually being asked.
     resumed=0
-    for w in $(workers_newest_first); do
+    for w in $(has_parks governor && workers_newest_first); do
       if budget_parked "$w"; then
         log "budget ${pct}% < ${RESUME}% -> resume $w"
         if [ "$DRY" != 1 ]; then
@@ -564,7 +627,8 @@ tick() {
 LIB_DIR="$(cd "$BIN_DIR/../lib" 2>/dev/null && pwd)"
 accounts_tick() {
   local out rc
-  grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" || return 1
+  local switch="${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled"
+  [ -f "$switch" ] && grep -qsx on "$switch" || return 1
   command -v node >/dev/null 2>&1 && [ -f "$LIB_DIR/accounts.mjs" ] || return 1
   out="$(node "$LIB_DIR/accounts.mjs" tick "$SOCK" $([ "$DRY" = 1 ] && echo --dry-run) 2>&1)"; rc=$?
   [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r line; do log "$line"; done
@@ -592,7 +656,7 @@ env_tick() {
 }
 
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
-reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}%, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
+reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}% with live memory pressure, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
 # The machine ceiling runs FIRST and short-circuits: with the box itself under threat,
 # a token reading is beside the point, and letting the budget path also act on the same
@@ -602,7 +666,7 @@ if [ "$ONCE" = 1 ]; then
   resource_tick || accounts_tick || tick
 else
   while true; do
-    tmux -u -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
+    GOV_SESSIONS="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}:#{session_created}' 2>/dev/null)" || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
     env_tick
     resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process

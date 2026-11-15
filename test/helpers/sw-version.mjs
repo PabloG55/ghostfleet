@@ -59,6 +59,18 @@ export function hashOf(src) {
   return m ? m[1] : null;
 }
 
+// The pin covers SHELL's files. Sources that build phone.js/phone.css count too,
+// even if a PR forgot to rebuild them; unrelated web/ documentation does not.
+export function touchesClient(files, sw) {
+  const shell = /const SHELL = \[([\s\S]*?)\n\];/.exec(String(sw || ''));
+  if (!Array.isArray(files) || !shell) return null;
+  const cached = new Set([...shell[1].matchAll(/'(\.\/[^']*)'/g)]
+    .map(m => 'web/' + (m[1].slice(2) || 'index.html')));
+  return files.some(f => f === 'web/sw.js' || cached.has(f) ||
+    f.startsWith('web/ui/') || f.startsWith('web/src/') ||
+    f === 'brand/tokens.css' || f === 'vite.config.mjs');
+}
+
 // ── the verdict, as a pure function ───────────────────────────────────────
 // SEPARATED FROM GIT SO THE FOUR CASES CAN BE DRIVEN. A guard whose only test is the
 // current repo state can only ever be exercised in the direction that passes, which is the
@@ -80,11 +92,11 @@ export function hashOf(src) {
 //   3. no origin/staging to read           -> skip locally, FAIL in CI on a pull request. A guard
 //                                         that quietly no-ops in the one place it matters reads
 //                                         as covered and is not.
-//   4. above staging                    -> pass.
-//   5. equal to staging, same bytes     -> pass. The overwhelming majority of PRs never touch
-//                                         web/ at all; requiring a bump from them would make
-//                                         this the most-ignored row in the suite within a week.
-//   6. anything else                    -> fail. Equal with different bytes is #85/#86. Below is
+//   4. PR does not change the client    -> n/a. Its squash leaves staging's client in place,
+//                                         even if the branch forked before a newer version.
+//   5. above staging                    -> pass.
+//   6. equal to staging, same bytes     -> pass.
+//   7. anything else                    -> fail. Equal with different bytes is #85/#86. Below is
 //                                         #81/#83, and it is a fail even with identical bytes,
 //                                         because the number is what a phone compares.
 export function verdict(s) {
@@ -106,6 +118,9 @@ export function verdict(s) {
       : { kind: 'skip', reason: 'origin/staging is missing from this clone — `git fetch origin staging` to enable the ordering check' };
   }
   if (theirs == null) return { kind: 'fail', reason: 'origin/staging:web/sw.js has no VERSION to compare against' };
+  if (s.clientChanged === false && !s.pushCI) {
+    return { kind: 'na', reason: 'this PR does not change the client' };
+  }
   if (ours > theirs) return { kind: 'pass', reason: `v${ours} is above staging's v${theirs}` };
   if (ours === theirs && s.ourHash != null && s.ourHash === s.theirHash) {
     return { kind: 'pass', reason: `v${ours} matches staging and so does the client, so there is nothing to move for` };
@@ -120,8 +135,36 @@ export function verdict(s) {
 // The numbers are the ones that actually happened, so a red row here reads as the incident
 // it stands for rather than as arithmetic.
 const H = { ourHash: 'aaaaaaaaaaaa', theirHash: 'bbbbbbbbbbbb' };
-const base = { refPresent: true, headInBase: false, prCI: false, ...H };
+const base = { refPresent: true, headInBase: false, prCI: false, clientChanged: true, ...H };
 const kindOf = (o) => verdict({ ...base, ...o }).kind;
+
+// A backend-only PR can retain its fork's version after staging has moved on.
+const cacheFixture = "const SHELL = [\n  './', './phone.js', './fixtures/projects.json',\n];";
+const backendOnly = touchesClient(['bin/fleet-list', 'lib/pane-limit.mjs'], cacheFixture);
+is('a stale non-web PR does not pose a client ordering question', 'na',
+   kindOf({ ours: 113, theirs: 114, prCI: true, clientChanged: backendOnly }));
+is('a current non-web PR is n/a rather than a pass', 'na',
+   kindOf({ ours: 114, theirs: 114, prCI: true, clientChanged: backendOnly, ourHash: H.theirHash }));
+is('a stale web/ui PR still fails even with identical client bytes', 'fail',
+   kindOf({ ours: 113, theirs: 114, prCI: true, clientChanged: touchesClient(['web/ui/session.jsx'], cacheFixture), ourHash: H.theirHash }));
+is('a fresh web PR above staging still passes', 'pass',
+   kindOf({ ours: 115, theirs: 114, prCI: true, clientChanged: touchesClient(['web/phone.js'], cacheFixture) }));
+is('the non-client verdict says why it is n/a', 'this PR does not change the client',
+   verdict({ ...base, ours: 113, theirs: 114, clientChanged: backendOnly }).reason);
+for (const f of ['web/sw.js', 'web/index.html', 'web/fixtures/projects.json', 'web/src/phone.jsx', 'brand/tokens.css', 'vite.config.mjs']) {
+  is(`a stale client change still fails: ${f}`, 'fail',
+     kindOf({ ours: 113, theirs: 114, clientChanged: touchesClient([f], cacheFixture), ourHash: H.theirHash }));
+}
+is('uncached web documentation is not a client change', 'na',
+   kindOf({ ours: 113, theirs: 114, clientChanged: touchesClient(['web/README.md'], cacheFixture) }));
+is('an unreadable diff cannot exempt a stale client', 'fail',
+   kindOf({ ours: 113, theirs: 114, clientChanged: touchesClient(null, cacheFixture) }));
+is('an unreadable cache list cannot exempt a stale client', 'fail',
+   kindOf({ ours: 113, theirs: 114, clientChanged: touchesClient(['web/phone.js'], '') }));
+is('a non-client diff cannot hide an unreadable VERSION', 'fail',
+   kindOf({ ours: null, theirs: 114, clientChanged: false }));
+is('a push still compares even if given a non-client diff', 'fail',
+   kindOf({ ours: 113, theirs: 114, clientChanged: false, pushCI: true }));
 
 is('staging+1 is what a branch should be', 'pass', kindOf({ ours: 20, theirs: 19 }));
 // THE THREE FAILURES ARE THE POINT OF THE FILE.
@@ -139,16 +182,14 @@ is('...nor v10 above v9\'s successor', 'fail', kindOf({ ours: 10, theirs: 11 }))
 is('...and a failure names the number to take', true,
    /go to v18\b/.test(verdict({ ...base, ours: 16, theirs: 17 }).reason));
 
-// A PR THAT NEVER TOUCHED web/ IS THE COMMON CASE. Equal versions with identical bytes is
-// most of this repo's history, and a guard that reds those is a guard people learn to
-// ignore. Both directions: identical bytes pass, and the moment the bytes differ the same
-// pair of numbers fails.
+// A client change can still build to identical bytes. Keep the existing equal-version
+// rule in both directions, independently of the non-client exemption above.
 is('an untouched client may keep staging\'s number', 'pass',
    kindOf({ ours: 19, theirs: 19, ourHash: 'cccccccccccc', theirHash: 'cccccccccccc' }));
 is('...but not once the bytes differ', 'fail',
    kindOf({ ours: 19, theirs: 19, ourHash: 'cccccccccccc', theirHash: 'dddddddddddd' }));
-// ...and the exemption is for EQUAL only. Below staging is wrong even with nothing to deploy,
-// because the number is the whole of what a phone compares.
+// For a PR that touches the client, identical bytes excuse EQUAL only. Below staging
+// still fails, because the number is the whole of what a phone compares.
 is('...and never excuses a version below staging', 'fail',
    kindOf({ ours: 18, theirs: 19, ourHash: 'cccccccccccc', theirHash: 'cccccccccccc' }));
 
@@ -234,6 +275,11 @@ const basePresent = pushCI
 
 const ourSrc = fs.readFileSync(path.join(ROOT, 'web', 'sw.js'), 'utf8');
 const theirSrc = basePresent ? git('show', `${BASE}:web/sw.js`) : null;
+// Compare the PR to its fork point, not to staging's tip: the latter includes
+// client updates that landed on staging after this branch was cut. Unknown
+// ancestry/diffs retain the ordering guard. --no-renames includes deleted paths.
+const fork = !pushCI && refPresent ? git('merge-base', 'HEAD', REF)?.trim() : null;
+const changed = fork ? git('diff', '--name-only', '--no-renames', '-z', fork, 'HEAD') : null;
 const state = {
   ours: versionOf(ourSrc),
   theirs: versionOf(theirSrc),
@@ -242,6 +288,7 @@ const state = {
   refPresent: basePresent,
   headInBase,
   pushCI,
+  clientChanged: touchesClient(changed == null ? null : changed.split('\0').filter(Boolean), ourSrc),
   prCI: process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'pull_request',
 };
 const v = verdict(state);

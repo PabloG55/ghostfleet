@@ -82,6 +82,9 @@ async function fakeDaemon() {
     busy: 0, maxBusy: 0,         // reads of any kind in flight
     older: 0, maxOlder: 0,       // reads of an OLDER page (`before`) in flight
     olderFails: 0,               // how many older-page reads to fail before answering
+    holdPane: false,             // typing starts before the fixture's pending request arrives
+    answered: false,
+    holdGrid: false,              // history scrolls before the session metadata arrives
   };
   const json = (res, code, j, extra = {}) => {
     const body = JSON.stringify(j);
@@ -102,12 +105,27 @@ async function fakeDaemon() {
     st.log.push(row);
     const reply = (code, j, extra) => { row.end = Date.now(); row.status = code; json(res, code, j, extra); };
     if (p === '/api/health') return reply(200, { ok: true, version: 'chat-lands-check' });
+    if (p === '/api/verb') {
+      let body = '';
+      req.on('data', c => { body += c; });
+      return req.on('end', () => {
+        const { tool, args } = JSON.parse(body);
+        row.tool = tool; row.args = args;
+        if (tool === 'fleet_answer') { st.answered = true; return reply(200, { ok: true }); }
+        reply(400, { ok: false, text: 'unexpected verb in transcript check' });
+      });
+    }
     if (req.method === 'GET' && Date.now() < st.limitedUntil)
       return reply(429, { ok: false, text: 'rate limited' }, { 'Retry-After': String(Math.ceil((st.limitedUntil - Date.now()) / 1000)) });
     if (p === '/api/projects') return reply(200, { ...fx('projects.json'), jarvis_enabled: false });
     if (p === '/api/grid') {
       st.busy++; st.maxBusy = Math.max(st.maxBusy, st.busy);
-      return setTimeout(() => { st.busy--; reply(200, fx(`grid-${PROJECT}.json`)); }, st.slowAll);
+      const deliver = () => {
+        if (res.destroyed) { st.busy--; return; }
+        if (st.holdGrid) return setTimeout(deliver, 25);
+        st.busy--; reply(200, fx(`grid-${PROJECT}.json`));
+      };
+      return setTimeout(deliver, st.slowAll);
     }
     if (p === '/api/settings') return reply(200, { global_nudge: false, sessions: {} });
     // The two reads the real daemon serves that every screen of the app makes besides these: the
@@ -120,7 +138,12 @@ async function fakeDaemon() {
         ? fx(`pane-${PROJECT}-${u.searchParams.get('session') === OTHER ? OTHER : SESSION}.json`)
         : { ok: true, projects: fx('projects.json').projects.map(x => ({ name: x.name,
             sessions: x.name === PROJECT ? fx(`grid-${PROJECT}.json`).cards.map(c => ({ name: c.name, status: c.status, ts: 0, lead: !!c.lead })) : [] })) };
-      return setTimeout(() => { st.busy--; reply(200, body); }, st.slowAll);
+      const deliver = () => {
+        if (p === '/api/pane' && st.holdPane) return setTimeout(deliver, 25);
+        if (p === '/api/pane' && st.answered) body.prompt = null;
+        st.busy--; reply(200, body);
+      };
+      return setTimeout(deliver, st.slowAll);
     }
     if (p === '/api/session') {
       const ms = st.convo[row.session] || [];
@@ -170,6 +193,22 @@ const INIT = () => `(() => {
   try {
     sessionStorage.setItem('gf.session:' + location.origin, JSON.stringify({ t: 'chat-lands-token', exp: Date.now() / 1000 + 3600 }));
   } catch {}
+  // What the chat's status line SAID, whenever it said it: the row reads this, not whatever it
+  // happened to sample, so a runner that gets to the row late cannot miss a line that was up and gone.
+  window.__said = [];
+  window.__pauseTiming = { keyAt: null, openedAt: null };
+  for (const type of ['keydown', 'input']) addEventListener(type, e => {
+    if (e.target.matches?.('.composer textarea')) window.__pauseTiming.keyAt = performance.now();
+  }, true);
+  let dialog = null;
+  new MutationObserver(() => {
+    const l = document.querySelector('.chat .loading'); const x = l && l.textContent;
+    if (x && window.__said[window.__said.length - 1] !== x) window.__said.push(x);
+    const next = document.querySelector('.session [role=dialog] .ask');
+    if (next && next !== dialog) window.__pauseTiming.openedAt = performance.now();
+    dialog = next;
+  })
+    .observe(document, { subtree: true, childList: true, characterData: true });
   let hidden = false;
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
@@ -183,8 +222,10 @@ const INIT = () => `(() => {
 const until = async (fn, ms) => { const t0 = Date.now(); let v; while (Date.now() - t0 < ms) { v = await fn(); if (v) return v; await sleep(100); } return v; };
 
 // One Chrome and one daemon per scenario, so no scenario can see another's state.
-async function scenario(name, run, { desktop = false, wide = false, open = null, history = 0 } = {}) {
+async function scenario(name, run, { desktop = false, wide = false, open = null, history = 0, holdGrid = false } = {}) {
   const d = await fakeDaemon();
+  d.st.holdGrid = holdGrid;
+  d.st.holdPane = name === 'typing' || !!open;
   // A longer conversation than the fixture's, written BEFORE it: three more pages to scroll up
   // through, each message tall enough that a page fills a screen.
   if (history) {
@@ -211,6 +252,8 @@ async function scenario(name, run, { desktop = false, wide = false, open = null,
     if (open) {
       const shown = await until(() => b.evaluate(() => !!document.querySelector('.chat')), 15000);
       if (!shown) { is(`${name}: the chat screen is drawn`, true, false); return; }
+      // CHAT_LANDS_LAG=1500: the row starts late, as it does on a runner that is slow to get to it.
+      if (+process.env.CHAT_LANDS_LAG) await sleep(+process.env.CHAT_LANDS_LAG);
       await run({ b, d, st: d.st, has, say, last });
       return;
     }
@@ -234,6 +277,33 @@ async function staysFor(has, ms) {
   return true;
 }
 
+// Cursor movement is a real composer keystroke without changing the draft. Keep it active
+// while waiting on a slow transcript; a single inserted sentence followed by 20 s idle is
+// a typing pause, and should open the request.
+async function keepTyping(b) {
+  for (const type of ['rawKeyDown', 'keyUp']) await b.call('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+}
+const visibleDraft = b => b.evaluate(() => {
+  const n = document.querySelector('.composer textarea');
+  return [getComputedStyle(n).visibility === 'visible', n.value];
+});
+async function pauseAndAnswer(b) {
+  // CHAT_LANDS_PAUSE_DELAY=2500: inspection starts after the legitimate typing
+  // pause has elapsed, as it can after the preceding checks on a slow runner.
+  if (+process.env.CHAT_LANDS_PAUSE_DELAY) await sleep(+process.env.CHAT_LANDS_PAUSE_DELAY);
+  const opened = await until(() => b.evaluate(() => !!document.querySelector('.session [role=dialog] .ask')), 5000);
+  const timing = await b.evaluate(() => window.__pauseTiming);
+  // Measure the actual pause in the page. The preceding assertions (or the
+  // seam above) may use up some or all of it before this helper starts waiting.
+  const paused = timing.keyAt != null && timing.openedAt != null ? timing.openedAt - timing.keyAt : null;
+  if (process.env.CHAT_LANDS_DEBUG) console.error('typing pause timing', JSON.stringify({ opened: !!opened, paused, ...timing }));
+  if (opened) {
+    await b.evaluate(() => document.querySelector('.session .ask .opt:last-child').click());
+    await until(() => b.evaluate(() => !document.querySelector('.session .request-return')), 5000);
+  }
+  return !!opened && paused != null && paused >= 1800 ? true : { opened: !!opened, paused, ...timing };
+}
+
 const SCENARIOS = [
   // ── the control: nothing misbehaves ────────────────────────────────────────────
   // Green on the client that had the bug, and it is here for that: it is what proves the rows
@@ -254,16 +324,19 @@ const SCENARIOS = [
   // ── the owner is typing the next message ──────────────────────────────────────────
   // pollPaused() held the WHOLE poll while the composer had focus — so the keyboard would not
   // close under a half-typed message — and the reply then waited for the keyboard to go away.
-  ['typing', async ({ b, has, say }) => {
+  ['typing', async ({ b, st, has, say }) => {
     await b.evaluate(() => { const t = document.querySelector('.composer textarea'); t.focus(); return null; });
     await b.call('Input.insertText', { text: 'and also check the toolbox build' });
+    st.holdPane = false;
     await sleep(500);
     say(REPLY);
-    is('typing: the reply lands while the owner is typing the next message', true, !!(await until(() => has(REPLY), 9000)));
+    is('typing: the reply lands while the owner is typing the next message', true, !!(await until(async () => { await keepTyping(b); return has(REPLY); }, 9000)));
     is('typing: ...and the box keeps its focus', true, await b.evaluate(() => {
       const a = document.activeElement; return !!a && a.tagName === 'TEXTAREA' && a.isConnected; }));
     is('typing: ...and its words', 'and also check the toolbox build',
        await b.evaluate(() => { const t = document.querySelector('.composer textarea'); return t ? t.value : ''; }));
+    is('typing: the pending dialog waits until the 2 s typing pause', true, await pauseAndAnswer(b));
+    is('typing: the draft is back in the box after answering', [true, 'and also check the toolbox build'], await visibleDraft(b));
   }],
 
   // ── a slow daemon ─────────────────────────────────────────────────────────────
@@ -425,7 +498,13 @@ const SCENARIOS = [
   // WHERE THE READER IS is the message on screen, not the scroll offset: a list that loses a
   // message above them keeps its scrollTop and still moves them by that message's height. So both
   // are asked — the offset, and the message at the top of the screen staying where it was drawn.
-  ['history', async ({ b, has, say }) => {
+  ['history', async ({ b, st, has, say }) => {
+    const shot = async (state) => {
+      if (!process.env.CHAT_LANDS_SHOTS) return;
+      fs.mkdirSync(process.env.CHAT_LANDS_SHOTS, { recursive: true });
+      const { data } = await b.call('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(path.join(process.env.CHAT_LANDS_SHOTS, `history-${state}.png`), Buffer.from(data, 'base64'));
+    };
     const up = await b.evaluate(() => {
       const c = document.querySelector('.chat');
       c.scrollTop = Math.max(0, Math.floor((c.scrollHeight - c.clientHeight) / 3));
@@ -433,23 +512,42 @@ const SCENARIOS = [
       const top = c.getBoundingClientRect().top;
       const m = [...c.querySelectorAll('[data-k]')].find(n => n.getBoundingClientRect().bottom > top + 1);
       if (m) m.__gfAnchor = 1;
-      return { top: c.scrollTop, end: c.scrollHeight - c.clientHeight, y: m ? m.getBoundingClientRect().top : null };
+      const read = (event) => ({ event, at: performance.now(), top: c.scrollTop,
+        end: c.scrollHeight - c.clientHeight, y: m ? m.getBoundingClientRect().top : null,
+        box: c.getBoundingClientRect().top, height: c.clientHeight, fonts: document.fonts.status });
+      window.__historyScroll = [read('fixture')];
+      c.addEventListener('scroll', () => window.__historyScroll.push(read('scroll')));
+      new ResizeObserver(() => window.__historyScroll.push(read('resize'))).observe(c);
+      document.fonts.ready.then(() => window.__historyScroll.push(read('fonts ready')));
+      return read('fixture');
     });
     const at = () => b.evaluate(() => {
       const c = document.querySelector('.chat'), m = [...c.querySelectorAll('[data-k]')].find(n => n.__gfAnchor);
-      return { top: c.scrollTop, y: m ? m.getBoundingClientRect().top : null };
+      return { top: c.scrollTop, y: m ? m.getBoundingClientRect().top : null, box: c.getBoundingClientRect().top };
     });
-    const still = (now) => now.top === up.top && now.y != null && up.y != null && Math.abs(now.y - up.y) <= 1;
+    // The header can grow after the reader scrolls. Holding the message at its
+    // screen position then requires increasing scrollTop by that same growth.
+    const still = (now) => Math.abs(now.top - (up.top + now.box - up.box)) <= 1 &&
+      now.y != null && up.y != null && Math.abs(now.y - up.y) <= 1;
+    const diagnostic = (now) => b.evaluate((initial, now) => ({ initial, now, events: window.__historyScroll }), up, now);
     is('history: fixture: the chat is scrolled up, away from the end', true, up.top > 0 && up.top < up.end - 50 && up.y != null);
+    await shot('before-metadata');
+    // Release only after the reader's position is recorded: no runner speed can
+    // make this miss the late header layout that used to move them once.
+    st.holdGrid = false;
+    if (!await until(() => b.evaluate(() => !!document.querySelector('.sess-title .branch')), 8000)) throw new Error('history metadata did not arrive');
     await sleep(6500);
     const a1 = await at();
-    is('history: a poll leaves the reader where they were', true, still(a1) || a1);
+    is('history: a poll leaves the reader where they were', true, still(a1) || await diagnostic(a1));
+    await shot('after-poll');
     say(REPLY);
     await until(() => has(REPLY), 9000);
     await sleep(500);
     const a2 = await at();
-    is('history: ...and so does a new message', true, still(a2) || a2);
-  }],
+    is('history: ...and so does a new message', true, still(a2) || await diagnostic(a2));
+    await shot('after-message');
+    if (process.env.CHAT_LANDS_DEBUG) console.error('history scroll trace', JSON.stringify(await b.evaluate(() => window.__historyScroll)));
+  }, { holdGrid: true }],
 
   // ── opening a chat: it loads, whatever the first read does ──────────────────────────
   // "Sometimes opening a chat shows nothing until I SEND a message." The first read of the
@@ -465,9 +563,11 @@ const SCENARIOS = [
     const n = `open (${kind})`;
     await b.evaluate(() => { const t = document.querySelector('.composer textarea'); if (t) t.focus(); return null; });
     await b.call('Input.insertText', { text: 'check the billing-svc build' });
+    st.holdPane = false;
     let said = '', skeleton = false;
     const t0 = Date.now();
     const shown = await until(async () => {
+      await keepTyping(b);
       if (await has(last)) return true;
       const st = await b.evaluate(() => { const c = document.querySelector('.chat'), l = c && c.querySelector('.loading');
         return { line: l ? l.textContent : '', busy: !!c && c.getAttribute('aria-busy') === 'true' && !!c.querySelector('.bubble.skel') }; });
@@ -475,6 +575,7 @@ const SCENARIOS = [
       if (st.busy) skeleton = true;
       return false;
     }, kind === 'hang' ? 25000 : 15000);
+    said = (await b.evaluate(() => (window.__said || []).join(' | '))) || said;
     is(`${n}: the conversation appears without sending anything`, true, !!shown);
     // Waiting is drawn as the skeleton, without words (the phone's rule since v70); a read that
     // FAILED is said in words, with the reason and that it is being asked again.
@@ -485,6 +586,8 @@ const SCENARIOS = [
     is(`${n}: ...and nothing was sent`, 0, st.log.filter(r => r.path === '/api/verb').length);
     is(`${n}: ...and the half-typed message is still in the box`, 'check the billing-svc build',
        await b.evaluate(() => { const t = document.querySelector('.composer textarea'); return t ? t.value : ''; }));
+    is(`${n}: the pending dialog opens after typing pauses`, true, await pauseAndAnswer(b));
+    is(`${n}: answering returns the visible draft`, [true, 'check the billing-svc build'], await visibleDraft(b));
     if (process.env.CHAT_LANDS_DEBUG) console.error(n, Date.now() - t0, 'ms', JSON.stringify(said));
   }, { open: (st) => { st.first = first; if (slow) st.delay = (k) => (k === 1 ? slow : 0); } }]),
 

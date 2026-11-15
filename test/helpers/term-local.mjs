@@ -60,14 +60,11 @@ function upgrade(L, ticket, origin) {
   });
 }
 
-// One enrolled device per listener, its terminal switched on (a grant: a fresh passkey).
+// One enrolled device per listener, with chat access (no separate terminal grant).
 async function device(L, id, rpId) {
   const a = new Authenticator({ rpId, origin: L.origin, host: L.host });
   const r = await a.enroll(L.base, enrolCode(id));
   is(`term ${id}: enrolled on its own listener`, 200, r.status);
-  const on = await a.api(L.base, 'POST', '/api/term/enable', { on: true },
-    { headers: { 'x-fleet-assertion': JSON.stringify(await a.fresh(L.base, 'terminal on')) } });
-  is(`term ${id}: the terminal is switched on`, 200, on.status);
   return a;
 }
 const mac = await device(LOCAL, 'mac', 'localhost');

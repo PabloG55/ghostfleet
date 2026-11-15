@@ -20,9 +20,9 @@ WHERE IT STANDS
 OPEN
   waits on you: master needs you: Claude needs your permission to use Bash
   waits on you: PR #1184 (docs/setup-pass) — its worker reported done; waits for review/merge
-  waits on you: request waiting on you: "Which plan tier should the rate limit apply to?"
+  waits on you: question for you: "Which plan tier should the rate limit apply to?"
   1 open request:
-    "Which plan tier should the rate limit apply to?" (master, 20m ago) [waiting]
+    "Move acme-web to the v2 export once billing-svc ships" (master, 20m ago) [waiting]
 RULES  most specific wins: project: beats profile beats all
   k861059144ea1cf70  [lead project:acme-api] Rate limits are per API key, never per account  (“per key, an account can have many”)
   k9bca217eb72fdd55  [owner profile] Every change lands through a PR, reviewed — main deploys on push
@@ -324,7 +324,7 @@ switch, off on every install:
 fleet-experimental enable know-brief
 ```
 
-What the suite's fixture fleet prints, 810 characters:
+What the suite's fixture fleet prints, 804 characters:
 
 ```
 [fleet] Briefing for acme-api, as of 2026-03-05T13:51:00Z. It REPLACES any earlier briefing in this conversation. Live state comes from fleet_know.
@@ -337,7 +337,7 @@ DECISIONS THAT HOLD (owner and lead only)
 - k0442b5ca1b2b2165 [lead] deploy.target = vercel-production
 WAITING ON THE OWNER
 - PR #1184 (docs/setup-pass) — its worker reported done; waits for review/merge
-- s-master/2 request waiting on you: "Which plan tier should the rate limit apply to?"
+- s-master/3 question for you: "Which plan tier should the rate limit apply to?"
 ```
 
 - **Who gets it:** a project's `master` in the project's own checkout. A linked worktree is a worker
@@ -350,6 +350,13 @@ WAITING ON THE OWNER
   observed state rather than anybody's word, so it has no authority to filter on. Ids and one line
   each. An excluded project gets nothing; a private one is told to its own lead with the private
   warning.
+- **Whose a request is:** the ledger's own rule, read from the source each request was opened with.
+  What a session asked OF the owner (`source: question`: a numbered question, a line of a
+  waiting-on-you list, a closing choice, the step a held request waits on) is listed under WAITING
+  ON THE OWNER; everything the session owes, a brief a lead sent it and a request it holds waiting on
+  the owner included, stays an open request of that session. Events carry the same answer as
+  `for`, but older ones called a held request `for: you`, which filled the owner's list with the
+  session's own work, so the source decides; a request with no source falls back to `for`.
 - **At most 2,000 characters**, whatever the log holds. Claude Code turns hook output over 10,000 into
   a file the model is not asked to read, so a log that grew past that would quietly brief nobody.
 - **A rule is the last thing cut.** A rule the lead was not told about is one it breaks, and a waiting

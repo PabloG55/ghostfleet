@@ -37,25 +37,6 @@ const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
 const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
 process.on('uncaughtException', (e) => { console.log(rows.join('\n')); console.error(String(e && e.stack || e)); process.exit(1); });
 
-// ── the terminal gate, lifted ──────────────────────────────────────────────────────────────
-// Fixture mode has no tmux, so the phone offers no terminal there for ANY project, and a
-// browser row "a remote project has no terminal" would pass for a client that offered one
-// everywhere a server answers. So the adapter's own two lines are lifted and called with a
-// server: another machine's project has none, this machine's has one.
-{
-  const src = fs.readFileSync(path.join(WEB, 'src', 'adapter.js'), 'utf8');
-  const rem = (/export const remote = (\(project\) => [^\n]*);/.exec(src) || [])[1] || '';
-  const gate = (/canTerm: (\(project\) => \{[^\n]*\}),/.exec(src) || [])[1] || '';
-  let canTerm = null;
-  try {
-    // eslint-disable-next-line no-new-func
-    canTerm = new Function('server', 'termAsked', 'readTerm', `const remote = ${rem}; return ${gate};`)(() => true, true, () => {});
-  } catch {}
-  is('the terminal gate is the adapter\'s own', 'function', typeof canTerm);
-  is('...another machine\'s project has no terminal, with a server answering', false, canTerm ? canTerm('billing-svc@vm') : null);
-  is('...and this machine\'s has one', true, canTerm ? canTerm('billing-svc') : null);
-}
-
 let b = null, srv = null;
 try {
   srv = await serveDir(WEB);
@@ -68,6 +49,12 @@ try {
   }
   await b.call('Network.enable');
   await b.call('Network.setBypassServiceWorker', { bypass: true });
+  // These navigation scenarios start with no assistant approval covering the controls.
+  await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    const real = window.fetch.bind(window);
+    window.fetch = (u, o) => String(u).includes('fixtures/jarvis.json')
+      ? real(u, o).then(async r => new Response(JSON.stringify({ ...await r.json(), pending: [] }), { status: 200 }))
+      : real(u, o);` });
   const base = srv.base;
   const goto = async (u) => { await b.call('Page.navigate', { url: u }); await sleep(600); };
   async function until(cond, ms = 8000) {
@@ -204,7 +191,9 @@ try {
     await step(`${at}: the queue names the machine`, async () => {
       await fresh({ ...size, paired: 'online', hash: '#/queue' });
       s = await settle(x => x.queue.some(q => /rotate|billing-svc/.test(q)) || x.queue.length > 1);
-      const vm = s.queue.filter(q => /\| vm · /.test(q));
+      // How long it has waited ends the line ("· 2 h ago"): a clock reading, not the machine's,
+      // so it is cut before comparing, and only when there is one to cut.
+      const vm = s.queue.filter(q => /\| vm · /.test(q)).map(q => q.replace(/ · [^·]* ago$/, ''));
       is(`${at}: the queue is merged — the vm's master's item is here, saying the machine`, ['billing-svc · #4 | vm · waits on the person: pick now or after'], vm);
     });
 
@@ -212,8 +201,8 @@ try {
     // `acme-api@vm · vm`. The picker's headings are the one place the two meet on one line.
     await step(`${at}: the stack picker names the machine once`, async () => {
       await fresh({ ...size, paired: 'online', hash: '#/stack-picker' });
-      await until(() => b.evaluate(() => [...document.querySelectorAll('.main section h2')].some(h => / · vm$/.test(h.textContent.trim()))), 8000);
-      const heads = await b.evaluate(() => [...document.querySelectorAll('.main section h2')].map(h => h.textContent.replace(/\s+/g, ' ').trim()));
+      await until(() => b.evaluate(() => [...document.querySelectorAll('.stack-group h2')].some(h => / · vm$/.test(h.textContent.trim()))), 8000);
+      const heads = await b.evaluate(() => [...document.querySelectorAll('.stack-group h2')].map(h => h.textContent.replace(/\s+/g, ' ').trim()));
       is(`${at}: the stack picker heads the vm's project with its name and the machine`, true, heads.includes('acme-api · vm'));
       is(`${at}: ...and no heading is an address`, [], heads.filter(x => /@/.test(x)));
     });
@@ -223,13 +212,13 @@ try {
       await openProject('vm', 'billing-svc');
       s = await settle(x => /billing-svc/.test(x.h1));
       is(`${at}: the remote project's page is titled with its name and its machine`, 'billing-svc · vm', s.h1);
-      is(`${at}: ...it offers no terminal or editor tab`, [], s.tools);
-      is(`${at}: ...and says why, in one line`, true, /another machine/.test(s.termWhy) && !/\n/.test(s.termWhy));
+      is(`${at}: ...fixtures offer no shell`, [], s.tools);
+      is(`${at}: ...has no obsolete refusal about the other machine`, '', s.termWhy);
       await fresh({ ...size, paired: 'online' });
       await openProject('laptop', 'billing-svc');
       s = await settle(x => /billing-svc/.test(x.h1));
       is(`${at}: this machine's project of the same name is titled with its name alone`, 'billing-svc', s.h1);
-      is(`${at}: ...and has no such line: the absence is about the machine`, '', s.termWhy);
+      is(`${at}: ...also has no obsolete terminal refusal`, '', s.termWhy);
     });
 
     // A PHOTO FOR ANOTHER MACHINE'S SESSION GOES TO THE UPLOAD, like a local one. In fixture mode

@@ -76,8 +76,12 @@ put('fact', { key: 'deploy.target', value: 'vercel-production' }, api, m(76), by
 put('spawn', { worker: 'docs-pass', branch: 'docs/setup-pass', repo, worktree: `${gf}/acme-api-2`, task: 'Tighten the README setup section', parent: 'master', base: 'main' }, api, m(80), { via: 'spawn' });
 put('session.start', { branch: 'docs/setup-pass', repo, cwd: `${gf}/acme-api-2` }, api, m(81), { via: 'hook', session: 's-docs', slot: 'docs-pass' });
 put('turn.end', { branch: 'docs/setup-pass', repo, status: 'done', said: 'Opened PR #1184 for the setup section.', files: ['README.md'], prs: [{ op: 'open', repo, number: 1184, url: 'https://github.com/acme/acme-api/pull/1184', branch: 'docs/setup-pass' }] }, api, m(95), { via: 'hook', session: 's-docs', slot: 'docs-pass' });
-put('request.open', { req: 's-master/2', text: 'Which plan tier should the rate limit apply to?', source: 'fleet' }, api, m(100), { via: 'mod', session: 's-master', slot: 'master' });
-put('request.state', { req: 's-master/2', state: 'waiting', text: 'Which plan tier should the rate limit apply to?' }, api, m(101), { via: 'mod', session: 's-master', slot: 'master' });
+// Two directions. A brief from the lead, held waiting, written before items said whose they are:
+// read by today's rule it is owed to the lead, an open request of master's and NOT the owner's.
+// And a question master put to the owner, as the ledger records one now: theirs to answer.
+put('request.open', { req: 's-master/2', text: 'Move acme-web to the v2 export once billing-svc ships', source: 'fleet' }, api, m(100), { via: 'mod', session: 's-master', slot: 'master' });
+put('request.state', { req: 's-master/2', state: 'waiting', text: 'Move acme-web to the v2 export once billing-svc ships' }, api, m(101), { via: 'mod', session: 's-master', slot: 'master' });
+put('request.open', { req: 's-master/3', text: 'Which plan tier should the rate limit apply to?', source: 'question', state: 'open', for: 'you' }, api, m(101), { via: 'mod', session: 's-master', slot: 'master' });
 put('prompt', { branch: 'main', repo, text: 'Add a rate limit to the export endpoint, per API key' }, api, m(110), { via: 'hook', session: 's-master', slot: 'master' });
 put('need-you', { branch: 'main', repo, note: 'Claude needs your permission to use Bash' }, api, m(111), { via: 'hook', session: 's-master', slot: 'master' });
 

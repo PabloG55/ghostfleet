@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 09fbb64a84fd
+// CLIENT-HASH: 23aa487142c9
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -460,7 +460,22 @@
 // paint (cache-first), and the controllerchange reload swaps it in once nothing is being
 // typed; on an installed iOS app, swipe it away and reopen it to be sure. Its stored screen
 // and tab are not carried over (the new app keeps its place in the address), its passkey is.
-const VERSION = 'ghostfleet-v107';
+// v108 words the accounts dialog for a choice by hand that holds until the account reaches
+// the line (no "until <time>" any more) and for a login the fleet cannot identify. A phone on
+// v107 prints "until undefined" in that one line until it is relaunched; nothing else differs.
+// v109 keeps what waits on the person apart from what the agent owes: each question a turn
+// ended on is its own card, numbered, with its options and an Explain sheet. A phone on v108
+// lists the same items without the numbering or the Explain button until it is relaunched.
+// v110 keeps arriving requests above the page alongside chat playback and speak mode.
+// v111 gives terminal and editor the chat session's access and opens direct localhost
+// without a lock once the server proves the request is local.
+// v113 keeps the stack picker controls pinned and each tool inside its column.
+// v115 folds the sidebar's devices and profile groups; both it and the stack picker's groups
+// open and close with one chevron icon.
+// v116 holds the phone's screen still (no zoom on a tap into a field, one size of composer
+// button, no page to drag), takes a conversation to its end on every send, and floats the
+// Assistant button 8px above the composer instead of over it.
+const VERSION = 'ghostfleet-v116';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

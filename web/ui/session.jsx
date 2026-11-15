@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, usePoll, toast, Markdown, Confirm, Modal, sinceTs } from './ui.jsx';
+import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
 import { Skeleton } from './skeleton.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
@@ -11,6 +11,7 @@ import { ToolTabs, ToolPanel } from './terminal.jsx';
 import { useLayer } from './select.jsx';
 import { BackLink } from './back.jsx';
 import { useTranscript } from './transcript.js';
+import { useReading, toggleRead, stopRead, useSpeakMode } from './chatvoice.js';
 import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
@@ -23,12 +24,11 @@ function optionText(label) {
   return { text: l, sub: '', kind: '' };
 }
 
-function PromptCard({ prompt, onAnswer, busy }) {
-  const [typed, setTyped] = useState('');
+function PromptCard({ prompt, onAnswer, busy, typed, setTyped }) {
   if (prompt.kind === 'permission') {
     return (
       <div class="ask permission">
-        <div class="ask-head"><b>● {t('sess.asksPermission')}</b><span>{prompt.tool || t('sess.aTool')}</span></div>
+        <div class="ask-head"><b>{prompt.tool || t('sess.aTool')}</b></div>
         {prompt.command ? <pre class="ask-cmd">{prompt.command.replace(/╌+/g, '').trim()}</pre> : null}
         <div class="ask-opts">
           {(prompt.options || []).map(o => {
@@ -47,14 +47,14 @@ function PromptCard({ prompt, onAnswer, busy }) {
   const tabs = (prompt.tabs || []).filter(x => !x.submit);
   return (
     <div class="ask question">
-      <div class="ask-head"><b>● {t('sess.asks')}</b>
+      <div class="ask-head">
         {tabs.length > 1 ? <span>{t('sess.qOf', { i: prompt.tab != null ? prompt.tab + 1 : '?', n: tabs.length })}</span> : null}
         {prompt.submit ? <span>{t('sess.review')}</span> : null}</div>
       <p class="ask-q">{prompt.question}</p>
       {prompt.typing ? (
         <form class="row" onSubmit={(e) => { e.preventDefault(); if (typed.trim()) onAnswer(typed.trim(), false); }}>
-          <input class="grow" value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
-          <Btn kind="primary" type="submit" disabled={busy || !typed.trim()}>{t('common.send')}</Btn>
+          <input class="grow" disabled={busy} value={typed} onInput={(e) => setTyped(e.currentTarget.value)} placeholder={t('sess.yourAnswer')} autoFocus />
+          <SendBtn disabled={busy || !typed.trim()} />
         </form>
       ) : (
         <div class="ask-opts">
@@ -66,6 +66,15 @@ function PromptCard({ prompt, onAnswer, busy }) {
         </div>
       )}
     </div>
+  );
+}
+
+// The play button on a message. Its slot is the same size playing or not (it swaps play for stop), so a bubble never
+// moves when one is pressed.
+function ReadBtn({ on, onClick }) {
+  return (
+    <button type="button" class={`read-btn${on ? ' on' : ''}`} aria-pressed={on} aria-label={on ? t('chat.stopRead') : t('chat.read')}
+            title={on ? t('chat.stopRead') : t('chat.read')} onClick={onClick}><Icon name={on ? 'stop' : 'play'} /></button>
   );
 }
 
@@ -114,18 +123,32 @@ const OLDER_NEAR_PX = 240;
 const SWIPE_NEXT = 60, EDGE = 24;
 
 // `author(message)` is an app's slot: who wrote a prompt. Without it, every prompt is an instruction.
-function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent = 0 }) {
   const author = useSlot('author');
+  const reading = useReading();
   const ref = useRef(null);
   const stick = useRef(true);
   const ours = useRef(-1);            // the scrollTop this chat last set itself (below)
   const anchor = useRef(null);
+  const reader = useRef(null);
   const swipe = useRef(null);
   const msgs = page.messages || [];
   const rows = keyed(msgs);
   const last = rows.length ? rows[rows.length - 1][0] : '';
-  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; };
+  const toEnd = (n) => { n.scrollTop = n.scrollHeight; ours.current = n.scrollTop; reader.current = null; };
+  const rememberReader = (box) => {
+    const top = box.getBoundingClientRect().top;
+    const n = !stick.current && [...box.children].find(c => c.dataset.k && c.getBoundingClientRect().bottom > top);
+    reader.current = n ? { node: n, top: n.getBoundingClientRect().top, scroll: box.scrollTop } : null;
+  };
   useEffect(() => { const n = ref.current; if (n && stick.current) toEnd(n); }, [last, queued.length]);
+  // A SEND TAKES THE CHAT TO ITS END, wherever the reader had scrolled to. The end used to follow
+  // only a reader already at it (`stick`), so a message sent while reading older turns went in
+  // below the fold and the chat stayed where it was, with nothing on screen to say it had gone.
+  // The send puts the reader back at the end, and the jump above and the size watch below then
+  // keep them there when the message lands, a moment later, from the transcript's next read or
+  // as a queued bubble. The chat's own box scrolls; the window never does (viewport.js).
+  useEffect(() => { const n = ref.current; if (!sent || !n) return; stick.current = true; toEnd(n); }, [sent]);
   // A CHAT AT ITS END STAYS AT ITS END. It jumped there when a message arrived, and its end moves
   // without one: the box shrinks when a permission card or a keyboard comes up, and a message grows
   // when its font lands. Under a permission card at 390x844 it sat 29 px short as opened, and the
@@ -141,7 +164,17 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
     const box = ref.current;
     if (!box || typeof ResizeObserver === 'undefined') return;
     const seen = new WeakSet();
-    const ro = new ResizeObserver(() => { if (stick.current && !anchor.current) toEnd(box); });
+    const ro = new ResizeObserver(() => {
+      if (anchor.current) return;
+      if (stick.current) { toEnd(box); return; }
+      // Late header metadata or a row's font can move the message the reader
+      // scrolled to without firing a scroll event. Keep that message on screen.
+      const a = reader.current;
+      if (a && box.contains(a.node)) {
+        const d = a.node.getBoundingClientRect().top - a.top;
+        if (Math.abs(d) > 0.5) { box.scrollTop += d; ours.current = box.scrollTop; a.scroll = box.scrollTop; }
+      }
+    });
     const watch = () => { for (const c of [box, ...box.children]) if (!seen.has(c) && c.tagName !== 'DETAILS') { seen.add(c); ro.observe(c); } };
     watch();
     const mo = new MutationObserver(watch);
@@ -183,7 +216,12 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
     <div class="chat" ref={ref} data-keep-scroll="chat" onPointerDown={down} onPointerUp={up} onPointerCancel={() => { swipe.current = null; }}
          onScroll={(e) => {
            const n = e.currentTarget;
-           if (Math.abs(n.scrollTop - ours.current) > 1) { ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60; }
+           if (Math.abs(n.scrollTop - ours.current) > 1) {
+             ours.current = -1; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 60;
+             // A queued scroll event can arrive after layout moved the box.
+             // If the offset did not change, it is still the same reading spot.
+             if (stick.current || !reader.current || Math.abs(n.scrollTop - reader.current.scroll) > 1) rememberReader(n);
+           }
            nearTop(n);
          }}>
       {page.next_before
@@ -211,6 +249,7 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
                 ? <>{author(m) || t('sess.instruction')}</>
                 : 'Claude'}
               <span class="when">{sinceTs(m.ts)}</span>
+              <ReadBtn on={reading === `${scope}:${k}`} onClick={() => toggleRead(`${scope}:${k}`, m.text)} />
             </div>
             <div class="bubble">{m.role === 'user' ? <p class="plain">{m.text}</p> : <Markdown text={m.text} />}</div>
           </div>
@@ -226,6 +265,7 @@ function Chat({ page, queued, older, onOlder, onRetryOlder, onStep }) {
   );
 }
 
+const STATE_KEY = { listening: 'chat.speakListening', hearing: 'chat.speakHearing', sending: 'chat.speakSending', waiting: 'chat.speakWaiting', speaking: 'chat.speakReading' };
 const hhmm = (at) => new Date(at * 1000).toLocaleString(locale(), { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const localInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
@@ -269,12 +309,14 @@ function ScheduleModal({ name, onClose, onSave }) {
 // pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
 // of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
 export const QUIET_PANE_MS = 15000;
-export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool = null, embedded = false, quiet = false }) {
+export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
+  const [localTool, setLocalTool] = useState(null);
+  const tool = embedded ? localTool : routeTool;
   // From a Terminal or Editor tab (a route of its own) the session's two tabs go back to its page.
-  const pick = (x) => { setTab(x); if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
+  const pick = (x) => { setTab(x); if (embedded) setLocalTool(null); else if (tool) fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`); };
   // The box is this session's draft (drafts.js): its words and files are back when the session is
   // opened again, after a reload and after a relaunch, until a send of them succeeds. The view is
   // mounted per session (keyed by its parent), so the draft is read once, here.
@@ -315,10 +357,24 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const [drag, setDrag] = useState(false);
   const picker = useRef(null);
   const typing = useRef(!!draft);
+  const composer = useRef(null);
+  const lastComposerKey = useRef(-Infinity);
+  const typingPause = useRef(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [composerRecent, setComposerRecent] = useState(false);
+  const composerKey = () => {
+    lastComposerKey.current = performance.now();
+    setComposerRecent(true);
+    clearTimeout(typingPause.current);
+    typingPause.current = setTimeout(() => setComposerRecent(false), 2000);
+  };
+  useEffect(() => () => clearTimeout(typingPause.current), []);
 
   // The transcript on its own poll (transcript.js), LIVE while an answer is owed: the session
   // working, or a message sent in the last two minutes.
   const sentAt = useRef(0);
+  // How many messages this screen has sent: each one takes the chat to its end (Chat's `sent`).
+  const [sends, setSends] = useState(0);
   const statusNow = useRef('unknown');
   const quietRef = useRef(quiet); quietRef.current = quiet;
   const tr = useTranscript(fleet, project, name, () => !quietRef.current &&
@@ -341,6 +397,17 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   statusNow.current = st;
   const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
+  const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+  // A request waits for a pause in an active sentence. The draft stays in its original box
+  // until then; Enter explicitly opens the request rather than sending that sentence.
+  const held = !!prompt && composerFocused && composerRecent;
+  const request = useRequest(`session:${project}/${name}`, pane.data ? (prompt?.fingerprint || null) : undefined, available && !held);
+  const showRequest = () => { clearTimeout(typingPause.current); setComposerRecent(false); request.show(); };
+  const quota = useRequest(`quota:${project}/${name}`, card ? (st === 'limit' ? String(card.limit_at || 'limit') : null) : undefined, available && !prompt);
+  const canAnswer = !fleet.canAnswer || fleet.canAnswer(project);
+  const [typedAnswer, setTypedAnswer] = useState('');
+  useEffect(() => { setTypedAnswer(''); }, [prompt?.fingerprint]);
+  const answering = useRef(false);
 
   const act = async (tool, args = {}, opts = {}) => {
     setBusy(true);
@@ -356,7 +423,41 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
       return null;
     } finally { setBusy(false); }
   };
-  const answer = (text, noEnter) => act('fleet_answer', { text, no_enter: noEnter, expect: prompt?.fingerprint });
+  const answer = async (text, noEnter) => {
+    if (!canAnswer || answering.current || !prompt) return;
+    answering.current = true;
+    try {
+      const r = await act('fleet_answer', { text, no_enter: noEnter, expect: prompt.fingerprint });
+      if (r) request.close();
+    } finally { answering.current = false; }
+  };
+  // The dialog owns these keys; the app's normal desk shortcuts deliberately stop at a modal.
+  const requestOpenedAt = useRef(Infinity);
+  useLayoutEffect(() => {
+    requestOpenedAt.current = request.open ? performance.now() : Infinity;
+  }, [request.open, prompt?.fingerprint]);
+  useLayoutEffect(() => {
+    if (!request.open || !canAnswer || prompt?.typing) return;
+    const key = (e) => {
+      if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229 || /^(INPUT|TEXTAREA)$/.test(e.target?.tagName) || e.target?.isContentEditable) return;
+      // Focus may have just left a sentence containing a number. Neither typed-through keys
+      // nor a held key may authorize a tool; deliberate clicks remain immediate.
+      const now = performance.now();
+      if (now - requestOpenedAt.current < 600 || now - lastComposerKey.current <= 1500) return;
+      const o = prompt.options?.find(o => String(o.n) === e.key);
+      if (o) { e.preventDefault(); answer(String(o.n), prompt.kind !== 'permission'); }
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [request.open, prompt, canAnswer]);
+  // Speak mode and the play button on messages (chatvoice.js). Leaving the session stops whichever of them is
+  // this session's, and only this session's: an embedded stack holds several of these at once.
+  const scope = `${project}/${name}`;
+  const speakMode = useSpeakMode({
+    scope, page: tr.page, status: st,
+    send: async (text) => { const r = await act('fleet_send', { prompt: text }); if (r) { sentAt.current = Date.now(); setSends(n => n + 1); } return !!r; },
+  });
+  useEffect(() => () => stopRead(scope), [scope]);
   // Each file goes up as soon as it is picked, so "Send" only sends the words that name them.
   const addFiles = (list) => {
     const picked = [...(list || [])].slice(0, Math.max(0, fleet.attachPerMessage - files.length));
@@ -374,15 +475,17 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
   const uploading = files.some(f => f.state === 'up');
   const ready = files.filter(f => f.state === 'ok');
   const sendDraft = async () => {
+    if (prompt) { showRequest(); return; }
+    if (st === 'limit') return;
     const text = draft.trim();
     if ((!text && !ready.length) || uploading) return;
     // Words first: a message that opens with a path (`/home/…`) reads as a slash command.
     const list = ready.map(f => `- ${f.path}`).join('\n');
-    const prompt = !ready.length ? text
+    const message = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
-    const r = await act('fleet_send', { prompt });
+    const r = await act('fleet_send', { prompt: message });
     if (r) {
-      sentAt.current = Date.now(); typing.current = false;
+      sentAt.current = Date.now(); typing.current = false; setSends(n => n + 1);
       for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
       sentDraft(dkey); setDraftState(''); setLost(0);
       if (mounted.current) setFilesState([]);
@@ -441,7 +544,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         {presence(pane.data?.here || [])}
       </header>
 
-      {st === 'limit' ? (
+      {quota.open ? <Modal sheet title={t('status.limit.hint')} onClose={quota.close}>
         <div class="ask limit">
           <div class="ask-head"><b><Icon name="hourglass" /> {t('status.limit.hint')}</b>{card?.limit_at ? <span>{t('sess.quotaBack', { when: hhmm(card.limit_at) })}</span> : null}</div>
           <p class="muted small">{t('sess.limitWhy')}</p>
@@ -449,24 +552,27 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
             ? <p>{t('sess.alreadySched', { when: hhmm(card.sched.at) })}</p>
             : !can('gfw_schedule') ? null
             : <div class="row wrap">
-                <Btn kind="primary" disabled={busy} onClick={() => act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') })}>
+                <Btn kind="primary" disabled={busy} onClick={async () => { const r = await act('gfw_schedule', { at: (card?.limit_at || Math.floor(Date.now() / 1000) + 5 * 3600) + 90, msg: t('sess.continueMsg') }); if (r) quota.close(); }}>
                   <Icon name="clock" /> {t('sess.resumeOnQuota')}</Btn>
-                <Btn kind="ghost" onClick={() => setSchedOpen(true)}>{t('sess.otherTime')}</Btn>
+                <Btn kind="ghost" onClick={() => { quota.close(); setSchedOpen(true); }}>{t('sess.otherTime')}</Btn>
               </div>}
         </div>
-      ) : null}
+      </Modal> : null}
 
-      {prompt ? <PromptCard key={prompt.fingerprint} prompt={prompt} onAnswer={answer} busy={busy} /> : null}
+      {request.open ? <Modal sheet title={t(prompt.kind === 'permission' ? 'sess.asksPermission' : 'sess.asks')} onClose={request.close}>
+        <PromptCard key={prompt.fingerprint} prompt={prompt} onAnswer={answer} busy={busy || !canAnswer} typed={typedAnswer} setTyped={setTypedAnswer} />
+        {!canAnswer ? <p class="modal-body muted small">{t('sess.requestReadonly')}</p> : null}
+      </Modal> : null}
 
       <div class="tabs" role="tablist">
         <button role="tab" class={!tool && tab === 'chat' ? 'on' : ''} onClick={() => pick('chat')}>{t('sess.chat')}</button>
         <button role="tab" class={!tool && tab === 'term' ? 'on' : ''} title={t('sess.screenHint')} onClick={() => pick('term')}>{t('sess.screen')}</button>
-        <ToolTabs project={project} session={name} tool={tool} />
+        <ToolTabs project={project} session={name} tool={tool} onPick={embedded ? setLocalTool : null} />
       </div>
-      {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} /> : tab === 'chat'
+      {tool ? <ToolPanel key={tool} project={project} session={name} kind={tool} quiet={quiet} onUnavailable={embedded ? () => setLocalTool(null) : null} /> : tab === 'chat'
         ? (!tr.page ? <ChatLoading load={tr.load} />
-            : <Chat page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
-                    onRetryOlder={tr.retryOlder} onStep={onStep} />)
+            : <Chat scope={scope} page={tr.page} queued={tr.page.queued || []} older={tr.older} onOlder={tr.loadOlder}
+                    onRetryOlder={tr.retryOlder} onStep={onStep} sent={sends} />)
         : <Terminal pane={pane.data?.pane ?? null} />}
 
       {/* The composer is the agent's; a Terminal or Editor tab has the keyboard to itself. */}
@@ -491,19 +597,33 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           </div>
         ) : null}
         <div class="composer-row">
-          <button type="button" class="attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
+          <button type="button" class="cbtn attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
-          <textarea rows={2} value={draft} placeholder={drag ? t('sess.drop') : prompt ? t('sess.pendingAbove') : t('sess.writeTo', { name })}
-                    onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value; }}
+          <div class={`composer-input${(prompt && !held) || st === 'limit' ? ' has-request' : ''}`}>
+          <textarea ref={composer} rows={embedded ? 1 : 2} value={draft} placeholder={drag ? t('sess.drop') : embedded ? t('sess.writeToShort', { name }) : t('sess.writeTo', { name })}
+                    onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)}
+                    onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value;
+                      if (document.activeElement === composer.current) composerKey(); }}
                     onPaste={(e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } }}
                     onKeyDown={(e) => {
+                      composerKey();
                       // Esc leaves the box. ⏎ sends with a keyboard and is a new line on a phone's
                       // on-screen one, never mid-composition (keys.js sendsOnEnter).
                       if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
+                      else if (held && e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); showRequest(); }
                       else if (sendsOnEnter(e)) { e.preventDefault(); sendDraft(); }
                     }} />
-          <Btn kind="primary" type="submit" disabled={busy || uploading || (!draft.trim() && !ready.length)}>{uploading ? t('sess.uploadingBtn') : t('common.send')}</Btn>
+          {(prompt && !held) || st === 'limit' ? <button type="button" class="btn request-return" onClick={prompt ? showRequest : quota.show}>
+            <Icon name={prompt ? 'question' : 'hourglass'} size={18} />
+            {t(prompt ? (canAnswer ? 'sess.answerRequest' : 'sess.viewRequest') : 'sess.viewLimit')}
+          </button> : null}
+          </div>
+          <button type="button" class={`cbtn speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
+                  aria-label={speakMode.on ? t('chat.speakOff') : t('chat.speak')} title={speakMode.on ? t('chat.speakOff') : t('chat.speak')}
+                  onClick={speakMode.toggle}><Icon name="mic" size={24} /></button>
+          <SendBtn busy={uploading} disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)} />
         </div>
+        <p class="speak-state muted small" role="status" aria-live="polite">{speakMode.on ? t(STATE_KEY[speakMode.phase] || 'chat.speakListening') : ''}</p>
       </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}

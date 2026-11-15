@@ -277,6 +277,15 @@ matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
 # holding the port, and the next group dies EADDRINUSE. Six groups skipped as "server did
 # not come up" while the daemon was up the whole time on a port nobody asked for.
 free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+# The provider's read-only profile request, stood in for (test/helpers/profile-stub.mjs), for
+# the accounts groups: who a login is comes from its token, and nothing in the suite may ask
+# the real provider. Starts one under <dir> on a port it picks and prints "<pid> <api url>";
+# the caller keeps the pid and kills exactly that one, never by pattern.
+profile_stub() {
+  node "$ROOT/test/helpers/profile-stub.mjs" "$1" >/dev/null 2>&1 </dev/null & local pid=$! i=0
+  while [ ! -s "$1/port" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  printf '%s http://127.0.0.1:%s\n' "$pid" "$(cat "$1/port" 2>/dev/null)"
+}
 
 # ── waiting for a condition, instead of sleeping at a guess ──────────────────
 # This file blocked for 334.9s of an 801.6s run inside fixed sleeps — 338 calls across 137
@@ -1033,6 +1042,28 @@ is "cursor's after-Escape prompt: blocked"         "1" "$(has "$cbl" "$FIX/curso
 is "...not ready"                                  "0" "$(has "$crd" "$FIX/cursor-skip.txt")"
 is "...not busy, though it says ctrl+c to stop"    "0" "$(has "$cre" "$FIX/cursor-skip.txt")"
 is "cursor busy_re holds in the C locale"          "1" "$([ "$(LC_ALL=C grep -cE -- "$cre" "$FIX/cursor-busy-30col.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
+
+group "governor: empty pressure passes wait for a reason to retry"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  GI="$(mktemp -d "$TEST_RUNS.$$.govidle.XXXXXX")"
+  node "$ROOT/test/helpers/governor-idle.mjs" > "$GI/rows" 2> "$GI/err"
+  is "idle governor harness ran" "0" "$?"
+  is "idle governor harness had no errors" "" "$(cat "$GI/err")"
+  is "idle governor emitted every row" "23" "$(wc -l < "$GI/rows" | tr -d ' ')"
+  while IFS=$'\t' read -r label want got; do is "$label" "$want" "$got"; done < "$GI/rows"
+  if command -v tmux >/dev/null 2>&1; then
+    node "$ROOT/test/helpers/governor-idle.mjs" "$ROOT/bin/fleet-governor" --measure > "$GI/measure" 2> "$GI/measure.err"
+    is "idle tick measurement ran" "0" "$?"
+    is "idle tick measurement had no errors" "" "$(cat "$GI/measure.err")"
+    is "an empty tick spawns about ten processes, including heal" "true" "$(jq '.execs <= 12' "$GI/measure")"
+    is "heal still stamps all three live sessions" "acme-web,billing-svc,master" "$(jq -r '.aliveSlots | join(",")' "$GI/measure")"
+  else
+    skip "idle tick process count" "tmux missing"
+  fi
+  rm -rf "$GI"
+else
+  skip "idle governor" "node or jq missing"
+fi
 
 # The governor scrapes the 5h usage % out of the same pane, and Claude TRUNCATES its
 # status line rather than wrapping it — so below ~100 columns the figure is simply not
@@ -3902,6 +3933,183 @@ else
   skip "lost codex reopen" "tmux, jq and node needed"
 fi
 
+group "after a shutdown every session the machine killed has a card: codex, another profile's dir, idle"
+# Three ways a session the machine killed came back with no card at all, measured on one
+# shutdown: 4 of 13 records were codex conversations (their rollout is under the codex home,
+# and the scan looked for a Claude transcript); several records of a class-profile fleet sat
+# in the personal profile's fleet dir, where that fleet's readers never looked; and sessions
+# that had sat idle for more than a week were past a window counted from their last write,
+# though they were alive until the shutdown. Every row below went red on the code before:
+# the scan found none of the five cards, no stamp was written, the record landed in the
+# other profile's dir, and R did nothing.
+#   The fleet is acme-api on the `class` profile; acme-web is a `personal` one whose dir the
+# misplaced records sit in. Fake HOME, config dirs and codex home; stub agents log the argv
+# they were launched with, so a reopen is seen and nothing real runs.
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  LR="$(cd "$(mktemp -d "$TEST_RUNS.$$.lost.XXXXXX")" && pwd -P)"; H="$LR/home"
+  LS=cf-class-acme-api; LW=cf-personal-acme-web
+  CD="$H/.claude-class/fleet"; PD="$H/.claude-personal/fleet"; LC="$LR/codex-home"
+  mkdir -p "$H/.config/ghostfleet" "$H/.claude/fleet" "$CD" "$PD" "$LR/bin" "$LR/sys" "$LR/count" "$LR/hookstub" \
+           "$LR/src/acme-api" "$LR/src/acme-web"
+  printf 'acme-api\t%s\tclass\nacme-web\t%s\tpersonal\n' "$LR/src/acme-api" "$LR/src/acme-web" > "$H/.config/ghostfleet/projects"
+  NOW=$(date +%s); DAY=86400
+  for a in claude codex; do      # one log for both, so the ORDER of reopens is on it
+    printf '#!/bin/sh\n[ "$1" = agents ] && exit 0\n[ "$1" = --help ] && exit 0\nprintf "%%s %%s %%s\\n" %s "$(tmux display-message -p "#S" 2>/dev/null)" "$*" >> "%s/argv"\nexec sleep 120\n' "$a" "$LR" > "$LR/bin/$a"
+    chmod +x "$LR/bin/$a"
+  done
+  for t in tmux jq node; do ln -s "$(command -v "$t")" "$LR/sys/$t"; done
+  printf '#!/bin/sh\necho "$*" >> "%s/tmux.calls"\nexec "%s" "$@"\n' "$LR" "$(command -v tmux)" > "$LR/count/tmux"; chmod +x "$LR/count/tmux"
+  lre() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT \
+            -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_PROFILE \
+            HOME="$H" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" CODEX_HOME="$LC" \
+            CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off "$@" 2>&1; }
+  lrec() {    # <dir> <id> <sock> <slot> <ts> <transcript> [agent] [pane]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","cwd":"%s","status":"ready","transcript":"%s","ts":%s%s%s}\n' \
+      "$2" "$3" "$4" "$LR/src/acme-api" "$6" "$5" "${7:+,\"agent\":\"$7\"}" "${8:+,\"pane\":\"$8\"}" > "$1/$2.json"
+  }
+  lost() { lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost) | "\(.name):\(.agent)"' 2>/dev/null | sort | tr '\n' ' '; }
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+
+  # ── codex: a rollout under the codex home is its conversation ───────────────
+  CX1=0198aa01-0000-7000-8000-000000000001; CX2=0198aa02-0000-7000-8000-000000000002
+  CX3=0198aa03-0000-7000-8000-000000000003; CL1=11111111-0000-4000-8000-0000000000c1
+  RCD="$LC/sessions/$(date +%Y/%m/%d)"
+  cx_rollout "$RCD/rollout-a-$CX1.jsonl" "$CX1" "$LR/src/acme-api" 900 task_complete
+  cx_rollout "$RCD/rollout-b-$CX2.jsonl" "$CX2" "$LR/src/acme-api" 900 task_complete
+  # the shape a hook older than the bridge's own fields left: no agent, no transcript
+  lrec "$CD" "$CX1" "$LS" billing-svc $((NOW - 3600)) ""
+  # ...and the record that names the fleet-side copy of codex's replies, not its rollout
+  lrec "$CD" "$CX2" "$LS" scratch $((NOW - 7200)) "$CD/$LS.scratch.codex.jsonl" codex
+  lrec "$CD" "$CX3" "$LS" nocx $((NOW - 7200)) "" codex          # no rollout anywhere: no card
+  # ── another profile's dir: this fleet's record, in the personal fleet's dir ──
+  CLT="$H/.claude-personal/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl"
+  mkdir -p "$(dirname "$CLT")"; printf '{"type":"user"}\n' > "$CLT"
+  lrec "$PD" "$CL1" "$LS" toolbox $((NOW - 3 * DAY)) "$CLT"
+  lrec "$PD" 22222222-0000-4000-8000-0000000000c2 "$LW" master $((NOW - 60)) "$CLT"   # that fleet's own
+
+  # ── the writer: a server whose env names ANOTHER fleet ───────────────────────
+  # The shape that put records in the wrong dir: a server started from the personal fleet's
+  # pane carries that fleet's socket and dirs in its global env, and a session opened on it
+  # with no -e of its own resolved its fleet dir from that socket.
+  cat > "$LR/hookstub/claude-here" <<STUB
+#!/usr/bin/env bash
+slot="\$1"; sid="fe-\$slot"; tr="$LR/\$sid.jsonl"; : > "\$tr"
+printf '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "\$sid" "\$PWD" "\$tr" \\
+  | "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+exec sleep 600
+STUB
+  chmod +x "$LR/hookstub/claude-here"
+  env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_AGENT HOME="$H" CODEX_HOME="$LC" \
+      CLAUDE_FLEET_SOCK="$LW" CLAUDE_CONFIG_DIR="$H/.claude-personal" CLAUDE_FLEET_DIR="$PD" CLAUDE_FLEET_PROFILE=personal \
+      CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off CLAUDE_FLEET_SLOTS="$LR/slots" \
+      PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s _scratch -c "$LR/src/acme-api" 'sleep 600'
+  PATH="$LR/hookstub:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" \
+      tmux -L "$LS" new-session -d -s fresh -c "$LR/src/acme-api" 'exec agent-here fresh'
+  wait_for 10 "fresh's first record" 'ls "$CD/fe-fresh.json" "$PD/fe-fresh.json" >/dev/null 2>&1'
+  is "lost: a session opened on a server whose env names another fleet writes into its OWN fleet's dir" \
+     "$LS|0" "$(jq -r .sock "$CD/fe-fresh.json" 2>/dev/null)|$(ls "$PD" | grep -c '^fe-fresh' || true)"
+
+  # ── the governor's tick: who is alive, from the reads it already makes ───────
+  tmux -L "$LS" new-session -d -s idle -c "$LR/src/acme-api" 'sleep 600'
+  heal() { : > "$LR/tmux.calls"; lre env PATH="$LR/count:$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" node "$ROOT/lib/fleet-env.mjs" heal "$LS" >/dev/null; wc -l < "$LR/tmux.calls" | tr -d ' '; }
+  heal >/dev/null
+  is "lost: the governor puts the server's socket right, as it does its dirs" \
+     "CLAUDE_FLEET_SOCK=$LS" "$(tmux -L "$LS" show-environment -g CLAUDE_FLEET_SOCK 2>/dev/null)"
+  n3="$(heal)"
+  for i in 1 2 3 4 5; do tmux -L "$LS" new-session -d -s "w$i" 'sleep 600'; done
+  heal >/dev/null; n8="$(heal)"
+  ST="$(ls "$CD/alive/$LS".*.json 2>/dev/null | head -1)"
+  is "lost: each tick writes down who is alive on this server, tabs left out" "7 0" \
+     "$(jq -r '.panes | length' "$ST" 2>/dev/null) $(jq -r '[.panes[] | select(startswith("_"))] | length' "$ST" 2>/dev/null)"
+  is "...at the same number of tmux calls for 3 sessions as for 8, and fewer than the 6 a tick made before" "yes" \
+     "$([ -n "$n3" ] && [ "$n3" = "$n8" ] && [ "$n3" -lt 6 ] && echo yes || echo "no: $n3 then $n8")"
+  # Then the server dies. The stamp is aged to say the server started twelve days ago and was
+  # last seen half an hour ago, and the records written as long ago as each row needs.
+  IDP="$(tmux -L "$LS" display-message -p -t idle '#{pane_id}@#{pid}' 2>/dev/null)"
+  SPID="${IDP#*@}"
+  for s in w1 w2 w3 w4 w5; do tmux -L "$LS" kill-session -t "$s" 2>/dev/null; done
+  tmux -L "$LS" kill-server 2>/dev/null
+  rm -f "$CD/fe-fresh.json"           # the writer's row is done; it would only be a fifth card
+  jq --argjson s $((NOW - 12 * DAY)) --argjson z $((NOW - 1800)) '.start = $s | .seen = $z' "$ST" > "$ST.t" && mv "$ST.t" "$ST"
+  ID1=33333333-0000-4000-8000-0000000000d1; ID2=33333333-0000-4000-8000-0000000000d2; ID3=33333333-0000-4000-8000-0000000000d3
+  for id in "$ID1" "$ID2" "$ID3"; do
+    t="$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$id.jsonl"; mkdir -p "$(dirname "$t")"; printf '{"type":"user"}\n' > "$t"
+  done
+  lrec "$CD" "$ID1" "$LS" idle   $((NOW - 10 * DAY)) "" "" "$IDP"          # idle ten days, alive until the end
+  lrec "$CD" "$ID2" "$LS" gone   $((NOW - 10 * DAY)) "" "" "%99@$SPID"     # stopped ten days ago: no stamp has it
+  lrec "$CD" "$ID3" "$LS" reused $((NOW - 13 * DAY)) "" "" "$IDP"          # older than the server that reused its pane id
+
+  L="$(lost)"
+  for want in billing-svc:codex scratch:codex toolbox:claude idle:claude; do
+    case "$want" in
+      billing-svc:*) why="lost: a codex record naming no agent and no rollout gets a card, as codex, from the rollout under its id" ;;
+      scratch:*)     why="...and one whose record names the fleet-side copy of its replies" ;;
+      toolbox:*)     why="lost: this fleet's record left in another profile's dir shows on this fleet's grid" ;;
+      idle:*)        why="lost: a session idle ten days and alive when its server died gets a card" ;;
+    esac
+    is "$why" "yes" "$(grep -qE "(^| )$want( |$)" <<< "$L" && echo yes || echo "no: $L")"
+  done
+  for not in nocx master gone reused; do
+    case "$not" in
+      nocx)   why="lost: a codex record with no rollout anywhere gets none" ;;
+      master) why="...nor another fleet's record in that same dir" ;;
+      gone)   why="...nor a session that stopped ten days ago" ;;
+      reused) why="...nor one whose pane id a later server reused" ;;
+    esac
+    is "$why" "no" "$(grep -qE "(^| )$not:" <<< "$L" && echo yes || echo no)"
+  done
+  # with the fleet's own profile in the env, the way the MCP asks another fleet (invocation())
+  IA="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.name == "idle") | .age' 2>/dev/null)"
+  is "...and its card says it died half an hour ago, not that it went quiet ten days ago" "yes" \
+     "$([ -n "$IA" ] && [ "$IA" -ge 1700 ] && [ "$IA" -le 2400 ] && echo yes || echo "no: age ${IA:-none}")"
+  fl="$(lre env CLAUDE_CONFIG_DIR="$H/.claude-class" CLAUDE_FLEET_DIR="$CD" "$ROOT/bin/fleet-list" -s "$LS")"
+  is "lost: fleet-list lists the same four" "billing-svc idle scratch toolbox" \
+     "$(sed -nE 's/^([a-z-]+) +lost.*/\1/p' <<< "$fl" | sort | tr '\n' ' ' | sed 's/ $//')"
+  is "lost: a dry-run reopen of the codex record that never said codex is not refused" "yes" \
+     "$(grep -q "would reopen 'billing-svc'" <<< "$(lre "$ROOT/bin/fleet-restart" -s "$LS" --reopen billing-svc --dry-run)" && echo yes || echo no)"
+
+  # ── R on the grid: every lost card back, once each, in the order drawn ─────
+  ORDER="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.lost and (.lead | not)) | .name' 2>/dev/null | tr '\n' ' ')"
+  cat > "$LR/grid.sh" <<SH
+#!/bin/sh
+exec env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_PROFILE \\
+  HOME="$H" CODEX_HOME="$LC" PATH="$ROOT/bin:$LR/bin:$LR/sys:/usr/bin:/bin" TMUX_TMPDIR="$TMUX_TMPDIR" \\
+  CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_GOVERNOR=off node "$ROOT/bin/fleet-grid.mjs" "$LS"
+SH
+  chmod +x "$LR/grid.sh"
+  tmux -L lrview new-session -d -x 200 -y 50 "'$LR/grid.sh'; sleep 60"
+  gcap() { tmux -L lrview capture-pane -p 2>/dev/null; }
+  wait_for 15 "the grid's lost cards" 'grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: the grid offers R while something is lost" "yes" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  tmux -L lrview send-keys -l R
+  wait_for 10 "the ask" 'grep -q "reopen all 4 lost sessions" <<< "$(gcap)"'
+  is "lost: R asks first, naming how many" "yes" "$(grep -q 'reopen all 4 lost sessions in this fleet' <<< "$(gcap)" && echo yes || echo no)"
+  is "...and nothing is reopened before the yes" "no" "$([ -s "$LR/argv" ] && echo yes || echo no)"
+  tmux -L lrview send-keys -l y
+  wait_for 60 "four reopens" '[ "$(wc -l < "$LR/argv" 2>/dev/null | tr -d " ")" -ge 4 ] && grep -q "reopened 4 of 4" <<< "$(gcap)"'
+  sleep 1
+  # The order is the grid's (newest death first), and pinned: an empty log equals an empty
+  # order, which is how this row passed on the code before, where nothing was lost at all.
+  is "lost: y reopens each lost session once, in the order the grid draws them" \
+     "idle billing-svc scratch toolbox |idle billing-svc scratch toolbox " \
+     "$ORDER|$(awk '{print $2}' "$LR/argv" 2>/dev/null | tr '\n' ' ')"
+  is "...codex's with codex resume <id>, the agent-less record's too" "yes yes" \
+     "$(grep -q "^codex billing-svc resume $CX1" "$LR/argv" && echo yes || echo no) $(grep -q "^codex scratch resume $CX2" "$LR/argv" && echo yes || echo no)"
+  is "...claude's with --resume <id>" "yes yes" \
+     "$(grep -q "^claude toolbox .*--resume $CL1" "$LR/argv" && echo yes || echo no) $(grep -q "^claude idle .*--resume $ID1" "$LR/argv" && echo yes || echo no)"
+  is "...the one kept under another profile's account copied to this fleet's, the original left" "yes yes" \
+     "$([ -f "$H/.claude-class/projects/$(enc "$LR/src/acme-api")/$CL1.jsonl" ] && echo yes || echo no) $([ -f "$CLT" ] && echo yes || echo no)"
+  is "...and none is lost any more: each is a session again" "|billing-svc idle scratch toolbox " \
+     "$(lost)|$(tmux -L "$LS" list-sessions -F '#{session_name}' 2>/dev/null | sort | tr '\n' ' ')"
+  wait_for 5 "the footer to drop R" '! grep -q "R reopen all lost" <<< "$(gcap)"'
+  is "lost: with nothing lost, the footer does not offer R" "no" "$(grep -q 'R reopen all lost' <<< "$(gcap)" && echo yes || echo no)"
+  for s in "$LS" lrview; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "${LR:?}"
+else
+  skip "lost cards after a shutdown" "tmux, jq and node needed"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
@@ -5539,8 +5747,8 @@ STUB
       skip "mod: its harness" "mods not available in this claude: $(grep -o 'the rollout switch[^:]*' <<< "$mdt" | head -1)"
     else
     is "mod: its harness runs and nothing fails" "0" "$(grep -oE '^ *[0-9]+ fail$' <<< "$mdt" | grep -oE '[0-9]+')"
-    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 62 ] && ok "mod: ...and all 62 tests ran" \
-      || bad "mod: ...and all 62 tests ran" ">= 62 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
+    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 188 ] && ok "mod: ...and all 188 tests ran" \
+      || bad "mod: ...and all 188 tests ran" ">= 188 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
     fi
   else
     skip "mod: claude plugin validate/test" "no claude with plugin test"
@@ -6099,9 +6307,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
   # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
   # Its four briefs from the lead the judge read as done stay open, answered with no proof:
-  # before that rule all four closed as judge-done and "open now" read 1.
+  # before that rule all four closed as judge-done and "open now" read 1. Its one request held
+  # on the person has its step, what the person must do (ledger.js linkSteps): 19 items, not 18.
   is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
-     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
+     "items 19|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
      "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
@@ -6157,8 +6366,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
   # WHAT THE SESSION HOLDS FOR THE PERSON (heldItems), and the status question that has the
   # agent ask it (isStatusQuestion, statusNote). Each state paired with the one beside it that
-  # must NOT be held: a fresh open ask, a promise, a closed item, a week-old waiting one. And
-  # each status phrasing paired with a request that names a status and is work.
+  # must NOT be held: a fresh open ask, a promise, a closed item. What waits on the PERSON never
+  # ages off (ledger.js FOR YOU), so a week-old one is held, first, as the oldest; a week-old one
+  # waiting on someone else is not. And each status phrasing paired with a request that names a
+  # status and is work.
   lh="$(node --no-warnings --input-type=module -e "
     import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
     const H = 3600000, now = 100 * 24 * H
@@ -6171,7 +6382,8 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       it('5', { progress: { at: now - H, reason: 'a worker is on it' } }),   // reported an hour ago
       it('6', { source: 'promise' }),                              // the agent's own: never held
       it('7', { state: 'done' }),
-      it('8', { state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H } }),  // past BAND_DAYS
+      it('8', { state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H } }),  // past BAND_DAYS, still theirs
+      it('9', { source: 'fleet', state: 'waiting', at: now - 8 * 24 * H, progress: { at: now - 8 * 24 * H, reason: 'reported: waiting on the registry' } }),
     ] }
     const held = L.heldItems(l, now).map(i => i.id + ':' + i.state).join(',')
     const yes = ['whats the status', 'status?', 'Status update please', 'any update?', \"what's left\", 'where are we?',
@@ -6188,7 +6400,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       L.requestText(note + ' and also fix it') === 'and also fix it',
     ].join(' | '))" 2>&1)"
   is "ledger: held for the person = waiting, answered, untouched 4h; a status question asks each, and a request naming a status does not; a quoted status note is not the person's words" \
-     "3:open,1:waiting,2:replied | all-yes | all-no | 2 | 1 | 3,1,2 | true | true | true" "$lh"
+     "8:waiting,3:open,1:waiting,2:replied | all-yes | all-no | 2 | 1 | 8,3,1,2 | true | true | true" "$lh"
   # ...AND THE TWO KINDS OF ITEM #82 AND #83 ADDED, through the code that makes them rather
   # than a hand-built item: a worker's ask CARRIED to its master by fleet-stop (carryItems), and
   # a `fleet` item the judge read as done, which stays open for its proof (applyVerdict). A
@@ -7048,12 +7260,20 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   git -C "$BS/repo" worktree add -q "$BS/api-fix" -b api-fix 2>/dev/null
   tmux -L cf-acme-api kill-server 2>/dev/null
   tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
+  # new-session returns before its child has necessarily chdir'd. Until then the
+  # nonempty pane_current_path is the server's cwd, so rename tries to move THAT
+  # checkout. A delayed chdir on tmux 3.4 reproduces all five missing-marker rows.
+  wait_for 5 "the boundary fixture pane to enter its checkout" \
+    '[ "$(tmux -L cf-acme-api display-message -p -t api-fix "#{pane_current_path}" 2>/dev/null)" = "$BS/api-fix" ]'
+  is "fixture pane entered its worktree" "$BS/api-fix" \
+    "$(tmux -L cf-acme-api display-message -p -t api-fix '#{pane_current_path}' 2>/dev/null)"
   : > "$BSF/cf-acme-api.api-fix.workers-merge"
   : > "$BSF/cf-acme-api.api-fix.review-gate-off"
   # The model pin (bin/fleet-model) lives the same life: a per-session marker, so it moves with
   # a rename and goes with a stop, or a worker reborn under the name would start on it.
   printf 'haiku\n' > "$BSF/cf-acme-api.api-fix.model"
-  env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
+  bs_rename_out="$(env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry 2>&1)"; bs_rename_rc=$?
+  is "rename succeeds (exit $bs_rename_rc: $bs_rename_out)" "0" "$bs_rename_rc"
   is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
   is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
   is "...and the review-gate override"            "1" "$([ -f "$BSF/cf-acme-api.api-retry.review-gate-off" ] && echo 1 || echo 0)"
@@ -9422,6 +9642,7 @@ if command -v node >/dev/null 2>&1; then
   RVS="$TMUX_TMPDIR/rvsrv"; mkdir -p "$RVS/home" "$RVS/xd"
   printf 'on\n' > "$RVS/xd/shots.enabled"
   node "$ROOT/test/helpers/reviews-api-check.mjs" build "$RVS/home"
+  printf 'off\n' > "$RVS/home/.config/ghostfleet/local-trust"
   RPORT="$(free_port)"; RPORT="${RPORT:-18913}"
   RBASE="http://localhost:$RPORT"
   rv_env() { env GHOSTFLEET_SERVE_CONFIG="$RVS/serve.json" GHOSTFLEET_SERVE_AUDIT="$RVS/audit.jsonl" HOME="$RVS/home" TMUX= \
@@ -16166,6 +16387,10 @@ fi
 # tools no session had (0 uses against 3,305 closes from Bash); and a stopped worker's items
 # went to its lead even when its PR had merged (23 carried items open in one lead's ledger).
 # Each assertion here is the shape of one of those, in both directions.
+#   THE DAY OF WAITING WAS REVERSED for what waits on the person: retiring it after a day took an
+# unanswered question off their list while the answer was still owed, and a lead that ended a
+# turn on twenty questions showed "3 open". An item waiting on the person now stays until they
+# answer or it is dropped (ledger.js FOR YOU); what expires is only what waits on someone else.
 group "the ledger: the owner's words, a day of waiting, a one-line rule, carried work that landed"
 if command -v node >/dev/null 2>&1; then
   lf="$(node --no-warnings --input-type=module - "$ROOT" <<'NODE' 2>&1
@@ -16181,13 +16406,34 @@ const w = { ...L.emptyLedger(), seq: 3, items: [
   { id: '3', text: 'fix the login redirect', at: now - h, state: 'open', source: 'user' },
 ] }
 out.push('held ' + L.heldItems(w, now).map(r => r.id).join(','))
-out.push('count ' + (L.listing(w, now).match(/\+(\d+) waiting/) || [, '0'])[1])
+// Requests the agent holds: its own, so none is the person's until the upgrade gives each its
+// step (upgradeForYou, the first read after the deploy), and then each step is
+const up = L.upgradeForYou(w, '', { at: now })
+out.push('count ' + [w, up].map(x => (L.listing(x, now).match(/for you \((\d+)\)/) || [, '0'])[1]).join('>')
+  + ' ' + L.forYouItems(up, now).map(r => r.reason.replace(/^unblocks: /, '')).join(';'))
 const ex = L.expireDormant(w, now)
 out.push('expire ' + (ex ? ex.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
-out.push('closable ' + (ex && L.closeByHand(ex, '1', now) ? 'yes' : 'no') + ' ' + (ex && L.listing(ex, now, { all: true }).includes('open the app') ? 'listed' : 'gone'))
-// a reply no item shares a word with: only the person's own turn shows the judge the fresh one
+// ...while one waiting on SOMEONE ELSE (a brief from the lead, held for a deploy) still retires after a day
+const wl = { ...w, items: [{ ...w.items[0], source: 'fleet', progress: { at: now - day - h, reason: 'reported: waiting on the registry' } }, w.items[1]] }
+const exl = L.expireDormant(wl, now)
+out.push('expire-lead ' + (exl ? exl.items.map(i => `${i.id}:${i.state}`).join(',') : 'none'))
+out.push('closable ' + (L.closeByHand(w, '1', now) ? 'yes' : 'no') + ' ' + (L.listing(w, now, { all: true }).includes('open the app') ? 'listed' : 'gone'))
+// a reply no item shares a word with: only the person's own turn shows the judge what waits on
+// them, the day-old one too (it is still theirs), and never a brief waiting a day on someone else
 out.push('revisit ' + L.revisitTurn(w, now, 'Went with JSON.').map(i => i.id).join(',') + '|'
   + L.revisitTurn(w, now, 'Went with JSON.', { person: true }).map(i => i.id).join(','))
+out.push('revisit-lead ' + L.revisitTurn(wl, now, 'Went with JSON.', { person: true }).map(i => i.id).join(','))
+// a request held for a question of theirs still open: not counted twice, and still waiting on
+// them, so neither the day nor the file's trim may take it from under the question
+const wa = { ...L.emptyLedger(), seq: 200, items: [
+  { id: '1', text: 'move acme-web to the v2 export', at: now - day - h, state: 'waiting', source: 'user', awaits: ['2'], progress: { at: now - day - h, reason: 'waits on the person: their pick of region', turnId: 't1' } },
+  { id: '2', text: 'Which region should the export run in?', at: now - day - h, state: 'open', source: 'question', turnId: 't1', n: 1 },
+  ...Array.from({ length: L.KEEP_ITEMS - 2 }, (_, k) => ({ id: String(k + 3), text: `ask ${k + 3}`, at: now - h, state: 'done', source: 'user' })),
+] }
+const wae = L.expireDormant(wa, now)
+out.push('await-expire ' + (wae ? wae.items.filter(i => i.state === 'expired').map(i => i.id).join(',') : 'none'))
+const wat = L.addItem(wa, { text: 'one more ask', at: now, source: 'user', asIs: true }).items.map(i => i.id)
+out.push('await-trim ' + ['1', '2', '3'].map(id => `${id}:${wat.includes(id) ? 'kept' : 'gone'}`).join(' '))
 // (c) the note: eight items of 130 characters, and a ninth for the count
 let n = { ...L.emptyLedger(), seq: 1000 }
 for (let k = 0; k < 9; k++) n = L.addItem(n, { text: `rework the acme-web ${k} ` + 'x'.repeat(120), at: now, source: 'user', asIs: true })
@@ -16236,12 +16482,17 @@ NODE
   lfv() { grep "^$1 " <<< "$lf" | head -1 | cut -d' ' -f2-; }
   is "a delivery is the person's only when marked as the owner's; a nudge is nothing; any other mark is a brief" \
      "user fleet null fleet fleet" "$(lfv source)"
-  is "a waiting item a day old is off the queue; one an hour old is on it" "2" "$(lfv held)"
-  is "...and off /ledger's waiting count" "1" "$(lfv count)"
-  is "...and the next judged turn retires it as expired, and only it" "1:expired,2:waiting,3:open" "$(lfv expire)"
+  is "a waiting item a day old is still held, beside one an hour old: the person has not answered" "1,2" "$(lfv held)"
+  is "...and on /ledger's for-you count once the upgrade gives each its step, none before: they are the agent's" \
+     "0>2 open the app to load the new version;pick CSV or JSON for the export" "$(lfv count)"
+  is "...and no judged turn retires it" "none" "$(lfv expire)"
+  is "...while one a day old that waits on someone else does retire, and only it" "1:expired,2:waiting" "$(lfv expire-lead)"
   is "...still listed by all, still closable" "yes listed" "$(lfv closable)"
-  is "a reply no item shares a word with: the person's own turn shows the judge their fresh waiting item, another turn does not" \
-     "|2" "$(lfv revisit)"
+  is "a reply no item shares a word with: the person's own turn shows the judge what waits on them, a day old too; another turn does not" \
+     "|2,1" "$(lfv revisit)"
+  is "...and never a brief that has waited a day on someone else" "2" "$(lfv revisit-lead)"
+  is "a request held for the person's open question: a day untouched does not expire it" "none" "$(lfv await-expire)"
+  is "...nor is it what the trim takes, with its question; the oldest of the rest goes" "1:kept 2:kept 3:gone" "$(lfv await-trim)"
   is "the note: eight items of 130 characters with four-digit ids fit in 1,250, name the CLI only, and keep the rule" \
      "fits cli-only rule" "$(lfv note)"
   is "...and so do the re-prompts" "cli-only" "$(lfv gate)"
@@ -18510,6 +18761,7 @@ else
 # run can attribute to a dead one.
 SV="$TMUX_TMPDIR/serve"; mkdir -p "$SV"
 mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
+printf 'off\n' > "$SV/home/.config/ghostfleet/local-trust"
 cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$SV/"
 # ...and the mod's hooks, which fleet-serve reads each master's ledger through (/api/waiting).
 mkdir -p "$SV/mods/ghostfleet" && cp -R "$ROOT/mods/ghostfleet/hooks" "$SV/mods/ghostfleet/"
@@ -18962,10 +19214,12 @@ printf 'busy-other\n' > "$SV/sessions.cf-other"
 chmod +x "$SV/bin/fleet-grid.mjs"
 # WHAT THE MASTERS HOLD FOR THE OWNER (/api/waiting): each fleet's master's ledger, read beside its
 # status record. Planted around the probe and removed after it. Four records, each a way the
-# list goes wrong: demo's master holds a waiting item and a closed one; a worker on demo holds
-# a waiting item of its own (its asks reach the owner through the master, never twice); an OLDER
-# master record on demo points at a ledger whose item is the restarted session's, not this
-# one's; and other's master has a ledger with nothing held.
+# list goes wrong: demo's master holds a request waiting on the owner, the step that says what
+# they must do for it, and a closed ask; a worker on demo asked the owner something of its own
+# (its asks reach the owner through the master, never twice); an OLDER master record on demo
+# points at a ledger whose question is the restarted session's, not this one's; and other's
+# master has a ledger with nothing for the owner. The request itself is the master's own work
+# and is not listed: its step is, saying what answering it unblocks.
 svw_rec() {   # $1=id $2=sock $3=slot $4=ts
   printf '{"session_id":"%s","sock":"%s","slot":"%s","status":"ready","ts":%s}\n' "$1" "$2" "$3" "$4" > "$SV/home/.claude/fleet/$1.json"
 }
@@ -18977,11 +19231,13 @@ svw_rec svw-other cf-other master "$svw_now"
 node -e '
   const fs = require("fs"), d = process.argv[1], now = Date.now()
   const w = (id, items) => fs.writeFileSync(`${d}/${id}.ledger`, JSON.stringify({ v: 1, seq: 9, items }))
-  const waiting = (id, text, reason) => ({ id, text, at: now - 3 * 3600e3, state: "waiting", source: "user", progress: { at: now - 2 * 3600e3, reason } })
-  w("svw-master", [waiting("7", "merge #12 or wait for the review", "waits on the person: pick merge now or wait"),
-                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" }])
-  w("svw-old", [waiting("1", "the old master ask", "waits on the person: x")])
-  w("svw-worker", [waiting("1", "the worker ask", "waits on the person: y")])
+  const asked = (id, text) => ({ id, text, at: now - 3 * 3600e3, state: "open", source: "question", turnId: "t1" })
+  w("svw-master", [{ id: "7", text: "merge #12 or wait for the review", at: now - 3 * 3600e3, state: "waiting", source: "user", awaits: ["9"],
+                     progress: { at: now - 2 * 3600e3, turnId: "t1", reason: "waits on the person: pick merge now or wait" } },
+                   { id: "8", text: "the done ask", at: now - 5 * 3600e3, state: "done", source: "user" },
+                   { ...asked("9", "Pick merge now or wait"), via: "step", at: now - 2 * 3600e3 }])
+  w("svw-old", [asked("1", "the old master ask")])
+  w("svw-worker", [asked("1", "the worker ask")])
   w("svw-other", [{ id: "1", text: "the fresh other ask", at: now - 60e3, state: "open", source: "user" }])
 ' "$SV/home/.claude/fleet"
 if sv_start json; then
@@ -18989,8 +19245,8 @@ if sv_start json; then
   is "the grid's JSON is served"              "200" "$(pf grid reads)"
   is "the owner's list needs a live token"     "401" "$(pf waiting.noToken reads)"
   is "...and is served with one"              "200" "$(pf waiting reads)"
-  is "a master's waiting item is on it, with what the master said it needs" "1" \
-     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="7"&&i[0].state==="waiting"&&i[0].text==="merge #12 or wait for the review"&&i[0].reason==="waits on the person: pick merge now or wait"&&i[0].since>i[0].at?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
+  is "a master's request held on the owner is on it as what the master said it needs, naming what it unblocks" "1" \
+     "$(pb waiting reads | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const i=JSON.parse(d).items;console.log(i.length===1&&i[0].project==="demo"&&i[0].session==="master"&&i[0].id==="9"&&i[0].state==="question"&&i[0].text==="Pick merge now or wait"&&i[0].reason==="unblocks: merge #12 or wait for the review"?1:0)}catch(e){console.log("unparsed: "+d.slice(0,120))}})')"
   is "...and a worker's, a closed one, a restarted master's and a fresh ask are not" "0" \
      "$(pb waiting reads | grep -c 'worker ask\|done ask\|old master ask\|fresh other ask' || true)"
   # The accounts line's source: behind the same token as everything else, and with this HOME's
@@ -19107,6 +19363,7 @@ if [ -z "$SV" ]; then
   skip "/api/pane" "node missing"
 else
 PN="$TMUX_TMPDIR/pane"; mkdir -p "$PN/home/.config/ghostfleet" "$PN/repo" "$PN/other"
+printf 'off\n' > "$PN/home/.config/ghostfleet/local-trust"
 printf 'demo\t%s\twork\nother\t%s\twork\n' "$PN/repo" "$PN/other" > "$PN/home/.config/ghostfleet/projects"
 # The dialog, on a pane sized like the one it was captured from, so the geometry the
 # endpoint reports can be checked against a number we chose rather than one we read back.
@@ -19416,6 +19673,7 @@ group "fleet-serve: the REAL grid, two projects, one daemon process"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 RG="$TMUX_TMPDIR/realgrid"; mkdir -p "$RG"
 mkdir -p "$RG/home/.config/ghostfleet" "$RG/home/.claude/fleet"
+  printf 'off\n' > "$RG/home/.config/ghostfleet/local-trust"
 for pj in pa pb; do
   mkdir -p "$RG/$pj"
   git init -q "$RG/$pj/main" 2>/dev/null
@@ -19540,6 +19798,7 @@ group "fleet-serve: the open chat's read is cheap, conditional and shared"
 # needs: free_port answers in digits
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   CS="$TMUX_TMPDIR/chatserve"; mkdir -p "$CS/home/.config/ghostfleet" "$CS/home/.claude/fleet" "$CS/repo"
+  printf 'off\n' > "$CS/home/.config/ghostfleet/local-trust"
   cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$CS/"
   mv "$CS/bin/fleet-read" "$CS/bin/fleet-read.real"
   printf '#!/bin/sh\necho x >> "%s/spawns"\nexec "$(dirname "$0")/fleet-read.real" "$@"\n' "$CS" > "$CS/bin/fleet-read"
@@ -19647,6 +19906,7 @@ lh_rt() {
   LH="$SV/lh"; mkdir -p "$LH"
   [ -f "$LH/rt/bin/fleet-serve.mjs" ] && [ -f "$LH/rt/web/phone.js" ] && return 0
   mkdir -p "$LH/rt" "$LH/proj" "$LH/home/.config/ghostfleet" "$LH/home/.claude/fleet"
+  printf 'off\n' > "$LH/home/.config/ghostfleet/local-trust"
   printf 'lhterm\t%s\twork\n' "$LH/proj" > "$LH/home/.config/ghostfleet/projects"
   cp -R "$SV/bin" "$SV/mcp" "$SV/lib" "$SV/mods" "$LH/rt/" && cp -R "$ROOT/web" "$ROOT/tmux" "$LH/rt/"
 }
@@ -19849,7 +20109,7 @@ else
       node "$ROOT/test/helpers/term-local.mjs" "$(LH_SERVE)" "$LHPORT9" "$LH_TAILHOST" "$LH_TAILORIGIN" lhterm \
       > "$LH/term" 2> "$LH/term.err"
     is "term-local ran"                  "" "$(head -2 "$LH/term.err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
+    is "...and produced its checks"      "yes" "$([ "$(wc -l < "$LH/term")" -ge 15 ] && echo yes || echo "no: $(wc -l < "$LH/term" | tr -d ' ') rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$LH/term"
@@ -19964,6 +20224,7 @@ if ! command -v curl >/dev/null 2>&1; then
 else
   PU="$(cd "$(mktemp -d)" && pwd -P)"
   mkdir -p "$PU/home/.config/ghostfleet" "$PU/home/.claude/fleet" "$PU/home/.claude-personal/fleet" "$PU/repo" "$PU/prepo"
+  printf 'off\n' > "$PU/home/.config/ghostfleet/local-trust"
   # TWO PROFILES, because a push channel scoped to one fleet dir is the failure CLAUDE.md
   # names: work notifies, personal is silent, and silence has no error in it to find.
   printf 'demo\t%s\twork\npers\t%s\tpersonal\n' "$PU/repo" "$PU/prepo" > "$PU/home/.config/ghostfleet/projects"
@@ -21319,7 +21580,7 @@ rm -rf "$SV"
 fi
 serve_stop
 
-# ── the web terminal: a fleet tab, from the browser, behind four gates ───────
+# ── the web terminal: a fleet tab, from the browser, with chat access ───────
 # A real shell in the web client, attached to the project's `_term-<project>` tab on the
 # fleet's own tmux server (bin/fleet-tab), through fleet-serve's WebSocket and a tmux
 # control-mode client (lib/web-term.mjs). The gates are the server's, and each refusal row
@@ -21331,9 +21592,7 @@ serve_stop
 #   passkey.js runs the ceremony (test/helpers/term-check.mjs).
 #   WATCHED GOING RED, each on purpose and then put back: the origin check removed (the
 #   evil-origin and no-origin rows took a 101, and two extra control clients attached); the
-#   per-device check removed from open (the disabled-device rows got 200 and a tab); the
-#   fresh assertion not required on open (the no-passkey row got through); the 'end'
-#   listener removed (a dropped socket kept its control client — the row that found the
+#   'end' listener removed (a dropped socket kept its control client — the row that found the
 #   bug); the client's query swallowing removed (xterm's answers to nvim's queries landed in
 #   the shell as typing: the back-to-the-shell and desk-key rows); fleet-tab's -d ignored
 #   (the desk's client was moved into the tab); a vendored byte changed (--check).
@@ -21353,7 +21612,7 @@ serve_stop
 #   removed, every row stayed green — a headless Chrome never moves the focus to a tapped
 #   button, so there is nothing here for it to lose. Whether the keyboard stays up is an
 #   iPhone's to say.
-group "fleet-serve: the web terminal is a fleet tab behind four gates"
+group "fleet-serve: the web terminal is a fleet tab with chat access"
 if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d "$TEST_RUNS.$$.term.XXXXXX")" && pwd -P)"
   # ── the wire formats, alone ─────────────────────────────────────────────────
@@ -21423,6 +21682,7 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
 
   # ── one daemon, the suite's own tmux, two projects so the halves start clean ──
   mkdir -p "$WT/home/.config/ghostfleet" "$WT/probe" "$WT/ui"
+  printf 'off\n' > "$WT/home/.config/ghostfleet/local-trust"
   printf 'wtprobe\t%s\twork\nwtui\t%s\twork\n' "$WT/probe" "$WT/ui" > "$WT/home/.config/ghostfleet/projects"
   WTPORT="$(free_port)"; WTPORT="${WTPORT:-18961}"
   WTBASE="http://localhost:$WTPORT"
@@ -21462,8 +21722,8 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     is "term: serve.log holds none of what the terminal printed" "0" "$(grep -c "${wtmark:-no-marker}" "$WT/log" || true)"
     is "...but does say a terminal opened and closed" "yes" \
        "$(grep -q 'terminal open: ' "$WT/log" && grep -q 'terminal closed: ' "$WT/log" && echo yes || echo no)"
-    is "term: the audit log has the opens, confirmed by passkey" "yes" \
-       "$(grep -q '"verb":"terminal".*"confirmed":"passkey:terminal' "$WT/audit.jsonl" && echo yes || echo no)"
+    is "term: the audit log has the opens, authorized by session" "yes" \
+       "$(grep -q '"verb":"terminal".*"confirmed":"session' "$WT/audit.jsonl" && echo yes || echo no)"
     wtcsp="$(curl -sI "$WTBASE/" | tr -d '\r')"
     is "term: the page's CSP lets the terminal's socket and styles in, and script nowhere else" "yes" \
        "$(grep -qi "^content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:$WTPORT wss://localhost:$WTPORT;" <<< "$wtcsp" && echo yes || echo no)"
@@ -22480,8 +22740,8 @@ if grep -q 'no chrome' "$PDC/out" 2>/dev/null; then
 else
   is "paired-check ran"               "0" "$pdcrc"
   is "...without complaining"         ""  "$(head -2 "$PDC/err" | tr '\n' ' ' | sed 's/ *$//')"
-  # 57 rows when it was written: 27 at each size, and the gate's three lifted from the adapter.
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
+  # 54 browser rows: the server-backed terminal gate is exercised by local-trust.mjs.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PDC/out")" -ge 54 ] && echo yes || echo "no: $(wc -l < "$PDC/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
@@ -22657,9 +22917,11 @@ else
 fi
 
 # ── what a master holds for the owner reaches the phone ──────────────────────
-# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner in state
-# `waiting`; fleet-serve reads them (heldScan) for /api/waiting and rings once when one is
-# NEW. Through the real exported functions against a real fleet dir, in both directions.
+# Each master's ledger (mods/ghostfleet/hooks/ledger.js) keeps its asks of the owner as open
+# `question` items (forYou); fleet-serve reads them (heldScan) for /api/waiting and rings once
+# when one is NEW. Through the real exported functions against a real fleet dir, in both
+# directions. (A request the agent holds waiting on the owner is the agent's own, not one of
+# these: what the owner must do for it is its step, a question like any other.)
 group "push: a master's new waiting item rings once per project, and says nothing it should not"
 if command -v node >/dev/null 2>&1; then
   WT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$WT/home/.claude/fleet"
@@ -22669,7 +22931,7 @@ if command -v node >/dev/null 2>&1; then
     const d = '$WT/home/.claude/fleet', now = Date.now();
     const rec = (id, sock, slot, ts) => fs.writeFileSync(d + '/' + id + '.json', JSON.stringify({ session_id: id, sock, slot, status: 'ready', ts }));
     const led = (id, items) => fs.writeFileSync(d + '/' + id + '.ledger', JSON.stringify({ v: 1, seq: 9, items }));
-    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'waiting', source: 'user', progress: { at: now - 3600e3, reason: 'waits on the person: a pick' } });
+    const W = (id, text) => ({ id, text, at: now - 7200e3, state: 'open', source: 'question', turnId: 't1' });
     rec('ma', 'cf-acme-api', 'master', 1); rec('mw', 'cf-acme-web', 'master', 1); rec('wk', 'cf-acme-api', 'api-fix', 5);
     led('ma', [W('1', 'the first ask')]); led('mw', []); led('wk', [W('1', 'a worker ask')]);
     const list = [{ name: 'acme-api', profile: 'work', sock: 'cf-acme-api', cfg: '$WT/home/.claude' },
@@ -22687,8 +22949,8 @@ if command -v node >/dev/null 2>&1; then
     // the worker's own new item: not the owner's, so no bell
     led('wk', [W('1', 'a worker ask'), W('2', 'another worker ask')]);
     out.push(tick().length);
-    // answered (open again) then waiting again HAS newly entered waiting
-    led('mw', [{ ...W('1', 'a web ask'), state: 'open', woke: now }]);
+    // answered, then on the list again (asked again), HAS newly entered waiting
+    led('mw', [{ ...W('1', 'a web ask'), state: 'done', closedBy: 'person' }]);
     out.push(tick().length);
     led('mw', [W('1', 'a web ask')]);
     out.push(tick().length);
@@ -22726,7 +22988,7 @@ if command -v node >/dev/null 2>&1; then
   UA="$(cd "$(mktemp -d "$TEST_RUNS.$$.usage.XXXXXX")" && pwd -P)"; mkdir -p "$UA/home"
   UNOW=1793109600
   uenv() { env -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_PROFILE \
-             TZ=UTC HOME="$UA/home" CLAUDE_FLEET_ACCOUNTS_CLOCK="$1" "${@:2}"; }
+             TZ=UTC HOME="$UA/home" CLAUDE_FLEET_LOGIN_STORE=file CLAUDE_FLEET_ACCOUNTS_CLOCK="$1" "${@:2}"; }
   # the endpoint's own function, over the projects this HOME lists — what fleet-serve serves
   urep() { uenv "$1" node --no-warnings --input-type=module -e "
     import { usageReport } from '$ROOT/bin/fleet-serve.mjs'; import { projects } from '$ROOT/lib/projects.mjs';
@@ -22757,9 +23019,9 @@ if command -v node >/dev/null 2>&1; then
   is "...for the profiles fleet-serve lists, and not one only a stray state file names" "work,personal" \
      "$(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).profiles.map(p => p.profile).join(",")) } catch { console.log("unparsed") }' "$UA/on.json")"
   is "each state is told apart: fresh, stale, out, needs-login, blocked, over the line; the pin; all exhausted" \
-     "work:main=active,backup=stale,spare=out,extra=needs-login,old=blocked pin=main@15:47 | personal:main=exhausted,backup=exhausted exhausted=17:00" \
+     "work:main=active,backup=stale,spare=out,extra=needs-login,old=blocked pin=main | personal:main=exhausted,backup=exhausted exhausted=17:00" \
      "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-        console.log(u.profiles.map(p => `${p.profile}:${p.accounts.map(a => a.name + "=" + a.kind).join(",")}${p.pin ? ` pin=${p.pin.account}@${p.pin.until_at}` : ""}${p.exhausted ? ` exhausted=${p.exhausted.until_at}` : ""}`).join(" | ")) } catch { console.log("unparsed") }' "$UA/on.json")"
+        console.log(u.profiles.map(p => `${p.profile}:${p.accounts.map(a => a.name + "=" + a.kind).join(",")}${p.pin ? ` pin=${p.pin.account}` : ""}${p.exhausted ? ` exhausted=${p.exhausted.until_at}` : ""}`).join(" | ")) } catch { console.log("unparsed") }' "$UA/on.json")"
   is "...and the line's short forms: 5h counts down, 7d names the day, a stale reading says how old" "2h10m Sat 8h ago 97" \
      "$(node -e 'try { const u = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")), w = u.profiles[0].accounts;
         console.log(w[0].five_hour.left, w[0].seven_day.day, w[1].seven_day.read, u.threshold) } catch { console.log("unparsed") }' "$UA/on.json")"
@@ -23297,14 +23559,35 @@ if [ -d "$ROOT/web" ]; then
   # other and must agree on one thing, that a reply quoting an item wakes it. Watched red
   # with the quote taken out of replyText (the item stayed waiting). Six rows since the
   # phone moved onto web/ui: the card's own rows went with the old client's waitingModel(),
-  # and the Queue is web/ui's screen in both apps now.
+  # and the Queue is web/ui's screen in both apps now. Three more for a question asked of the
+  # person: the same head settles THAT question with its option (red with the head's parse
+  # broken), and the screen marks it answered in the ledger as well (red with the call gone).
   node "$ROOT/test/helpers/waiting-check.mjs" > "$PW/waiting" 2> "$PW/waiting.err"
   is "waiting-check ran"              "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/waiting.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 6 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 9 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/waiting"
+
+  # test/helpers/explain-check.mjs: EXPLÍCAME in a real browser, at 390 and at 1280, on the
+  # fixture queue — every item for the person a card with Explain; one tap sends one request
+  # for that item; the answer opens in a sheet on the phone and a dialog at the desk, never
+  # inline, with the item's options; a busy session's request waits and the sheet says so; an
+  # option chosen answers the item. Watched red with the sheet taken off the Modal, the options
+  # dropped from the sheet, and the ledger's answer call removed.
+  node "$ROOT/test/helpers/explain-check.mjs" > "$PW/explain" 2> "$PW/explain.err"
+  exrc=$?
+  if grep -q '^no chrome$' "$PW/explain" 2>/dev/null; then
+    skip "Explícame in a browser" "no chrome to look in"
+  else
+    is "explain-check ran"            "0" "$exrc"
+    is "...without complaining"       ""  "$(head -2 "$PW/explain.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"   "yes" "$([ "$(wc -l < "$PW/explain")" -ge 38 ] && echo yes || echo "no: $(wc -l < "$PW/explain") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PW/explain"
+  fi
 
   node "$ROOT/test/helpers/speak-check.mjs" > "$PW/speak" 2> "$PW/speak.err"
   is "speak-check ran"                "0" "$?"
@@ -23402,6 +23685,16 @@ if [ -d "$ROOT/web" ]; then
   #   - the project's header keeping its height when the lead's button lands: its phone rule taken
   #     out turned 390 and 320 red ("49 to 98 px"), and the narrow sides taken out turned 320 red
   #     ("Despertar al líder": 98 to 138 px).
+  #   - stackChecks: all 13 rows failed on the original source: groups were cards with messages,
+  #     the picker scrolled its action away, desktop kept a member bar, columns said No data,
+  #     and Terminal/Editor navigated away instead of pausing and resuming inside a column.
+  #   - realStackChecks: the real phone client left three rows red before the follow-up fixes:
+  #     metadata spread across the row, no project at the scroll edge, and wrapped composer hints.
+  #   - a message sent from up a conversation (send-scroll.mjs): on the client before it, the
+  #     session's sent message sat "712 px from the top of a 504 px box" and the assistant's, in a
+  #     full feed, 2085 px down a 437 px one. A send that used scrollIntoView, with a frame tall
+  #     enough to scroll, turned "...it is the chat that scrolled, not the window or the frame" red
+  #     ("main 82"), and the box that stopped scrolling turned "in view" red through its on-screen half.
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?
@@ -23425,14 +23718,69 @@ else
   skip "phone client" "web/ not present"
 fi
 
+group "phone client: the screen holds still on a touch screen, in a real browser"
+if [ -d "$ROOT/web" ]; then
+  # ── no zoom on a tap into a field, a composer's buttons of one size, a page that cannot be dragged
+  # Reported from the installed iPhone app, all three at once: the page zoomed in when the chat box
+  # took the focus, Send and attach were different sizes, and the whole page could be dragged left,
+  # right, up and down. phone-check.mjs --fit-only drives web/ui's screens with TOUCH EMULATION on,
+  # which the group above leaves off, and test/helpers/phone-fit.mjs says what each row is for.
+  #   Watched red on the client as it was (HEAD's web/, before this change): every screen with a
+  # field under 16px (the projects' filter 13px, the chat box, the searches and the dialogs' fields
+  # 14px, the assistant's 15px), all four composers' Send at 61x33 beside 46x46 buttons, and a
+  # swipe up on the top bar that moved the page 302px. The rows that were green there were broken
+  # on purpose, on a copy of the built client, and watched going red:
+  #   - a Send that widens once it has text: "typing a message moves neither the composer nor its
+  #     box", on the session and the lead, and the assistant card's (where the form keeps its rect
+  #     and the box gives up the difference, which is why that row measures both).
+  #   - the inner scrollers' overflow undone: the table and the code block "scroll sideways in
+  #     their own box" ("box 0").
+  #   - the 16px given to a mouse as well: "with a mouse the composer keeps its 14px".
+  #   - no fixed shell and no net, with a top bar 480px wide: "the document is the screen's width"
+  #     (160 at 320, 91 at 390) and "nothing runs past the screen's edge" at all four widths.
+  #   - the assistant's Send a size of its own: "...and that size is the session's".
+  #   The swipes are raw touch points (Input.dispatchTouchEvent). The first driver was
+  #   Input.synthesizeScrollGesture, which pans a page on macOS and scrolls nothing at all under
+  #   Linux's headless Chrome: there the swipe rows were green on any code, and only the row that
+  #   swipes a page built to move said so, on the Linux leg. Measured on both since: the client
+  #   before this change is red on the same 18 rows under Debian's Chromium 156 and macOS's Chrome
+  #   157, the three swipe rows among them.
+  #   The Assistant button's rows (section 5 of phone-fit.mjs): on the client before the button
+  #   measured, it sat 24 px into the text box on every session at 320 and 390 (the words being
+  #   typed ran under it), on the stack's Speak mode and Send, and at a desk on the right column's
+  #   mic; with the keyboard up it stayed by the screen's foot, 437 px below the composer. The
+  #   newest-message rows were green there, the button being low; a chat that leaves 20 px under
+  #   its list turned 12 of them red ("under the button by 21 px").
+  #   SKIPPED where there is no Chrome, like the group above.
+  PFIT="$(mktemp -d "$TEST_RUNS.$$.fit.XXXXXX")"
+  node "$ROOT/test/helpers/phone-check.mjs" --fit-only > "$PFIT/out" 2> "$PFIT/err"
+  pfitrc=$?
+  if grep -q 'no chrome' "$PFIT/out" 2>/dev/null; then
+    skip "the phone app holding still" "no chrome to look in"
+  else
+    is "phone-check --fit-only ran"     "0" "$pfitrc"
+    is "...without complaining"         ""  "$(head -2 "$PFIT/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor: a browser that fails to start emits a row or two. 140 rows when it was written, 194
+    # with the Assistant button's.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 180 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PFIT/out"
+  fi
+  rm -rf "$PFIT"
+else
+  skip "phone client" "web/ not present"
+fi
+
 group "one base: the phone and the team app are one app"
 # ee/team/test is the team app's own suite, and CI runs none of it: it needs the team's packages
-# and some of it a browser. These three need neither — they read the source — and they are the
+# and some of it a browser. These four need neither — they read the source — and they are the
 # ones that hold the two apps to one base: one-base (a page routed in one app and not the other, a
 # screen kept in an app's folder, a link no route answers, a sidebar word that is not the back
 # link's word), and the words of both languages for every key the shared screens ask for. Left to
 # the team's suite they failed only for whoever ran it: an app-folder file one-base did not know
-# sat on this branch red until somebody did.
+# sat on this branch red until somebody did. no-emoji is the fourth: it reads source, comments
+# included, and sat red on staging unseen because nothing here ran it.
 if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs" ]; then
   OB_OUT="$(mktemp "$TMUX_TMPDIR/one-base.XXXXXX")"
   # THE REPORTER IS NAMED because the count below is read from its summary line. Node 20 picks
@@ -23440,11 +23788,11 @@ if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs
   # where spec says `ℹ pass 18`; a newer Node prints spec either way. Unnamed, the floor read
   # 0 on CI's Node 20 while every test passed, and passed on every machine it was written on.
   node --test --test-reporter=spec "$ROOT/ee/team/test/one-base.test.mjs" "$ROOT/ee/team/test/i18n.test.mjs" \
-    "$ROOT/ee/team/test/phone-screen-words.test.mjs" > "$OB_OUT" 2>&1
+    "$ROOT/ee/team/test/phone-screen-words.test.mjs" "$ROOT/ee/team/test/no-emoji.test.mjs" > "$OB_OUT" 2>&1
   ob_rc=$?
   is "one-base and both languages' words pass" "0" "$ob_rc"
   # A floor: a file that fails to import runs no tests and node --test still has to say so.
-  is "...and ran their tests" "yes" "$(n="$(sed -n 's/^ℹ pass //p' "$OB_OUT")"; [ "${n:-0}" -ge 18 ] && echo yes || echo "no: ${n:-0} passed")"
+  is "...and ran their tests" "yes" "$(n="$(sed -n 's/^ℹ pass //p' "$OB_OUT")"; [ "${n:-0}" -ge 21 ] && echo yes || echo "no: ${n:-0} passed")"
   [ "$ob_rc" -eq 0 ] || grep -A12 '^✖' "$OB_OUT" | head -40
   rm -f "${OB_OUT:?}"
 else
@@ -27026,8 +27374,9 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
   AC_TMUX="$TMUX_TMPDIR/acct"; mkdir -p "$AC_TMUX"
   ASOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"
-  mkdir -p "$AH/.config/ghostfleet" "$AW/fleet" "$AC/stub" "$AC/src/acme-api"
+  mkdir -p "$AH/.config/ghostfleet" "$AW/fleet" "$AC/stub" "$AC/src/acme-api" "$AC/prof"
   printf 'acme-api\t%s\twork\n' "$AC/src/acme-api" > "$AH/.config/ghostfleet/projects"
+  read -r APID AAPI < <(profile_stub "$AC/prof")
   printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$AC" > "$AC/stub/agent-here"
   chmod +x "$AC/stub/agent-here"
   # THE GROUP'S OWN CLOCK. Every row here is about which second something fell in — a
@@ -27048,6 +27397,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$AH" TMUX_TMPDIR="$AC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$AC/kc" \
            CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
+           CLAUDE_FLEET_PROFILE_API="$AAPI" FAKE_PROFILE_DIR="$AC/prof" \
            CLAUDE_FLEET_ACCOUNTS_CLOCK="$(tnow)" PATH="$AC/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
   atick() { ax node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
   atmux() { TMUX_TMPDIR="$AC_TMUX" tmux "$@"; }
@@ -27143,6 +27493,18 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts on: a rate_limit failure keeps Claude's sentence beside the word, on one line" \
      "rate_limit|You've hit your weekly limit · resets Oct 29 at 1am (America/New_York) /upgrade" \
      "$(jq -r '"\(.failure.error)|\(.failure.message)"' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)"
+  # model_not_found keeps its sentence too: it is the only place the refused model is named.
+  # Watched red on the hook before: the word with no message.
+  jq -nc --arg id eeeeeeee-0000-4000-8000-0000000000f1 --arg cwd "$AC/src/acme-api/w2" \
+     '{hook_event_name:"StopFailure", session_id:$id, cwd:$cwd, error:"model_not_found",
+       last_assistant_message:"There\u0027s an issue with the selected model (claude-fable-5-2). It may not exist or you may not have access to it."}' \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_EXPERIMENTAL_DIR \
+          HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
+  is "accounts on: a model_not_found failure keeps the sentence that names the model" \
+     "model_not_found|claude-fable-5-2" \
+     "$(jq -r '.failure.message' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null | node --input-type=module -e "
+        import { modelRefused } from '$ROOT/lib/accounts.mjs'; let t = ''; process.stdin.on('data', d => t += d).on('end', () =>
+        console.log('$(jq -r .failure.error "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)|' + (modelRefused(t) || 'none')))" 2>&1)"
   rm -f "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json"
 
   # ── 5h at the threshold, and one point under it ───────────────────────────────
@@ -27412,39 +27774,71 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts: resets a second apart are one window, where the higher figure still wins" "40" \
      "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json")"
 
-  # ── a /login by hand to a login that is NOT saved ────────────────────────────────
-  # The owner logs the config dir into dave, whom no account holds. What dave reads is not
-  # backup's, from the last tick that still saw a saved login; and while dave is live the
-  # profile is the owner's: no failover, no park, nothing relaunched onto a saved login, and
-  # what the engine parked is let go — said once. dave's 99% sits in a window that resets
+  # ── a login nobody can say whose it is ───────────────────────────────────────────
+  # The config dir holds dave's login, and the provider refuses to say whose it is (as for a
+  # token Claude Code had just been handed). What it reads is not backup's, from the last tick
+  # that still saw a known login; and while it is live the profile is the owner's: no
+  # failover, no park, nothing written over it — it may be the only working copy of a login
+  # — and what the engine parked is let go, said once. Its 99% sits in a window that resets
   # AFTER backup's, so one-window-per-account alone would hand it to backup.
-  T="$(tnow)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
+  NOID='work: on a login it cannot identify (the provider refused its access token) — failover paused until it can'
+  T="$(tnow)"; rows0="$(inbox_n "$NOID")"
   jq --argjson t "$T" --argjson r1 "$R1" '.exhausted = {since:$t, until:$r1}' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   for s in w1 w2; do printf 'governor-accounts %s\n' "$T" > "$AW/fleet/$ASOCK.$s.parked"; done
-  ax node "$FL" set "$AW" dave D1
-  # Read BEFORE the tick that notices dave, as the first minute of a hand /login always is:
-  # the second between them is what makes "the span opens at the last saved tick" matter.
+  ax node "$FL" set "$AW" dave D1; ax node "$FL" forget D1
+  # Read BEFORE the tick that notices it, as the first minute of a hand /login always is:
+  # the second between them is what makes "the span opens at the last known tick" matter.
   arec w1 "$ID1" ready 99 10 "$(tnow)" "$((R2 + 1800))"; tadv
   out="$(atick; atick)"
-  is "accounts: on an unsaved login, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
+  is "accounts: on a login it cannot identify, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
      "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(livewho)"
   is "accounts: ...exhausted clears, the engine's parks are let go, nothing is relaunched" "null none none 0" \
      "$(jq -c .exhausted "$AW/fleet/accounts.json") $(for s in w1 w2; do cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none; done | paste -sd' ' -) $(grep -c relaunch <<< "$out" || true)"
   is "accounts: ...said once over two ticks, and the span is nobody's in the history" "1 \"\"" \
-     "$(( $(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
+     "$(( $(inbox_n "$NOID") - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
   is "accounts: ...and fleet-accounts list says so, rather than calling backup active" "yes" \
-     "$(grep -q 'ON A LOGIN THAT IS NOT SAVED, failover paused' <<< "$(ax "$ROOT/bin/fleet-accounts" list)" && echo yes || echo no)"
+     "$(grep -q 'ON A LOGIN IT CANNOT IDENTIFY, failover paused until it can' <<< "$(ax "$ROOT/bin/fleet-accounts" list)" && echo yes || echo no)"
+  out="$(ax "$ROOT/bin/fleet-accounts" use work main)"; rc=$?
+  is "accounts: ...and 'use' will not write over it, and says why" "1 yes dave" \
+     "$rc $(grep -q 'could not tell whose login ~/.claude holds (the provider refused its access token), so it was not replaced' <<< "$out" && echo yes || echo "no: $out") $(livewho)"
   # Back to a saved login by hand — the one already marked active — and the engine has it again.
   rows0="$(inbox_n 'work: now on backup (a /login by hand)')"
   ax node "$FL" set "$AW" bob B4
   atick >/dev/null
   is "accounts: a /login back to the active account is adopted again, readings and all" "backup 1 \"backup\"" \
      "$(active) $(( $(inbox_n 'work: now on backup (a /login by hand)') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
-  # ...and `use` of the account marked active, while an unsaved login is live, swaps it back in
-  # rather than answering that it is already there.
-  ax node "$FL" set "$AW" dave D2; atick >/dev/null
+
+  # ── a /login by hand to an account no slot is for ────────────────────────────────
+  # The owner's report: a hand /login was filed into the account in use, so that slot then
+  # held somebody else's login under its name. It is filed by who its token says it is, and
+  # no slot is dave's: it becomes a slot of its own, held there, and backup's copy is not
+  # touched. Watched red on the code before: backup's saved login became dave's.
+  NEWS="work: a /login to an account no slot is for — saved as 'login-1' and held there"
+  rows0="$(inbox_n "$NEWS")"
+  ax node "$FL" set "$AW" dave D2
+  arec w1 "$ID1" ready 99 10 "$(tnow)" "$((R2 + 1800))"; tadv
+  atick >/dev/null; atick >/dev/null
+  is "accounts: a /login no slot is for becomes a slot of its own, held there — never filed into the one in use" \
+     "login-1 login-1 dave at-D2 bob at-B4" \
+     "$(active) $(jq -r '.pin.account // "none"' "$AW/fleet/accounts.json") $(saved login-1) $(saved backup)"
+  is "accounts: ...the reading from before the tick that saw it is nobody's: backup keeps 40, login-1 has none" "40 none" \
+     "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(jq -r '.accounts["login-1"] | if . == null then "no-slot" else (.usage.five_hour // "none") end' "$AW/fleet/accounts.json")"
+  is "accounts: ...said once over two ticks" "1" "$(( $(inbox_n "$NEWS") - rows0 ))"
+  out="$(ax "$ROOT/bin/fleet-accounts" list work)"
+  is "accounts: ...list names where it came from and how to name it" "yes" \
+     "$(grep -q 'saved from a /login (fleet-accounts add names it)' <<< "$(grep -A1 -E '^  \* login-1 ' <<< "$out")" && echo yes || echo "no: $out")"
+  out="$(ax "$ROOT/bin/fleet-accounts" add work dave)"
+  is "accounts: ...and 'add' while it is live names it: the same slot, still held, the same login, no login-1 left" \
+     "main,backup,spare,dave dave dave dave at-D2 none" \
+     "$(jq -r '.order | join(",")' "$AW/fleet/accounts.json") $(active) $(jq -r '.pin.account // "none"' "$AW/fleet/accounts.json") $(saved dave) $(saved login-1 | grep . || echo none)"
+  # `use` of the account in use, while the config dir holds a login no slot is for: that login
+  # is kept first, under a slot of its own, and then the chosen one goes back in.
+  ax node "$FL" set "$AW" erin E1
+  out="$(ax "$ROOT/bin/fleet-accounts" use work dave)"
+  is "accounts: 'use' over a login no slot is for saves it first, then puts the chosen one back" "dave erin at-E1 yes" \
+     "$(livewho) $(saved login-1) $(grep -q "saved as 'login-1' first, so it is not lost" <<< "$out" && echo yes || echo "no: $out")"
   ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
-  is "accounts: 'use' of the active account over an unsaved login puts the saved one back" "bob" "$(livewho)"
+  ax "$ROOT/bin/fleet-accounts" remove work dave >/dev/null; ax "$ROOT/bin/fleet-accounts" remove work login-1 >/dev/null
 
   # ── `use` right after a /login by hand, before the tick has looked ──────────────────
   # spare is flagged NEEDS-LOGIN (a login that failed days ago). The owner logs the config dir
@@ -27489,7 +27883,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
 
   # ── the Linux store: 0600 files beside .credentials.json ─────────────────────────
   LH="$AC/lhome"; mkdir -p "$LH/.config/ghostfleet" "$LH/.claude/fleet"; printf 'on\n' > "$LH/.config/ghostfleet/accounts.enabled"
-  lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file "$@" 2>&1; }
+  lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file \
+           CLAUDE_FLEET_PROFILE_API="$AAPI" FAKE_PROFILE_DIR="$AC/prof" "$@" 2>&1; }
   lx node "$FL" set "$LH/.claude" alice L1; lx "$ROOT/bin/fleet-accounts" add work main >/dev/null
   lx node "$FL" set "$LH/.claude" bob L2;   lx "$ROOT/bin/fleet-accounts" add work backup >/dev/null
   lx "$ROOT/bin/fleet-accounts" use work main >/dev/null
@@ -27548,6 +27943,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts on: claude-here records the login the session starts on" "$(active)" "$(cut -f1 "$AW/fleet/$ASOCK.w9.account" 2>/dev/null)"
 
   atmux -L "$ASOCK" kill-server 2>/dev/null
+  kill "$APID" 2>/dev/null
   rm -rf "${AC:?}" "${AC_TMUX:?}"
 else
   skip "accounts: several logins per profile" "tmux, jq or node missing"
@@ -27576,13 +27972,15 @@ fi
 group "accounts planner: spend the allowance that expires first"
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.plan.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
-  PC_TMUX="$TMUX_TMPDIR/plan"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  PC_TMUX="$TMUX_TMPDIR/plan"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof"
   printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
   PSOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"; T=1900000000; H=3600; CLK=$T
   px() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$PH" TMUX_TMPDIR="$PC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$PC/kc" \
            CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE="${PGRACE:-0}" \
+           CLAUDE_FLEET_PROFILE_API="$PAPI" FAKE_PROFILE_DIR="$PC/prof" \
            CLAUDE_FLEET_ACCOUNTS_CLOCK="$CLK" PATH="$ROOT/bin:$PATH" "$@" 2>&1; }
   # ptick <clock> — one governor tick at that second; prints the account in use after it
   ptick() { CLK="$1" px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; pst '.active'; }
@@ -27649,15 +28047,22 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   r1="$(ptick $((T + 60)))"; rd backup 20 $((T + 24*H)) $((T - H))
   is "planner: a week ending 3h sooner is not worth a switch; one ending 6h sooner is" "main backup" "$r1 $(ptick $((T + 120)))"
 
-  # ── a by-hand `use` holds against the planner for two hours, but not past running out ──
+  # ── a by-hand `use` holds against the planner until it is handed back, not past running out ──
+  # The owner's "bro u switch me again, change it back": a choice by hand lasted two hours,
+  # and the planner then put the profile back where the owner had moved it from. It holds
+  # until that account reaches the line, or `fleet-accounts auto` hands it back. Watched red
+  # on the code before: main at 2h01m.
   fresh main backup
   prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T"; rd backup 20 $((T + 100*H)) $((T - H))
   ptick "$T" >/dev/null          # main's reading in, while main is the one it can be credited to
   CLK=$T px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
   out="$(CLK=$((T + 20*60)) px "$ROOT/bin/fleet-accounts" list work)"
-  is "planner: a by-hand 'use' is kept 2h (past the hold), then the earlier week wins again" "backup backup main" \
-     "$(pst .active) $(ptick $((T + 20*60))) $(ptick $((T + 2*H + 60)))"
-  is "planner: ...and list says it is pinned and until when" "yes" "$(grep -q "on 'backup' by hand until" <<< "$out" && echo yes || echo "no: $out")"
+  r="$(pst .active) $(ptick $((T + 20*60))) $(ptick $((T + 2*H + 60)))"
+  CLK=$((T + 2*H + 90)) px "$ROOT/bin/fleet-accounts" auto work >/dev/null
+  is "planner: a by-hand 'use' holds past two hours, and the earlier week wins once 'auto' hands it back" "backup backup backup main" \
+     "$r $(ptick $((T + 2*H + 120)))"
+  is "planner: ...and list says it is held, and how to hand it back" "yes" \
+     "$(grep -q "on 'backup' by hand — held there until it reaches the threshold or runs out (fleet-accounts auto work hands it back to the planner)" <<< "$out" && echo yes || echo "no: $out")"
   # A guard rather than a change (the code before also left an account at its limit): the
   # pin is a preference, so the account it holds still gives way when it runs out.
   CLK=$((T + 3*H)) px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
@@ -27706,6 +28111,7 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   jq --argjson at $((T + 600)) '.usage.at = $at' "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json"
   r2="$(ptick $((T + 660))) $(pst .accounts.main.blocked) $(pst .exhausted)"; r3="$(ptick $((T + 720))) $(pst .accounts.main.blocked)"
   is "planner: ...a reading on it afterwards clears BLOCKED and resumes, and the old failure stays spent" "main true|main null null|main null" "$r1|$r2|$r3"
+  kill "$PPID_STUB" 2>/dev/null
   rm -rf "${PC:?}"
 else
   skip "accounts planner" "jq or node missing"
@@ -27733,8 +28139,9 @@ group "accounts: never switch to an account that is out of usage"
 # needs: accounts planner: spend the allowance that expires first
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.out.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
-  PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof"
   printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
   CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
   # pfail <n> <at> <message> — session n's turn failed at <at> with rate_limit and that text,
   # as hooks/fleet-event.sh writes it
@@ -27883,9 +28290,225 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   pfail 1 $((T + 60)) "You've hit your weekly limit"
   is "out: with no reset to read, out a day after the failure or until the stored 7d reset, whichever is later" \
      "backup $((T + 60 + 86400))|backup $((T + 30*H + 86400*2))" "$r1|$(ptick $((T + 120))) $(pst .accounts.main.out.until)"
+  kill "$PPID_STUB" 2>/dev/null
   rm -rf "${PC:?}"
 else
   skip "accounts: never switch to an account that is out of usage" "jq or node missing"
+fi
+
+# ── who a login is, and whose a reading is ───────────────────────────────────────
+# Four saved logins in different organizations, and an owner who could not tell which was
+# which: a hand /login filed into the slot in use, a write-back that copied one account's
+# tokens into another's slot, one account's week filed under another and kept there because
+# the later reset always won, a real early reset refused because the higher figure always
+# won, a move to an account that cannot run the model a session is on, a move to another
+# organization whose cost nobody was told, and a choice by hand undone two hours later. Who a
+# login is comes from its token now (the provider's read-only profile request, stood in for
+# by test/helpers/profile-stub.mjs), and a reading belongs to the login that took it.
+# WATCHED GOING RED on the code before this, every row below but the guard: the lie was
+# filed as backup and alice's tokens written into backup's slot; DUPLICATE, MISLABELLED and
+# "not checked" were never said, and backup was swapped in over both; 99 → 1 was refused
+# (max within a window) and the profile left main at 99; the 80% week stayed under main
+# because its reset was later; reset, models, exclude and include were unknown commands;
+# the fable session went onto backup; the org-2 account was chosen by its earlier week, and
+# planned onto; a one-account profile kept the login it was added with.
+group "accounts: a login is who its token says, and a reading is the login's that took it"
+# Runs on the planner's px, ptick, pst, pset, rd, prec and its clock (T, H): one setup.
+# needs: accounts planner: spend the allowance that expires first
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.who.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
+  PC_TMUX="$TMUX_TMPDIR/who"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api" "$PC/prof" "$PC/tr"
+  printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  read -r PPID_STUB PAPI < <(profile_stub "$PC/prof")
+  CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  # fresh2 <name>=<who>[@<org>]… — the planner's fresh, with each login's organization named
+  fresh2() {
+    rm -rf "${PW:?}/fleet" "${PC:?}/kc"; mkdir -p "$PW/fleet"
+    local x; for x in "$@"; do
+      CLK=$((T - 3*H)) px node "$FL" set "$PW" "${x#*=}" "${x%%=*}1" >/dev/null
+      CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" add work "${x%%=*}" >/dev/null
+    done
+    CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" use work main >/dev/null
+    pset '.pin = null'; rm -f "$PW/fleet/accounts.notify" "$PW/fleet/accounts.log"
+  }
+  # obs <n> <at> <5h pct|-> <5h resets> <7d pct|-> <7d resets> [<model>] — session n's record as
+  # the mod writes it, carrying only the windows the binary still reported, and <model> as its
+  # transcript's last reply
+  obs() {
+    local id="eeeeeeee-0000-4000-8000-00000000020$1" tr="$PC/tr/$1.jsonl"
+    [ -n "${7:-}" ] && printf '{"type":"assistant","message":{"role":"assistant","model":"%s","content":[]}}\n' "$7" > "$tr"
+    jq -n --arg id "$id" --arg sock "$PSOCK" --arg slot "w$1" --arg tr "$tr" --argjson at "$2" \
+          --arg p5 "$3" --argjson r5 "$4" --arg p7 "$5" --argjson r7 "$6" \
+      '{session_id:$id, sock:$sock, slot:$slot, status:"ready", ts:$at, transcript:$tr,
+        usage:{at:$at, limits:({} + (if $p5 == "-" then {} else {five_hour:{pct:($p5|tonumber), resets:$r5}} end)
+                                  + (if $p7 == "-" then {} else {seven_day:{pct:($p7|tonumber), resets:$r7}} end))}}' > "$PW/fleet/$id.json"
+  }
+  fl() { CLK="${CLK:-$T}" px node "$FL" "$@"; }
+  fa() { px "$ROOT/bin/fleet-accounts" "$@"; }
+  wk() { pst ".accounts.$1.usage.seven_day // {} | \"\(.pct // \"-\") \(.resets // \"-\")\""; }
+  logn() { awk -v p="$1" 'index($0, p) {n++} END {print n+0}' < <(cat "$PW/fleet/accounts.log" 2>/dev/null); }
+
+  # ── who a login is: its token, never .claude.json ─────────────────────────────────
+  # Claude Code refreshed main's login (new tokens), and a session that started on backup
+  # wrote backup's account back into .claude.json: the file now names bob over alice's
+  # tokens. Filed by the file, backup was "adopted" and alice's tokens written into its slot
+  # — two copies of one login, and the next refresh of either retires the other's.
+  fresh2 main=alice backup=bob spare=carol
+  fl set "$PW" alice A7; fl lie "$PW" bob
+  r="$(ptick $((T + 60)))"
+  is "who: a refreshed login whose .claude.json names another account is filed by its token: main stays, and its slot gets the new tokens" \
+     "main alice at-A7" "$r $(fl saved work "$PW" main)"
+  is "who: ...backup's copy is not touched, and .claude.json is put right" "bob at-backup1 alice" \
+     "$(fl saved work "$PW" backup) $(fl live "$PW" | awk '{print $1}')"
+  # A slot whose saved copy is another slot's login: the shape the old write-back left.
+  fresh2 main=alice backup=bob spare=carol
+  fl plant work "$PW" backup alice A8
+  out="$(CLK=$((T + 60)) fa list work)"
+  is "who: a slot whose saved login answers as another slot's account is DUPLICATE, and list names the other and the fix" "yes yes" \
+     "$(grep -qE '^ +backup .* DUPLICATE$' <<< "$out" && echo yes || echo "no: $out") $(grep -qF "its saved login answers as main's account — two copies of one login, and using either retires the other's; out of rotation — fleet-accounts remove work backup, then" <<< "$out" && echo yes || echo no)"
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) $((T + 60)); rd backup 10 $((T + 20*H)) $((T - H)); rd spare 10 $((T + 90*H)) $((T - H))
+  is "who: ...and it is out of rotation: main at its limit goes to spare, though backup's week ends first" "spare at-spare1" \
+     "$(ptick $((T + 120))) $(fl live "$PW" | awk '{print $2}')"
+  # ...and one whose saved login is an account no slot is for, with no `list` before the tick:
+  # the swap itself asks first.
+  fresh2 main=alice backup=bob spare=carol
+  fl plant work "$PW" backup zoe Z1
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) $((T + 60)); rd backup 10 $((T + 20*H)) $((T - H)); rd spare 10 $((T + 90*H)) $((T - H))
+  r="$(ptick $((T + 120)))"
+  out="$(CLK=$((T + 180)) fa list work)"
+  is "who: a saved login that answers as nobody's account is never put in, even by a tick no list ran before — MISLABELLED" "spare yes" \
+     "$r $(grep -qE '^ +backup .* MISLABELLED$' <<< "$out" && echo yes || echo "no: $out")"
+  # Never refreshed to ask: an access token past its expiry is not sent, and list says so.
+  fresh2 main=alice backup=bob
+  fl plant work "$PW" backup bob B9 $(( $(date +%s) * 1000 - 60000 ))
+  out="$(CLK=$((T + 60)) fa list work)"
+  is "who: an expired access token is not asked about — list says so, and nothing was sent for it" "yes 0" \
+     "$(grep -qF 'not checked: its access token has expired' <<< "$(grep -A1 -E '^ +backup ' <<< "$out")" && echo yes || echo "no: $out") $(grep -c '^at-B9 ' "$PC/prof/requests.log" 2>/dev/null || true)"
+  is "who: ...and list names each slot's organization" "yes" \
+     "$(grep -qE '^ +org org-1 · checked ' <<< "$(grep -A1 -E '^ +\* main ' <<< "$out")" && echo yes || echo "no: $out")"
+
+  # ── readings: the login's that took them ──────────────────────────────────────────
+  # The week reset early, and the reset time stayed the same: 99 → 1 in one window. The
+  # higher figure always won within a window, so the profile left an account it had a whole
+  # week on.
+  fresh2 main=alice backup=bob
+  rd backup 20 $((T + 100*H)) $((T - H))
+  pset --argjson r $((T + 30*H)) --argjson at $((T - H)) '.accounts.main.usage = {seven_day:{pct:99, resets:$r, at:$at}}'
+  obs 1 "$T" 3 $((T + 4*H)) 1 $((T + 30*H))
+  is "readings: a week reset early (99 → 1, the same reset time) is believed, and main stays in use" "main 1" \
+     "$(ptick $((T + 60))) $(pst .accounts.main.usage.seven_day.pct)"
+  # ...and a session whose binary has not seen the reset goes on writing its 96%: no 5h window
+  # (its own has passed, so the binary dropped it), written after the reset was read. No 5h
+  # window while the account's own runs is a reading from before that window began.
+  obs 2 $((T + 600)) - 0 96 $((T + 30*H))
+  is "readings: ...and a stale 96% with no 5h window, first written after the reset, is refused" "main 1" \
+     "$(ptick $((T + 660))) $(pst .accounts.main.usage.seven_day.pct)"
+  # One account's week filed under another: a later reset than the account's own, and older.
+  fresh2 main=alice backup=bob
+  rd backup 20 $((T + 100*H)) $((T - H))
+  pset --argjson r $((T + 100*H)) --argjson at $((T - 2*H)) '.accounts.main.usage = {seven_day:{pct:80, resets:$r, at:$at}}'
+  obs 1 "$T" 3 $((T + 4*H)) 10 $((T + 30*H))
+  ptick $((T + 60)) >/dev/null
+  is "readings: a week filed under the wrong account gives way to the account's own newer reading, though its reset is later" \
+     "10 $((T + 30*H))" "$(wk main)"
+  fresh2 main=alice backup=bob
+  pset --argjson r $((T + 100*H)) --argjson at $((T - 2*H)) --arg id "$(pst .accounts.backup.id)" \
+       '.accounts.main.usage = {seven_day:{pct:80, resets:$r, at:$at, id:$id}}'
+  ptick $((T + 60)) >/dev/null
+  is "readings: ...and a window that says it was another login's is dropped, with nothing to replace it" "- -" "$(wk main)"
+  # A reset nobody saw, on an account no session is on: cleared by hand.
+  fresh2 main=alice backup=bob
+  pset --argjson r5 $((T + 3*H)) --argjson r7 $((T + 90*H)) --argjson at $((T - H)) \
+       '.accounts.backup.usage = {five_hour:{pct:99, resets:$r5, at:$at}, seven_day:{pct:50, resets:$r7, at:$at}}'
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  r1="$(ptick $((T + 60))) $(pst '.exhausted != null')"
+  out="$(CLK=$((T + 120)) fa reset work backup)"
+  is "reset: an inactive account's figures, cleared by hand, and the profile can move onto it" "main true|backup null|yes" \
+     "$r1|$(ptick $((T + 180))) $(pst .exhausted)|$(grep -q 'figures cleared' <<< "$out" && echo yes || echo "no: $out")"
+
+  # ── models ────────────────────────────────────────────────────────────────────────
+  # backup cannot run fable. A move onto it put a fable session on an account that refuses
+  # every one of its turns.
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2
+  r1="$(ptick $((T + 60)))"
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-opus-5-5
+  is "models: an account lacking a model a running session uses is passed over; with no session on that model it is not" "spare|backup" \
+     "$r1|$(ptick $((T + 60)))"
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 99 $((T + 90*H)) $((T - H))
+  CLK=$T fa models work backup --without fable >/dev/null
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2; obs 2 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)) claude-fable-5-2
+  is "models: ...but it is the last resort, not never: with nothing else it is used, and the line names who cannot run" "backup 1" \
+     "$(ptick $((T + 60))) $(logn 'switched from main to backup (5h at 98%) — backup cannot run fable: w1, w2 are on it')"
+  out="$(CLK=$((T + 120)) fa list work)"
+  is "models: ...and list says what it lacks" "yes" "$(grep -q 'lacks fable' <<< "$(grep -A1 -E '^ +\* backup ' <<< "$out")" && echo yes || echo "no: $out")"
+  # Learned from the refusal itself: the binary's sentence names the model.
+  fresh2 main=alice backup=bob spare=carol
+  rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa use work backup >/dev/null; CLK=$T fa auto work >/dev/null
+  obs 1 $((T + 1000)) 10 $((T + 4*H)) 10 $((T + 150*H)) claude-fable-5-2
+  jq --argjson at $((T + 1000)) '. + {failure:{error:"model_not_found", at:$at, message:"There'"'"'s an issue with the selected model (claude-fable-5-2). It may not exist or you may not have access to it. Run /model to pick a different model."}}' \
+     "$PW/fleet/eeeeeeee-0000-4000-8000-000000000201.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/eeeeeeee-0000-4000-8000-000000000201.json"
+  r="$(ptick $((T + 1060))) $(ptick $((T + 1120)))"
+  is "models: a turn refused for its model teaches the account it lacks it, said once, and the profile moves off it" "fable spare spare 1" \
+     "$(pst '(.accounts.backup.without // []) | map(.model) | join(",") | if . == "" then "none" else . end') $r $(logn 'work/backup cannot run claude-fable-5-2')"
+
+  # ── exclude and include ───────────────────────────────────────────────────────────
+  fresh2 main=alice backup=bob spare=carol
+  rd backup 20 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 90*H)) $((T - H))
+  CLK=$T fa exclude work backup >/dev/null
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  r1="$(ptick $((T + 60)))"
+  out="$(CLK=$((T + 120)) fa list work)"
+  CLK=$((T + 120)) fa include work backup >/dev/null
+  is "exclude: an excluded account is never chosen; include puts it back, and its earlier week wins again" "spare|yes|backup" \
+     "$r1|$(grep -qE '^ +backup .*excluded \(fleet-accounts include work backup\)$' <<< "$out" && echo yes || echo "no: $out")|$(ptick $((T + 60 + 16*60)))"
+  CLK=$((T + 20*60)) fa exclude work backup >/dev/null
+  is "exclude: ...and the account in use, excluded, is left at the next tick" "spare" "$(ptick $((T + 21*60)))"
+
+  # ── organizations: the same one first ─────────────────────────────────────────────
+  # spare is in another organization: a session moved there loses its earlier thinking
+  # ("Claude can't use thinking from another organization"). Chosen by its earlier week
+  # alone, the profile crossed while backup, in the same organization, had room.
+  fresh2 main=alice backup=bob spare=carol@org-2
+  rd backup 20 $((T + 90*H)) $((T - H)); rd spare 20 $((T + 20*H)) $((T - H))
+  obs 1 "$T" 98 $((T + 3*H)) 10 $((T + 150*H)); obs 2 "$T" 98 $((T + 3*H)) 10 $((T + 150*H))
+  r1="$(ptick $((T + 60)))"
+  obs 1 $((T + 1200)) 98 $((T + 4*H)) 30 $((T + 90*H)); obs 2 $((T + 1200)) 98 $((T + 4*H)) 30 $((T + 90*H))
+  is "org: a failover stays in the organization in use while it has an account with room, though another's week ends first" "backup" "$r1"
+  is "org: ...and crosses only once those are spent, saying which sessions lose their earlier thinking" "spare 1" \
+     "$(ptick $((T + 1260))) $(logn 'switched from backup to spare (5h at 98%) — another organization: w1, w2 lose their earlier thinking')"
+  fresh2 main=alice spare=carol@org-2
+  rd spare 20 $((T + 20*H)) $((T - H))
+  obs 1 "$T" 10 $((T + 4*H)) 30 $((T + 100*H))
+  is "org: a planned move never crosses organizations, however much sooner the other's week ends" "main main" \
+     "$(ptick $((T + 60))) $(ptick $((T + 2*H)))"
+
+  # ── dying logins ──────────────────────────────────────────────────────────────────
+  # Proved from the code: a slot's copy dies when it falls behind its own login's rotations,
+  # and a copy falls behind when nothing writes the live login back into it. A profile with
+  # ONE account was never written back (the tick returned before it looked), so the first
+  # swap back onto it after a second was added met a retired refresh token.
+  fresh2 main=alice
+  fl set "$PW" alice A5
+  CLK=$((T + 60)) px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; rc=$?
+  is "dying: a profile with one account still writes its rotated login back, and stays unmanaged (exit 3)" "3 alice at-A5" \
+     "$rc $(fl saved work "$PW" main)"
+  # The only thing ever asked of the provider is the profile request, and it was asked: the
+  # stub answers 404 to any other path, a token endpoint included.
+  asked="$(grep -c ' 200$' "$PC/prof/requests.log" 2>/dev/null)"; other="$(grep -c ' 404$' "$PC/prof/requests.log" 2>/dev/null)"
+  is "who: the provider was asked only for profiles, never for a token" "yes 0" \
+     "$([ "${asked:-0}" -ge 1 ] && echo yes || echo no) ${other:-0}"
+  kill "$PPID_STUB" 2>/dev/null
+  rm -rf "${PC:?}"
+else
+  skip "accounts: a login is who its token says" "jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
@@ -30704,6 +31327,24 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$VCOUT"
 else
   skip "voice pair" "node, tmux or jq missing"
+fi
+
+
+group "fleet-serve: local trust and chat authorize terminals and editors"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  LT="$(mktemp -d)"
+  node "$ROOT/test/helpers/local-trust.mjs" > "$LT/rows" 2> "$LT/err"
+  is "local-trust helper exits cleanly" "0" "$?"
+  LOCAL_TRUST_DUAL=1 LOCAL_TRUST_NO_BROWSER=1 node "$ROOT/test/helpers/local-trust.mjs" >> "$LT/rows" 2>> "$LT/err"
+  is "local-trust two-listener helper exits cleanly" "0" "$?"
+  is "local-trust helper produces its rows" "yes" "$([ "$(grep -c "$US" "$LT/rows")" -ge 40 ] && echo yes || echo no)"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; else is "$name" "$want" "$got"; fi
+  done < "$LT/rows"
+  rm -rf "$LT"
+else
+  skip "local trust and chat terminal access" "node or tmux missing"
 fi
 
 

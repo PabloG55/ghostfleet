@@ -57,13 +57,24 @@ try {
   }
   await b.call('Emulation.setFocusEmulationEnabled', { enabled: true });
   await b.call('Network.setBypassServiceWorker', { bypass: true });
+  // A slow runner, on demand: GF_CPU_THROTTLE=5 makes this laptop lose the way a loaded CI box does.
+  if (+process.env.GF_CPU_THROTTLE > 1) await b.call('Emulation.setCPUThrottlingRate', { rate: +process.env.GF_CPU_THROTTLE });
   await b.call('DOM.enable');
   await b.call('Accessibility.enable');
   await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
     const real = window.fetch.bind(window);
-    window.fetch = (url, opts) => String(url).includes('/fixtures/waiting.json')
+    const lag = ${+process.env.GF_FETCH_DELAY || 0};
+    window.fetch = (url, opts) => lag ? new Promise(r => setTimeout(r, lag * Math.random())).then(() => real(url, opts)) : String(url).includes('/fixtures/waiting.json')
       ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(WAITING))}, { status: 200 }))
       : real(url, opts);` });
+  // GF_COVER_MS=1500: a fixed layer over the whole phone for that long after every load and route change, as a toast or
+  // a half-drawn sheet is on a slow runner. The tap has to wait for the control to be hittable.
+  if (+process.env.GF_COVER_MS) await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    const cv = document.createElement('div'); let t0 = 0;
+    cv.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:transparent';
+    const arm = () => { t0 = Date.now(); document.documentElement.appendChild(cv); };
+    addEventListener('DOMContentLoaded', arm); addEventListener('hashchange', arm);
+    setInterval(() => { if (Date.now() - t0 > ${+process.env.GF_COVER_MS}) cv.remove(); }, 50);` });
   b.onEvent((m, p) => {
     if (m === 'Runtime.exceptionThrown') console.error('page threw:', ((p.exceptionDetails && (p.exceptionDetails.exception?.description || p.exceptionDetails.text)) || '').split('\n')[0]);
   });
@@ -109,11 +120,26 @@ try {
     if (!n) return null;
     n.scrollIntoView({ block: 'nearest' });
     const r = n.getBoundingClientRect();
-    return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+    if (!r.width || !r.height) return null;
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    // A press lands on whatever is topmost at the point, not on the control that is there: a toast,
+    // the floating Assistant or a half-drawn sheet over it eats the tap and nothing opens. Not
+    // pressable until the control itself is what a finger would hit.
+    const top = document.elementFromPoint(x, y);
+    return top && (top === n || n.contains(top)) ? { x, y } : null;
   }, sel, text);
   async function tap(sel, text = '') {
-    const p = await until(() => centreOf(sel, text), 4000);
+    let p = await until(() => centreOf(sel, text), 4000);
     if (!p) return false;
+    // Session data and fonts can land between locating More and the pointer press.
+    // Use its settled position, as the team browser helper does for the owner picker.
+    for (let i = 0; i < 20; i++) {
+      await sleep(80);
+      const now = await centreOf(sel, text);
+      if (!now) return false;
+      if (now.x === p.x && now.y === p.y) break;
+      p = now;
+    }
     await press(p.x, p.y);
     return true;
   }
@@ -167,19 +193,23 @@ try {
       return !!document.querySelector('.app .main');
     }), 10000);
     await sleep(300);
+    await b.evaluate(() => document.fonts.ready.then(() => 0));
+    await tap('.modal .x');
   }
   async function step(name, fn) {
     try { await fn(); } catch (e) { is(`${name}: ran to the end`, 'yes', String((e && e.message) || e).slice(0, 160)); }
   }
   // Where the dialogs live.
   const toProject = (p) => async () => { await goTo(`/p/${p}`); await until(() => centreOf('.page button', 'New session'), 8000); };
-  const toSession = async () => { await goTo('/p/acme-api/s/api-fix'); await until(() => centreOf('.sess-tools button', 'More'), 8000); };
+  const toSession = async () => { await goTo('/p/acme-api/s/api-fix'); await until(() => b.evaluate(() => !!document.querySelector('.session .request-return') && !!document.querySelector('.sess-title .branch')), 8000); await tap('.modal .x'); };
   const fromMenu = (item) => async () => { await tap('.sess-tools button', 'More'); await tap('.menu button', item); };
   const toQueue = async () => { await goTo('/queue'); await until(() => centreOf('.extra-card button', 'Reply'), 8000); };
 
   // Every dialog the fixture fleet can open on the phone's screens, from the screen it lives on.
   // Label and schedule are not here: the phone's server does not serve them (adapter NOT_SERVED).
   const DIALOGS = [
+    { name: 'permission request', home: toSession, open: () => tap('.request-return') },
+    { name: 'assistant approval', home: async () => { await goTo('/'); await tap('.modal .x'); }, open: () => tap('.proposal-return') },
     { name: 'new session', home: toProject('acme-api'), open: () => tap('.page button', 'New session') },
     { name: 'delete a free worktree', home: toProject('toolbox'), open: () => tap('.free-row button', 'Delete') },
     { name: 'rename', home: toSession, open: fromMenu('Rename') },

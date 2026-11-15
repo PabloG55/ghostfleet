@@ -45,6 +45,19 @@ export function Btn({ kind = '', icon, children, ...rest }) {
   return <button type="button" class={`btn ${kind}`} {...rest}>{icon ? <Icon name={icon} /> : null}{children}</button>;
 }
 
+// A composer's Send: the same square as the attach and voice buttons beside it (ui.css .cbtn),
+// so the row is a box and its controls. A word would make it the one control in the row whose
+// width is its text's: "Send" was 61 x 33 beside two 46 x 46 buttons, "Uploading…" wider still,
+// and the box beside it gave up the difference mid-message. Its name is the label a reader hears.
+export function SendBtn({ busy = false, ...rest }) {
+  const name = busy ? t('sess.uploadingBtn') : t('common.send');
+  return (
+    <button type="submit" class="cbtn send" aria-label={name} title={name} aria-busy={busy ? 'true' : undefined} {...rest}>
+      <Icon name={busy ? 'hourglass' : 'send'} size={24} />
+    </button>
+  );
+}
+
 // The app icon, drawn from its own pixels so it stays crisp at any size: the ghost ship on
 // its dark tile, with a faint glow because it is a ghost.
 export function Logo({ size = 28 }) {
@@ -159,15 +172,53 @@ export function ProjectName({ name }) {
   return host ? <>{bare}<small class="at"> · {host}</small></> : bare;
 }
 
-export function Modal({ title, onClose, children, wide }) {
+// Remember a dismissal while navigating away and back. Undefined means the poll has not
+// answered yet; only a confirmed absence ends the request's lifetime.
+const requestsSeen = new Map();
+export function useRequest(scope, key, active = true) {
+  const [opened, setOpened] = useState(null);
+  useEffect(() => {
+    if (key === undefined || !active) return;
+    if (key === null) { requestsSeen.delete(scope); setOpened(null); return; }
+    if (requestsSeen.get(scope) !== key) {
+      requestsSeen.set(scope, key);
+      setOpened(key);
+    }
+  }, [scope, key, active]);
+  return { open: !!key && opened === key && active, close: () => setOpened(null), show: () => setOpened(key) };
+}
+
+export function Modal({ title, onClose, children, wide, sheet = false }) {
+  const box = useRef(null);
+  useLayoutEffect(() => {
+    if (!sheet) return;
+    const previous = document.activeElement;
+    const dialog = box.current;
+    const owner = dialog?.closest('.session, .proposal-slot');
+    dialog?.focus({ preventScroll: true });
+    const trap = (e) => {
+      if (e.key !== 'Tab') return;
+      const items = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')].filter(n => n.getClientRects().length);
+      const first = items[0], last = items[items.length - 1];
+      if (document.activeElement === dialog) { e.preventDefault(); (e.shiftKey ? last : first)?.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    };
+    dialog?.addEventListener('keydown', trap);
+    return () => {
+      dialog?.removeEventListener('keydown', trap);
+      const back = owner?.querySelector('.request-return, .proposal-return') || previous;
+      if (back?.isConnected && back.getClientRects().length && getComputedStyle(back).visibility !== 'hidden') back.focus({ preventScroll: true });
+    };
+  }, [sheet]);
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose(); };
     addEventListener('keydown', k);
     return () => removeEventListener('keydown', k);
   }, [onClose]);
   return (
-    <div class="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+    <div class={`scrim${sheet ? ' sheet-scrim' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} class={`modal${wide ? ' wide' : ''}${sheet ? ' sheet' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={sheet ? -1 : undefined}>
         <header><h2>{title}</h2><button class="x" aria-label={t('common.close')} onClick={onClose}><Icon name="close" /></button></header>
         {children}
       </div>

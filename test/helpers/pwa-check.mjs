@@ -360,7 +360,7 @@ is('...and the client reloads when it is claimed', true,
    /addEventListener\('controllerchange'[\s\S]{0,400}location\.reload\(\)/.test(SRC.phone));
 is('...but not while something is being typed', true, /if \(typing\(\)\) \{ setTimeout\(swap, 5000\); return; \}/.test(SRC.phone));
 is('...and the reloaded page takes its session back before it asks for a passkey', true,
-   /pk\.resume\(\)\.then\(\(r\) => \{\s*if \(r === 'ok'\)/.test(SRC.phone));
+   /api\.ready\(\)\.then\(\(\) => api\.localTrusted\(\) \? 'ok' : pk\.resume\(\)\)\.then\(\(r\) => \{\s*if \(r === 'ok'\)/.test(SRC.phone));
 
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
@@ -445,8 +445,8 @@ is('label and schedule are hidden while fleet-serve refuses them', true,
    /^\s*fleet_label:/m.test(notYet) && /^\s*fleet_schedule:/m.test(notYet)
    && /NOT_SERVED = new Set\(\['gfw_label', 'gfw_schedule', 'gfw_unschedule'\]\)/.test(SRC.adapter));
 is('...through the screen\'s own question', true, /can\('gfw_label'\)/.test(sess) && /can\('gfw_schedule'\)/.test(sess));
-// The terminal and the editor open through one path, each with a fresh assertion of its own.
-is('a terminal or an editor opens through the one path', true, /api\.termOpen\(project, size, a, kind\)/.test(SRC.adapter));
+// The terminal and editor use one path with the already-authorized chat session.
+is('a terminal or an editor opens through the one path', true, /api\.termOpen\(project, size, null, kind\)/.test(SRC.adapter));
 is('the client never builds a tab name itself', 0, (JS['phone.js'].match(/['"`]_(term|edit)-/g) || []).length);
 is('the page bound is 20', 20, api.PAGE);
 
@@ -560,7 +560,7 @@ const on401 = API.split('\n').filter(l => /if \(r\.status === 401/.test(l));
 is('every 401 branch clears the token', '', on401.filter(l => !/clearToken\(\)/.test(l)).join(' | '));
 is('...and there are 401 branches to check', true, on401.length >= 4);
 is('clearToken removes the stored copy', true,
-   /export function clearToken\(\) \{ token = null; tokenExp = 0; storeToken\(\); \}/.test(API));
+   /export function clearToken\(\) \{[\s\S]{0,100}token = null; tokenExp = 0; storeToken\(\);\s*\}/.test(API));
 // ...and a refused token locks the app: the adapter turns an AuthError into the lock screen
 // rather than a page of red errors behind a session that is already gone.
 is('a refused session locks the app', true, /e instanceof api\.AuthError\) lock\(\)/.test(SRC.adapter));

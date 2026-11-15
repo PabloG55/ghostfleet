@@ -18,6 +18,7 @@
 //   place(route)                      optional: what an app's own route is called on a back link
 //   offers(view)                      optional: false hides a page this server does not have
 //   can(verb)                         optional: false hides an action this server refuses (a gfw_* verb)
+//   canAnswer(project)                optional: false makes a pending request read-only
 //   activity()                        → { rows }                       what was done, newest first
 //   settings, saveLang                optional: Settings' sections (views.jsx), and where a language is kept
 //   route, tasks, taskSent, taskPlace, taskDone    the assistant's dispatcher and list (agent.js)

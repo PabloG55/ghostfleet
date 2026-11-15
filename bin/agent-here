@@ -89,6 +89,15 @@ set -uo pipefail
 # whichever fleet owns the repo, and a transcript only resumes under its own config dir.
 # A launcher says so with a per-session -e, which `show-environment -t <pane>` reports and
 # the server's global value never shows up in — so only an inherited one is replaced.
+#   THE SOCKET FROM $TMUX, as the hook takes it. A server's global env names the socket of
+# whatever pane started the server, so a session opened on it with no -e of its own was told
+# ANOTHER fleet's socket: this resolved that fleet's directory, and the hook, which names the
+# socket from $TMUX, wrote this fleet's records into it. Records for one profile's fleet sat in
+# another profile's dir, where neither the grid nor the phone of that fleet looked, and a
+# session lost to a shutdown never got its card. $TMUX is the server this pane is on, and it
+# cannot be stale.
+_ah_t="${TMUX:-}"
+case "${_ah_t##*/}" in cf-*) _ah_s="${_ah_t%%,*}"; export CLAUDE_FLEET_SOCK="${_ah_s##*/}" ;; esac
 if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && command -v node >/dev/null 2>&1; then
   _ah="${BASH_SOURCE[0]}"
   while [ -L "$_ah" ]; do _l="$(readlink "$_ah")"; case "$_l" in /*) _ah="$_l" ;; *) _ah="$(dirname "$_ah")/$_l" ;; esac; done

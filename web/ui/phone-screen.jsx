@@ -17,12 +17,12 @@ export const sessionRoute = (project, session) => `/p/${encodeURIComponent(proje
 // put first sat above a search's field and a queue's sign-ins, so each was drawn one line low and
 // came back up when the read answered. The skeleton stands where the cards will (`skeleton`: its
 // shape, a drawing of the screen's own, or false for none).
-export function PhoneScreen({ title, parent = '/', error, loading, children, actions, skeleton = 'cards' }) {
+export function PhoneScreen({ title, parent = '/', error, loading, children, actions, skeleton = 'cards', class: extra = '' }) {
   useKeys(key => {
     if (!key.ctrl && !key.alt && ['q', '`'].includes(key.k)) { back(parent); return true; }
     return false;
   });
-  return <div class="page fleet-extra"><BackLink parent={parent} /><header class="page-head"><h1>{title}</h1><div class="row wrap">{actions}</div></header>
+  return <div class={`page fleet-extra ${extra}`}><BackLink parent={parent} /><header class="page-head"><h1>{title}</h1><div class="row wrap">{actions}</div></header>
     {error ? <p class="err" role="alert">{error.message}</p> : null}
     {children}{!loading || error || !skeleton ? null : typeof skeleton === 'string' ? <Skeleton shape={skeleton} box={skeleton === 'cards' ? 'extra-grid' : ''} n={3} /> : skeleton}</div>;
 }

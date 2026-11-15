@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # fleet-ledger [-s SOCKET] [--session ID] [session] [list|all|close <id> [proof]|drop <id> <reason>|add <ask>|clear]
 # fleet-ledger [-s SOCKET] [--session ID] [session] drop-carried <worker> <reason>
+# fleet-ledger [-s SOCKET] [--session ID] [session] explain <id>
+# fleet-ledger [-s SOCKET] [--session ID] [session] answer <id> [--option <k>] [<answer>]
 #
 # A session's request LEDGER (the mod's LEDGER section, mods/ghostfleet/hooks/register.js):
 # every message submitted to it, held open until a final message answers it, and the
@@ -18,6 +20,14 @@
 #                      drop, with one reason, every item still owed that fleet-stop carried
 #                      here from <worker>: for the person or the lead clearing what one
 #                      stopped worker left, after reading it. Never run on anyone's behalf
+#   explain <id>       ask the session to explain one item that waits on the person, in plain
+#                      words and in their language; it is sent as a prompt (fleet-send
+#                      --explain), so it waits for a running turn to end and never interrupts
+#                      it. The answer is kept on the item: `list` shows it, and so does the phone
+#   answer <id> [--option <k>] [<answer>]
+#                      the ledger's half of answering an item for the person: a question is
+#                      answered, a request held for them is the session's move again. It does
+#                      NOT tell the session; send it the answer as a message (the phone does both)
 #
 # The last three are the mod's tools from Bash, for a session older than the tools: the mod
 # registers them once, at session start, and /reload-plugins does not register them again.
@@ -29,12 +39,12 @@ set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-SESSION=""; VERB=""; ARG=""; WHY=""
+SESSION=""; VERB=""; ARG=""; WHY=""; OPTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s) SOCK="${2:-}"; shift 2 ;;
     --session) SESSION="${2:-}"; [ -n "$SESSION" ] || { echo "fleet-ledger: --session needs a session id" >&2; exit 1; }; shift 2 ;;
-    -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "fleet-ledger: unknown option $1" >&2; exit 1 ;;
     list|all|clear) [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }; VERB="$1"; shift ;;
     close|drop)
@@ -47,6 +57,18 @@ while [ $# -gt 0 ]; do
       VERB="$1"; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: drop-carried needs the worker's name" >&2; exit 1; }
       shift 2; WHY="$*"; set --
       [ -n "$WHY" ] || { echo "fleet-ledger: drop-carried needs a reason" >&2; exit 1; } ;;
+    explain)
+      [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
+      VERB=explain; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: explain needs an item id" >&2; exit 1; }
+      shift 2 ;;
+    answer)
+      [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
+      VERB=answer; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: answer needs an item id" >&2; exit 1; }
+      shift 2
+      if [ "${1:-}" = --option ]; then OPTION="${2:-}"; [ -n "$OPTION" ] || { echo "fleet-ledger: --option needs a key" >&2; exit 1; }; shift 2; fi
+      [ "${1:-}" = -- ] && shift
+      WHY="$*"; set --
+      [ -n "$WHY" ] || [ -n "$OPTION" ] || { echo "fleet-ledger: answer needs the answer, or --option" >&2; exit 1; } ;;
     add)
       [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
       VERB=add; shift; WHY="$*"; set --
@@ -93,8 +115,22 @@ done
 LEDGER_JS="$(cd "$(dirname "$src")/.." 2>/dev/null && pwd)/mods/ghostfleet/hooks/ledger.js"
 [ -f "$LEDGER_JS" ] || { echo "fleet-ledger: $LEDGER_JS is missing" >&2; exit 1; }
 
-exec node --no-warnings --input-type=module -e '
-  const [js, dir, id, name, verb, arg, why, knowJs] = process.argv.slice(1)
+# EXPLAIN SENDS AFTER IT MARKS: the mark is the item's "asked" (the phone's sheet reads it as
+# "waiting for the session"), and the explanation is written over it when the turn ends; marked
+# after the send, a quick turn's answer could land first and the mark would erase it. A send that
+# fails takes the mark back to "could not ask", so the sheet never waits on a prompt nobody got.
+# The slot and socket are the session's own record's: an id names no session on its own.
+if [ "$VERB" = explain ]; then
+  REC="$(for f in "$FLEET_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    jq -r --arg i "$ID" 'select(.session_id==$i and (.slot//"")!="")|[(.ts//0),.slot,(.sock//"")]|@tsv' "$f" 2>/dev/null
+  done | sort -rn | head -1)"
+  E_SLOT="$(printf '%s' "$REC" | cut -f2)"; E_SOCK="$(printf '%s' "$REC" | cut -f3)"
+  [ -n "$E_SLOT" ] && [ -n "$E_SOCK" ] || { echo "fleet-ledger: $SESSION has no fleet record to send to (explain it from inside: /ledger explain $ARG)" >&2; exit 1; }
+fi
+
+ledger_node() { node --no-warnings --input-type=module -e '
+  const [js, dir, id, name, verb, arg, why, knowJs, option] = process.argv.slice(1)
   const L = await import(js)
   const fs = await import("node:fs")
   // The memory (docs/MEMORY.md) hears every change this makes, from here: imported before the
@@ -125,6 +161,8 @@ exec node --no-warnings --input-type=module -e '
       const before = fs.readFileSync(file, "utf8")
       const r = fn(L.parseLedger(before))
       if (!r.ledger) return r
+      // As every write by the mod does: a step whose request this change moved on closes with it.
+      r.ledger = L.settleSteps(r.ledger, now)
       const tmp = `${dir}/.${id}.ledger.cli.${process.pid}.tmp`
       fs.writeFileSync(tmp, JSON.stringify(r.ledger))
       let now2 = null
@@ -143,8 +181,24 @@ exec node --no-warnings --input-type=module -e '
     "drop-carried": l => L.dropCarried(l, arg, why, ctx),
     add: l => L.addByAgent(l, why, ctx),
     clear: l => { const n = L.openItems(l, now).length; return { ledger: L.clearOpen(l, now), said: `closed ${n} open item${n === 1 ? "" : "s"}` } },
+    answer: l => L.answerItem(l, arg, why || option, { nowMs: now, option }),
+    // prints the prompt itself: the shell sends it
+    explain: l => { const r = L.markExplainAsked(l, arg, { nowMs: now, lang: L.personLang(l) }); return r.ledger ? { ...r, said: L.explainPrompt(r.item, { lang: r.ledger.items.find(i => i.id === r.item.id).explain.lang }) } : r },
+    "explain-failed": l => L.explainFailed(l, arg, why, now),
   }[verb]
   const r = change(act)
   if (!r.ledger) { console.error(r.said); process.exit(1) }
   console.log(r.said); process.exit(0)
-' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$VERB" "$ARG" "$WHY" "$(dirname "$LEDGER_JS")/../../../lib/know.mjs"
+' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$1" "$ARG" "$2" "$(dirname "$LEDGER_JS")/../../../lib/know.mjs" "$OPTION"; }
+
+if [ "$VERB" != explain ]; then ledger_node "$VERB" "$WHY"; exit $?; fi
+PROMPT="$(ledger_node explain "")" || exit 1
+SEND="$(dirname "$src")/fleet-send"
+[ -x "$SEND" ] || SEND="fleet-send"
+out="$("$SEND" -s "$E_SOCK" --explain -- "$E_SLOT" "$PROMPT" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  ledger_node explain-failed "$(printf '%s' "$out" | head -1)" >/dev/null 2>&1
+  echo "fleet-ledger: could not ask $SESSION to explain $ARG: $out" >&2; exit 1
+fi
+case "$out" in *"queued #"*) echo "asked $SESSION to explain $ARG; it is busy, so the request waits for its turn to end ($(printf '%s' "$out" | grep -o 'queued #[0-9]*' | head -1))" ;;
+  *) echo "asked $SESSION to explain $ARG" ;; esac

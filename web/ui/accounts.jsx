@@ -125,7 +125,7 @@ function AccountsDialog({ u, onClose }) {
               : p.exhausted ? t('acct.profExhausted', { until: until(p.exhausted.until_at), workers: workers(p.exhausted) }) : ''}</h3>
             {!(p.accounts || []).length ? <p>{t('acct.noAccounts')}</p> : <>
               {p.accounts.length < 2 ? <p>{t('acct.one')}</p> : null}
-              {p.pin ? <p class="u-pin">{t('acct.pin', { account: p.pin.account, at: p.pin.until_at })}</p> : null}
+              {p.pin ? <p class="u-pin">{t('acct.pin', { account: p.pin.account })}</p> : null}
               {p.accounts.map((a) => (
                 <div key={a.name} class={`u-acct u-${hue(a)}`}>
                   <div class="u-head"><span class="u-name">{a.active ? '* ' : ''}{a.name}</span>

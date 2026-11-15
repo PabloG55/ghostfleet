@@ -43,6 +43,7 @@ export const remote = (project) => /@[^@]+$/.test(String(project || ''));
 // (passkey.js freshNow: WebKit keeps the tap's activation only if nothing is awaited first);
 // otherwise the ceremony fetches its own challenge. Fixtures with no passkey need none.
 function assertFor(purpose) {
+  if (api.localTrusted()) return Promise.resolve(null);
   if (!pk.available() || !pk.registered()) {
     if (pk.bypassAllowed()) return Promise.resolve(null);
     return Promise.reject(new Error(t('lock.noPasskey', { why: pk.unavailableReason() || t('lock.enrolHint') })));
@@ -80,25 +81,6 @@ export function phoneAdapter({ lock, go, place }) {
   const noted = (view) => (e) => { if (e?.status === 404) off.add(view); throw e; };
   api.getAutomations().catch(noted('automations')).catch(() => {});
 
-  // WHETHER THIS DEVICE MAY OPEN A TERMINAL AT ALL (fleet-serve /api/term), known before the tap.
-  // The server checks it before the assertion, so that a device with it off is told to switch it
-  // on rather than asked for a fingerprint it cannot use. An adapter that asked for the assertion
-  // first threw that order away: every open from a device with the terminal off spent a Face ID
-  // on a refusal. Read once the terminal is offered, kept by settings when it switches, and taken
-  // from the server's own refusal when it changed somewhere else. Unknown (null) asks as before.
-  // Asked once by the first screen that offers the terminal (a failed read is not asked again on
-  // every render), and again after a refusal, in case the switch has moved since.
-  let termOn = null, termAsked = false, termReading = null;
-  const readTerm = () => { termAsked = true; return (termReading ||= api.getTerm()
-    .then((j) => { termOn = !!j.enabled; }, () => {}).finally(() => { termReading = null; })); };
-  const termOff = () => Object.assign(new Error(t('term.off')), { status: 403, needs: 'enable' });
-  const openTerm = (project, kind, size) => {
-    const asking = pk.available() && pk.registered()
-      ? pk.freshNow(`${kind === 'edit' ? 'editor' : 'terminal'} ${project}`) : Promise.resolve(null);
-    return guard(asking.then((a) => api.termOpen(project, size, a, kind)))
-      .catch((e) => { if (e && e.needs === 'enable') termOn = false; throw e; });
-  };
-
   // A paired host's grid is read only for its boats, and it is the most expensive read there is
   // (one fleet-grid run on the other machine, through this one): kept for 15 s.
   const peerGrids = new Map();
@@ -106,22 +88,34 @@ export function phoneAdapter({ lock, go, place }) {
     const hit = peerGrids.get(name);
     if (hit && Date.now() - hit.at < 15000) return hit.sessions;
     let sessions = hit ? hit.sessions : [];
-    try { sessions = fromCards((await api.getGrid(name)).cards); } catch {}
+    const g = await within(api.getGrid(name), null);
+    if (g) sessions = fromCards(g.cards);
     peerGrids.set(name, { at: Date.now(), sessions });
     return sessions;
   }
 
+  // A read that never answers must not hold the whole list: one stalled grid read (a paired machine
+  // that stopped replying, a project whose fleet is wedged) kept `Promise.all` pending for ever, so
+  // the sidebar sat on "Loading..." while the rest of the app, which polls its own routes, had loaded.
+  // Past the limit the side read is taken as empty and the next poll asks again.
+  const SIDE_READ_MS = 8000;
+  const within = (p, fallback) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), SIDE_READ_MS);
+    Promise.resolve(p).then(v => { clearTimeout(timer); resolve(v); }, () => { clearTimeout(timer); resolve(fallback); });
+  });
+
   // Projects, in the shape every shared screen reads, with the machine each one is on.
   async function projects() {
     // Asked together: neither answer is needed to ask for the other, and one after the other was
-    // two round trips before the first page had anything to draw.
-    const [j, digest] = await Promise.all([guard(api.getProjects()), api.getDigest().catch(() => null)]);
+    // two round trips before the first page had anything to draw. The digest is a side read, so
+    // it is held to the same limit as the grids below.
+    const [j, digest] = await Promise.all([guard(api.getProjects()), within(api.getDigest(), null)]);
     const local = new Map((digest?.projects || []).map(p => [p.name, p]));
     const rows = await Promise.all((j.projects || []).map(async (p) => {
       const d = !p.host_key && local.get(p.name);
       const sessions = d ? (d.sessions || []).map(s => ({ name: s.name, status: s.status, ts: s.ts, lead: !!s.lead }))
         : p.host_key ? await peerSessions(p.name)
-        : fromCards((await api.getGrid(p.name).catch(() => ({ cards: [] }))).cards);
+        : fromCards((await within(api.getGrid(p.name), { cards: [] })).cards);
       return { name: p.name, path: p.path, profile: p.profile, agent: p.agent || null, model: p.model || null,
                host: p.host || '', host_key: p.host_key || '', sched: p.sched || null, counts: counted(sessions), sessions };
     }));
@@ -203,12 +197,9 @@ export function phoneAdapter({ lock, go, place }) {
     attach: (project, session, file) => guard(api.attach(project, session, file)),
     attachPerMessage: api.ATTACH_PER_MESSAGE,
     lead,
-    // The terminal and the editor: this machine's projects only (a paired host's shell is not
-    // reachable from here, by decision), and only against a server — fixtures have no tmux.
-    canTerm: (project) => { if (server() && !termAsked) readTerm(); return server() && !remote(project); },
-    // ...and the reason, where the reason is the machine: a remote project's page says why it has
-    // no Terminal tab, rather than drawing the same page as a viewer's with the tabs quietly gone.
-    termWhy: (project) => (remote(project) ? t('phone.noTermRemote', { host: String(project).split('@').pop() }) : ''),
+    // The same authorization as chat, including paired projects. Fixtures have no shell.
+    canTerm: () => server(),
+    termWhy: () => '',
     // THE CALLS JARVIS TRIED THAT A TOOL REFUSED UNTIL THE OWNER SAYS YES (docs/jarvis.md): the old
     // Jarvis screen's list, which the one assistant draws now (assistant.jsx Proposals). The same
     // read tells routing where Jarvis is, so the list adds no second /api/jarvis poll. Switched off,
@@ -221,17 +212,7 @@ export function phoneAdapter({ lock, go, place }) {
     // A yes lets the call run, so it costs a fresh passkey like the verb itself would; a no costs
     // nothing. The ceremony starts before anything is awaited, inside the tap (assertFor).
     answerProposal: async (p, yes) => guard(api.jarvisConfirm(p.id, yes ? 'yes' : 'no', yes ? await assertFor(`jarvis yes ${p.id}`) : null)),
-    // Each open takes a fresh assertion, made inside the tap when one is prepared (passkey.js
-    // freshNow). The first open after a tab is drawn may come too late for WebKit to count the
-    // tap; the screen then offers "open again", and that tap reaches the sensor itself.
-    // A device whose terminal is off is told so WITHOUT the sensor (see termOn).
-    // A read still in flight is waited for: the tab opens after it mounts, not inside the tap, so
-    // waiting costs no activation the open still had.
-    termOpen: (project, kind, size) => {
-      if (termReading) return termReading.then(() => (termOn === false ? Promise.reject(termOff()) : openTerm(project, kind, size)));
-      if (termOn === false) { readTerm(); return Promise.reject(termOff()); }
-      return openTerm(project, kind, size);
-    },
+    termOpen: (project, kind, size) => guard(api.termOpen(project, size, null, kind)),
     termSocket: api.termSocket,
     go,
     // web/ui's names for its pages first (phone-places.js), then the phone's own, as the team's adapter.
@@ -259,26 +240,18 @@ export function phoneAdapter({ lock, go, place }) {
         state: () => push.state(t),
         set: (on) => (on ? push.enable(t) : push.disable()),
       },
-      terminal: {
-        state: async () => {
-          if (!server()) return { ready: false, why: t('phone.termFixtures') };
-          try { const j = await guard(api.getTerm()); termOn = !!j.enabled; return { ready: true, on: termOn, why: termOn ? t('phone.termOn') : '' }; }
-          catch (e) { return { ready: false, why: e.status === 404 ? t('phone.termOld') : e.message }; }
-        },
-        // ON is a grant and takes a fresh passkey (fleet-serve /api/term/enable); OFF takes one away.
-        set: async (on) => { const a = on && pk.registered() ? await pk.fresh('terminal on') : null; await guard(api.termEnable(on, a)); termOn = !!on; },
-      },
       hosts: {
         list: async () => ((await guard(api.getProjects())).hosts || []),
         unpair: (key) => guard(api.unpairHost(key)),
       },
       device: {
         state: () => {
+          if (api.localTrusted()) return { text: t('phone.localAccess') };
           const k = devKind();
           if (!pk.available()) return { text: t('phone.noSensor'), detail: pk.unavailableReason() };
           return pk.registered() ? { text: t(`dev.${k}.has`) } : { text: t(`dev.${k}.none`), detail: t(`dev.${k}.enrol`) };
         },
-        actions: () => [
+        actions: () => api.localTrusted() ? [] : [
           { id: 'lock', label: t('phone.lockNow'), run: () => lock() },
           ...(pk.registered() ? [{ id: 'forget', label: t('phone.forget'), kind: 'danger', run: () => { pk.forget(); lock(); } }] : []),
         ],
