@@ -23636,6 +23636,11 @@ if [ -d "$ROOT/web" ]; then
   #     and Terminal/Editor navigated away instead of pausing and resuming inside a column.
   #   - realStackChecks: the real phone client left three rows red before the follow-up fixes:
   #     metadata spread across the row, no project at the scroll edge, and wrapped composer hints.
+  #   - a message sent from up a conversation (send-scroll.mjs): on the client before it, the
+  #     session's sent message sat "712 px from the top of a 504 px box" and the assistant's, in a
+  #     full feed, 2085 px down a 437 px one. A send that used scrollIntoView, with a frame tall
+  #     enough to scroll, turned "...it is the chat that scrolled, not the window or the frame" red
+  #     ("main 82"), and the box that stopped scrolling turned "in view" red through its on-screen half.
   PHC="$(mktemp -d "$TEST_RUNS.$$.phone.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" > "$PHC/out" 2> "$PHC/err"
   phcrc=$?

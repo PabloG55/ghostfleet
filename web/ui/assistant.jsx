@@ -104,7 +104,12 @@ export function Feed({ limit, empty }) {
   const S = useAgent();
   const ref = useRef(null);
   const rows = limit ? S.feed.slice(-limit) : S.feed;
-  useEffect(() => { const n = ref.current; if (n) n.scrollTop = n.scrollHeight; }, [S.feed.length, S.interim]);
+  // To the end on every new row: what was just said and its answer. Keyed on the newest row, not
+  // the count: the feed keeps its last 61 (agent.js push), so from the 61st on its length stopped
+  // changing, and a message sent in a long conversation went in below the fold with the feed held
+  // where the reader had left it.
+  const newest = rows.length ? rows[rows.length - 1].id : 0;
+  useEffect(() => { const n = ref.current; if (n) n.scrollTop = n.scrollHeight; }, [newest, S.interim]);
   return (
     <div class="as-feed" ref={ref}>
       {!rows.length && !S.interim ? empty : null}

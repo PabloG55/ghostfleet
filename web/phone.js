@@ -7122,7 +7122,7 @@ function ChatLoading({ load }) {
 var OLDER_NEAR_PX = 240;
 var SWIPE_NEXT = 60;
 var EDGE = 24;
-function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
+function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep, sent = 0 }) {
 	const author = useSlot("author");
 	const reading = useReading();
 	const ref = A(null);
@@ -7141,6 +7141,12 @@ function Chat({ scope, page, queued, older, onOlder, onRetryOlder, onStep }) {
 		const n = ref.current;
 		if (n && stick.current) toEnd(n);
 	}, [last, queued.length]);
+	h(() => {
+		const n = ref.current;
+		if (!sent || !n) return;
+		stick.current = true;
+		toEnd(n);
+	}, [sent]);
 	_(() => {
 		const box = ref.current;
 		if (!box || typeof ResizeObserver === "undefined") return;
@@ -7458,6 +7464,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	};
 	h(() => () => clearTimeout(typingPause.current), []);
 	const sentAt = A(0);
+	const [sends, setSends] = d(0);
 	const statusNow = A("unknown");
 	const quietRef = A(quiet);
 	quietRef.current = quiet;
@@ -7569,7 +7576,10 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 		status: st,
 		send: async (text) => {
 			const r = await act("fleet_send", { prompt: text });
-			if (r) sentAt.current = Date.now();
+			if (r) {
+				sentAt.current = Date.now();
+				setSends((n) => n + 1);
+			}
 			return !!r;
 		}
 	});
@@ -7618,6 +7628,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 		if (await act("fleet_send", { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
+			setSends((n) => n + 1);
 			for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
 			sentDraft(dkey);
 			setDraftState("");
@@ -7916,7 +7927,8 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 				older: tr.older,
 				onOlder: tr.loadOlder,
 				onRetryOlder: tr.retryOlder,
-				onStep
+				onStep,
+				sent: sends
 			}) : /* @__PURE__ */ u(Terminal, { pane: pane.data?.pane ?? null }),
 			!tool && /* @__PURE__ */ u("form", {
 				class: `composer${drag ? " drag" : ""}`,
@@ -12528,10 +12540,11 @@ function Feed({ limit, empty }) {
 	const S = useAgent();
 	const ref = A(null);
 	const rows = limit ? S.feed.slice(-limit) : S.feed;
+	const newest = rows.length ? rows[rows.length - 1].id : 0;
 	h(() => {
 		const n = ref.current;
 		if (n) n.scrollTop = n.scrollHeight;
-	}, [S.feed.length, S.interim]);
+	}, [newest, S.interim]);
 	return /* @__PURE__ */ u("div", {
 		class: "as-feed",
 		ref,
