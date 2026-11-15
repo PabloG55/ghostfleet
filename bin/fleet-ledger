@@ -161,6 +161,8 @@ ledger_node() { node --no-warnings --input-type=module -e '
       const before = fs.readFileSync(file, "utf8")
       const r = fn(L.parseLedger(before))
       if (!r.ledger) return r
+      // As every write by the mod does: a step whose request this change moved on closes with it.
+      r.ledger = L.settleSteps(r.ledger, now)
       const tmp = `${dir}/.${id}.ledger.cli.${process.pid}.tmp`
       fs.writeFileSync(tmp, JSON.stringify(r.ledger))
       let now2 = null

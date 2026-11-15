@@ -112,7 +112,7 @@ function Fold({ cls, k, shut, onToggle, items, label, dot, children }) {
   const need = needOf(items), total = items.reduce((n, p) => n + p.counts.total, 0);
   return (
     <button type="button" class={`side-fold ${cls}${shut ? ' shut' : ''}`} aria-expanded={!shut} onClick={() => onToggle(k)}>
-      <span class="chev" aria-hidden="true">▾</span>
+      <span class="chev" aria-hidden="true">{shut ? '▸' : '▾'}</span>
       {shut ? <Led state={topLight(items.flatMap(p => p.sessions.map(x => x.status)))} size={8} /> : dot ? <Led state={dot} size={8} /> : null}
       <span class="grow ellipsis">{label}</span>
       {children}
