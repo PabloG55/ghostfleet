@@ -3536,7 +3536,7 @@ function useRoom(name, waiting, gone = false) {
 	const key = `gfw.room.${name}.${typeof innerWidth === "number" ? innerWidth : 0}`;
 	_(() => {
 		if (waiting) return;
-		const h = gone || !ref.current ? 0 : Math.round(ref.current.getBoundingClientRect().height);
+		const h = gone || !ref.current ? 0 : ref.current.getBoundingClientRect().height;
 		if (h === wrote.current) return;
 		wrote.current = h;
 		try {

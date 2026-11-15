@@ -158,9 +158,12 @@ try {
           const o = getComputedStyle(p).overflowY; if (o === 'auto' || o === 'scroll') return true; } return false; };
         const moving = (el) => { for (let e = el; e; e = e.parentElement) if (e.getAnimations().some(a => a.playState === 'running' && a.effect?.target === e)) return true; return false; };
         window.__held = [];
+        // ...and whatever has no area, which draws nothing: an empty list under a skeleton slid up
+        // 16 px when the skeleton went, inside a panel that did not change height.
         for (const el of main ? main.querySelectorAll('*') : []) {
           if (el.closest('.sk') || !el.getClientRects().length || scrolls(el) || moving(el)) continue;
           const r = el.getBoundingClientRect();
+          if (!r.width || !r.height) continue;
           window.__held.push([el, Math.round(r.left), Math.round(r.top), (typeof el.className === 'string' && el.className) || el.tagName]);
         }
       });

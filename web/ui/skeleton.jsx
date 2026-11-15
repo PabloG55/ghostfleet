@@ -81,7 +81,9 @@ export function useRoom(name, waiting, gone = false) {
   const key = `gfw.room.${name}.${typeof innerWidth === 'number' ? innerWidth : 0}`;
   useLayoutEffect(() => {
     if (waiting) return;
-    const h = gone || !ref.current ? 0 : Math.round(ref.current.getBoundingClientRect().height);
+    // UNROUNDED: a block 312.4 px tall that waited at 312 moved what is under it by the 0.4 when
+    // it landed, and a sub-pixel move is still a move (the Live map's ticker, on a phone).
+    const h = gone || !ref.current ? 0 : ref.current.getBoundingClientRect().height;
     if (h === wrote.current) return;
     wrote.current = h;
     try { if (h) localStorage.setItem(key, String(h)); else localStorage.removeItem(key); } catch {}
