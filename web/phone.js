@@ -494,7 +494,6 @@ var en_default = {
 	"map.showIdle": "Show projects with no sessions ({n})",
 	"skel.asOfNow": "as of just now",
 	"skel.asOf": "as of {n} min ago",
-	"map.reading": "Reading the fleet…",
 	"map.none": "No project has open sessions.",
 	"map.noSessions": "no sessions",
 	"map.live": "Live",
@@ -580,7 +579,6 @@ var en_default = {
 	"sess.review": "review and send",
 	"sess.yourAnswer": "Type your answer",
 	"common.send": "Send",
-	"sess.readingTerm": "Reading the terminal…",
 	"sess.older": "Load earlier messages",
 	"sess.noMsgs": "No messages in this session yet.",
 	"sess.actions": "{n} actions",
@@ -894,7 +892,6 @@ var en_default = {
 	"agent.noServer": "The assistant is not connected to a server yet.",
 	"agent.you": "The owner",
 	"app.notHere": "This server does not have this page.",
-	"settings.reading": "Reading…",
 	"settings.hosts": "Paired machines",
 	"settings.hostsNone": "No other machine is paired with this one.",
 	"settings.hostThis": "this machine",
@@ -1348,7 +1345,6 @@ var es_default = {
 	"map.showIdle": "Mostrar proyectos sin sesiones ({n})",
 	"skel.asOfNow": "hace un momento",
 	"skel.asOf": "de hace {n} min",
-	"map.reading": "Leyendo la flota…",
 	"map.none": "No hay sesiones abiertas en ningún proyecto.",
 	"map.noSessions": "sin sesiones",
 	"map.live": "En vivo",
@@ -1434,7 +1430,6 @@ var es_default = {
 	"sess.review": "revisar y enviar",
 	"sess.yourAnswer": "Escribe tu respuesta",
 	"common.send": "Enviar",
-	"sess.readingTerm": "Leyendo la terminal…",
 	"sess.older": "Cargar mensajes anteriores",
 	"sess.noMsgs": "Todavía no hay mensajes en esta sesión.",
 	"sess.actions": "{n} acciones",
@@ -1748,7 +1743,6 @@ var es_default = {
 	"agent.noServer": "El asistente todavía no está conectado a un servidor.",
 	"agent.you": "El propietario",
 	"app.notHere": "Este servidor no tiene esta página.",
-	"settings.reading": "Leyendo…",
 	"settings.hosts": "Máquinas emparejadas",
 	"settings.hostsNone": "Ninguna otra máquina está emparejada con esta.",
 	"settings.hostThis": "esta máquina",
@@ -10306,20 +10300,27 @@ function Search({ query = "" }) {
 	const [q, setQ] = useKept("search.query", query);
 	const { data, error, loading } = usePoll(() => fleet.screenProjects(), 15e3, [], { key: "screenProjects" });
 	const wanted = (data?.projects || []).filter((p) => !p.sessions || p.sessions.total !== 0);
-	const { data: grids, error: gridError, loading: gridLoading } = usePoll(async () => !q.trim() ? [] : Promise.all(wanted.map(async (p) => {
-		try {
-			return {
-				project: p,
-				...await fleet.grid(p.name)
-			};
-		} catch (error) {
-			return {
-				project: p,
-				cards: [],
-				error
-			};
-		}
-	})), 15e3, [wanted.map((p) => p.name).join("\n"), !!q.trim()]);
+	const names = wanted.map((p) => p.name).join("\n");
+	const asked = `${!!q.trim()}\n${names}`;
+	const { data: got, error: gridError } = usePoll(async () => ({
+		asked,
+		list: !q.trim() ? [] : await Promise.all(wanted.map(async (p) => {
+			try {
+				return {
+					project: p,
+					...await fleet.grid(p.name)
+				};
+			} catch (error) {
+				return {
+					project: p,
+					cards: [],
+					error
+				};
+			}
+		}))
+	}), 15e3, [names, !!q.trim()]);
+	const grids = got && got.asked === asked ? got.list : null;
+	const gridLoading = !grids && !gridError;
 	const needle = q.trim().toLocaleLowerCase();
 	const projects = (data?.projects || []).filter((p) => !needle || `${p.name} ${p.path || ""}`.toLocaleLowerCase().includes(needle));
 	const sessions = (grids || []).flatMap((g) => (g.cards || []).filter((c) => !c.lost && `${c.name} ${c.branch || ""} ${c.path || ""} ${c.pr || ""} ${c.msg || ""} ${c.label || ""}`.toLocaleLowerCase().includes(needle)).map((c) => ({
@@ -10359,7 +10360,7 @@ function Search({ query = "" }) {
 			shape: "cards",
 			box: "extra-grid",
 			n: 3
-		})] }),
+		})] }, data ? "sessions" : "projects"),
 		children: [
 			/* @__PURE__ */ u(SearchInput, {
 				value: q,

@@ -3,7 +3,7 @@
 // real fleet-serve running the real fleet-read over a large transcript.
 //
 //     node serve-session.mjs build <fleet-dir> <transcript> <sock> <session>
-//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log>
+//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log> [grid-run-log]
 //
 // `probe` prints one "name <US> want <US> got" row per check; test/run.sh compares them.
 //
@@ -55,7 +55,7 @@ if (mode === 'build') {
 
 if (mode !== 'probe') { console.error('usage: serve-session.mjs build|probe …'); process.exit(2); }
 const { Authenticator, request } = await import('./serve-client.mjs');
-const [base, code, transcript, spawnLog] = rest;
+const [base, code, transcript, spawnLog, gridLog] = rest;
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const a = new Authenticator({ rpId: new URL(base).hostname, origin: base });
@@ -118,5 +118,36 @@ const s0 = spawns();
 const burst = await Promise.all(Array.from({ length: 6 }, () => get()));
 is('six reads at once all get the page', 6, burst.filter(r => r.status === 200 && (r.text || '').includes('and one more after it')).length);
 is('...from ONE run of fleet-read', 1, spawns() - s0);
+
+// ── ONE GRID PER FLEET, HOWEVER MANY ASK ─────────────────────────────────────
+// The grid here is a stand-in that writes a line each time it is run and takes 300 ms to answer,
+// so "at once" really overlaps. Two devices on the same screen are two reads of the same fleet;
+// the Projects rollup is a third, by another route. Counted in runs, because a run is the
+// process the daemon starts, and both directions: kept for ever would pass the first three rows,
+// so the same read after the kept one has aged must run again, and so must the read that
+// follows a write, though it comes well inside the time a result is kept.
+if (gridLog) {
+  const runs = () => { try { return fs.readFileSync(gridLog, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
+  const grid = () => request(base, 'GET', '/api/grid?project=demo', { headers: auth });
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  await wait(2700);
+  let g0 = runs();
+  const pair = await Promise.all([grid(), grid()]);
+  is('two clients reading a fleet\'s grid at once both get it', 2, pair.filter(r => r.status === 200 && r.json && Array.isArray(r.json.cards)).length);
+  is('...from ONE run of fleet-grid', 1, runs() - g0);
+  await grid();
+  await request(base, 'GET', '/api/projects', { headers: auth });
+  is('...and a read just after, and the Projects rollup, start no other', 1, runs() - g0);
+  await wait(2700);
+  g0 = runs();
+  await grid();
+  is('a read after the kept grid has aged runs it again', 1, runs() - g0);
+  g0 = runs();
+  const sent = await request(base, 'POST', '/api/verb', { headers: auth, body: { tool: 'fleet_send', args: { project: 'demo', session: 'api-fix', prompt: 'a line' } } });
+  is('a send is answered', true, sent.status > 0);
+  await wait(100);
+  await grid();
+  is('a send to a fleet makes the next read run that fleet\'s grid again', 1, runs() - g0);
+}
 
 console.log(rows.join('\n'));

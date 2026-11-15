@@ -146,8 +146,8 @@
  * title, not like the line of where it runs. */
 .fleet-extra .login-profile { color:var(--white); font:600 15.5px var(--mono); }
 .fleet-extra h2 { margin:20px 0 10px; font-size:14px; color:var(--dim); }
-/* A grid with nothing in it yet takes no room: its margins were 22 px of nothing above the
- * skeleton, which the first card then landed 10 px above. */
+/* A grid with nothing in it yet takes no room: it is a flex item of the page, so it would put a
+ * gap of nothing above the skeleton, and the first card would land that much higher. */
 .fleet-extra .extra-grid:empty { display:none; }
 .extra-search { display:flex; gap:8px; margin:12px 0 20px; }
 .extra-search input { min-width:0; flex:1; }

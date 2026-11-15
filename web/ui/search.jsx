@@ -27,7 +27,13 @@ export function Search({ query = '' }) {
   // looked at for seconds, and coming back to the page re-reads at once (usePoll).
   const wanted = (data?.projects || []).filter(p => !p.sessions || p.sessions.total !== 0);
   const names = wanted.map(p => p.name).join('\n');
-  const { data: grids, error: gridError, loading: gridLoading } = usePoll(async () => !q.trim() ? [] : Promise.all(wanted.map(async p => { try { return { project:p,...await fleet.grid(p.name) }; } catch(error) { return { project:p,cards:[],error }; } })), 15000, [names, !!q.trim()]);
+  const asked = `${!!q.trim()}\n${names}`;
+  // The answer says WHICH projects it is for, and whether there was anything to look for. The render in which the list lands still holds the
+  // answer to "no projects" from before it, and for that one frame nothing was waiting: the
+  // skeleton left, the page closed up, and it came back when the reads for the new list began.
+  const { data: got, error: gridError } = usePoll(async () => ({ asked, list: !q.trim() ? [] : await Promise.all(wanted.map(async p => { try { return { project:p,...await fleet.grid(p.name) }; } catch(error) { return { project:p,cards:[],error }; } })) }), 15000, [names, !!q.trim()]);
+  const grids = got && got.asked === asked ? got.list : null;
+  const gridLoading = !grids && !gridError;
   const needle = q.trim().toLocaleLowerCase();
   const projects = (data?.projects || []).filter(p => !needle || `${p.name} ${p.path || ''}`.toLocaleLowerCase().includes(needle));
   const sessions = (grids || []).flatMap(g => (g.cards || []).filter(c => !c.lost && `${c.name} ${c.branch || ''} ${c.path || ''} ${c.pr || ''} ${c.msg || ''} ${c.label || ''}`.toLocaleLowerCase().includes(needle)).map(c => ({ project: g.project, card: c })));
@@ -42,7 +48,10 @@ export function Search({ query = '' }) {
   useEffect(() => { field.current?.focus(); }, []);
   useKeys(key => { if (!key.ctrl && !key.alt && key.k === '/') { field.current?.focus(); return true; } return false; });
   return <PhoneScreen title={t('phone.search')} error={openError || error || gridError || grids?.find(g => g.error)?.error} loading={loading || (!!needle && gridLoading)}
-    skeleton={<section><h2><SkelLine w="6em" /></h2><Skeleton shape="cards" box="extra-grid" n={3} /></section>}>
+    // Two waits, one after the other: the projects, then the sessions under them. Each is its own
+    // node (the key), so the second is drawn under the projects that replaced the first, rather
+    // than being the first one pushed down the page by them.
+    skeleton={<section key={data ? 'sessions' : 'projects'}><h2><SkelLine w="6em" /></h2><Skeleton shape="cards" box="extra-grid" n={3} /></section>}>
     <SearchInput value={q} onChange={setQ} onOpen={first} inputRef={field} />
     {projects.length ? <section><h2>{t('phone.projects')}</h2><div class="extra-grid">{projects.map(p => <button class="card extra-card" key={p.name} onClick={() => openProject(p)}><h3>{splitAddr(p.name)[0]}</h3><p class="muted">{p.host || p.path}</p></button>)}</div></section> : null}
     {needle && sessions.length ? <section><h2>{t('phone.sessions')}</h2><div class="extra-grid">{sessions.map(({ project: p, card: c }) => <button class="card extra-card" key={`${p.name}/${c.name}`} onClick={() => fleet.go(sessionRoute(p.name, c.name))}><StatusPill status={c.status} small /><h3>{c.name}</h3><p>{joinMeta(p.name, p.host)}</p><p class="muted">{c.branch} {c.pr} {c.label}</p><p>{c.msg}</p></button>)}</div></section> : null}

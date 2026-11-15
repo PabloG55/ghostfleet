@@ -1042,7 +1042,41 @@ function gridHasFlag(flag) {
 const gridSupportsJson = () => gridHasFlag('--json');
 const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted']);
 
+// ONE GRID PER FLEET, HOWEVER MANY ASK. A grid is a node process that runs tmux and bash, once
+// per fleet, and every reader asked for its own: each /api/grid, each /api/projects rollup, the
+// same again from a second device, from a paired machine on its phone's behalf, and from the
+// scans. Measured on a daemon with five fleets and two clients on the Projects screen: every
+// poll of either ran all five grids, seconds after the other had. On a machine where each exec
+// is also paid for by the endpoint daemons that watch it, that is the load.
+//   So a result is kept for GRID_TTL_MS, and a read that arrives while the run is still out
+// awaits THAT run instead of starting another. In memory only, and an error is never kept.
+//   ANYTHING THAT CHANGES A FLEET DROPS ITS GRID (gridDrop, from the writes below), so the read
+// a client makes after its own send is a fresh run and not the grid from before it. A run that
+// was already out when the fleet changed is left to finish for whoever awaits it, but nobody
+// new is handed it. What an agent does by itself is seen at most GRID_TTL_MS late, which is
+// under the fastest poll there is.
+const GRID_TTL_MS = 2500;
+const gridKept = new Map();          // cfg \0 sock \0 sub -> { at, r, run }
 function gridJson(t, sub = '') {
+  const key = `${t.cfg}\0${t.sock}\0${sub}`;
+  const hit = gridKept.get(key);
+  if (hit && hit.run) return hit.run;
+  if (hit && Date.now() - hit.at < GRID_TTL_MS) return Promise.resolve(hit.r);
+  const e = { at: 0, r: null, run: null };
+  e.run = gridRun(t, sub).then((r) => {
+    e.run = null; e.r = r; e.at = Date.now();
+    if (r.error && gridKept.get(key) === e) gridKept.delete(key);
+    return r;
+  });
+  gridKept.set(key, e);
+  return e.run;
+}
+// `sock` of the fleet that changed, or nothing for all of them (a write that names no project
+// this machine can place).
+function gridDrop(sock = '') {
+  for (const k of [...gridKept.keys()]) if (!sock || k.split('\0')[1] === sock) gridKept.delete(k);
+}
+function gridRun(t, sub = '') {
   return new Promise((resolve) => {
     // --sub is only passed when the grid knows it: an unknown flag is ignored by --json
     // (it is argv, not a mode), but a sub-grid answered as the top grid would draw the top
@@ -2076,10 +2110,10 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status, pla
 let pushHeld = [];
 const loginSeen = new Set();
 async function loginPushEvents() {
-  const items = loginList(shownToPhone());
+  const items = loginListKept(shownToPhone());
   // The subscribed phone may belong only to this Linux host. Read its peer's pending
   // logins on the same signed, scoped channel the app uses, without a second hop.
-  const fan = await fanOut('/api/logins', { client: { id: 'push' } }, 5000);
+  const fan = await loginFan({ client: { id: 'push' } }, 5000);
   for (const { peer, r } of fan || []) if (r.status === 200 && Array.isArray(r.json?.items))
     for (const item of r.json.items) items.push({ ...item, project: addrOf(item.project, peer), sock: `${peer.key}/${item.sock}` });
   const accountKey = item => `${item.sock}/account:${item.session}`;
@@ -2535,6 +2569,38 @@ async function callPeer(peer, opts, { fan = false } = {}) {
   else markPeer(peer, true);
   return r;
 }
+// PENDING SIGN-INS, READ ONCE FOR EVERYONE WHO MAY SEE THE SAME ONES. The list costs a tmux
+// call per fleet and a pane capture per session (lib/logins.mjs), and it is asked for by every
+// open client, and every few seconds by a paired machine's scan: measured at about a second a
+// call on a machine with seventeen fleets. The answer is kept for LOGINS_TTL_MS under the SET
+// OF PROJECTS it was computed for, so a reader shown fewer projects is never handed a list made
+// for one shown more. What is kept is what the endpoint already returns; it lives in this Map
+// and nowhere else — not in a log line, not in a file. A write drops it (loginsDrop).
+const LOGINS_TTL_MS = 3000;
+const loginsKept = new Map();
+function loginListKept(shown) {
+  const key = shown.map(t => `${t.cfg}\0${t.sock}\0${t.name}`).sort().join('\n');
+  const hit = loginsKept.get(key);
+  if (hit && Date.now() - hit.at < LOGINS_TTL_MS) return hit.items.map(x => ({ ...x }));
+  const items = loginList(shown);
+  loginsKept.set(key, { at: Date.now(), items });
+  for (const [k, v] of loginsKept) if (Date.now() - v.at >= LOGINS_TTL_MS) loginsKept.delete(k);
+  return items.map(x => ({ ...x }));
+}
+// The other machines' half of the same question, per client it is asked on behalf of (the peer
+// scopes its answer to that client). Concurrent askers share the call that is out.
+const loginFans = new Map();
+function loginFan(req, timeout) {
+  const key = String((req.client && req.client.id) || '');
+  const hit = loginFans.get(key);
+  if (hit && (hit.run || Date.now() - hit.at < LOGINS_TTL_MS)) return hit.run || Promise.resolve(hit.r);
+  const e = { at: 0, r: null, run: null };
+  e.run = fanOut('/api/logins', req, timeout).then((r) => { e.run = null; e.r = r; e.at = Date.now(); return r; },
+    (err) => { if (loginFans.get(key) === e) loginFans.delete(key); throw err; });
+  loginFans.set(key, e);
+  return e.run;
+}
+function loginsDrop() { loginsKept.clear(); loginFans.clear(); }
 async function fanOut(pathq, req, timeout = 8000) {
   const v = peers();
   if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
@@ -3246,10 +3312,10 @@ function agentCatalogue() {
   }
 
   if (p === '/api/logins' && req.method === 'GET') {
-    const fan = fanOut('/api/logins', req, 5000);
+    const fan = req.client.pair ? null : loginFan(req, 5000);     // a paired request never fans out again
     const project = url.searchParams.get('project');
     const shown = shownTo(req).filter(t => !project || t.name === project);
-    const items = loginList(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
+    const items = loginListKept(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
     for (const { peer, r } of await fan || [])
       if (r.status === 200 && Array.isArray(r.json?.items))
         for (const item of r.json.items) if (!project || project === `${item.project}@${peer.key}`)
@@ -3541,6 +3607,19 @@ function agentCatalogue() {
   }
 
   // ── writes ────────────────────────────────────────────────────────────────
+  // A WRITE CHANGES WHAT THE KEPT READS SAID. Whatever this request does — a send, a stop, a
+  // pause, a spawn, an answer, a sign-in finished — the grid of the fleet it names and the
+  // pending sign-ins are dropped when it has been answered, so the read that follows it runs
+  // again. A project this machine cannot place (another machine's, or none named) drops every
+  // grid: a read too many is the cheap mistake, and a grid from before the write is not.
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const named = String((body && ((body.args && body.args.project) || body.project)) || '');
+    res.on('finish', () => {
+      const t = named ? projects().find(x => x.name === named) : null;
+      gridDrop(t ? t.sock : '');
+      loginsDrop();
+    });
+  }
   if (p === '/api/term' || p === '/api/term/enable' || p === '/api/term/open') return termRoutes(p, req, res, body, c, ip);
 
   if (p === '/api/verb') {
