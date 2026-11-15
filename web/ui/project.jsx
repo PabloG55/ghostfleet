@@ -35,6 +35,9 @@ export function Card({ c, active, compact, onOpen }) {
       {c.label ? <span class="card-label"><Icon name="tag" /> {c.label}</span> : null}
       <div class="card-meta">
         <span class="branch" title={t('project.branch')}><Icon name="branch" /> {c.branch || '—'}</span>
+        {/* The agent when it is not Claude, as the desk's card draws it: a lost codex card reopens
+            with `codex resume`, and nothing else on the card says which of the two it is */}
+        {c.agent && c.agent !== 'claude' ? <span class="tag agent">{c.agent}</span> : null}
         {c.pr ? <span class="tag pr">PR {c.pr}</span> : null}
         {c.queued ? <span class="tag">{t('project.queued', { n: c.queued })}</span> : null}
         {c.sched ? <span class="tag sched" title={c.sched.msg || ''}><Icon name="clock" /> {new Date(c.sched.at * 1000).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })}</span> : null}

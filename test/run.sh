@@ -4038,6 +4038,9 @@ STUB
     is "$why" "no" "$(grep -qE "(^| )$not:" <<< "$L" && echo yes || echo no)"
   done
   # with the fleet's own profile in the env, the way the MCP asks another fleet (invocation())
+  IA="$(lre node "$ROOT/bin/fleet-grid.mjs" "$LS" --json | jq -r '.cards[] | select(.name == "idle") | .age' 2>/dev/null)"
+  is "...and its card says it died half an hour ago, not that it went quiet ten days ago" "yes" \
+     "$([ -n "$IA" ] && [ "$IA" -ge 1700 ] && [ "$IA" -le 2400 ] && echo yes || echo "no: age ${IA:-none}")"
   fl="$(lre env CLAUDE_CONFIG_DIR="$H/.claude-class" CLAUDE_FLEET_DIR="$CD" "$ROOT/bin/fleet-list" -s "$LS")"
   is "lost: fleet-list lists the same four" "billing-svc idle scratch toolbox" \
      "$(sed -nE 's/^([a-z-]+) +lost.*/\1/p' <<< "$fl" | sort | tr '\n' ' ' | sed 's/ $//')"

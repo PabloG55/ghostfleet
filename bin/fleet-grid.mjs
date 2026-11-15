@@ -1168,7 +1168,11 @@ function gather({ lead = false, sub = '' } = {}) {
       try { loginReason = accountLoginReason(accountPane(SOCK, s.name, FLEET_DIR)); } catch {}
       if (loginReason) status = 'need-you';
     }
-    const ageBase = tmt || st?.ts || 0;
+    // A lost card's age is how long ago it DIED, the question its line answers. That is the
+    // last time anything saw it alive (lib/fleet-scan.mjs: the governor's stamp, else its
+    // last write), not its transcript's last write: a session idle for ten days that died
+    // half an hour ago read `lost 10d`, which is the card you dismiss rather than reopen.
+    const ageBase = s.lostAt || tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
@@ -3366,7 +3370,7 @@ if (JSON_OUT) {
       // land here, and the card draws as it did before this field existed.
       pr:       c.pr || null,
       msg:      c.msg,
-      age:      c.age,            // seconds since the last transcript write; null = unknown
+      age:      c.age,            // seconds since the last transcript write (a lost card: since it died); null = unknown
       // ── THE TWO STATES THAT ARE NOT STATUSES, AND WERE NOT ON THE WIRE ──────
       // `exited` and `asleep` ride beside the status because the nine statuses describe
       // what a RUNNING agent is doing. Both were computed on the card and neither was
