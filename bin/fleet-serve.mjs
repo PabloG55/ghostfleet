@@ -736,6 +736,10 @@ const TOOLS_ALLOWED = {
   // Taking an undelivered prompt back out of the queue, so the phone can edit it. A write:
   // it removes a task somebody asked for, so it is audited like the send that queued it.
   fleet_unqueue:         { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
+  // The ledger's two writes the owner makes from the list of what waits on them: ask the session
+  // to EXPLAIN one item (a prompt, queued behind a running turn like any send), and ANSWER one
+  // (an option tapped). A write on both counts: each changes the ledger and explain starts a turn.
+  fleet_ledger:          { fields: ['project', 'session', 'verb', 'id', 'text', 'option'], write: true, subject: 'session' },
   fleet_resume:          { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
   // the session verbs, no passkey: it restores a conversation the fleet itself put to sleep.
@@ -943,7 +947,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // session's ledger as the owner's own words, which is owner authority in the memory and in the
   // lead's briefing. Unmarked it arrives as a brief, the way a lead's does.
   const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
-                                               status: tool === 'fleet_send' || tool === 'fleet_wake' });
+                                               status: tool === 'fleet_send' || tool === 'fleet_wake' || tool === 'fleet_ledger' });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
   // non-zero when the prompt never reached the session — the mod refused to submit it, the
@@ -960,7 +964,10 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // FAILED, and the phone went on to open a session that was not there.
   const unwoken = tool === 'fleet_wake' && typeof out === 'object' && !out.isError && out.code !== 0;
   if (unwoken) text = text.replace(/^fleet-hibernate: (FAILED — )?/gm, '');
-  const refused = undelivered || unwoken || (typeof out !== 'string' && out.isError === true);
+  // fleet-ledger says why on stderr and exits 1 (no such item, a send that never arrived).
+  const unledgered = tool === 'fleet_ledger' && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (unledgered) text = text.replace(/^fleet-ledger: |^ledger: /gm, '');
+  const refused = undelivered || unwoken || unledgered || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -1003,7 +1010,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   //   `queued: 'question'` when fleet-send held the prompt behind a prompt in the pane: it
   // succeeded, and it will not run until somebody answers, so the phone must not say "sent".
   const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question'
-    : !refused && tool === 'fleet_send' && /queued #\d+/.test(text) ? 'turn' : undefined;
+    : !refused && (tool === 'fleet_send' || tool === 'fleet_ledger') && /queued #\d+/.test(text) ? 'turn' : undefined;
   // TOO LATE TO EDIT IS NOT AN ERROR IN THE QUEUE, it is the answer: the drain typed it into
   // the session between the phone drawing the bubble and the tap. The executor hands a
   // non-zero exit back as text, so it is recognised by fleet-send's own sentence, and the
@@ -1773,13 +1780,16 @@ export function accountEvents(dirs, sizes) {
 }
 const accountSizes = new Map();
 
-// ── what each master holds for the owner: its ledger's waiting items ────────
-// mods/ghostfleet/hooks/ledger.js keeps a master's asks of the owner as items in state
-// `waiting`, and goes on with everything else; this is where they leave the session. One
+// ── what each master holds for the owner: its ledger's FOR YOU items ────────
+// mods/ghostfleet/hooks/ledger.js keeps what waits on the owner in the same ledger as what the
+// session owes, told apart by one rule (forYou): the questions it asked them, each numbered one
+// its own item, and the requests it holds until they decide. This is where they leave the
+// session, and ONLY they do: what the session owes (an open ask, its promises) is its work, not
+// the owner's, and listing it here is how a band said "3 open" over twenty questions. One
 // reader for the list (/api/waiting) and the bell (waitingEvents), so the phone's list and
 // the push cannot disagree about what is waiting. MASTERS ONLY: a worker's asks reach the
 // owner through its master, and listing both would be the same ask twice.
-//   The ledger is read whole, through the mod's own parseLedger/heldItems, never a copy of
+//   The ledger is read whole, through the mod's own parseLedger/forYouItems, never a copy of
 // their rules here. A file is re-read only when its mtime or size moved: the push watcher
 // asks every few seconds and a master's ledger changes once a turn.
 //   Rows carry the ask's TEXT, which is why they travel only on the authenticated read
@@ -1798,7 +1808,7 @@ export function heldScan(list, nowMs = Date.now(), cache = ledgerCache) {
   const bySock = new Map(list.map(t => [t.sock, t]));
   const rows = [], socks = new Set(), live = new Set();
   if (!L) return { rows, socks };
-  const { ledgerFile, parseLedger, heldItems } = L;
+  const { ledgerFile, parseLedger, forYouItems } = L;
   for (const m of masterRecords(scanDirs(list))) {
     const t = bySock.get(m.sock);
     if (!t) continue;
@@ -1814,7 +1824,7 @@ export function heldScan(list, nowMs = Date.now(), cache = ledgerCache) {
       hit = { st, l: parseLedger(text) };
       cache.set(file, hit);
     }
-    for (const i of heldItems(hit.l, nowMs))
+    for (const i of forYouItems(hit.l, nowMs))
       rows.push({ project: t.name, profile: t.profile, sock: m.sock, session: 'master', key: `${m.sessionId}:${i.id}`, ...i });
   }
   for (const f of [...cache.keys()]) if (!live.has(f)) cache.delete(f);
@@ -1832,7 +1842,7 @@ export function waitingEvents({ rows, socks }, seen) {
   const cur = new Map([...socks].map(s => [s, new Set()]));
   const project = new Map();
   for (const r of rows) {
-    if (r.state !== 'waiting' || !cur.has(r.sock)) continue;
+    if ((r.state !== 'waiting' && r.state !== 'question') || !cur.has(r.sock)) continue;
     cur.get(r.sock).add(r.key);
     project.set(r.sock, r.project);
   }
@@ -2416,7 +2426,7 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 // it controls. That grants no wider power than fleet_send already grants to that host.
 const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
-const PAIR_VERBS = new Set(['fleet_send', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_ledger', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
 // has to land where the run and its --check are. It is safe to expose because it is no more
@@ -3189,10 +3199,11 @@ function agentCatalogue() {
   }
 
   // ── what every master holds for the owner, across every project and profile ─
-  // The owner's list (web/ui/queue.jsx, "waiting on you"): each master's waiting items, the ones the
-  // owner replied to that it has not closed yet, and requests nobody has touched in hours. Read off
-  // the ledger files (heldScan); nothing here changes one. An item leaves when its master
-  // closes or drops it — the reply is a message (fleet_send), never a close by hand.
+  // The owner's list (web/ui/queue.jsx, "waiting on you"): each master's for-you items — the
+  // questions it asked and the requests it holds for the owner — with each question's number in its
+  // turn, its options and its explanation when one was asked for. Read off the ledger files
+  // (heldScan); nothing here changes one. An item leaves when it is answered (a message, or an
+  // option tapped: fleet_ledger answer) or its master drops it.
   if (p === '/api/waiting' && req.method === 'GET') {
     const fan = fanOut('/api/waiting', req, 5000);
     if (!L && !peers().peers.length) return send(res, 503, { ok: false, text: ledgerWhy });
@@ -3202,6 +3213,7 @@ function agentCatalogue() {
     return send(res, 200, mergeWaiting({ ok: true, at: now(), items: [...heldWakes(shown), ...rows.map(r => ({
       project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
       text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
+      ...(r.n ? { n: r.n } : {}), ...(r.options ? { options: r.options } : {}), ...(r.explain ? { explain: r.explain } : {}),
       // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
       ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) }))] }, await fan));
   }

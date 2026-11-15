@@ -1,21 +1,35 @@
 #!/usr/bin/env node
 // fleet-accounts — several Claude logins for one profile, spending what expires first.
 //
-//   fleet-accounts [list] [<profile>]       accounts, which is active, 5h/7d and how old each figure is
+//   fleet-accounts [list] [<profile>]       accounts, which is active, 5h/7d, how old each figure is,
+//                                           and the organization each saved login answers as
 //   fleet-accounts add <profile> <name>     save the login the profile's config dir holds NOW
 //   fleet-accounts remove <profile> <name>  forget a saved login
-//   fleet-accounts use <profile> <name>     switch the profile to it now, and keep it there 2h
+//   fleet-accounts use <profile> <name>     switch the profile to it now, and hold it there
+//   fleet-accounts auto <profile>           end a choice by hand: the planner picks again
+//   fleet-accounts exclude <profile> <name> keep it out of rotation (its login stays saved)
+//   fleet-accounts include <profile> <name> put it back
+//   fleet-accounts reset <profile> <name>   forget its figures: after a usage reset nobody saw
+//   fleet-accounts models <profile> <name> [--without <model>]… [--with <model>]…
+//                                           the models it lacks (fable, opus, sonnet, haiku)
 //   fleet-accounts threshold [<pct>]        show or set the switch point (default 97)
 //
 // Of the accounts under the threshold on BOTH the 5h and 7d windows, the profile runs on the
 // one whose 7d window resets soonest (its unspent allowance is the next to be lost); weeks
 // ending within 5h of each other are a tie, won by more 7d room. It leaves an account at the
 // threshold, and comes back once that account's 5h window resets. A planned switch waits 15
-// minutes after the last one, needs a week ending more than 5h sooner, and is never made onto
-// an account last read over 6h ago (`stale` in the list) — that one is only a failover.
+// minutes after the last one, needs a week ending more than 5h sooner, stays inside the
+// organization in use, and is never made onto an account last read over 6h ago (`stale` in
+// the list) — that one is only a failover. A failover tries the same organization first (a
+// session moved to another loses its earlier thinking), and an account lacking a model a
+// running session uses last of all. A choice by hand — `use`, or a /login — holds until that
+// account reaches the threshold or runs out, or until `auto`.
+// Who a login is comes from its token (the provider's own profile request), never from
+// .claude.json: a /login is filed under the account it answers as, or saved as a new slot.
 // Figures come only from real turns on the login in use, so an inactive account's are as old
 // as `list` says. A turn refused with Claude's "You've hit your … limit · resets …" marks
 // that account OUT until the reset it names; it is left at once and never chosen before then.
+// A turn refused for a model the account lacks teaches it that (see `models`).
 // An account its organization has disabled for Claude Code is BLOCKED and skipped: a /login
 // cannot fix that, only an admin of that organization can.
 // With every account spent, the profile's workers are parked until the earliest reset —
@@ -52,21 +66,25 @@ function fmtWin(w, label) {
   if (!w) return `${label} —`.padEnd(44);
   return `${label} ${String(w.pct).padStart(3)}% (resets ${w.resets_at}, read ${w.read})`.padEnd(44);
 }
-function list(only) {
+async function list(only) {
   const thr = A.threshold();
   const profs = only ? [prof(only)] : A.profiles();
+  if (X.enabled('accounts')) for (const p of profs) { try { await A.checkSlots(p); } catch {} }
   console.log(`accounts${X.enabled('accounts') ? '' : ' — DISABLED: ' + X.howToEnable('accounts')}; switch at ${thr}% of the 5h or 7d limit, spending the week that ends first`);
   if (!profs.length) { console.log('  no profile has an account yet — fleet-accounts add <profile> <name>'); return; }
   for (const p of profs) {
-    const d = A.describe(p, thr);
-    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${d.unsaved ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : d.exhausted ? `  — ALL EXHAUSTED${d.exhausted.until_at ? ' until ' + d.exhausted.until_at : ''}, ${A.WORKERS[d.exhausted.workers] || A.WORKERS.paused}` : ''}`);
+    const d = A.describe(p, thr, A.nowS(), { detail: true });
+    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${d.unsaved ? '  — ON A LOGIN IT CANNOT IDENTIFY, failover paused until it can' : d.exhausted ? `  — ALL EXHAUSTED${d.exhausted.until_at ? ' until ' + d.exhausted.until_at : ''}, ${A.WORKERS[d.exhausted.workers] || A.WORKERS.paused}` : ''}`);
     if (!d.accounts.length) { console.log('  (no accounts)'); continue; }
     if (d.accounts.length < 2) console.log('  one account: nothing to fail over to yet — add another');
-    if (d.pin) console.log(`  on '${d.pin.account}' by hand until ${d.pin.until_at} — the planner leaves it there unless it runs out`);
+    if (d.pin) console.log(`  on '${d.pin.account}' by hand — held there until it reaches the threshold or runs out (fleet-accounts auto ${p} hands it back to the planner)`);
     const w = Math.max(...d.accounts.map(a => a.name.length));
     for (const a of d.accounts) {
       console.log(`  ${a.active ? '*' : ' '} ${a.name.padEnd(w)}  ${fmtWin(a.five_hour, '5h')} ${fmtWin(a.seven_day, '7d')} ${a.state}${a.active && a.state !== 'active' ? ' (active)' : ''}`);
       if (a.fix) console.log(`    ${a.fix}`);
+      const more = [a.org ? `org ${a.org}` : 'org unknown', a.answers, a.without.length ? `lacks ${a.without.join(', ')}` : '',
+                    a.auto ? 'saved from a /login (fleet-accounts add names it)' : ''].filter(Boolean);
+      console.log(`      ${more.join(' · ')}`);
     }
   }
 }
@@ -74,17 +92,18 @@ function list(only) {
 async function main() {
   const [cmd = 'list', a1, a2] = process.argv.slice(2);
   if (['-h', '--help', 'help'].includes(cmd)) {
-    return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+    const src = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n');
+    return console.log(src.slice(1, src.findIndex(l => l.startsWith('// [experimental]')) + 1).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
   }
-  if (cmd === 'list') return list(a1);
+  if (cmd === 'list') return await list(a1);
   if (!X.enabled('accounts')) die(X.disabledWhy('accounts', 'fleet-accounts'));
   switch (cmd) {
     case 'add': {
       const p = prof(a1); if (!a2) die('add needs <profile> <name>', 2);
-      let r; try { r = A.add(p, a2); } catch (e) { die(e.message); }
+      let r; try { r = await A.add(p, a2); } catch (e) { die(e.message); }
       if (!r) die('another fleet-accounts is holding the profile — try again in a moment');
       const wired = A.wireStopFailure(cfgFor(p), HOOK);
-      console.log(`${p}/${a2}: ${r.readded ? 'login saved again (any NEEDS-LOGIN mark is cleared)' : 'login saved'} — ${r.st.order.length} account${r.st.order.length === 1 ? '' : 's'}: ${r.st.order.join(' → ')}`);
+      console.log(`${p}/${a2}: ${r.renamed ? `the login saved as '${r.renamed}' is now '${a2}'` : r.readded ? 'login saved again (any NEEDS-LOGIN mark is cleared)' : 'login saved'}${r.org ? `, in ${r.org}` : ''} — ${r.st.order.length} account${r.st.order.length === 1 ? '' : 's'}: ${r.st.order.join(' → ')}`);
       console.log(`  ${p} is now running on '${a2}' (it is the login the config dir holds).`);
       if (wired) console.log(`  wired the StopFailure hook into ${cfgFor(p)}/settings.json, so a login refused mid-turn is seen`);
       if (r.st.order[0] !== a2 && r.st.order.length > 1) console.log(`  to go back to '${r.st.order[0]}' now: fleet-accounts use ${p} ${r.st.order[0]}`);
@@ -98,10 +117,41 @@ async function main() {
     }
     case 'use': {
       const p = prof(a1); if (!a2) die('use needs <profile> <name>', 2);
-      let r; try { r = A.use(p, a2); } catch (e) { die(e.message); }
+      let r; try { r = await A.use(p, a2); } catch (e) { die(e.message); }
+      if (!r) die('another fleet-accounts is holding the profile — try again in a moment');
+      const held = `held there until it reaches the threshold or runs out (fleet-accounts auto ${p} hands it back to the planner)`;
+      if (r.made) console.log(`${p}: the login the config dir held is no slot's — saved as '${r.made}' first, so it is not lost`);
       if (r.wasOut) console.log(`${p}/${a2} hit its ${r.wasOut.why} (Claude said until ${A.hhmm(r.wasOut.until)}) — using it anyway, by hand; a turn refused at the limit again marks it out and moves on`);
-      if (r.same) return console.log(`${p} is already on '${a2}' — kept there until ${A.hhmm(r.st.pin.until)} unless it runs out`);
-      return console.log(`${p}: switched to '${a2}' — running sessions move onto it by themselves within half a minute, as after a /login; nothing is restarted. Kept there until ${A.hhmm(r.st.pin.until)} unless it runs out`);
+      if (r.same) return console.log(`${p} is already on '${a2}' — ${held}`);
+      return console.log(`${p}: switched to '${a2}' — running sessions move onto it by themselves within half a minute, as after a /login; nothing is restarted. ${held[0].toUpperCase()}${held.slice(1)}`);
+    }
+    case 'auto': {
+      const p = prof(a1);
+      let was; try { was = A.auto(p); } catch (e) { die(e.message); }
+      return console.log(was ? `${p}: no longer held on '${was}' — the planner picks from the next tick` : `${p}: nothing was held by hand — the planner already picks`);
+    }
+    case 'exclude': case 'include': {
+      const p = prof(a1); if (!a2) die(`${cmd} needs <profile> <name>`, 2);
+      try { A.setExcluded(p, a2, cmd === 'exclude'); } catch (e) { die(e.message); }
+      return console.log(cmd === 'exclude'
+        ? `${p}/${a2}: excluded — never chosen, and left at the next tick when another account can run; its login stays saved (fleet-accounts include ${p} ${a2})`
+        : `${p}/${a2}: back in rotation`);
+    }
+    case 'reset': {
+      const p = prof(a1); if (!a2) die('reset needs <profile> <name>', 2);
+      try { A.resetUsage(p, a2); } catch (e) { die(e.message); }
+      return console.log(`${p}/${a2}: figures cleared — nothing read before now is believed for it again; its next turn reads the real ones`);
+    }
+    case 'models': {
+      const p = prof(a1); if (!a2) die('models needs <profile> <name> [--without <model>] [--with <model>]', 2);
+      const rest = process.argv.slice(5), without = [], have = [];
+      for (let i = 0; i < rest.length; i++) {
+        const f = rest[i], v = rest[i + 1];
+        if ((f === '--without' || f === '--with') && v && /^[A-Za-z0-9._\[\]-]{1,80}$/.test(v)) { (f === '--without' ? without : have).push(v); i++; }
+        else die(`models: '${f}' is not --without <model> or --with <model>`, 2);
+      }
+      let lacks; try { lacks = A.setModels(p, a2, { without, with: have }); } catch (e) { die(e.message); }
+      return console.log(lacks.length ? `${p}/${a2} lacks ${lacks.join(', ')} — the last resort while a session runs ${lacks.length === 1 ? 'it' : 'one of them'}` : `${p}/${a2}: lacks no model it knows of`);
     }
     case 'threshold': {
       if (a1 === undefined) return console.log(`${A.threshold()}`);

@@ -68,6 +68,12 @@ try {
   }
   await b.call('Network.enable');
   await b.call('Network.setBypassServiceWorker', { bypass: true });
+  // These navigation scenarios start with no assistant approval covering the controls.
+  await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+    const real = window.fetch.bind(window);
+    window.fetch = (u, o) => String(u).includes('fixtures/jarvis.json')
+      ? real(u, o).then(async r => new Response(JSON.stringify({ ...await r.json(), pending: [] }), { status: 200 }))
+      : real(u, o);` });
   const base = srv.base;
   const goto = async (u) => { await b.call('Page.navigate', { url: u }); await sleep(600); };
   async function until(cond, ms = 8000) {
@@ -204,7 +210,9 @@ try {
     await step(`${at}: the queue names the machine`, async () => {
       await fresh({ ...size, paired: 'online', hash: '#/queue' });
       s = await settle(x => x.queue.some(q => /rotate|billing-svc/.test(q)) || x.queue.length > 1);
-      const vm = s.queue.filter(q => /\| vm · /.test(q));
+      // How long it has waited ends the line ("· 2 h ago"): a clock reading, not the machine's,
+      // so it is cut before comparing, and only when there is one to cut.
+      const vm = s.queue.filter(q => /\| vm · /.test(q)).map(q => q.replace(/ · [^·]* ago$/, ''));
       is(`${at}: the queue is merged — the vm's master's item is here, saying the machine`, ['billing-svc · #4 | vm · waits on the person: pick now or after'], vm);
     });
 

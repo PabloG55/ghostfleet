@@ -34,7 +34,7 @@ export const isAdmin = (user) => !!user && !user.disabled && user.role === 'admi
 // Each fleet verb is one of the actions above. A verb that is not listed is refused, so a new
 // tool added to index.mjs's allowlist stays closed until someone says what it needs.
 export const TOOL_ACTION = {
-  fleet_send: 'prompt', fleet_answer: 'prompt', fleet_resume: 'prompt', fleet_unqueue: 'prompt',
+  fleet_send: 'prompt', fleet_answer: 'prompt', fleet_resume: 'prompt', fleet_unqueue: 'prompt', fleet_ledger: 'prompt',
   fleet_interrupt: 'prompt', fleet_pause: 'prompt', fleet_wake: 'prompt', fleet_reopen: 'prompt',
   fleet_rename: 'prompt', gfw_label: 'prompt', gfw_schedule: 'prompt', gfw_unschedule: 'prompt',
   fleet_spawn: 'spawn',

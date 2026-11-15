@@ -224,6 +224,14 @@ export const plainText = (md) => String(md || '')
   .replace(/\s+/g, ' ')
   .trim();
 
+// The device voice's speed, set by the person under `gf.rate` (the key the phone's own screen used
+// before it moved onto web/ui): anything outside what a voice can do is the old fixed 1.05.
+export function savedRate() {
+  let r = NaN;
+  try { r = Number(localStorage.getItem('gf.rate')); } catch {}
+  return Number.isFinite(r) && r >= 0.5 && r <= 2 ? r : 1.05;
+}
+
 let playing = null;
 export function stopSpeaking() {
   window.speechSynthesis?.cancel();
@@ -238,7 +246,7 @@ function utter(text, onEnd) {
     ? all.find(x => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find(x => /^es/i.test(x.lang))
     : all.find(x => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find(x => /^en/i.test(x.lang));
   if (v) u.voice = v;
-  u.lang = v?.lang || speechLang(); u.rate = 1.05;
+  u.lang = v?.lang || speechLang(); u.rate = savedRate();
   u.onend = () => onEnd?.(); u.onerror = () => onEnd?.();
   s.speak(u);
 }
