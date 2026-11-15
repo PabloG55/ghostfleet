@@ -3016,6 +3016,20 @@ var ROWS = {
 		"............",
 		"............"
 	],
+	chevron: [
+		"............",
+		"...##.......",
+		"....##......",
+		".....##.....",
+		"......##....",
+		".......##...",
+		".......##...",
+		"......##....",
+		".....##.....",
+		"....##......",
+		"...##.......",
+		"............"
+	],
 	link: [
 		"............",
 		".......####.",
@@ -3843,10 +3857,9 @@ function Fold({ cls, k, shut, onToggle, items, label, dot, children }) {
 		"aria-expanded": !shut,
 		onClick: () => onToggle(k),
 		children: [
-			/* @__PURE__ */ u("span", {
-				class: "chev",
-				"aria-hidden": "true",
-				children: shut ? "▸" : "▾"
+			/* @__PURE__ */ u(Icon, {
+				name: "chevron",
+				class: "chev"
 			}),
 			shut ? /* @__PURE__ */ u(Led, {
 				state: topLight(items.flatMap((p) => p.sessions.map((x) => x.status))),
@@ -11444,13 +11457,20 @@ function StackPicker({ members = [], onOpen }) {
 							[p.name]: open
 						}));
 					},
-					children: [/* @__PURE__ */ u("summary", { children: [/* @__PURE__ */ u("h2", { children: joinMeta(splitAddr(p.name)[0], p.host) }), /* @__PURE__ */ u("span", {
-						class: "muted",
-						children: t("phone.stackCount", {
-							n: sessions.length,
-							selected: count
+					children: [/* @__PURE__ */ u("summary", { children: [
+						/* @__PURE__ */ u(Icon, {
+							name: "chevron",
+							class: "chev"
+						}),
+						/* @__PURE__ */ u("h2", { children: joinMeta(splitAddr(p.name)[0], p.host) }),
+						/* @__PURE__ */ u("span", {
+							class: "muted",
+							children: t("phone.stackCount", {
+								n: sessions.length,
+								selected: count
+							})
 						})
-					})] }), /* @__PURE__ */ u("div", { children: cards.map((c) => {
+					] }), /* @__PURE__ */ u("div", { children: cards.map((c) => {
 						const m = {
 							project: p.name,
 							session: c.name

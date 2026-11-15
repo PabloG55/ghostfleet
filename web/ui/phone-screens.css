@@ -24,8 +24,6 @@
 /* Cover partial glyphs from rows clipped at the list's scroll boundary. */
 .stack-group > summary { position: sticky; top: 0; z-index: 3; background: var(--bg); list-style: none; cursor: pointer; padding: 16px 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .stack-group > summary::-webkit-details-marker { display: none; }
-.stack-group > summary::before { content: '▸'; color: var(--dim); }
-.stack-group[open] > summary::before { content: '▾'; }
 .stack-group > summary h2 { margin: 0; color: var(--fg); }
 .stack-group > summary > span { margin-left: auto; font-size: 12px; }
 .stack-choice { display: grid; grid-template-columns: 20px minmax(0,28ch) max-content minmax(0,36ch); justify-content: start; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; min-height: 44px; }
