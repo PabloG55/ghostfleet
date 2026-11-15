@@ -170,6 +170,11 @@ const INIT = () => `(() => {
   try {
     sessionStorage.setItem('gf.session:' + location.origin, JSON.stringify({ t: 'chat-lands-token', exp: Date.now() / 1000 + 3600 }));
   } catch {}
+  // What the chat's status line SAID, whenever it said it: the row reads this, not whatever it
+  // happened to sample, so a runner that gets to the row late cannot miss a line that was up and gone.
+  window.__said = [];
+  new MutationObserver(() => { const l = document.querySelector('.chat .loading'); const x = l && l.textContent; if (x && window.__said[window.__said.length - 1] !== x) window.__said.push(x); })
+    .observe(document, { subtree: true, childList: true, characterData: true });
   let hidden = false;
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
@@ -211,6 +216,8 @@ async function scenario(name, run, { desktop = false, wide = false, open = null,
     if (open) {
       const shown = await until(() => b.evaluate(() => !!document.querySelector('.chat')), 15000);
       if (!shown) { is(`${name}: the chat screen is drawn`, true, false); return; }
+      // CHAT_LANDS_LAG=1500: the row starts late, as it does on a runner that is slow to get to it.
+      if (+process.env.CHAT_LANDS_LAG) await sleep(+process.env.CHAT_LANDS_LAG);
       await run({ b, d, st: d.st, has, say, last });
       return;
     }
@@ -475,6 +482,7 @@ const SCENARIOS = [
       if (st.busy) skeleton = true;
       return false;
     }, kind === 'hang' ? 25000 : 15000);
+    said = (await b.evaluate(() => (window.__said || []).join(' | '))) || said;
     is(`${n}: the conversation appears without sending anything`, true, !!shown);
     // Waiting is drawn as the skeleton, without words (the phone's rule since v70); a read that
     // FAILED is said in words, with the reason and that it is being asked again.
