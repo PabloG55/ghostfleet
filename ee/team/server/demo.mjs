@@ -5,6 +5,7 @@ import * as attachments from './attach.mjs';
 import { dataDir } from './users.mjs';
 import { t as tr } from '../shared/i18n/index.js';
 import { literalProject } from './terminal-tab.mjs';
+import { demoLedger } from './screen-demo.mjs';
 
 const now = () => Math.floor(Date.now() / 1000);
 const ago = (min) => now() - min * 60;
@@ -152,6 +153,19 @@ function say(k, text) {
 }
 
 export async function act(tool, a) {
+  // The ledger's writes touch no demo session: they change the waiting list (screen-demo.mjs).
+  if (tool === 'fleet_ledger') {
+    find(a.project);
+    const key = `${a.project}#${a.id}`;
+    if (a.verb === 'explain') {
+      demoLedger.explain.set(key, { askedAt: Date.now(), lang: 'es' });
+      return demoLedger.busy.has(key)
+        ? { ok: true, queued: 'turn', text: `asked ${a.session} to explain ${a.id}; it is busy, so the request waits for its turn to end (queued #1)` }
+        : { ok: true, text: `asked ${a.session} to explain ${a.id}` };
+    }
+    if (a.verb === 'answer') { demoLedger.answered.add(key); return { ok: true, text: `ledger: ${a.id} answered` }; }
+    return { ok: true, text: 'ledger: nothing open' };
+  }
   const { p, k } = find(a.project, a.session ?? null);
   switch (tool) {
     case 'fleet_send': {

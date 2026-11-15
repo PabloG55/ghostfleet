@@ -422,6 +422,17 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .modal > .field { padding: 0 18px 8px; }
 .modal footer { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px; }
 .modal-body footer { padding: 6px 0 0; }
+/* A SHEET (Modal `sheet`): the dialog docked to the bottom edge at a phone's width, where the
+ * thumb is, full width, over the home indicator's inset. At a desk it stays the centred dialog. */
+@media (max-width: 900px) {
+  .scrim.sheet-scrim { place-items: end stretch; padding: 0; }
+  .modal.sheet { max-width: none; max-height: 88vh; max-height: 88dvh; border-radius: 14px 14px 0 0; border-bottom: 0;
+                 padding-bottom: var(--safe-b); }
+}
+@media (max-width: 900px) and (prefers-reduced-motion: no-preference) {
+  .modal.sheet { animation: sheet-up .22s cubic-bezier(.2, .8, .2, 1); }
+}
+@keyframes sheet-up { from { transform: translateY(24px); opacity: .4; } to { transform: none; opacity: 1; } }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding-top: 10px; }
 .advanced summary { cursor: pointer; color: var(--dim); font-size: 13px; }

@@ -1448,7 +1448,7 @@ never written, and nobody finds out until they go looking. So does "I'll merge w
 green", said once and never done. The mod holds both to account from inside the session.
 
 ```
-ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
+ledger · 2 open · 3 for you · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
 ```
 
 The ledger is a hybrid. **The agent closes its own items** as it finishes them, through
@@ -1609,6 +1609,35 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   `~/.claude-*/fleet`, `$CLAUDE_FLEET_DIR`, each once by real path), beside the state of every
   item and the age and sender of everything still owed. Counts only: no text, session,
   branch or path. A ledger written before the counter is reported `untallied`.
+- **Two directions: what the agent owes, and what is for you.** `N open` is what the agent
+  owes: the person's asks, a lead's briefs, its own promises. `M for you` is what waits on the
+  person: a question the agent put to them, and a request it holds until they decide. Measured
+  before the split: a lead ended a turn on 20 numbered questions to the owner while its band
+  read `3 open`, and those three were the agent's own work. So the judge lists each question a
+  turn ends on as an item of its own (`source: question`, its options kept as `a`, `b`, `1`, `2`),
+  one per numbered question; a request held `waiting` in the same turn **awaits** those
+  questions and is not counted a second time, and it is the agent's again once they are
+  answered. An answer in the chat settles the question it names ("1", "sí al 3", "5: no, use
+  JSON"; a lone number picks that option of the one question that has it), and the judge can
+  never close a for-you item as `done`, because what it lacks is the person's answer, not the
+  agent's work. **A prompt the fleet pasted is never the person's**: `fleet-send` (and so
+  `fleet-spawn --prompt`) and `fleet-schedule` write `<sock>.<session>.pasted` before they paste,
+  and the mod spends that mark at submit time: the item is the sender's (`source: fleet`), owed
+  to it, and never listed as waiting on the owner. The marker is the test, by time and length,
+  never the wording. An item written before directions existed is read by the same rule:
+  nothing is rewritten or deleted. One list everywhere: the band, `/ledger`, the phone's
+  "waiting on you", the briefing's WAITING ON THE OWNER and `fleet-know waiting` all read
+  `forYou()`.
+- **Explain it to me.** `fleet-ledger [session] explain <id>`, `/ledger explain <id>` and the
+  Explain button on every for-you card (phone, desk and the team app, through
+  `fleet_ledger`) ask the session that raised the item to explain that one item in plain words:
+  what is being decided, what each option causes, and which it recommends, in the person's
+  language. It goes as a prompt (`fleet-send --explain`), so a session mid-turn takes it when
+  that turn ends and nothing is interrupted; the sheet says so meanwhile. The explanation is
+  kept on the item, shown in a sheet on a phone and a dialog at a desk, never inline, with the
+  item's options beside it: choosing one sends the answer to the session, quoting the item, and
+  `fleet_ledger answer` records it. The explanation comes from the session that asked, not
+  from a second model.
 - **Waiting on the person.** An item the judge reports `in-progress` because it waits on
   the person ("waits on the person: their pick between A and B") leaves the open list and the
   gate as `waiting`, and comes back when the person's message speaks to it. A reply like
@@ -1616,10 +1645,13 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   message started** (typed, or marked as the owner's; never a nudge, the gate's re-prompt
   or a lead's brief) shows the judge that session's waiting items, newest first, ten at
   most, mentioned or not: done closes one, in progress reopens it, and one the turn did not
-  address stays waiting. **A waiting item untouched for 24 hours expires**: off the phone's
-  queue and the status note at once, written `expired` at the next judged turn, still in
-  `/ledger all` and still closable. Measured before it: of 35 waiting items within a week,
-  34 were over a day old and 27 had three or more messages from the person since. A master's
+  address stays waiting. **An item waiting on the person never expires**: it stays until they
+  answer or drop it. One waiting on anything else (a lead's brief held for a deploy, a
+  registry) **expires after 24 hours untouched**: off the phone's queue and the status note at
+  once, written `expired` at the next judged turn, still in `/ledger all` and still closable.
+  Measured before the expiry: of 35 waiting items within a week, 34 were over a day old and 27
+  had three or more messages from the person since; it retired the person's questions with the
+  rest, which is why it now spares them. A master's
   waiting items are what an unattended run ends up holding, so they leave the session two
   ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
   and profile it lists; workers' items reach the owner through their master), Projects
@@ -1653,8 +1685,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   session, without a turn. `fleet-ledger [session] drop-carried <worker> "<reason>"` drops
   every item still owed that was carried from one stopped worker, with one reason: the
   person's or the lead's call after reading them, never run on anyone's behalf. `clear` closes every open item and keeps the history; `all` shows
-  who closed each and the proof or reason. Items older than 7 days drop off the band and
-  the gate; the file keeps the newest 200.
+  who closed each and the proof or reason. Items the agent owes drop off the band and the gate
+  after 7 days; what is for the person stays until they answer it. The file keeps the newest
+  200, and a for-you item is never what the trim takes.
 - **A stopped worker's unfinished items go to its lead.** `fleet-stop` (with or without
   `--reclaim`, and the MCP `fleet_stop`, which runs it) hands each item still `open`,
   `waiting` or `not-done` to the lead's ledger: its sub-lead's when it has one, else

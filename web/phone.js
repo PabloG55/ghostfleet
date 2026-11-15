@@ -1277,6 +1277,23 @@ var en_default = {
 	"phone.reasonNeeded": "Flagged steps need a written reason",
 	"phone.queueState.waiting": "Waiting",
 	"phone.queueState.replied": "Replied",
+	"phone.queueState.question": "Question for you",
+	"phone.questionN": "question {num}",
+	"phone.explain": "Explain",
+	"phone.explained": "explained",
+	"phone.explainedBy": "explained by {session}",
+	"phone.explainAsking": "Asked {session} to explain it. The explanation appears here when it answers.",
+	"phone.explainQueued": "{session} is busy, so the request waits for its current turn to end and nothing is interrupted. The explanation appears here.",
+	"phone.explainFailed": "Could not ask: {why}",
+	"phone.explainRetry": "Try again",
+	"phone.explainAgain": "Ask for a new explanation",
+	"phone.explainGone": "This no longer waits on you: it was answered or closed.",
+	"phone.answerIt": "Your answer",
+	"phone.answerOwnWords": "Or answer in your own words",
+	"phone.answerWords": "Answer in your own words",
+	"phone.answered": "Answered",
+	"phone.answerNotMarked": "Sent, but the list could not mark it answered: {why}",
+	"phone.replyHintYours": "Sent to the session quoting this item, and it counts as your answer.",
 	"phone.cardHeld": "Held",
 	"phone.signInFailed": "Sign-in failed",
 	"phone.stackPlace": "Stacks",
@@ -2139,6 +2156,23 @@ var es_default = {
 	"phone.reasonNeeded": "Los pasos con alertas necesitan una explicación escrita",
 	"phone.queueState.waiting": "Esperando",
 	"phone.queueState.replied": "Respondido",
+	"phone.queueState.question": "Pregunta para ti",
+	"phone.questionN": "pregunta {num}",
+	"phone.explain": "Explícame",
+	"phone.explained": "explicado",
+	"phone.explainedBy": "lo explicó {session}",
+	"phone.explainAsking": "Le pedí a {session} que lo explique. La explicación aparece aquí cuando responda.",
+	"phone.explainQueued": "{session} está ocupado, así que el pedido espera a que termine lo que está haciendo, sin interrumpirlo. La explicación aparece aquí.",
+	"phone.explainFailed": "No se pudo preguntar: {why}",
+	"phone.explainRetry": "Intentar de nuevo",
+	"phone.explainAgain": "Pedir otra explicación",
+	"phone.explainGone": "Esto ya no espera por ti: se respondió o se cerró.",
+	"phone.answerIt": "Tu respuesta",
+	"phone.answerOwnWords": "O responde con tus palabras",
+	"phone.answerWords": "Responde con tus palabras",
+	"phone.answered": "Respondido",
+	"phone.answerNotMarked": "Se envió, pero la lista no pudo marcarlo como respondido: {why}",
+	"phone.replyHintYours": "Se envía a la sesión citando esto, y cuenta como tu respuesta.",
 	"phone.cardHeld": "Retenido",
 	"phone.signInFailed": "Falló el inicio de sesión",
 	"phone.stackPlace": "Grupos de sesiones",
@@ -3171,7 +3205,7 @@ function ProjectName({ name }) {
 		children: [" · ", host]
 	})] }) : bare;
 }
-function Modal({ title, onClose, children, wide }) {
+function Modal({ title, onClose, children, wide, sheet }) {
 	h(() => {
 		const k = (e) => {
 			if (e.key === "Escape") onClose();
@@ -3180,12 +3214,12 @@ function Modal({ title, onClose, children, wide }) {
 		return () => removeEventListener("keydown", k);
 	}, [onClose]);
 	return /* @__PURE__ */ u("div", {
-		class: "scrim",
+		class: `scrim${sheet ? " sheet-scrim" : ""}`,
 		onMouseDown: (e) => {
 			if (e.target === e.currentTarget) onClose();
 		},
 		children: /* @__PURE__ */ u("div", {
-			class: `modal${wide ? " wide" : ""}`,
+			class: `modal${wide ? " wide" : ""}${sheet ? " sheet" : ""}`,
 			role: "dialog",
 			"aria-modal": "true",
 			"aria-label": title,
@@ -11389,10 +11423,14 @@ function Held({ row, project, id }) {
 //#endregion
 //#region web/ui/queue.jsx
 var replyText = (row, text) => `Re your ledger item ${row.id}: "${row.text}"\n\n${String(text || "").trim()}`;
+var yours = (r) => r.state === "question" || r.state === "waiting";
+var optionLine = (o) => `${o.key}) ${o.text}`;
+var PENDING_POLL_MS = 2e3;
 function Queue() {
 	const fleet = useFleet();
 	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, []);
 	const [row, setRow] = d(null), [drafts, setDrafts] = d({}), [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const [explaining, setExplaining] = d(null), [asked, setAsked] = d({});
 	const keyOf = (r) => `${r.project}/${r.id}`;
 	const text = row ? drafts[keyOf(row)] || "" : "";
 	const setText = (v) => {
@@ -11402,23 +11440,40 @@ function Queue() {
 			[k]: v
 		}));
 	};
+	const clearDraft = (r) => setDrafts((d) => {
+		const n = { ...d };
+		delete n[keyOf(r)];
+		return n;
+	});
+	const answer = async (r, said, option) => {
+		const session = r.session || "master";
+		await fleet.act("fleet_send", {
+			project: r.project,
+			session,
+			prompt: replyText(r, said)
+		});
+		if (!yours(r)) return;
+		try {
+			await fleet.act("fleet_ledger", {
+				project: r.project,
+				session,
+				verb: "answer",
+				id: String(r.id),
+				...option ? { option: option.key } : {},
+				text: said
+			});
+		} catch (e) {
+			toast(t("phone.answerNotMarked", { why: e.message }), "bad");
+		}
+	};
 	const send = async () => {
 		if (!text.trim() || busy) return;
 		setBusy(true);
 		setFailure("");
-		const k = keyOf(row);
 		try {
-			await fleet.act("fleet_send", {
-				project: row.project,
-				session: "master",
-				prompt: replyText(row, text)
-			});
+			await answer(row, text);
+			clearDraft(row);
 			setRow(null);
-			setDrafts((d) => {
-				const n = { ...d };
-				delete n[k];
-				return n;
-			});
 			reload();
 		} catch (e) {
 			setFailure(e.message);
@@ -11426,6 +11481,36 @@ function Queue() {
 			setBusy(false);
 		}
 	};
+	const explain = async (r) => {
+		setExplaining(r);
+		const live = r.explain || {};
+		if (live.text || live.askedAt && !live.failed) return;
+		try {
+			const out = await fleet.act("fleet_ledger", {
+				project: r.project,
+				session: r.session || "master",
+				verb: "explain",
+				id: String(r.id)
+			});
+			setAsked((a) => ({
+				...a,
+				[keyOf(r)]: {
+					at: Date.now(),
+					queued: !!(out && out.queued)
+				}
+			}));
+			reload();
+		} catch (e) {
+			setAsked((a) => ({
+				...a,
+				[keyOf(r)]: {
+					at: Date.now(),
+					failed: e.message
+				}
+			}));
+		}
+	};
+	const items = data?.items || [];
 	return /* @__PURE__ */ u(PhoneScreen, {
 		title: t("phone.queue"),
 		error,
@@ -11434,30 +11519,16 @@ function Queue() {
 			/* @__PURE__ */ u(PendingSignIns, {}),
 			/* @__PURE__ */ u("div", {
 				class: "extra-grid",
-				children: (data?.items || []).map((r) => r.state === "held" ? /* @__PURE__ */ u(HeldCard, { row: r }, `${r.project}/${r.id}`) : /* @__PURE__ */ u("article", {
-					class: "card extra-card s-yellow",
-					children: [
-						/* @__PURE__ */ u("span", {
-							class: "pill c-yellow",
-							children: ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state
-						}),
-						/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`) }),
-						/* @__PURE__ */ u("p", { children: r.text }),
-						/* @__PURE__ */ u("p", {
-							class: "muted",
-							children: joinMeta(r.host, typeof r.reason === "string" ? r.reason : r.reason?.text)
-						}),
-						/* @__PURE__ */ u(Btn, {
-							onClick: () => {
-								setRow(r);
-								setFailure("");
-							},
-							children: t("phone.reply")
-						})
-					]
-				}, `${r.project}/${r.id}`))
+				children: items.map((r) => r.state === "held" ? /* @__PURE__ */ u(HeldCard, { row: r }, keyOf(r)) : /* @__PURE__ */ u(ForYouCard, {
+					r,
+					onReply: () => {
+						setRow(r);
+						setFailure("");
+					},
+					onExplain: () => explain(r)
+				}, keyOf(r)))
 			}),
-			data && !data.items?.length ? /* @__PURE__ */ u("p", {
+			data && !items.length ? /* @__PURE__ */ u("p", {
 				class: "empty",
 				children: t("phone.nothingWaiting")
 			}) : null,
@@ -11468,7 +11539,7 @@ function Queue() {
 					/* @__PURE__ */ u("p", { children: row.text }),
 					/* @__PURE__ */ u("p", {
 						class: "muted",
-						children: t("phone.replyHint")
+						children: t(yours(row) ? "phone.replyHintYours" : "phone.replyHint")
 					}),
 					/* @__PURE__ */ u("label", {
 						class: "field",
@@ -11490,8 +11561,180 @@ function Queue() {
 						children: t("common.send")
 					})
 				]
+			}) : null,
+			explaining ? /* @__PURE__ */ u(ExplainSheet, {
+				row: items.find((x) => keyOf(x) === keyOf(explaining)) || null,
+				was: explaining,
+				asked: asked[keyOf(explaining)],
+				reload,
+				draft: drafts[keyOf(explaining)] || "",
+				setDraft: (v) => setDrafts((d) => ({
+					...d,
+					[keyOf(explaining)]: v
+				})),
+				onAnswer: async (said, option) => {
+					await answer(explaining, said, option);
+					clearDraft(explaining);
+					setExplaining(null);
+					reload();
+					toast(t("phone.answered"));
+				},
+				onAgain: () => {
+					setAsked((a) => ({
+						...a,
+						[keyOf(explaining)]: null
+					}));
+					explain({
+						...explaining,
+						explain: null
+					});
+				},
+				onClose: () => setExplaining(null)
 			}) : null
 		]
+	});
+}
+function ForYouCard({ r, onReply, onExplain }) {
+	const label = r.state === "question" ? t("phone.queueState.question") : ["waiting", "replied"].includes(r.state) ? t(`phone.queueState.${r.state}`) : r.state;
+	const reason = typeof r.reason === "string" ? r.reason : r.reason?.text;
+	return /* @__PURE__ */ u("article", {
+		class: "card extra-card s-yellow foryou-card",
+		children: [
+			/* @__PURE__ */ u("span", {
+				class: "pill c-yellow",
+				children: label
+			}),
+			/* @__PURE__ */ u("h3", { children: joinMeta(splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`, r.n ? t("phone.questionN", { num: r.n }) : null) }),
+			/* @__PURE__ */ u("p", { children: r.text }),
+			r.options?.length ? /* @__PURE__ */ u("ul", {
+				class: "foryou-options",
+				children: r.options.map((o) => /* @__PURE__ */ u("li", { children: optionLine(o) }, o.key))
+			}) : null,
+			/* @__PURE__ */ u("p", {
+				class: "muted",
+				children: joinMeta(r.host, reason, r.since ? ago(Date.now() / 1e3 - r.since) : "", r.explain?.text ? t("phone.explained") : null)
+			}),
+			/* @__PURE__ */ u("div", {
+				class: "foryou-actions",
+				children: [yours(r) ? /* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					icon: "question",
+					onClick: onExplain,
+					children: t("phone.explain")
+				}) : null, /* @__PURE__ */ u(Btn, {
+					onClick: onReply,
+					children: t("phone.reply")
+				})]
+			})
+		]
+	});
+}
+function ExplainSheet({ row, was, asked, reload, draft, setDraft, onAnswer, onAgain, onClose }) {
+	const r = row || was, ex = row && row.explain || null;
+	const [busy, setBusy] = d(false), [failure, setFailure] = d("");
+	const session = r.session || "master";
+	const failed = asked && asked.failed || ex && ex.failed || "";
+	const pending = !failed && !(ex && ex.text) && !!row;
+	h(() => {
+		if (!pending) return void 0;
+		const iv = setInterval(() => {
+			if (!document.hidden) reload();
+		}, PENDING_POLL_MS);
+		return () => clearInterval(iv);
+	}, [pending, reload]);
+	const go = async (said, option) => {
+		if (busy || !String(said || "").trim()) return;
+		setBusy(true);
+		setFailure("");
+		try {
+			await onAnswer(String(said).trim(), option);
+		} catch (e) {
+			setFailure(e.message);
+		} finally {
+			setBusy(false);
+		}
+	};
+	const status = !row ? /* @__PURE__ */ u("p", {
+		class: "muted",
+		children: t("phone.explainGone")
+	}) : ex && ex.text ? /* @__PURE__ */ u("div", {
+		class: "explain-text",
+		children: [/* @__PURE__ */ u(Markdown, { text: ex.text }), /* @__PURE__ */ u("p", {
+			class: "muted",
+			children: joinMeta(t("phone.explainedBy", { session }), ex.at ? ago((Date.now() - ex.at) / 1e3) : "")
+		})]
+	}) : failed ? /* @__PURE__ */ u("div", {
+		class: "explain-wait",
+		children: [/* @__PURE__ */ u("p", {
+			class: "err",
+			role: "alert",
+			children: t("phone.explainFailed", { why: failed })
+		}), /* @__PURE__ */ u(Btn, {
+			onClick: onAgain,
+			children: t("phone.explainRetry")
+		})]
+	}) : /* @__PURE__ */ u("div", {
+		class: "explain-wait",
+		role: "status",
+		children: [/* @__PURE__ */ u("span", {
+			class: "explain-dots",
+			"aria-hidden": "true"
+		}), /* @__PURE__ */ u("p", { children: asked && asked.queued ? t("phone.explainQueued", { session }) : t("phone.explainAsking", { session }) })]
+	});
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		title: joinMeta(t("phone.explain"), splitAddr(r.project)[0], r.id == null ? null : `#${r.id}`),
+		onClose: () => !busy && onClose(),
+		children: /* @__PURE__ */ u("div", {
+			class: "modal-body explain-sheet",
+			children: [
+				/* @__PURE__ */ u("blockquote", {
+					class: "explain-ask",
+					children: r.text
+				}),
+				status,
+				row && ex && ex.text ? /* @__PURE__ */ u("button", {
+					type: "button",
+					class: "link-btn",
+					onClick: onAgain,
+					children: t("phone.explainAgain")
+				}) : null,
+				row ? /* @__PURE__ */ u("section", {
+					class: "explain-answer",
+					"aria-label": t("phone.answerIt"),
+					children: [
+						/* @__PURE__ */ u("h4", { children: t("phone.answerIt") }),
+						r.options?.length ? /* @__PURE__ */ u("div", {
+							class: "explain-options",
+							children: r.options.map((o) => /* @__PURE__ */ u(Btn, {
+								disabled: busy,
+								onClick: () => go(optionLine(o), o),
+								children: optionLine(o)
+							}, o.key))
+						}) : null,
+						/* @__PURE__ */ u("label", {
+							class: "field",
+							children: [/* @__PURE__ */ u("span", { children: r.options?.length ? t("phone.answerOwnWords") : t("phone.answerWords") }), /* @__PURE__ */ u("textarea", {
+								rows: 3,
+								value: draft,
+								onInput: (e) => setDraft(e.currentTarget.value)
+							})]
+						}),
+						failure ? /* @__PURE__ */ u("p", {
+							class: "err",
+							role: "alert",
+							children: failure
+						}) : null,
+						/* @__PURE__ */ u(Btn, {
+							kind: "primary",
+							disabled: busy || !draft.trim(),
+							onClick: () => go(draft),
+							children: t("common.send")
+						})
+					]
+				}) : null
+			]
+		})
 	});
 }
 //#endregion

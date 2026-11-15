@@ -1,4 +1,21 @@
 {
   "ok": true,
-  "items": []
+  "items": [
+    { "project": "acme-web", "session": "master", "key": "fx-acme:12", "id": "12", "source": "question", "state": "question", "n": 1,
+      "text": "Should the cache fix ship before the release, or wait for the next one?",
+      "options": [{ "key": "a", "text": "ship it now, in this release" }, { "key": "b", "text": "hold it for the next release" }],
+      "reason": "", "since_ago": 1500, "at_ago": 1500,
+      "explain_demo": "**What is being decided:** whether the cache fix goes out with this week's release or waits for the next one.\n\n- **a) ship it now:** acme-web stops showing stale prices today. The release carries one more change, so the release check runs again (about 20 minutes).\n- **b) hold it:** the release goes out as it was tested. Stale prices stay until the next release, about a week.\n\n**My recommendation: a.** The fix is small, its tests pass, and stale prices are what customers notice." },
+    { "project": "acme-web", "session": "master", "key": "fx-acme:13", "id": "13", "source": "question", "state": "question", "n": 2,
+      "text": "Keep the old --legacy flag as an alias for one more release?",
+      "reason": "", "since_ago": 1500, "at_ago": 1500,
+      "explain_demo": "**What is being decided:** whether `--legacy` keeps working for one more release.\n\n- **Yes:** scripts that still pass it keep running, with a warning that it is going away.\n- **No:** those scripts stop with an error the day the release lands.\n\n**My recommendation: yes.** It costs one line, and the toolbox scripts still use it." },
+    { "project": "acme-web", "session": "master", "key": "fx-acme:14", "id": "14", "source": "question", "state": "question", "n": 3,
+      "text": "Which store should billing-svc use for the webhook log?",
+      "options": [{ "key": "a", "text": "sqlite, a file beside the service" }, { "key": "b", "text": "postgres, the database it already has" }],
+      "reason": "", "since_ago": 1500, "at_ago": 1500, "busy_demo": true },
+    { "project": "toolbox", "session": "master", "key": "fx-toolbox:4", "id": "4", "source": "user", "state": "waiting",
+      "text": "merge the kpi-report PR once you have looked at the numbers",
+      "reason": "waits on the person: their OK on PR #31 after reading the report", "since_ago": 7200, "at_ago": 9000 }
+  ]
 }
