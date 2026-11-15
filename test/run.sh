@@ -14732,6 +14732,92 @@ is "...counted apart from ready"     "1" "$(grep -acE "limit: +n\('limit'\)" "$R
 # showed up there as an "idle" session you could stack.
 is "the stack picker drops tabs"     "1" "$(sed -n '/^function sessionStatuses/,/^}/p' "$ROOT/bin/fleet-grid.mjs" | grep -c 'isTab' || true)"
 
+# ── 4d2b. a spent CODEX account is `limit`, wherever Claude's is ─────────────
+# Five codex workers stopped at the usage limit and the fleet showed three as working, one as
+# idle and nothing in the inbox: codex had no limit pattern, and the figure the grid wanted
+# was Claude's "N%(" used-percent, where codex prints the percent LEFT ("5h 0% left"). Same
+# discipline as the Claude group above: the sentence at codex's own marker AND the footer's
+# figure at zero, and neither alone.
+#   The limited captures are built from the text codex prints (wrapped over three lines at 80
+# columns, the footer cut to `wee…` there), because the real ones were lost; the healthy one
+# is a real pane with its names rewritten.
+group "codex usage limit"
+CXL="$ROOT/lib/pane-limit.mjs"
+cxl() { node "$CXL" codex < "$FIX/$1" 2>/dev/null || echo none; }
+cxl_c() { LC_ALL=C LANG=C LC_CTYPE=C node "$CXL" codex < "$FIX/$1" 2>/dev/null || echo none; }
+is "codex has a limit pattern"          "1" "$([ -n "$("$ROOT/bin/fleet-agent" field codex limit_re_js)" ] && echo 1 || echo 0)"
+is "...a figure and its direction"      "left" "$("$ROOT/bin/fleet-agent" field codex limit_fig_kind)"
+is "...claude's direction is unchanged" "used" "$("$ROOT/bin/fleet-agent" field claude limit_fig_kind)"
+for loc in utf8 C; do
+  rd() { if [ "$loc" = C ]; then cxl_c "$1"; else cxl "$1"; fi; }
+  is "[$loc] the wide limited capture reads, with its reset"   "Nov 11 12:04am" "$(rd codex-limit-hit-235col.txt)"
+  is "[$loc] the 80-column capture still reads as limited"     "Nov 11 12:04am" "$(rd codex-limit-hit-80col.txt)"
+  is "[$loc] the sentence with the account refilled is not"    "none" "$(rd codex-limit-line-refilled.txt)"
+  is "[$loc] a footer cut past the figure fails closed"        "none" "$(rd codex-limit-hit-cutfooter.txt)"
+  is "[$loc] a quote inside a tool's output is not"            "none" "$(rd codex-idle-quoting-limit.txt)"
+  is "[$loc] a healthy pane with the 38%-left warning is not"  "none" "$(rd codex-healthy-warn-38.txt)"
+  is "[$loc] a healthy idle pane is not"                       "none" "$(rd codex-idle-0160-160col.txt)"
+done
+is "claude's own limited pane reads as before"     "10:20pm" "$(node "$CXL" claude < "$FIX/claude-limit-hit.txt")"
+is "...and claude's quoting pane still does not"   "none"    "$(node "$CXL" claude < "$FIX/claude-idle-quoting-limit.txt" 2>/dev/null || echo none)"
+# the ERE twin used by bash readers answers the same in both locales on the marker line
+CXRE="$("$ROOT/bin/fleet-agent" field codex limit_re)"
+is "[C] the ERE finds the marker line"   "1" "$(LC_ALL=C grep -cE -- "$CXRE" "$FIX/codex-limit-hit-80col.txt" || true)"
+is "[C] ...and not the quoted one"       "0" "$(LC_ALL=C grep -cE -- "$CXRE" "$FIX/codex-idle-quoting-limit.txt" || true)"
+is "reset times keep the short form"     "Nov 11 12:04am|10:20pm|3:04pm" \
+   "$(node --input-type=module -e "import {shortReset as s} from '$ROOT/lib/pane-limit.mjs'; console.log([s('Nov 11th, 2026 12:04 AM'),s('10:20pm'),s('3:04 PM')].join('|'))")"
+
+if command -v tmux >/dev/null 2>&1; then
+  CX="$(cd "$(mktemp -d)" && pwd -P)"; CXF="$CX/fleet"; mkdir -p "$CXF" "$CX/cfg"
+  CXS=cfcodexlim
+  tmux -L "$CXS" kill-server 2>/dev/null
+  cx_up() {   # $1=session $2=capture $3=columns
+    mkdir -p "$CX/wt/$1"
+    printf 'codex\n' > "$CXF/$CXS.$1.agent"
+    # a hook status of `working`, stale on purpose: the pane must beat it
+    printf '{"sock":"%s","slot":"%s","cwd":"%s","folder":"%s","branch":"main","status":"working","ts":%s}\n' \
+      "$CXS" "$1" "$CX/wt/$1" "$1" "$(date +%s)" > "$CXF/$1.json"
+    tmux -L "$CXS" new-session -d -s "$1" -c "$CX/wt/$1" -x "$3" -y 30 "cat '$FIX/$2'; sleep 300" 2>/dev/null
+  }
+  cx_up c-wide   codex-limit-hit-235col.txt     235
+  cx_up c-narrow codex-limit-hit-80col.txt       80
+  cx_up c-ok     codex-healthy-warn-38.txt       80
+  cx_up c-quote  codex-idle-quoting-limit.txt    80
+  cx_up c-cut    codex-limit-hit-cutfooter.txt   80
+  sleep 1
+  cxgrid() { env -u TMUX "$@" CLAUDE_FLEET_DIR="$CXF" CLAUDE_FLEET_ROOT= CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_SCOPE=demoproj \
+               node "$ROOT/bin/fleet-grid.mjs" "$CXS" --json 2>/dev/null; }
+  cxst() { node -e 'const o=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log(o.cards.filter(c=>process.argv[1].split(",").includes(c.name)).map(c=>c.name+"="+c.status+"/"+(c.limit_at||"-")).join(" "))' "$1"; }
+  for loc in utf8 C; do
+    if [ "$loc" = C ]; then g="$(cxgrid LC_ALL=C LANG=C LC_CTYPE=C | cxst c-wide,c-narrow,c-ok,c-quote,c-cut)"
+    else g="$(cxgrid | cxst c-wide,c-narrow,c-ok,c-quote,c-cut)"; fi
+    is "[$loc] grid: both limited panes read limit with the reset over a stale working, the rest do not" \
+       "c-cut=idle/- c-narrow=limit/Nov 11 12:04am c-ok=working/- c-quote=idle/- c-wide=limit/Nov 11 12:04am" "$g"
+  done
+  # ONE inbox row per episode, however many readers look
+  cxgrid >/dev/null; cxgrid >/dev/null
+  is "one inbox row per limited session, filed once" "2" "$(grep -c 'need-you' "$CXF/$CXS.inbox" 2>/dev/null || true)"
+  is "...and none for the healthy or the quoting pane" "0" "$(grep -cE 'c-(ok|quote|cut)' "$CXF/$CXS.inbox" 2>/dev/null || true)"
+  is "...naming the reset"                           "1" "$([ "$(grep -c 'resets Nov 11 12:04am' "$CXF/$CXS.inbox" 2>/dev/null || true)" -ge 1 ] && echo 1 || echo 0)"
+  # fleet-list reads the hook status, which says working
+  for loc in utf8 C; do
+    if [ "$loc" = C ]; then fl="$(env -u TMUX LC_ALL=C LANG=C LC_CTYPE=C CLAUDE_FLEET_DIR="$CXF" CLAUDE_CONFIG_DIR="$CX/cfg" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-list" -s "$CXS" 2>/dev/null)"
+    else fl="$(env -u TMUX CLAUDE_FLEET_DIR="$CXF" CLAUDE_CONFIG_DIR="$CX/cfg" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-list" -s "$CXS" 2>/dev/null)"; fi
+    is "[$loc] fleet-list: limit on the limited panes, the hook's word elsewhere" \
+       "c-cut=working c-narrow=limit c-ok=working c-quote=working c-wide=limit" \
+       "$(awk '$1 ~ /^c-/ {printf "%s%s=%s", s, $1, $2; s=" "}' <<< "$fl")"
+  done
+  # fleet-send refuses to paste into a spent session, and says why
+  out="$(env -u TMUX CLAUDE_FLEET_DIR="$CXF" CLAUDE_FLEET_SOCK="$CXS" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s "$CXS" c-narrow "do the next thing" 2>&1)"; rc=$?
+  is "fleet-send to a limited codex session refuses" "1" "$rc"
+  is "...and names the limit and the reset"          "1" "$([[ "$out" == *"usage limit (resets Nov 11 12:04am)"* ]] && echo 1 || echo 0)"
+  is "...nothing was pasted into its pane"           "0" "$(tmux -L "$CXS" capture-pane -p -t c-narrow | grep -c 'do the next thing' || true)"
+  tmux -L "$CXS" kill-server 2>/dev/null
+  case "$CX" in /*/tmp.*|/tmp/*|/private/*|"$TMPDIR"*) rm -rf "$CX" ;; esac
+else
+  skip "codex usage limit through the grid, fleet-list and fleet-send" "tmux not available"
+fi
+
 # ── 4d3. a status glyph wider than one column shifts every card ──────────────
 # vis() counts CODE POINTS, not display columns, so the whole card grid is built on
 # "one character = one cell". A 2-column glyph renders wider than the arithmetic

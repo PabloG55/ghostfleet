@@ -449,6 +449,23 @@ while [ -L "$_src" ]; do
   _lnk="$(readlink "$_src")"; case "$_lnk" in /*) _src="$_lnk" ;; *) _src="$(dirname "$_src")/$_lnk" ;; esac
 done
 MOD_TARGET="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/mod-target.mjs"
+
+# A SPENT ACCOUNT TAKES NO PROMPT. A session at its usage limit leaves its input box up, so a
+# paste lands, is rejected by the agent, and the sender hears nothing: the lead went on sending
+# work to codex workers that could not take it. Two signals read off the pane (the agent's
+# sentence AND its own figure, lib/pane-limit.mjs), so a pane that merely quotes the sentence
+# still takes the send. --anyway is the way past it for a prompt meant to wait for the reset.
+if [ "$MODE" = send ] && [ "$ANYWAY" != 1 ] && [ -z "$REPLY_TO" ]; then
+  _pl="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/pane-limit.mjs"
+  if [ -f "$_pl" ] && command -v node >/dev/null 2>&1; then
+    _pla="${_a:-claude}"
+    if _plat="$(node "$_pl" "$_pla" <<< "$(tmux -u -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)" 2>/dev/null)"; then
+      echo "fleet-send: '$SESSION' is at its usage limit (resets $_plat) and would reject this prompt — nothing was sent. Give the work to another session, or add --anyway to paste it for when the limit lifts" >&2
+      exit 1
+    fi
+  fi
+fi
+
 MOD_SID=""; MOD_STATE=""; MOD_NOW=""; MOD_DIR=""
 # THE SERVER THIS SEND ADDRESSES, so a record of the same name on another one is not taken
 # for it (lib/mod-target.mjs). Empty when tmux cannot say, which refuses every record that

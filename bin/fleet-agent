@@ -65,6 +65,15 @@
 #               own — the caller must also see the session's own usage figure at 100%+,
 #               because a pane that merely QUOTES the notice looks identical otherwise.
 #   limit_re_js the same signal as a JavaScript regex source, for fleet-grid.mjs.
+#   limit_fig_js   the agent's OWN usage figure, as a JS regex source whose group 1 is the number
+#               (the LAST match in the pane wins). The second signal limit_re needs beside it.
+#   limit_fig_kind `used` = the figure is the percent spent, the account is out at 100+; `left` =
+#               the figure is the percent REMAINING, the account is out at 0. Claude paints
+#               "102%(4h 9m)", codex "5h 0% left": the same fact in opposite directions.
+#   limit_at_js the reset time, a JS regex source whose group 1 is the time. Searched from the
+#               limit line on, over the next three lines joined by a space, because codex wraps
+#               the sentence ("try again at …") across lines at 80 columns.
+#   (lib/pane-limit.mjs reads all four; every reader of the limit goes through it.)
 #   budget      yes = its pane carries the shared-account usage % the governor meters
 #   resume      yes = re-opening a session continues that cwd's conversation
 #   verified    yes = the values above were checked against a running binary
@@ -213,6 +222,9 @@ agent_field() {
         # the part prose cannot forge: really-limited read 102%, the quoter 15%.
         limit_re)    printf '%s' "You've hit your (session|usage) limit" ;;
         limit_re_js) printf '%s' "You've hit your (?:session|usage) limit" ;;
+        limit_fig_js)   printf '%s' '[^:0-9](\d+)%\(' ;;
+        limit_fig_kind) printf 'used' ;;
+        limit_at_js)    printf '%s' 'resets\s+(\d{1,2}:\d{2}\s*[ap]m)' ;;
         # A turn cut short — "Interrupted · What should Claude do instead?" — leaves the
         # session waiting on a human with an ordinary empty input box, so it read as
         # "✓ ready" while doing nothing. A park interrupts a turn, so a governor episode
@@ -318,6 +330,21 @@ agent_field() {
         # wraps at 30 columns and the option line does not.
         blocked_re) printf '%s' 'Do you trust the contents of this directory|^(›| ) 1\. Trust and continue *$|^(›| ) 1\. Run without daemon this( time)? *$|^(›| ) 1\. Review hooks *$' ;;
         blocked_re_js) printf '%s' 'Do you trust the contents of this directory|^(?:›| ) 1\. Trust and continue *$|^(?:›| ) 1\. Run without daemon this(?: time)? *$|^(?:›| ) 1\. Review hooks *$' ;;
+        # THE ACCOUNT IS SPENT. Codex prints "■ You've hit your usage limit. Upgrade to Pro (…),
+        # visit … or try again at Nov 11th, 2026 12:04 AM." (wrapped over three lines at 80
+        # columns) and keeps its input box up, so every ready signal still matches and a spent
+        # worker read as working or idle. Measured on codex-cli 0.166, 2026-11-10.
+        #   TWO SIGNALS, like claude, and neither alone. The line is anchored to codex's own
+        # marker at the left edge: a pane that merely QUOTES the sentence carries it inside a
+        # tool's output, indented under "└", never at column 0. The second signal is codex's
+        # own footer, "5h 0% left" — the percent REMAINING, which is why the direction is its
+        # own field. The "⚠ 5h limit: 38% left" warning above the composer is not it ("limit:"
+        # sits between), and a footer cut so far that the figure is gone reads as no limit.
+        limit_re)       printf '%s' "^■ You(’|')ve hit your usage limit" ;;
+        limit_re_js)    printf '%s' "^■ You[’']ve hit your usage limit" ;;
+        limit_fig_js)   printf '%s' '\b5h (\d+)% left' ;;
+        limit_fig_kind) printf 'left' ;;
+        limit_at_js)    printf '%s' 'try\s+again\s+at\s+(.+?)\.(?:\s|$)' ;;
         # The composer footer ("gpt-5.5 medium · ~/work/repo"). Deliberately NOT the
         # "›" input marker: that also renders on the trust dialog's menu, and a false
         # ready would make fleet-spawn fire its prompt into that dialog and lose it.
