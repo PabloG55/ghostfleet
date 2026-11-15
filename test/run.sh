@@ -23737,8 +23737,8 @@ if [ -d "$ROOT/web" ]; then
     is "phone-check --fit-only ran"     "0" "$pfitrc"
     is "...without complaining"         ""  "$(head -2 "$PFIT/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor: a browser that fails to start emits a row or two. 140 rows when it was written, 194
-    # with the Assistant button's.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 180 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
+    # with the Assistant button's, 212 with the keyboard-up strip, the hint and the box's inset.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 200 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PFIT/out"

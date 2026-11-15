@@ -578,6 +578,40 @@ try {
     is('a smaller visual viewport with nothing focused is not a keyboard', false,
        await b.evaluate(() => document.documentElement.classList.contains('kb')));
     await b.evaluate(() => window.__vv(null));
+    // A CONNECTED KEYBOARD. iOS shows only its accessory bar, about 64pt, which is under the 120 px
+    // the on-screen keyboard is told by, and pans the visual viewport about 68pt down to show the
+    // box over it: seen on the simulator, the top bar went off the top of the screen until the
+    // field lost the focus. A pan while a field has the focus pins the app as well.
+    const pinGeo = () => b.evaluate(() => {
+      const r = document.getElementById('app').getBoundingClientRect();
+      return `top ${Math.round(r.top)}, ${Math.round(r.height) === innerHeight ? 'the full height' : `${Math.round(r.height)} tall`}, visible from ${Math.round(visualViewport.offsetTop)}`;
+    });
+    await b.evaluate(() => { document.querySelector('.composer textarea').focus(); window.__vv(innerHeight - 68, 68); });
+    await sleep(100);
+    is('a connected keyboard\'s bar, the visible area panned 68 px: the app\'s top is the visible area\'s',
+       'top 68, ' + (await b.evaluate(() => innerHeight - 68)) + ' tall, visible from 68', await pinGeo());
+    // iOS may put the pan back once the box shows. A pin that let go then would hand the box back
+    // to the bar, to be panned again.
+    await b.evaluate(() => window.__vv(innerHeight - 68, 0));
+    await sleep(100);
+    is('...and it holds when iOS puts the pan back, the visible area still short',
+       'top 0, ' + (await b.evaluate(() => innerHeight - 68)) + ' tall, visible from 0', await pinGeo());
+    await b.evaluate(() => { document.activeElement?.blur(); window.__vv(null); });
+    await sleep(100);
+    is('...and lets go when the field does', 'top 0, the full height, visible from 0', await pinGeo());
+    // A pan with nothing to type into is the page's own (a zoomed page let go, an overscroll).
+    await b.evaluate(() => window.__vv(innerHeight - 68, 68));
+    await sleep(100);
+    is('a pan with no field focused is not a keyboard', false, await b.evaluate(() => document.documentElement.classList.contains('kb')));
+    await b.evaluate(() => window.__vv(null));
+    await sleep(100);
+    // A window made shorter at a desk, with the box focused, is short with no pan: not a keyboard.
+    await b.evaluate(() => { document.querySelector('.composer textarea').focus(); window.__vv(innerHeight - 64, 0); });
+    await sleep(100);
+    is('a visible area a little short, never panned, is not a keyboard even with the box focused', false,
+       await b.evaluate(() => document.documentElement.classList.contains('kb')));
+    await b.evaluate(() => { document.activeElement?.blur(); window.__vv(null); });
+    await sleep(100);
 
     // ── the owner's music ─────────────────────────────────────────────────────
     is('nothing on the way through claimed the audio session', '', (await b.evaluate(() => window.__audio)).join(','));

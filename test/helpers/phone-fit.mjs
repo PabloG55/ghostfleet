@@ -18,10 +18,25 @@
 //     wider than the screen, as anything drawn outside .main would be. Wide content (a table, a
 //     code block in a message) must still scroll sideways inside its own box.
 //   - And, seen in this file's own shot of a typed message, the floating Assistant button over the
-//     composer's corner: it floats 8 px above a composer, keyboard up or down, at a desk too.
+//     composer's corner: it floats 8 px above a composer with the keyboard down, at a desk too.
+//
+// Then four seen on the iOS simulator, in the installed app, once those were fixed:
+//   - THE BUTTON OVER A STRIP OF CHAT. With the keyboard up the chat left visible is about 140pt and
+//     the button covered a third of it. It is not drawn while the keyboard is up, and the newest
+//     message sits where it would on a page with no button, a reader at the end staying there.
+//   - THE HINT CUT IN HALF. The placeholder wrapped to three lines in the two-line box and the third
+//     showed half cut off. On a touch screen it is drawn on one line.
+//   - TEXT RUNNING INTO THE BORDER. Three lines in the box, and the first sat flush against its top
+//     border with its tops cut: a textarea's padding scrolls with its text. Nothing is drawn in the
+//     box's inset at any scroll.
+//   - (A connected keyboard sliding the top bar off the screen is phone-check.mjs's, beside the other
+//     keyboard rows; the one row here asks that ⏎ still sends with it.)
+// The second and third are asked of the PIXELS (ink() below), because the question is where text is
+// drawn, which no style and no rect says.
 import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from '../../lib/browser.mjs';
+import { decodePng } from '../../mods/ghostfleet/hooks/peek-shape.js';
 
 // Every place a field can be: the pages, and the things a tap opens over them.
 const PAGES = [['home', '#/'], ['map', '#/map'], ['project', '#/p/acme-api'], ['lead session', '#/p/acme-api/s/master'],
@@ -46,6 +61,26 @@ export async function phoneFit({ b, is, shots = '' }) {
     await sleep(900);
   };
   const touch = (on) => b.call('Emulation.setTouchEmulationEnabled', { enabled: on, maxTouchPoints: on ? 5 : 1 });
+  // Ink: how many pixels of a horizontal band of an element (y0..y1 from its top, 3 px in from the
+  // left, clear of its frame, and 20 px in from the right, clear of the grip a desktop engine draws
+  // in a textarea's corner) differ from the element's own background by more than anti-aliasing
+  // does. Read off a screenshot of the band, so it is what was painted: a hint wrapped onto a second
+  // line, or text scrolled into a box's padding, is ink where no rect or computed style shows it.
+  const ink = async (sel, y0, y1) => {
+    const e = await b.evaluate((s) => {
+      const n = document.querySelector(s), r = n?.getBoundingClientRect();
+      return r ? { x: r.left, y: r.top, w: r.width, bg: (getComputedStyle(n).backgroundColor.match(/[\d.]+/g) || []).map(Number) } : null;
+    }, sel);
+    if (!e || y1 - y0 < 1) return -1;
+    const { data } = await b.call('Page.captureScreenshot', { format: 'png', clip: { x: e.x + 3, y: e.y + y0, width: e.w - 23, height: y1 - y0, scale: 1 } });
+    const pic = decodePng(new Uint8Array(Buffer.from(data, 'base64')));
+    if (!pic) return -1;
+    let n = 0;
+    for (let i = 0; i < pic.rgba.length; i += 4) {
+      if (Math.max(Math.abs(pic.rgba[i] - e.bg[0]), Math.abs(pic.rgba[i + 1] - e.bg[1]), Math.abs(pic.rgba[i + 2] - e.bg[2])) > 48) n++;
+    }
+    return n;
+  };
   const W = 390, H = 844;
   await touch(true);
   await b.viewport(W, H);
@@ -119,6 +154,9 @@ export async function phoneFit({ b, is, shots = '' }) {
   await touch(false);
   await open('#/p/acme-api/s/master');
   is('with a mouse the composer keeps its 14px', '14px', await b.evaluate(() => getComputedStyle(document.querySelector('.composer textarea')).fontSize));
+  // ...and its whole hint, file and ⏎ included: the short one is the touch screen's (section 2b).
+  is('...and its whole hint, dragging a file and ⏎ included', true,
+     await b.evaluate(() => /Enter sends/.test(document.querySelector('.composer textarea').placeholder)));
   await touch(true);
   await sleep(200);
 
@@ -156,6 +194,50 @@ export async function phoneFit({ b, is, shots = '' }) {
   const cardSend = await sizeOf('.home-agent .console form button[type=submit]');
   await open('#/p/acme-api/s/api-fix');
   is(`${W} ...and that size is the session's`, await sizeOf('.composer button[type=submit]'), cardSend);
+
+  // ── 2b. the box's hint is one line, and its text never runs into its inset ──
+  // Seen on the simulator: the hint wrapped to three lines in the two-line box, the third cut in
+  // half; and with three lines typed the first sat against the top border, its tops cut. Asked of
+  // the pixels: no hint below its first line, and no text in the box's top or bottom inset (the
+  // distance from its edge to where the first line starts with nothing scrolled) at any scroll.
+  const boxAt = () => b.evaluate(() => {
+    const t = document.querySelector('.composer textarea'), cs = getComputedStyle(t), r = t.getBoundingClientRect();
+    return { hint: t.placeholder, typed: t.value, first: t.clientTop + parseFloat(cs.paddingTop), lh: parseFloat(cs.lineHeight), h: r.height, max: t.scrollHeight - t.clientHeight };
+  });
+  for (const w of [320, 390]) {
+    await b.viewport(w, H);
+    for (const [name, hash] of [['lead session', '#/p/acme-api/s/master'], ['quiet session', '#/p/acme-api/s/docs-pass']]) {
+      await open(hash);
+      await until(() => !!document.querySelector('.composer textarea')?.placeholder);
+      const g = await boxAt();
+      const on = await ink('.composer textarea', g.first + 2, g.first + g.lh - 2);
+      const below = await ink('.composer textarea', g.first + g.lh + 1, g.h - 2);
+      is(`${w} ${name}: the box's hint is drawn on one line`, '1 line',
+         g.typed ? 'the box is not empty' : on <= 0 ? `no hint drawn ("${g.hint}")` : below ? `${below} px of it below the first line ("${g.hint}")` : '1 line');
+      if (w === 390 && name === 'lead session') await shot('hint');
+    }
+    await open('#/p/acme-api/s/docs-pass');
+    await until(() => !!document.querySelector('.composer textarea'));
+    await b.evaluate(() => document.querySelector('.composer textarea').focus());
+    await b.call('Input.insertText', { text: 'a quick reply going\npast the two rows\nof the box' });
+    await sleep(300);
+    const g = await boxAt();
+    is(`${w} three lines in the box: it scrolls`, true, g.max > 0 || `scrolls ${g.max} px`);
+    const into = { top: [], bottom: [] };
+    for (let s = 0; s <= g.max; s += 2) {
+      await b.evaluate((x) => { document.querySelector('.composer textarea').scrollTop = x; }, s);
+      await sleep(40);
+      const top = await ink('.composer textarea', 2, g.first - 1), foot = await ink('.composer textarea', g.h - g.first + 1, g.h - 2);
+      if (top) into.top.push(`${top} px scrolled ${s}`);
+      if (foot) into.bottom.push(`${foot} px scrolled ${s}`);
+    }
+    const said = (k) => into[k].length ? `${into[k].length} of ${Math.floor(g.max / 2) + 1} scrolls, e.g. ${into[k].slice(-2).join(', ')}` : '';
+    is(`${w} ...and no text is drawn in its top inset, at any scroll`, '', said('top'));
+    is(`${w} ...nor in its bottom inset`, '', said('bottom'));
+    if (w === 390) await shot('three-lines');
+    await b.evaluate(() => { const n = document.querySelector('.composer textarea'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); n.blur(); });
+  }
+  await b.viewport(W, H);
 
   // ── 3. the page itself never moves ────────────────────────────────────────
   // Elements past the screen's edge that nothing holds: not inside a box that scrolls sideways
@@ -294,8 +376,8 @@ export async function phoneFit({ b, is, shots = '' }) {
   // Seen in this file's own shot: the button over the box's top-right corner, the words being
   // typed running under it, because its height over a composer was a guess the taller touch box
   // outgrew; at a desk it sat on a stack column's mic. It goes 8 px above the composer's real
-  // top, keyboard up or down, and the chat under it leaves room for its newest message to scroll
-  // clear. Asked of the button's whole dock (Done and Stop sit in it while a conversation is
+  // top, and the chat under it leaves room for its newest message to scroll clear. With the
+  // keyboard up it is not drawn at all (kbRead, below). Asked of the button's whole dock (Done and Stop sit in it while a conversation is
   // live) against every composer control and every text field on the screen, and of the chat the
   // button is over, not the first one found: a desk's stack has three.
   const STACK = (s) => `#/stack/${encodeURIComponent(JSON.stringify(s.map(session => ({ project: 'acme-api', session }))))}`;
@@ -325,13 +407,46 @@ export async function phoneFit({ b, is, shots = '' }) {
     }
     return { cover, gap, chat, kb: document.documentElement.classList.contains('kb') };
   });
-  const launchRows = async (label, kb) => {
+  const launchRows = async (label) => {
     const r = await dockRead();
-    if (kb) is(`${label}: ...the keyboard is up (the app pinned to the visible 431 px)`, true, r.kb);
     is(`${label}: the Assistant button covers no composer control and no text field`, 'none', r.cover);
     is(`${label}: ...its bottom edge 8 px above the composer under it`, '8 px', r.gap);
     is(`${label}: ...and the newest message scrolls clear of it`, 'clear', r.chat);
   };
+  // WITH THE KEYBOARD UP the chat left on a phone is a strip about 140pt tall (seen on the
+  // simulator), and the button covered a third of it. So it is not drawn, and the chat gives back
+  // the room it kept for it: the newest message sits exactly where it sits with the button taken
+  // out of the page and nothing else changed (taken out, measured and put back in one task, so
+  // nothing renders in between). The chat is the one being typed into, a stack's column's own.
+  // `end` is read FIRST, before this scrolls anything: a reader at the end when the keyboard came
+  // up is still there, so the room going did not move what they were reading.
+  const chatOf = () => document.activeElement?.closest?.('.session')?.querySelector('.chat') || document.querySelector('.chat');
+  const kbRead = () => b.evaluate((chatOfSrc) => {
+    const chatOf = eval(chatOfSrc), c = chatOf();
+    const dock = document.querySelector('.as-dock');
+    const kb = document.documentElement.classList.contains('kb');
+    if (!c || !dock) return { kb, drawn: !dock ? 'no button' : 'drawn', end: 'no chat', same: 'no chat' };
+    const end = c.scrollHeight - c.clientHeight - c.scrollTop < 2 ? 'at the end' : `${Math.round(c.scrollHeight - c.clientHeight - c.scrollTop)} px short of the end`;
+    const drawn = dock.getClientRects().length && getComputedStyle(dock).visibility !== 'hidden' ? `drawn, ${Math.round(dock.getBoundingClientRect().height)} px tall` : 'not drawn';
+    const main = document.querySelector('.main');
+    const toEnd = () => { if (main) main.scrollTop = main.scrollHeight; c.scrollTop = c.scrollHeight; };
+    const last = () => { const m = [...c.querySelectorAll('.msg')].pop(), r = m?.getBoundingClientRect(); return r ? [r.x, r.y, r.width, r.height].map(Math.round).join(',') : 'none'; };
+    toEnd();
+    const withIt = last();
+    const parent = dock.parentNode, next = dock.nextSibling;
+    dock.remove(); toEnd();
+    const gone = last();
+    parent.insertBefore(dock, next); toEnd();
+    return { kb, drawn, end, same: withIt === gone ? 'the same' : `${withIt} beside the button, ${gone} with it gone` };
+  }, chatOf.toString());
+  const endRead = () => b.evaluate((chatOfSrc) => {
+    const c = eval(chatOfSrc)(), dock = document.querySelector('.as-dock');
+    if (!c || !dock) return 'no chat';
+    const short = Math.round(c.scrollHeight - c.clientHeight - c.scrollTop);
+    const D = dock.getBoundingClientRect(), m = [...c.querySelectorAll('.msg')].pop()?.getBoundingClientRect();
+    const under = m && D.height && m.left < D.right && m.right > D.left && m.top < D.bottom && m.bottom > D.top;
+    return short >= 2 ? `${short} px short of the end` : !D.height ? 'no button' : under ? `under the button by ${Math.round(m.bottom - D.top)} px` : 'at the end, clear of the button';
+  }, chatOf.toString());
   for (const w of [320, 390]) {
     await b.viewport(w, H);
     // The session with a request open is asked with the keyboard down only: its box is behind
@@ -341,15 +456,22 @@ export async function phoneFit({ b, is, shots = '' }) {
       await open(hash);
       await until(() => !!document.querySelector('.composer textarea') && !!document.querySelector('.as-dock'));
       await sleep(300);
-      await launchRows(`${w} ${name}, keyboard down`, false);
+      // ...which leaves the chat scrolled to its end: the reader the keyboard rows follow.
+      await launchRows(`${w} ${name}, keyboard down`);
       if (w === 390 && name === 'lead session') await shot('launch-down');
       if (!typed) continue;
       await b.evaluate(() => { document.querySelector('.composer textarea')?.focus(); window.__vv?.(431); });
       await sleep(400);
-      await launchRows(`${w} ${name}, keyboard up`, true);
+      const r = await kbRead();
+      const label = `${w} ${name}, keyboard up`;
+      is(`${label}: ...the keyboard is up (the app pinned to the visible 431 px)`, true, r.kb);
+      is(`${label}: a reader at the end is still at the end`, 'at the end', r.end);
+      is(`${label}: the Assistant button is not drawn`, 'not drawn', r.drawn);
+      is(`${label}: ...and the newest message sits where it does with no button at all`, 'the same', r.same);
       if (w === 390 && name === 'lead session') await shot('launch-up');
       await b.evaluate(() => { document.activeElement?.blur?.(); window.__vv?.(null); });
-      await sleep(300);
+      await sleep(400);
+      is(`${w} ${name}, keyboard gone: the button is back, the reader still at the end and clear of it`, 'at the end, clear of the button', await endRead());
     }
   }
   await b.viewport(W, H);
@@ -361,8 +483,32 @@ export async function phoneFit({ b, is, shots = '' }) {
     await open(hash);
     await until(() => !!document.querySelector('.composer textarea') && !!document.querySelector('.as-dock'));
     await sleep(400);
-    await launchRows(`1280 ${name}`, false);
+    await launchRows(`1280 ${name}`);
     if (name === 'stack') await shot('launch-desk-stack');
   }
   await b.viewport(W, H);
+
+  // ── 6. a connected keyboard: pinned, and its ⏎ still sends ─────────────────
+  // With a hardware keyboard iOS shows a bar of about 64pt and pans the visual viewport about 68pt
+  // to show the box over it, which took the top bar off the screen (seen on the simulator).
+  // viewport.js pins the app for that too (phone-check.mjs asks the geometry). It is a pin and not
+  // an on-screen keyboard: the first key typed marks a keyboard someone attached, and ⏎ sends
+  // (keys.js). A probe that answered "keyboard up" for the pin would make ⏎ a new line under the
+  // owner's fingers. LAST in this run, because that mark is the page's for the rest of its life.
+  await touch(true);
+  await open('#/p/acme-api/s/docs-pass');
+  await until(() => !!document.querySelector('.composer textarea'));
+  await b.evaluate(() => { document.querySelector('.composer textarea').focus(); window.__vv?.(776, 68); });
+  await sleep(200);
+  const pinned = await b.evaluate(() => document.documentElement.classList.contains('kb'));
+  for (const [key, code, vk, text] of [['k', 'KeyK', 75, 'k'], ['Enter', 'Enter', 13, '\r']]) {
+    await b.call('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: vk, text });
+    await b.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk });
+  }
+  await sleep(700);
+  const left = await b.evaluate(() => document.querySelector('.composer textarea').value);
+  is(`${W} a connected keyboard's bar: the app is pinned, and ⏎ sends what was typed`, 'pinned, sent',
+     `${pinned ? 'pinned' : 'not pinned'}, ${left === '' ? 'sent' : `the box holds ${JSON.stringify(left)}`}`);
+  await b.evaluate(() => { document.activeElement?.blur?.(); window.__vv?.(null); });
+  await touch(false);
 }
