@@ -87,8 +87,44 @@ export const profileGroups = (items, order = []) => {
   return names.length > 1 ? names.map(n => ({ n, items: items.filter(p => profOf(p) === n) })) : [{ n: null, items }];
 };
 
+// Which sidebar groups are folded, kept in THIS browser only (a fold is a viewer's own habit, not
+// the fleet's state). Everything starts open; a read or write that throws leaves the list working
+// and simply forgetting. Keys are `h:<machine>` and `g:<machine>:<profile>`.
+const FOLD_KEY = 'ghostfleet.side.folded';
+const readFolds = () => {
+  try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
+  catch { return {}; }
+};
+export function useFolds() {
+  const [folds, setFolds] = useState(readFolds);
+  const toggle = (k) => setFolds(f => {
+    const n = { ...f };
+    if (n[k]) delete n[k]; else n[k] = 1;
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify(n)); } catch {}
+    return n;
+  });
+  return [folds, toggle];
+}
+
+// What a folded header still says about everything under it: the strongest light and the summed
+// count, need-you first — folding hides rows, never the fact that someone is wanted.
+function Fold({ cls, k, shut, onToggle, items, label, dot, children }) {
+  const need = needOf(items), total = items.reduce((n, p) => n + p.counts.total, 0);
+  return (
+    <button type="button" class={`side-fold ${cls}${shut ? ' shut' : ''}`} aria-expanded={!shut} onClick={() => onToggle(k)}>
+      <Icon name="chevron" class="chev" />
+      {shut ? <Led state={topLight(items.flatMap(p => p.sessions.map(x => x.status)))} size={8} /> : dot ? <Led state={dot} size={8} /> : null}
+      <span class="grow ellipsis">{label}</span>
+      {children}
+      {shut ? (need ? <span class="badge need">{need}</span> : total ? <span class="n">{total}</span> : null)
+        : (cls === 'side-prof' && need ? <span class="badge need">{need}</span> : null)}
+    </button>
+  );
+}
+
 export function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below, foot }) {
   const [q, setQ] = useState('');
+  const [folds, toggle] = useFolds();
   const list = (projects || [])
     .filter(p => !q || p.name.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => (b.counts.need_you - a.counts.need_you) || (b.counts.total - a.counts.total) || a.name.localeCompare(b.name));
@@ -115,29 +151,23 @@ export function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav,
         {groups.map(({ h, items }) => (
           <Fragment key={h ? `h:${h.key}` : 'all'}>
             {h ? (
-              <div class={`side-host${hostDown(h) ? ' down' : ''}`}>
-                <Led state={hostDown(h) ? 'off' : 'idle'} size={8} />
-                <span class="grow ellipsis">{h.label || h.key}</span>
+              <Fold cls={`side-host${hostDown(h) ? ' down' : ''}`} k={`h:${h.key}`} shut={!q && !!folds[`h:${h.key}`]} onToggle={toggle} items={items}
+                    dot={hostDown(h) ? 'off' : 'idle'} label={h.label || h.key}>
                 {hostDown(h) ? <small>{t('settings.hostOffline')}</small> : h.self ? <small>{t('settings.hostThis')}</small> : null}
-              </div>
+              </Fold>
             ) : null}
-            {profileGroups(items, profOrder).map(({ n, items: mine }) => (
+            {!(h && !q && folds[`h:${h.key}`]) ? profileGroups(items, profOrder).map(({ n, items: mine }) => (
               <Fragment key={n || 'one'}>
-                {n ? (
-                  <div class="side-prof">
-                    <span class="grow ellipsis">{n}</span>
-                    {needOf(mine) ? <span class="badge need">{needOf(mine)}</span> : null}
-                  </div>
-                ) : null}
-                {mine.map(p => (
+                {n ? <Fold cls="side-prof" k={`g:${h ? h.key : ''}:${n}`} shut={!q && !!folds[`g:${h ? h.key : ''}:${n}`]} onToggle={toggle} items={mine} label={n} /> : null}
+                {!(n && !q && folds[`g:${h ? h.key : ''}:${n}`]) ? mine.map(p => (
                   <NavLink key={p.name} to={`/p/${encodeURIComponent(p.name)}`} active={route.view === 'project' && route.project === p.name} onClick={onClose}>
                     <Led state={topLight(p.sessions.map(x => x.status))} size={8} />
                     <span class="grow ellipsis">{h ? p.name.replace(/@[^@]+$/, '') : p.name}</span>
                     {p.counts.need_you ? <span class="badge need">{p.counts.need_you}</span> : p.counts.total ? <span class="n">{p.counts.total}</span> : null}
                   </NavLink>
-                ))}
+                )) : null}
               </Fragment>
-            ))}
+            )) : null}
           </Fragment>
         ))}
       </div>

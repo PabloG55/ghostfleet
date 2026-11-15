@@ -1044,11 +1044,17 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .link-btn:hover, .link-btn[aria-expanded="true"] { color: var(--fg); }
 
 /* the sidebar's machine headings (shell.jsx hostGroups): one per paired machine */
-.side-host { display: flex; align-items: center; gap: 8px; padding: 10px 10px 4px; color: var(--dim); font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; }
+.side-fold { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 28px; box-sizing: border-box; background: none; border: 0; text-align: left; cursor: pointer; color: var(--dim); font: inherit; }
+.side-fold:hover { color: var(--fg); }
+.side-fold:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
+.px-ico.chev { color: var(--dim); transition: transform .15s; }
+.side-fold:not(.shut) .chev, .stack-group[open] > summary .chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .px-ico.chev { transition: none; } }
+.side-host { padding: 10px 10px 4px; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; }
 .side-host small { text-transform: none; letter-spacing: 0; font-size: 11px; }
 .side-host.down { color: var(--fg); }
 .side-host.down small { color: var(--red); }
-.side-prof { display: flex; align-items: center; gap: 8px; padding: 8px 10px 2px 26px; color: var(--dim); font-size: 11px; letter-spacing: .04em; }
+.side-prof { padding: 8px 10px 2px 18px; font-size: 11px; letter-spacing: .04em; }
 .side-prof:first-child { padding-top: 2px; }
 
 /* ══ a phone's edges: the home indicator and, sideways, the notch ═══════════════════════════

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: f72324808e8f
+// CLIENT-HASH: 23aa487142c9
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -470,10 +470,12 @@
 // v111 gives terminal and editor the chat session's access and opens direct localhost
 // without a lock once the server proves the request is local.
 // v113 keeps the stack picker controls pinned and each tool inside its column.
-// v115 holds the phone's screen still (no zoom on a tap into a field, one size of composer
+// v115 folds the sidebar's devices and profile groups; both it and the stack picker's groups
+// open and close with one chevron icon.
+// v116 holds the phone's screen still (no zoom on a tap into a field, one size of composer
 // button, no page to drag), takes a conversation to its end on every send, and floats the
 // Assistant button 8px above the composer instead of over it.
-const VERSION = 'ghostfleet-v115';
+const VERSION = 'ghostfleet-v116';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
