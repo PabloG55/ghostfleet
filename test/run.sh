@@ -1049,7 +1049,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   node "$ROOT/test/helpers/governor-idle.mjs" > "$GI/rows" 2> "$GI/err"
   is "idle governor harness ran" "0" "$?"
   is "idle governor harness had no errors" "" "$(cat "$GI/err")"
-  is "idle governor emitted every row" "23" "$(wc -l < "$GI/rows" | tr -d ' ')"
+  is "idle governor emitted every row" "30" "$(wc -l < "$GI/rows" | tr -d ' ')"
   while IFS=$'\t' read -r label want got; do is "$label" "$want" "$got"; done < "$GI/rows"
   if command -v tmux >/dev/null 2>&1; then
     node "$ROOT/test/helpers/governor-idle.mjs" "$ROOT/bin/fleet-governor" --measure > "$GI/measure" 2> "$GI/measure.err"
