@@ -9,18 +9,26 @@
 // empty pane. Here a refusal is a throw (api.js verb() throws on `ok: false`), it is not caught, and
 // every caller (search, the assistant, the project page) opens its session only once this resolves.
 //
-//   deps: grid(project) → { cards }, projects() → { projects }, act(tool, args), remote(project),
+// EVERY STATE A LEAD CAN BE DOWN IN, ON EVERY MACHINE. The phone reaches one machine through
+// another (a paired fleet-serve forwards the verb), so each of these is a verb that crosses:
+// asleep → fleet_wake, parked → fleet_resume, lost → fleet_reopen, and no lead at all →
+// fleet_lead_start, by the project's NAME. That last used to be fleet_project_add with the
+// project's path, which a paired machine rightly refuses — it can register a folder — so a
+// project on the other machine with no lead was a dead end: "has no lead to start from this
+// phone". The name is all a start needs; the machine that has the project looks it up.
+//
+//   deps: grid(project) → { cards }, projects() → { projects }, act(tool, args),
 //         wait(ms), noLead(project) → Error
-export function makeLead({ grid, projects, act, remote, wait, noLead, tries = 20, every = 1500 }) {
+export function makeLead({ grid, projects, act, wait, noLead, tries = 20, every = 1500 }) {
   return async function lead(project) {
     const find = async () => ((await grid(project)).cards || []).find(c => c.lead);
     const m = await find();
     let did = null;
     if (!m) {
       const p = ((await projects()).projects || []).find(x => x.name === project);
-      if (!p || remote(project)) throw noLead(project);
+      if (!p) throw noLead(project);
       did = 'start';
-      await act('fleet_project_add', { path: p.path, name: p.name, profile: p.profile, start: true });
+      await act('fleet_lead_start', { project });
     } else if (m.lost || m.exited) { did = 'reopen'; await act('fleet_reopen', { project, session: m.name }); }
     else if (m.asleep) { did = 'wake'; await act('fleet_wake', { project, session: m.name }); }
     else if (m.status === 'parked') { did = 'resume'; await act('fleet_resume', { project, session: m.name }); }

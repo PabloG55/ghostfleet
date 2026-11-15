@@ -749,6 +749,13 @@ const TOOLS_ALLOWED = {
   // The same class as a wake, for the same reason: it restores the session's own
   // conversation, by id, under the name it already had — nothing new is created.
   fleet_reopen:          { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // A REGISTERED PROJECT'S LEAD, by name, when it has none (fleet-project start). Narrower than
+  // fleet_project_add — no path, so nothing can be registered, and no prompt — which is why it
+  // takes no passkey where that one does: what it runs is the agent the owner chose when they
+  // registered the project, in the folder they registered, and nothing tells it to do anything.
+  // The class of a wake or a reopen, minus the conversation: and so it refuses a lead that one
+  // of those would bring back (see the check in runVerb), rather than starting a new one over it.
+  fleet_lead_start:      { fields: ['project'],                                write: true, subject: 'project' },
   fleet_spawn:           { fields: ['project', 'name', 'branch', 'from', 'prompt', 'model', 'reuse', 'force_new'],
                            write: true, passkey: true, subject: 'name' },
   fleet_stop:            { fields: ['project', 'session', 'reclaim', 'force'], write: true, passkey: true, subject: 'session' },
@@ -942,14 +949,31 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
     return { status: 409, json: { ok: false, changed: true,
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
   if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
-  // fleet_wake asks for the exit status too: see `unwoken` below.
+  // A START IS ONLY FOR A PROJECT WITH NO LEAD, asked of the target fleet's own grid — the same
+  // reading its card is drawn from, so this and the button cannot disagree about which lead is
+  // there. A lead that is asleep, lost or parked has a conversation a start would abandon: the
+  // refusal names the verb that brings it back, and a running one is already the answer. Each
+  // is an answer in place of the run, not a return, so it is audited like one: "nothing about
+  // the lead in either audit log" is how a phone's failed attempt went unseen.
+  let decided = null;
+  if (tool === 'fleet_lead_start') {
+    const g = await gridJson(t);
+    const m = g.error ? null : (g.json.cards || []).find(c => c && c.lead);
+    const how = !m ? null : (m.lost || m.exited) ? `it is lost — reopen it (fleet_reopen ${m.name}), which brings back its own conversation`
+      : m.asleep ? `it is asleep — wake it (fleet_wake ${m.name}), which brings back its own conversation`
+      : m.status === 'parked' ? `it is parked — resume it (fleet_resume ${m.name})` : '';
+    if (g.error) decided = { code: 1, refusal: true, text: `could not read ${t.name}'s fleet to see whether it has a lead, so nothing was started: ${g.error}` };
+    else if (how) decided = { code: 1, refusal: true, text: `${t.name} already has a lead, and starting one would begin a new conversation over it: ${how}` };
+    else if (m) decided = { code: 0, text: `${t.name}'s lead (${m.name}) is already running` };
+  }
+  // fleet_wake asks for the exit status too: see `unwoken` below; so do a reopen and a start.
   // human IS THE REQUEST BEING THE OWNER, and it is what marks a send as the person speaking
   // (mcp/fleet-dispatch.mjs asOwner). An automation is not: its prompt was written earlier, maybe
   // by the draft model, and nobody is holding the phone. Marked, it landed in the receiving
   // session's ledger as the owner's own words, which is owner authority in the memory and in the
   // lead's briefing. Unmarked it arrives as a brief, the way a lead's does.
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
-                                               status: tool === 'fleet_send' || tool === 'fleet_wake' || tool === 'fleet_ledger' });
+  const out = decided || await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: !client.automation,
+                                               status: ['fleet_send', 'fleet_wake', 'fleet_ledger', 'fleet_reopen', 'fleet_lead_start'].includes(tool) });
   let text = typeof out === 'string' ? out : String(out.text);
   // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
   // non-zero when the prompt never reached the session — the mod refused to submit it, the
@@ -969,7 +993,13 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // fleet-ledger says why on stderr and exits 1 (no such item, a send that never arrived).
   const unledgered = tool === 'fleet_ledger' && typeof out === 'object' && !out.isError && out.code !== 0;
   if (unledgered) text = text.replace(/^fleet-ledger: |^ledger: /gm, '');
-  const refused = undelivered || unwoken || unledgered || (typeof out !== 'string' && out.isError === true);
+  // A REOPEN OR A START THAT DID NOT HAPPEN, the same way: fleet-restart refuses a live name, a
+  // record with no conversation and a checkout that is gone, and fleet-project an unregistered
+  // name or a sleeping lead, each on stderr with exit 1 — which was dropped here, so the phone
+  // drew "The lead is ready." over a refusal and then polled for a lead that never came.
+  const unstarted = (tool === 'fleet_reopen' || tool === 'fleet_lead_start') && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (unstarted) text = text.replace(/^fleet-(?:restart|project): /gm, '');
+  const refused = undelivered || unwoken || unledgered || unstarted || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -997,7 +1027,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
                   confirmed: client.local ? 'local' : v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
-                  result: undelivered ? 'not delivered' : unwoken ? 'failed' : refused ? 'refused' : 'ran',
+                  result: undelivered ? 'not delivered' : decided?.refusal ? 'refused' : (unwoken || unstarted) ? 'failed' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
   }
@@ -2463,9 +2493,28 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 // power than completing an authorization the remote started with state it issued. Residual
 // risk: a compromised paired host could sign a session into an account
 // it controls. That grants no wider power than fleet_send already grants to that host.
+// REOPEN AND A LEAD'S START cross so the phone, which reaches this host THROUGH a paired one,
+// can bring a lead up in every state it can be down in (web/src/lead.js: asleep → fleet_wake,
+// parked → fleet_resume, lost → fleet_reopen, no lead → fleet_lead_start). Neither takes
+// anything from the paired host but a name, and neither carries words:
+//   fleet_reopen      restarts a session THIS host recorded — under its own name, on its own
+//                     conversation by id, in its recorded folder, as its recorded agent
+//                     (fleet-restart --reopen). The class of the wake that already crosses:
+//                     what comes back is what was there, and a name with no record is refused
+//   fleet_lead_start  a project's NAME, which must already be in this host's projects file —
+//                     and in the pair scope, which answers a hidden project as one this host
+//                     never had. It runs that project's own agent in its own checkout with no
+//                     prompt, and refuses a lead a wake or a reopen would bring back (runVerb)
+// fleet_project_add does NOT cross, and that is the line: it takes a PATH, and a paired host
+// must never choose a folder this machine runs code in. Neither does fleet_spawn, which makes
+// a worktree. The widening, stated: before, a project with no session at all was one where a
+// paired host could run nothing; now it can start that project's idle lead and then send it
+// work, as it could already send to every other session it reaches. It stays bounded by what
+// the owner registered and shares: a project whose pair setting is `hide` is out of reach.
 const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
-const PAIR_VERBS = new Set(['fleet_send', 'fleet_ledger', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
+const PAIR_VERBS = new Set(['fleet_send', 'fleet_ledger', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_reopen', 'fleet_lead_start',
+                            'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
 // THE ONE WRITE OUTSIDE /api/verb. A verdict is what `fleet-shots --check` reads, so this
 // lets one machine write a merge-gating file on another — which is the point: the verdict
 // has to land where the run and its --check are. It is safe to expose because it is no more
@@ -2475,7 +2524,7 @@ const PAIR_VERBS = new Set(['fleet_send', 'fleet_ledger', 'fleet_wake', 'fleet_p
 // against this host's own manifest — and it is serialized and audited here with the paired
 // host's label and the client it acted for, exactly as a paired send is.
 const PAIR_POSTS = new Set(['/api/shots/verdict', '/api/voice/ask']);
-const PAIR_SCOPE_WORDS = 'terminals, editors, projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, finish a pending login and a review verdict to act';
+const PAIR_SCOPE_WORDS = 'terminals, editors, projects, grids, conversations, panes, the queue, pending logins, usage, reviews, the fleet\'s memory and whether someone is at a keyboard to read; send (photos too), wake, park, resume, reopen, start a registered project\'s lead, finish a pending login and a review verdict to act';
 // WHAT A PAIRED HOST MAY ASK FOR, IN ONE PLACE. The home host asks it before it forwards and
 // the remote asks it before it serves, so the two cannot drift into one forwarding what the
 // other refuses. A photo is a WRITE — after it there are bytes on the remote's disk — and it

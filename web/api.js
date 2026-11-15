@@ -1290,6 +1290,7 @@ function fixtureVerb(tool, a) {
     case 'fleet_project_order':  return ok('project order saved');
     case 'fleet_project_remove': return ok(`removed '${a.name}' from the projects list (its sessions and history are untouched)`);
     case 'fleet_project_add':    return ok(`registered '${a.name || a.path}'`);
+    case 'fleet_lead_start':     return ok(`fleet-project: started master of '${a.project}'`);
     // The picker is a WRITE, so fixtures have to make it stick or the sheet reads as a
     // control that does nothing — the same reason every other verb here has an overlay.
     // An empty agent stores '' rather than deleting the key: '' is the real answer (back

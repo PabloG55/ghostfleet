@@ -7504,7 +7504,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false }) {
+function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
@@ -7858,6 +7858,20 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 								onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
 								icon: parked ? "play" : "pause",
 								children: parked ? t("sess.resume") : t("sess.pause")
+							}) : null,
+							card?.lead && parked ? /* @__PURE__ */ u(Btn, {
+								kind: "ghost sm",
+								disabled: busy,
+								onClick: () => act("fleet_resume"),
+								icon: "play",
+								children: t("sess.resume")
+							}) : null,
+							!card && startLead ? /* @__PURE__ */ u(Btn, {
+								kind: "ghost sm",
+								disabled: busy,
+								onClick: startLead,
+								icon: "play",
+								children: t("project.leadStart")
 							}) : null,
 							/* @__PURE__ */ u("div", {
 								class: "menu-wrap",
@@ -8651,7 +8665,8 @@ function ProjectView({ project, session, tool = null }) {
 				tool,
 				onChanged: reload,
 				onGone: sessionBack,
-				onStep: step
+				onStep: step,
+				startLead: g && !lead && session === "master" && !waking ? wake : null
 			}, `${project}/${session}`),
 			modals
 		]
@@ -14047,21 +14062,15 @@ var adapterExtras = {
 };
 //#endregion
 //#region web/src/lead.js
-function makeLead({ grid, projects, act, remote, wait, noLead, tries = 20, every = 1500 }) {
+function makeLead({ grid, projects, act, wait, noLead, tries = 20, every = 1500 }) {
 	return async function lead(project) {
 		const find = async () => ((await grid(project)).cards || []).find((c) => c.lead);
 		const m = await find();
 		let did = null;
 		if (!m) {
-			const p = ((await projects()).projects || []).find((x) => x.name === project);
-			if (!p || remote(project)) throw noLead(project);
+			if (!((await projects()).projects || []).find((x) => x.name === project)) throw noLead(project);
 			did = "start";
-			await act("fleet_project_add", {
-				path: p.path,
-				name: p.name,
-				profile: p.profile,
-				start: true
-			});
+			await act("fleet_lead_start", { project });
 		} else if (m.lost || m.exited) {
 			did = "reopen";
 			await act("fleet_reopen", {
@@ -14117,7 +14126,6 @@ var NOT_SERVED = /* @__PURE__ */ new Set([
 	"gfw_unschedule"
 ]);
 var devKind = () => /Mac/.test(passkey.device().noun) ? "mac" : "phone";
-var remote = (project) => /@[^@]+$/.test(String(project || ""));
 function assertFor(purpose) {
 	if (api$1.localTrusted()) return Promise.resolve(null);
 	if (!passkey.available() || !passkey.registered()) {
@@ -14241,7 +14249,6 @@ function phoneAdapter({ lock, go, place }) {
 		grid: (project) => guard(api$1.getGrid(project)),
 		projects: () => api$1.getProjects(),
 		act,
-		remote,
 		wait: (ms) => new Promise((r) => setTimeout(r, ms)),
 		noLead: (project) => new Error(t("phone.noLead", { project }))
 	});

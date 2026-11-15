@@ -279,7 +279,7 @@ ago() {
 stranded() {
   local out n sess id at len kind inq why f
   # A glob first: this runs on every call, and almost always finds nothing.
-  for f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused; do
+  for f in "$FLEET_DIR/$SOCK".*.queue.*.tmp "$FLEET_DIR/$SOCK".*.queue.*.indoubt "$FLEET_DIR/$SOCK".*.queue.*.refused "$FLEET_DIR/$SOCK".*.queue.*.unwoken; do
     [ -f "$f" ] && break; f=""
   done
   [ -n "$f" ] || return 0
@@ -292,6 +292,7 @@ stranded() {
     case "$kind" in
       indoubt) why="its drain died mid-delivery — it MAY have been typed in already" ;;
       refused) why="the session refused it" ;;
+      unwoken) why="its session was asleep and did not wake — never delivered" ;;
       *)       why="left by a drain that died — never delivered" ;;
     esac
     [ "$inq" = 1 ] && why="a copy of one still queued — re-queueing skips it"
