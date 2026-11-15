@@ -17,6 +17,8 @@
 //     touch swipes each way on the page, with something put in the shell that is taller and
 //     wider than the screen, as anything drawn outside .main would be. Wide content (a table, a
 //     code block in a message) must still scroll sideways inside its own box.
+//   - And, seen in this file's own shot of a typed message, the floating Assistant button over the
+//     composer's corner: it floats 8 px above a composer, keyboard up or down, at a desk too.
 import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from '../../lib/browser.mjs';
@@ -287,5 +289,80 @@ export async function phoneFit({ b, is, shots = '' }) {
     if (name === 'code block') await shot('code-scrolled');
   }
   await b.evaluate(() => document.getElementById('fit-code')?.remove());
+
+  // ── 5. the Assistant button floats above a composer, never on it ───────────
+  // Seen in this file's own shot: the button over the box's top-right corner, the words being
+  // typed running under it, because its height over a composer was a guess the taller touch box
+  // outgrew; at a desk it sat on a stack column's mic. It goes 8 px above the composer's real
+  // top, keyboard up or down, and the chat under it leaves room for its newest message to scroll
+  // clear. Asked of the button's whole dock (Done and Stop sit in it while a conversation is
+  // live) against every composer control and every text field on the screen, and of the chat the
+  // button is over, not the first one found: a desk's stack has three.
+  const STACK = (s) => `#/stack/${encodeURIComponent(JSON.stringify(s.map(session => ({ project: 'acme-api', session }))))}`;
+  const dockRead = () => b.evaluate(() => {
+    const dock = document.querySelector('.as-dock');
+    if (!dock) return { cover: 'no button', gap: 'no button', chat: 'no button', kb: false };
+    const D = dock.getBoundingClientRect();
+    const across = (r) => r.width > 0 && r.height > 0 && r.left < D.right - 0.5 && r.right > D.left + 0.5;
+    const hit = (r) => across(r) && r.top < D.bottom - 0.5 && r.bottom > D.top + 0.5;
+    const name = (el) => el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.textContent.trim().slice(0, 24) || el.tagName.toLowerCase();
+    const controls = [...document.querySelectorAll('.composer button, .composer textarea, .composer input, .composer select, textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio]), select, [contenteditable="true"]')]
+      .filter(el => !dock.contains(el) && !el.closest('.assistant') && getComputedStyle(el).visibility !== 'hidden');
+    const cover = [...new Set(controls.filter(el => hit(el.getBoundingClientRect())).map(name))].join(' | ') || 'none';
+    const under = [...document.querySelectorAll('.composer')].map(c => c.getBoundingClientRect()).filter(across);
+    const gap = under.length ? `${Math.round(Math.min(...under.map(r => r.top)) - D.bottom)} px` : 'no composer under it';
+    const c = [...document.querySelectorAll('.chat')].find(x => across(x.getBoundingClientRect()));
+    let chat = 'no chat under it';
+    if (c) {
+      // Where a reader can take it: the page to its end as well as the chat. With the keyboard up
+      // a session can be taller than .main, and its sticky composer covers the chat's foot until
+      // .main is scrolled, as the main run's clear() also does.
+      const main = document.querySelector('.main');
+      if (main) main.scrollTop = main.scrollHeight;
+      c.scrollTop = c.scrollHeight;
+      const m = [...c.querySelectorAll('.msg')].pop(), R = m?.getBoundingClientRect();
+      chat = !m ? 'no message' : hit(R) ? `under the button by ${Math.round(R.bottom - D.top)} px` : 'clear';
+    }
+    return { cover, gap, chat, kb: document.documentElement.classList.contains('kb') };
+  });
+  const launchRows = async (label, kb) => {
+    const r = await dockRead();
+    if (kb) is(`${label}: ...the keyboard is up (the app pinned to the visible 431 px)`, true, r.kb);
+    is(`${label}: the Assistant button covers no composer control and no text field`, 'none', r.cover);
+    is(`${label}: ...its bottom edge 8 px above the composer under it`, '8 px', r.gap);
+    is(`${label}: ...and the newest message scrolls clear of it`, 'clear', r.chat);
+  };
+  for (const w of [320, 390]) {
+    await b.viewport(w, H);
+    // The session with a request open is asked with the keyboard down only: its box is behind
+    // "Answer the request", a tap there opens the request, and no keyboard comes up from it.
+    for (const [name, hash, typed = true] of [['lead session', '#/p/acme-api/s/master'], ['session with a request', '#/p/acme-api/s/api-fix', false],
+      ['quiet session', '#/p/acme-api/s/docs-pass'], ['stack', STACK(['master', 'docs-pass'])]]) {
+      await open(hash);
+      await until(() => !!document.querySelector('.composer textarea') && !!document.querySelector('.as-dock'));
+      await sleep(300);
+      await launchRows(`${w} ${name}, keyboard down`, false);
+      if (w === 390 && name === 'lead session') await shot('launch-down');
+      if (!typed) continue;
+      await b.evaluate(() => { document.querySelector('.composer textarea')?.focus(); window.__vv?.(431); });
+      await sleep(400);
+      await launchRows(`${w} ${name}, keyboard up`, true);
+      if (w === 390 && name === 'lead session') await shot('launch-up');
+      await b.evaluate(() => { document.activeElement?.blur?.(); window.__vv?.(null); });
+      await sleep(300);
+    }
+  }
+  await b.viewport(W, H);
   await touch(false);
+  // ...and at a desk, with a mouse: the lead's chat, and a stack of three whose right column the
+  // button sat over, its mic under the button.
+  await b.viewport(1280, 900);
+  for (const [name, hash] of [['lead session', '#/p/acme-api/s/master'], ['stack', STACK(['master', 'types', 'docs-pass'])]]) {
+    await open(hash);
+    await until(() => !!document.querySelector('.composer textarea') && !!document.querySelector('.as-dock'));
+    await sleep(400);
+    await launchRows(`1280 ${name}`, false);
+    if (name === 'stack') await shot('launch-desk-stack');
+  }
+  await b.viewport(W, H);
 }

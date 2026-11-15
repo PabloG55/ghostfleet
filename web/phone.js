@@ -4153,7 +4153,7 @@ function useFollow(open, place, inside) {
 	}, [open]);
 }
 var EDGE$1 = 8;
-var GAP = 4;
+var GAP$1 = 4;
 function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW = Infinity, prefer = "down" } = {}) {
 	const r = anchor.getBoundingClientRect();
 	const vw = document.documentElement.clientWidth, vh = innerHeight;
@@ -4162,11 +4162,11 @@ function placeBy(anchor, box, { maxH = 320, align = "start", minWidth = 0, maxW 
 	box.style.minWidth = `${Math.min(minWidth, vw - 16)}px`;
 	box.style.maxHeight = "none";
 	const full = box.offsetHeight;
-	const below = vh - r.bottom - GAP - EDGE$1, above = r.top - GAP - EDGE$1;
+	const below = vh - r.bottom - GAP$1 - EDGE$1, above = r.top - GAP$1 - EDGE$1;
 	const up = prefer === "up" ? !(full > above && below > above) : full > below && above > below;
 	const h = Math.min(full, maxH, Math.max(0, up ? above : below));
 	box.style.maxHeight = `${h}px`;
-	box.style.top = `${up ? r.top - GAP - h : r.bottom + GAP}px`;
+	box.style.top = `${up ? r.top - GAP$1 - h : r.bottom + GAP$1}px`;
 	const w = box.offsetWidth;
 	let left = align === "end" ? r.right - w : align === "center" ? r.left + (r.width - w) / 2 : r.left;
 	left = Math.max(EDGE$1, Math.min(left, vw - EDGE$1 - w));
@@ -12812,14 +12812,79 @@ function HomeAgent({ projects }) {
 		]
 	});
 }
+var GAP = 8;
+function useAboveComposers(ref) {
+	_(() => {
+		const dock = ref.current, app = dock?.closest(".app");
+		if (!dock || !app || typeof ResizeObserver === "undefined") return void 0;
+		const watched = /* @__PURE__ */ new WeakSet(), last = {};
+		const put = (k, v) => {
+			if (last[k] === v) return;
+			last[k] = v;
+			if (v == null) app.style.removeProperty(k);
+			else app.style.setProperty(k, v);
+		};
+		let frame = 0;
+		const place = () => {
+			frame = 0;
+			const d = dock.getBoundingClientRect();
+			if (!d.height) return;
+			put("--launch-h", `${Math.round(d.height)}px`);
+			const under = [];
+			for (const c of app.querySelectorAll(".composer")) {
+				if (!watched.has(c)) {
+					watched.add(c);
+					ro.observe(c);
+				}
+				const r = c.getBoundingClientRect();
+				if (r.height > 0 && r.left < d.right && r.right > d.left) under.push(r.top);
+			}
+			if (!under.length) {
+				put("--launch-b", null);
+				return;
+			}
+			const now = parseFloat(getComputedStyle(dock).bottom) || 0;
+			put("--launch-b", `${Math.round(now + d.bottom - (Math.min(...under) - GAP))}px`);
+		};
+		const soon = () => {
+			if (!frame) frame = requestAnimationFrame(place);
+		};
+		const ro = new ResizeObserver(soon);
+		ro.observe(dock);
+		ro.observe(app);
+		const mo = new MutationObserver(soon);
+		mo.observe(app, {
+			childList: true,
+			subtree: true
+		});
+		const vv = globalThis.visualViewport;
+		addEventListener("resize", soon);
+		addEventListener("scroll", soon, true);
+		vv?.addEventListener?.("resize", soon);
+		place();
+		return () => {
+			cancelAnimationFrame(frame);
+			ro.disconnect();
+			mo.disconnect();
+			removeEventListener("resize", soon);
+			removeEventListener("scroll", soon, true);
+			vv?.removeEventListener?.("resize", soon);
+			app.style.removeProperty("--launch-b");
+			app.style.removeProperty("--launch-h");
+		};
+	}, []);
+}
 function Launcher({ onOpen }) {
 	const S = useAgent();
+	const dock = A(null);
+	useAboveComposers(dock);
 	const state = shipStateOf(S);
 	const live = LIVE.includes(S.phase) || S.conversing;
 	const doing = working(state);
 	const word = doing ? stateWord(S, state) : S.conversing ? `${t("as.name")} · ${t("as.conversing")}` : t("as.name");
 	return /* @__PURE__ */ u("div", {
 		class: `as-dock st-${state}`,
+		ref: dock,
 		children: [
 			S.phase === "listening" && S.vs?.hear?.ready ? /* @__PURE__ */ u("span", {
 				class: "vb-meter",

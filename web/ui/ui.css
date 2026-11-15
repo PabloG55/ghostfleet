@@ -876,6 +876,8 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .meter i { display: block; height: 100%; background: var(--gf-white); transition: width .08s linear; }
 .voice-src { margin: -4px 0 0; }
 
+/* Where the button starts over a composer, until it has measured one (assistant.jsx Launcher puts
+   its bottom edge 8px above the composer's real top, keyboard up or down, and sets both itself). */
 .app:has(.composer) { --launch-b: 96px; }
 .app:has(.att-list) { --launch-b: 150px; }
 /* A toast used to land on the launcher, where the next click often goes, and hide it for as long
@@ -886,9 +888,10 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .app:not(:has(.as-launch)) .tk-chip.floating { bottom: var(--launch-b); }
 .app:not(:has(.as-launch)):has(.tk-chip.floating) .toasts { bottom: calc(var(--launch-b) + 48px); }
 /* A page clears the floating button with its bottom padding; the chat scrolls on its own, so it
-   needs the same, or its newest message ends under the button even scrolled to the end. */
-.app:has(.as-launch) .chat { padding-bottom: 60px; }
-@media (max-width: 900px) { .app:has(.as-launch) .chat { padding-bottom: 50px; } }
+   needs the same, or its newest message ends under the button even scrolled to the end. The
+   button floats 8px over the composer, which is the chat's foot, so the room is its measured
+   height (--launch-h, from the Launcher), those 8px, and 8 more. */
+.app:has(.as-launch) .chat { padding-bottom: calc(var(--launch-h, 50px) + 16px); }
 /* A Terminal or Editor tab (web/ui/terminal.css) fills the column to its foot, so the button
    sat over its last row and, on a phone, over half the key row. Cleared the way the chat is:
    the button's bottom offset plus its height, and a gap. */

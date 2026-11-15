@@ -23699,6 +23699,12 @@ if [ -d "$ROOT/web" ]; then
   #   swipes a page built to move said so, on the Linux leg. Measured on both since: the client
   #   before this change is red on the same 18 rows under Debian's Chromium 156 and macOS's Chrome
   #   157, the three swipe rows among them.
+  #   The Assistant button's rows (section 5 of phone-fit.mjs): on the client before the button
+  #   measured, it sat 24 px into the text box on every session at 320 and 390 (the words being
+  #   typed ran under it), on the stack's Speak mode and Send, and at a desk on the right column's
+  #   mic; with the keyboard up it stayed by the screen's foot, 437 px below the composer. The
+  #   newest-message rows were green there, the button being low; a chat that leaves 20 px under
+  #   its list turned 12 of them red ("under the button by 21 px").
   #   SKIPPED where there is no Chrome, like the group above.
   PFIT="$(mktemp -d "$TEST_RUNS.$$.fit.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" --fit-only > "$PFIT/out" 2> "$PFIT/err"
@@ -23708,8 +23714,9 @@ if [ -d "$ROOT/web" ]; then
   else
     is "phone-check --fit-only ran"     "0" "$pfitrc"
     is "...without complaining"         ""  "$(head -2 "$PFIT/err" | tr '\n' ' ' | sed 's/ *$//')"
-    # A floor: a browser that fails to start emits a row or two. 140 rows when it was written.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 130 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
+    # A floor: a browser that fails to start emits a row or two. 140 rows when it was written, 194
+    # with the Assistant button's.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 180 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PFIT/out"
