@@ -23461,12 +23461,13 @@ fi
 
 group "one base: the phone and the team app are one app"
 # ee/team/test is the team app's own suite, and CI runs none of it: it needs the team's packages
-# and some of it a browser. These three need neither — they read the source — and they are the
+# and some of it a browser. These four need neither — they read the source — and they are the
 # ones that hold the two apps to one base: one-base (a page routed in one app and not the other, a
 # screen kept in an app's folder, a link no route answers, a sidebar word that is not the back
 # link's word), and the words of both languages for every key the shared screens ask for. Left to
 # the team's suite they failed only for whoever ran it: an app-folder file one-base did not know
-# sat on this branch red until somebody did.
+# sat on this branch red until somebody did. no-emoji is the fourth: it reads source, comments
+# included, and sat red on staging unseen because nothing here ran it.
 if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs" ]; then
   OB_OUT="$(mktemp "$TMUX_TMPDIR/one-base.XXXXXX")"
   # THE REPORTER IS NAMED because the count below is read from its summary line. Node 20 picks
@@ -23474,11 +23475,11 @@ if command -v node >/dev/null 2>&1 && [ -f "$ROOT/ee/team/test/one-base.test.mjs
   # where spec says `ℹ pass 18`; a newer Node prints spec either way. Unnamed, the floor read
   # 0 on CI's Node 20 while every test passed, and passed on every machine it was written on.
   node --test --test-reporter=spec "$ROOT/ee/team/test/one-base.test.mjs" "$ROOT/ee/team/test/i18n.test.mjs" \
-    "$ROOT/ee/team/test/phone-screen-words.test.mjs" > "$OB_OUT" 2>&1
+    "$ROOT/ee/team/test/phone-screen-words.test.mjs" "$ROOT/ee/team/test/no-emoji.test.mjs" > "$OB_OUT" 2>&1
   ob_rc=$?
   is "one-base and both languages' words pass" "0" "$ob_rc"
   # A floor: a file that fails to import runs no tests and node --test still has to say so.
-  is "...and ran their tests" "yes" "$(n="$(sed -n 's/^ℹ pass //p' "$OB_OUT")"; [ "${n:-0}" -ge 18 ] && echo yes || echo "no: ${n:-0} passed")"
+  is "...and ran their tests" "yes" "$(n="$(sed -n 's/^ℹ pass //p' "$OB_OUT")"; [ "${n:-0}" -ge 21 ] && echo yes || echo "no: ${n:-0} passed")"
   [ "$ob_rc" -eq 0 ] || grep -A12 '^✖' "$OB_OUT" | head -40
   rm -f "${OB_OUT:?}"
 else
