@@ -62,6 +62,7 @@ import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
 import { startAccountLogin, finishAccountLogin, accountPaneLease, accountLoginNeeds } from '../lib/account-logins.mjs';
 import * as voice from '../lib/voice.mjs';
 import { connectingUid } from '../lib/local-trust.mjs';
+import { readCache as portsCache, sessionView as portsView } from '../lib/ports.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -2604,7 +2605,7 @@ const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang}
 // paired host could run nothing; now it can start that project's idle lead and then send it
 // work, as it could already send to every other session it reaches. It stays bounded by what
 // the owner registered and shares: a project whose pair setting is `hide` is out of reach.
-const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
+const PAIR_READS = new Set(['/api/logins', '/api/projects', '/api/grid', '/api/session', '/api/pane', '/api/ports', '/api/settings', '/api/waiting', '/api/usage', '/api/presence',
                             '/api/shots', '/api/shots/run', '/api/shots/media', '/api/know/events']);
 const PAIR_VERBS = new Set(['fleet_send', 'fleet_ledger', 'fleet_wake', 'fleet_pause', 'fleet_resume', 'fleet_reopen', 'fleet_lead_start',
                             'fleet_login_finish', 'fleet_account_login_start', 'fleet_account_login_finish']);
@@ -3414,6 +3415,44 @@ function agentCatalogue() {
     const t = rp.t;
     const r = await checkouts(t);
     return r.error ? send(res, 502, { ok: false, text: r.error }) : send(res, 200, r.json);
+  }
+
+  // ── what one session left listening, running or booted (lib/ports.mjs) ──────
+  // A session's Details sheet. THIS READS A FILE AND RUNS NOTHING: the scan behind it costs
+  // a dozen processes, and a route a client can call is a route a client can call every
+  // 2.5 s — #192 took this machine from 330-440 new processes a second to ~69, and a scan on
+  // a read would have put it back. The governor rescans every five minutes, and `fleet-ports`
+  // or the desktop's Refresh below on demand; this returns what the last one found, and when.
+  //   Read from the project's OWN profile's fleet dir, so a project of another profile
+  // answers from that profile's scan — the one that is allowed to name its sessions — and a
+  // paired host reads it through PAIR_READS, scoped like every other read. `can_refresh` is
+  // true for a direct localhost request only: the phone and a pairing read, and never ask.
+  if (p === '/api/ports' && req.method === 'GET') {
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const t = rp.t;
+    const session = url.searchParams.get('session') || '';
+    if (!session) return send(res, 400, { ok: false, text: 'session is required' });
+    const cache = portsCache(path.join(t.cfg, 'fleet'));
+    const v = portsView(cache, t.sock, session);
+    return send(res, 200, { ok: true, project: t.name, session, ...v, can_refresh: req.localTrust === true });
+  }
+  // A SCAN NOW, for the desktop's Refresh. A direct localhost request only (localRequest:
+  // the owner's own browser on this machine), and not in PAIR_POSTS, so neither the phone
+  // nor a paired host can make this machine spawn a scan. lib/ports.mjs takes a lock and
+  // skips a scan younger than 15 s, so a held-down button costs one.
+  //   400, not 403: web/api.js reads a 401 or 403 as a dead session and locks the app, and
+  // this refusal is about where the request came from, not about who sent it (proxyRemote).
+  if (p === '/api/ports/refresh') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (!req.localTrust) return send(res, 400, { ok: false, text: 'a scan is started from this machine only — run fleet-ports, or refresh from the desktop on localhost' });
+    const rp = resolveProject(url.searchParams.get('project') || String(body?.project || ''), peerScope(req));
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const dir = path.join(rp.t.cfg, 'fleet');
+    const r = await new Promise(done => execFile(process.execPath, [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'ports.mjs'), 'refresh', '--dir', dir, '--max-age', '15'],
+      { timeout: 60000, env: { ...process.env, CLAUDE_CONFIG_DIR: rp.t.cfg, CLAUDE_FLEET_DIR: dir } }, (e) => done(e)));
+    if (r) return send(res, 502, { ok: false, text: `the scan did not finish: ${String(r.message || r).slice(0, 200)}` });
+    return send(res, 200, { ok: true, at: portsCache(dir)?.at ?? null });
   }
 
   if (p === '/api/settings' && req.method === 'GET') {

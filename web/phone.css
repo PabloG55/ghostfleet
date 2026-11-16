@@ -1027,6 +1027,18 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
   .modal.sheet { animation: sheet-up .22s cubic-bezier(.2, .8, .2, 1); }
 }
 @keyframes sheet-up { from { transform: translateY(24px); opacity: .4; } to { transform: none; opacity: 1; } }
+/* A SESSION'S DETAILS (session.jsx DetailsModal): what it left listening, running or booted. The
+ * flag line is the one warning on the sheet, in the yellow the desk uses for "look at this"; each
+ * row is what it is, then how it was tied to the session, then the command, which can be long and
+ * so wraps inside the sheet instead of scrolling it sideways at a phone's width. */
+.details-flag { color: var(--yellow); font-family: var(--mono); font-size: 13px; display: flex; gap: 6px; align-items: baseline; }
+.details-group h3 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 6px; }
+.details-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.details-group li { border-left: 2px solid var(--line); padding-left: 10px; min-width: 0; }
+.details-what b { font-family: var(--mono); }
+.details-how { margin-top: 2px; overflow-wrap: anywhere; }
+.details-cmd { display: block; margin-top: 3px; color: var(--dim); font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
+.details footer { justify-content: space-between; align-items: center; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding-top: 10px; }
 .advanced summary { cursor: pointer; color: var(--dim); font-size: 13px; }

@@ -202,6 +202,11 @@ export function phoneAdapter({ lock, go, place }) {
     // figures, read only. The team app has no such member, so it draws nothing there.
     usage: () => guard(api.getUsage()),
     pane: (project, name) => guard(api.getPane(project, name)),
+    // A session's Details (web/ui/session.jsx): the last scan of what it left listening, running
+    // or booted (lib/ports.mjs). Read once when the sheet opens, never polled. The team app has
+    // no such member, so it draws no Details entry.
+    ports: (project, name) => guard(api.getPorts(project, name)),
+    portsRefresh: (project) => guard(api.refreshPorts(project)),
     act,
     attach: (project, session, file) => guard(api.attach(project, session, file)),
     attachPerMessage: api.ATTACH_PER_MESSAGE,

@@ -637,6 +637,32 @@ var en_default = {
 	"sess.renameMenu": "Rename…",
 	"sess.stopMenu": "Stop session…",
 	"sess.stopRmMenu": "Stop and delete worktree…",
+	"sess.details": "Details…",
+	"details.title": "{name} · details",
+	"details.state.done": "done",
+	"details.state.asleep": "asleep",
+	"details.state.parked": "paused",
+	"details.state.lost": "lost",
+	"details.state.exited": "exited",
+	"details.state.stopped": "stopped",
+	"details.flagListen": "still listening on {ports}",
+	"details.flagContainer": "a container still running",
+	"details.flagContainers": "{n} containers still running",
+	"details.flagSimulator": "a simulator still booted",
+	"details.flagSimulators": "{n} simulators still booted",
+	"details.listening": "Listening",
+	"details.containers": "Containers",
+	"details.simulators": "Simulators",
+	"details.how.parent": "started from its pane: {chain}",
+	"details.how.cwd": "running in its folder, {path}",
+	"details.how.label": "a compose project in its folder, {path}",
+	"details.how.mount": "mounts its folder, {path}",
+	"details.how.argv": "named by pid {pid}, which its pane started",
+	"details.empty": "Nothing listening, no container, no simulator.",
+	"details.never": "Not scanned yet. It is scanned every five minutes; fleet-ports on this machine scans now.",
+	"details.scanned": "Scanned {ago}",
+	"details.scannedNow": "Scanned a moment ago",
+	"details.refresh": "Scan now",
 	"sess.quotaBack": "quota is back {when}",
 	"sess.limitWhy": "Until then it cannot go on. You can schedule it to pick up on its own.",
 	"sess.alreadySched": "Already scheduled for {when}.",
@@ -1531,6 +1557,32 @@ var es_default = {
 	"sess.renameMenu": "Renombrar…",
 	"sess.stopMenu": "Detener sesión…",
 	"sess.stopRmMenu": "Detener y borrar worktree…",
+	"sess.details": "Detalles…",
+	"details.title": "{name} · detalles",
+	"details.state.done": "terminó",
+	"details.state.asleep": "dormida",
+	"details.state.parked": "en pausa",
+	"details.state.lost": "perdida",
+	"details.state.exited": "se cerró",
+	"details.state.stopped": "detenida",
+	"details.flagListen": "sigue escuchando en {ports}",
+	"details.flagContainer": "un contenedor sigue corriendo",
+	"details.flagContainers": "{n} contenedores siguen corriendo",
+	"details.flagSimulator": "un simulador sigue encendido",
+	"details.flagSimulators": "{n} simuladores siguen encendidos",
+	"details.listening": "Escuchando",
+	"details.containers": "Contenedores",
+	"details.simulators": "Simuladores",
+	"details.how.parent": "arrancó desde su panel: {chain}",
+	"details.how.cwd": "corre en su carpeta, {path}",
+	"details.how.label": "un proyecto de compose en su carpeta, {path}",
+	"details.how.mount": "monta su carpeta, {path}",
+	"details.how.argv": "lo nombra el pid {pid}, que arrancó su panel",
+	"details.empty": "Nada escuchando, ningún contenedor, ningún simulador.",
+	"details.never": "Todavía no se ha revisado. Se revisa cada cinco minutos; fleet-ports en esta máquina lo revisa ya.",
+	"details.scanned": "Revisado {ago}",
+	"details.scannedNow": "Revisado hace un momento",
+	"details.refresh": "Revisar ahora",
 	"sess.quotaBack": "el cupo vuelve {when}",
 	"sess.limitWhy": "Mientras tanto no puede seguir. Puedes dejarlo programado para que retome solo.",
 	"sess.alreadySched": "Ya está programado para {when}.",
@@ -7600,6 +7652,160 @@ var hhmm$1 = (at) => (/* @__PURE__ */ new Date(at * 1e3)).toLocaleString(locale(
 	minute: "2-digit"
 });
 var localInput = (d) => (/* @__PURE__ */ new Date(d.getTime() - d.getTimezoneOffset() * 6e4)).toISOString().slice(0, 16);
+var IDLE_STATES = [
+	"done",
+	"asleep",
+	"parked",
+	"lost",
+	"exited",
+	"stopped"
+];
+function detailsFlag(state, items) {
+	if (!IDLE_STATES.includes(state) || !items?.length) return "";
+	const ports = [...new Set(items.flatMap((i) => i.kind === "listen" ? [i.port] : i.kind === "container" ? (i.ports || []).map((p) => p.host) : []))].sort((a, b) => a - b);
+	const nc = items.filter((i) => i.kind === "container").length, ns = items.filter((i) => i.kind === "simulator").length;
+	const bits = [];
+	if (ports.length) bits.push(t("details.flagListen", { ports: ports.map((p) => ":" + p).join(", ") }));
+	if (nc) bits.push(t(nc === 1 ? "details.flagContainer" : "details.flagContainers", { n: nc }));
+	if (ns) bits.push(t(ns === 1 ? "details.flagSimulator" : "details.flagSimulators", { n: ns }));
+	return `${t(`details.state.${state}`)} — ${bits.join(", ")}`;
+}
+function howWords(tie) {
+	const at = tie.path ? tie.path.replace(/^\/(?:Users|home)\/[^/]+/, "~") : "";
+	if (tie.how === "parent") return t("details.how.parent", { chain: (tie.chain || []).join(" ← ") });
+	if (tie.how === "cwd") return t("details.how.cwd", { path: at });
+	if (tie.how === "label") return t("details.how.label", { path: at });
+	if (tie.how === "mount") return t("details.how.mount", { path: at });
+	if (tie.how === "argv") return t("details.how.argv", { pid: tie.pid });
+	return "";
+}
+function DetailsModal({ project, name, onClose }) {
+	const fleet = useFleet();
+	const [data, setData] = d(null);
+	const [err, setErr] = d("");
+	const [busy, setBusy] = d(false);
+	const load = async () => {
+		try {
+			setData(await fleet.ports(project, name));
+			setErr("");
+		} catch (e) {
+			setErr(String(e?.message || e));
+		}
+	};
+	h(() => {
+		load();
+	}, [project, name]);
+	const refresh = async () => {
+		setBusy(true);
+		try {
+			await fleet.portsRefresh(project);
+			await load();
+		} catch (e) {
+			toast(String(e?.message || e), "bad");
+		} finally {
+			setBusy(false);
+		}
+	};
+	const items = data?.items || [];
+	const flag = data ? detailsFlag(data.state, items) : "";
+	const groups = [
+		["listen", "details.listening"],
+		["container", "details.containers"],
+		["simulator", "details.simulators"]
+	].map(([kind, head]) => [head, items.filter((i) => i.kind === kind)]).filter(([, list]) => list.length);
+	const age = data?.at ? Date.now() / 1e3 - data.at : null;
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		wide: true,
+		title: t("details.title", { name }),
+		onClose,
+		children: /* @__PURE__ */ u("div", {
+			class: "modal-body stack details",
+			children: [
+				flag ? /* @__PURE__ */ u("p", {
+					class: "details-flag",
+					role: "status",
+					children: [
+						/* @__PURE__ */ u(Icon, { name: "warning" }),
+						" ",
+						flag
+					]
+				}) : null,
+				err ? /* @__PURE__ */ u("p", {
+					class: "bad small",
+					children: err
+				}) : !data ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("common.loading")
+				}) : !data.at ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("details.never")
+				}) : !items.length ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("details.empty")
+				}) : groups.map(([head, list]) => /* @__PURE__ */ u("section", {
+					class: "details-group",
+					children: [/* @__PURE__ */ u("h3", { children: t(head) }), /* @__PURE__ */ u("ul", { children: list.map((it) => /* @__PURE__ */ u("li", { children: [
+						/* @__PURE__ */ u("div", {
+							class: "details-what",
+							children: it.kind === "listen" ? /* @__PURE__ */ u(S$1, { children: [
+								/* @__PURE__ */ u("b", { children: [":", it.port] }),
+								" ",
+								/* @__PURE__ */ u("span", { children: it.name || "?" }),
+								" ",
+								/* @__PURE__ */ u("span", {
+									class: "muted small",
+									children: ["pid ", it.pid]
+								})
+							] }) : it.kind === "container" ? /* @__PURE__ */ u(S$1, { children: [
+								/* @__PURE__ */ u("b", { children: it.name || it.id }),
+								" ",
+								/* @__PURE__ */ u("span", {
+									class: "muted small",
+									children: it.image
+								}),
+								(it.ports || []).map((p) => /* @__PURE__ */ u("span", {
+									class: "muted small",
+									children: [
+										" :",
+										p.host,
+										"→",
+										p.to
+									]
+								}, `${p.host}${p.to}`))
+							] }) : /* @__PURE__ */ u(S$1, { children: [
+								/* @__PURE__ */ u("b", { children: it.name }),
+								" ",
+								/* @__PURE__ */ u("span", {
+									class: "muted small",
+									children: it.runtime
+								})
+							] })
+						}),
+						/* @__PURE__ */ u("div", {
+							class: "details-how muted small",
+							children: howWords(it.tie)
+						}),
+						it.kind === "listen" && it.cmd ? /* @__PURE__ */ u("code", {
+							class: "details-cmd small",
+							children: it.cmd
+						}) : null
+					] }, `${it.kind}:${it.port || it.id || it.udid}:${it.pid || ""}`)) })]
+				}, head)),
+				/* @__PURE__ */ u("footer", { children: [/* @__PURE__ */ u("span", {
+					class: "muted small",
+					children: data?.at ? age < 60 ? t("details.scannedNow") : t("details.scanned", { ago: ago(age) }) : ""
+				}), data?.can_refresh && fleet.portsRefresh ? /* @__PURE__ */ u(Btn, {
+					kind: "ghost sm",
+					disabled: busy,
+					onClick: refresh,
+					icon: "refresh",
+					children: t("details.refresh")
+				}) : null] })
+			]
+		})
+	});
+}
 function ScheduleModal({ name, onClose, onSave }) {
 	const [msg, setMsg] = d(() => t("sched.default"));
 	const [when, setWhen] = d(() => localInput(new Date(Date.now() + 36e5)));
@@ -7714,6 +7920,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	});
 	const [labelEdit, setLabelEdit] = d(null);
 	const [schedOpen, setSchedOpen] = d(false);
+	const [detailsOpen, setDetailsOpen] = d(false);
 	const [files, setFilesState] = d(() => draftFiles(dkey));
 	const mounted = A(true);
 	h(() => () => {
@@ -7785,7 +7992,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	const shaped = waiting && !card;
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
-	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen && !detailsOpen;
 	const held = !!prompt && composerFocused && composerRecent;
 	const request = useRequest(`session:${project}/${name}`, pane.data ? prompt?.fingerprint || null : void 0, available && !held);
 	const showRequest = () => {
@@ -8166,6 +8373,17 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 											}) : null
 										]
 									}) : null,
+									card && fleet.ports ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setDetailsOpen(true);
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "list" }),
+											" ",
+											t("sess.details")
+										]
+									}) : null,
 									can("gfw_label") ? /* @__PURE__ */ u("button", {
 										onClick: () => {
 											setMenu(false);
@@ -8497,6 +8715,11 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 			confirm ? /* @__PURE__ */ u(Confirm, {
 				...confirm,
 				onClose: () => setConfirm(null)
+			}) : null,
+			detailsOpen ? /* @__PURE__ */ u(DetailsModal, {
+				project,
+				name,
+				onClose: () => setDetailsOpen(false)
 			}) : null,
 			schedOpen ? /* @__PURE__ */ u(ScheduleModal, {
 				name,
@@ -14692,6 +14915,8 @@ function phoneAdapter({ lock, go, place }) {
 		heldFor: api$1.heldFor,
 		usage: () => guard(api$1.getUsage()),
 		pane: (project, name) => guard(api$1.getPane(project, name)),
+		ports: (project, name) => guard(api$1.getPorts(project, name)),
+		portsRefresh: (project) => guard(api$1.refreshPorts(project)),
 		act,
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,

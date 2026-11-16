@@ -13,6 +13,8 @@
 //   GET  /api/pane?project=&session=[&scrollback=N]
 //                                               -> { session, rows?, cols?, at, pane: "<SGR text>" }
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
+//   GET  /api/ports?project=&session=           -> { at, state, items, can_refresh }  (the last scan; runs nothing)
+//   POST /api/ports/refresh?project=<name>      -> { at }          (a direct localhost request only)
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 //   GET  /api/usage                             -> { enabled, off?, threshold, profiles: [ accounts.mjs describe() ] }
 //   GET  /api/logins                            -> { items: pending authorizations, each with its session and host }
@@ -688,6 +690,31 @@ export async function getGrid(project, sub = '', { fresh = false } = {}) {
 export async function getCheckouts(project) {
   if ((await ready()).mode === 'server') return get(`/api/checkouts?project=${encodeURIComponent(project || '')}`);
   return fixture('checkouts.json');
+}
+
+// What one session left listening, running or booted (lib/ports.mjs), for its Details. A
+// READ OF THE LAST SCAN, never a scan: the daemon answers from a file the governor rewrites
+// every five minutes, so opening Details costs this machine nothing.
+export async function getPorts(project, session) {
+  if ((await ready()).mode === 'server')
+    return get(`/api/ports?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}`);
+  try { return await fixture(`ports-${bareName(project)}-${session}.json`); }
+  catch { return { ok: true, session, at: null, state: null, items: [], can_refresh: false }; }
+}
+// A scan now. The daemon takes it from a direct localhost request only (`can_refresh` on the
+// read says whether this is one), so the phone never draws the button that would ask.
+export async function refreshPorts(project) {
+  if ((await ready()).mode === 'server') {
+    let r;
+    try {
+      r = await fetch(baseUrl() + `/api/ports/refresh?project=${encodeURIComponent(project || '')}`,
+        { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(haveToken() ? { Authorization: `Bearer ${token}` } : {}) }, body: '{}' });
+    } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+    const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+    if (!j.ok) throw new Error(j.text || `HTTP ${r.status}`);
+    return j;
+  }
+  return { ok: true, at: Math.floor(Date.now() / 1000) };
 }
 
 // The per-session auto-nudge state. Deliberately NOT bolted onto §4: that schema is

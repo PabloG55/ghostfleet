@@ -53,6 +53,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
 | what a stopped worker still **owed** | `fleet-ledger` — both stops hand its open, waiting and not-done ledger items to you, labelled `[<worker>]`; finish, re-dispatch or drop each |
 | the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
+| what a session **left running** (ports, containers, simulators), and how each was tied to it | `fleet-ports` · `fleet-ports -s <socket> <session>` — read only; `--cached` prints the governor's last scan (every 5 minutes) without starting one. A session's **Details** on the web client shows the same, and a done or asleep session that still holds something is flagged there ("asleep — still listening on :5173") and nowhere on a card |
 
 ### Nested leads — a worker can run its own workers
 
