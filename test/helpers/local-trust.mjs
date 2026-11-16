@@ -18,6 +18,9 @@ const address = process.env.LOCAL_TRUST_V6 ? '::1' : '127.0.0.1';
 const dual = !!process.env.LOCAL_TRUST_DUAL;
 const is = (n, w, g) => rows.push([n, JSON.stringify(w), JSON.stringify(g)].join('\x1f'));
 let server, peerServer, browser;
+const listeners = [];
+// Alive by every measure a stop has: there, and not a zombie waiting to be reaped.
+const alive = (pid) => { try { const st = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim(); return !!st && !st.startsWith('Z'); } catch { return false; } };
 const env = { ...process.env, HOME: path.join(tmp, 'home'), TMUX_TMPDIR: tmp, TMUX: '',
   CLAUDE_FLEET_AWAKE: 'off', CLAUDE_FLEET_EDITOR: '/bin/sh', SHELL: '/bin/sh', ENV: '',
   GHOSTFLEET_SERVE_CONFIG: path.join(tmp, 'serve.json'), GHOSTFLEET_SERVE_AUDIT: path.join(tmp, 'audit.jsonl') };
@@ -56,6 +59,22 @@ try {
   }
   if (process.env.LOCAL_TRUST_SERVE_SOURCE) fs.copyFileSync(process.env.LOCAL_TRUST_SERVE_SOURCE, path.join(tmp, 'rt/bin/fleet-serve.mjs'));
   fs.writeFileSync(path.join(cfg, 'projects'), `acme-api\t${tmp}/acme-api\twork\n`);
+  // A personal-profile project, one asleep session in it, and two throwaway listeners in that
+  // session's folder, started here: the only things a stop in this helper can reach. Twins, so
+  // "exactly that pid" has a sibling to spare. The work project above never offers a stop.
+  const playground = path.join(tmp, 'scratch', 'playground');
+  fs.mkdirSync(playground, { recursive: true });
+  fs.writeFileSync(path.join(cfg, 'projects.personal'), `scratch\t${tmp}/scratch\tpersonal\n`);
+  fs.mkdirSync(path.join(env.HOME, '.claude-personal/fleet'), { recursive: true });
+  fs.writeFileSync(path.join(env.HOME, '.claude-personal/fleet/cf-personal-scratch.playground.asleep'), `${scanAt}\teeeeeeee-0000-0000-0000-00000000aa01\t${playground}\t3\n`);
+  const LISTEN = "require('net').createServer(c => c.end()).listen(+process.argv[1], '127.0.0.1'); setTimeout(() => process.exit(0), 120000).unref();";
+  for (let i = 0; i < 2; i++) {
+    const f = net.createServer(); await new Promise(r => f.listen(0, '127.0.0.1', r));
+    const lp = f.address().port; await new Promise(r => f.close(r));
+    const ch = spawn(process.execPath, ['-e', LISTEN, String(lp)], { cwd: playground, stdio: 'ignore' });
+    listeners.push({ port: lp, pid: ch.pid, ch });
+  }
+  for (const l of listeners) await until(() => new Promise(r => { const c = net.connect(l.port, '127.0.0.1', () => { c.destroy(); r(true); }); c.on('error', () => r(false)); }));
   // A fixture grid keeps screenshots independent of any real session or account.
   fs.writeFileSync(path.join(tmp, 'rt/bin/fleet-grid.mjs'), `// '--json'\nconsole.log(JSON.stringify(${JSON.stringify({ project: 'acme-api', cards: [], free_worktrees: [], sessions: [], counts: { need_you: 0, working: 0, ready: 0, parked: 0, lost: 0, total: 0 } })}));\n`);
   const free = net.createServer();
@@ -95,6 +114,25 @@ try {
   is('local: Details reads one session\'s ports, and may refresh', [200, 'done', [5173], true], portsOf(await portsRead()));
   const localScan = await call('POST', '/api/ports/refresh?project=acme-api', {}, {});
   is('local: a refresh is accepted directly', [200, scanAt], [localScan.status, localScan.json?.at]);
+  // A stop, from the owner's own browser on this machine: never in a work project, always the
+  // identity the sheet showed, and exactly that pid.
+  is('local: a work project\'s Details offers no stop', false, (await portsRead()).json?.can_stop ?? null);
+  const workStop = await call('POST', '/api/ports/stop?project=acme-api&session=api-1', {}, { want: { kind: 'listen', port: 5173, pid: 4242, cmd: 'node vite' } });
+  is('local: a stop in a work project is refused as the work profile\'s, and not as a dead session', [409, 'work'], [workStop.status, workStop.json?.code ?? null]);
+  await call('POST', '/api/ports/refresh?project=scratch', {}, {});
+  const pgRead = await call('GET', '/api/ports?project=scratch&session=playground');
+  const pgItem = (n) => (pgRead.json?.items || []).find(i => i.kind === 'listen' && i.port === listeners[n].port);
+  is('local: a personal project\'s Details lists its session\'s listeners and offers a stop', [200, [listeners[0].pid, listeners[1].pid], true],
+     [pgRead.status, [pgItem(0)?.pid ?? null, pgItem(1)?.pid ?? null], pgRead.json?.can_stop ?? null]);
+  const wantOf = (i) => ({ kind: 'listen', port: i?.port, pid: i?.pid, start: i?.start, cmd: i?.cmd });
+  const stopAt = (q, extra, want) => call('POST', `/api/ports/stop?${q}`, extra, { want });
+  const stale = await stopAt('project=scratch&session=playground', {}, { ...wantOf(pgItem(0)), start: 'Mon Jan 1 00:00:00 2001' });
+  is('local: a stop naming a start time the pid no longer has is refused, and nothing is sent', [409, 'changed', true], [stale.status, stale.json?.code ?? null, alive(listeners[0].pid)]);
+  const localStop = await stopAt('project=scratch&session=playground', {}, wantOf(pgItem(0)));
+  is('local: the localhost desktop stop is accepted', [200, 'stopped'], [localStop.status, localStop.json?.result ?? null]);
+  is('...and ended exactly that pid, not its twin in the same folder', [false, true], [alive(listeners[0].pid), alive(listeners[1].pid)]);
+  const audit = fs.readFileSync(env.GHOSTFLEET_SERVE_AUDIT, 'utf8').trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return {}; } }).filter(a => a.verb === 'ports_stop');
+  is('local: every stop is an audit row, the refused ones too', ['refused:work local', 'refused:changed local', 'stopped local'], audit.map(a => `${a.result} ${a.confirmed}`));
   for (const h of ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'tailscale-user-login', 'tailscale-headers-info', 'via', 'x-real-ip', 'x-fleet-on-behalf', 'x-proxy-scratch']) {
     const r = await open({ [h]: '' });
     is(`local + ${h}: only direct gets a ticket`, [true, h === 'x-fleet-on-behalf' ? 403 : 401, h === 'x-fleet-on-behalf' ? null : 'passkey'], [accepted, r.status, r.json?.needs ?? null]);
@@ -161,6 +199,9 @@ try {
   is('remote: Details reads, with no refresh offered', [200, 'done', [5173], false], portsOf(await portsRead(remoteHeaders)));
   const remoteScan = await call('POST', '/api/ports/refresh?project=acme-api', remoteHeaders, {});
   is('remote: a refresh is refused beside direct acceptance, and not as a dead session', [200, 400], [localScan.status, remoteScan.status]);
+  is('remote: the phone is never offered a stop', false, (await call('GET', '/api/ports?project=scratch&session=playground', remoteHeaders)).json?.can_stop ?? null);
+  const remoteStop = await stopAt('project=scratch&session=playground', remoteHeaders, wantOf(pgItem(1)));
+  is('remote: a stop from the phone is refused with a 400 beside direct acceptance, and nothing is sent', [200, 400, true], [localStop.status, remoteStop.status, alive(listeners[1].pid)]);
   const ending = await remoteOpen();
   await call('POST', '/api/auth/end', remoteHeaders, {});
   is('ticket dies with the exact session that minted it', [200, 401], [remoteTerm.status, await ws(ending.json?.ticket, { 'x-forwarded-for': '100.64.0.9' })]);
@@ -190,6 +231,13 @@ try {
   const pairPorts = await call('GET', '/api/ports?project=toolbox%40vm&session=master', remoteHeaders);
   is('paired: Details reads the other host\'s scan, with no refresh', [200, [], false], [pairPorts.status, pairPorts.json?.items ?? null, pairPorts.json?.can_refresh ?? null]);
   is('paired: a refresh does not cross', [200, 400], [localScan.status, (await call('POST', '/api/ports/refresh?project=toolbox%40vm', remoteHeaders, {})).status]);
+  // A stop does not cross either way: asked of a paired host's project, from the phone or from
+  // this machine's own browser, it is refused HERE with a 400 and never forwarded. Here, and not
+  // by the other host's own localhost gate, which would answer the same 400 to a forward and so
+  // hide a pairing that had started forwarding stops: hence the `remote` refusal's own words.
+  const crossed = async (extra) => { const r = await stopAt('project=toolbox%40vm&session=master', extra, wantOf(pgItem(1))); return [r.status, /does not cross/.test(r.json?.text || '')]; };
+  is('paired: a stop does not cross, from the phone or from localhost', [200, [400, true], [400, true], true],
+     [localStop.status, await crossed(remoteHeaders), await crossed({}), alive(listeners[1].pid)]);
   is('paired terminal carries shell output through the home host', { status: 101, output: true }, await ws(pairTerm.json?.ticket, {}, true));
   const pairEnding = await pairOpen('term');
   await call('POST', '/api/auth/end', remoteHeaders, {});
@@ -256,6 +304,7 @@ try {
   if (/no chrome:/.test(String(e))) rows.push('#SKIP\x1fLocal trust browser proof\x1fno chrome installed');
   else is('local-trust helper ran to completion', '', String(e.stack || e).split('\n').slice(0, 2).join(' '));
 } finally {
+  for (const l of listeners) try { l.ch.kill('SIGTERM'); } catch {}
   try { await browser?.close(); } catch {}
   if (peerServer && peerServer.exitCode === null) { peerServer.kill('SIGTERM'); await new Promise(r => peerServer.once('exit', r)); }
   if (server && server.exitCode === null) { server.kill('SIGTERM'); await new Promise(r => server.once('exit', r)); }

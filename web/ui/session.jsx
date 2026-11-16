@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs, ago } from './ui.jsx';
+import { STATUS, statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs, ago } from './ui.jsx';
 import { Skeleton } from './skeleton.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
@@ -275,20 +275,35 @@ const localInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).
 // it every five minutes. Every row says HOW it was tied to the session, because that is what makes
 // it believable: a port is this session's only if a parent process, a working directory, a compose
 // label, a mount or a process naming the device says so.
-//   READ ONLY, and the phone gets no control here. `can_refresh` is the daemon saying this is the
-// owner's own browser on this machine, the one place a scan may be started from. Nothing on a card
-// says any of this: the line at the top is the flag, and it is shown only here and in fleet-ports.
+//   THE PHONE GETS NO CONTROL HERE. `can_refresh` and `can_stop` are the daemon saying this is the
+// owner's own browser on this machine, the one place a scan may be started or a thing stopped
+// from (and never a stop in a work-profile project). A stop is ONE row, through a modal that names
+// it; "Force stop" exists only after a TERM left that process running, behind a second modal of
+// its own. Nothing on a card says any of this: the line at the top is the flag, and it is shown
+// only here and in fleet-ports.
+//   THE FLAG SPEAKS IN THE CHIP'S WORD. The scan's own state word ("done") sat under a header
+// whose chip said "Ready" for the same session — two names for one moment, side by side. So the
+// scan says WHETHER to flag (the session is not running a turn), and the header's status says
+// what to call it. A chip that says the session is busy again means the scan is older than that,
+// and a leftover flag on a working session would be the stale half talking.
 export const IDLE_STATES = ['done', 'asleep', 'parked', 'lost', 'exited', 'stopped'];
-export function detailsFlag(state, items) {
-  if (!IDLE_STATES.includes(state) || !items?.length) return '';
+const BUSY_CHIP = new Set(['working', 'need-you', 'starting']);
+export function detailsFlag(state, items, status) {
+  if (!IDLE_STATES.includes(state) || !items?.length || BUSY_CHIP.has(status)) return '';
   const ports = [...new Set(items.flatMap(i => i.kind === 'listen' ? [i.port] : i.kind === 'container' ? (i.ports || []).map(p => p.host) : []))].sort((a, b) => a - b);
   const nc = items.filter(i => i.kind === 'container').length, ns = items.filter(i => i.kind === 'simulator').length;
   const bits = [];
   if (ports.length) bits.push(t('details.flagListen', { ports: ports.map(p => ':' + p).join(', ') }));
   if (nc) bits.push(t(nc === 1 ? 'details.flagContainer' : 'details.flagContainers', { n: nc }));
   if (ns) bits.push(t(ns === 1 ? 'details.flagSimulator' : 'details.flagSimulators', { n: ns }));
-  return `${t(`details.state.${state}`)} — ${bits.join(', ')}`;
+  return `${STATUS[status]?.label || t(`details.state.${state}`)} — ${bits.join(', ')}`;
 }
+// What Details sends back to stop a row: the identity it SHOWED, so the daemon stops the
+// process that was confirmed or refuses — never whatever holds that port now.
+const wantOf = (it) => it.kind === 'listen' ? { kind: 'listen', port: it.port, pid: it.pid, start: it.start, cmd: it.cmd }
+  : it.kind === 'container' ? { kind: 'container', id: it.id } : { kind: 'simulator', udid: it.udid };
+const rowKey = (it) => `${it.kind}:${it.port || it.id || it.udid}:${it.pid || ''}`;
+const rowName = (it) => it.kind === 'listen' ? `:${it.port} ${it.name || ''} (pid ${it.pid})`.replace('  ', ' ') : it.name || it.id;
 function howWords(tie) {
   const at = tie.path ? tie.path.replace(/^\/(?:Users|home)\/[^/]+/, '~') : '';
   if (tie.how === 'parent') return t('details.how.parent', { chain: (tie.chain || []).join(' ← ') });
@@ -298,11 +313,13 @@ function howWords(tie) {
   if (tie.how === 'argv') return t('details.how.argv', { pid: tie.pid });
   return '';
 }
-function DetailsModal({ project, name, onClose }) {
+function DetailsModal({ project, name, status, onClose }) {
   const fleet = useFleet();
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState(null);       // { it, kill } — the row a modal is asking about
+  const [left, setLeft] = useState({});       // rowKey -> the text of a TERM that left it running
   const load = async () => {
     try { setData(await fleet.ports(project, name)); setErr(''); }
     catch (e) { setErr(String(e?.message || e)); }
@@ -314,13 +331,26 @@ function DetailsModal({ project, name, onClose }) {
     catch (e) { toast(String(e?.message || e), 'bad'); }
     finally { setBusy(false); }
   };
+  const stopOne = async ({ it, kill }) => {
+    try {
+      const r = await fleet.portsStop(project, name, wantOf(it), kill);
+      if (r.result === 'still-running' && !kill) setLeft(l => ({ ...l, [rowKey(it)]: r.text }));
+      else setLeft(l => { const n = { ...l }; delete n[rowKey(it)]; return n; });
+      toast(r.text, r.result === 'stopped' ? 'ok' : 'bad');
+    } catch (e) { toast(String(e?.message || e), 'bad'); }
+    await load();
+  };
   const items = data?.items || [];
-  const flag = data ? detailsFlag(data.state, items) : '';
+  const canStop = data?.can_stop === true && !!fleet.portsStop;
+  const flag = data ? detailsFlag(data.state, items, status) : '';
   const groups = [['listen', 'details.listening'], ['container', 'details.containers'], ['simulator', 'details.simulators']]
     .map(([kind, head]) => [head, items.filter(i => i.kind === kind)]).filter(([, list]) => list.length);
   const age = data?.at ? Date.now() / 1000 - data.at : null;
-  return (
-    <Modal sheet wide title={t('details.title', { name })} onClose={onClose}>
+  // The confirm is the sheet's SIBLING, not its child, so the sheet's Tab trap does not walk into
+  // it; and while it is open the sheet ignores its own Esc, which would otherwise close both.
+  const keep = () => {};
+  return (<>
+    <Modal sheet wide title={t('details.title', { name })} onClose={ask ? keep : onClose}>
       <div class="modal-body stack details">
         {flag ? <p class="details-flag" role="status"><Icon name="warning" /> {flag}</p> : null}
         {err ? <p class="bad small">{err}</p>
@@ -340,6 +370,12 @@ function DetailsModal({ project, name, onClose }) {
                     </div>
                     <div class="details-how muted small">{howWords(it.tie)}</div>
                     {it.kind === 'listen' && it.cmd ? <code class="details-cmd small">{it.cmd}</code> : null}
+                    {canStop && left[rowKey(it)] ? <p class="details-left small" role="status">{t('details.stillRunning')}</p> : null}
+                    {canStop ? <div class="details-stop">
+                      {left[rowKey(it)] && it.kind === 'listen'
+                        ? <Btn kind="danger sm" onClick={() => setAsk({ it, kill: true })}>{t('details.force')}</Btn>
+                        : <Btn kind="ghost sm" icon="stop" onClick={() => setAsk({ it, kill: false })}>{t('details.stop')}</Btn>}
+                    </div> : null}
                   </li>))}
               </ul>
             </section>))}
@@ -350,7 +386,14 @@ function DetailsModal({ project, name, onClose }) {
         </footer>
       </div>
     </Modal>
-  );
+    {ask ? <Confirm danger
+        title={t(ask.kill ? 'details.forceTitle' : 'details.stopTitle', { what: rowName(ask.it) })}
+        body={ask.kill ? t('details.forceBody', { pid: ask.it.pid })
+          : t(ask.it.kind === 'listen' ? 'details.stopBodyListen' : ask.it.kind === 'container' ? 'details.stopBodyContainer' : 'details.stopBodySimulator',
+              { pid: ask.it.pid, id: ask.it.id, udid: ask.it.udid, name })}
+        action={t(ask.kill ? 'details.forceGo' : 'details.stopGo')}
+        onYes={() => stopOne(ask)} onClose={() => setAsk(null)} /> : null}
+  </>);
 }
 
 function ScheduleModal({ name, onClose, onSave }) {
@@ -810,7 +853,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
       </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
-      {detailsOpen ? <DetailsModal project={project} name={name} onClose={() => setDetailsOpen(false)} /> : null}
+      {detailsOpen ? <DetailsModal project={project} name={name} status={st} onClose={() => setDetailsOpen(false)} /> : null}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}
                                   onSave={async (at, msg) => { const r = await act('gfw_schedule', { at, msg }); if (r) toast(r.text, 'good'); }} /> : null}
       {labelEdit != null ? (

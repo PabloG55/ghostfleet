@@ -25190,12 +25190,97 @@ JS
   pttick 0
   is "...and the next tick, fresh again, starts nothing" "1" "$(grep -c . "$PT/node.log" 2>/dev/null || echo 0)"
 
+  # ── stopping one thing: by the pid the scan captured, re-read before the signal ──
+  # Three more throwaway listeners, detached in the asleep session's folder (tied by cwd): two
+  # identical ones, so "exactly that pid" has a sibling to spare, and one that ignores TERM, for
+  # the second confirmation. Every stop below names one of this group's own listeners; a real
+  # process is never in reach, because a stop refuses anything not tied to this fake profile.
+  cat > "$PT/stubborn.js" <<'JS'
+process.on('SIGTERM', () => {});
+require('net').createServer(c => c.end()).listen(+process.argv[2], '127.0.0.1');
+setTimeout(() => process.exit(0), 120000).unref();
+JS
+  PTS1="$(free_port)"; PTS2="$(free_port)"; PTS3="$(free_port)"
+  ( cd "$PT/toolbox-docs-pass" && exec node "$PT/listen.js" "$PTS1" ) >/dev/null 2>&1 & PTKS1=$!
+  ( cd "$PT/toolbox-docs-pass" && exec node "$PT/listen.js" "$PTS2" ) >/dev/null 2>&1 & PTKS2=$!
+  ( cd "$PT/toolbox-docs-pass" && exec node "$PT/stubborn.js" "$PTS3" ) >/dev/null 2>&1 & PTKS3=$!
+  ptall=yes; for p in "$PTS1" "$PTS2" "$PTS3"; do ptup "$p" || ptall=no; done
+  is "ports stop: three more throwaway listeners are up" "yes" "$ptall"
+  # A TERM'd child of this shell is a zombie until it is waited for: gone, by every measure a
+  # stop has, but `kill -0` would still say yes.
+  ptalive() { local st; st="$(ps -o stat= -p "$1" 2>/dev/null)"; case "$st" in ''|Z*) echo gone ;; *) echo up ;; esac; }
+  ptopen() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && echo open || echo closed; }
+  ptwork() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_PROFILE \
+               HOME="$PTH" PATH="$PT/bin:$PATH" CLAUDE_FLEET_DIR="$PTW/fleet" CLAUDE_CONFIG_DIR="$PTW" \
+               "$ROOT/bin/fleet-ports" "$@"; }
+
+  ports stop ":$PTS1" > "$PT/st1" 2>&1; ptrc=$?
+  is "ports stop: a session's listener is stopped, named by its port" "0" "$ptrc"
+  is "...the pid the scan captured is gone" "gone" "$(ptalive "$PTKS1")"
+  is "...its twin in the same folder, running the same command, is untouched" "up open" "$(ptalive "$PTKS2") $(ptopen "$PTS2")"
+  is "...and the report names the pid it signalled" "yes" "$(grep -qF "(pid $PTKS1) — sent TERM" "$PT/st1" && echo yes || echo no)"
+
+  # The identity Details showed travels with the stop; a pid that is no longer it is refused.
+  ptcmd="$(ps -ww -o command= -p "$PTKS2")"
+  ptstart="$(LC_ALL=C ps -o lstart= -p "$PTKS2" | tr -s ' ' | sed 's/^ //;s/ $//')"
+  ptwant() { jq -nc --argjson p "$PTKS2" --arg s "$1" --arg c "$2" '{kind: "listen", pid: $p, start: $s, cmd: $c}'; }
+  ports stop --json --want "$(ptwant "Mon Jan 1 00:00:00 2001" "$ptcmd")" > "$PT/st2" 2>/dev/null; ptrc=$?
+  is "ports stop: a pid whose start time is not the one shown is refused (reused)" "3 changed" "$ptrc $(jq -r .code "$PT/st2" 2>/dev/null)"
+  is "...and nothing was sent to it" "up" "$(ptalive "$PTKS2")"
+  ports stop --json --want "$(ptwant "$ptstart" "python3 -m http.server $PTS2")" > "$PT/st2" 2>/dev/null; ptrc=$?
+  is "ports stop: a pid whose command is not the one shown is refused" "3 changed" "$ptrc $(jq -r .code "$PT/st2" 2>/dev/null)"
+  is "...and nothing was sent to it" "up" "$(ptalive "$PTKS2")"
+  # The re-read in the instant before the signal: the scan saw this listener, and by the time of
+  # the kill the pid answers as another command. The suite cannot make the kernel reuse a pid on
+  # cue, so the re-read is handed one that already has.
+  # (By env, not argv: ports.mjs runs its CLI when argv[1] is its own path.)
+  ptre="$(env -u TMUX HOME="$PTH" PATH="$PT/bin:$PATH" CLAUDE_FLEET_DIR="$PTP/fleet" CLAUDE_CONFIG_DIR="$PTP" \
+          PT_LIB="$ROOT/lib/ports.mjs" PT_PORT="$PTS2" node --input-type=module -e '
+    const { stop, identityOf } = await import(process.env.PT_LIB);
+    const r = stop({ dir: process.env.CLAUDE_FLEET_DIR, want: { kind: "listen", port: +process.env.PT_PORT },
+                     ident: (pid, env) => { const i = identityOf(pid, env); return i && { ...i, cmd: "sleep 600" }; } });
+    console.log(`${r.result} ${r.code}`);' 2>&1)"
+  is "ports stop: a pid that turns into another command between the scan and the signal is refused" "refused changed" "$ptre"
+  is "...and nothing was sent to it" "up" "$(ptalive "$PTKS2")"
+  ports stop --json --want "$(ptwant "$ptstart" "$ptcmd")" > "$PT/st2" 2>/dev/null; ptrc=$?
+  is "ports stop: the same pid, shown as what it really is, is stopped" "0 stopped gone" "$ptrc $(jq -r .result "$PT/st2" 2>/dev/null) $(ptalive "$PTKS2")"
+
+  # What is never stopped, each by its kind, with the thing left running.
+  ports stop --json ":$PTP6" > "$PT/st3" 2>/dev/null; ptrc=$?
+  is "ports stop: a listener tied to no session or project (the machine's) is refused" "3 machine up" "$ptrc $(jq -r .code "$PT/st3" 2>/dev/null) $(ptalive "$PTK6")"
+  ports stop --json ":$PTP5" > "$PT/st3" 2>/dev/null; ptrc=$?
+  is "ports stop: another profile's session's listener is refused as another profile's" "3 other open" "$ptrc $(jq -r .code "$PT/st3" 2>/dev/null) $(ptopen "$PTP5")"
+  ptwork stop --json ":$PTP5" > "$PT/st3" 2>/dev/null; ptrc=$?
+  is "ports stop: the work profile refuses every stop, its own session's included" "3 work open" "$ptrc $(jq -r .code "$PT/st3" 2>/dev/null) $(ptopen "$PTP5")"
+  ports stop --json ":$PTP7" > "$PT/st3" 2>/dev/null; ptrc=$?
+  is "ports stop: an agent's own socket is refused as the agent's" "3 agent up" "$ptrc $(jq -r .code "$PT/st3" 2>/dev/null) $(ptalive "$PTK7")"
+  ports stop --json ":$PTP4" > "$PT/st3" 2>/dev/null; ptrc=$?
+  is "ports stop: a leftover tied only to its project (a worktree no session holds) may be stopped" "0 gone" "$ptrc $(ptalive "$PTK4")"
+
+  # TERM, then report; KILL only as the second confirmation, for the same process.
+  ports stop --kill --json ":$PTS3" > "$PT/st4" 2>/dev/null; ptrc=$?
+  is "ports stop: --kill before any TERM is refused" "3 kill-needs-term up" "$ptrc $(jq -r .code "$PT/st4" 2>/dev/null) $(ptalive "$PTKS3")"
+  ports stop ":$PTS3" > "$PT/st4" 2>&1; ptrc=$?
+  is "ports stop: a listener that ignores TERM is reported still running" "1 up" "$ptrc $(ptalive "$PTKS3")"
+  is "...naming the second confirmation by its pid" "yes" "$(grep -qF "fleet-ports stop --kill $PTKS3" "$PT/st4" && echo yes || echo no)"
+  ports stop --kill ":$PTS3" > "$PT/st4" 2>&1; ptrc=$?
+  is "...and --kill after that TERM ends it" "0 gone" "$ptrc $(ptalive "$PTKS3")"
+  # One process on two ports, as a dev server and its reload socket are: named by its pid, it is
+  # one thing to stop, not two to choose between.
+  PTS4="$(free_port)"; PTS5="$(free_port)"
+  ( cd "$PT/toolbox-docs-pass" && exec node -e 'for (const p of process.argv.slice(1)) require("net").createServer(c => c.end()).listen(+p, "127.0.0.1"); setTimeout(() => process.exit(0), 120000).unref();' "$PTS4" "$PTS5" ) >/dev/null 2>&1 & PTKS4=$!
+  ptup "$PTS4"; ptup "$PTS5"
+  ports stop "$PTKS4" > "$PT/st8" 2>&1; ptrc=$?
+  is "ports stop: a pid listening on two ports is one thing to stop" "0 gone closed closed" "$ptrc $(ptalive "$PTKS4") $(ptopen "$PTS4") $(ptopen "$PTS5")"
+  kill "$PTKS1" "$PTKS2" "$PTKS3" "$PTKS4" 2>/dev/null; wait "$PTKS1" "$PTKS2" "$PTKS3" "$PTKS4" 2>/dev/null
+
   # ── containers: by the compose label, by a bind mount, and never by a guess ──
   cat > "$PT/bin/docker" <<SH
 #!/bin/sh
 case "\$1" in
-  ps) printf 'aaaaaaaaaaaa1\nbbbbbbbbbbbb2\ncccccccccccc3\n' ;;
+  ps) printf 'aaaaaaaaaaaa1\nbbbbbbbbbbbb2\ncccccccccccc3\ndddddddddddd4\n' ;;
   inspect) cat "$PT/inspect.json" ;;
+  stop) echo "\$*" >> "$PT/docker.log" ;;
   *) exit 1 ;;
 esac
 SH
@@ -25203,18 +25288,26 @@ SH
   jq -n --arg a "$PT/toolbox-api-fix" --arg d "$PT/toolbox-docs-pass" --arg hp "$(free_port)" '[
     {Id:"aaaaaaaaaaaa1", Name:"/api-fix-db-1", Config:{Image:"postgres:16", Labels:{"com.docker.compose.project.working_dir":$a}}, Mounts:[], NetworkSettings:{Ports:{"5432/tcp":[{HostPort:$hp}]}}, State:{StartedAt:"x"}},
     {Id:"bbbbbbbbbbbb2", Name:"/docs-cache", Config:{Image:"redis:7", Labels:{}}, Mounts:[{Type:"bind", Source:($d + "/data")}], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}},
-    {Id:"cccccccccccc3", Name:"/two-homes", Config:{Image:"busybox", Labels:{}}, Mounts:[{Type:"bind", Source:$a}, {Type:"bind", Source:$d}], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}}]' > "$PT/inspect.json"
+    {Id:"cccccccccccc3", Name:"/two-homes", Config:{Image:"busybox", Labels:{}}, Mounts:[{Type:"bind", Source:$a}, {Type:"bind", Source:$d}], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}},
+    {Id:"dddddddddddd4", Name:"/loose", Config:{Image:"busybox", Labels:{}}, Mounts:[], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}}]' > "$PT/inspect.json"
   ports --json --no-write > "$PT/dk.json" 2>/dev/null
   ptc() { jq -r --arg n "$1" '.items[] | select(.kind == "container" and .name == $n) | [.tie.level, (.tie.session // "-"), (.tie.how // "-")] | join(" ")' "$PT/dk.json"; }
   is "ports: a compose container is tied to the session whose folder its label names" "session api-fix label" "$(ptc api-fix-db-1)"
   is "ports: a container that bind-mounts a session's folder is that session's" "session docs-pass mount" "$(ptc docs-cache)"
   is "ports: one mounting two sessions' folders is neither's" "project - mount" "$(ptc two-homes)"
+  rm -f "$PT/docker.log"
+  ports stop --json api-fix-db-1 > "$PT/st5" 2>/dev/null; ptrc=$?
+  is "ports stop: a session's container is stopped by its id, with docker stop and nothing else" "0|stop aaaaaaaaaaaa" "$ptrc|$(cat "$PT/docker.log" 2>/dev/null)"
+  ports stop --kill --json docs-cache > "$PT/st5" 2>/dev/null; ptrc=$?
+  is "ports stop: a container has no --kill (docker stop escalates on its own)" "3 kill-kind" "$ptrc $(jq -r .code "$PT/st5" 2>/dev/null)"
+  ports stop --json loose > "$PT/st5" 2>/dev/null; ptrc=$?
+  is "ports stop: a container tied to nothing here is refused, and docker is not asked" "3 machine|stop aaaaaaaaaaaa" "$ptrc $(jq -r .code "$PT/st5" 2>/dev/null)|$(cat "$PT/docker.log" 2>/dev/null)"
   rm -f "$PT/bin/docker"
 
   # ── simulators: macOS only, by a process under one session's pane naming the device ──
   if [ "$(uname -s)" = Darwin ]; then
     PTU=11111111-2222-3333-4444-555555555555
-    printf '#!/bin/sh\n[ "$1 $2 $3 $4 $5" = "simctl list devices booted -j" ] || exit 1\ncat <<EOF\n{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-0":[{"udid":"%s","name":"iPhone 17","state":"Booted"}]}}\nEOF\n' "$PTU" > "$PT/bin/xcrun"
+    printf '#!/bin/sh\n[ "$1 $2" = "simctl shutdown" ] && { echo "$*" >> "%s/xcrun.log"; exit 0; }\n[ "$1 $2 $3 $4 $5" = "simctl list devices booted -j" ] || exit 1\ncat <<EOF\n{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-0":[{"udid":"%s","name":"iPhone 17","state":"Booted"}]}}\nEOF\n' "$PT" "$PTU" > "$PT/bin/xcrun"
     chmod +x "$PT/bin/xcrun"
     ( exec -a launchd_sim sleep 120 ) & PTKS=$!
     # Two commands, so neither shell can exec the UDID out of its own argv.
@@ -25223,10 +25316,14 @@ SH
     ports --json --no-write > "$PT/sim.json" 2>/dev/null
     is "ports: a booted simulator named by a session's process is that session's" "session api-fix argv" \
        "$(jq -r '.items[] | select(.kind == "simulator") | [.tie.level, (.tie.session // "-"), .tie.how] | join(" ")' "$PT/sim.json")"
+    ports stop --json "$PTU" > "$PT/st6" 2>/dev/null; ptrc=$?
+    is "ports stop: a session's simulator is shut down by its UDID, and never booted again" "0|simctl shutdown $PTU" "$ptrc|$(cat "$PT/xcrun.log" 2>/dev/null)"
     tmux -L cf-personal-toolbox kill-window -t "api-fix:1" 2>/dev/null
     ports --json --no-write > "$PT/sim.json" 2>/dev/null
     is "...and with nothing naming it, the machine's" "machine" \
        "$(jq -r '.items[] | select(.kind == "simulator") | .tie.level' "$PT/sim.json")"
+    ports stop --json "iPhone 17" > "$PT/st6" 2>/dev/null; ptrc=$?
+    is "...which a stop refuses, and simctl is not asked" "3 machine|simctl shutdown $PTU" "$ptrc $(jq -r .code "$PT/st6" 2>/dev/null)|$(cat "$PT/xcrun.log" 2>/dev/null)"
     kill "$PTKS" 2>/dev/null; wait "$PTKS" 2>/dev/null; rm -f "$PT/bin/xcrun"
   else
     na "ports: a booted simulator named by a session's process is that session's" "simulators are macOS only"
@@ -25242,9 +25339,12 @@ SH
     ports --json --no-write > "$PT/real.json" 2>/dev/null
     is "ports: a real compose-labelled container is tied to its session" "session api-fix label" \
        "$(jq -r --arg id "${ptid:0:12}" '.items[] | select(.kind == "container" and .id == $id) | [.tie.level, (.tie.session // "-"), .tie.how] | join(" ")' "$PT/real.json")"
+    ports stop "${ptid:0:12}" > "$PT/st7" 2>&1; ptrc=$?
+    is "ports stop: a real session container is stopped by docker stop" "0 false" "$ptrc $(docker inspect -f '{{.State.Running}}' "$ptid" 2>/dev/null)"
     [ -n "$ptid" ] && docker rm -f "$ptid" >/dev/null 2>&1
   else
     skip "ports: a real compose-labelled container is tied to its session" "docker, its daemon or a local busybox/alpine image not available"
+    skip "ports stop: a real session container is stopped by docker stop" "docker, its daemon or a local busybox/alpine image not available"
   fi
 
   # ── done: stop exactly what this group started ──
@@ -25255,7 +25355,7 @@ SH
   kill "$PTK2" "$PTK4" "$PTK6" "$PTK7" "$PTK8" 2>/dev/null; wait "$PTK2" "$PTK4" "$PTK6" "$PTK7" "$PTK8" 2>/dev/null
   for s in cf-personal-toolbox cf-acme-api; do tmux -L "$s" kill-server 2>/dev/null; done
   sleep 0.5; ptleft=""
-  for p in "$PTP1" "$PTP2" "$PTP3" "$PTP4" "$PTP5" "$PTP6" "$PTP7" "$PTP8"; do (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && ptleft="$ptleft :$p"; done
+  for p in "$PTP1" "$PTP2" "$PTP3" "$PTP4" "$PTP5" "$PTP6" "$PTP7" "$PTP8" "$PTS1" "$PTS2" "$PTS3" "$PTS4" "$PTS5"; do (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && ptleft="$ptleft :$p"; done
   is "ports: nothing this group started is still listening" "" "$ptleft"
 else
   skip "ports: a leftover is tied to its session" "tmux, jq, node, git or lsof/ss missing"

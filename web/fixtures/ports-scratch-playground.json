@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "project": "scratch",
+  "session": "playground",
+  "at": 1772700000,
+  "sources": { "listen": "lsof", "docker": "ok", "simctl": "none booted" },
+  "state": "done",
+  "status": "ready",
+  "items": [
+    {
+      "kind": "listen", "port": 5173, "addrs": ["127.0.0.1", "::1"], "pid": 51240, "start": "Thu Mar 5 10:02:11 2026",
+      "name": "node", "cmd": "node /Users/you/gf-demo/playground/node_modules/.bin/vite --port 5173",
+      "cwd": "/Users/you/gf-demo/playground",
+      "tie": { "level": "session", "sock": "cf-personal-scratch", "session": "playground", "project": "scratch", "how": "parent", "chain": [51240, 51198, 50877] }
+    },
+    {
+      "kind": "listen", "port": 9229, "addrs": ["127.0.0.1"], "pid": 51302, "start": "Thu Mar 5 10:04:37 2026",
+      "name": "node", "cmd": "node --inspect=9229 /Users/you/gf-demo/playground/scripts/watch.mjs",
+      "cwd": "/Users/you/gf-demo/playground", "ignores_term": true,
+      "tie": { "level": "session", "sock": "cf-personal-scratch", "session": "playground", "project": "scratch", "how": "cwd", "path": "/Users/you/gf-demo/playground" }
+    }
+  ],
+  "can_refresh": false,
+  "can_stop": false
+}

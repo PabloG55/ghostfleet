@@ -658,10 +658,13 @@ const BINARY_REVIEWED = new Set([
   '124af5e966543c72',   // docs/permission-modal/team-390-readonly-open.png
   '87860a450352f7db',   // docs/permission-modal/phone-390-pending-voice.png
   // A session's Details, shot on fixtures at 390 and 1280 and opened: the demo banner, every
-  // project and session one of web/fixtures/'s, and the only home /Users/you/gf-demo.
-  '56a0336f57ce5ffd',   // docs/session-details/phone-1280-open.png
+  // project and session one of web/fixtures/'s, and the only home /Users/you/gf-demo. The stop's
+  // modal at 1280 and the phone's sheet with no stop are the demo's one personal project.
+  '94c0d917b68f6796',   // docs/session-details/phone-1280-open.png
   '87dea89b7ded23da',   // docs/session-details/phone-390-more.png
-  'cbcd476f47020b64',   // docs/session-details/phone-390-open.png
+  '6592b0bd5396a745',   // docs/session-details/phone-390-open.png
+  '2bc07aec2cfa697c',   // docs/session-details/desk-1280-stop-confirm.png
+  '19df3e6839b3bf56',   // docs/session-details/phone-390-no-stop.png
   // The loading skeletons, mid-load and loaded, shot on fixtures: all twelve opened, every name
   // in them one of web/fixtures/'s, and the only host 127.0.0.1.
   '9c304df74456f431',   // docs/skeletons/390-home-loading.png
@@ -704,6 +707,7 @@ const BINARY_EXPECTED = [
   'docs/permission-modal/phone-390-open.png',
   'docs/permission-modal/phone-390-pending-voice.png',
   'docs/session-details/phone-1280-open.png', 'docs/session-details/phone-390-more.png', 'docs/session-details/phone-390-open.png',
+  'docs/session-details/desk-1280-stop-confirm.png', 'docs/session-details/phone-390-no-stop.png',
   'docs/permission-modal/team-390-readonly-open.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.

@@ -207,6 +207,7 @@ export function phoneAdapter({ lock, go, place }) {
     // no such member, so it draws no Details entry.
     ports: (project, name) => guard(api.getPorts(project, name)),
     portsRefresh: (project) => guard(api.refreshPorts(project)),
+    portsStop: (project, name, want, kill) => guard(api.stopPorts(project, name, want, kill)),
     act,
     attach: (project, session, file) => guard(api.attach(project, session, file)),
     attachPerMessage: api.ATTACH_PER_MESSAGE,

@@ -178,13 +178,13 @@ try {
   const hash = () => b.evaluate(() => location.hash);
   const goTo = async (to) => { await b.evaluate((h) => { location.hash = h; }, `#${to}`); await sleep(500); };
 
-  async function fresh(size) {
+  async function fresh(size, store = {}) {
     touch = size.touch;
     await b.call('Emulation.setDeviceMetricsOverride', { width: size.w, height: size.h, deviceScaleFactor: 1, mobile: size.touch });
     await b.call('Emulation.setTouchEmulationEnabled', { enabled: size.touch, ...(size.touch ? { maxTouchPoints: 5 } : {}) });
     await b.call('Page.navigate', { url: base + '/index.html' });
     await sleep(400);
-    await b.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch {} return null; });
+    await b.evaluate((st) => { try { localStorage.clear(); sessionStorage.clear(); for (const [k, v] of Object.entries(st)) localStorage.setItem(k, v); } catch {} return null; }, store);
     await b.call('Page.navigate', { url: base + '/index.html' });
     // The fixture backend's lock, passed the way it offers.
     await until(() => b.evaluate(() => {
@@ -216,6 +216,7 @@ try {
     { name: 'stop', home: toSession, open: fromMenu('Stop session') },
     { name: 'stop and delete the worktree', home: toSession, open: fromMenu('Stop and delete') },
     { name: 'reply', home: toQueue, open: () => tap('.extra-card button', 'Reply') },
+    { name: 'details', home: toSession, open: fromMenu('Details') },
   ];
 
   const sizes = [['phone', { w: 390, h: 844, touch: true }], ['desk', { w: 1600, h: 900, touch: false }]];
@@ -319,6 +320,82 @@ try {
       is(`${at} · delete: ...and is eaten — New session did not open`, false, await dlgUp());
     });
   }
+
+  // ── a session's Details: a Stop at the desk on localhost, never on the phone ──────────
+  // The fixture answers as the daemon does: `gf.fixture.local` is the owner's own browser on this
+  // machine; without it, the phone. scratch's leftovers fixture is the demo's personal project (a
+  // done session with a dev server and a watcher that ignores TERM); acme-api is a work one.
+  // The stop's confirm is the sheet's sibling, so "the dialog" here is the LAST one up.
+  const LEFT = { 'gf.fixture': 'grid-scratch-leftovers.json' };
+  const LOCAL = { ...LEFT, 'gf.fixture.local': '1' };
+  const toPlayground = async (more = 'More') => { await goTo('/p/scratch/s/playground'); await until(() => centreOf('.sess-tools button', more), 8000); };
+  const openDetails = async (more = 'More', item = 'Details') => { await tap('.sess-tools button', more); await tap('.menu button', item); return !!(await until(() => b.evaluate(() => !!document.querySelector('.details .details-group, .details p.muted')), 4000)); };
+  const shown = () => b.evaluate(() => [...document.querySelectorAll('.details .details-what b')].map(x => x.textContent.trim()));
+  const stops = () => b.evaluate(() => [...document.querySelectorAll('.details .details-stop button')].map(x => x.textContent.trim()));
+  const upTop = () => b.evaluate(() => { const m = [...document.querySelectorAll('.scrim > .modal')]; return { n: m.length, title: ((m[m.length - 1] || document).querySelector('header h2')?.textContent || '').trim() }; });
+  const topPoint = (where) => b.evaluate((w) => {
+    const m = [...document.querySelectorAll('.scrim > .modal')].pop(); if (!m) return null;
+    if (w === 'x') { const r = m.querySelector('header button.x').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }
+    const r = m.getBoundingClientRect(); return { x: innerWidth / 2, y: Math.max(4, r.top / 2) };
+  }, where);
+  const flagAndChip = () => b.evaluate(() => [(document.querySelector('.details-flag')?.textContent || '').trim(), (document.querySelector('.sess-meta .pill')?.textContent || '').trim()]);
+  const esc = async () => { for (const type of ['keyDown', 'keyUp']) await b.call('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await sleep(250); };
+
+  await step('phone · details', async () => {
+    await fresh(sizes[0][1], LEFT);
+    await toPlayground();
+    is('phone · details: the sheet opens and lists what the session left', [true, [':5173', ':9229']], [await openDetails(), await shown()]);
+    is('phone · details: ...with no stop control at all', [], await stops());
+  });
+  await step('desk · details stop', async () => {
+    await fresh(sizes[1][1], LOCAL);
+    await toPlayground();
+    await openDetails();
+    is('desk · details: on localhost, a personal project\'s rows each offer a stop', ['Stop', 'Stop'], await stops());
+    const [flag, chip] = await flagAndChip();
+    is('desk · details: the flag calls the session what its header chip does', ['Ready', true, false], [chip, flag.startsWith(`${chip} — `), /\bdone\b/.test(flag)]);
+    const ask = async () => { await tap('.details-stop button', 'Stop'); return upTop(); };
+    is('desk · stop: a modal over the sheet names the one row it stops', { n: 2, title: 'Stop :5173 node (pid 51240)?' }, await ask());
+    let p = await topPoint('x'); if (p) await press(p.x, p.y);
+    is('desk · stop: its X cancels it, the sheet stays, nothing stopped', [{ n: 1, title: 'playground · details' }, [':5173', ':9229']], [await upTop(), await shown()]);
+    await ask(); p = await topPoint('beside'); if (p) await press(p.x, p.y);
+    is('desk · stop: a click beside it cancels it and is eaten: the sheet stays', [{ n: 1, title: 'playground · details' }, [':5173', ':9229']], [await upTop(), await shown()]);
+    await ask(); await esc();
+    is('desk · stop: Esc cancels the confirm, not the sheet under it', [{ n: 1, title: 'playground · details' }, [':5173', ':9229']], [await upTop(), await shown()]);
+    await ask(); await tap('.scrim > .modal footer button', 'Stop it');
+    is('desk · stop: confirmed, exactly that row goes', [1, [':9229']], [(await until(async () => (await shown()).length === 1 && await upTop(), 4000) || {}).n, await shown()]);
+    await ask(); await tap('.scrim > .modal footer button', 'Stop it');
+    await until(async () => (await stops()).includes('Force stop…'), 4000);
+    is('desk · stop: a process TERM left running is said so, and only now offered a force stop', [[':9229'], ['Force stop…'], true],
+       [await shown(), await stops(), await b.evaluate(() => /still running/.test(document.querySelector('.details-left')?.textContent || ''))]);
+    await tap('.details-stop button', 'Force stop');
+    is('desk · stop: the force stop is a second modal of its own', { n: 2, title: 'Force stop :9229 node (pid 51302)?' }, await upTop());
+    await tap('.scrim > .modal footer button', 'Send KILL');
+    is('desk · stop: ...and confirmed, the row goes', [], (await until(async () => (await shown()).length === 0 && [], 4000)) || await shown());
+  });
+  await step('desk · details on a work project', async () => {
+    await fresh(sizes[1][1], { 'gf.fixture.local': '1' });
+    await goTo('/p/acme-api/s/docs-pass'); await until(() => centreOf('.sess-tools button', 'More'), 8000);
+    await openDetails();
+    is('desk · details: a work-profile project offers no stop, even on localhost', [[':5173', ':8080', 'docs-pass-db-1'], []], [await shown(), await stops()]);
+  });
+  await step('desk · details in Spanish', async () => {
+    // The lock's way past is passed in English; the language is switched after it, as a person would.
+    await fresh(sizes[1][1], LOCAL);
+    await b.evaluate(() => { localStorage.setItem('gfw.lang', 'es'); return null; });
+    await b.call('Page.reload', {});
+    await until(() => b.evaluate(() => {
+      const e = [...document.querySelectorAll('button')].find(x => /^seguir sin llave de acceso/i.test(x.textContent.trim()));
+      if (e) e.click();
+      return !e && !!document.querySelector('.app .main');
+    }), 10000);
+    await tap('.modal .x');
+    await toPlayground('Más');
+    await openDetails('Más', 'Detalles');
+    const [flag, chip] = await flagAndChip();
+    is('desk · details: in Spanish too, the flag says the chip\'s word', ['Lista', true, false], [chip, flag.startsWith(`${chip} — `), /terminó/.test(flag)]);
+    is('desk · details: ...and the stop is named in Spanish', ['Detener', 'Detener'], await stops());
+  });
 } catch (e) {
   is('dialogs-check ran', 'yes', `no: ${String((e && e.message) || e)}`);
 } finally {

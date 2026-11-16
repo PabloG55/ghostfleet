@@ -13,8 +13,10 @@
 //   GET  /api/pane?project=&session=[&scrollback=N]
 //                                               -> { session, rows?, cols?, at, pane: "<SGR text>" }
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
-//   GET  /api/ports?project=&session=           -> { at, state, items, can_refresh }  (the last scan; runs nothing)
+//   GET  /api/ports?project=&session=           -> { at, state, items, can_refresh, can_stop }  (the last scan; runs nothing)
 //   POST /api/ports/refresh?project=<name>      -> { at }          (a direct localhost request only)
+//   POST /api/ports/stop?project=&session=  { want, kill }  -> { result, text, item }  (a direct localhost
+//                                               request only; 409 with the reason when the item is refused)
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 //   GET  /api/usage                             -> { enabled, off?, threshold, profiles: [ accounts.mjs describe() ] }
 //   GET  /api/logins                            -> { items: pending authorizations, each with its session and host }
@@ -66,6 +68,10 @@ const LS = {
   // The only way to see the paired screens without two fleet-serves — and the way the suite
   // looks at them.
   paired: 'gf.fixture.paired',
+  // '1': the fixture answers as the owner's own browser on this machine would be answered (a
+  // direct localhost request), so a session's Details offers Refresh and Stop. Absent, it
+  // answers as the phone is, with neither: the default, because a demo is mostly a phone.
+  local: 'gf.fixture.local',
 };
 
 // Verbs that take a second passkey assertion at the moment of action (§7).
@@ -228,6 +234,7 @@ export const FIXTURES = [
   { file: 'grid-degraded.json', project: 'acme-api', title: 'acme-api — unknown · limit · interrupted · parked' },
   { file: 'grid-free.json',     project: 'toolbox',  title: 'toolbox — free worktrees' },
   { file: 'grid-empty.json',    project: 'scratch',  title: 'scratch — nothing running' },
+  { file: 'grid-scratch-leftovers.json', project: 'scratch', title: 'scratch — a done session left things listening' },
   { file: 'grid-jarvis.json',   project: 'jarvis',   title: 'jarvis — the master of masters' },
 ];
 export function fixtureName() {
@@ -698,9 +705,22 @@ export async function getCheckouts(project) {
 export async function getPorts(project, session) {
   if ((await ready()).mode === 'server')
     return get(`/api/ports?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}`);
-  try { return await fixture(`ports-${bareName(project)}-${session}.json`); }
-  catch { return { ok: true, session, at: null, state: null, items: [], can_refresh: false }; }
+  // As the daemon answers: Refresh and Stop for a direct localhost request only, and Stop never
+  // in a work-profile project (the demo's acme-api is one, so its Details never offers a Stop;
+  // scratch's leftovers fixture is the demo's personal one).
+  const local = (() => { try { return localStorage.getItem(LS.local) === '1'; } catch { return false; } })();
+  const work = await fixture('projects.json').then(p => (p.projects || p).find?.(x => x.name === bareName(project))?.profile === 'work', () => false);
+  try {
+    const j = await fixture(`ports-${bareName(project)}-${session}.json`);
+    return { ...j, items: (j.items || []).filter(i => !fixtureStopped.has(portsKey(project, session, i))), can_refresh: local, can_stop: local && !work };
+  } catch { return { ok: true, session, at: null, state: null, items: [], can_refresh: false, can_stop: false }; }
 }
+// The fixture's stops: what was stopped this page load, so Details shows it gone. An item the
+// fixture marks `ignores_term` stays up after a TERM, which is the only way to see the second
+// confirmation (KILL) without a process that really ignores one.
+const fixtureStopped = new Set();
+const fixtureTermed = new Set();
+const portsKey = (project, session, i) => `${bareName(project)}/${session}/${i.kind}:${i.pid || i.id || i.udid}`;
 // A scan now. The daemon takes it from a direct localhost request only (`can_refresh` on the
 // read says whether this is one), so the phone never draws the button that would ask.
 export async function refreshPorts(project) {
@@ -715,6 +735,33 @@ export async function refreshPorts(project) {
     return j;
   }
   return { ok: true, at: Math.floor(Date.now() / 1000) };
+}
+// Stop ONE item a session left, as Details showed it (`want`: its kind, and its pid, start and
+// command, or its container id, or its UDID). `kill` only after a TERM left it running. The
+// daemon answers a direct localhost request only (`can_stop` on the read), and a refusal of
+// the item is a 409 with the reason, which this throws as the error's text.
+export async function stopPorts(project, session, want, kill = false) {
+  if ((await ready()).mode === 'server') {
+    let r;
+    try {
+      r = await fetch(baseUrl() + `/api/ports/stop?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}`,
+        { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(haveToken() ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ want, kill: kill === true }) });
+    } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+    const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+    if (!j.ok) throw new Error(j.text || `HTTP ${r.status}`);
+    return j;
+  }
+  const read = await getPorts(project, session);
+  if (!read.can_stop) throw new Error('fixture: a stop is made from this machine only, and never in a work-profile project');
+  const j = await fixture(`ports-${bareName(project)}-${session}.json`).catch(() => ({ items: [] }));
+  const it = (j.items || []).find(i => i.kind === want?.kind && (i.pid || i.id || i.udid) === (want.pid || want.id || want.udid));
+  if (!it) throw new Error('fixture: nothing matches — it may have stopped already');
+  const k = portsKey(project, session, it);
+  if (kill && !fixtureTermed.has(k)) throw new Error('fixture: KILL is a second confirmation — send TERM first');
+  if (it.ignores_term && !kill) { fixtureTermed.add(k); return { ok: true, result: 'still-running', text: `fixture: sent TERM to pid ${it.pid}; it is still running`, item: it }; }
+  fixtureStopped.add(k);
+  return { ok: true, result: 'stopped', text: `fixture: stopped ${it.kind === 'listen' ? ':' + it.port : it.name}, nothing ran`, item: it };
 }
 
 // The per-session auto-nudge state. Deliberately NOT bolted onto §4: that schema is
