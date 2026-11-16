@@ -84,8 +84,27 @@ export async function sendScroll({ b, is, shots = '' }) {
   for (let i = 0; i < 32; i++) await send(FILL);
   const rows = await until(() => { const n = document.querySelectorAll('.assistant .as-feed .as-row').length; return n >= 61 && n; });
   is(`${W} ...and its feed is full: the 61 rows it keeps`, true, rows >= 61 || `only ${rows} rows`);
+  // The first message is answered by the daemon on its own time: its chain (find the lead, hand
+  // the message over) can push a row long after the 61st was counted, and the feed follows every
+  // row to its end. A scroll to the top that comes before that row is undone by it, and the newest
+  // row is "in view" again. So the feed is scrolled up only once it has stopped: the same last row
+  // and the feed at its end for a third of a second, and no hand-over still in flight.
+  // LATE_ROW=1 forces the race on demand: a row lands 150 ms from now, as a late answer would.
+  const late = process.env.LATE_ROW ? sleep(150).then(() => send('something else entirely')) : null;
+  if (!process.env.LATE_ROW_NO_SETTLE) {
+    let still = 0, last = '';
+    const end = Date.now() + 8000;
+    while (still < 6 && Date.now() < end) {
+      const now = await b.evaluate(() => { const f = document.querySelector('.assistant .as-feed'); return `${document.querySelector('.assistant .sea')?.className.replace(/.*st-/, '') || ''}|${f.children.length}|${f.lastElementChild?.textContent}|${f.scrollHeight - f.clientHeight - f.scrollTop < 2}`; });
+      still = now === last && now.endsWith('|true') && !/^(routing|sending|starting)\|/.test(now) ? still + 1 : 0;
+      last = now;
+      await sleep(50);
+    }
+    is(`${W} ...and its feed has stopped moving before it is scrolled up`, true, still >= 6 || `still moving: ${last.slice(0, 60)}`);
+  }
   await b.evaluate(() => { const f = document.querySelector('.assistant .as-feed'); f.scrollTop = 0; f.dispatchEvent(new Event('scroll')); });
   await sleep(300);
+  await late;
   is(`${W} ...and scrolled to its top, its newest row is out of view`, true,
      (await seen('.assistant .as-feed', '.assistant .as-feed .as-row')) !== 'in view');
   const marked = await b.evaluate(() => { const m = [...document.querySelectorAll('.assistant .as-feed .as-row.me')]; m.forEach(x => { x.dataset.old = '1'; }); return m.length; });
