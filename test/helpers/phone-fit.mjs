@@ -31,6 +31,10 @@
 //     box's inset at any scroll.
 //   - (A connected keyboard sliding the top bar off the screen is phone-check.mjs's, beside the other
 //     keyboard rows; the one row here asks that ⏎ still sends with it.)
+// And one more from the installed app once those were: "the chat button is taller than the mic
+// attach and send". The box rested at its two rows, 68 px beside three 46 px buttons. It is asked
+// at rest against its buttons at 320, 390 and 430 in both languages, and asked to grow only as
+// lines are typed (2c).
 // The second and third are asked of the PIXELS (ink() below), because the question is where text is
 // drawn, which no style and no rect says.
 import fs from 'node:fs';
@@ -227,10 +231,11 @@ export async function phoneFit({ b, is, shots = '' }) {
     await open('#/p/acme-api/s/docs-pass');
     await until(() => !!document.querySelector('.composer textarea'));
     await b.evaluate(() => document.querySelector('.composer textarea').focus());
-    await b.call('Input.insertText', { text: 'a quick reply going\npast the two rows\nof the box' });
+    // Six lines: past the four a phone's box grows to (2c below), so it scrolls and the insets are asked.
+    await b.call('Input.insertText', { text: 'a quick reply going\npast the four lines\nthe box grows to\nso that it\nhas to scroll\nthe rest' });
     await sleep(300);
     const g = await boxAt();
-    is(`${w} three lines in the box: it scrolls`, true, g.max > 0 || `scrolls ${g.max} px`);
+    is(`${w} six lines in the box: it scrolls`, true, g.max > 0 || `scrolls ${g.max} px`);
     const into = { top: [], bottom: [] };
     for (let s = 0; s <= g.max; s += 2) {
       await b.evaluate((x) => { document.querySelector('.composer textarea').scrollTop = x; }, s);
@@ -245,6 +250,80 @@ export async function phoneFit({ b, is, shots = '' }) {
     if (w === 390) await shot('three-lines');
     await b.evaluate(() => { const n = document.querySelector('.composer textarea'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); n.blur(); });
   }
+  await b.viewport(W, H);
+
+  // ── 2c. at rest the box is one line, its buttons' height, and only typing grows it ──
+  // Reported from the installed iPhone app: "the chat button is taller than the mic attach and
+  // send". The box was its two rows, 68 px at 16px, beside three 46 px buttons. Asked at the three
+  // widths a phone is, in both languages (the language is read at load, so a reload past the lock
+  // in each), on a session with a request open as well, whose cover has to say itself in that
+  // height: at 320 "Answer the request" went a word a line and the last one was cut.
+  const relang = async (l) => {
+    await b.evaluate((x) => { if (x) localStorage.setItem('gfw.lang', x); else localStorage.removeItem('gfw.lang'); }, l);
+    await b.evaluate(() => location.reload());
+    await sleep(300);
+    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey|sin llave/i.test(x.textContent)));
+    await b.evaluate(() => [...document.querySelectorAll('.auth-card button')].find(x => /without a passkey|sin llave/i.test(x.textContent))?.click());
+    await until(() => !!document.querySelector('.app'));
+  };
+  const rest = () => b.evaluate(() => {
+    const t = document.querySelector('.composer textarea'), cs = getComputedStyle(t);
+    const btns = [...document.querySelectorAll('.composer .composer-row > button')].filter(x => x.getClientRects().length)
+      .map(x => Math.round(x.getBoundingClientRect().height * 10) / 10);
+    const h = Math.round(t.getBoundingClientRect().height * 10) / 10, f = parseFloat(cs.fontSize);
+    return `box ${h}, buttons ${[...new Set(btns)].join('/')}, text ${f >= 16 ? '16px or more' : cs.fontSize}`;
+  });
+  for (const lang of ['en', 'es']) {
+    await relang(lang);
+    for (const w of [320, 390, 430]) {
+      await b.viewport(w, H);
+      await open('#/p/acme-api/s/docs-pass');
+      await until(() => !!document.querySelector('.composer textarea')?.placeholder);
+      is(`${w} ${lang} session: the box at rest is one line, its buttons' height`, 'box 46, buttons 46, text 16px or more', await rest());
+      const g = await boxAt();
+      const below = await ink('.composer textarea', g.first + g.lh + 1, g.h - 2), above = await ink('.composer textarea', 2, g.first - 1);
+      is(`${w} ${lang} session: ...and its hint is drawn on one line inside it`, '1 line',
+         g.typed ? 'the box is not empty' : below || above ? `${above} px above its line, ${below} below ("${g.hint}")` : '1 line');
+      if (w === 390) await shot(`box-rest-${lang}`);
+      await open('#/p/acme-api/s/api-fix');
+      await until(() => !!document.querySelector('.composer .request-return'));
+      await b.evaluate(() => document.querySelector('[role=dialog] .x, .modal .x')?.click());
+      await sleep(200);
+      is(`${w} ${lang} session with a request: the box is the same height under its cover`, 'box 46, buttons 46, text 16px or more', await rest());
+      // Its LINES against its edges, not scrollHeight: the cover centres its words, so a third line
+      // overflows above as much as below, and what runs over the top is in no scrollHeight.
+      is(`${w} ${lang} session with a request: ...and the cover says itself inside it`, 'fits', await b.evaluate(() => {
+        const c = document.querySelector('.composer .request-return'), r = c.getBoundingClientRect(), cs = getComputedStyle(c);
+        const top = r.top + parseFloat(cs.borderTopWidth), foot = r.bottom - parseFloat(cs.borderBottomWidth);
+        const words = document.createRange(); words.selectNodeContents(c);
+        const out = [...words.getClientRects()].filter(x => x.width && x.height && (x.top < top - 0.5 || x.bottom > foot + 0.5));
+        return out.length ? `${out.length} of its lines past its edge, by ${Math.round(Math.max(...out.map(x => Math.max(top - x.top, x.bottom - foot))))} px ("${c.textContent.trim()}")` : 'fits';
+      }));
+      if (w === 320) await shot(`box-request-${lang}`);
+    }
+    // Typing grows it a line at a time to four, after which it scrolls, and an emptied box (a send
+    // empties it) is one line again. The step is the box's own line, so the row holds at any size.
+    await b.viewport(W, H);
+    await open('#/p/acme-api/s/docs-pass');
+    await until(() => !!document.querySelector('.composer textarea'));
+    await b.evaluate(() => document.querySelector('.composer textarea').focus());
+    const seen = [await boxAt()];
+    for (const line of ['one line', '\nand a second', '\na third', '\na fourth', '\na fifth']) {
+      await b.call('Input.insertText', { text: line });
+      await sleep(150);
+      seen.push(await boxAt());
+      if (lang === 'en' && seen.length === 4) await shot('box-three-lines');
+    }
+    await b.evaluate(() => { const n = document.querySelector('.composer textarea'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); });
+    await sleep(150);
+    const emptied = await boxAt();
+    const lh = seen[0].lh, [r0, l1, l2, l3, l4, l5] = seen.map(x => Math.round(x.h));
+    const grew = l1 === r0 && l2 === r0 + lh && l3 === r0 + 2 * lh && l4 === r0 + 3 * lh && l5 === l4 && seen[5].max > 0 && seen[4].max <= 0 && Math.round(emptied.h) === r0;
+    is(`${W} ${lang} session: typing grows the box a line at a time to four, then it scrolls, and emptied it is one line again`, 'so',
+       grew ? 'so' : `${seen.map(x => Math.round(x.h) + (x.max > 0 ? ` (scrolls ${x.max})` : '')).join(' -> ')}, emptied ${Math.round(emptied.h)}`);
+    await b.evaluate(() => document.activeElement?.blur?.());
+  }
+  await relang(null);
   await b.viewport(W, H);
 
   // ── 3. the page itself never moves ────────────────────────────────────────
