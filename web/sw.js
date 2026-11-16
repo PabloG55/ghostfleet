@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 37560b5df9bb
+// CLIENT-HASH: 6e9be7e6e1ec
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -477,7 +477,10 @@
 // Assistant button 8px above the composer instead of over it.
 // v117 brings a lead up from any state on either machine of a pairing: a project with no lead
 // is started by name (fleet_lead_start), and a reopen or start that fails says why.
-const VERSION = 'ghostfleet-v117';
+// v118 keeps the chat, the hint and the top bar in place around a keyboard: the Assistant
+// button is not drawn while one is up, the touch hint is one line, a connected keyboard's bar
+// pins the app like the on-screen one, and the box's text stays out of its inset.
+const VERSION = 'ghostfleet-v118';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

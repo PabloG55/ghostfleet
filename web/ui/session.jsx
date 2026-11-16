@@ -5,7 +5,7 @@ import { render as renderAnsi } from '../ansi.js';   // the phone client's own, 
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
 import { Icon } from './icon.jsx';
-import { sendsOnEnter } from './keys.js';
+import { sendsOnEnter, finePointer } from './keys.js';
 import { ToolTabs, ToolPanel } from './terminal.jsx';
 import { useLayer } from './select.jsx';
 import { BackLink } from './back.jsx';
@@ -606,7 +606,9 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           <button type="button" class="cbtn attach-btn" onClick={() => picker.current?.click()} title={t('sess.attach')} aria-label={t('sess.attach')}><Icon name="clip" size={24} /></button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.currentTarget.files); e.currentTarget.value = ''; }} />
           <div class={`composer-input${(prompt && !held) || st === 'limit' ? ' has-request' : ''}`}>
-          <textarea ref={composer} rows={embedded ? 1 : 2} value={draft} placeholder={drag ? t('sess.drop') : embedded ? t('sess.writeToShort', { name }) : t('sess.writeTo', { name })}
+          {/* The hint names dragging a file and ⏎ only where a mouse is, which is where ⏎ sends
+              (keys.js): on a phone it wrapped to three lines in the two-line box, the last one cut. */}
+          <textarea ref={composer} rows={embedded ? 1 : 2} value={draft} placeholder={drag ? t('sess.drop') : embedded || !finePointer() ? t('sess.writeToShort', { name }) : t('sess.writeTo', { name })}
                     onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)}
                     onInput={(e) => { setDraft(e.currentTarget.value); typing.current = !!e.currentTarget.value;
                       if (document.activeElement === composer.current) composerKey(); }}
