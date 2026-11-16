@@ -4191,11 +4191,14 @@ function Frame({ name, sub, title = name, route, projects, hosts, nav, below, fo
 					}),
 					/* @__PURE__ */ u("span", {
 						class: "topbar-end",
-						children: [topEnd ? topEnd(open) : null, need ? /* @__PURE__ */ u("a", {
-							class: "badge need",
-							href: "#/",
-							children: need
-						}) : null]
+						children: [topEnd ? topEnd(open) : null, /* @__PURE__ */ u("span", {
+							class: "topbar-need",
+							children: need ? /* @__PURE__ */ u("a", {
+								class: "badge need",
+								href: "#/",
+								children: need
+							}) : null
+						})]
 					})
 				]
 			}),

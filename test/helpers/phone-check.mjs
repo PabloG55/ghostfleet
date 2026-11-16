@@ -928,6 +928,41 @@ try {
     await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
     await b.viewport(390, 844);
 
+    // ── the top bar holds still whatever the needs-you count does ──
+    // The bar spaced its three parts between the edges, so a count arriving as a bare child
+    // widened the right part and the logo slid ~9 px at 390. Each part is measured with no count
+    // (grid-empty), a count (grid-degraded: 2 need you) and no count again, in both languages,
+    // by reloading under each fleet: the menu, the logo and the slot the count stands in.
+    for (const lang of ['en', 'es']) {
+      const seen = [];
+      for (const fx of ['grid-empty.json', 'grid-degraded.json', 'grid-empty.json']) {
+        await b.evaluate(([f, l]) => { localStorage.setItem('gf.fixture', f); localStorage.setItem('gfw.lang', l); location.hash = '#/'; }, [fx, lang]);
+        await sleep(200);
+        await b.evaluate(() => location.reload());
+        await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey|sin llave/i.test(x.textContent)));
+        await clickText('.auth-card button', 'without a passkey|sin llave');
+        await until(() => !!document.querySelector('.topbar .brand'));
+        await sleep(1200);
+        seen.push(await b.evaluate(() => {
+          const bar = document.querySelector('.topbar'), at = (e) => e ? Math.round(e.getBoundingClientRect().left * 10) / 10 : null;
+          return { count: bar.querySelector('.badge.need')?.textContent || '', menu: at(bar.querySelector('.icon-btn')),
+                   logo: at(bar.querySelector('.brand')), end: at(bar.querySelector('.topbar-end')) };
+        }));
+      }
+      is(`390 top bar (${lang}): the count is there once, and gone again`, ['', '2', ''], seen.map(x => x.count));
+      is(`390 top bar (${lang}): the logo stands where it stood when the count arrives and when it goes`, 'still',
+        seen.every(x => x.logo === seen[0].logo) ? 'still' : seen.map(x => x.logo).join(' -> ') + ' px');
+      is(`390 top bar (${lang}): ...and so do the menu button and the end of the bar`, 'still',
+        seen.every(x => x.menu === seen[0].menu && x.end === seen[0].end) ? 'still' : seen.map(x => `${x.menu}/${x.end}`).join(' -> '));
+    }
+    // the language lives in memory until a reload: put the page back in the one the rows after this expect
+    await b.evaluate(() => { localStorage.removeItem('gf.fixture'); localStorage.removeItem('gfw.lang'); location.hash = '#/'; });
+    await sleep(200);
+    await b.evaluate(() => location.reload());
+    await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey|sin llave/i.test(x.textContent)));
+    await clickText('.auth-card button', 'without a passkey|sin llave');
+    await until(() => !!document.querySelector('.topbar .brand'));
+
     // ── a page nobody is looking at asks nothing, and asks once when it is looked at again ──
     // REALLY hidden: a second tab is opened in front of this one, which is what the app switcher
     // does to it (document.hidden is true; nothing is stubbed). Thirty seconds of reads are

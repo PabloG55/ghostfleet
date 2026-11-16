@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: ec48d1d8bcce
+// CLIENT-HASH: 6bce9ee6f7ef
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -486,7 +486,7 @@
 // The app's own poll asks for the project list without its per-fleet rollup. A phone on v118
 // works as before against this daemon; it only goes on paying for the rollup until relaunched.
 // Bringing a lead up reads the grid fresh (`&fresh=1`), past the 2.5 s the daemon now keeps it.
-const VERSION = 'ghostfleet-v119';
+const VERSION = 'ghostfleet-v120';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
