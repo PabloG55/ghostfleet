@@ -377,6 +377,13 @@ function ScheduleModal({ name, onClose, onSave }) {
   );
 }
 
+// One of the state's controls in the header (Interrupt, Pause, Wake, Reopen, Resume, Start). Its
+// word is a span of its own, so a phone can draw the button as its icon alone (ui.css) while the
+// word stays its name: what a screen reader says and what a test or a search of the page finds.
+function Act({ kind = '', icon, word, title, ...rest }) {
+  return <Btn kind={`ghost sm act ${kind}`} icon={icon} title={title || word} {...rest}><span class="act-word">{word}</span></Btn>;
+}
+
 // Slots (adapter.jsx): `ownerPicker({ project, name, owner, onChanged })` beside the session's
 // tools, and `presence(here)` under the header, where `here` is the pane's list of who else has
 // it open. The adapter's optional `presence(project, session, typing)` is told every 5 s.
@@ -446,6 +453,26 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   const picker = useRef(null);
   const typing = useRef(!!draft);
   const composer = useRef(null);
+  // ON A PHONE THE BOX IS AS TALL AS WHAT IS TYPED IN IT: one line at rest, the buttons' height
+  // (ui.css), and a line more for each line typed, up to its cap, after which it scrolls. Sized from
+  // the draft and nothing else, so a message that arrives or a card that lands never moves it, and
+  // a send that empties it puts it back on one line. Before paint (a layout effect), so a draft
+  // brought back from an earlier visit opens at its height instead of growing into it. The desk
+  // keeps its two rows and does not grow.
+  useLayoutEffect(() => {
+    const n = composer.current;
+    const fit = () => {
+      if (!n) return;
+      n.style.height = '';
+      if (!matchMedia('(max-width: 900px)').matches) return;
+      const cs = getComputedStyle(n);
+      const need = n.scrollHeight + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+      if (need > n.offsetHeight + 0.5) n.style.height = `${need}px`;
+    };
+    fit();
+    addEventListener('resize', fit);
+    return () => removeEventListener('resize', fit);
+  }, [draft, tool]);   // a tool tab unmounts the composer; back on the chat, the draft is fitted again
   const lastComposerKey = useRef(-Infinity);
   const typingPause = useRef(null);
   const [composerFocused, setComposerFocused] = useState(false);
@@ -618,7 +645,12 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
                 The state is the first thing on that line and not the last thing beside the name,
               because its width is the card's too: "Ready" is 65 px, "Interrupted" half as wide
               again, the shape 62. Anything drawn after it before the card came would stand
-              wherever the word ended, and the branch's line did, 10 to 39 px along on a desk. */}
+              wherever the word ended, and the branch's line did, 10 to 39 px along on a desk.
+                ON A PHONE THE WHOLE HEADER IS ONE ROW, 44 px: back, ship, these two lines, the
+              controls as icons and More (ui.css). It was three rows, 145 px, and with the
+              on-screen keyboard up on a 390 x 844 phone that left the conversation 21 px between
+              it and the composer, none of it a line of text. So this line holds the state and the
+              branch there, and the PR, the label and the schedule are at the top of More. */}
           <span class="sess-meta">
             {shaped ? <span class="sk sk-ghost-row" role="status" aria-label={t('common.loading')}>
               <span class="pill sk-ghost" aria-hidden="true">Working</span>
@@ -641,31 +673,48 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
             Pause while working, Wake asleep, Reopen lost, Resume parked, none for an idle lead),
             so More, drawn after them, was wherever they ended: one shape and More while the card
             was out, then Interrupt and Pause landed and pushed it 97 px along, and it moved again
-            each time the session started or stopped working. */}
+            each time the session started or stopped working. On a phone each control is its icon
+            alone, 38 px wide, with its word kept as its name (Act). */}
         <div class="sess-tools">
           <div class="sess-acts">
           {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
-          {shaped ? <span class="sk" aria-hidden="true"><Btn kind="ghost sm sk-ghost" disabled tabIndex={-1} icon="pause">{t('sess.pause')}</Btn></span> : null}
-          {st === 'working' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
-          {st === 'asleep' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
-          {st === 'lost' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
+          {shaped ? <span class="sk" aria-hidden="true"><Act kind="sk-ghost" disabled tabIndex={-1} icon="pause" word={t('sess.pause')} /></span> : null}
+          {st === 'working' && !shaped ? <Act disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand" word={t('sess.interrupt')} /> : null}
+          {st === 'asleep' && !shaped ? <Act disabled={busy} onClick={() => act('fleet_wake')} icon="sun" word={t('sess.wake')} /> : null}
+          {st === 'lost' && !shaped ? <Act disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh" word={t('sess.reopen')} /> : null}
           {card && !card.lead && !['asleep', 'lost'].includes(st)
-            ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
+            ? <Act disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'} word={parked ? t('sess.resume') : t('sess.pause')} /> : null}
           {/* A LEAD IS NEVER PAUSED HERE, but a parked one has to come back from here: the pair
               above is a worker's, so a lead parked by an older build or by hand had no way up
               from its own screen. Only Resume, never Pause (fleet_pause refuses a lead). */}
-          {card?.lead && parked ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_resume')} icon="play">{t('sess.resume')}</Btn> : null}
+          {card?.lead && parked ? <Act disabled={busy} onClick={() => act('fleet_resume')} icon="play" word={t('sess.resume')} /> : null}
           {/* ...and a project with NO lead, opened at its lead's name: the project page's own
               start (startLead, fleet.lead), so both places start one the same way. */}
-          {!card && startLead ? <Btn kind="ghost sm" disabled={busy} onClick={startLead} icon="play">{t('project.leadStart')}</Btn> : null}
+          {!card && startLead ? <Act disabled={busy} onClick={startLead} icon="play" word={t('project.leadStart')} /> : null}
           </div>
           <div class="menu-wrap" ref={menuWrap}>
-            <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
+            <Btn kind="ghost sm more-btn" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu} title={t('sess.more')}>
+              <Icon name="more" class="more-ico" /><span class="act-word">{t('sess.more')}</span><span class="more-caret" aria-hidden="true"> ▾</span></Btn>
             {menu ? (
               <div class="menu">
+                {/* On a phone the line under the name holds the state and the branch, cut short;
+                    the rest of what the card says is here, whole (ui.css). A desk's header has
+                    room for all of it, and this is not drawn there. */}
+                {card && (card.branch || card.pr || card.label || card.sched) ? (
+                  <div class="menu-info">
+                    {card.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
+                    {card.pr ? <span class="tag pr">PR {card.pr}</span> : null}
+                    {card.label ? <span class="chip-label"><Icon name="tag" /> {card.label}</span> : null}
+                    {card.sched ? <span class="chip-sched"><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 60)}”</span> : null}
+                  </div>) : null}
+                {/* ...and the rest of what this session is about, beside it: what it left listening,
+                    running or booted (DetailsModal), on a desk and a phone alike. */}
+                {card && fleet.ports ? <button onClick={() => { setMenu(false); setDetailsOpen(true); }}><Icon name="list" /> {t('sess.details')}</button> : null}
                 {can('gfw_label') ? <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button> : null}
                 {can('gfw_schedule') ? <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button> : null}
-                {card && fleet.ports ? <button onClick={() => { setMenu(false); setDetailsOpen(true); }}><Icon name="list" /> {t('sess.details')}</button> : null}
+                {/* The schedule's × rides in its chip, which a phone does not draw (above), so its
+                    cancel is here as well. */}
+                {card?.sched && can('gfw_unschedule') ? <button onClick={() => { setMenu(false); act('gfw_unschedule'); }}><Icon name="close" /> {t('sess.unsched')}</button> : null}
                 {card && !card.lead ? <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button> : null}
                 {card && !card.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
                 {card && !card.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 7e5faff5433a
+// CLIENT-HASH: e2857c59dfb7
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -486,10 +486,14 @@
 // The app's own poll asks for the project list without its per-fleet rollup. A phone on v118
 // works as before against this daemon; it only goes on paying for the rollup until relaunched.
 // Bringing a lead up reads the grid fresh (`&fresh=1`), past the 2.5 s the daemon now keeps it.
-// v121 adds Details to a session's More menu: what it left listening, running or booted, read
-// from the last scan (lib/ports.mjs) and never polled, with one new fixture. A phone on v120
-// has no Details entry until relaunched, and loses nothing else.
-const VERSION = 'ghostfleet-v121';
+// v121 puts a session's header on one row on a phone, 45 px instead of 145, so a conversation
+// still shows above the composer with the on-screen keyboard up: the state's controls are icons,
+// and the PR, the label and the schedule are at the top of More. The composer's box rests at one
+// line, its buttons' 46 px instead of 67, and grows a line for each line typed, to four.
+// v122 adds Details to a session's More, beside what v121 moved there: what it left listening,
+// running or booted, read from the last scan (lib/ports.mjs) and never polled, with one new
+// fixture. A phone on v121 has no Details entry until relaunched, and loses nothing else.
+const VERSION = 'ghostfleet-v122';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

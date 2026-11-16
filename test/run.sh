@@ -24011,6 +24011,11 @@ if [ -d "$ROOT/web" ]; then
   #   mic; with the keyboard up it stayed by the screen's foot, 437 px below the composer. The
   #   newest-message rows were green there, the button being low; a chat that leaves 20 px under
   #   its list turned 12 of them red ("under the button by 21 px").
+  #   The box at rest (2c of phone-fit.mjs), reported as "the chat button is taller than the mic
+  #   attach and send": on the client before it, 14 rows red at 320, 390 and 430 in both
+  #   languages, "box 66, buttons 46", and a box that never grew ("66 -> 66 -> 66 -> 66 (scrolls
+  #   24)"). The request's cover was green there, its box being 66; with the box at 46 and the
+  #   cover's own padding put back, its words ran 2 px past both edges and the row said so.
   #   SKIPPED where there is no Chrome, like the group above.
   PFIT="$(mktemp -d "$TEST_RUNS.$$.fit.XXXXXX")"
   node "$ROOT/test/helpers/phone-check.mjs" --fit-only > "$PFIT/out" 2> "$PFIT/err"
@@ -24021,8 +24026,9 @@ if [ -d "$ROOT/web" ]; then
     is "phone-check --fit-only ran"     "0" "$pfitrc"
     is "...without complaining"         ""  "$(head -2 "$PFIT/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor: a browser that fails to start emits a row or two. 140 rows when it was written, 194
-    # with the Assistant button's, 212 with the keyboard-up strip, the hint and the box's inset.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 200 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
+    # with the Assistant button's, 212 with the keyboard-up strip, the hint and the box's inset,
+    # 238 with the box at rest in both languages.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PFIT/out")" -ge 230 ] && echo yes || echo "no: $(wc -l < "$PFIT/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PFIT/out"

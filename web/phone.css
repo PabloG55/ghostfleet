@@ -398,7 +398,8 @@ button.usage:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px
   --px: Silkscreen, var(--mono);
   /* square, or nearly: a terminal has no rounded corners */
   --r: 2px;
-  /* A thumb's target: every composer's attach, voice and send buttons, and the box's least height. */
+  /* A thumb's target: every composer's attach, voice and send buttons, and the box's least height
+     (on a phone, its height at rest). */
   --tap: 46px;
   color-scheme: dark;
 }
@@ -671,10 +672,73 @@ textarea { resize: vertical; }
 .sess-meta::-webkit-scrollbar { display: none; }
 .sess-meta > *, .sess-meta > .sk-ghost-row > * { flex: none; }
 .sess-meta > .branch { flex: 0 1 auto; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ══ ON A PHONE THE HEADER IS ONE ROW, and the same row in every state, keyboard up or down ═══
+   Reported from the installed iPhone app: "when opening the chat on phone the chat completely
+   disappears". The header had grown to three rows (the back link; the ship and the name over the
+   card's line; the controls with More), 145 px at 390, and with the on-screen keyboard up the app
+   is the visible area (viewport.js): 394 px on an iPhone 17e simulator, in the installed app, of
+   which the top bar, the demo bar, the header, the tabs and the composer left the conversation
+   36 px, its own padding, and not one line of text. The keyboard's pin was right; there was no room.
+     So it is a chat app's header, 44 px: ← (its aria-label says where to, "Back to Home"), the
+   ship, the name over one small line with the state and the branch, then the state's controls as
+   icons and More as ⋯, at the row's end. Not collapsed while the keyboard is up: a header that
+   changes height under a typing thumb is itself the layout moving. With it the same strip shows
+   the newest message whole (phone-check, "the keyboard up and 394 visible").
+     The controls keep their words as their names (session.jsx Act), so a screen reader, a test and
+   a search of the page still find "Interrupt". A team app's presence line, when someone else is
+   here, is the one thing that takes a row of its own under it. */
 @media (max-width: 900px) {
-  .sess-head:not(.embedded) .sess-title { flex-direction: column; align-items: stretch; }
-  .sess-head:not(.embedded) .sess-name { align-self: flex-start; max-width: 100%; }
-  .sess-head:not(.embedded) .sess-meta { flex: none; }
+  .sess-head:not(.embedded) { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0 4px; padding: 0 8px 0 4px; }
+  .sess-head:not(.embedded) > .back-link { flex: none; display: inline-grid; place-items: center; width: 44px; height: 44px;
+    margin: 0; padding: 0; font-size: 20px; line-height: 1; color: var(--fg); }
+  .sess-head:not(.embedded) > .back-link > .back-place,
+  .sess-head:not(.embedded) .sess-tools .act-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .sess-head:not(.embedded) .sess-title { flex: 1 1 0; min-width: 0; height: 44px; display: grid; grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: 20px 17px; align-content: center; column-gap: 8px; }
+  .sess-head:not(.embedded) .sess-name { display: contents; }
+  .sess-head:not(.embedded) .sess-name > .fship { grid-area: 1 / 1 / 3 / 2; align-self: center; }
+  .sess-head:not(.embedded) .sess-title h1 { grid-area: 1 / 2; min-width: 0; font-size: 16px; line-height: 20px; }
+  .sess-head:not(.embedded) .sess-meta { grid-area: 2 / 2; min-height: 0; height: 17px; gap: .6em; font-size: 11.5px; line-height: 17px; overflow: hidden; }
+  .sess-head:not(.embedded) .sess-meta :is(.pill, .branch) { border: 0; padding: 0; margin: 0; font-size: 11.5px; line-height: 17px; }
+  .sess-head:not(.embedded) .sess-meta .pill:not(.sk-ghost) { background: none; }
+  .sess-head:not(.embedded) .sess-meta .branch { min-width: 0; }
+  /* ...and the line holds the state and the branch. The PR, the label and the schedule went with
+     two controls beside them: the branch was cut to "fe…". They are at the top of More instead
+     (session.jsx .menu-info), in full, and the schedule's cancel with them. */
+  .sess-head:not(.embedded) .sess-meta :is(.tag.pr, .chip-label, .chip-sched) { display: none; }
+  .sess-head:not(.embedded) .sess-tools .sk .btn.sk-ghost { background: linear-gradient(var(--line), var(--line)) center / 14px 14px no-repeat; }
+  .sess-head:not(.embedded) .sess-tools { flex: none; align-items: center; gap: 2px; }
+  /* THE CONTROLS' ROOM IS THE SAME IN EVERY STATE. It is two controls wide, and they stand at its
+     end, against More: Interrupt and Pause fill it, an idle lead leaves it empty, and the one
+     shape drawn before the card stands where Pause lands. Sized by its content instead, it was
+     one shape wide while the card was out and then two controls, or none, so the row's box moved
+     40 px one way or 38 the other when the card came, and the name's room changed with it.
+     40 px tall even empty, or an idle lead's would be 0 tall and its middle 20 px lower. */
+  .sess-head:not(.embedded) .sess-acts { flex: none; flex-wrap: nowrap; gap: 2px; justify-content: flex-end; min-width: 78px; height: 40px; }
+  /* The team app puts its owner picker in that row (the ownerPicker slot), drawn before the card
+     as well: its avatar alone, its name kept as its label, at the end beside More, with a place
+     of its own on top of the two. */
+  .sess-head:not(.embedded) .sess-acts:has(> .select) { min-width: 118px; }
+  .sess-head:not(.embedded) .sess-acts > .select { order: 1; flex: none; width: 38px; height: 40px; padding: 0; justify-content: center; background-image: none; }
+  .sess-head:not(.embedded) .sess-acts > .select > .select-v { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .sess-head:not(.embedded) .sess-tools .btn { width: 38px; height: 40px; padding: 0; justify-content: center; border-color: transparent; }
+  .sess-head:not(.embedded) .sess-tools .more-caret { display: none; }
+  .sess-head:not(.embedded) > :not(.back-link, .sess-title, .sess-tools) { flex-basis: 100%; }
+  /* The tabs under it lose the 10 px of air over them, which the header's own border now gives.
+     `~`, not `+`: the request's sheet and the quota's are drawn between the two while they are open. */
+  .sess-head:not(.embedded) ~ .tabs { padding-top: 0; }
+  /* And the conversation's own margins, which with the keyboard up are a share of a strip about
+     125 px tall: the 18 px under the newest message was most of another line. The launcher's
+     room (below) still wins while the keyboard is down. */
+  .sess-head:not(.embedded) ~ .chat { padding-top: 12px; padding-bottom: 10px; }
+}
+.more-ico, .menu-info { display: none; }
+@media (max-width: 900px) {
+  .sess-head:not(.embedded) .more-ico { display: inline-block; }
+  .sess-head:not(.embedded) .menu-info { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: .55em .75em .7em;
+    margin-bottom: 4px; border-bottom: 1px solid var(--line); max-width: min(320px, calc(100vw - 32px)); }
+  .menu-info > .branch { overflow-wrap: anywhere; }
+  .menu-info > .tag.pr { margin: 0; }
 }
 /* More at the row's end and the state's controls in the room before it (session.jsx): More's
    place is the row's width, which no state changes. The controls wrap inside their own box, so
@@ -872,8 +936,21 @@ textarea { resize: vertical; }
 /* ...and its placeholder is one line on a touch screen. It wrapped to three in the two-line box
    and the third, "Enter sends)", showed half cut off. The words are shorter there (session.jsx);
    a name too long for a narrow phone ends in an ellipsis rather than in a line that is cut. */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 900px) {
   .composer-input textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
+/* ON A PHONE THE BOX AT REST IS ONE LINE, ITS BUTTONS' HEIGHT. Reported from the installed iPhone
+   app: "the chat button is taller than the mic attach and send". The box was its two rows, 68 px
+   at the touch screen's 16px, beside three 46 px buttons, and with the keyboard up those 22 px were
+   the conversation's. Now it is the tap's height with its one line centred (the inset is what the
+   line leaves of it, so the text is not cut at any scroll), and it grows a line for each line typed
+   (session.jsx sizes it from the draft) to four, then scrolls. Typing is the only thing that sizes
+   it. The desk keeps its two rows, where the hint names dragging a file and ⏎ and needs them. */
+@media (max-width: 900px) {
+  .composer-input textarea { height: var(--tap); max-height: calc(3lh + var(--tap)); border-block-width: calc((var(--tap) - 1lh) / 2); resize: none; }
+  /* ...and what covers it while a request is open says itself in two lines of that height: at 320
+     its own padding left "Answer the request" a word a line, the last one cut by the box's edge. */
+  .composer-input .request-return { padding: 0 6px; gap: 6px; }
 }
 /* A COMPOSER'S BUTTONS ARE ONE SIZE: attach, voice and send, in the session's composer, a
    question's answer row and the assistant's. Reported from the phone as "the buttons of the chat
