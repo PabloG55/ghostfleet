@@ -12,7 +12,8 @@
 #                                     what --pressure WOULD sleep, leads included; changes nothing
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
 #     fleet-hibernate --json          the same plan, machine-readable
-#     -s SOCK                         one fleet instead of all of them
+#     -s SOCK                         one fleet instead of all of this profile's ($CLAUDE_FLEET_DIR's);
+#                                     another profile's fleet is listed, never judged, and refused by -s
 #   A fleet's lead sleeps only under --pressure, and only when <fleet dir>/hibernate-leads.enabled
 #   exists (its content, if any, is the lead's idle threshold in hours; default 24).
 #   <fleet dir>/<sock>.lead-stays-up keeps that one fleet's lead up whatever the switch says.
@@ -96,7 +97,7 @@ while [ $# -gt 0 ]; do
     --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
     --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,27p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,28p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
@@ -379,12 +380,57 @@ ROLLOUT="${FLEET_ENV%/*}/codex-rollout.mjs"
 BIN_DIR="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)"
 undim() { LC_ALL=C awk -f "$UNDIM"; }
 
+# ── WHOSE FLEET IS THIS SOCKET ───────────────────────────────────────────────
+# sockets() walks every fleet on the machine, and everything this decides with — the switches,
+# the records, the markers — is read from ONE fleet dir. So a run for one profile judged every
+# other profile's fleets by its own rules. Measured, read-only, on a machine with three
+# profiles and the leads switch on in one of them: a dry run of --pressure from that profile
+# offered two leads of the OTHER two profiles for sleep, each read as status `unknown` because
+# its record was in its own profile's dir and not here. And that dry run was not read-only:
+# finding a live conversation with no record beside it, correct_record wrote one, into this
+# dir, claiming the other fleet's session — eighteen of them had built up, every one
+# `unknown`. Runs that read this dir had gone further and slept ten workers of another
+# profile, with their asleep markers here, where that fleet's own grid and wake never look.
+#   The answer is the projects files, the one map from a socket to its profile that the
+# wake's launch env (lib/fleet-env.mjs), fleet-send and fleet-restart already read — never a
+# rule about the socket's NAME. A default-profile socket has no profile segment, so
+# `cf-personal-scratch` is equally the default profile's project `personal-scratch` and the
+# personal profile's `scratch`; the projects files say which. A socket no project owns (a
+# scratch or test fleet) has no profile to be wrong about, and is judged by the rule below:
+# a session is this dir's to touch only if this dir holds its record.
+PROJECTS_JS="${FLEET_ENV%/*}/projects.mjs"
+NOT_OURS="not this profile's fleet"
+OWNERS=""
+FLEET_DIR_REAL="$(cd "$FLEET_DIR" 2>/dev/null && pwd -P)" || FLEET_DIR_REAL="${FLEET_DIR%/}"
+load_owners() {
+  command -v node >/dev/null 2>&1 && [ -f "$PROJECTS_JS" ] || return 0
+  OWNERS="$(node "$PROJECTS_JS" socks 2>/dev/null)"
+}
+# own | none | the fleet dir of the profile that owns it. ANY claimant that is not this dir
+# makes it another's: when both of the projects above exist they are one socket, and a socket
+# two profiles claim is not one this run can call its own.
+sock_owner() {   # sock
+  printf '%s\n' "$OWNERS" | awk -F$'\x1f' -v s="$1" -v me="$FLEET_DIR_REAL" '
+    $1 == s { n++; if ($2 != me) other = $2 }
+    END { if (!n) print "none"; else if (other != "") print other; else print "own" }'
+}
+foreign_why() {   # owner-dir
+  printf "%s — its project's records and switches are in %s, not here" "$NOT_OURS" "$1"
+}
+# Said once for any mode that would judge, sleep or wake a session of another profile's
+# fleet, with the one command that would do it under that fleet's own rules.
+refuse_foreign() {   # sock owner-dir what
+  echo "fleet-hibernate: refusing — $1 is another profile's fleet. Its records and switches are in $2, and this run reads $FLEET_DIR, so it would $3 by the wrong profile's rules. Run it as: CLAUDE_FLEET_DIR=$2 fleet-hibernate -s $1 …" >&2
+}
+
 # ── WHICH AGENT A SESSION RUNS ───────────────────────────────────────────────
 # The marker fleet-spawn and an agent switch write (bin/fleet-agent), read the way
 # fleet-restart's agent_for reads it. No marker is claude, as everywhere else.
 agent_of_slot() {   # sock slot
   local a=""
-  a="$(tr -d '[:space:]' < "${FLEET_DIR:?}/$1.$2.agent" 2>/dev/null)"
+  # 2>/dev/null FIRST: redirections apply left to right, and a missing marker — the common
+  # case, since no marker is claude — printed "No such file" for every such session.
+  a="$(tr -d '[:space:]' 2>/dev/null < "${FLEET_DIR:?}/$1.$2.agent")"
   printf '%s' "${a:-claude}"
 }
 
@@ -961,12 +1007,23 @@ veto_for() {
 # ── the plan ──────────────────────────────────────────────────────────────────
 PLAN=""
 build_plan() {
-  local sock slot created st ts id cwd tr idle why live _rs agent home note
+  local sock slot created st ts id cwd tr idle why live _rs agent home note owner rec u=$'\x1f'
   while IFS= read -r sock; do
     [ -n "$sock" ] || continue
+    owner="$(sock_owner "$sock")"
     while IFS=$'\t' read -r slot created; do
       [ -n "$slot" ] || continue
       [ -z "$NAMED" ] || [ "$slot" = "$NAMED" ] || continue
+      # ANOTHER PROFILE'S FLEET IS LISTED AND NOT READ: no record lookup, no live process
+      # asked, no record corrected — each of those is this dir's business only (sock_owner).
+      # The same ten columns as the row below, by name: sock slot status idle id cwd why note
+      # agent home.
+      case "$owner" in own|none) ;; *)
+        PLAN="$PLAN${sock}${u}${slot}${u}unknown${u}${u}${u}${u}$(foreign_why "$owner")${u}${u}${u}"$'\n'
+        continue ;;
+      esac
+      # The newest record's own sock column: non-empty exactly when this dir holds one.
+      rec="$(field_for "$sock" "$slot" 1)"
       st="$(field_for "$sock" "$slot" 5)"; ts="$(field_for "$sock" "$slot" 3)"
       id="$(field_for "$sock" "$slot" 4)"; tr="$(field_for "$sock" "$slot" 6)"
       cwd="$(field_for "$sock" "$slot" 7)"
@@ -1004,9 +1061,13 @@ build_plan() {
             cwd="$(field_for "$sock" "$_rs" 7)"
           else _rs=""; fi
         fi
+        [ -n "$_rs" ] && rec="$_rs"
         if [ "$live" = yes ]; then
           [ -n "$cwd" ] || cwd="$(tmux -u -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
-          [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}" "$FOLLOW_PREV"
+          # Corrected only where this dir already holds a record of it: written from nothing,
+          # it is a claim on a session whose hooks write somewhere else (sock_owner).
+          [ "$LIVE_ID" = "$id" ] || [ -z "$rec" ] \
+            || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}" "$FOLLOW_PREV"
           # the live transcript or none: falling back to the recorded one is the bug itself
           id="$LIVE_ID"; tr="$LIVE_TR"
         fi
@@ -1016,7 +1077,19 @@ build_plan() {
       # and dated — is the newest conversation, never a dead predecessor.
       if [ "$agent" != codex ]; then follow_continued "$id" "$tr"; id="$FOLLOW_ID"; tr="$FOLLOW_TR"; fi
       idle="$(idle_hours "$tr" "$agent")"
-      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live" "$created" "$agent" "$home")"
+      # ── NO RECORD HERE, NOT OURS ──────────────────────────────────────────────
+      # Belt and braces under sock_owner, and the whole of the rule for a socket no project
+      # owns: every agent session in a fleet has a record in its fleet's dir (the hook writes
+      # one on every event, codex's watcher for codex), so a session with none in THIS dir is
+      # one whose hooks write somewhere else. Its status here is only ever `unknown`, and
+      # every veto below that reads the record would be answering for an empty one. A tab
+      # never has a record and says so below.
+      case "$slot" in _*) rec=tab ;; esac
+      if [ -z "$rec" ]; then
+        why="$NOT_OURS — no record of this session in $FLEET_DIR"
+      else
+        why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live" "$created" "$agent" "$home")"
+      fi
       # What let a lead go, said on its row and in the governor's log: the one sleep a person
       # will ask about afterwards is the lead's, and the answer is a file they can remove.
       # Here and not in veto_for, which runs in a subshell and can hand back only its reason.
@@ -1369,7 +1442,7 @@ _wake_one() {
 
 # ── output ────────────────────────────────────────────────────────────────────
 print_plan() {
-  local sock slot st idle id cwd why note agent home n_sleep=0 n_keep=0
+  local sock slot st idle id cwd why note agent home n_sleep=0 n_keep=0 n_theirs=0
   if [ "$JSON" = yes ]; then
     printf '['
     local first=1
@@ -1389,17 +1462,35 @@ print_plan() {
     if [ -z "$why" ]; then n_sleep=$((n_sleep+1))
       printf '%-18s %-22s %-11s %8s  WOULD SLEEP%s\n' "$sock" "$slot" "$st" "${idle:-?}" "${note:+ — $note}"
     else n_keep=$((n_keep+1))
+      case "$why" in "$NOT_OURS"*) n_theirs=$((n_theirs+1)) ;; esac
       printf '%-18s %-22s %-11s %8s  stays up — %s\n' "$sock" "$slot" "$st" "${idle:-?}" "$why"
     fi
   done <<< "$PLAN"
   printf '\n%s would sleep, %s stay up (threshold %sh idle' "$n_sleep" "$n_keep" "$IDLE_HOURS"
   if leads_on && [ "$PRESSURE" = yes ]; then printf "; a lead's %sh, under --pressure" "$LEAD_HOURS"; fi
   printf ')\n'
+  [ "$n_theirs" -eq 0 ] || printf "%s of those are %s — this run reads %s and judges only its own\n" "$n_theirs" "$NOT_OURS" "${FLEET_DIR:?}"
   enabled || printf 'hibernation is OFF — --apply will refuse. Turn it on: touch %s/hibernate.enabled\n' "${FLEET_DIR:?}"
 }
 
 command -v tmux >/dev/null 2>&1 || { echo "fleet-hibernate: tmux required" >&2; exit 1; }
-load_records; load_trusted; load_ps
+load_records; load_trusted; load_ps; load_owners
+
+# ── -s NAMING ANOTHER PROFILE'S FLEET IS REFUSED, NOT RUN UNDER THIS ONE'S RULES ──
+# Every caller that names a socket already passes that fleet's own dir: the governor and the
+# grid's wake from bin/ghostfleet, fleet-send's wake from lib/fleet-env.mjs, the MCP tools
+# from the target project. So the only run this stops is the one that would have judged that
+# fleet by this dir's switches and written its markers where its own grid never looks — by
+# hand, from an agent, or through `fleet-pause --hibernate`, which passes its caller's dir.
+# --resolve and --composer are not here: they take the socket as an argument, read the pane,
+# and are asked by callers that set the fleet dir themselves. A wake is checked in its own
+# branch, which also says where a stray marker belongs.
+if [ -n "$ONLY_SOCK" ]; then
+  case "$MODE" in plan|apply|pressure)
+    _o="$(sock_owner "$ONLY_SOCK")"
+    case "$_o" in own|none) ;; *) refuse_foreign "$ONLY_SOCK" "$_o" "judge its sessions"; exit 2 ;; esac ;;
+  esac
+fi
 
 case "$MODE" in
   # ── ONE ANSWER TO "WHICH CONVERSATION", ASKED BY EVERYTHING THAT RESUMES ─────
@@ -1442,14 +1533,31 @@ case "$MODE" in
       [ -n "$_t" ] && [ -f "${FLEET_DIR:?}/$_t.$WAKE_SLOT.asleep" ] && SOCK="$_t"
     fi
     if [ -z "$SOCK" ]; then
-      found=""
+      # Another profile's marker is not a candidate: it would make a name ambiguous that
+      # this profile has asleep once. It is only answered (below) when it is the only one.
+      found=""; theirs=""
       for f in "${FLEET_DIR:?}"/*."$WAKE_SLOT".asleep; do [ -f "$f" ] || continue
-        s="$(basename "$f")"; found="$found ${s%%.$WAKE_SLOT.asleep}"; done
+        s="$(basename "$f")"; s="${s%%.$WAKE_SLOT.asleep}"
+        case "$(sock_owner "$s")" in own|none) found="$found $s" ;; *) theirs="${theirs:-$s}" ;; esac
+      done
       set -- $found
       [ $# -gt 1 ] && { echo "fleet-hibernate: '$WAKE_SLOT' is asleep in $# fleets ($*) — say which with -s" >&2; exit 1; }
-      SOCK="${1:-}"
+      SOCK="${1:-$theirs}"
     fi
     [ -n "$SOCK" ] || { echo "fleet-hibernate: no sleeping session called '$WAKE_SLOT'" >&2; exit 1; }
+    # ── A MARKER HERE FOR ANOTHER PROFILE'S FLEET ─────────────────────────────
+    # Found by the glob above, or named by $TMUX: either way the wake would clear this dir's
+    # markers and watch for an exit marker that session's agent-here writes in its own dir.
+    # A marker of that kind is what a run that read the wrong dir left behind, and the way
+    # back is to put it where its fleet looks — said, never done here.
+    _o="$(sock_owner "$SOCK")"
+    case "$_o" in own|none) ;; *)
+      refuse_foreign "$SOCK" "$_o" "wake '$WAKE_SLOT'"
+      if [ -f "${FLEET_DIR:?}/$SOCK.$WAKE_SLOT.asleep" ] && [ ! -f "$_o/$SOCK.$WAKE_SLOT.asleep" ]; then
+        echo "fleet-hibernate: its asleep marker is in this dir and not in its fleet's, so that fleet cannot see it: move ${FLEET_DIR:?}/$SOCK.$WAKE_SLOT.asleep into $_o/ and wake it from there" >&2
+      fi
+      exit 2 ;;
+    esac
     wake_one "$SOCK" "$WAKE_SLOT"; exit $? ;;
   plan)
     build_plan; print_plan ;;
@@ -1460,7 +1568,13 @@ case "$MODE" in
     # A NAME IS ONE SESSION, NOT ONE PER FLEET. Every project has a `master`, so a bare
     # `--apply master` would otherwise put every lead on the machine to sleep at once.
     if [ -n "$NAMED" ]; then
+      # Counted over this profile's rows only: another profile's `master` neither makes the
+      # name ambiguous nor is a candidate, so it is dropped here and the reason kept for when
+      # it was the only one.
+      _theirs="$(printf '%s' "$PLAN" | awk -F$'\x1f' -v n="$NOT_OURS" 'index($7, n) == 1 { print $7; exit }')"
+      PLAN="$(printf '%s' "$PLAN" | awk -F$'\x1f' -v n="$NOT_OURS" 'index($7, n) != 1')"
       n_named="$(printf '%s' "$PLAN" | cut -d$'\x1f' -f1 | sort -u | grep -c .)"
+      [ "$n_named" -gt 0 ] || [ -z "$_theirs" ] || { echo "fleet-hibernate: '$NAMED' stays up — $_theirs" >&2; exit 1; }
       [ "$n_named" -gt 0 ] || { echo "fleet-hibernate: no live session called '$NAMED'" >&2; exit 1; }
       [ "$n_named" -eq 1 ] || { echo "fleet-hibernate: '$NAMED' is in $n_named fleets — say which with -s" >&2; exit 1; }
     fi
