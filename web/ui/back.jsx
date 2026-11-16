@@ -53,7 +53,7 @@ export function BackLink({ parent, class: extra = '' }) {
          e.preventDefault();
          back(parent);
        }}>
-      <span aria-hidden="true">←</span> {place}
+      <span aria-hidden="true">←</span> <span class="back-place">{place}</span>
     </a>
   );
 }

@@ -2760,6 +2760,20 @@ var ROWS = {
 		"...##.......",
 		"...#........"
 	],
+	more: [
+		"............",
+		"............",
+		"............",
+		"............",
+		"............",
+		".##..##..##.",
+		".##..##..##.",
+		"............",
+		"............",
+		"............",
+		"............",
+		"............"
+	],
 	pause: [
 		"............",
 		"..###..###..",
@@ -4286,7 +4300,10 @@ function BackLink({ parent, class: extra = "" }) {
 				children: "←"
 			}),
 			" ",
-			place
+			/* @__PURE__ */ u("span", {
+				class: "back-place",
+				children: place
+			})
 		]
 	});
 }
@@ -7655,6 +7672,18 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
+function Act({ kind = "", icon, word, title, ...rest }) {
+	return /* @__PURE__ */ u(Btn, {
+		kind: `ghost sm act ${kind}`,
+		icon,
+		title: title || word,
+		...rest,
+		children: /* @__PURE__ */ u("span", {
+			class: "act-word",
+			children: word
+		})
+	});
+}
 function SessionView({ project, name, card, waiting = false, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
@@ -7699,6 +7728,20 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	const picker = A(null);
 	const typing = A(!!draft);
 	const composer = A(null);
+	_(() => {
+		const n = composer.current;
+		const fit = () => {
+			if (!n) return;
+			n.style.height = "";
+			if (!matchMedia("(max-width: 900px)").matches) return;
+			const cs = getComputedStyle(n);
+			const need = n.scrollHeight + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+			if (need > n.offsetHeight + .5) n.style.height = `${need}px`;
+		};
+		fit();
+		addEventListener("resize", fit);
+		return () => removeEventListener("resize", fit);
+	}, [draft, tool]);
 	const lastComposerKey = A(-Infinity);
 	const typingPause = A(null);
 	const [composerFocused, setComposerFocused] = d(false);
@@ -8014,70 +8057,115 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 								shaped ? /* @__PURE__ */ u("span", {
 									class: "sk",
 									"aria-hidden": "true",
-									children: /* @__PURE__ */ u(Btn, {
-										kind: "ghost sm sk-ghost",
+									children: /* @__PURE__ */ u(Act, {
+										kind: "sk-ghost",
 										disabled: true,
 										tabIndex: -1,
 										icon: "pause",
-										children: t("sess.pause")
+										word: t("sess.pause")
 									})
 								}) : null,
-								st === "working" && !shaped ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								st === "working" && !shaped ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: () => act("fleet_interrupt"),
 									title: t("sess.interruptHint"),
 									icon: "hand",
-									children: t("sess.interrupt")
+									word: t("sess.interrupt")
 								}) : null,
-								st === "asleep" && !shaped ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								st === "asleep" && !shaped ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: () => act("fleet_wake"),
 									icon: "sun",
-									children: t("sess.wake")
+									word: t("sess.wake")
 								}) : null,
-								st === "lost" && !shaped ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								st === "lost" && !shaped ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: () => act("fleet_reopen"),
 									icon: "refresh",
-									children: t("sess.reopen")
+									word: t("sess.reopen")
 								}) : null,
-								card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
 									icon: parked ? "play" : "pause",
-									children: parked ? t("sess.resume") : t("sess.pause")
+									word: parked ? t("sess.resume") : t("sess.pause")
 								}) : null,
-								card?.lead && parked ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								card?.lead && parked ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: () => act("fleet_resume"),
 									icon: "play",
-									children: t("sess.resume")
+									word: t("sess.resume")
 								}) : null,
-								!card && startLead ? /* @__PURE__ */ u(Btn, {
-									kind: "ghost sm",
+								!card && startLead ? /* @__PURE__ */ u(Act, {
 									disabled: busy,
 									onClick: startLead,
 									icon: "play",
-									children: t("project.leadStart")
+									word: t("project.leadStart")
 								}) : null
 							]
 						}), /* @__PURE__ */ u("div", {
 							class: "menu-wrap",
 							ref: menuWrap,
 							children: [/* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
+								kind: "ghost sm more-btn",
 								onClick: () => setMenu((m) => !m),
 								"aria-haspopup": "true",
 								"aria-expanded": menu,
-								children: [t("sess.more"), " ▾"]
+								title: t("sess.more"),
+								children: [
+									/* @__PURE__ */ u(Icon, {
+										name: "more",
+										class: "more-ico"
+									}),
+									/* @__PURE__ */ u("span", {
+										class: "act-word",
+										children: t("sess.more")
+									}),
+									/* @__PURE__ */ u("span", {
+										class: "more-caret",
+										"aria-hidden": "true",
+										children: " ▾"
+									})
+								]
 							}), menu ? /* @__PURE__ */ u("div", {
 								class: "menu",
 								children: [
+									card && (card.branch || card.pr || card.label || card.sched) ? /* @__PURE__ */ u("div", {
+										class: "menu-info",
+										children: [
+											card.branch ? /* @__PURE__ */ u("span", {
+												class: "branch",
+												children: [
+													/* @__PURE__ */ u(Icon, { name: "branch" }),
+													" ",
+													card.branch
+												]
+											}) : null,
+											card.pr ? /* @__PURE__ */ u("span", {
+												class: "tag pr",
+												children: ["PR ", card.pr]
+											}) : null,
+											card.label ? /* @__PURE__ */ u("span", {
+												class: "chip-label",
+												children: [
+													/* @__PURE__ */ u(Icon, { name: "tag" }),
+													" ",
+													card.label
+												]
+											}) : null,
+											card.sched ? /* @__PURE__ */ u("span", {
+												class: "chip-sched",
+												children: [
+													/* @__PURE__ */ u(Icon, { name: "clock" }),
+													" ",
+													hhmm$1(card.sched.at),
+													" · “",
+													String(card.sched.msg || "").slice(0, 60),
+													"”"
+												]
+											}) : null
+										]
+									}) : null,
 									can("gfw_label") ? /* @__PURE__ */ u("button", {
 										onClick: () => {
 											setMenu(false);
@@ -8098,6 +8186,17 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 											/* @__PURE__ */ u(Icon, { name: "clock" }),
 											" ",
 											t("sess.schedule")
+										]
+									}) : null,
+									card?.sched && can("gfw_unschedule") ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											act("gfw_unschedule");
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "close" }),
+											" ",
+											t("sess.unsched")
 										]
 									}) : null,
 									card && !card.lead ? /* @__PURE__ */ u("button", {

@@ -610,6 +610,46 @@ try {
        await b.evaluate(() => document.documentElement.classList.contains('kb')));
     await b.evaluate(() => { document.activeElement?.blur(); window.__vv(null); });
     await sleep(100);
+    // ── WITH THE KEYBOARD UP THERE IS STILL A CONVERSATION ──────────────────
+    // Reported from an installed phone as "the chat completely disappears". Measured on an iPhone
+    // 17e simulator, standalone from its home-screen icon: the page is 797 tall and the on-screen
+    // keyboard leaves 394 of it, and the top bar took 45, the demo bar 26, the session's header 145
+    // (three rows: the back link, the ship and name over the state's line, the controls), the tabs
+    // 47 and the composer 120. The conversation had 36 px, which is its own padding, and showed
+    // not one line of text. The keyboard pin was right (the app was 394 tall, from the top); there
+    // was no room. The header is one row on a phone now, the same height whether the keyboard is
+    // up or down, and the strip left over holds the newest message whole.
+    //   Scrolled to the end with the keyboard down, as a conversation opens, and not again: keeping
+    // the newest message in view as the keyboard rises is viewport.js's part of this.
+    await b.viewport(390, 797);
+    await sleep(200);
+    const headDown = await b.evaluate(() => { const c = document.querySelector('.chat'); c.scrollTop = c.scrollHeight;
+      return Math.round(document.querySelector('.main .sess-head').getBoundingClientRect().height); });
+    await b.evaluate(() => { document.querySelector('.composer textarea').focus(); window.__vv(394); });
+    await sleep(300);
+    const strip = await b.evaluate(() => {
+      const c = document.querySelector('.chat'), r = c.getBoundingClientRect();
+      const top = r.top, bot = Math.min(r.bottom, document.querySelector('.composer').getBoundingClientRect().top);
+      // a line is a row of text wholly between the two; an author's name and its time are one row
+      const rows = [];
+      const walk = document.createTreeWalker(c, NodeFilter.SHOW_TEXT);
+      for (let n; (n = walk.nextNode());) {
+        if (!n.textContent.trim()) continue;
+        const rg = document.createRange(); rg.selectNodeContents(n);
+        for (const x of rg.getClientRects())
+          if (x.height > 4 && x.top >= top - 0.5 && x.bottom <= bot + 0.5 && !rows.some(y => Math.abs(y - x.top) < 4)) rows.push(x.top);
+      }
+      const last = [...c.querySelectorAll('.msg')].at(-1)?.getBoundingClientRect();
+      return { lines: rows.length, head: Math.round(document.querySelector('.main .sess-head').getBoundingClientRect().height),
+               last: !last ? 'no message' : last.top >= top - 0.5 && last.bottom <= bot + 0.5 ? 'whole'
+                 : `${Math.round(Math.max(0, Math.min(last.bottom, bot) - Math.max(last.top, top)))} px of its ${Math.round(last.height)}` };
+    });
+    is('390 x 797, the keyboard up and 394 visible (an iPhone 17e, installed): the newest message shows whole', 'whole', strip.last);
+    is('...with three lines of the conversation or more', true, strip.lines >= 3 ? true : `${strip.lines} lines`);
+    is('...under a header the height it is with the keyboard down', headDown, strip.head);
+    await b.evaluate(() => { document.activeElement?.blur(); window.__vv(null); });
+    await b.viewport(390, 844);
+    await sleep(100);
 
     // ── the owner's music ─────────────────────────────────────────────────────
     is('nothing on the way through claimed the audio session', '', (await b.evaluate(() => window.__audio)).join(','));
