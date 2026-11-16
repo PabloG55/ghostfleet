@@ -188,7 +188,7 @@ export function Frame({ name, sub, title = name, route, projects, hosts, nav, be
       <div class="topbar">
         <button class="icon-btn" aria-label={t('nav.menu')} onClick={open}><Icon name="menu" /></button>
         <div class="brand"><Logo size={22} /><b>{name}</b></div>
-        <span class="topbar-end">{topEnd ? topEnd(open) : null}{need ? <a class="badge need" href="#/">{need}</a> : null}</span>
+        <span class="topbar-end">{topEnd ? topEnd(open) : null}<span class="topbar-need">{need ? <a class="badge need" href="#/">{need}</a> : null}</span></span>
       </div>
       {menu ? <div class="side-scrim" onClick={close} /> : null}
       <Sidebar name={name} sub={sub} route={route} projects={projects} hosts={hosts} open={menu} onClose={close} nav={nav} below={below} foot={foot} />

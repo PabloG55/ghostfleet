@@ -1129,6 +1129,13 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 
 /* ── usage: what is left of each Claude account, always on screen ─────────────────────── */
 .topbar-end { display: inline-flex; align-items: center; gap: 8px; }
+/* The needs-you count has a place of its own, as wide as the menu button on the other side
+   (28px, skin.css), drawn whether or not there is a count. The bar spaces its three parts
+   between the edges, so a count that arrived as a bare child widened the right part and the
+   logo, already drawn, slid left by half of it: 9px at 390 for a single digit. An empty slot
+   of the menu's width keeps the logo where the bar centres it, and a count never moves it.
+   Wider than the slot (three digits) it grows out to the left, into the gap, not the logo. */
+.topbar-need { flex: none; width: 28px; display: flex; justify-content: flex-end; align-items: center; }
 
 /* ── lights & boats (fleet.jsx) ──────────────────────────────────────────────────────────
  * One light per session, the same in a LED, a pill and a boat's mast lamp: green working,
