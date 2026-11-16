@@ -69,6 +69,20 @@ tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 
+# A PARK IS A MARKER IN THIS PROFILE'S FLEET DIR, so it must be this profile's fleet. Aimed at
+# another profile's socket it dropped <sock>.<session>.parked where that fleet's grid and
+# governor never look: the turn was interrupted, and nothing anywhere said it was parked.
+# Whose socket it is comes from fleet-hibernate (the projects files), as for its own -s.
+# The interrupt-only form writes nothing, so it is never refused. Every caller in this repo
+# (governor, accounts, grid, MCP) already runs with the target fleet's own dir.
+if [ "$INTERRUPT" = no ]; then
+  _o="$("$(dirname "$0")/fleet-hibernate" --owner "$SOCK" 2>/dev/null)"
+  case "$_o" in ""|own|none) ;; *)
+    echo "fleet-pause: refusing — $SOCK is another profile's fleet. Its markers belong in $_o, and this run would write $FLEET_DIR/$SOCK.$SESSION.parked, where that fleet's grid never looks. Run it as: CLAUDE_FLEET_DIR=$_o fleet-pause -s $SOCK $SESSION" >&2
+    exit 2 ;;
+  esac
+fi
+
 snap()    { tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null; }
 is_idle() { local a b; a="$(snap)"; sleep 0.6; b="$(snap)"; [ "$a" = "$b" ]; }
 
