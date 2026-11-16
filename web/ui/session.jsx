@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
 import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
+import { Skeleton } from './skeleton.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
 import { t, locale } from './i18n.js';
@@ -84,7 +85,7 @@ function Terminal({ pane }) {
   useEffect(() => { const n = ref.current; if (n && stick.current) n.scrollTop = n.scrollHeight; }, [html]);
   return (
     <div class="term" ref={ref} onScroll={(e) => { const n = e.currentTarget; stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 40; }}>
-      {pane == null ? <p class="muted">{t('sess.readingTerm')}</p> : <pre class="pane" dangerouslySetInnerHTML={{ __html: html }} />}
+      {pane == null ? <Skeleton shape="lines" n={8} /> : <pre class="pane" dangerouslySetInnerHTML={{ __html: html }} />}
     </div>
   );
 }
@@ -102,7 +103,7 @@ function keyed(msgs) {
 // resolves is exactly the "it does not load until I send" this was reported as.
 function ChatLoading({ load }) {
   return (
-    <div class="chat" aria-busy="true">
+    <div class="chat sk-late" aria-busy="true">
       {load.tries ? <p class="loading err center" role="status">{t('chat.loadFailed', { why: load.why })}</p> : null}
       {[0, 1, 2].map(i => <div key={i} class={`msg ${i === 1 ? 'me' : 'ai'} skel`} aria-hidden="true"><div class="bubble skel" /></div>)}
     </div>
@@ -308,7 +309,10 @@ function ScheduleModal({ name, onClose, onSave }) {
 // pace and its pane every 15 s, 16 a minute, and the focused one reads as a session does. A stack
 // of twelve fits. The pane read keeps its last answer between reads, so nothing flickers.
 export const QUIET_PANE_MS = 15000;
-export function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
+// `waiting` is the parent saying its read of the cards has not answered yet, which is not the
+// same as a session with no card: the first is drawn as the header's shape (below), the second
+// as "No data", which is a finding and was being shown for the length of every load.
+export function SessionView({ project, name, card, waiting = false, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
   const fleet = useFleet();
   const ownerPicker = useSlot('ownerPicker'), presence = useSlot('presence');
   const [tab, setTab] = useState('chat');
@@ -394,6 +398,11 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
 
   const st = card ? statusOf(card) : (tr.page?.status || 'unknown');
   statusNow.current = st;
+  // THE HEADER IS A SHAPE UNTIL THE CARD LANDS, its controls included. With no card the state
+  // above is the conversation's own read, which can land first: a working session then drew
+  // Interrupt beside the controls' shape, and when the card came the shape went and Interrupt
+  // slid 82 px back along the row (two loads in six, at either width).
+  const shaped = waiting && !card;
   const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
   const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
@@ -508,23 +517,53 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
         {/* where the person came from, by name; opened by a link, the session's project */}
         {embedded ? null : <BackLink parent={`/p/${encodeURIComponent(project)}`} />}
         <div class="sess-title">
-          {embedded ? null : <><Ship state={st} size={32} /><h1>{name}</h1></>}
-          <StatusPill status={st} />
-          {card?.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
-          {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
-          {card?.label ? (can('gfw_label')
-            ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button>
-            : <span class="chip-label"><Icon name="tag" /> {card.label}</span>) : null}
-          {card?.sched ? (
-            <span class="chip-sched" title={t('sess.schedMsg', { msg: card.sched.msg || '' })}><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 30)}”
-              {can('gfw_unschedule') ? <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button> : null}</span>
-          ) : null}
+          {/* THE HEADER AT ITS FINAL SIZE BEFORE ITS CARD HAS LANDED. Its state, branch, PR and
+              controls all come with the card, so the header used to be a name and "More", and
+              grew a row when the card answered: 28 px at 390 wide, under which the tabs and the
+              whole conversation went down. The same elements are drawn as shapes (ui.css
+              .sk-ghost) where the real ones will stand. */}
+          {embedded ? null : <span class="sess-name"><Ship state={shaped ? 'idle' : st} size={32} /><h1>{name}</h1></span>}
+          {/* ...BUT HOW MANY LINES THEY TOOK, AND HOW WIDE, WAS THE CARD'S TO SAY. The shapes were
+              one guess, a branch and a PR after the name, and at 390 wide that wrapped to two
+              lines; a lead on `main` with no PR fits on one, so its header lost a row when the
+              card landed and the tabs and the conversation went UP 28 px (measured per state:
+              master, list-pages and csv-export 28, a label and a schedule 5). So the name is one
+              line, and everything the card says about the session is one more (ui.css
+              .sess-meta), on a phone under the name and on a desk after it, and neither wraps.
+                The state is the first thing on that line and not the last thing beside the name,
+              because its width is the card's too: "Ready" is 65 px, "Interrupted" half as wide
+              again, the shape 62. Anything drawn after it before the card came would stand
+              wherever the word ended, and the branch's line did, 10 to 39 px along on a desk. */}
+          <span class="sess-meta">
+            {shaped ? <span class="sk sk-ghost-row" role="status" aria-label={t('common.loading')}>
+              <span class="pill sk-ghost" aria-hidden="true">Working</span>
+              <span class="branch sk-ghost" aria-hidden="true"><Icon name="branch" /> feat/a-branch-name</span>
+              <span class="tag pr sk-ghost" aria-hidden="true">PR 0000</span>
+            </span> : <StatusPill status={st} />}
+            {card?.branch ? <span class="branch" title={card.branch}><Icon name="branch" /> {card.branch}</span> : null}
+            {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
+            {card?.label ? (can('gfw_label')
+              ? <button class="chip-label" title={t('sess.changeLabel')} onClick={() => setLabelEdit(card.label)}><Icon name="tag" /> {card.label}</button>
+              : <span class="chip-label"><Icon name="tag" /> {card.label}</span>) : null}
+            {card?.sched ? (
+              <span class="chip-sched" title={t('sess.schedMsg', { msg: card.sched.msg || '' })}><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 30)}”
+                {can('gfw_unschedule') ? <button aria-label={t('sess.unsched')} onClick={() => act('gfw_unschedule')}><Icon name="close" /></button> : null}</span>
+            ) : null}
+          </span>
         </div>
+        {/* MORE HAS A PLACE OF ITS OWN, at the row's end, and the state's controls fill the room
+            before it (ui.css .sess-acts). They are a different set in every state (Interrupt and
+            Pause while working, Wake asleep, Reopen lost, Resume parked, none for an idle lead),
+            so More, drawn after them, was wherever they ended: one shape and More while the card
+            was out, then Interrupt and Pause landed and pushed it 97 px along, and it moved again
+            each time the session started or stopped working. */}
         <div class="sess-tools">
+          <div class="sess-acts">
           {ownerPicker({ project, name, owner, onChanged: () => { onChanged(); tr.reload(); } })}
-          {st === 'working' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
-          {st === 'asleep' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
-          {st === 'lost' ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
+          {shaped ? <span class="sk" aria-hidden="true"><Btn kind="ghost sm sk-ghost" disabled tabIndex={-1} icon="pause">{t('sess.pause')}</Btn></span> : null}
+          {st === 'working' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_interrupt')} title={t('sess.interruptHint')} icon="hand">{t('sess.interrupt')}</Btn> : null}
+          {st === 'asleep' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_wake')} icon="sun">{t('sess.wake')}</Btn> : null}
+          {st === 'lost' && !shaped ? <Btn kind="ghost sm" disabled={busy} onClick={() => act('fleet_reopen')} icon="refresh">{t('sess.reopen')}</Btn> : null}
           {card && !card.lead && !['asleep', 'lost'].includes(st)
             ? <Btn kind="ghost sm" disabled={busy} onClick={() => act(parked ? 'fleet_resume' : 'fleet_pause')} icon={parked ? 'play' : 'pause'}>{parked ? t('sess.resume') : t('sess.pause')}</Btn> : null}
           {/* A LEAD IS NEVER PAUSED HERE, but a parked one has to come back from here: the pair
@@ -534,6 +573,7 @@ export function SessionView({ project, name, card, onChanged, onGone, onStep = n
           {/* ...and a project with NO lead, opened at its lead's name: the project page's own
               start (startLead, fleet.lead), so both places start one the same way. */}
           {!card && startLead ? <Btn kind="ghost sm" disabled={busy} onClick={startLead} icon="play">{t('project.leadStart')}</Btn> : null}
+          </div>
           <div class="menu-wrap" ref={menuWrap}>
             <Btn kind="ghost sm" onClick={() => setMenu(m => !m)} aria-haspopup="true" aria-expanded={menu}>{t('sess.more')} ▾</Btn>
             {menu ? (

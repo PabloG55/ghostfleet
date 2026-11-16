@@ -16,6 +16,7 @@
 import { Fragment } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { Logo, Toasts } from './ui.jsx';
+import { Skeleton } from './skeleton.jsx';
 import { Led } from './fleet.jsx';
 import { topLight } from './lights.js';
 import { Icon } from './icon.jsx';
@@ -147,7 +148,7 @@ export function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav,
                }} />
       </div>
       <div class="side-list">
-        {projects == null ? <p class="muted pad">{t('common.loading')}</p> : null}
+        {projects == null ? <Skeleton shape="lines" n={4} /> : null}
         {groups.map(({ h, items }) => (
           <Fragment key={h ? `h:${h.key}` : 'all'}>
             {h ? (

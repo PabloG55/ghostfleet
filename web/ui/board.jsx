@@ -7,6 +7,7 @@ import { t, worded } from './i18n.js';
 import { useSlot } from './adapter.jsx';
 import { useShipTips } from './shiptip.jsx';
 import { ProjectName } from './ui.jsx';
+import { Skeleton, SkelLine, useRoom } from './skeleton.jsx';
 
 const FRESH_S = 15 * 60;        // "just finished": ready, and its turn ended this recently
 
@@ -41,6 +42,7 @@ const projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 export function Board({ projects }) {
   const ownerBadge = useSlot('ownerBadge');
   const tips = useShipTips();
+  const room = useRoom('legend', projects == null);
   const [showQuiet, setShowQuiet] = useKept('board.quiet', false);
   const now = Date.now() / 1000;
   const fleets = (projects || []).map(p => {
@@ -56,10 +58,12 @@ export function Board({ projects }) {
   const quiet = fleets.filter(f => f.top === 'off').sort((a, b) => b.boats.length - a.boats.length || a.name.localeCompare(b.name));
   const total = Object.fromEntries(ORDER.map(k => [k, fleets.reduce((x, f) => x + f.n[k], 0)]));
 
-  if (projects == null) return <p class="muted">{t('map.reading')}</p>;
+  // Its own frame while the fleet is read: the legend, at the height it had last time (its chips
+  // wrap on a phone), and the grid the projects go in.
+  if (projects == null) return <section class="board"><div class="legend" ref={room.ref} style={room.style}><span class="lg"><SkelLine w="9em" /></span></div><Skeleton shape="fleets" box="fleets" n={3} /></section>;
   return (
     <section class="board">
-      <div class="legend" role="list">
+      <div class="legend" role="list" ref={room.ref}>
         {ORDER.filter(k => total[k]).map(k => (
           <span key={k} role="listitem" class={`lg c-${LOOKS[k].color} lk-${k}`}><Led state={LOOKS[k].light} hidden />{total[k]} <small>{LOOKS[k].label}</small></span>
         ))}

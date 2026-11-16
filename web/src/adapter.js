@@ -77,9 +77,15 @@ export function phoneAdapter({ lock, go, place }) {
   // shared app had a link that opened onto "/api/automations → HTTP 404". So a 404 takes the link
   // and the page away, through offers(), and anything else leaves them. Asked once per adapter (one
   // per unlock), outside the guard: before the unlock there is no token, and a 401 here is no answer.
-  const off = new Set();
-  const noted = (view) => (e) => { if (e?.status === 404) off.add(view); throw e; };
-  api.getAutomations().catch(noted('automations')).catch(() => {});
+  //   THE ANSWER IS KEPT ON THE DEVICE, so the next launch starts from it. Asked fresh every time,
+  // the link was drawn, the 404 came back, and the link left: every row of the menu under it went
+  // up 34 px a moment after the app opened. Now a daemon that had them off last time has no link
+  // from the first frame, and one that turns them on gets the link back when this read answers.
+  const OFF_KEY = 'gf.off';
+  const off = new Set((() => { try { return JSON.parse(localStorage.getItem(OFF_KEY) || '[]'); } catch { return []; } })());
+  const keepOff = () => { try { localStorage.setItem(OFF_KEY, JSON.stringify([...off])); } catch {} };
+  const noted = (view) => (e) => { if (e?.status === 404) { off.add(view); keepOff(); } throw e; };
+  api.getAutomations().then(() => { if (off.delete('automations')) keepOff(); }).catch(noted('automations')).catch(() => {});
 
   // A paired host's grid is read only for its boats, and it is the most expensive read there is
   // (one fleet-grid run on the other machine, through this one): kept for 15 s.
@@ -106,8 +112,13 @@ export function phoneAdapter({ lock, go, place }) {
 
   // Projects, in the shape every shared screen reads, with the machine each one is on.
   async function projects() {
-    const j = await guard(api.getProjects());
-    const digest = await within(api.getDigest(), null);
+    // Asked together: neither answer is needed to ask for the other, and one after the other was
+    // two round trips before the first page had anything to draw. The digest is a side read, so
+    // it is held to the same limit as the grids below.
+    // The list is asked for WITHOUT its rollup: every row's sessions come from the digest, a paired
+    // machine's grid or the project's own grid below, and the rollup is a grid run per fleet on
+    // the daemon for a count nothing here reads (api.js getProjects).
+    const [j, digest] = await Promise.all([guard(api.getProjects({ rollup: false })), within(api.getDigest(), null)]);
     const local = new Map((digest?.projects || []).map(p => [p.name, p]));
     const rows = await Promise.all((j.projects || []).map(async (p) => {
       const d = !p.host_key && local.get(p.name);
@@ -141,7 +152,7 @@ export function phoneAdapter({ lock, go, place }) {
   // The lead, started if it is not running: the team server's /api/lead, done from here (lead.js,
   // where the suite runs it against a daemon that refuses the wake).
   const lead = makeLead({
-    grid: (project) => guard(api.getGrid(project)),
+    grid: (project, opts) => guard(api.getGrid(project, '', opts)),
     projects: () => api.getProjects(),
     act,
     wait: (ms) => new Promise(r => setTimeout(r, ms)),
@@ -149,7 +160,7 @@ export function phoneAdapter({ lock, go, place }) {
   });
 
   const tasks = createTasks({
-    projects: async () => ((await api.getProjects()).projects || []).map(p => p.name),
+    projects: async () => ((await api.getProjects({ rollup: false })).projects || []).map(p => p.name),
     jarvis: jarvisProject,
     session: (project, name) => api.getSession(project, name),
     grid: (project) => api.getGrid(project),
@@ -239,7 +250,7 @@ export function phoneAdapter({ lock, go, place }) {
         set: (on) => (on ? push.enable(t) : push.disable()),
       },
       hosts: {
-        list: async () => ((await guard(api.getProjects())).hosts || []),
+        list: async () => ((await guard(api.getProjects({ rollup: false }))).hosts || []),
         unpair: (key) => guard(api.unpairHost(key)),
       },
       device: {

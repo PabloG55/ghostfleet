@@ -657,6 +657,20 @@ const BINARY_REVIEWED = new Set([
   '96456c781c0d50b5',   // docs/permission-modal/phone-390-open.png
   '124af5e966543c72',   // docs/permission-modal/team-390-readonly-open.png
   '87860a450352f7db',   // docs/permission-modal/phone-390-pending-voice.png
+  // The loading skeletons, mid-load and loaded, shot on fixtures: all twelve opened, every name
+  // in them one of web/fixtures/'s, and the only host 127.0.0.1.
+  '9c304df74456f431',   // docs/skeletons/390-home-loading.png
+  '03032423fdf4c93d',   // docs/skeletons/390-home-loaded.png
+  'ade943d41276250d',   // docs/skeletons/1280-home-loading.png
+  'e43d13577ffc2d28',   // docs/skeletons/1280-home-loaded.png
+  '736696f2b203e75d',   // docs/skeletons/390-session-loading.png
+  'ead12d6b72010d27',   // docs/skeletons/390-session-loaded.png
+  'f1d47eaf4257bb19',   // docs/skeletons/1280-session-loading.png
+  'b24953883d60355f',   // docs/skeletons/1280-session-loaded.png
+  '80468a7eb543c459',   // docs/skeletons/390-settings-loading.png
+  'e40c511d56c012f6',   // docs/skeletons/390-settings-loaded.png
+  '7dc7f2a73b3474b3',   // docs/skeletons/1280-settings-loading.png
+  '933c42c3c19b7e54',   // docs/skeletons/1280-settings-loaded.png
   // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
   // packages the team app installs), so they carry the foundries' tables and nothing of ours.
   '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
@@ -690,6 +704,12 @@ const BINARY_EXPECTED = [
   'ee/team/web/public/icons/apple-touch-icon.png', 'ee/team/web/public/icons/icon-192.png', 'ee/team/web/public/icons/icon-512.png',
   // The phone's fonts, served from web/ so the app asks nothing of a font CDN.
   'web/fonts/inter-latin-wght-normal.woff2', 'web/fonts/jetbrains-mono-latin-wght-normal.woff2', 'web/fonts/silkscreen-latin-400-normal.woff2',
+  'docs/skeletons/390-home-loading.png', 'docs/skeletons/390-home-loaded.png',
+  'docs/skeletons/1280-home-loading.png', 'docs/skeletons/1280-home-loaded.png',
+  'docs/skeletons/390-session-loading.png', 'docs/skeletons/390-session-loaded.png',
+  'docs/skeletons/1280-session-loading.png', 'docs/skeletons/1280-session-loaded.png',
+  'docs/skeletons/390-settings-loading.png', 'docs/skeletons/390-settings-loaded.png',
+  'docs/skeletons/1280-settings-loading.png', 'docs/skeletons/1280-settings-loaded.png',
   'web/fixtures/shots/api-health.png', 'web/fixtures/shots/api-keys.png', 'web/fixtures/shots/api-search.png', 'web/fixtures/shots/docs-config.png', 'web/fixtures/shots/docs-install.png', 'web/fixtures/shots/flow.mp4', 'web/fixtures/shots/web-invoices.png',
 ].sort().join(' ');
 is('...skipping binaries by content, and naming them', BINARY_EXPECTED, skipped.sort().join(' '));

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 6e9be7e6e1ec
+// CLIENT-HASH: ec48d1d8bcce
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -480,7 +480,13 @@
 // v118 keeps the chat, the hint and the top bar in place around a keyboard: the Assistant
 // button is not drawn while one is up, the touch hint is one line, a connected keyboard's bar
 // pins the app like the on-screen one, and the box's text stays out of its inset.
-const VERSION = 'ghostfleet-v118';
+// v119 draws every wait as the shape of what is coming, at its size (web/ui/skeleton.jsx): the
+// session's header is its final height before its card lands, Settings and the Live map keep
+// the height they had last time, and the menu no longer loses a link a moment after it opens.
+// The app's own poll asks for the project list without its per-fleet rollup. A phone on v118
+// works as before against this daemon; it only goes on paying for the rollup until relaunched.
+// Bringing a lead up reads the grid fresh (`&fresh=1`), past the 2.5 s the daemon now keeps it.
+const VERSION = 'ghostfleet-v119';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

@@ -472,13 +472,11 @@ try {
     // always beside the page.
     {
       const hung = await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
-        // The fixture backend reads each project's grid once itself (api.js rollup) before the adapter
-        // reads it again for the sessions: the first read after each projects.json passes, the
-        // adapter's never answers.
-        const f = window.fetch.bind(window); window.__hung = 0; let pass = 0;
+        // The adapter asks for the list without its rollup (api.js getProjects), so the only read of
+        // this grid on the way to the list is the adapter's own, for the sessions. It never answers.
+        const f = window.fetch.bind(window); window.__hung = 0;
         window.fetch = (u, ...r) => { const s = String(u && u.url || u);
-          if (/fixtures\\/projects\\.json/.test(s)) pass = 1;
-          if (/fixtures\\/grid-acme-api\\.json/.test(s)) { if (pass) { pass = 0; return f(u, ...r); } window.__hung++; return new Promise(() => {}); }
+          if (/fixtures\\/grid-acme-api\\.json/.test(s)) { window.__hung++; return new Promise(() => {}); }
           return f(u, ...r); };
       })()` });
       await b.viewport(1280, 900);
@@ -500,7 +498,7 @@ try {
       await until(() => !!document.querySelector('.sess-tools .menu-wrap .btn'));
       await b.evaluate(() => document.querySelector('.sess-tools .menu-wrap .btn').click());
       await until(() => !!document.querySelector('.sess-tools .menu'));
-      const r = { menu: await texts('.sess-tools .menu button'), tools: await texts('.sess-tools > .btn') };
+      const r = { menu: await texts('.sess-tools .menu button'), tools: await texts('.sess-acts > .btn') };
       await b.evaluate(() => document.querySelector('.sess-tools .menu-wrap .btn').click());
       return r;
     };
@@ -737,6 +735,240 @@ try {
     await b.evaluate(() => document.fonts.ready.then(() => 0));
     await sleep(300);
     is('390 session, opened cold from its link: the newest message clears the Assistant button', 'clear', await clear());
+
+    // ── waiting is a skeleton, where the data will be (web/ui/skeleton.jsx) ───────────────
+    // Every fixture read is held back two seconds, by a wrapper put in before the page's own code
+    // (a reload, so the adapter is new and has kept no answer to paint instead). A screen then has
+    // two seconds of waiting to draw, which on a laptop reading local files it otherwise never has.
+    //   WHAT IS HELD: the blocks of the page that are there while it waits are marked and
+    // measured, and measured again once the data has landed. None may have moved, and the first
+    // thing the data drew must stand where the skeleton stood.
+    await b.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      const f0 = window.fetch.bind(window);
+      window.fetch = async (u, o) => {
+        const ms = window.__holdMs == null ? Number(sessionStorage.getItem('gf.test.hold') || 0) : window.__holdMs;
+        const at = String((u && u.url) || u);
+        const more = /fixtures\\/grid-/.test(at) ? Number(sessionStorage.getItem('gf.test.holdgrid') || 0) : 0;
+        if (ms && /fixtures\\//.test(at)) await new Promise(r => setTimeout(r, ms + more));
+        return f0(u, o);
+      };
+    })();` });
+    const midLoad = () => b.evaluate(() => {
+      const sk = document.querySelector('.main .sk:not(.sk-line)');
+      const page = document.querySelector('.main .page');
+      if (!page) return { sk: false, why: 'no page' };
+      let i = 0;
+      const kept = {};
+      for (const el of page.querySelectorAll(':scope > *, :scope > * > *, :scope > * > * > *')) {
+        if (el.closest('.sk') || !el.getClientRects().length) continue;
+        const r = el.getBoundingClientRect();
+        el.dataset.mid = String(i);
+        kept[i++] = [Math.round(r.top), Math.round(r.left), el.className || el.tagName];
+      }
+      const cs = sk ? getComputedStyle(sk) : null;
+      return { sk: !!sk, shown: cs ? cs.visibility : '', delay: cs ? cs.animationDelay : '', name: cs ? cs.animationName : '',
+               top: sk ? Math.round(sk.getBoundingClientRect().top) : null, kept, words: /Loading…|Reading the fleet…|Reading…/.test(page.textContent) };
+    });
+    const landed = (dataSel) => b.evaluate((sel) => {
+      const moved = [];
+      for (const el of document.querySelectorAll('.main .page [data-mid]')) {
+        const r = el.getBoundingClientRect(), was = window.__mid[el.dataset.mid];
+        if (was && el.getClientRects().length && (Math.abs(Math.round(r.top) - was[0]) > 1 || Math.abs(Math.round(r.left) - was[1]) > 1))
+          moved.push(`${was[2] || '?'}: ${was[0]} to ${Math.round(r.top)} px`);
+      }
+      const first = document.querySelector(sel);
+      return { moved: moved.slice(0, 3).join(', ') || 'none moved', top: first ? Math.round(first.getBoundingClientRect().top) : null,
+               sk: !!document.querySelector('.main .sk:not(.sk-line)') };
+    }, dataSel);
+    // [name, address, the data's first block, the box the skeleton stands in for]
+    const WAITS = [['home', '#/', '.board .fleets', true], ['project', '#/p/acme-api', '.main .group .cards', false],
+                   ['queue', '#/queue', '.main .extra-grid .card, .main .page > .empty', false], ['search', '#/search?q=api', '.main .extra-grid', false],
+                   ['reviews', '#/reviews', '.main .extra-grid .card', false]];
+    for (const [w, h] of [[390, 844], [1280, 900]]) {
+      await b.viewport(w, h);
+      await b.evaluate(() => { sessionStorage.setItem('gf.test.hold', '2000'); location.hash = '#/'; });
+      await sleep(200);
+      await b.evaluate(() => location.reload());
+      await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+      await clickText('.auth-card button', 'without a passkey');
+      await until(() => !!document.querySelector('.app .main .page'));
+      for (const [name, hash, dataSel, cold] of WAITS) {
+        if (!cold) {
+          await b.evaluate(() => { location.hash = '#/settings'; });
+          await sleep(300);
+          await b.evaluate((x) => { location.hash = x; }, hash);
+        }
+        await sleep(700);
+        const mid = await midLoad();
+        await b.evaluate((k) => { window.__mid = k; }, mid.kept || {});
+        is(`${w} ${name}, its data held 2 s: a skeleton is drawn`, true, mid.sk);
+        is(`${w} ${name}: ...shown by now`, 'visible', mid.shown);
+        is(`${w} ${name}: ...after a wait of its own, so a quick read never flashes one`, 'sk-show 0.18s', `${mid.name} ${mid.delay}`);
+        is(`${w} ${name}: ...and no words where a shape fits`, false, mid.words);
+        if (name === 'home') {
+          // The pulse is motion, and is off for a reader who asked for less of it; the wait is not.
+          // BOTH PREFERENCES ARE SET HERE, NEVER INHERITED: the first row used to read whatever the
+          // machine's own setting was, and a macOS runner whose Chrome reported reduced motion read
+          // the pulse as `none` at both widths, on a build that pulses (Chrome with
+          // --force-prefers-reduced-motion reproduces it).
+          const anim = () => b.evaluate(() => ['.main .sk .sk-bar', '.main .sk'].map((q) => { const e = document.querySelector(q); return e ? getComputedStyle(e).animationName : 'absent'; }).join(' '));
+          await b.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+          is(`${w} the skeleton pulses`, 'skel sk-show', await anim());
+          await b.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+          is(`${w} ...and stands still under reduced motion, still waiting its 180 ms`, 'none sk-show', await anim());
+          await b.call('Emulation.setEmulatedMedia', { features: [] });
+        }
+        // Twice over: the demo derives each project's rollup from its grid, one after the other, so a
+        // held Search is a dozen seconds of reads that are one on a daemon.
+        for (let i = 0; i < 2; i++) if (await until((sel) => !!document.querySelector(sel) && !document.querySelector('.main .sk:not(.sk-line)'), dataSel)) break;
+        await sleep(150);
+        const end = await landed(dataSel);
+        is(`${w} ${name}: when the data lands the skeleton is gone`, false, end.sk);
+        is(`${w} ${name}: ...nothing that was on the page has moved`, 'none moved', end.moved);
+        is(`${w} ${name}: ...and the data stands where the skeleton stood`, true, mid.top != null && end.top != null && Math.abs(end.top - mid.top) <= 1 ? true : `${mid.top} to ${end.top} px`);
+      }
+      // GONE BACK TO, a screen paints what it last showed, and says how old it is, instead of a
+      // skeleton of data it had ten seconds ago (usePoll's key, adapter.jsx keptReads).
+      await b.evaluate(() => { location.hash = '#/settings'; });
+      await sleep(300);
+      await b.evaluate(() => { location.hash = '#/p/acme-api'; });
+      await sleep(500);
+      const back = await b.evaluate(() => ({ cards: document.querySelectorAll('.main .cards .card').length, sk: !!document.querySelector('.main .sk'), asOf: document.querySelector('.main .as-of')?.textContent || '' }));
+      is(`${w} a project gone back to paints its last answer while the next is out`, true, back.cards > 0);
+      is(`${w} ...with no skeleton`, false, back.sk);
+      is(`${w} ...and dated`, true, /as of/.test(back.asOf));
+      is(`${w} ...until the read lands, when the date goes`, true, !!(await until(() => !document.querySelector('.main .as-of') && document.querySelectorAll('.main .cards .card').length > 0)));
+
+      // THE SESSION'S HEADER IS ITS FINAL SIZE BEFORE ITS CARD LANDS. Opened cold from its link (a
+      // reload, so no grid is kept to paint the card from): the state, the branch, the PR and the
+      // controls all come with the card, and the header used to be a name and "More" until it did,
+      // then grew a row and pushed the tabs and the conversation down, 28 px at 390 wide. It also
+      // said "No data" for the length of every load, which is a finding about a session and not a
+      // way to say one is being read.
+      //   IN EVERY STATE, because each state draws a different header. A working session's
+      // Interrupt and Pause pushed More 97 px along when they landed, an idle lead has neither and
+      // pulled it 82 px back, and at 390 a lead on `main` fitted its title on the line the shapes
+      // had wrapped onto two, so its header shrank 28 px; a label and a schedule made it 5 px
+      // taller; and on a desk, the line after the state went along with the state's word. [session,
+      // fixture, what its header holds]
+      const HEADS = [['api-fix', '', 'working: Interrupt and Pause'], ['master', '', 'an idle lead: no controls, a short title'],
+                     ['types', '', 'a label and a schedule'], ['rate-limit', 'grid-degraded.json', 'parked: Resume'],
+                     ['csv-export', 'grid-degraded.json', 'interrupted, the widest state']];
+      //   The cards are held 1.5 s longer than the rest, as a slow grid holds them on a daemon: the
+      // conversation answers first, with a state of its own, and until the card comes the header
+      // has to go on being the card's shape rather than draw controls beside it.
+      for (const [s, fx, what] of HEADS) {
+        await b.evaluate(([x, f]) => { if (f) localStorage.setItem('gf.fixture', f); else localStorage.removeItem('gf.fixture');
+          sessionStorage.setItem('gf.test.holdgrid', '1500'); location.hash = x; }, [`#/p/acme-api/s/${s}`, fx]);
+        await sleep(200);
+        await b.evaluate(() => location.reload());
+        await until(() => [...document.querySelectorAll('.auth-card button')].some(x => /without a passkey/i.test(x.textContent)));
+        await clickText('.auth-card button', 'without a passkey');
+        await until(() => !!document.querySelector('.main .sess-head'));
+        await sleep(700);
+        const headNow = () => b.evaluate(() => {
+          const top = (q) => { const e = document.querySelector(q); return e ? Math.round(e.getBoundingClientRect().top) : null; };
+          const head = document.querySelector('.main .sess-head');
+          const more = head.querySelector('.sess-tools .menu-wrap > .btn')?.getBoundingClientRect();
+          return { shapes: head.querySelectorAll('.sk-ghost').length, words: /No data/.test(head.textContent), branch: !!head.querySelector('.branch:not(.sk-ghost)'),
+                   h: Math.round(head.getBoundingClientRect().height), under: `${top('.main .tabs')} ${top('.main .chat')}`,
+                   more: more ? [Math.round(more.left), Math.round(more.top)] : null };
+        });
+        const hm = await headNow();
+        // Every box the header has drawn by now, shapes aside, by where it stands. The ship counts
+        // as its box (.fship): inside it the hull is the state's pose, and an interrupted one lists
+        // 2 px (skin.css m-list), and while it sails it bobs a pixel on its own, card or no card.
+        await b.evaluate(() => {
+          const head = document.querySelector('.main .sess-head');
+          const sails = (e) => { for (let x = e; x && x !== head; x = x.parentElement) if (x.getAnimations().some(a => a.effect?.target === x && a.playState === 'running')) return true; return false; };
+          window.__head = [];
+          for (const e of head.querySelectorAll('*')) {
+            if (e.closest('.sk') || e.parentElement?.closest('.fship') || !e.getClientRects().length || sails(e)) continue;
+            const r = e.getBoundingClientRect();
+            window.__head.push([e, Math.round(r.left), Math.round(r.top), String(e.className?.baseVal ?? e.className ?? '').split(' ')[0] || e.tagName.toLowerCase()]);
+          }
+        });
+        is(`${w} session ${s}, its card held 2 s: the header is not read yet`, false, hm.branch);
+        is(`${w} session ${s}: ...its state, branch, PR and controls are drawn as shapes`, true, hm.shapes >= 4 ? true : `${hm.shapes} shapes`);
+        is(`${w} session ${s}: ...and it does not say "No data" of a session it has not read`, false, hm.words);
+        // the conversation's answer is in, the card's is not
+        await sleep(1700);
+        is(`${w} session ${s}: ...and with the conversation in and the card not, it is still the shape, with no control beside it`,
+          'shape', await b.evaluate(() => {
+            const head = document.querySelector('.main .sess-head');
+            if (head.querySelector('.branch:not(.sk-ghost)')) return 'the card came first';
+            const real = [...head.querySelectorAll('.sess-tools .btn')].filter(e => !e.closest('.sk') && !e.closest('.menu-wrap')).map(e => e.textContent.trim());
+            return real.length ? `drew ${real.join(', ')}` : head.querySelector('.sk-ghost') ? 'shape' : 'no shape';
+          }));
+        await until(() => !document.querySelector('.main .sess-head .sk-ghost') && !!document.querySelector('.main .sess-head .branch'));
+        await sleep(150);
+        const he = await headNow();
+        is(`${w} session ${s}: when the card lands the shapes are gone`, 0, he.shapes);
+        is(`${w} session ${s} (${what}): ...the header is the height it was`, hm.h, he.h);
+        is(`${w} session ${s} (${what}): ...the tabs and the conversation under it have not moved`, hm.under, he.under);
+        is(`${w} session ${s} (${what}): ...and More stands where it stood`, 'still',
+          !hm.more || !he.more ? 'no More' : hm.more[0] === he.more[0] && hm.more[1] === he.more[1] ? 'still'
+            : `${he.more[0] - hm.more[0]} px across, ${he.more[1] - hm.more[1]} px down`);
+        // ...and nor does anything else it had drawn. More is the one a thumb was on its way to, and
+        // not the only thing that can stand after a word the card decides: the line of the branch
+        // and the PR went 10 to 39 px along on a desk, once More had stopped moving, because the
+        // state's word stood before it and "Interrupted" is wider than its shape.
+        is(`${w} session ${s} (${what}): ...and nothing else it had drawn has moved`, 'none moved', await b.evaluate(() => {
+          const out = [];
+          for (const [e, x, y, what] of window.__head) {
+            if (!e.isConnected || !e.getClientRects().length) continue;
+            const r = e.getBoundingClientRect(), dx = Math.round(r.left) - x, dy = Math.round(r.top) - y;
+            if (Math.abs(dx) > 1 || Math.abs(dy) > 1) out.push(`${what} ${dx} px across, ${dy} px down`);
+          }
+          return out.slice(0, 3).join(', ') || 'none moved';
+        }));
+      }
+      await b.evaluate(() => { localStorage.removeItem('gf.fixture'); sessionStorage.removeItem('gf.test.holdgrid'); });
+    }
+    await b.evaluate(() => { sessionStorage.removeItem('gf.test.hold'); window.__holdMs = 0; });
+    await b.viewport(390, 844);
+
+    // ── a page nobody is looking at asks nothing, and asks once when it is looked at again ──
+    // REALLY hidden: a second tab is opened in front of this one, which is what the app switcher
+    // does to it (document.hidden is true; nothing is stubbed). Thirty seconds of reads are
+    // counted on the session screen, the one with the most timers, then the tab is closed and the
+    // page is in front again. Settings' paired machines are read every 15 s, so a read of them in
+    // the first second back is the catch-up and not the interval happening to come round.
+    //   THE CATCH-UP IS TIMED FROM THE MOMENT THE PAGE IS SHOWN, not counted over a second: an
+    // interval that was due while the page was hidden comes round within a second of its return
+    // anyway (Chrome aligns a hidden page's timers to the second), so "a read in the first second"
+    // was green on a client with no catch-up at all. A read made BY the return is made in the
+    // same task as the event; one made by a timer is hundreds of milliseconds behind it.
+    const countReads = (re) => b.evaluate((r) => (window.__seen || []).filter(x => new RegExp(r).test(x[1])).length, re);
+    await b.evaluate(() => {
+      const f1 = window.fetch; window.__seen = [];
+      window.fetch = (u, o) => { window.__seen.push([performance.now(), String((u && u.url) || u)]); return f1(u, o); };
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) window.__shownAt = performance.now(); }, true);
+      location.hash = '#/p/acme-api/s/api-fix';
+    });
+    await until(() => !!document.querySelector('.main .chat .msg:not(.skel)'));
+    await sleep(6000);
+    const awake = await countReads('fixtures/');
+    is('a session in front reads as it goes', true, awake >= 2 ? true : `${awake} reads in 6 s`);
+    for (const [name, hash] of [['a session', '#/p/acme-api/s/api-fix'], ['settings', '#/settings']]) {
+      await b.evaluate((x) => { location.hash = x; }, hash);
+      await sleep(2500);
+      const tab = await b.newTab();
+      await sleep(500);
+      is(`${name}, with another tab in front, is hidden`, 'hidden', await b.evaluate(() => document.visibilityState));
+      await b.evaluate(() => { window.__seen = []; window.__shownAt = 0; });
+      await sleep(30000);
+      const quiet = await countReads('fixtures/');
+      is(`${name}: ...and reads nothing in 30 s`, 0, quiet);
+      await b.call('Target.closeTarget', { targetId: tab.targetId }).catch(() => {});
+      await until(() => document.visibilityState === 'visible' && window.__shownAt > 0);
+      await sleep(1500);
+      const gap = await b.evaluate(() => { const f = (window.__seen || []).find(x => /fixtures\/projects/.test(x[1])); return f ? Math.round(f[0] - window.__shownAt) : null; });
+      is(`${name}: shown again, the fleet is read at once, not when its interval next comes round`, true, gap != null && gap < 250 ? true : `${gap} ms after it was shown`);
+      // one for each thing on the page that reads the fleet (the app's own poll, and Settings' list)
+      const burst = await countReads('fixtures/projects');
+      is(`${name}: ...once each, not a burst`, true, burst >= 1 && burst <= 2 ? true : `${burst} reads of the fleet in 1.5 s`);
+    }
 
     // ── a chat that talks: the ▶ on every message, and speak mode in the composer ──
     // The voice and the ear are the stubs above. The session is one the fixture has no transcript

@@ -374,9 +374,14 @@ async function fixture(file) {
 }
 
 // ── reads ─────────────────────────────────────────────────────────────────
-export async function getProjects() {
+// `rollup: false` asks for the list alone, with no `sessions` on its rows. The rollup is what
+// makes this read dear: the daemon runs a grid for every fleet to count its cards, and a caller
+// that takes its sessions from the digest (the app's own poll, every 5 s) was paying for a
+// count it never looked at. Measured on a daemon with five small fleets and three devices
+// open: 68 grid runs a minute, about fifty processes each, nearly all of them for this.
+export async function getProjects({ rollup: counts = true } = {}) {
   if ((await ready()).mode === 'server') {
-    const j = await get('/api/projects');
+    const j = await get(counts ? '/api/projects' : '/api/projects?rollup=0');
     setHome(j.home || '');
     return j;
   }
@@ -390,7 +395,7 @@ export async function getProjects() {
   // screen must not tell. On a server the daemon computes it from sessionStatuses,
   // which is where the `sessions` field in the fixture comes from.
   const projects = [];
-  for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
+  for (const p of j.projects || []) projects.push({ ...p, sessions: counts ? await rollup(p.name) : undefined,
     agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent,
     model: overlay.projModel.has(p.name) ? overlay.projModel.get(p.name) : (p.model ?? null) });
   const pr = await pairedFixture();
@@ -646,9 +651,12 @@ export async function getUsage() {
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
-export async function getGrid(project, sub = '') {
+// `fresh`: a read that decides what to DO (bring a lead up: reopen, wake, resume or start) asks
+// the daemon to run the grid now rather than hand it the one it keeps for 2.5 s. Through the keep
+// a lead that went lost a moment ago read as up, and the button said it was ready and did nothing.
+export async function getGrid(project, sub = '', { fresh = false } = {}) {
   if ((await ready()).mode === 'server')
-    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : ''));
+    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : '') + (fresh ? '&fresh=1' : ''));
   // A sub-grid is its own fixture, named for the project and the sub-lead — the server
   // answers it from `fleet-grid.mjs --json --sub`, which draws only that team.
   if (sub) {

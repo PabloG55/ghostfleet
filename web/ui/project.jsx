@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, StatusPill, Btn, usePoll, ago, toast, Modal, Confirm, ProjectName } from './ui.jsx';
+import { Skeleton, SkelLine, AsOf } from './skeleton.jsx';
 import { SessionView } from './session.jsx';
 import { t, locale, worded } from './i18n.js';
 import { Icon } from './icon.jsx';
@@ -57,7 +58,7 @@ const allCards = (cards) => cards;
 export function ProjectView({ project, session, tool = null }) {
   const fleet = useFleet();
   const filterCards = useSlot('filterCards', allCards), filterChips = useSlot('filterChips');
-  const { data: g, error, reload } = usePoll(() => fleet.grid(project), 3000, [project]);
+  const { data: g, error, reload, at, stale } = usePoll(() => fleet.grid(project), 3000, [project], { key: `grid:${project}` });
   const [filter, setFilter] = useKept('project.filter', 'all');
   const [spawn, setSpawn] = useState(null);
   const [confirm, setConfirm] = useState(null);
@@ -178,7 +179,7 @@ export function ProjectView({ project, session, tool = null }) {
     <header class="page-head proj-head">
       <div>
         <h1 class="name"><ProjectName name={project} /></h1>
-        <p class="muted">{g ? `${t('project.sessions', { n: g.cards.length })} · ${t('project.freeWts', { n: g.free_worktrees?.length || 0 })}` : t('common.loading')}</p>
+        <p class="muted">{g ? `${t('project.sessions', { n: g.cards.length })} · ${t('project.freeWts', { n: g.free_worktrees?.length || 0 })}` : <SkelLine w="14em" />}</p>
         {/* A tab that is missing for a reason says the reason (the phone: another machine's shell) */}
         {termWhy ? <p class="muted term-why">{termWhy}</p> : null}
       </div>
@@ -218,9 +219,10 @@ export function ProjectView({ project, session, tool = null }) {
             <a class="link split-name" href={`#${projectTo(project)}`}><ProjectName name={project} /></a>
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
+          {!g && !error ? <Skeleton shape="rows" n={4} /> : null}
           {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
-        <SessionView key={`${project}/${session}`} project={project} name={session} card={current} tool={tool}
+        <SessionView key={`${project}/${session}`} project={project} name={session} card={current} waiting={!g && !error} tool={tool}
                      onChanged={reload} onGone={sessionBack} onStep={step}
                      startLead={g && !lead && session === 'master' && !waking ? wake : null} />
         {modals}
@@ -236,6 +238,8 @@ export function ProjectView({ project, session, tool = null }) {
       {header}
       <ProjectTabs project={project} tool={null} />
       {filters}
+      <AsOf at={at} stale={stale} />
+      {!g && !error ? <section class="group"><h2><SkelLine w="9em" /></h2><Skeleton shape="cards" box="cards" n={3} /></section> : null}
       {g && !g.cards.length ? (
         <div class="empty">
           <p><b>{t('project.empty')}</b></p>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'preact/hooks';
 import { STATUS, StatusMark, statusOf, Btn, SendBtn, usePoll, toast, Modal, useRequest } from './ui.jsx';
+import { useRoom } from './skeleton.jsx';
 import { Select, Popover } from './select.jsx';
 import { plainText, browserCanHear, PAUSES } from './voice.js';
 import { useAgent, talk, stop, submit, setPin, setOption, canHear, busy, unframe } from './agent.js';
@@ -187,10 +188,14 @@ export function Assistant({ projects, onClose, chip }) {
 export function Proposals() {
   const fleet = useFleet();
   const has = typeof fleet.proposals === 'function';
-  const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has]);
+  const { data, reload } = usePoll(() => (has ? fleet.proposals() : Promise.resolve([])), has ? 15000 : 0, [has], { key: 'proposals' });
   const [busyId, setBusyId] = useState('');
   const list = Array.isArray(data) ? data : [];
   const request = useRequest('proposals', data == null ? undefined : list.map(p => `${p.id}:${!!p.granted}`).join('|') || null);
+  // The way back to a request is a button ABOVE the box a person types in, and it is only there
+  // when something waits: while the first read is out the slot keeps the height it had last time
+  // on this device (skeleton.jsx useRoom), so the box under it is not pushed down when it lands.
+  const room = useRoom('proposals', has && data == null, !list.length);
   if (!has) return null;
   const answer = async (p, yes) => {
     setBusyId(p.id);
@@ -202,7 +207,7 @@ export function Proposals() {
     finally { setBusyId(''); reload(); }
   };
   return (
-    <div class="proposal-slot">
+    <div class="proposal-slot" ref={room.ref} style={room.style}>
     {list.length ? <Btn kind="sm proposal-return" onClick={request.show}>{t('sess.answerRequest')}</Btn> : null}
     {request.open ? <Modal sheet title={t('as.proposals')} onClose={request.close}>
     <ul class="as-asks modal-body" aria-label={t('as.proposals')}>

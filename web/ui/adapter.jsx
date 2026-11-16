@@ -46,6 +46,22 @@ export function useFleet() {
   return a;
 }
 
+// THE LAST ANSWER TO EACH READ, kept per adapter (ui.jsx usePoll's `key`): what a screen paints,
+// dated, when it is gone back to, instead of a skeleton of data it showed ten seconds ago. It is
+// keyed by the adapter OBJECT, so a client pointed at another server — a new adapter — starts
+// with nothing, and it lives in memory only: a fleet's session names and last messages are not
+// written to a phone's storage for the sake of one frame. A screen outside a provider (the lock)
+// gets a store of its own that nothing else reads.
+const kept = new WeakMap();
+const loose = new Map();
+export function useKeptReads() {
+  const a = useContext(Fleet);
+  if (!a) return loose;
+  let m = kept.get(a);
+  if (!m) kept.set(a, m = new Map());
+  return m;
+}
+
 // The slot, or `fallback` — by default a function that draws nothing.
 const none = () => null;
 export function useSlot(name, fallback = none) {

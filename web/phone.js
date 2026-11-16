@@ -200,6 +200,15 @@ function useFleet() {
 	if (!a) throw new Error("web/ui: a shared screen was rendered outside <FleetProvider>");
 	return a;
 }
+var kept$3 = /* @__PURE__ */ new WeakMap();
+var loose = /* @__PURE__ */ new Map();
+function useKeptReads() {
+	const a = x(Fleet);
+	if (!a) return loose;
+	let m = kept$3.get(a);
+	if (!m) kept$3.set(a, m = /* @__PURE__ */ new Map());
+	return m;
+}
 var none = () => null;
 function useSlot(name, fallback = none) {
 	const s = useFleet().slots;
@@ -486,7 +495,8 @@ var en_default = {
 	"map.closed": "{project}: {session} closed",
 	"map.sub": "The whole fleet at once. The ghost ship goes wherever something is happening.",
 	"map.showIdle": "Show projects with no sessions ({n})",
-	"map.reading": "Reading the fleet…",
+	"skel.asOfNow": "as of just now",
+	"skel.asOf": "as of {n} min ago",
 	"map.none": "No project has open sessions.",
 	"map.noSessions": "no sessions",
 	"map.live": "Live",
@@ -579,7 +589,6 @@ var en_default = {
 	"sess.review": "review and send",
 	"sess.yourAnswer": "Type your answer",
 	"common.send": "Send",
-	"sess.readingTerm": "Reading the terminal…",
 	"sess.older": "Load earlier messages",
 	"sess.noMsgs": "No messages in this session yet.",
 	"sess.actions": "{n} actions",
@@ -908,7 +917,6 @@ var en_default = {
 	"agent.noServer": "The assistant is not connected to a server yet.",
 	"agent.you": "The owner",
 	"app.notHere": "This server does not have this page.",
-	"settings.reading": "Reading…",
 	"settings.hosts": "Paired machines",
 	"settings.hostsNone": "No other machine is paired with this one.",
 	"settings.hostThis": "this machine",
@@ -1381,7 +1389,8 @@ var es_default = {
 	"map.closed": "{project}: se cerró {session}",
 	"map.sub": "Toda la flota a la vez. El barco fantasma va a donde está pasando algo.",
 	"map.showIdle": "Mostrar proyectos sin sesiones ({n})",
-	"map.reading": "Leyendo la flota…",
+	"skel.asOfNow": "hace un momento",
+	"skel.asOf": "de hace {n} min",
 	"map.none": "No hay sesiones abiertas en ningún proyecto.",
 	"map.noSessions": "sin sesiones",
 	"map.live": "En vivo",
@@ -1474,7 +1483,6 @@ var es_default = {
 	"sess.review": "revisar y enviar",
 	"sess.yourAnswer": "Escribe tu respuesta",
 	"common.send": "Enviar",
-	"sess.readingTerm": "Leyendo la terminal…",
 	"sess.older": "Cargar mensajes anteriores",
 	"sess.noMsgs": "Todavía no hay mensajes en esta sesión.",
 	"sess.actions": "{n} acciones",
@@ -1803,7 +1811,6 @@ var es_default = {
 	"agent.noServer": "El asistente todavía no está conectado a un servidor.",
 	"agent.you": "El propietario",
 	"app.notHere": "Este servidor no tiene esta página.",
-	"settings.reading": "Leyendo…",
 	"settings.hosts": "Máquinas emparejadas",
 	"settings.hostsNone": "Ninguna otra máquina está emparejada con esta.",
 	"settings.hostThis": "esta máquina",
@@ -3194,20 +3201,34 @@ var clock = (ts) => (/* @__PURE__ */ new Date(ts * 1e3)).toLocaleString(locale()
 	hour: "2-digit",
 	minute: "2-digit"
 });
-function usePoll(fn, ms, deps) {
-	const [data, setData] = d(null);
+function usePoll(fn, ms, deps, opt) {
+	const key = opt && opt.key || "";
+	const store = useKeptReads();
+	const first = key ? store.get(key) : null;
+	const [data, setData] = d(first ? first.data : null);
 	const [error, setError] = d(null);
-	const [loading, setLoading] = d(true);
+	const [loading, setLoading] = d(!first);
+	const [at, setAt] = d(first ? first.at : 0);
+	const [stale, setStale] = d(!!first);
 	const live = A(0);
 	const out = A(0);
+	const last = A(0);
 	const run = q(async () => {
 		const id = live.current;
 		out.current++;
 		try {
 			const d = await fn();
+			const now = Date.now();
+			if (key) store.set(key, {
+				data: d,
+				at: now
+			});
 			if (id === live.current) {
+				last.current = now;
 				setData(d);
 				setError(null);
+				setAt(now);
+				setStale(false);
 			}
 		} catch (e) {
 			if (id === live.current) setError(e);
@@ -3217,20 +3238,32 @@ function usePoll(fn, ms, deps) {
 		}
 	}, deps);
 	h(() => {
+		const kept = key ? store.get(key) : null;
 		live.current++;
-		setLoading(true);
-		setData(null);
+		setLoading(!kept);
+		setData(kept ? kept.data : null);
+		setAt(kept ? kept.at : 0);
+		setStale(!!kept);
 		run();
 		if (!ms) return void 0;
 		const iv = setInterval(() => {
-			if (!document.hidden && !out.current) run();
+			if (!document.hidden && !out.current && Date.now() - last.current >= ms / 2) run();
 		}, ms);
-		return () => clearInterval(iv);
+		const back = () => {
+			if (!document.hidden && !out.current && Date.now() - last.current >= ms) run();
+		};
+		document.addEventListener("visibilitychange", back);
+		return () => {
+			clearInterval(iv);
+			document.removeEventListener("visibilitychange", back);
+		};
 	}, [run]);
 	return {
 		data,
 		error,
 		loading,
+		at,
+		stale,
 		reload: run
 	};
 }
@@ -3425,6 +3458,107 @@ function Confirm({ title, body, action, danger, typed, onYes, onClose }) {
 			})] })
 		]
 	});
+}
+//#endregion
+//#region web/ui/skeleton.jsx
+var PIECES = {
+	cards: () => /* @__PURE__ */ u("div", {
+		class: "sk-b sk-card",
+		children: [
+			/* @__PURE__ */ u("i", { class: "sk-bar w3" }),
+			/* @__PURE__ */ u("i", { class: "sk-bar w6 tall" }),
+			/* @__PURE__ */ u("i", { class: "sk-bar w9" }),
+			/* @__PURE__ */ u("i", { class: "sk-bar w7" })
+		]
+	}),
+	rows: () => /* @__PURE__ */ u("div", {
+		class: "sk-b sk-row",
+		children: [
+			/* @__PURE__ */ u("i", { class: "sk-bar w2" }),
+			/* @__PURE__ */ u("i", { class: "sk-bar grow" }),
+			/* @__PURE__ */ u("i", { class: "sk-bar w1" })
+		]
+	}),
+	fleets: () => /* @__PURE__ */ u("div", {
+		class: "sk-b sk-fleet",
+		children: [/* @__PURE__ */ u("i", { class: "sk-bar w4" }), /* @__PURE__ */ u("i", { class: "sk-sea" })]
+	}),
+	lines: (i) => /* @__PURE__ */ u("i", { class: `sk-bar ${[
+		"w9",
+		"w7",
+		"w6",
+		"w9",
+		"w5",
+		"w7",
+		"w8",
+		"w6"
+	][i % 8]}` }),
+	toggle: () => /* @__PURE__ */ u("div", {
+		class: "sk-b sk-toggle",
+		children: [/* @__PURE__ */ u("span", { children: [/* @__PURE__ */ u("i", { class: "sk-bar w5" }), /* @__PURE__ */ u("i", { class: "sk-bar w8" })] }), /* @__PURE__ */ u("i", { class: "sk-bar w1 tall" })]
+	})
+};
+function Skeleton({ shape = "cards", box = "", n = 3 }) {
+	const piece = PIECES[shape] || PIECES.cards;
+	return /* @__PURE__ */ u("div", {
+		class: `sk sk-${shape}${box ? " " + box : ""}`,
+		role: "status",
+		"aria-busy": "true",
+		"aria-label": t("common.loading"),
+		children: Array.from({ length: n }, (_, i) => /* @__PURE__ */ u("div", {
+			class: "sk-item",
+			"aria-hidden": "true",
+			children: piece(i)
+		}, i))
+	});
+}
+function SkelLine({ w = "12em" }) {
+	return /* @__PURE__ */ u("span", {
+		class: "sk sk-line",
+		role: "status",
+		"aria-label": t("common.loading"),
+		children: [/* @__PURE__ */ u("i", {
+			class: "sk-bar",
+			style: { width: w },
+			"aria-hidden": "true"
+		}), "\xA0"]
+	});
+}
+function AsOf({ at, stale }) {
+	if (!stale || !at) return null;
+	const s = Math.max(0, (Date.now() - at) / 1e3);
+	return /* @__PURE__ */ u("p", {
+		class: "muted small as-of",
+		role: "status",
+		children: s < 60 ? t("skel.asOfNow") : t("skel.asOf", { n: Math.round(s / 60) })
+	});
+}
+function useRoom(name, waiting, gone = false) {
+	const ref = A(null);
+	const wrote = A(-1);
+	const key = `gfw.room.${name}.${typeof innerWidth === "number" ? innerWidth : 0}`;
+	_(() => {
+		if (waiting) return;
+		const h = gone || !ref.current ? 0 : ref.current.getBoundingClientRect().height;
+		if (h === wrote.current) return;
+		wrote.current = h;
+		try {
+			if (h) localStorage.setItem(key, String(h));
+			else localStorage.removeItem(key);
+		} catch {}
+	});
+	let h = 0;
+	if (waiting) try {
+		h = Number(localStorage.getItem(key)) || 0;
+	} catch {}
+	return {
+		ref,
+		style: h ? {
+			height: `${h}px`,
+			overflow: "hidden"
+		} : void 0,
+		h
+	};
 }
 //#endregion
 //#region web/ui/keyboard.jsx
@@ -3985,9 +4119,9 @@ function Sidebar({ name, sub, route, projects, hosts, open, onClose, nav, below,
 			}),
 			/* @__PURE__ */ u("div", {
 				class: "side-list",
-				children: [projects == null ? /* @__PURE__ */ u("p", {
-					class: "muted pad",
-					children: t("common.loading")
+				children: [projects == null ? /* @__PURE__ */ u(Skeleton, {
+					shape: "lines",
+					n: 4
 				}) : null, groups.map(({ h, items }) => /* @__PURE__ */ u(S$1, { children: [h ? /* @__PURE__ */ u(Fold, {
 					cls: `side-host${hostDown(h) ? " down" : ""}`,
 					k: `h:${h.key}`,
@@ -4807,6 +4941,7 @@ var projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 function Board({ projects }) {
 	const ownerBadge = useSlot("ownerBadge");
 	const tips = useShipTips();
+	const room = useRoom("legend", projects == null);
 	const [showQuiet, setShowQuiet] = useKept("board.quiet", false);
 	const now = Date.now() / 1e3;
 	const fleets = (projects || []).map((p) => {
@@ -4828,9 +4963,21 @@ function Board({ projects }) {
 	const live = fleets.filter((f) => f.top !== "off").sort((a, b) => ORDER.indexOf(a.top) - ORDER.indexOf(b.top) || b.n.need - a.n.need || b.n.work - a.n.work || b.last - a.last);
 	const quiet = fleets.filter((f) => f.top === "off").sort((a, b) => b.boats.length - a.boats.length || a.name.localeCompare(b.name));
 	const total = Object.fromEntries(ORDER.map((k) => [k, fleets.reduce((x, f) => x + f.n[k], 0)]));
-	if (projects == null) return /* @__PURE__ */ u("p", {
-		class: "muted",
-		children: t("map.reading")
+	if (projects == null) return /* @__PURE__ */ u("section", {
+		class: "board",
+		children: [/* @__PURE__ */ u("div", {
+			class: "legend",
+			ref: room.ref,
+			style: room.style,
+			children: /* @__PURE__ */ u("span", {
+				class: "lg",
+				children: /* @__PURE__ */ u(SkelLine, { w: "9em" })
+			})
+		}), /* @__PURE__ */ u(Skeleton, {
+			shape: "fleets",
+			box: "fleets",
+			n: 3
+		})]
 	});
 	return /* @__PURE__ */ u("section", {
 		class: "board",
@@ -4838,6 +4985,7 @@ function Board({ projects }) {
 			/* @__PURE__ */ u("div", {
 				class: "legend",
 				role: "list",
+				ref: room.ref,
 				children: ORDER.filter((k) => total[k]).map((k) => /* @__PURE__ */ u("span", {
 					role: "listitem",
 					class: `lg c-${LOOKS[k].color} lk-${k}`,
@@ -7153,9 +7301,9 @@ function Terminal({ pane }) {
 			const n = e.currentTarget;
 			stick.current = n.scrollHeight - n.scrollTop - n.clientHeight < 40;
 		},
-		children: pane == null ? /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: t("sess.readingTerm")
+		children: pane == null ? /* @__PURE__ */ u(Skeleton, {
+			shape: "lines",
+			n: 8
 		}) : /* @__PURE__ */ u("pre", {
 			class: "pane",
 			dangerouslySetInnerHTML: { __html: html }
@@ -7173,7 +7321,7 @@ function keyed(msgs) {
 }
 function ChatLoading({ load }) {
 	return /* @__PURE__ */ u("div", {
-		class: "chat",
+		class: "chat sk-late",
 		"aria-busy": "true",
 		children: [load.tries ? /* @__PURE__ */ u("p", {
 			class: "loading err center",
@@ -7504,7 +7652,7 @@ function ScheduleModal({ name, onClose, onSave }) {
 		})
 	});
 }
-function SessionView({ project, name, card, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
+function SessionView({ project, name, card, waiting = false, onChanged, onGone, onStep = null, tool: routeTool = null, embedded = false, quiet = false, startLead = null }) {
 	const fleet = useFleet();
 	const ownerPicker = useSlot("ownerPicker"), presence = useSlot("presence");
 	const [tab, setTab] = d("chat");
@@ -7588,6 +7736,7 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 	}, [project, name]);
 	const st = card ? statusOf(card) : tr.page?.status || "unknown";
 	statusNow.current = st;
+	const shaped = waiting && !card;
 	const owner = card?.owner || tr.page?.owner || null;
 	const prompt = pane.data?.prompt || null;
 	const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
@@ -7764,175 +7913,215 @@ function SessionView({ project, name, card, onChanged, onGone, onStep = null, to
 					embedded ? null : /* @__PURE__ */ u(BackLink, { parent: `/p/${encodeURIComponent(project)}` }),
 					/* @__PURE__ */ u("div", {
 						class: "sess-title",
-						children: [
-							embedded ? null : /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Ship, {
-								state: st,
+						children: [embedded ? null : /* @__PURE__ */ u("span", {
+							class: "sess-name",
+							children: [/* @__PURE__ */ u(Ship, {
+								state: shaped ? "idle" : st,
 								size: 32
-							}), /* @__PURE__ */ u("h1", { children: name })] }),
-							/* @__PURE__ */ u(StatusPill, { status: st }),
-							card?.branch ? /* @__PURE__ */ u("span", {
-								class: "branch",
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "branch" }),
-									" ",
-									card.branch
-								]
-							}) : null,
-							card?.pr ? /* @__PURE__ */ u("span", {
-								class: "tag pr",
-								children: ["PR ", card.pr]
-							}) : null,
-							card?.label ? can("gfw_label") ? /* @__PURE__ */ u("button", {
-								class: "chip-label",
-								title: t("sess.changeLabel"),
-								onClick: () => setLabelEdit(card.label),
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "tag" }),
-									" ",
-									card.label
-								]
-							}) : /* @__PURE__ */ u("span", {
-								class: "chip-label",
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "tag" }),
-									" ",
-									card.label
-								]
-							}) : null,
-							card?.sched ? /* @__PURE__ */ u("span", {
-								class: "chip-sched",
-								title: t("sess.schedMsg", { msg: card.sched.msg || "" }),
-								children: [
-									/* @__PURE__ */ u(Icon, { name: "clock" }),
-									" ",
-									hhmm$1(card.sched.at),
-									" · “",
-									String(card.sched.msg || "").slice(0, 30),
-									"”",
-									can("gfw_unschedule") ? /* @__PURE__ */ u("button", {
-										"aria-label": t("sess.unsched"),
-										onClick: () => act("gfw_unschedule"),
-										children: /* @__PURE__ */ u(Icon, { name: "close" })
-									}) : null
-								]
-							}) : null
-						]
+							}), /* @__PURE__ */ u("h1", { children: name })]
+						}), /* @__PURE__ */ u("span", {
+							class: "sess-meta",
+							children: [
+								shaped ? /* @__PURE__ */ u("span", {
+									class: "sk sk-ghost-row",
+									role: "status",
+									"aria-label": t("common.loading"),
+									children: [
+										/* @__PURE__ */ u("span", {
+											class: "pill sk-ghost",
+											"aria-hidden": "true",
+											children: "Working"
+										}),
+										/* @__PURE__ */ u("span", {
+											class: "branch sk-ghost",
+											"aria-hidden": "true",
+											children: [/* @__PURE__ */ u(Icon, { name: "branch" }), " feat/a-branch-name"]
+										}),
+										/* @__PURE__ */ u("span", {
+											class: "tag pr sk-ghost",
+											"aria-hidden": "true",
+											children: "PR 0000"
+										})
+									]
+								}) : /* @__PURE__ */ u(StatusPill, { status: st }),
+								card?.branch ? /* @__PURE__ */ u("span", {
+									class: "branch",
+									title: card.branch,
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "branch" }),
+										" ",
+										card.branch
+									]
+								}) : null,
+								card?.pr ? /* @__PURE__ */ u("span", {
+									class: "tag pr",
+									children: ["PR ", card.pr]
+								}) : null,
+								card?.label ? can("gfw_label") ? /* @__PURE__ */ u("button", {
+									class: "chip-label",
+									title: t("sess.changeLabel"),
+									onClick: () => setLabelEdit(card.label),
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "tag" }),
+										" ",
+										card.label
+									]
+								}) : /* @__PURE__ */ u("span", {
+									class: "chip-label",
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "tag" }),
+										" ",
+										card.label
+									]
+								}) : null,
+								card?.sched ? /* @__PURE__ */ u("span", {
+									class: "chip-sched",
+									title: t("sess.schedMsg", { msg: card.sched.msg || "" }),
+									children: [
+										/* @__PURE__ */ u(Icon, { name: "clock" }),
+										" ",
+										hhmm$1(card.sched.at),
+										" · “",
+										String(card.sched.msg || "").slice(0, 30),
+										"”",
+										can("gfw_unschedule") ? /* @__PURE__ */ u("button", {
+											"aria-label": t("sess.unsched"),
+											onClick: () => act("gfw_unschedule"),
+											children: /* @__PURE__ */ u(Icon, { name: "close" })
+										}) : null
+									]
+								}) : null
+							]
+						})]
 					}),
 					/* @__PURE__ */ u("div", {
 						class: "sess-tools",
-						children: [
-							ownerPicker({
-								project,
-								name,
-								owner,
-								onChanged: () => {
-									onChanged();
-									tr.reload();
-								}
-							}),
-							st === "working" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_interrupt"),
-								title: t("sess.interruptHint"),
-								icon: "hand",
-								children: t("sess.interrupt")
-							}) : null,
-							st === "asleep" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_wake"),
-								icon: "sun",
-								children: t("sess.wake")
-							}) : null,
-							st === "lost" ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_reopen"),
-								icon: "refresh",
-								children: t("sess.reopen")
-							}) : null,
-							card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
-								icon: parked ? "play" : "pause",
-								children: parked ? t("sess.resume") : t("sess.pause")
-							}) : null,
-							card?.lead && parked ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: () => act("fleet_resume"),
-								icon: "play",
-								children: t("sess.resume")
-							}) : null,
-							!card && startLead ? /* @__PURE__ */ u(Btn, {
-								kind: "ghost sm",
-								disabled: busy,
-								onClick: startLead,
-								icon: "play",
-								children: t("project.leadStart")
-							}) : null,
-							/* @__PURE__ */ u("div", {
-								class: "menu-wrap",
-								ref: menuWrap,
-								children: [/* @__PURE__ */ u(Btn, {
+						children: [/* @__PURE__ */ u("div", {
+							class: "sess-acts",
+							children: [
+								ownerPicker({
+									project,
+									name,
+									owner,
+									onChanged: () => {
+										onChanged();
+										tr.reload();
+									}
+								}),
+								shaped ? /* @__PURE__ */ u("span", {
+									class: "sk",
+									"aria-hidden": "true",
+									children: /* @__PURE__ */ u(Btn, {
+										kind: "ghost sm sk-ghost",
+										disabled: true,
+										tabIndex: -1,
+										icon: "pause",
+										children: t("sess.pause")
+									})
+								}) : null,
+								st === "working" && !shaped ? /* @__PURE__ */ u(Btn, {
 									kind: "ghost sm",
-									onClick: () => setMenu((m) => !m),
-									"aria-haspopup": "true",
-									"aria-expanded": menu,
-									children: [t("sess.more"), " ▾"]
-								}), menu ? /* @__PURE__ */ u("div", {
-									class: "menu",
-									children: [
-										can("gfw_label") ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setLabelEdit(card?.label || "");
-											},
-											children: [
-												/* @__PURE__ */ u(Icon, { name: "tag" }),
-												" ",
-												t("sess.setLabel")
-											]
-										}) : null,
-										can("gfw_schedule") ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setSchedOpen(true);
-											},
-											children: [
-												/* @__PURE__ */ u(Icon, { name: "clock" }),
-												" ",
-												t("sess.schedule")
-											]
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												setRename(name);
-											},
-											children: t("sess.renameMenu")
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											onClick: () => {
-												setMenu(false);
-												stop(false);
-											},
-											children: t("sess.stopMenu")
-										}) : null,
-										card && !card.lead ? /* @__PURE__ */ u("button", {
-											class: "danger",
-											onClick: () => {
-												setMenu(false);
-												stop(true);
-											},
-											children: t("sess.stopRmMenu")
-										}) : null
-									]
-								}) : null]
-							})
-						]
+									disabled: busy,
+									onClick: () => act("fleet_interrupt"),
+									title: t("sess.interruptHint"),
+									icon: "hand",
+									children: t("sess.interrupt")
+								}) : null,
+								st === "asleep" && !shaped ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act("fleet_wake"),
+									icon: "sun",
+									children: t("sess.wake")
+								}) : null,
+								st === "lost" && !shaped ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act("fleet_reopen"),
+									icon: "refresh",
+									children: t("sess.reopen")
+								}) : null,
+								card && !card.lead && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act(parked ? "fleet_resume" : "fleet_pause"),
+									icon: parked ? "play" : "pause",
+									children: parked ? t("sess.resume") : t("sess.pause")
+								}) : null,
+								card?.lead && parked ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: () => act("fleet_resume"),
+									icon: "play",
+									children: t("sess.resume")
+								}) : null,
+								!card && startLead ? /* @__PURE__ */ u(Btn, {
+									kind: "ghost sm",
+									disabled: busy,
+									onClick: startLead,
+									icon: "play",
+									children: t("project.leadStart")
+								}) : null
+							]
+						}), /* @__PURE__ */ u("div", {
+							class: "menu-wrap",
+							ref: menuWrap,
+							children: [/* @__PURE__ */ u(Btn, {
+								kind: "ghost sm",
+								onClick: () => setMenu((m) => !m),
+								"aria-haspopup": "true",
+								"aria-expanded": menu,
+								children: [t("sess.more"), " ▾"]
+							}), menu ? /* @__PURE__ */ u("div", {
+								class: "menu",
+								children: [
+									can("gfw_label") ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setLabelEdit(card?.label || "");
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "tag" }),
+											" ",
+											t("sess.setLabel")
+										]
+									}) : null,
+									can("gfw_schedule") ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setSchedOpen(true);
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "clock" }),
+											" ",
+											t("sess.schedule")
+										]
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setRename(name);
+										},
+										children: t("sess.renameMenu")
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											stop(false);
+										},
+										children: t("sess.stopMenu")
+									}) : null,
+									card && !card.lead ? /* @__PURE__ */ u("button", {
+										class: "danger",
+										onClick: () => {
+											setMenu(false);
+											stop(true);
+										},
+										children: t("sess.stopRmMenu")
+									}) : null
+								]
+							}) : null]
+						})]
 					}),
 					presence(pane.data?.here || [])
 				]
@@ -8391,7 +8580,7 @@ var allCards = (cards) => cards;
 function ProjectView({ project, session, tool = null }) {
 	const fleet = useFleet();
 	const filterCards = useSlot("filterCards", allCards), filterChips = useSlot("filterChips");
-	const { data: g, error, reload } = usePoll(() => fleet.grid(project), 3e3, [project]);
+	const { data: g, error, reload, at, stale } = usePoll(() => fleet.grid(project), 3e3, [project], { key: `grid:${project}` });
 	const [filter, setFilter] = useKept("project.filter", "all");
 	const [spawn, setSpawn] = d(null);
 	const [confirm, setConfirm] = d(null);
@@ -8553,7 +8742,7 @@ function ProjectView({ project, session, tool = null }) {
 			}),
 			/* @__PURE__ */ u("p", {
 				class: "muted",
-				children: g ? `${t("project.sessions", { n: g.cards.length })} · ${t("project.freeWts", { n: g.free_worktrees?.length || 0 })}` : t("common.loading")
+				children: g ? `${t("project.sessions", { n: g.cards.length })} · ${t("project.freeWts", { n: g.free_worktrees?.length || 0 })}` : /* @__PURE__ */ u(SkelLine, { w: "14em" })
 			}),
 			termWhy ? /* @__PURE__ */ u("p", {
 				class: "muted term-why",
@@ -8639,29 +8828,37 @@ function ProjectView({ project, session, tool = null }) {
 		children: [
 			/* @__PURE__ */ u("aside", {
 				class: "split-list",
-				children: [/* @__PURE__ */ u("div", {
-					class: "split-head",
-					children: [/* @__PURE__ */ u("a", {
-						class: "link split-name",
-						href: `#${projectTo(project)}`,
-						children: /* @__PURE__ */ u(ProjectName, { name: project })
-					}), /* @__PURE__ */ u(Btn, {
-						kind: "ghost sm",
-						icon: "plus",
-						onClick: () => setSpawn({}),
-						children: t("project.new")
-					})]
-				}), (g?.cards || []).map((c) => /* @__PURE__ */ u(Card, {
-					c,
-					compact: true,
-					active: c.name === session,
-					onOpen: () => open(c.name)
-				}, c.name))]
+				children: [
+					/* @__PURE__ */ u("div", {
+						class: "split-head",
+						children: [/* @__PURE__ */ u("a", {
+							class: "link split-name",
+							href: `#${projectTo(project)}`,
+							children: /* @__PURE__ */ u(ProjectName, { name: project })
+						}), /* @__PURE__ */ u(Btn, {
+							kind: "ghost sm",
+							icon: "plus",
+							onClick: () => setSpawn({}),
+							children: t("project.new")
+						})]
+					}),
+					!g && !error ? /* @__PURE__ */ u(Skeleton, {
+						shape: "rows",
+						n: 4
+					}) : null,
+					(g?.cards || []).map((c) => /* @__PURE__ */ u(Card, {
+						c,
+						compact: true,
+						active: c.name === session,
+						onOpen: () => open(c.name)
+					}, c.name))
+				]
 			}),
 			/* @__PURE__ */ u(SessionView, {
 				project,
 				name: session,
 				card: current,
+				waiting: !g && !error,
 				tool,
 				onChanged: reload,
 				onGone: sessionBack,
@@ -8695,6 +8892,18 @@ function ProjectView({ project, session, tool = null }) {
 				tool: null
 			}),
 			filters,
+			/* @__PURE__ */ u(AsOf, {
+				at,
+				stale
+			}),
+			!g && !error ? /* @__PURE__ */ u("section", {
+				class: "group",
+				children: [/* @__PURE__ */ u("h2", { children: /* @__PURE__ */ u(SkelLine, { w: "9em" }) }), /* @__PURE__ */ u(Skeleton, {
+					shape: "cards",
+					box: "cards",
+					n: 3
+				})]
+			}) : null,
 			g && !g.cards.length ? /* @__PURE__ */ u("div", {
 				class: "empty",
 				children: [
@@ -9125,6 +9334,7 @@ function FleetMap({ projects }) {
 	const idle = (projects || []).filter((p) => !p.sessions.length);
 	const shown = showIdle ? [...active, ...idle] : active;
 	const fs = focus && (projects || []).find((p) => p.name === focus.project)?.sessions.find((s) => s.name === focus.session);
+	const room = useRoom("map", projects == null);
 	return /* @__PURE__ */ u("div", {
 		class: "page map-page",
 		children: [/* @__PURE__ */ u("header", {
@@ -9149,11 +9359,16 @@ function FleetMap({ projects }) {
 			children: [
 				/* @__PURE__ */ u("div", {
 					class: "ocean",
-					ref: sea,
+					ref: (el) => {
+						sea.current = el;
+						room.ref.current = el;
+					},
+					style: room.style,
 					children: [
-						projects == null ? /* @__PURE__ */ u("p", {
-							class: "muted pad",
-							children: t("map.reading")
+						projects == null ? /* @__PURE__ */ u(Skeleton, {
+							shape: "fleets",
+							box: "sk-isles",
+							n: 3
 						}) : null,
 						projects && !shown.length ? /* @__PURE__ */ u("p", {
 							class: "muted pad",
@@ -9329,7 +9544,7 @@ var RESULT = {
 };
 function Activity() {
 	const fleet = useFleet();
-	const { data, error } = usePoll(() => fleet.activity(), 5e3, []);
+	const { data, error, at, stale } = usePoll(() => fleet.activity(), 5e3, [], { key: "activity" });
 	const [who, setWho] = useKept("activity.who", "all");
 	const rows = (data?.rows || []).filter((r) => who === "all" || r.user === who);
 	const people = useSlot("activityPeople");
@@ -9352,6 +9567,14 @@ function Activity() {
 			error ? /* @__PURE__ */ u("p", {
 				class: "err",
 				children: error.message
+			}) : null,
+			/* @__PURE__ */ u(AsOf, {
+				at,
+				stale
+			}),
+			!data && !error ? /* @__PURE__ */ u(Skeleton, {
+				shape: "rows",
+				n: 8
 			}) : null,
 			/* @__PURE__ */ u("div", {
 				class: "log",
@@ -9457,24 +9680,29 @@ function SwitchSection({ title, part, label, icon }) {
 		setBusy(false);
 		load();
 	};
+	const room = useRoom(`set.${icon}`, st == null);
 	return /* @__PURE__ */ u("section", {
 		class: "panel",
 		children: [/* @__PURE__ */ u("h2", { children: [
 			/* @__PURE__ */ u(Icon, { name: icon }),
 			" ",
 			title
-		] }), st == null ? /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: t("settings.reading")
-		}) : st.ready === false ? /* @__PURE__ */ u("p", {
-			class: "muted",
-			children: st.why
-		}) : /* @__PURE__ */ u(Toggle, {
-			label,
-			hint: st.why,
-			on: st.on,
-			busy,
-			onChange: flip
+		] }), /* @__PURE__ */ u("div", {
+			ref: room.ref,
+			style: room.style,
+			children: st == null ? /* @__PURE__ */ u(Skeleton, {
+				shape: "toggle",
+				n: 1
+			}) : st.ready === false ? /* @__PURE__ */ u("p", {
+				class: "muted",
+				children: st.why
+			}) : /* @__PURE__ */ u(Toggle, {
+				label,
+				hint: st.why,
+				on: st.on,
+				busy,
+				onChange: flip
+			})
 		})]
 	});
 }
@@ -9482,68 +9710,77 @@ function Hosts({ part }) {
 	const { data, error, reload } = usePoll(() => part.list(), 15e3, []);
 	const [asking, setAsking] = d("");
 	const hosts = data || [];
+	const room = useRoom("set.hosts", !data && !error);
 	return /* @__PURE__ */ u("section", {
 		class: "panel",
-		children: [
-			/* @__PURE__ */ u("h2", { children: [
-				/* @__PURE__ */ u(Icon, { name: "map" }),
-				" ",
-				t("settings.hosts")
-			] }),
-			error ? /* @__PURE__ */ u("p", {
-				class: "err",
-				children: error.message
-			}) : null,
-			data && !hosts.length ? /* @__PURE__ */ u("p", {
-				class: "muted",
-				children: t("settings.hostsNone")
-			}) : null,
-			/* @__PURE__ */ u("div", {
-				class: "rows",
-				children: hosts.map((h) => /* @__PURE__ */ u("div", {
-					class: "row-item static",
-					children: [
-						/* @__PURE__ */ u(Led, {
-							state: h.self || h.online !== false ? "idle" : "off",
-							size: 8
-						}),
-						/* @__PURE__ */ u("span", {
-							class: "grow",
-							children: [
-								/* @__PURE__ */ u("b", { children: h.label || h.key }),
-								" ",
-								/* @__PURE__ */ u("small", {
-									class: "muted",
-									children: h.self ? t("settings.hostThis") : h.online === false ? t("settings.hostOffline") : t("settings.hostOnline")
-								})
-							]
-						}),
-						h.self ? null : asking === h.key ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
-							kind: "danger",
-							onClick: async () => {
-								try {
-									await part.unpair(h.key);
-									toast(t("settings.unpaired", { name: h.label || h.key }), "good");
-								} catch (e) {
-									toast(e.message, "bad");
-								}
-								setAsking("");
-								reload();
-							},
-							children: t("settings.unpair")
-						}), /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setAsking(""),
-							children: t("common.cancel")
-						})] }) : /* @__PURE__ */ u(Btn, {
-							kind: "ghost",
-							onClick: () => setAsking(h.key),
-							children: t("settings.unpairQ")
-						})
-					]
-				}, h.key))
-			})
-		]
+		children: [/* @__PURE__ */ u("h2", { children: [
+			/* @__PURE__ */ u(Icon, { name: "map" }),
+			" ",
+			t("settings.hosts")
+		] }), /* @__PURE__ */ u("div", {
+			class: "stack-room",
+			ref: room.ref,
+			style: room.style,
+			children: [
+				error ? /* @__PURE__ */ u("p", {
+					class: "err",
+					children: error.message
+				}) : null,
+				data && !hosts.length ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("settings.hostsNone")
+				}) : null,
+				!data && !error ? /* @__PURE__ */ u(Skeleton, {
+					shape: "rows",
+					n: 1
+				}) : null,
+				/* @__PURE__ */ u("div", {
+					class: "rows",
+					children: hosts.map((h) => /* @__PURE__ */ u("div", {
+						class: "row-item static",
+						children: [
+							/* @__PURE__ */ u(Led, {
+								state: h.self || h.online !== false ? "idle" : "off",
+								size: 8
+							}),
+							/* @__PURE__ */ u("span", {
+								class: "grow",
+								children: [
+									/* @__PURE__ */ u("b", { children: h.label || h.key }),
+									" ",
+									/* @__PURE__ */ u("small", {
+										class: "muted",
+										children: h.self ? t("settings.hostThis") : h.online === false ? t("settings.hostOffline") : t("settings.hostOnline")
+									})
+								]
+							}),
+							h.self ? null : asking === h.key ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Btn, {
+								kind: "danger",
+								onClick: async () => {
+									try {
+										await part.unpair(h.key);
+										toast(t("settings.unpaired", { name: h.label || h.key }), "good");
+									} catch (e) {
+										toast(e.message, "bad");
+									}
+									setAsking("");
+									reload();
+								},
+								children: t("settings.unpair")
+							}), /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => setAsking(""),
+								children: t("common.cancel")
+							})] }) : /* @__PURE__ */ u(Btn, {
+								kind: "ghost",
+								onClick: () => setAsking(h.key),
+								children: t("settings.unpairQ")
+							})
+						]
+					}, h.key))
+				})
+			]
+		})]
 	});
 }
 function Connection({ part, onChange }) {
@@ -9954,7 +10191,7 @@ function CardStatePill({ status, label }) {
 	});
 }
 var sessionRoute = (project, session) => `/p/${encodeURIComponent(project)}/s/${encodeURIComponent(session || "master")}`;
-function PhoneScreen({ title, parent = "/", error, loading, children, actions, class: extra = "" }) {
+function PhoneScreen({ title, parent = "/", error, loading, children, actions, skeleton = "cards", class: extra = "" }) {
 	useKeys((key) => {
 		if (!key.ctrl && !key.alt && ["q", "`"].includes(key.k)) {
 			back(parent);
@@ -9978,12 +10215,12 @@ function PhoneScreen({ title, parent = "/", error, loading, children, actions, c
 				role: "alert",
 				children: error.message
 			}) : null,
-			loading ? /* @__PURE__ */ u("p", {
-				class: "muted",
-				role: "status",
-				children: t("common.loading")
-			}) : null,
-			children
+			children,
+			!loading || error || !skeleton ? null : typeof skeleton === "string" ? /* @__PURE__ */ u(Skeleton, {
+				shape: skeleton,
+				box: skeleton === "cards" ? "extra-grid" : "",
+				n: 3
+			}) : skeleton
 		]
 	});
 }
@@ -10030,7 +10267,7 @@ function Automations({ ctx, projects, id }) {
 	const api = useFleet();
 	const people = api.hasPeople === true;
 	ctx = ctx || api;
-	const { data, error, reload } = usePoll(() => api.automations(), 1e4, []);
+	const { data, error, reload, at, stale } = usePoll(() => api.automations(), 1e4, [], { key: "automations" });
 	const [tab, setTabState] = d(() => {
 		try {
 			return localStorage.getItem(TAB_KEY) || "mine";
@@ -10193,6 +10430,14 @@ function Automations({ ctx, projects, id }) {
 						children: t("phone.autos.createFirst")
 					})
 				] })
+			}) : null,
+			/* @__PURE__ */ u(AsOf, {
+				at,
+				stale
+			}),
+			!data && !error ? /* @__PURE__ */ u(Skeleton, {
+				shape: "rows",
+				n: 3
 			}) : null,
 			/* @__PURE__ */ u("div", {
 				class: "auto-list",
@@ -10404,9 +10649,12 @@ function Editor({ ctx, projects, data, error, id, onSaved }) {
 	});
 	if (!draft || !data) return /* @__PURE__ */ u("div", {
 		class: "page",
-		children: /* @__PURE__ */ u("p", {
+		children: data ? /* @__PURE__ */ u("p", {
 			class: "muted",
-			children: data ? t("phone.autos.notFound") : t("common.loading")
+			children: t("phone.autos.notFound")
+		}) : /* @__PURE__ */ u(Skeleton, {
+			shape: "rows",
+			n: 4
 		})
 	});
 	const set = (patch) => setDraft((d) => ({
@@ -11158,7 +11406,7 @@ var reviewRoute = (host, profile, run) => `/reviews/${[
 ].map(encodeURIComponent).join("/")}`;
 function Reviews() {
 	const fleet = useFleet();
-	const { data, error, loading } = usePoll(() => fleet.reviews(), 5e3, []);
+	const { data, error, loading } = usePoll(() => fleet.reviews(), 5e3, [], { key: "reviews" });
 	const [expanded, setExpanded] = useKept("reviews.expanded", []);
 	const open = (g, r) => fleet.go(reviewRoute(g.host_key, g.profile, r.id));
 	return /* @__PURE__ */ u(PhoneScreen, {
@@ -11486,7 +11734,7 @@ function StackPicker({ members = [], onOpen }) {
 				};
 			}
 		}));
-	}, 5e3, []);
+	}, 15e3, []);
 	const toggle = (m) => setSelected((items) => items.some((x) => keyOf(x) === keyOf(m)) ? items.filter((x) => keyOf(x) !== keyOf(m)) : [...items, m]);
 	const open = () => selected.length && (onOpen ? onOpen(selected) : fleet.go(`/stack/${encodeURIComponent(JSON.stringify(selected))}`));
 	useKeys((key) => {
@@ -11646,6 +11894,7 @@ function StackView({ members = [] }) {
 					})]
 				}), narrow && i !== active ? null : /* @__PURE__ */ u(SessionView, {
 					card: cards.data?.[m.project]?.find((c) => c.name === m.session),
+					waiting: cards.data == null && !cards.error,
 					embedded: true,
 					quiet: i !== active,
 					project: m.project,
@@ -11859,7 +12108,7 @@ var optionLine = (o) => `${o.key}) ${o.text}`;
 var PENDING_POLL_MS = 2e3;
 function Queue() {
 	const fleet = useFleet();
-	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, []);
+	const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5e3, [], { key: "waiting" });
 	const [row, setRow] = d(null), [drafts, setDrafts] = d({}), [busy, setBusy] = d(false), [failure, setFailure] = d("");
 	const [explaining, setExplaining] = d(null), [asked, setAsked] = d({});
 	const keyOf = (r) => `${r.project}/${r.id}`;
@@ -12196,21 +12445,29 @@ function Search({ query = "" }) {
 	const fleet = useFleet(), field = A();
 	const [openError, setOpenError] = d(null);
 	const [q, setQ] = useKept("search.query", query);
-	const { data, error, loading } = usePoll(() => fleet.screenProjects(), 5e3, []);
-	const { data: grids, error: gridError, loading: gridLoading } = usePoll(async () => !q.trim() ? [] : Promise.all((data?.projects || []).filter((p) => !p.sessions || p.sessions.total !== 0).map(async (p) => {
-		try {
-			return {
-				project: p,
-				...await fleet.grid(p.name)
-			};
-		} catch (error) {
-			return {
-				project: p,
-				cards: [],
-				error
-			};
-		}
-	})), 5e3, [data, !!q.trim()]);
+	const { data, error, loading } = usePoll(() => fleet.screenProjects(), 15e3, [], { key: "screenProjects" });
+	const wanted = (data?.projects || []).filter((p) => !p.sessions || p.sessions.total !== 0);
+	const names = wanted.map((p) => p.name).join("\n");
+	const asked = `${!!q.trim()}\n${names}`;
+	const { data: got, error: gridError } = usePoll(async () => ({
+		asked,
+		list: !q.trim() ? [] : await Promise.all(wanted.map(async (p) => {
+			try {
+				return {
+					project: p,
+					...await fleet.grid(p.name)
+				};
+			} catch (error) {
+				return {
+					project: p,
+					cards: [],
+					error
+				};
+			}
+		}))
+	}), 15e3, [names, !!q.trim()]);
+	const grids = got && got.asked === asked ? got.list : null;
+	const gridLoading = !grids && !gridError;
 	const needle = q.trim().toLocaleLowerCase();
 	const projects = (data?.projects || []).filter((p) => !needle || `${p.name} ${p.path || ""}`.toLocaleLowerCase().includes(needle));
 	const sessions = (grids || []).flatMap((g) => (g.cards || []).filter((c) => !c.lost && `${c.name} ${c.branch || ""} ${c.path || ""} ${c.pr || ""} ${c.msg || ""} ${c.label || ""}`.toLocaleLowerCase().includes(needle)).map((c) => ({
@@ -12245,7 +12502,12 @@ function Search({ query = "" }) {
 	return /* @__PURE__ */ u(PhoneScreen, {
 		title: t("phone.search"),
 		error: openError || error || gridError || grids?.find((g) => g.error)?.error,
-		loading,
+		loading: loading || !!needle && gridLoading,
+		skeleton: /* @__PURE__ */ u("section", { children: [/* @__PURE__ */ u("h2", { children: /* @__PURE__ */ u(SkelLine, { w: "6em" }) }), /* @__PURE__ */ u(Skeleton, {
+			shape: "cards",
+			box: "extra-grid",
+			n: 3
+		})] }, data ? "sessions" : "projects"),
 		children: [
 			/* @__PURE__ */ u(SearchInput, {
 				value: q,
@@ -12813,10 +13075,11 @@ function Assistant({ projects, onClose, chip }) {
 function Proposals() {
 	const fleet = useFleet();
 	const has = typeof fleet.proposals === "function";
-	const { data, reload } = usePoll(() => has ? fleet.proposals() : Promise.resolve([]), has ? 15e3 : 0, [has]);
+	const { data, reload } = usePoll(() => has ? fleet.proposals() : Promise.resolve([]), has ? 15e3 : 0, [has], { key: "proposals" });
 	const [busyId, setBusyId] = d("");
 	const list = Array.isArray(data) ? data : [];
 	const request = useRequest("proposals", data == null ? void 0 : list.map((p) => `${p.id}:${!!p.granted}`).join("|") || null);
+	const room = useRoom("proposals", has && data == null, !list.length);
 	if (!has) return null;
 	const answer = async (p, yes) => {
 		setBusyId(p.id);
@@ -12833,6 +13096,8 @@ function Proposals() {
 	};
 	return /* @__PURE__ */ u("div", {
 		class: "proposal-slot",
+		ref: room.ref,
+		style: room.style,
 		children: [list.length ? /* @__PURE__ */ u(Btn, {
 			kind: "sm proposal-return",
 			onClick: request.show,
@@ -13097,7 +13362,15 @@ function usageLines(u) {
 	});
 }
 function useUsage(fleet) {
-	const [u, setU] = d(null);
+	const store = useKeptReads();
+	const [u, setKept] = d(() => (store.get("usage") || {}).data || null);
+	const setU = (j) => {
+		store.set("usage", {
+			data: j,
+			at: Date.now()
+		});
+		setKept(j);
+	};
 	h(() => {
 		if (!fleet.usage) return void 0;
 		let live = true, busy = false, wanted = false, at = 0;
@@ -13106,7 +13379,9 @@ function useUsage(fleet) {
 			wanted = false;
 			Promise.resolve().then(() => fleet.usage()).then((j) => {
 				if (live) setU(j);
-			}, () => {}).finally(() => {
+			}, () => {
+				if (live) setKept((k) => k || false);
+			}).finally(() => {
 				busy = false;
 				at = Date.now();
 			});
@@ -13136,9 +13411,21 @@ function useUsage(fleet) {
 	return u;
 }
 function AccountsLine() {
-	const u$1 = useUsage(useFleet());
+	const fleet = useFleet();
+	const u$1 = useUsage(fleet);
 	const [open, setOpen] = d(false);
 	const lines = usageLines(u$1);
+	const waiting = u$1 === null && !!fleet.usage;
+	const room = useRoom("usage", waiting, !lines.length);
+	if (waiting) return /* @__PURE__ */ u("div", {
+		class: "usage",
+		ref: room.ref,
+		style: room.style,
+		children: /* @__PURE__ */ u("div", {
+			class: "u-line",
+			children: /* @__PURE__ */ u(SkelLine, { w: "16em" })
+		})
+	});
 	if (!lines.length) return null;
 	const kids = lines.map((l, i) => /* @__PURE__ */ u("div", {
 		class: `u-line u-${l.color}`,
@@ -13152,11 +13439,13 @@ function AccountsLine() {
 	}, i));
 	if (!u$1.enabled) return /* @__PURE__ */ u("div", {
 		class: "usage",
+		ref: room.ref,
 		children: kids
 	});
 	return /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("button", {
 		type: "button",
 		class: "usage",
+		ref: room.ref,
 		"aria-haspopup": "dialog",
 		title: t("acct.open"),
 		onClick: () => setOpen(true),
@@ -14064,7 +14353,7 @@ var adapterExtras = {
 //#region web/src/lead.js
 function makeLead({ grid, projects, act, wait, noLead, tries = 20, every = 1500 }) {
 	return async function lead(project) {
-		const find = async () => ((await grid(project)).cards || []).find((c) => c.lead);
+		const find = async () => ((await grid(project, { fresh: true })).cards || []).find((c) => c.lead);
 		const m = await find();
 		let did = null;
 		if (!m) {
@@ -14164,12 +14453,29 @@ function phoneAdapter({ lock, go, place }) {
 		if (e instanceof api$1.AuthError) lock();
 		throw e;
 	});
-	const off = /* @__PURE__ */ new Set();
+	const OFF_KEY = "gf.off";
+	const off = new Set((() => {
+		try {
+			return JSON.parse(localStorage.getItem(OFF_KEY) || "[]");
+		} catch {
+			return [];
+		}
+	})());
+	const keepOff = () => {
+		try {
+			localStorage.setItem(OFF_KEY, JSON.stringify([...off]));
+		} catch {}
+	};
 	const noted = (view) => (e) => {
-		if (e?.status === 404) off.add(view);
+		if (e?.status === 404) {
+			off.add(view);
+			keepOff();
+		}
 		throw e;
 	};
-	api$1.getAutomations().catch(noted("automations")).catch(() => {});
+	api$1.getAutomations().then(() => {
+		if (off.delete("automations")) keepOff();
+	}).catch(noted("automations")).catch(() => {});
 	const peerGrids = /* @__PURE__ */ new Map();
 	async function peerSessions(name) {
 		const hit = peerGrids.get(name);
@@ -14195,8 +14501,7 @@ function phoneAdapter({ lock, go, place }) {
 		});
 	});
 	async function projects() {
-		const j = await guard(api$1.getProjects());
-		const digest = await within(api$1.getDigest(), null);
+		const [j, digest] = await Promise.all([guard(api$1.getProjects({ rollup: false })), within(api$1.getDigest(), null)]);
 		const local = new Map((digest?.projects || []).map((p) => [p.name, p]));
 		return {
 			projects: await Promise.all((j.projects || []).map(async (p) => {
@@ -14246,14 +14551,14 @@ function phoneAdapter({ lock, go, place }) {
 		return guard(api$1.verb(tool, args, assertion));
 	}
 	const lead = makeLead({
-		grid: (project) => guard(api$1.getGrid(project)),
+		grid: (project, opts) => guard(api$1.getGrid(project, "", opts)),
 		projects: () => api$1.getProjects(),
 		act,
 		wait: (ms) => new Promise((r) => setTimeout(r, ms)),
 		noLead: (project) => new Error(t("phone.noLead", { project }))
 	});
 	const tasks = createTasks({
-		projects: async () => ((await api$1.getProjects()).projects || []).map((p) => p.name),
+		projects: async () => ((await api$1.getProjects({ rollup: false })).projects || []).map((p) => p.name),
 		jarvis: jarvisProject,
 		session: (project, name) => api$1.getSession(project, name),
 		grid: (project) => api$1.getGrid(project)
@@ -14341,7 +14646,7 @@ function phoneAdapter({ lock, go, place }) {
 				set: (on) => on ? enable(t) : disable()
 			},
 			hosts: {
-				list: async () => (await guard(api$1.getProjects())).hosts || [],
+				list: async () => (await guard(api$1.getProjects({ rollup: false }))).hosts || [],
 				unpair: (key) => guard(api$1.unpairHost(key))
 			},
 			device: {

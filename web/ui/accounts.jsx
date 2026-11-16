@@ -15,7 +15,8 @@
 // only move when a turn lands, so it reads every POLL_MS and once more on a resume — never sooner
 // than FLOOR_MS after the read before, so a window clicked in and out of is not a burst.
 import { useState, useEffect } from 'preact/hooks';
-import { useFleet } from './adapter.jsx';
+import { useFleet, useKeptReads } from './adapter.jsx';
+import { SkelLine, useRoom } from './skeleton.jsx';
 import { Modal } from './ui.jsx';
 import { t } from './i18n.js';
 import './accounts.css';
@@ -50,15 +51,21 @@ export function usageLines(u) {
   });
 }
 
+// THE LAST ANSWER IS KEPT (adapter.jsx keptReads), because this line is above the whole first
+// page and it is mounted again on every visit to it: read fresh each time, it was absent for the
+// first frames and then pushed the assistant's card and the board down by its own height, every
+// time the page was gone back to — measured at 390 wide as the board going from 361 to 579 px.
 function useUsage(fleet) {
-  const [u, setU] = useState(null);
+  const store = useKeptReads();
+  const [u, setKept] = useState(() => (store.get('usage') || {}).data || null);
+  const setU = (j) => { store.set('usage', { data: j, at: Date.now() }); setKept(j); };
   useEffect(() => {
     if (!fleet.usage) return undefined;
     let live = true, busy = false, wanted = false, at = 0;
     // Stamped either way, so a daemon that refuses it is asked again in 45s and not in 5.
     const read = () => {
       busy = true; wanted = false;
-      Promise.resolve().then(() => fleet.usage()).then((j) => { if (live) setU(j); }, () => {})
+      Promise.resolve().then(() => fleet.usage()).then((j) => { if (live) setU(j); }, () => { if (live) setKept(k => k || false); })   // refused: no line, and no skeleton left waiting for one
         .finally(() => { busy = false; at = Date.now(); });
     };
     const tick = () => {
@@ -84,6 +91,11 @@ export function AccountsLine() {
   const u = useUsage(fleet);
   const [open, setOpen] = useState(false);
   const lines = usageLines(u);
+  const waiting = u === null && !!fleet.usage;
+  const room = useRoom('usage', waiting, !lines.length);
+  // Never read yet: the height it had last time is held for it (skeleton.jsx useRoom), or one
+  // line's on a device that has never drawn it, so what is under it is placed once.
+  if (waiting) return <div class="usage" ref={room.ref} style={room.style}><div class="u-line"><SkelLine w="16em" /></div></div>;
   if (!lines.length) return null;
   const kids = lines.map((l, i) => (
     <div key={i} class={`u-line u-${l.color}`}>
@@ -91,10 +103,10 @@ export function AccountsLine() {
     </div>
   ));
   // Off is a sentence with nothing behind it, so it is not a control.
-  if (!u.enabled) return <div class="usage">{kids}</div>;
+  if (!u.enabled) return <div class="usage" ref={room.ref}>{kids}</div>;
   return (
     <>
-      <button type="button" class="usage" aria-haspopup="dialog" title={t('acct.open')} onClick={() => setOpen(true)}>{kids}</button>
+      <button type="button" class="usage" ref={room.ref} aria-haspopup="dialog" title={t('acct.open')} onClick={() => setOpen(true)}>{kids}</button>
       {open ? <AccountsDialog u={u} onClose={() => setOpen(false)} /> : null}
     </>
   );

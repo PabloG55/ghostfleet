@@ -30,6 +30,7 @@ vite, and the root vite that builds `web/screens.js`).
 | `map.jsx` | the live map |
 | `fleet.jsx`, `sprite.js`, `lights.js`, `icon.jsx` | the ships, the status lights, the icon set |
 | `ui.jsx` | buttons, pills, `Modal`, `Confirm`, toasts, `usePoll`, `Markdown` |
+| `skeleton.jsx` | `Skeleton`, `SkelLine`, `AsOf`: what a screen draws while it waits (below) |
 | `history.js` | one history for every way back, framework-free: `go`, `back`, each entry's scroll and state |
 | `back.jsx` | `BackLink` (names where it goes), `useKept` (a screen's state, kept per history entry) |
 | `keys.js` | the keyboard's rules, framework-free |
@@ -180,6 +181,26 @@ back walks it: the back link, the browser's button, a phone's back swipe, and th
   ("← Automations"). Its aria-label is "Back to …". It is a real link, so a middle click opens
   the destination in a new tab, and a plain click is `back()`. On a phone it carries a
   thumb-sized box round its small words, without moving anything.
+
+## Waiting
+
+A screen that waits on a read draws the **shape** of what is coming, where it will be, and the
+data replaces it in place. There is one component for it (`skeleton.jsx`); no screen writes
+"Loading…" where a shape fits, and none draws a spinner.
+
+```jsx
+{!data && !error ? <Skeleton shape="cards" box="cards" n={3} /> : null}   // cards | rows | fleets | lines | toggle
+<p class="muted">{g ? counts : <SkelLine w="14em" />}</p>                 // one line, inside its own element
+```
+
+- `box` is the class of the container the data will use, so the skeleton is laid out by the same
+  grid. A grid the screen draws empty before its data must take no room (`.extra-grid:empty`).
+- It takes its space from the first frame and is invisible for 180 ms (`.sk` in `ui.css`), so a
+  read that answers quickly never flashes one. The pulse is off under `prefers-reduced-motion`.
+- `usePoll(fn, ms, deps, { key })` keeps the last answer for `key` in memory, per adapter. A
+  screen gone back to paints it at once instead of a skeleton, with `stale` true and `at` its
+  time until the fresh read lands; `<AsOf at stale />` is the line that says how old it is.
+- `usePoll` reads nothing while the page is hidden and reads once when it is shown again.
 
 ## CSS and words
 

@@ -35,6 +35,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -58,7 +59,7 @@ import { ATTACH_PER_MESSAGE, enforceQuota, storePhoto, defaultFleetDir } from '.
 import { pairScope } from '../lib/projects.mjs';
 import { createAutomations } from '../lib/automations.mjs';
 import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
-import { startAccountLogin, finishAccountLogin, accountPaneLease } from '../lib/account-logins.mjs';
+import { startAccountLogin, finishAccountLogin, accountPaneLease, accountLoginNeeds } from '../lib/account-logins.mjs';
 import * as voice from '../lib/voice.mjs';
 import { connectingUid } from '../lib/local-trust.mjs';
 
@@ -1080,7 +1081,61 @@ function gridHasFlag(flag) {
 const gridSupportsJson = () => gridHasFlag('--json');
 const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted']);
 
-function gridJson(t, sub = '') {
+// ONE GRID PER FLEET, HOWEVER MANY ASK. A grid is a node process that runs tmux and bash, once
+// per fleet, and every reader asked for its own: each /api/grid, each /api/projects rollup, the
+// same again from a second device, from a paired machine on its phone's behalf, and from the
+// scans. Measured on a daemon with five fleets and two clients on the Projects screen: every
+// poll of either ran all five grids, seconds after the other had. On a machine where each exec
+// is also paid for by the endpoint daemons that watch it, that is the load.
+//   So a result is kept for GRID_TTL_MS, and a read that arrives while the run is still out
+// awaits THAT run instead of starting another. In memory only, and an error is never kept.
+//   ANYTHING THAT CHANGES A FLEET DROPS ITS GRID (gridDrop, from the writes below), so the read
+// a client makes after its own send is a fresh run and not the grid from before it. A run that
+// was already out when the fleet changed is left to finish for whoever awaits it, but nobody
+// new is handed it. What an agent does by itself is seen at most GRID_TTL_MS late, which is
+// under the fastest poll there is.
+const GRID_TTL_MS = 2500;
+const gridKept = new Map();          // cfg \0 sock \0 sub -> { at, r, run }
+//   A READ THAT ACTS ON WHAT IT SEES ASKS FOR `fresh` (the phone bringing a lead up decides
+// between reopen, wake, resume and start from it). It runs now, shares no run that was already
+// out (that one may predate the change it is asking about), and what it reads replaces the kept
+// one. Through the keep, a lead lost a second ago read as up and nothing was done.
+function gridJson(t, sub = '', { fresh = false } = {}) {
+  const key = `${t.cfg}\0${t.sock}\0${sub}`;
+  const hit = fresh ? null : gridKept.get(key);
+  if (hit && hit.run) return hit.run;
+  if (hit && Date.now() - hit.at < GRID_TTL_MS) return Promise.resolve(hit.r);
+  const e = { at: 0, r: null, run: null };
+  e.run = gridRun(t, sub).then((r) => {
+    e.run = null; e.r = r; e.at = Date.now();
+    if (r.error && gridKept.get(key) === e) gridKept.delete(key);
+    return r;
+  });
+  gridKept.set(key, e);
+  return e.run;
+}
+// `sock` of the fleet that changed, or nothing for all of them (a write that names no project
+// this machine can place).
+function gridDrop(sock = '') {
+  for (const k of [...gridKept.keys()]) if (!sock || k.split('\0')[1] === sock) gridKept.delete(k);
+}
+// THE DIGEST THE SAME WAY: one run for everyone asking at once, kept for as long as a grid is,
+// dropped by any write. It is the same answer for every reader (it takes nothing from the
+// request), and every open client asks for it every five seconds: three devices were three
+// runs of fleet-digest where one had just finished. A failure is never kept.
+let digestKept = null;
+function digestOnce() {
+  const hit = digestKept;
+  if (hit && hit.run) return hit.run;
+  if (hit && Date.now() - hit.at < GRID_TTL_MS) return Promise.resolve(hit.out);
+  const e = { at: 0, out: null, run: null };
+  e.run = callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 }).then(
+    (out) => { e.run = null; e.out = out; e.at = Date.now(); return out; },
+    (err) => { if (digestKept === e) digestKept = null; throw err; });
+  digestKept = e;
+  return e.run;
+}
+function gridRun(t, sub = '') {
   return new Promise((resolve) => {
     // --sub is only passed when the grid knows it: an unknown flag is ignored by --json
     // (it is argv, not a mode), but a sub-grid answered as the top grid would draw the top
@@ -1319,10 +1374,24 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
   '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png',
   '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.mp4': 'video/mp4' };
 
+// TEXT GOES OUT COMPRESSED, to a client that says it reads gzip. Nothing did: a phone's first
+// load of the app was 885 kB over the wire, 720 kB of it JavaScript, CSS and JSON that gzip takes
+// to about a quarter, and every poll after it was its JSON at full length. A browser always
+// sends Accept-Encoding; the suite's own client and curl do not, so they get the bytes they
+// always got. Small bodies are left alone — under GZIP_MIN the header costs what it saves.
+const GZIP_MIN = 1024;
+const GZIP_TYPES = new Set(['.html', '.js', '.css', '.json', '.webmanifest', '.svg', '.txt']);
+const takesGzip = (req) => /\bgzip\b/.test(String((req && req.headers && req.headers['accept-encoding']) || ''));
+
 function send(res, status, obj, extra = {}) {
-  const body = Buffer.from(JSON.stringify(obj) + '\n');
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8',
-    'content-length': body.length, 'cache-control': 'no-store', ...extra });
+  let body = Buffer.from(JSON.stringify(obj) + '\n');
+  const head = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...extra };
+  if (body.length >= GZIP_MIN && takesGzip(res.req) && !head['content-encoding']) {
+    body = zlib.gzipSync(body, { level: 6 });
+    head['content-encoding'] = 'gzip';
+    head.vary = 'Accept-Encoding';
+  }
+  res.writeHead(status, { ...head, 'content-length': body.length });
   res.end(body);
 }
 async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
@@ -2140,10 +2209,10 @@ export function holdStep(held, { events, here, now: t, hold, readAt, status, pla
 let pushHeld = [];
 const loginSeen = new Set();
 async function loginPushEvents() {
-  const items = loginList(shownToPhone());
+  const items = loginListKept(shownToPhone(), { fresh: true });
   // The subscribed phone may belong only to this Linux host. Read its peer's pending
   // logins on the same signed, scoped channel the app uses, without a second hop.
-  const fan = await fanOut('/api/logins', { client: { id: 'push' } }, 5000);
+  const fan = await loginFan({ client: { id: 'push' } }, 5000);
   for (const { peer, r } of fan || []) if (r.status === 200 && Array.isArray(r.json?.items))
     for (const item of r.json.items) items.push({ ...item, project: addrOf(item.project, peer), sock: `${peer.key}/${item.sock}` });
   const accountKey = item => `${item.sock}/account:${item.session}`;
@@ -2303,9 +2372,33 @@ function serveStatic(req, res, pathname) {
   // seeked: a tap on chapter 3 set currentTime to 6s and the player went on from 0:00. iOS
   // goes further and will not play it at all. The media route's own Range handling serves it.
   if (req.headers.range) return shots.serveFile(req, res, full, MIME[path.extname(full)] || 'application/octet-stream');
-  res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream',
+  const ext = path.extname(full);
+  if (GZIP_TYPES.has(ext) && st.size >= GZIP_MIN && takesGzip(req)) {
+    const body = gzipped(full, st);
+    if (body) {
+      res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream', 'content-length': body.length,
+        'content-encoding': 'gzip', vary: 'Accept-Encoding', 'cache-control': 'no-cache' });
+      res.end(body);
+      return;
+    }
+  }
+  res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream',
     'content-length': st.size, 'cache-control': 'no-cache', 'accept-ranges': 'bytes' });
   fs.createReadStream(full).pipe(res);
+}
+
+// A shell file, compressed once and kept until the file changes (its size and mtime are the
+// key, so a cf-sync is seen on the next request). The shell is a dozen files; nothing is evicted.
+const gz = new Map();
+function gzipped(full, st) {
+  const key = `${st.size}:${st.mtimeMs}`;
+  const hit = gz.get(full);
+  if (hit && hit.key === key) return hit.body;
+  try {
+    const body = zlib.gzipSync(fs.readFileSync(full), { level: 9 });
+    gz.set(full, { key, body });
+    return body;
+  } catch { return null; }
 }
 
 // The assertion check, shared by "let me in" (/api/auth/assert) and "authorise this
@@ -2593,6 +2686,47 @@ async function callPeer(peer, opts, { fan = false } = {}) {
   else markPeer(peer, true);
   return r;
 }
+// PENDING SIGN-INS: THE COSTLY HALF IS READ ONCE FOR EVERYONE WHO MAY SEE THE SAME ONES. An
+// account's need is a tmux call per fleet and a pane capture per session (lib/account-logins.mjs),
+// asked for by every open client and every few seconds by a paired machine's scan: measured at
+// about a second a call on a machine with seventeen fleets. That half is kept for LOGINS_TTL_MS
+// under the SET OF PROJECTS it was computed for, so a reader shown fewer projects is never handed
+// one made for a reader shown more. It lives in this Map and nowhere else, and a write drops it.
+//   The records are NOT kept: they are a directory read, and they are written by other processes
+// (a hook capturing a sign-in, a record marked used), which no write here sees. Kept whole, a
+// sign-in captured a moment after the last read was missing from the list for up to 3 s, and one
+// in a project just hidden from a paired machine was still on it.
+//   The push watch reads the costly half fresh on every tick and leaves what it read for the
+// clients: it is what notices an account that expired, recovered and expired again, and a state
+// that lasts a second is invisible through a 3 s keep. Its tick already paid for that read.
+const LOGINS_TTL_MS = 3000;
+const needsKept = new Map();
+function accountNeedsKept(shown, fresh) {
+  const key = shown.map(t => `${t.cfg}\0${t.sock}\0${t.name}`).sort().join('\n');
+  const hit = needsKept.get(key);
+  if (!fresh && hit && Date.now() - hit.at < LOGINS_TTL_MS) return hit.needs;
+  const needs = accountLoginNeeds(shown);
+  needsKept.set(key, { at: Date.now(), needs });
+  for (const [k, v] of needsKept) if (Date.now() - v.at >= LOGINS_TTL_MS) needsKept.delete(k);
+  return needs;
+}
+function loginListKept(shown, { fresh = false } = {}) {
+  return loginList(shown, Date.now(), (p) => accountNeedsKept(p, fresh)).map(x => ({ ...x }));
+}
+// The other machines' half of the same question, per client it is asked on behalf of (the peer
+// scopes its answer to that client). Askers at the same moment share the call that is out, and
+// nothing is kept after it: each machine keeps its own costly half, and a second keep on top of
+// it doubled how late a change on that machine was seen here.
+const loginFans = new Map();
+function loginFan(req, timeout) {
+  const key = String((req.client && req.client.id) || '');
+  const out = loginFans.get(key);
+  if (out) return out;
+  const run = fanOut('/api/logins', req, timeout).finally(() => { if (loginFans.get(key) === run) loginFans.delete(key); });
+  loginFans.set(key, run);
+  return run;
+}
+function loginsDrop() { needsKept.clear(); loginFans.clear(); }
 async function fanOut(pathq, req, timeout = 8000) {
   const v = peers();
   if (!v.peers.length || req.client.pair) return null;     // a paired request never fans out again
@@ -3217,7 +3351,7 @@ function agentCatalogue() {
     if (sub && !/^[A-Za-z0-9._~-]+$/.test(sub)) return send(res, 400, { ok: false, text: `'${sub}' is not a session name` });
     if (sub && !gridHasFlag('--sub'))
       return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --sub flag (${GRID}) — it predates nested leads; cf-sync the runtime` });
-    const r = await gridJson(t, sub);
+    const r = await gridJson(t, sub, { fresh: url.searchParams.get('fresh') === '1' });
     // §4, verbatim — no wrapper. The client reads .cards/.counts/.project off the top
     // level and decides success from the HTTP status, so an envelope here would be a
     // second shape for the same payload.
@@ -3313,10 +3447,15 @@ function agentCatalogue() {
   }
 
   if (p === '/api/logins' && req.method === 'GET') {
-    const fan = fanOut('/api/logins', req, 5000);
+    const fan = req.client.pair ? null : loginFan(req, 5000);     // a paired request never fans out again
     const project = url.searchParams.get('project');
     const shown = shownTo(req).filter(t => !project || t.name === project);
-    const items = loginList(shown).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
+    // A paired machine's push watch asks on behalf of 'push' (loginPushEvents), and is answered
+    // fresh for the reason its own half is: a keep here sat between it and every state shorter
+    // than 3 s, so an account that expired, recovered and expired again rang once. The name is in
+    // the signed canonical string, and all it can buy is a read this machine would do anyway.
+    const fresh = !!(req.client.pair && req.client.onBehalf === 'push');
+    const items = loginListKept(shown, { fresh }).map(r => ({ ...r, host: P.selfLabel(peers()), host_key: '' }));
     for (const { peer, r } of await fan || [])
       if (r.status === 200 && Array.isArray(r.json?.items))
         for (const item of r.json.items) if (!project || project === `${item.project}@${peer.key}`)
@@ -3372,7 +3511,7 @@ function agentCatalogue() {
   // tool runs is the one the phone reads; a second implementation of "what is the fleet"
   // is the drift docs/mobile.md §3 forbids.
   if (p === '/api/digest' && req.method === 'GET') {
-    const out = await callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const out = await digestOnce();
     const text = typeof out === 'string' ? out : String(out.text);
     let j;
     try { j = JSON.parse(text); } catch { return send(res, 502, { ok: false, text: `fleet-digest did not return JSON: ${text.trim().slice(0, 200)}` }); }
@@ -3609,6 +3748,20 @@ function agentCatalogue() {
   }
 
   // ── writes ────────────────────────────────────────────────────────────────
+  // A WRITE CHANGES WHAT THE KEPT READS SAID. Whatever this request does — a send, a stop, a
+  // pause, a spawn, an answer, a sign-in finished — the grid of the fleet it names and the
+  // pending sign-ins are dropped when it has been answered, so the read that follows it runs
+  // again. A project this machine cannot place (another machine's, or none named) drops every
+  // grid: a read too many is the cheap mistake, and a grid from before the write is not.
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const named = String((body && ((body.args && body.args.project) || body.project)) || '');
+    res.on('finish', () => {
+      const t = named ? projects().find(x => x.name === named) : null;
+      gridDrop(t ? t.sock : '');
+      loginsDrop();
+      digestKept = null;
+    });
+  }
   if (p === '/api/term' || p === '/api/term/enable' || p === '/api/term/open') return termRoutes(p, req, res, body, c, ip);
 
   if (p === '/api/verb') {

@@ -3,7 +3,7 @@
 // real fleet-serve running the real fleet-read over a large transcript.
 //
 //     node serve-session.mjs build <fleet-dir> <transcript> <sock> <session>
-//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log>
+//     node serve-session.mjs probe <base> <enrolment-code> <transcript> <spawn-log> [grid-run-log] [digest-run-log]
 //
 // `probe` prints one "name <US> want <US> got" row per check; test/run.sh compares them.
 //
@@ -55,7 +55,7 @@ if (mode === 'build') {
 
 if (mode !== 'probe') { console.error('usage: serve-session.mjs build|probe …'); process.exit(2); }
 const { Authenticator, request } = await import('./serve-client.mjs');
-const [base, code, transcript, spawnLog] = rest;
+const [base, code, transcript, spawnLog, gridLog, digestLog] = rest;
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const a = new Authenticator({ rpId: new URL(base).hostname, origin: base });
@@ -70,6 +70,13 @@ const spawns = () => { try { return fs.readFileSync(spawnLog, 'utf8').split('\n'
 const first = await timed();
 is('the first read is the newest page', 20, first.r.json && first.r.json.messages ? first.r.json.messages.length : -1);
 is('...and it is the transcript we built', true, JSON.stringify(first.r.json || {}).includes('answer 7999'));
+
+// ── COMPRESSED, WHEN ASKED ───────────────────────────────────────────────────
+// A page of the chat is the largest JSON a poll carries. A browser says it reads gzip and gets
+// it; this client does not say so and must get what it always got.
+const zipped = await get({ 'accept-encoding': 'gzip' });
+is('a page of the chat is gzipped for a client that reads gzip', 'gzip', (zipped.headers && zipped.headers['content-encoding']) || '');
+is('...and plain for one that does not', '', (first.r.headers && first.r.headers['content-encoding']) || '');
 
 // ── THE BOUND ────────────────────────────────────────────────────────────────
 // The read every open chat repeats: same page, nothing new. The median of five, so one slow
@@ -111,5 +118,69 @@ const s0 = spawns();
 const burst = await Promise.all(Array.from({ length: 6 }, () => get()));
 is('six reads at once all get the page', 6, burst.filter(r => r.status === 200 && (r.text || '').includes('and one more after it')).length);
 is('...from ONE run of fleet-read', 1, spawns() - s0);
+
+// ── ONE GRID PER FLEET, HOWEVER MANY ASK ─────────────────────────────────────
+// The grid here is a stand-in that writes a line each time it is run and takes 300 ms to answer,
+// so "at once" really overlaps. Two devices on the same screen are two reads of the same fleet;
+// the Projects rollup is a third, by another route. Counted in runs, because a run is the
+// process the daemon starts, and both directions: kept for ever would pass the first three rows,
+// so the same read after the kept one has aged must run again, and so must the read that
+// follows a write, though it comes well inside the time a result is kept.
+if (gridLog) {
+  const runs = () => { try { return fs.readFileSync(gridLog, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
+  const grid = () => request(base, 'GET', '/api/grid?project=demo', { headers: auth });
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+  await wait(2700);
+  let g0 = runs();
+  const pair = await Promise.all([grid(), grid()]);
+  is('two clients reading a fleet\'s grid at once both get it', 2, pair.filter(r => r.status === 200 && r.json && Array.isArray(r.json.cards)).length);
+  is('...from ONE run of fleet-grid', 1, runs() - g0);
+  await grid();
+  await request(base, 'GET', '/api/projects', { headers: auth });
+  is('...and a read just after, and the Projects rollup, start no other', 1, runs() - g0);
+  await wait(2700);
+  g0 = runs();
+  await grid();
+  is('a read after the kept grid has aged runs it again', 1, runs() - g0);
+  g0 = runs();
+  const sent = await request(base, 'POST', '/api/verb', { headers: auth, body: { tool: 'fleet_send', args: { project: 'demo', session: 'api-fix', prompt: 'a line' } } });
+  is('a send is answered', true, sent.status > 0);
+  await wait(100);
+  await grid();
+  is('a send to a fleet makes the next read run that fleet\'s grid again', 1, runs() - g0);
+  // A read that acts on what it sees (the phone bringing a lead up) cannot be handed a grid from
+  // before a change the daemon never saw: a lead that went lost read as up through the keep.
+  g0 = runs();
+  await grid();
+  const fresh = await request(base, 'GET', '/api/grid?project=demo&fresh=1', { headers: auth });
+  is('a fresh read inside the keep runs the grid again', [200, 1], [fresh.status, runs() - g0]);
+  await grid();
+  is('...and what it read is what the next plain read is handed', 1, runs() - g0);
+
+  // ── the list without its rollup, and one digest for everyone asking ──────────────────
+  // What the app's own poll asks every five seconds. The rollup is a grid per fleet, so the
+  // list asked for WITHOUT it must start none, measured after the kept grid has aged so that
+  // "none" cannot be the kept one answering; and the same list WITH it must start one, or the
+  // first row would pass on a daemon that never ran a grid at all.
+  await wait(2700);
+  g0 = runs();
+  const bare = await request(base, 'GET', '/api/projects?rollup=0', { headers: auth });
+  is('the project list without its rollup is answered', true, bare.status === 200 && Array.isArray(bare.json?.projects) && bare.json.projects.length === 1);
+  is('...and runs no grid', 0, runs() - g0);
+  await request(base, 'GET', '/api/projects', { headers: auth });
+  is('...where the list with it runs one', 1, runs() - g0);
+  if (digestLog) {
+    const druns = () => { try { return fs.readFileSync(digestLog, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
+    const digest = () => request(base, 'GET', '/api/digest', { headers: auth });
+    let d0 = druns();
+    const three = await Promise.all([digest(), digest(), digest()]);
+    is('three clients asking for the digest at once all get it', 3, three.filter(r => r.status === 200 && r.json && r.json.ok).length);
+    is('...from ONE run of fleet-digest', 1, druns() - d0);
+    await wait(2700);
+    d0 = druns();
+    await digest();
+    is('a digest asked for after the kept one has aged is run again', 1, druns() - d0);
+  }
+}
 
 console.log(rows.join('\n'));

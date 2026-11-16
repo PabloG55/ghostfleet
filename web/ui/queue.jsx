@@ -20,7 +20,7 @@ const optionLine = (o) => `${o.key}) ${o.text}`;
 const PENDING_POLL_MS = 2000;
 export function Queue() {
   const fleet = useFleet();
-  const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5000, []);
+  const { data, error, loading, reload } = usePoll(() => fleet.waiting(), 5000, [], { key: 'waiting' });
   // A DRAFT PER ITEM, in memory only. One shared box was emptied each time a reply opened, so
   // words typed and closed with a tap beside the dialog were gone when it was reopened — and
   // kept instead, they would have been sent as the answer to whichever item opened next.

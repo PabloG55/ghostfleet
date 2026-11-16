@@ -146,6 +146,9 @@
  * title, not like the line of where it runs. */
 .fleet-extra .login-profile { color:var(--white); font:600 15.5px var(--mono); }
 .fleet-extra h2 { margin:20px 0 10px; font-size:14px; color:var(--dim); }
+/* A grid with nothing in it yet takes no room: it is a flex item of the page, so it would put a
+ * gap of nothing above the skeleton, and the first card would land that much higher. */
+.fleet-extra .extra-grid:empty { display:none; }
 .extra-search { display:flex; gap:8px; margin:12px 0 20px; }
 .extra-search input { min-width:0; flex:1; }
 .review-media { display:block; width:100%; max-height:65vh; object-fit:contain; background:var(--panel); }
@@ -222,6 +225,7 @@ button.usage { cursor: pointer; }
 button.usage:hover { border-color: var(--dim); }
 button.usage:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .usage .u-line { display: flex; gap: 12px; min-width: 0; }
+.usage .u-line .sk-line { line-height: 20px; }
 .usage .u-prof { color: var(--dim); flex: none; font-size: 12px; min-width: 5.5em; line-height: 20px; }
 .usage .u-text { min-width: 0; overflow-wrap: anywhere; line-height: 20px; }
 .u-green .u-text, .u-green .u-state { color: var(--green); }
@@ -649,7 +653,37 @@ textarea { resize: vertical; }
 .back-link:hover { color: var(--cyan); }
 .sess-head > .back-link { margin-bottom: -4px; }
 .split-name { font-family: var(--mono); font-size: 13px; text-decoration: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* THE TITLE IS TWO LINES THAT DO NOT WRAP (session.jsx): the name, and what the card says about
+   the session, its state, branch, PR, label and schedule (.sess-meta). On a desk the second runs
+   on after the first, as it always has; on a phone it is a line of its own under the name. How
+   many lines the title wrapped to used to be the card's to decide, and the card lands after the
+   header is drawn: a lead on `main` fitted beside its name at 390 and a branch with a PR did
+   not, so the header lost or gained 28 px when the card came. Now a long name ends in an
+   ellipsis, the branch gives way next, and then the line scrolls sideways rather than wrap, so
+   the schedule's × stays in reach. The line is a chip's height, the tallest thing it can hold,
+   so a bare branch on it stands as tall as a label, and its shapes as tall as either. */
+.sess-title { flex-wrap: nowrap; }
+.sess-name { display: flex; align-items: center; gap: .7em; flex: 0 1 auto; min-width: 0; }
+.sess-name > * { flex: none; }
+.sess-name > h1 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-meta { display: flex; align-items: center; gap: .7em; flex: 1 1 0; min-width: 0; min-height: 24px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.sess-meta::-webkit-scrollbar { display: none; }
+.sess-meta > *, .sess-meta > .sk-ghost-row > * { flex: none; }
+.sess-meta > .branch { flex: 0 1 auto; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .sess-head:not(.embedded) .sess-title { flex-direction: column; align-items: stretch; }
+  .sess-head:not(.embedded) .sess-name { align-self: flex-start; max-width: 100%; }
+  .sess-head:not(.embedded) .sess-meta { flex: none; }
+}
+/* More at the row's end and the state's controls in the room before it (session.jsx): More's
+   place is the row's width, which no state changes. The controls wrap inside their own box, so
+   in a narrow stack column it is they that take a second line and not More, which stays on the
+   first; aligned to the top, so a second line of them does not take More down half a line. The
+   menu already opened leftwards from More's right edge, which now is the header's. */
+.sess-tools { display: flex; gap: 8px; align-items: flex-start; }
+.sess-acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.sess-tools > .menu-wrap { flex: none; }
 .menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r); padding: 5px; min-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
 .menu > button, .select-opt { background: none; border: 0; text-align: left; padding: .55em .75em; border-radius: var(--r); cursor: pointer; }
@@ -726,6 +760,45 @@ textarea { resize: vertical; }
 @media (prefers-reduced-motion: no-preference) {
   .bubble.skel { animation: skel 1.6s ease-in-out infinite; }
   @keyframes skel { 50% { opacity: .3; } }
+}
+
+/* ── THE SKELETON (skeleton.jsx): the shape of what a screen is waiting for ──────────────────
+ * Laid out from the first frame, in the box the data will use, and INVISIBLE FOR 180 ms: a read
+ * that answers inside that never flashes one, and one that does not gets the shape without
+ * anything having moved to make room. The wait is a zero-length animation's delay, so it needs
+ * no timer and it is not motion — it holds under reduced motion, where only the pulse is off. */
+.sk { animation: sk-show 0s linear 180ms both; }
+@keyframes sk-show { from { visibility: hidden; } to { visibility: visible; } }
+.sk-item { min-width: 0; }
+.sk-b { background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); display: flex; gap: 10px; min-width: 0; }
+.sk-bar { display: block; flex: none; height: .8em; max-width: 100%; border-radius: var(--r); background: var(--line); }
+.sk-bar.tall { height: 1.15em; }
+.sk-bar.grow { flex: 1; min-width: 0; }
+.sk-bar.w1 { width: 3em; } .sk-bar.w2 { width: 6em; } .sk-bar.w3 { width: 5em; } .sk-bar.w4 { width: 8em; } .sk-bar.w5 { width: 11em; }
+.sk-bar.w6 { width: 60%; } .sk-bar.w7 { width: 70%; } .sk-bar.w8 { width: 16em; } .sk-bar.w9 { width: 90%; }
+.sk-card { flex-direction: column; padding: 16px; min-height: 132px; }
+.sk-row { align-items: center; padding: .55em .85em; min-height: 2.6em; }
+.sk-fleet { flex-direction: column; padding: 10px 12px 0; min-height: 118px; }
+.sk-sea { display: block; flex: 1; margin: 0 -12px; background: color-mix(in srgb, var(--line) 35%, transparent); }
+.sk-toggle { align-items: center; justify-content: space-between; border: 0; background: none; min-height: 2.6em; }
+.sk-toggle span { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sk-line { display: inline-flex; align-items: center; max-width: 100%; vertical-align: bottom; }
+.sk-line .sk-bar { display: inline-block; }
+/* A REAL ELEMENT DRAWN AS ITS OWN SHAPE: the pill, chip or button keeps its box (its padding,
+ * its font, its border width), so what replaces it is the same size, and only its ink is gone. */
+.sk .sk-ghost, .sk .btn.sk-ghost:disabled { color: transparent; background: var(--line); border-color: transparent; box-shadow: none; opacity: 1; pointer-events: none; user-select: none; }
+.sk-ghost > * { visibility: hidden; }
+.sk-ghost-row { display: contents; }
+.sk-rows, .sk-lines { display: flex; flex-direction: column; gap: 4px; }
+.sk-lines { gap: 9px; padding: .6em 0; }
+.sk-isles { display: flex; flex-wrap: wrap; gap: 22px; }
+.sk-isles .sk-item { width: 180px; }
+.split-list .sk-row { min-height: 3.4em; }
+/* the chat's own three bubbles (session.jsx) wait the same 180 ms before they show */
+.sk-late .msg.skel { animation: sk-show 0s linear 180ms both; }
+.as-of { margin: 0 0 8px; }
+@media (prefers-reduced-motion: no-preference) {
+  .sk .sk-bar, .sk .sk-sea, .sk .sk-ghost { animation: skel 1.6s ease-in-out infinite; }
 }
 .chat > .older, .chat > .start { font-size: 12px; margin: 0 auto; }
 .chat > .older { display: flex; flex-wrap: wrap; gap: .3em .8em; justify-content: center; align-items: baseline; }
@@ -841,6 +914,8 @@ textarea { resize: vertical; }
    column stretched it: "Reset demo data" ran the width of Settings, its label at the left edge
    of a bordered box, and read as a text field. */
 .panel > .btn { align-self: flex-start; }
+/* a panel's read-dependent part, kept as one block so its height can be held (skeleton.jsx useRoom) */
+.stack-room { display: flex; flex-direction: column; gap: 12px; }
 
 /* ── modal, toast ────────────────────────────────────── */
 .scrim, .side-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: grid; place-items: center; padding: 16px; }

@@ -13,10 +13,13 @@ import { PhoneScreen, joinMeta, sessionRoute } from './phone-screen.jsx';
 // the machine, because a stack can hold this machine's acme-api and the other one's.
 const memberName = (m) => joinMeta(...splitAddr(m.project), m.session);
 const keyOf = m => JSON.stringify([m.project, m.session]);
+// A grid per project with sessions in it, which is the dearest read the daemon has, so it is
+// asked every 15 s as Search asks it, not every 5: a picker is looked at for seconds, and at 5 s
+// four projects were 48 grid reads a minute from a screen nobody is watching change.
 export function StackPicker({ members = [], onOpen }) {
   const fleet = useFleet();
   const [selected, setSelected] = useKept('stack.members', members), [query, setQuery] = useKept('stack.query', '');
-  const { data, error, loading } = usePoll(async () => { const p = await fleet.screenProjects(); return Promise.all((p.projects || []).filter(p => !p.sessions || p.sessions.total !== 0).map(async p => { try { return { ...p,...await fleet.grid(p.name) }; } catch(error) { return { ...p,cards:[],error }; } })); }, 5000, []);
+  const { data, error, loading } = usePoll(async () => { const p = await fleet.screenProjects(); return Promise.all((p.projects || []).filter(p => !p.sessions || p.sessions.total !== 0).map(async p => { try { return { ...p,...await fleet.grid(p.name) }; } catch(error) { return { ...p,cards:[],error }; } })); }, 15000, []);
   const toggle = m => setSelected(items => items.some(x => keyOf(x) === keyOf(m)) ? items.filter(x => keyOf(x) !== keyOf(m)) : [...items, m]);
   const open = () => selected.length && (onOpen ? onOpen(selected) : fleet.go(`/stack/${encodeURIComponent(JSON.stringify(selected))}`));
   useKeys(key => { if (!key.ctrl && !key.alt && key.k === 'Enter') { open(); return true; } return false; });
@@ -67,6 +70,6 @@ export function StackView({ members = [] }) {
   const cards = usePoll(async () => Object.fromEntries(await Promise.all(projects.map(async project =>
     [project, (await fleet.grid(project)).cards || []]))), Math.max(5000, projects.length * 7500), [JSON.stringify(projects)]);
   return <PhoneScreen class="stack-view" error={cards.error} title={t('phone.stacks')} parent="/stack-picker" actions={<Btn onClick={() => fleet.go('/stack-picker')}>{t('phone.editStack')}</Btn>}>
-    {!members.length ? <p class="empty">{t('phone.emptyStack')}</p> : <>{narrow ? <div class="seg stack-switcher" role="tablist">{members.map((m, i) => <button role="tab" aria-selected={active === i} class={active === i ? 'on' : ''} onClick={() => setActive(i)}>{memberName(m)}</button>)}</div> : null}<div class="stack-columns">{members.map((m, i) => <section class={`stack-column${i === active ? ' stack-active' : ''}`} key={keyOf(m)} onPointerDown={() => setActive(i)} onFocusIn={() => setActive(i)}><header class="row wrap"><h2>{memberName(m)}</h2><Btn onClick={() => fleet.go(sessionRoute(m.project, m.session))}>{t('phone.openSession')}</Btn></header>{narrow && i !== active ? null : <SessionView card={cards.data?.[m.project]?.find(c => c.name === m.session)} embedded quiet={i !== active} project={m.project} name={m.session} onChanged={cards.reload} onGone={() => fleet.go('/stack-picker')} />}</section>)}</div></>}
+    {!members.length ? <p class="empty">{t('phone.emptyStack')}</p> : <>{narrow ? <div class="seg stack-switcher" role="tablist">{members.map((m, i) => <button role="tab" aria-selected={active === i} class={active === i ? 'on' : ''} onClick={() => setActive(i)}>{memberName(m)}</button>)}</div> : null}<div class="stack-columns">{members.map((m, i) => <section class={`stack-column${i === active ? ' stack-active' : ''}`} key={keyOf(m)} onPointerDown={() => setActive(i)} onFocusIn={() => setActive(i)}><header class="row wrap"><h2>{memberName(m)}</h2><Btn onClick={() => fleet.go(sessionRoute(m.project, m.session))}>{t('phone.openSession')}</Btn></header>{narrow && i !== active ? null : <SessionView card={cards.data?.[m.project]?.find(c => c.name === m.session)} waiting={cards.data == null && !cards.error} embedded quiet={i !== active} project={m.project} name={m.session} onChanged={cards.reload} onGone={() => fleet.go('/stack-picker')} />}</section>)}</div></>}
   </PhoneScreen>;
 }

@@ -17,11 +17,16 @@
 // project on the other machine with no lead was a dead end: "has no lead to start from this
 // phone". The name is all a start needs; the machine that has the project looks it up.
 //
-//   deps: grid(project) → { cards }, projects() → { projects }, act(tool, args),
+// IT ACTS ON WHAT IT READS, SO IT READS FRESH. The daemon keeps a grid for 2.5 s for everyone
+// polling it; through that keep a lead lost a second ago read as up, and the button said the lead
+// was ready and did nothing. So every read here asks for `{ fresh: true }`, which the daemon
+// answers with a run of its own (fleet-serve gridJson), on whichever machine has the project.
+//
+//   deps: grid(project, { fresh }) → { cards }, projects() → { projects }, act(tool, args),
 //         wait(ms), noLead(project) → Error
 export function makeLead({ grid, projects, act, wait, noLead, tries = 20, every = 1500 }) {
   return async function lead(project) {
-    const find = async () => ((await grid(project)).cards || []).find(c => c.lead);
+    const find = async () => ((await grid(project, { fresh: true })).cards || []).find(c => c.lead);
     const m = await find();
     let did = null;
     if (!m) {

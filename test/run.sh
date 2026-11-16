@@ -19949,6 +19949,19 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   mv "$CS/bin/fleet-read" "$CS/bin/fleet-read.real"
   printf '#!/bin/sh\necho x >> "%s/spawns"\nexec "$(dirname "$0")/fleet-read.real" "$@"\n' "$CS" > "$CS/bin/fleet-read"
   chmod +x "$CS/bin/fleet-read"
+  # The digest counted the same way, and slowed, so three reads "at once" really overlap.
+  mv "$CS/bin/fleet-digest" "$CS/bin/fleet-digest.real"
+  printf '#!/bin/sh\necho x >> "%s/digestruns"\nsleep 0.3\nexec "$(dirname "$0")/fleet-digest.real" "$@"\n' "$CS" > "$CS/bin/fleet-digest"
+  chmod +x "$CS/bin/fleet-digest"
+  # A stand-in grid that counts its runs: what is being measured is how many times the daemon
+  # STARTS one, and a real grid would need a fleet. It names '--json' because the daemon reads
+  # the file for the flag before it will run it, and waits so two reads at once overlap.
+  cat > "$CS/bin/fleet-grid.mjs" <<GRIDSTUB
+import fs from 'node:fs';
+if (!process.argv.includes('--json')) process.exit(2);
+fs.appendFileSync('$CS/gridruns', 'x\\n');
+setTimeout(() => console.log(JSON.stringify({ project: 'demo', sub: null, counts: {}, cards: [], free_worktrees: [] })), 300);
+GRIDSTUB
   printf 'demo\t%s\twork\n' "$CS/repo" > "$CS/home/.config/ghostfleet/projects"
   CST="$CS/home/.claude/projects/-repo/t.jsonl"
   node "$ROOT/test/helpers/serve-session.mjs" build "$CS/home/.claude/fleet" "$CST" cf-demo api-fix
@@ -19967,9 +19980,9 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     i=$((i+1)); sleep 0.1
   done
   if curl -s -m1 "$CBASE/healthz" >/dev/null 2>&1; then
-    node "$ROOT/test/helpers/serve-session.mjs" probe "$CBASE" "$ccode" "$CST" "$CS/spawns" > "$CS/out" 2> "$CS/err"
+    node "$ROOT/test/helpers/serve-session.mjs" probe "$CBASE" "$ccode" "$CST" "$CS/spawns" "$CS/gridruns" "$CS/digestruns" > "$CS/out" 2> "$CS/err"
     is "serve-session ran"                "" "$(head -2 "$CS/err" | tr '\n' ' ' | sed 's/ *$//')"
-    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$CS/out")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$CS/out") rows")"
+    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$CS/out")" -ge 26 ] && echo yes || echo "no: $(wc -l < "$CS/out") rows")"
     while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$CS/out"
   else
     bad "the daemon comes up (chat read)" "listening on $CBASE" "$(tr '\n' ' ' < "$CS/log" 2>/dev/null | cut -c1-180)"
@@ -21211,6 +21224,21 @@ if sv_start origin; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PWO/out"
+
+  # ── the shell goes out compressed, to a client that reads gzip ─────────────
+  # Nothing did: a phone's first load was every file at full length. Both directions, because a
+  # header on a body nobody compressed is a blank page, and a compressed body with no header is
+  # one too: the bytes must be the file, the header must say gzip only when asked, and it must be
+  # worth it. curl without --compressed asks for nothing, as the suite's own client does.
+  gz_head() { curl -s -m5 -o /dev/null -D - "$@" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-encoding"{print $2}'; }
+  is "the shell is gzipped for a client that reads gzip"  "gzip" "$(gz_head -H 'Accept-Encoding: gzip, br' "$BASE/phone.js")"
+  is "...and plain for one that does not"                 ""     "$(gz_head "$BASE/phone.js")"
+  is "...and what arrives is the file"                    "$(cksum < "$ROOT/web/phone.js")" "$(curl -s -m5 --compressed "$BASE/phone.js" | cksum)"
+  is "...and the plain one is too"                        "$(cksum < "$ROOT/web/phone.js")" "$(curl -s -m5 "$BASE/phone.js" | cksum)"
+  gz_n="$(curl -s -m5 -H 'Accept-Encoding: gzip' "$BASE/phone.js" | wc -c | tr -d ' ')"
+  is "...at under a third of its length"                  "yes"  "$([ "$gz_n" -gt 0 ] && [ "$((gz_n * 3))" -lt "$(wc -c < "$ROOT/web/phone.js")" ] && echo yes || echo "no: $gz_n bytes")"
+  is "...a font is left as it is"                         ""     "$(gz_head -H 'Accept-Encoding: gzip' "$BASE/fonts/inter-latin-wght-normal.woff2")"
+  is "...and so is a body too small to gain"              ""     "$(gz_head -H 'Accept-Encoding: gzip' "$BASE/api/health")"
 
   # ── and the client has to RUN, and paint what it decided ──────────────────
   # `node --check` proves syntax, not that it runs (CLAUDE.md), and the old client met that
@@ -23940,7 +23968,7 @@ if [ -d "$ROOT/web" ]; then
     # 278 rows when the rebuilt features above were added, 283 with the empty pages, 286 with
     # the session's tab row, 296 with the chat's end and the project's header, 297 with the
     # row that says the cold open is a load of its own.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 260 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PHC/out")" -ge 590 ] && echo yes || echo "no: $(wc -l < "$PHC/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$PHC/out"
