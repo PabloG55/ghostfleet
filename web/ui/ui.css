@@ -487,6 +487,23 @@ textarea { resize: vertical; }
   display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--yellow);
   border-color: color-mix(in srgb, var(--yellow) 55%, var(--line)); cursor: pointer; }
 .composer textarea { flex: 1 1 auto; min-height: var(--tap); max-height: 220px; }
+/* THE BOX KEEPS ITS INSET WHEN IT SCROLLS. Seen on the phone with three lines typed into the
+   two-line box: the first line sat flush against the top border with its tops cut. A textarea's
+   PADDING IS INSIDE WHAT IT SCROLLS, so once the text outgrows the box the padding scrolls away
+   with it and the text runs to the border. A border does not scroll, so the vertical inset is a
+   transparent border of the padding's size plus the line's, and the line itself is an outline
+   drawn 1px inside the edge, where the border was. The box's rect, its two rows and its tap
+   target are what they were; the text is now cut at the inset, at every height. Sideways the
+   text wraps and never scrolls, so the padding stays. */
+.composer-input textarea { padding-block: 0; border-color: transparent; border-block-width: calc(.55em + 1px);
+  outline: 1px solid var(--line); outline-offset: -1px; }
+.composer-input textarea:focus { border-color: transparent; outline-color: var(--cyan); }
+/* ...and its placeholder is one line on a touch screen. It wrapped to three in the two-line box
+   and the third, "Enter sends)", showed half cut off. The words are shorter there (session.jsx);
+   a name too long for a narrow phone ends in an ellipsis rather than in a line that is cut. */
+@media (pointer: coarse) {
+  .composer-input textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
 /* A COMPOSER'S BUTTONS ARE ONE SIZE: attach, voice and send, in the session's composer, a
    question's answer row and the assistant's. Reported from the phone as "the buttons of the chat
    send and attachment are different sizes": attach and voice were 46 x 46 and Send was a word,
@@ -962,7 +979,15 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
    needs the same, or its newest message ends under the button even scrolled to the end. The
    button floats 8px over the composer, which is the chat's foot, so the room is its measured
    height (--launch-h, from the Launcher), those 8px, and 8 more. */
-.app:has(.as-launch) .chat { padding-bottom: calc(var(--launch-h, 50px) + 16px); }
+html:not(.kb) .app:has(.as-launch) .chat { padding-bottom: calc(var(--launch-h, 50px) + 16px); }
+/* NOT WHILE A KEYBOARD IS UP. With the on-screen keyboard the chat that stays visible is a strip
+   about 140pt tall, and the button, 50pt and floating over its foot, covered a third of it. So it
+   goes while the keyboard is up (html.kb, viewport.js) and comes back when the keyboard goes, and
+   the chat's room for it goes with it (above), leaving the room the chat has on a page with no
+   button at all. The same step moves the reader: viewport.js puts a reader who was at the end back
+   at the end, in the same call that swaps the class, so the newest message does not jump. A
+   reader up the conversation sees nothing move: the room is below what they are reading. */
+html.kb .as-dock { display: none; }
 /* A Terminal or Editor tab (web/ui/terminal.css) fills the column to its foot, so the button
    sat over its last row and, on a phone, over half the key row. Cleared the way the chat is:
    the button's bottom offset plus its height, and a gap. */
@@ -1139,8 +1164,8 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .composer { padding-bottom: calc(16px + var(--safe-b)); }
 .as-controls { padding-bottom: calc(14px + var(--safe-b)); }
 .as-dock, .toasts, .tk-chip.floating, .keyprompt { margin-bottom: var(--safe-b); }
-/* ...and while the on-screen keyboard is up (viewport.js), the app is the VISIBLE area and not
-   the screen: pinned to the visual viewport's top and sized to its height, so nothing overflows
+/* ...and while a keyboard is up (viewport.js: the on-screen one, or a connected one's bar after iOS
+   panned for it), the app is the VISIBLE area and not the screen: pinned to the visual viewport's top and sized to its height, so nothing overflows
    and iOS has nothing to scroll. The bottom inset is spent on the home indicator, which the
    keyboard covers. With the keyboard down none of this applies and the layout is the plain one. */
 html.kb, html.kb body { overflow: hidden; }

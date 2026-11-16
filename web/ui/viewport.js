@@ -26,9 +26,20 @@
 // between the text box and the bottom" half of the same report.
 //   A pinch zoom shrinks the visual viewport too, so the class also needs the focus in a text
 // field: a zoomed page that nobody is typing into keeps its own layout.
+//   A CONNECTED KEYBOARD IS THE SAME FAULT, SMALLER. With a hardware keyboard iOS shows only its
+// accessory bar, about 64pt, which is under the threshold above, so the app was laid out to the
+// whole screen while iOS panned the visual viewport about 68pt down to show the box over the bar:
+// the top bar went off the top of the screen until the field lost the focus. So the app is pinned
+// the same way, by the same class, whenever the visual viewport has been PANNED (offsetTop off 0)
+// while a field has the focus at a zoom of 1. And it stays pinned while the visible area is still
+// short of the tallest: once the app fits, iOS may put offsetTop back to 0, and a pin that let go
+// then would hand the box back to the bar and be panned again, flickering. A pan is the signal
+// rather than a short visible area alone, because a window made shorter at a desk is short too
+// and is not a keyboard. This is a pin and nothing more: the ⏎ rule's probe still answers for the
+// on-screen keyboard only (`up`), since with keys under the fingers ⏎ sends.
 import { setSoftKeyboardProbe } from './keys.js';
 
-let tallest = 0, width = 0, up = false;
+let tallest = 0, width = 0, up = false, panned = false;
 
 const typingInto = () => {
   const a = typeof document !== 'undefined' ? document.activeElement : null;
@@ -43,14 +54,16 @@ export function syncViewport() {
     if (w !== width) { width = w; tallest = 0; }
     tallest = Math.max(tallest, h, Number(globalThis.innerHeight) || 0);
     up = tallest - h > 120 && typingInto();
+    const top = Number(vv.offsetTop) || 0, unzoomed = Math.abs((Number(vv.scale) || 1) - 1) < 0.01;
+    panned = !up && typingInto() && unzoomed && (Math.abs(top) >= 1 || (panned && tallest - h >= 1));
     const root = document.documentElement;
     // A conversation that was showing its newest message keeps showing it as it shrinks: the
     // keyboard opening must not leave the reader looking at whatever was mid-screen.
     const list = document.querySelector('.chat');
     const atEnd = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 4;
-    if (up) {
+    if (up || panned) {
       root.classList.add('kb');
-      root.style.setProperty('--app-top', Math.round(Number(vv.offsetTop) || 0) + 'px');
+      root.style.setProperty('--app-top', Math.round(top) + 'px');
       root.style.setProperty('--app-h', Math.round(h) + 'px');
     } else {
       root.classList.remove('kb');

@@ -394,6 +394,7 @@ function cycleName(names, current, d) {
 var tallest = 0;
 var width = 0;
 var up = false;
+var panned = false;
 var typingInto = () => {
 	const a = typeof document !== "undefined" ? document.activeElement : null;
 	return !!a && (a.tagName === "TEXTAREA" || a.tagName === "INPUT" || a.isContentEditable);
@@ -409,12 +410,14 @@ function syncViewport() {
 		}
 		tallest = Math.max(tallest, h, Number(globalThis.innerHeight) || 0);
 		up = tallest - h > 120 && typingInto();
+		const top = Number(vv.offsetTop) || 0, unzoomed = Math.abs((Number(vv.scale) || 1) - 1) < .01;
+		panned = !up && typingInto() && unzoomed && (Math.abs(top) >= 1 || panned && tallest - h >= 1);
 		const root = document.documentElement;
 		const list = document.querySelector(".chat");
 		const atEnd = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 4;
-		if (up) {
+		if (up || panned) {
 			root.classList.add("kb");
-			root.style.setProperty("--app-top", Math.round(Number(vv.offsetTop) || 0) + "px");
+			root.style.setProperty("--app-top", Math.round(top) + "px");
 			root.style.setProperty("--app-h", Math.round(h) + "px");
 		} else {
 			root.classList.remove("kb");
@@ -8325,7 +8328,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 									ref: composer,
 									rows: embedded ? 1 : 2,
 									value: draft,
-									placeholder: drag ? t("sess.drop") : embedded ? t("sess.writeToShort", { name }) : t("sess.writeTo", { name }),
+									placeholder: drag ? t("sess.drop") : embedded || !finePointer() ? t("sess.writeToShort", { name }) : t("sess.writeTo", { name }),
 									onFocus: () => setComposerFocused(true),
 									onBlur: () => setComposerFocused(false),
 									onInput: (e) => {
