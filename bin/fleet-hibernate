@@ -96,6 +96,7 @@ while [ $# -gt 0 ]; do
     --json)       JSON=yes; shift ;;
     --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
     --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
+    --owner)      MODE=owner; ONLY_SOCK="${2:?--owner needs SOCK}"; shift 2 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
     -h|--help)    sed -n '2,28p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
@@ -1500,11 +1501,25 @@ case "$MODE" in
   # a second copy of it — two spellings of "which conversation is live" would drift the way
   # this repo keeps writing down. No guessing is added here: the answer is live_sid's or
   # nothing, and the caller decides what nothing means.
+  # ── WHOSE FLEET IS THIS SOCKET, FOR A CALLER THAT WRITES IN A DIR (fleet-pause) ──
+  # Prints sock_owner's answer — own, none, or the owning profile's fleet dir — and nothing else,
+  # so a second script never grows its own reading of the projects files.
+  owner)
+    sock_owner "$ONLY_SOCK"
+    exit 0 ;;
   resolve)
     live_sid "$ONLY_SOCK" "$NAMED" || exit 1
     _old="$(field_for "$ONLY_SOCK" "$NAMED" 4)"; _cwd="$(field_for "$ONLY_SOCK" "$NAMED" 7)"
     [ -n "$_cwd" ] || _cwd="$(tmux -u -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
-    [ "$LIVE_ID" = "$_old" ] || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd" "$NAMED" "$FOLLOW_PREV"
+    # The answer is the same whoever asks; the CORRECTION is this dir's business only. A caller
+    # whose env points at one profile's dir and whose socket belongs to another's (a hand-typed
+    # fleet-model, a restart run from the wrong shell) used to write a record here for that
+    # fleet's session — eighteen `unknown` ones built up that way. So, as build_plan does: a
+    # socket another profile owns is corrected only where this dir already holds its record.
+    _rec="$(field_for "$ONLY_SOCK" "$NAMED" 1)"
+    case "$(sock_owner "$ONLY_SOCK")" in own|none) _rec=own ;; esac
+    [ "$LIVE_ID" = "$_old" ] || [ -z "$_rec" ] \
+      || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd" "$NAMED" "$FOLLOW_PREV"
     printf '%s\x1f%s\x1f%s\n' "$LIVE_ID" "$LIVE_TR" "$LIVE_HOW"
     exit 0 ;;
   # ── WHAT IS IN THE INPUT BOX, FOR A CALLER ABOUT TO TYPE INTO IT ──────────────

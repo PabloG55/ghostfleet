@@ -25826,6 +25826,40 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "...and neither launched anything" "no:no" "$([ -f "$OP/launched" ] && echo yes || echo no):$(opup cf-acme-api docs-pass)"
   rm -f "$OPP/fleet/cf-acme-api.docs-pass.asleep"
 
+  # ── --resolve: the answer is given, the record is not written for another profile ──
+  # fleet-restart, fleet-model and fleet-jarvis ask it with their own env. Aimed at a socket
+  # another profile owns, it used to file a record in THIS dir for that fleet's session.
+  oprec() { jq -r --arg id "$1" 'select(.session_id==$id) | .session_id' "$OPP"/fleet/*.json 2>/dev/null | grep -c . || true; }
+  opres() { env -u TMUX -u TMUX_PANE HOME="$OPH" CLAUDE_FLEET_DIR="$OPP/fleet" CLAUDE_CONFIG_DIR="$OPP" \
+              "$ROOT/bin/fleet-hibernate" --resolve "$@" 2>/dev/null | tr '\037' '|'; }
+  is "own: --resolve for another profile's session still answers" "$OPA" "$(opres cf-acme-api master | cut -d'|' -f1)"
+  is "...and files no record of it in this dir" "0" "$(oprec "$OPA")"
+  OPR=dddddddd-5555-5555-5555-000000000005
+  op_session cf-personal-toolbox rs "$OPR" "$OPP" "$OPW/fleet" 1; rm -f "$OPW/fleet/$OPR.json"
+  is "own: --resolve for this profile's own session still answers" "$OPR" "$(opres cf-personal-toolbox rs | cut -d'|' -f1)"
+  is "...and still files the record it was missing" "1" "$(oprec "$OPR")"
+  rm -f "$OPP/fleet/$OPR.json"; tmux -L cf-personal-toolbox kill-session -t rs 2>/dev/null
+
+  # ── fleet-pause: a park is a marker in this profile's dir, for this profile's fleet ──
+  op_session cf-acme-api w1 dddddddd-6666-6666-6666-000000000006 "$OPW" "$OPW/fleet" 1
+  op_session cf-personal-toolbox w1 dddddddd-7777-7777-7777-000000000007 "$OPP" "$OPP/fleet" 1
+  opp() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK HOME="$OPH" CLAUDE_FLEET_DIR="$OPP/fleet" CLAUDE_CONFIG_DIR="$OPP" \
+            "$ROOT/bin/fleet-pause" "$@"; }
+  opp -s cf-acme-api w1 > "$OP/pause" 2>&1; oprc=$?
+  is "own: fleet-pause aimed at another profile's fleet is refused" "2" "$oprc"
+  is "...naming the dir that fleet's park belongs in" "yes" \
+     "$(opyn grep -q "CLAUDE_FLEET_DIR=$OPW/fleet fleet-pause -s cf-acme-api w1" "$OP/pause")"
+  is "...and writes no .parked marker here" "0" "$(find "$OPP/fleet" -name 'cf-acme-api.*.parked' | grep -c . || true)"
+  opp --interrupt -s cf-acme-api w1 > "$OP/intr" 2>&1; oprc=$?
+  is "own: an interrupt of another profile's session is still allowed, and writes nothing" "0:0" \
+     "$oprc:$(find "$OPP/fleet" -name 'cf-acme-api.*.parked' | grep -c . || true)"
+  opp -s cf-personal-toolbox w1 > "$OP/pause" 2>&1; oprc=$?
+  is "own: fleet-pause of this profile's own session still parks it" "0:yes" \
+     "$oprc:$([ -f "$OPP/fleet/cf-personal-toolbox.w1.parked" ] && echo yes || echo no)"
+  rm -f "$OPP/fleet/cf-personal-toolbox.w1.parked"
+  tmux -L cf-acme-api kill-session -t w1 2>/dev/null; tmux -L cf-personal-toolbox kill-session -t w1 2>/dev/null
+  rm -f "$OPW/fleet/dddddddd-6666-6666-6666-000000000006.json" "$OPP/fleet/dddddddd-7777-7777-7777-000000000007.json"
+
   # ── for real, last, because it ends panes ──
   op --pressure > "$OP/press" 2>&1
   is "own: a real --pressure leaves the other profile's leads up" "yes:yes" \
