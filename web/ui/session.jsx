@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { Ship } from './fleet.jsx';
-import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs } from './ui.jsx';
+import { statusOf, StatusPill, Btn, SendBtn, usePoll, toast, Markdown, Confirm, Modal, useRequest, sinceTs, ago } from './ui.jsx';
 import { Skeleton } from './skeleton.jsx';
 import { render as renderAnsi } from '../ansi.js';   // the phone client's own, not a copy
 import { useFleet, useSlot } from './adapter.jsx';
@@ -269,6 +269,90 @@ const STATE_KEY = { listening: 'chat.speakListening', hearing: 'chat.speakHearin
 const hhmm = (at) => new Date(at * 1000).toLocaleString(locale(), { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const localInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
+// ── DETAILS: what this session left listening, running or booted ─────────────
+// lib/ports.mjs's last scan, narrowed to this one session by the daemon (/api/ports). READ ONCE
+// WHEN THE SHEET OPENS, NEVER POLLED: the scan is a dozen processes and the governor already redoes
+// it every five minutes. Every row says HOW it was tied to the session, because that is what makes
+// it believable: a port is this session's only if a parent process, a working directory, a compose
+// label, a mount or a process naming the device says so.
+//   READ ONLY, and the phone gets no control here. `can_refresh` is the daemon saying this is the
+// owner's own browser on this machine, the one place a scan may be started from. Nothing on a card
+// says any of this: the line at the top is the flag, and it is shown only here and in fleet-ports.
+export const IDLE_STATES = ['done', 'asleep', 'parked', 'lost', 'exited', 'stopped'];
+export function detailsFlag(state, items) {
+  if (!IDLE_STATES.includes(state) || !items?.length) return '';
+  const ports = [...new Set(items.flatMap(i => i.kind === 'listen' ? [i.port] : i.kind === 'container' ? (i.ports || []).map(p => p.host) : []))].sort((a, b) => a - b);
+  const nc = items.filter(i => i.kind === 'container').length, ns = items.filter(i => i.kind === 'simulator').length;
+  const bits = [];
+  if (ports.length) bits.push(t('details.flagListen', { ports: ports.map(p => ':' + p).join(', ') }));
+  if (nc) bits.push(t(nc === 1 ? 'details.flagContainer' : 'details.flagContainers', { n: nc }));
+  if (ns) bits.push(t(ns === 1 ? 'details.flagSimulator' : 'details.flagSimulators', { n: ns }));
+  return `${t(`details.state.${state}`)} — ${bits.join(', ')}`;
+}
+function howWords(tie) {
+  const at = tie.path ? tie.path.replace(/^\/(?:Users|home)\/[^/]+/, '~') : '';
+  if (tie.how === 'parent') return t('details.how.parent', { chain: (tie.chain || []).join(' ← ') });
+  if (tie.how === 'cwd') return t('details.how.cwd', { path: at });
+  if (tie.how === 'label') return t('details.how.label', { path: at });
+  if (tie.how === 'mount') return t('details.how.mount', { path: at });
+  if (tie.how === 'argv') return t('details.how.argv', { pid: tie.pid });
+  return '';
+}
+function DetailsModal({ project, name, onClose }) {
+  const fleet = useFleet();
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    try { setData(await fleet.ports(project, name)); setErr(''); }
+    catch (e) { setErr(String(e?.message || e)); }
+  };
+  useEffect(() => { load(); }, [project, name]);
+  const refresh = async () => {
+    setBusy(true);
+    try { await fleet.portsRefresh(project); await load(); }
+    catch (e) { toast(String(e?.message || e), 'bad'); }
+    finally { setBusy(false); }
+  };
+  const items = data?.items || [];
+  const flag = data ? detailsFlag(data.state, items) : '';
+  const groups = [['listen', 'details.listening'], ['container', 'details.containers'], ['simulator', 'details.simulators']]
+    .map(([kind, head]) => [head, items.filter(i => i.kind === kind)]).filter(([, list]) => list.length);
+  const age = data?.at ? Date.now() / 1000 - data.at : null;
+  return (
+    <Modal sheet wide title={t('details.title', { name })} onClose={onClose}>
+      <div class="modal-body stack details">
+        {flag ? <p class="details-flag" role="status"><Icon name="warning" /> {flag}</p> : null}
+        {err ? <p class="bad small">{err}</p>
+          : !data ? <p class="muted">{t('common.loading')}</p>
+          : !data.at ? <p class="muted">{t('details.never')}</p>
+          : !items.length ? <p class="muted">{t('details.empty')}</p>
+          : groups.map(([head, list]) => (
+            <section key={head} class="details-group">
+              <h3>{t(head)}</h3>
+              <ul>
+                {list.map(it => (
+                  <li key={`${it.kind}:${it.port || it.id || it.udid}:${it.pid || ''}`}>
+                    <div class="details-what">
+                      {it.kind === 'listen' ? <><b>:{it.port}</b> <span>{it.name || '?'}</span> <span class="muted small">pid {it.pid}</span></>
+                        : it.kind === 'container' ? <><b>{it.name || it.id}</b> <span class="muted small">{it.image}</span>{(it.ports || []).map(p => <span key={`${p.host}${p.to}`} class="muted small"> :{p.host}→{p.to}</span>)}</>
+                        : <><b>{it.name}</b> <span class="muted small">{it.runtime}</span></>}
+                    </div>
+                    <div class="details-how muted small">{howWords(it.tie)}</div>
+                    {it.kind === 'listen' && it.cmd ? <code class="details-cmd small">{it.cmd}</code> : null}
+                  </li>))}
+              </ul>
+            </section>))}
+        <footer>
+          <span class="muted small">{data?.at ? (age < 60 ? t('details.scannedNow') : t('details.scanned', { ago: ago(age) })) : ''}</span>
+          {data?.can_refresh && fleet.portsRefresh
+            ? <Btn kind="ghost sm" disabled={busy} onClick={refresh} icon="refresh">{t('details.refresh')}</Btn> : null}
+        </footer>
+      </div>
+    </Modal>
+  );
+}
+
 function ScheduleModal({ name, onClose, onSave }) {
   const [msg, setMsg] = useState(() => t('sched.default'));
   const [when, setWhen] = useState(() => localInput(new Date(Date.now() + 3600e3)));
@@ -347,6 +431,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   });
   const [labelEdit, setLabelEdit] = useState(null);
   const [schedOpen, setSchedOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [files, setFilesState] = useState(() => draftFiles(dkey));   // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
   // An upload answers seconds after it was picked, perhaps once the person has moved on: it lands in
   // THIS session's draft, and on the screen only while the screen is still this session's.
@@ -405,7 +490,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   const shaped = waiting && !card;
   const owner = card?.owner || tr.page?.owner || null;
   const prompt = pane.data?.prompt || null;
-  const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen;
+  const available = !quiet && !confirm && rename == null && labelEdit == null && !schedOpen && !detailsOpen;
   // A request waits for a pause in an active sentence. The draft stays in its original box
   // until then; Enter explicitly opens the request rather than sending that sentence.
   const held = !!prompt && composerFocused && composerRecent;
@@ -580,6 +665,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
               <div class="menu">
                 {can('gfw_label') ? <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button> : null}
                 {can('gfw_schedule') ? <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button> : null}
+                {card && fleet.ports ? <button onClick={() => { setMenu(false); setDetailsOpen(true); }}><Icon name="list" /> {t('sess.details')}</button> : null}
                 {card && !card.lead ? <button onClick={() => { setMenu(false); setRename(name); }}>{t('sess.renameMenu')}</button> : null}
                 {card && !card.lead ? <button onClick={() => { setMenu(false); stop(false); }}>{t('sess.stopMenu')}</button> : null}
                 {card && !card.lead ? <button class="danger" onClick={() => { setMenu(false); stop(true); }}>{t('sess.stopRmMenu')}</button> : null}
@@ -675,6 +761,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
       </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
+      {detailsOpen ? <DetailsModal project={project} name={name} onClose={() => setDetailsOpen(false)} /> : null}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}
                                   onSave={async (at, msg) => { const r = await act('gfw_schedule', { at, msg }); if (r) toast(r.text, 'good'); }} /> : null}
       {labelEdit != null ? (

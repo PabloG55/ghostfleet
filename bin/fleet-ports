@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# fleet-ports — what this profile's sessions left listening, running or booted, and how each
+# one was tied to its session (lib/ports.mjs has the whole account).
+#
+#   fleet-ports                    scan now, keep the result for the session screens, print it
+#   fleet-ports -s SOCKET NAME     one session: what it holds, and the line its Details shows
+#                                  ("asleep — still listening on :5173")
+#   fleet-ports --cached           print the last scan (the governor's, every 5 minutes) instead
+#   fleet-ports --no-write         scan and print, and leave the kept result as it was
+#   fleet-ports --json             the same, as data
+#
+# Read only. It lists TCP listeners (lsof on macOS, ss on Linux), docker containers and booted
+# simulators, and names a session only when a parent process, a working directory, a compose
+# label, a bind mount or a process that names the device says so. Everything else is "not tied
+# to a session". Another profile's sessions are counted, never listed: run it from that profile.
+#
+# The terminal's view of what a session's Details shows on the web client: there is no grid
+# column and nothing on a card.
+#
+# A launcher, as bin/fleet-digest is for its node: this puts `fleet-ports` on PATH with a
+# readable error when node is missing.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-ports: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/../lib/ports.mjs" cli "$@"

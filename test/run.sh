@@ -25058,6 +25058,203 @@ else
 fi
 unset CLAUDE_FLEET_WAKE_GRACE
 
+# ── what a session left listening, and how it was tied to it (lib/ports.mjs) ──
+# Two profiles, as the group above: `toolbox` is the personal profile's and every scan here runs
+# as that profile; `acme-api` is the work profile's. Real throwaway node listeners on ports the
+# suite picks, each one a different way a leftover gets left: started IN a session's pane (the
+# parent walk), started detached from the shell with its cwd in an asleep session's folder (the
+# cwd), in a done session's pane (the flag), in a worktree no session holds (stopped), in a
+# folder no project owns (not tied), in another profile's pane (never listed, only counted), and
+# one run under an agent's name (an agent's own socket, not a leftover). Every listener is
+# stopped by the pid this group captured, and each one also exits by itself after two minutes,
+# so a run killed halfway leaves nothing listening for long.
+#   Docker and simctl are SHIMS on PATH answering exactly what the scanner asks, so the label,
+# mount and UDID rules are tested the same on every machine; a real container runs only where
+# docker and a local image already are (--init --cpus 3), and no simulator is ever booted.
+group "ports: a leftover is tied to its session, and only to this profile's"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1 \
+   && { command -v lsof >/dev/null 2>&1 || command -v ss >/dev/null 2>&1; }; then
+  PT="$(cd "$(mktemp -d "$TEST_RUNS.$$.ports.XXXXXX")" && pwd -P)"
+  PTH="$PT/home"; PTW="$PTH/.claude"; PTP="$PTH/.claude-personal"
+  mkdir -p "$PTW/fleet" "$PTP/fleet" "$PTH/.config/ghostfleet" "$PT/bin" "$PT/elsewhere" "$PT/acme-api"
+  git init -q "$PT/toolbox" && git -C "$PT/toolbox" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+  for w in api-fix docs-pass types old-task; do git -C "$PT/toolbox" worktree add -q "$PT/toolbox-$w" -b "$w" 2>/dev/null; done
+  printf 'acme-api\t%s\twork\n' "$PT/acme-api" > "$PTH/.config/ghostfleet/projects"
+  printf 'toolbox\t%s\tpersonal\n' "$PT/toolbox" > "$PTH/.config/ghostfleet/projects.personal"
+  cat > "$PT/listen.js" <<'JS'
+const s = require('net').createServer(c => c.end()).listen(+process.argv[2], '127.0.0.1');
+setTimeout(() => process.exit(0), 120000).unref();
+JS
+  ln -s "$(command -v node)" "$PT/bin/claude"
+  ptup() { local i=0; while [ "$i" -lt 100 ]; do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 0.05; i=$((i + 1)); done; return 1; }
+  # As the personal profile, from outside any fleet, with the shims first on PATH.
+  ports() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_PROFILE \
+              HOME="$PTH" PATH="$PT/bin:$PATH" CLAUDE_FLEET_DIR="$PTP/fleet" CLAUDE_CONFIG_DIR="$PTP" \
+              "$ROOT/bin/fleet-ports" "$@"; }
+  PTP1="$(free_port)"; PTP2="$(free_port)"; PTP3="$(free_port)"; PTP4="$(free_port)"
+  PTP5="$(free_port)"; PTP6="$(free_port)"; PTP7="$(free_port)"; PTP8="$(free_port)"
+  # in a session's pane, as its child: tied by the parent walk
+  tmux -L cf-personal-toolbox new-session -d -s api-fix -c "$PT/toolbox-api-fix" -x 80 -y 24 "node '$PT/listen.js' $PTP1; sleep 600"
+  # in a done session's pane: its record says ready, and its last inbox row says done
+  tmux -L cf-personal-toolbox new-session -d -s types -c "$PT/toolbox-types" -x 80 -y 24 "node '$PT/listen.js' $PTP3; sleep 600"
+  jq -n --arg s cf-personal-toolbox --arg cwd "$PT/toolbox-types" --argjson ts "$(date +%s)" \
+    '{session_id:"eeeeeeee-0000-0000-0000-000000000003", sock:$s, slot:"types", cwd:$cwd, status:"ready", ts:$ts}' \
+    > "$PTP/fleet/eeeeeeee-0000-0000-0000-000000000003.json"
+  printf '%s\ttypes\tdone\tshipped the types\n' "$(date +%s)" >> "$PTP/fleet/cf-personal-toolbox.inbox"
+  # in another profile's pane
+  tmux -L cf-acme-api new-session -d -s master -c "$PT/acme-api" -x 80 -y 24 "node '$PT/listen.js' $PTP5; sleep 600"
+  # detached, cwd in an asleep session's folder: the marker keeps the folder
+  printf '%s\teeeeeeee-0000-0000-0000-000000000002\t%s\t3\n' "$(date +%s)" "$PT/toolbox-docs-pass" > "$PTP/fleet/cf-personal-toolbox.docs-pass.asleep"
+  ( cd "$PT/toolbox-docs-pass" && exec node "$PT/listen.js" "$PTP2" ) >/dev/null 2>&1 & PTK2=$!
+  # detached, in a worktree no session holds; in a folder no project owns; under an agent's name
+  ( cd "$PT/toolbox-old-task" && exec node "$PT/listen.js" "$PTP4" ) >/dev/null 2>&1 & PTK4=$!
+  ( cd "$PT/elsewhere" && exec node "$PT/listen.js" "$PTP6" ) >/dev/null 2>&1 & PTK6=$!
+  ( cd "$PT/toolbox-api-fix" && exec "$PT/bin/claude" "$PT/listen.js" "$PTP7" ) >/dev/null 2>&1 & PTK7=$!
+  # in a clone of its own that sits inside a session's folder: somebody else's checkout
+  git init -q "$PT/toolbox-api-fix/vendor/acme-web"
+  ( cd "$PT/toolbox-api-fix/vendor/acme-web" && exec node "$PT/listen.js" "$PTP8" ) >/dev/null 2>&1 & PTK8=$!
+  ptall=yes; for p in "$PTP1" "$PTP2" "$PTP3" "$PTP4" "$PTP5" "$PTP6" "$PTP7" "$PTP8"; do ptup "$p" || ptall=no; done
+  is "ports: eight fixture listeners are up" "yes" "$ptall"
+
+  ports --json > "$PT/scan.json" 2> "$PT/scan.err"; ptrc=$?
+  is "ports: the scan runs" "0:yes" "$ptrc:$(jq -e '.v == 1' "$PT/scan.json" >/dev/null 2>&1 && echo yes || echo no)"
+  pti() { jq -c --argjson p "$1" '[.items[] | select(.kind == "listen" and .port == $p)] | .[0] // null
+          | if . == null then "absent" else [.tie.level, (.tie.session // "-"), (.tie.how // "-"), (.tie.state // "-")] | join(" ") end' "$PT/scan.json" | tr -d '"'; }
+  pts() { jq -r --arg s "$1" '.sessions[] | select(.sock == "cf-personal-toolbox" and .session == $s) | .state' "$PT/scan.json"; }
+  is "ports: a listener its pane started is that session's, by parent" "session api-fix parent -" "$(pti "$PTP1")"
+  is "...and the walk ends at the pane's own process" "$(tmux -u -L cf-personal-toolbox display-message -p -t api-fix '#{pane_pid}')" \
+     "$(jq -r --argjson p "$PTP1" '.items[] | select(.port == $p) | .tie.chain | last' "$PT/scan.json")"
+  is "ports: a detached listener in an asleep session's folder is its, by cwd" "session docs-pass cwd -" "$(pti "$PTP2")"
+  is "...and the session reads as asleep" "asleep" "$(pts docs-pass)"
+  is "ports: a session whose last word was done reads as done" "done" "$(pts types)"
+  is "...and a live one with no done reads as live" "live" "$(pts api-fix)"
+  is "ports: a listener in a worktree no session holds is the project's, stopped" "project - cwd stopped" "$(pti "$PTP4")"
+  is "ports: a listener in no project's folder is not tied to a session" "machine - - -" "$(pti "$PTP6")"
+  is "ports: one in a separate clone inside a session's folder is not that session's" "machine - - -" "$(pti "$PTP8")"
+  is "ports: another profile's session's listener is not listed" "absent" "$(pti "$PTP5")"
+  is "...only counted" "yes" "$([ "$(jq -r '.other' "$PT/scan.json")" -ge 1 ] && echo yes || echo no)"
+  is "...and nothing in the scan names its session" "0" "$(jq -r '[.. | strings | select(. == "cf-acme-api")] | length' "$PT/scan.json")"
+  is "ports: an agent's own socket is not a leftover" "absent" "$(pti "$PTP7")"
+  is "...and is counted as one" "yes" "$([ "$(jq -r '.agents' "$PT/scan.json")" -ge 1 ] && echo yes || echo no)"
+
+  # ── the flag, in the terminal's view ──
+  ports --cached > "$PT/scan.txt" 2>&1
+  is "ports: the done session is flagged with the port it still holds" "yes" \
+     "$(grep -q "types  *done — still listening on :$PTP3\$" "$PT/scan.txt" && echo yes || echo no)"
+  is "...the asleep one too" "yes" "$(grep -q "docs-pass  *asleep — still listening on :$PTP2\$" "$PT/scan.txt" && echo yes || echo no)"
+  is "...and the stopped worktree, by its folder" "yes" \
+     "$(grep -q "(no session)  *stopped — still listening on :$PTP4 — .*toolbox-old-task, no session holds it" "$PT/scan.txt" && echo yes || echo no)"
+  is "...and a live session is not" "no" "$(grep -q "api-fix .*still listening" "$PT/scan.txt" && echo yes || echo no)"
+  is "...and the other profile is a count, with the run that would list it" "yes" \
+     "$(grep -qE "belongs? to another profile's fleets — run fleet-ports from that profile" "$PT/scan.txt" && echo yes || echo no)"
+  is "ports: -s gives one session's flag" "asleep — still listening on :$PTP2" \
+     "$(ports --cached --json -s cf-personal-toolbox docs-pass | jq -r '.flag')"
+  ports -s cf-acme-api master > "$PT/refused" 2>&1; ptrc=$?
+  is "ports: -s naming another profile's fleet is refused" "2" "$ptrc"
+  is "...naming the run that would answer" "yes" \
+     "$(grep -q "CLAUDE_FLEET_DIR=$PTW/fleet fleet-ports -s cf-acme-api master" "$PT/refused" && echo yes || echo no)"
+
+  # ── the cache: where the session screen reads it, and only there ──
+  is "ports: the cache is in a subfolder, never a top-level record" "yes:0" \
+     "$([ -f "$PTP/fleet/ports/scan.json" ] && echo yes || echo no):$(find "$PTP/fleet" -maxdepth 1 -name '*.json' -newer "$PT/listen.js" ! -name 'eeeeeeee-*' | grep -c . || true)"
+  ptat="$(cat "$PTP/fleet/ports/at")"; echo 1 > "$PTP/fleet/ports/at"
+  ports --json --no-write >/dev/null 2>&1
+  is "ports: --no-write leaves the kept scan as it was" "1" "$(cat "$PTP/fleet/ports/at")"
+  echo "$ptat" > "$PTP/fleet/ports/at"
+
+  # ── the governor's tick: a fresh scan costs no process at all ──
+  # ports_tick lifted out of the governor, with `node` a shim that writes down every start.
+  mkdir -p "$PT/shim"
+  printf '#!/bin/sh\necho "$*" >> "%s/node.log"\nexec "%s" "$@"\n' "$PT" "$(command -v node)" > "$PT/shim/node"; chmod +x "$PT/shim/node"
+  sed -n '/^PORTS_EVERY=/p;/^ports_tick() {/,/^}/p' "$ROOT/bin/fleet-governor" > "$PT/tick.sh"
+  pttick() {   # DRY, then the tick, as the personal profile's governor
+    env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_PORTS_EVERY -u CLAUDE_FLEET_GOV_CLOCK HOME="$PTH" PATH="$PT/shim:$PT/bin:$PATH" CLAUDE_FLEET_DIR="$PTP/fleet" CLAUDE_CONFIG_DIR="$PTP" \
+      bash -c 'LIB_DIR="$1"; FLEET_DIR="$2"; DRY="$3"; GOV_STARTED=$(date +%s); log() { echo "$*"; }; . "$4"; ports_tick' _ \
+      "$ROOT/lib" "$PTP/fleet" "$1" "$PT/tick.sh" >/dev/null 2>&1
+  }
+  rm -f "$PT/node.log"; date +%s > "$PTP/fleet/ports/at"
+  pttick 0
+  is "ports: the governor's tick with a fresh scan starts no process" "0" "$(grep -c . "$PT/node.log" 2>/dev/null || echo 0)"
+  echo 1 > "$PTP/fleet/ports/at"
+  pttick 1
+  is "...a dry-run governor never scans, however stale" "0" "$(grep -c . "$PT/node.log" 2>/dev/null || echo 0)"
+  pttick 0
+  is "...and a stale one scans exactly once" "1" "$(grep -c 'ports.mjs refresh' "$PT/node.log" 2>/dev/null || echo 0)"
+  is "...and keeps it for the screens" "yes" "$([ "$(cat "$PTP/fleet/ports/at")" -gt 1 ] && echo yes || echo no)"
+  pttick 0
+  is "...and the next tick, fresh again, starts nothing" "1" "$(grep -c . "$PT/node.log" 2>/dev/null || echo 0)"
+
+  # ── containers: by the compose label, by a bind mount, and never by a guess ──
+  cat > "$PT/bin/docker" <<SH
+#!/bin/sh
+case "\$1" in
+  ps) printf 'aaaaaaaaaaaa1\nbbbbbbbbbbbb2\ncccccccccccc3\n' ;;
+  inspect) cat "$PT/inspect.json" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$PT/bin/docker"
+  jq -n --arg a "$PT/toolbox-api-fix" --arg d "$PT/toolbox-docs-pass" --arg hp "$(free_port)" '[
+    {Id:"aaaaaaaaaaaa1", Name:"/api-fix-db-1", Config:{Image:"postgres:16", Labels:{"com.docker.compose.project.working_dir":$a}}, Mounts:[], NetworkSettings:{Ports:{"5432/tcp":[{HostPort:$hp}]}}, State:{StartedAt:"x"}},
+    {Id:"bbbbbbbbbbbb2", Name:"/docs-cache", Config:{Image:"redis:7", Labels:{}}, Mounts:[{Type:"bind", Source:($d + "/data")}], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}},
+    {Id:"cccccccccccc3", Name:"/two-homes", Config:{Image:"busybox", Labels:{}}, Mounts:[{Type:"bind", Source:$a}, {Type:"bind", Source:$d}], NetworkSettings:{Ports:{}}, State:{StartedAt:"x"}}]' > "$PT/inspect.json"
+  ports --json --no-write > "$PT/dk.json" 2>/dev/null
+  ptc() { jq -r --arg n "$1" '.items[] | select(.kind == "container" and .name == $n) | [.tie.level, (.tie.session // "-"), (.tie.how // "-")] | join(" ")' "$PT/dk.json"; }
+  is "ports: a compose container is tied to the session whose folder its label names" "session api-fix label" "$(ptc api-fix-db-1)"
+  is "ports: a container that bind-mounts a session's folder is that session's" "session docs-pass mount" "$(ptc docs-cache)"
+  is "ports: one mounting two sessions' folders is neither's" "project - mount" "$(ptc two-homes)"
+  rm -f "$PT/bin/docker"
+
+  # ── simulators: macOS only, by a process under one session's pane naming the device ──
+  if [ "$(uname -s)" = Darwin ]; then
+    PTU=11111111-2222-3333-4444-555555555555
+    printf '#!/bin/sh\n[ "$1 $2 $3 $4 $5" = "simctl list devices booted -j" ] || exit 1\ncat <<EOF\n{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-0":[{"udid":"%s","name":"iPhone 17","state":"Booted"}]}}\nEOF\n' "$PTU" > "$PT/bin/xcrun"
+    chmod +x "$PT/bin/xcrun"
+    ( exec -a launchd_sim sleep 120 ) & PTKS=$!
+    # Two commands, so neither shell can exec the UDID out of its own argv.
+    tmux -L cf-personal-toolbox new-window -d -t api-fix "sh -c 'sleep 120; :' simctl-launch-$PTU"
+    sleep 0.3
+    ports --json --no-write > "$PT/sim.json" 2>/dev/null
+    is "ports: a booted simulator named by a session's process is that session's" "session api-fix argv" \
+       "$(jq -r '.items[] | select(.kind == "simulator") | [.tie.level, (.tie.session // "-"), .tie.how] | join(" ")' "$PT/sim.json")"
+    tmux -L cf-personal-toolbox kill-window -t "api-fix:1" 2>/dev/null
+    ports --json --no-write > "$PT/sim.json" 2>/dev/null
+    is "...and with nothing naming it, the machine's" "machine" \
+       "$(jq -r '.items[] | select(.kind == "simulator") | .tie.level' "$PT/sim.json")"
+    kill "$PTKS" 2>/dev/null; wait "$PTKS" 2>/dev/null; rm -f "$PT/bin/xcrun"
+  else
+    na "ports: a booted simulator named by a session's process is that session's" "simulators are macOS only"
+  fi
+
+  # ── a real container, only where docker and a local image already are ──
+  ptimg=""
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    for i in busybox:latest alpine:latest; do docker image inspect "$i" >/dev/null 2>&1 && { ptimg="$i"; break; }; done
+  fi
+  if [ -n "$ptimg" ]; then
+    ptid="$(docker run -d --init --cpus 3 --label "com.docker.compose.project.working_dir=$PT/toolbox-api-fix" "$ptimg" sleep 60 2>/dev/null)"
+    ports --json --no-write > "$PT/real.json" 2>/dev/null
+    is "ports: a real compose-labelled container is tied to its session" "session api-fix label" \
+       "$(jq -r --arg id "${ptid:0:12}" '.items[] | select(.kind == "container" and .id == $id) | [.tie.level, (.tie.session // "-"), .tie.how] | join(" ")' "$PT/real.json")"
+    [ -n "$ptid" ] && docker rm -f "$ptid" >/dev/null 2>&1
+  else
+    skip "ports: a real compose-labelled container is tied to its session" "docker, its daemon or a local busybox/alpine image not available"
+  fi
+
+  # ── done: stop exactly what this group started ──
+  for p in "$PTP1" "$PTP3" "$PTP5"; do
+    ptpid="$(jq -r --argjson p "$p" '.items[] | select(.kind == "listen" and .port == $p) | .pid' "$PT/scan.json" 2>/dev/null)"
+    [ -n "$ptpid" ] && kill "$ptpid" 2>/dev/null
+  done
+  kill "$PTK2" "$PTK4" "$PTK6" "$PTK7" "$PTK8" 2>/dev/null; wait "$PTK2" "$PTK4" "$PTK6" "$PTK7" "$PTK8" 2>/dev/null
+  for s in cf-personal-toolbox cf-acme-api; do tmux -L "$s" kill-server 2>/dev/null; done
+  sleep 0.5; ptleft=""
+  for p in "$PTP1" "$PTP2" "$PTP3" "$PTP4" "$PTP5" "$PTP6" "$PTP7" "$PTP8"; do (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && ptleft="$ptleft :$p"; done
+  is "ports: nothing this group started is still listening" "" "$ptleft"
+else
+  skip "ports: a leftover is tied to its session" "tmux, jq, node, git or lsof/ss missing"
+fi
+
 # ── 4a10c10. a session sleeps, and comes back ────────────────────────────────
 # The round trip, and the reason it can run in a suite at all: everything here happens on a
 # socket under this run's own $TMUX_TMPDIR, against a STUB agent this group puts on PATH.

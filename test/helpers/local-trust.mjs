@@ -37,6 +37,15 @@ try {
   fs.writeFileSync(shell, "#!/bin/sh\nexport PS1='$ '\nexec /bin/sh -i\n", { mode: 0o755 });
   env.SHELL = shell;
   fs.mkdirSync(path.join(env.HOME, '.claude/fleet'), { recursive: true });
+  // The last ports scan (lib/ports.mjs), as the governor would have left it: one session's
+  // listener and a second session's, so a read for one cannot be passing on the other's.
+  fs.mkdirSync(path.join(env.HOME, '.claude/fleet/ports'), { recursive: true });
+  const scanAt = Math.floor(Date.now() / 1000);
+  const tie = (session) => ({ level: 'session', sock: 'cf-acme-api', session, project: 'acme-api', how: 'parent', chain: [4242, 4200] });
+  fs.writeFileSync(path.join(env.HOME, '.claude/fleet/ports/scan.json'), JSON.stringify({ v: 1, at: scanAt, sources: { listen: 'lsof', docker: 'missing', simctl: 'not macOS' },
+    sessions: [{ sock: 'cf-acme-api', project: 'acme-api', session: 'api-1', state: 'done', status: 'ready' }, { sock: 'cf-acme-api', project: 'acme-api', session: 'api-2', state: 'live' }],
+    items: [{ kind: 'listen', port: 5173, pid: 4242, cmd: 'node vite', tie: tie('api-1') }, { kind: 'listen', port: 8080, pid: 4243, cmd: 'node api', tie: tie('api-2') }], other: 0, agents: 0 }));
+  fs.writeFileSync(path.join(env.HOME, '.claude/fleet/ports/at'), `${scanAt}\n`);
   fs.mkdirSync(path.join(tmp, 'acme-api'));
   fs.mkdirSync(path.join(tmp, 'rt'));
   for (const d of ['bin', 'lib', 'mcp', 'mods', 'tmux', 'web']) fs.cpSync(path.join(root, d), path.join(tmp, 'rt', d), { recursive: true });
@@ -80,6 +89,12 @@ try {
   const health = await call('GET', '/api/health');
   is('local: server announces this connection', true, health.json?.local_trust === true);
   is('local: usage needs no passkey', 200, (await call('GET', '/api/usage')).status);
+  // A session's Details: the last scan, narrowed to that session, and a Refresh only here.
+  const portsRead = (extra = {}) => call('GET', '/api/ports?project=acme-api&session=api-1', extra);
+  const portsOf = (r) => [r.status, r.json?.state ?? null, (r.json?.items || []).map(i => i.port), r.json?.can_refresh ?? null];
+  is('local: Details reads one session\'s ports, and may refresh', [200, 'done', [5173], true], portsOf(await portsRead()));
+  const localScan = await call('POST', '/api/ports/refresh?project=acme-api', {}, {});
+  is('local: a refresh is accepted directly', [200, scanAt], [localScan.status, localScan.json?.at]);
   for (const h of ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'tailscale-user-login', 'tailscale-headers-info', 'via', 'x-real-ip', 'x-fleet-on-behalf', 'x-proxy-scratch']) {
     const r = await open({ [h]: '' });
     is(`local + ${h}: only direct gets a ticket`, [true, h === 'x-fleet-on-behalf' ? 403 : 401, h === 'x-fleet-on-behalf' ? null : 'passkey'], [accepted, r.status, r.json?.needs ?? null]);
@@ -142,6 +157,10 @@ try {
   is('signed-in remote opens editor without assertion', 200, (await remoteOpen('edit')).status);
   is('remote without token remains locked', [true, 401, 'passkey'], [remoteTerm.status === 200, (await open({ 'x-forwarded-for': '100.64.0.9' })).status, (await open({ 'x-forwarded-for': '100.64.0.9' })).json?.needs]);
   is('remote token upgrades without assertion', 101, await ws(remoteTerm.json?.ticket, { 'x-forwarded-for': '100.64.0.9' }));
+  // The phone reads Details and is never offered, nor allowed, a scan.
+  is('remote: Details reads, with no refresh offered', [200, 'done', [5173], false], portsOf(await portsRead(remoteHeaders)));
+  const remoteScan = await call('POST', '/api/ports/refresh?project=acme-api', remoteHeaders, {});
+  is('remote: a refresh is refused beside direct acceptance, and not as a dead session', [200, 400], [localScan.status, remoteScan.status]);
   const ending = await remoteOpen();
   await call('POST', '/api/auth/end', remoteHeaders, {});
   is('ticket dies with the exact session that minted it', [200, 401], [remoteTerm.status, await ws(ending.json?.ticket, { 'x-forwarded-for': '100.64.0.9' })]);
@@ -167,6 +186,10 @@ try {
   const pairTerm = await pairOpen('term');
   is('paired chat caller opens terminal without assertion', true, pairTerm.status === 200 && !!pairTerm.json?.ticket);
   is('paired chat caller opens editor without assertion', 200, (await pairOpen('edit')).status);
+  // A paired host's Details read crosses (PAIR_READS) and answers from THAT host's scan; a scan does not cross.
+  const pairPorts = await call('GET', '/api/ports?project=toolbox%40vm&session=master', remoteHeaders);
+  is('paired: Details reads the other host\'s scan, with no refresh', [200, [], false], [pairPorts.status, pairPorts.json?.items ?? null, pairPorts.json?.can_refresh ?? null]);
+  is('paired: a refresh does not cross', [200, 400], [localScan.status, (await call('POST', '/api/ports/refresh?project=toolbox%40vm', remoteHeaders, {})).status]);
   is('paired terminal carries shell output through the home host', { status: 101, output: true }, await ws(pairTerm.json?.ticket, {}, true));
   const pairEnding = await pairOpen('term');
   await call('POST', '/api/auth/end', remoteHeaders, {});

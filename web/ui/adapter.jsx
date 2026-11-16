@@ -9,6 +9,8 @@
 //   grid(project)                     → { cards, worktrees, … }        the project's sessions
 //   session(project, name, before?)   → { messages, … }                a chat, older pages by `before`
 //   pane(project, name)               → { text, status, here?, … }     the terminal and the live status
+//   ports(project, name)              optional → { at, state, items }  Details: what it left listening
+//   portsRefresh(project)             optional → { at }                scan now (only when can_refresh)
 //   act(tool, args, opts?)            → { text, queued? }              every change, by fleet tool name
 //   attach(project, session, file)    → { path }                       an upload, the path to cite
 //   attachPerMessage                  number                           how many files one message takes

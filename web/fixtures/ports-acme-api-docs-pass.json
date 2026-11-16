@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "project": "acme-api",
+  "session": "docs-pass",
+  "at": 1772700000,
+  "sources": { "listen": "lsof", "docker": "ok", "simctl": "none booted" },
+  "state": "done",
+  "status": "ready",
+  "items": [
+    {
+      "kind": "listen", "port": 5173, "addrs": ["127.0.0.1", "::1"], "pid": 48211, "start": "Thu Mar 5 09:12:40 2026",
+      "name": "node", "cmd": "node /Users/you/gf-demo/docs-pass/node_modules/.bin/vite --port 5173",
+      "cwd": "/Users/you/gf-demo/docs-pass",
+      "tie": { "level": "session", "sock": "cf-acme-api", "session": "docs-pass", "project": "acme-api", "how": "parent", "chain": [48211, 48190, 47702] }
+    },
+    {
+      "kind": "listen", "port": 8080, "addrs": ["*"], "pid": 48530, "start": "Thu Mar 5 09:20:02 2026",
+      "name": "python3", "cmd": "python3 -m http.server 8080",
+      "cwd": "/Users/you/gf-demo/docs-pass/site",
+      "tie": { "level": "session", "sock": "cf-acme-api", "session": "docs-pass", "project": "acme-api", "how": "cwd", "path": "/Users/you/gf-demo/docs-pass/site" }
+    },
+    {
+      "kind": "container", "id": "3f9c2a71b0de", "name": "docs-pass-db-1", "image": "postgres:16",
+      "ports": [{ "host": 55432, "to": "5432/tcp" }], "started": "2026-03-05T09:14:10Z",
+      "label": "/Users/you/gf-demo/docs-pass", "mounts": [],
+      "tie": { "level": "session", "sock": "cf-acme-api", "session": "docs-pass", "project": "acme-api", "how": "label", "path": "/Users/you/gf-demo/docs-pass" }
+    }
+  ],
+  "can_refresh": false
+}

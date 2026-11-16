@@ -661,6 +661,33 @@ env_tick() {
   return 0
 }
 
+# ── WHAT THIS PROFILE'S SESSIONS LEFT LISTENING (lib/ports.mjs) ──────────────
+# A session's Details (the session screen's More menu) and `fleet-ports --cached` read a
+# cache, <fleet dir>/ports/scan.json, and this is the slow tick that keeps it fresh: once per
+# PORTS_EVERY per PROFILE, not per fleet. Every fleet has a governor, so the first one to
+# find the stamp stale scans for all of them, and the scan's lock keeps a second one out.
+#   THE TEST FOR STALE STARTS NO PROCESS: a builtin read of the stamp and arithmetic on the
+# governor's own clock, not $(date) or a $(gov_now) subshell. #192 brought this machine down
+# to ~69 new processes a second, and a node per governor per minute would have been twenty
+# more a minute to learn, nearly every time, that nothing was due.
+PORTS_EVERY="${CLAUDE_FLEET_PORTS_EVERY:-300}"
+ports_tick() {
+  case "$PORTS_EVERY" in ''|*[!0-9]*|0) return 0 ;; esac
+  [ -f "$LIB_DIR/ports.mjs" ] || return 0
+  local at="" now=$(( GOV_STARTED + SECONDS ))
+  if [ -n "${CLAUDE_FLEET_GOV_CLOCK:-}" ]; then read -r now 2>/dev/null < "$CLAUDE_FLEET_GOV_CLOCK" || now=$(( GOV_STARTED + SECONDS )); fi
+  read -r at 2>/dev/null < "$FLEET_DIR/ports/at" || at=0
+  case "$at" in ''|*[!0-9]*) at=0 ;; esac
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  [ $(( now - at )) -ge "$PORTS_EVERY" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  [ "$DRY" = 1 ] && return 0        # a dry run reports pressure, and a scan is not pressure
+  # --max-age a little under the period: the node re-reads the stamp after taking the lock,
+  # so a governor that lost the race to another one exits without scanning twice.
+  node "$LIB_DIR/ports.mjs" refresh --dir "$FLEET_DIR" --max-age $(( PORTS_EVERY - 30 )) >/dev/null 2>&1
+  return 0
+}
+
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
 reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}% with live memory pressure, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
@@ -669,11 +696,13 @@ log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<
 # pass could resume for one ceiling what the other just parked for.
 if [ "$ONCE" = 1 ]; then
   env_tick
+  ports_tick
   resource_tick || accounts_tick || tick
 else
   while true; do
     GOV_SESSIONS="$(tmux -u -L "$SOCK" list-sessions -F '#{session_name}:#{session_created}' 2>/dev/null)" || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
     env_tick
+    ports_tick
     resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process
     # that is already alive exactly as long as Jarvis is, so the restart needs no daemon, cron
