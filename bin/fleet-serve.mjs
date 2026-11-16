@@ -62,7 +62,7 @@ import { loginList, loginRecords, finishLogin } from '../lib/logins.mjs';
 import { startAccountLogin, finishAccountLogin, accountPaneLease, accountLoginNeeds } from '../lib/account-logins.mjs';
 import * as voice from '../lib/voice.mjs';
 import { connectingUid } from '../lib/local-trust.mjs';
-import { readCache as portsCache, sessionView as portsView } from '../lib/ports.mjs';
+import { readCache as portsCache, sessionView as portsView, isWorkDir as portsWorkDir } from '../lib/ports.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -3435,7 +3435,10 @@ function agentCatalogue() {
     if (!session) return send(res, 400, { ok: false, text: 'session is required' });
     const cache = portsCache(path.join(t.cfg, 'fleet'));
     const v = portsView(cache, t.sock, session);
-    return send(res, 200, { ok: true, project: t.name, session, ...v, can_refresh: req.localTrust === true });
+    // `can_stop`: the same direct-localhost test, and never a work-profile project (lib/ports.mjs
+    // refuses those whoever asks; this is only so the desk does not offer what would be refused).
+    return send(res, 200, { ok: true, project: t.name, session, ...v, can_refresh: req.localTrust === true,
+                            can_stop: req.localTrust === true && !portsWorkDir(path.join(t.cfg, 'fleet')) });
   }
   // A SCAN NOW, for the desktop's Refresh. A direct localhost request only (localRequest:
   // the owner's own browser on this machine), and not in PAIR_POSTS, so neither the phone
@@ -3453,6 +3456,44 @@ function agentCatalogue() {
       { timeout: 60000, env: { ...process.env, CLAUDE_CONFIG_DIR: rp.t.cfg, CLAUDE_FLEET_DIR: dir } }, (e) => done(e)));
     if (r) return send(res, 502, { ok: false, text: `the scan did not finish: ${String(r.message || r).slice(0, 200)}` });
     return send(res, 200, { ok: true, at: portsCache(dir)?.at ?? null });
+  }
+  // ONE THING A SESSION LEFT, STOPPED, from the desktop's Details. The same gate as the scan
+  // above — a direct localhost request, and not in PAIR_POSTS, so the phone and a paired host
+  // are refused with a 400 before anything is read — and then lib/ports.mjs's stop(), which
+  // re-scans, refuses another profile's, the work profile's, an agent's and an untied item, and
+  // re-reads the pid immediately before the signal. `want` is the item as Details showed it
+  // (its pid, start and command, or its container id or UDID), and the session it was shown
+  // under, so what is stopped is what the person confirmed; `kill` is the second confirmation
+  // and is refused unless a TERM from here left that same process running.
+  //   A refusal about the ITEM is a 409 with the reason, never a 401/403, which the client reads
+  // as a dead session. Every attempt is an audit row, refused ones included.
+  if (p === '/api/ports/stop') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (!req.localTrust) return send(res, 400, { ok: false, text: 'a stop is made from this machine only — fleet-ports stop, or Details on the desktop at localhost' });
+    const rp = resolveProject(url.searchParams.get('project') || String(body?.project || ''), peerScope(req));
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const session = url.searchParams.get('session') || String(body?.session || '');
+    if (!session) return send(res, 400, { ok: false, text: 'session is required' });
+    const w = body?.want && typeof body.want === 'object' ? body.want : {};
+    const num = (x) => (Number.isInteger(x) && x > 0 ? x : undefined);
+    const str = (x, n) => (typeof x === 'string' && x ? x.slice(0, n) : undefined);
+    const want = { kind: ['listen', 'container', 'simulator'].includes(w.kind) ? w.kind : undefined, port: num(w.port), pid: num(w.pid),
+                   start: str(w.start, 64), cmd: str(w.cmd, 8192), id: str(w.id, 64), udid: str(w.udid, 64), sock: rp.t.sock, session };
+    if (!want.kind || (want.kind === 'listen' ? !want.pid : want.kind === 'container' ? !want.id : !want.udid))
+      return send(res, 400, { ok: false, text: 'want names one item: a listener by pid, a container by id, a simulator by udid' });
+    const dir = path.join(rp.t.cfg, 'fleet');
+    const kill = body?.kill === true;
+    const out = await new Promise(done => execFile(process.execPath,
+      [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'ports.mjs'), 'cli', 'stop', '--dir', dir, '--json', '--want', JSON.stringify(want), ...(kill ? ['--kill'] : [])],
+      { timeout: 60000, env: { ...process.env, CLAUDE_CONFIG_DIR: rp.t.cfg, CLAUDE_FLEET_DIR: dir } }, (e, stdout) => done({ e, stdout })));
+    let r = null;
+    try { r = JSON.parse(String(out.stdout || '').trim().split('\n').pop()); } catch {}
+    if (!r) r = { ok: false, result: 'failed', code: 'run', text: `the stop did not finish: ${String(out.e?.message || 'no answer').slice(0, 200)}` };
+    auditAppend({ ts: now(), client: req.client?.id || localClient.id, ip, verb: 'ports_stop', project: rp.t.name, subject: session,
+                  args: { kind: want.kind, port: want.port, pid: want.pid, id: want.id, udid: want.udid, kill }, confirmed: 'local',
+                  result: r.result === 'refused' ? `refused:${r.code}` : r.result, output: String(r.text || '').slice(0, 300) });
+    const status = r.result === 'stopped' || r.result === 'still-running' ? 200 : r.result === 'refused' ? 409 : 502;
+    return send(res, status, { ok: status === 200, result: r.result, code: r.code, text: r.text, item: r.item });
   }
 
   if (p === '/api/settings' && req.method === 'GET') {

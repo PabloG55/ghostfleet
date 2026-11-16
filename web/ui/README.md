@@ -65,8 +65,9 @@ the phone's is `web/src/adapter.js`, over fleet-serve. An adapter is a plain obj
 | `grid(project)` | → `{ cards, free_worktrees }` | a project's sessions (the cards, in the fleet's order) and its unused worktrees; also how Ctrl-f's "card N" finds card N |
 | `session(project, name, before?)` | → `{ messages, status, owner?, queued?, next_before? }` | a session's chat; passing `next_before` back as `before` reads the older page |
 | `pane(project, name)` | → `{ pane, prompt?, here? }` | the terminal's text; `prompt` is an open question, with its `fingerprint`; `here` is who else has the session open, for the `presence` slot |
-| `ports(project, name)` | optional, → `{ at, state, items, can_refresh }` | the session's Details sheet: the last scan of what it left listening, running or booted (`lib/ports.mjs`), each item with how it was tied to the session; read once when the sheet opens, never polled. Without it there is no Details entry |
+| `ports(project, name)` | optional, → `{ at, state, items, can_refresh, can_stop }` | the session's Details sheet: the last scan of what it left listening, running or booted (`lib/ports.mjs`), each item with how it was tied to the session; read once when the sheet opens, never polled. Without it there is no Details entry |
 | `portsRefresh(project)` | optional, → `{ at }` | a scan now, offered only when the read said `can_refresh` (a direct localhost request); the phone never has it |
+| `portsStop(project, name, want, kill)` | optional, → `{ result, text }` | stop ONE row, as the sheet showed it (`want`: kind plus pid, start and command, or container id, or UDID); offered only when the read said `can_stop` (a direct localhost request, not a work-profile project), always through a modal; `kill` only after a TERM left it running; the phone never has it |
 | `act(tool, args, opts?)` | → `{ text, queued? }` | every change (below); `queued` is `'question'` or truthy when it waits behind a turn |
 | `attach(project, session, file)` | → `{ path }` | an upload; the composer cites the path |
 | `attachPerMessage` | number | how many files one message may carry |

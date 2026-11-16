@@ -1,0 +1,29 @@
+{
+  "project": "scratch",
+  "profile": "personal",
+  "sub": null,
+  "counts": { "need_you": 0, "working": 0, "ready": 1, "parked": 0, "limit": 0, "interrupted": 0 },
+  "cards": [
+    {
+      "name": "playground",
+      "label": null,
+      "status": "ready",
+      "team_status": null,
+      "folder": "playground",
+      "branch": "try/vite-preview",
+      "agent": "claude",
+      "pr": null,
+      "msg": "Done. The preview builds; I left the dev server up on :5173 so you can look.",
+      "age": 1800,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": false,
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
+    }
+  ],
+  "free_worktrees": []
+}

@@ -663,6 +663,17 @@ var en_default = {
 	"details.scanned": "Scanned {ago}",
 	"details.scannedNow": "Scanned a moment ago",
 	"details.refresh": "Scan now",
+	"details.stop": "Stop",
+	"details.stopTitle": "Stop {what}?",
+	"details.stopBodyListen": "Sends TERM to pid {pid}, after checking it is still the process shown here. If that pid now belongs to something else, nothing is sent. Nothing is restarted.",
+	"details.stopBodyContainer": "Runs docker stop {id}. The container is not removed, and nothing is restarted.",
+	"details.stopBodySimulator": "Shuts the simulator down (simctl shutdown {udid}). Nothing is restarted.",
+	"details.stopGo": "Stop it",
+	"details.stillRunning": "Sent TERM; it is still running.",
+	"details.force": "Force stop…",
+	"details.forceTitle": "Force stop {what}?",
+	"details.forceBody": "TERM left pid {pid} running. This sends KILL: it ends at once, with no chance to clean up — and only if it is still the same process.",
+	"details.forceGo": "Send KILL",
 	"sess.quotaBack": "quota is back {when}",
 	"sess.limitWhy": "Until then it cannot go on. You can schedule it to pick up on its own.",
 	"sess.alreadySched": "Already scheduled for {when}.",
@@ -1583,6 +1594,17 @@ var es_default = {
 	"details.scanned": "Revisado {ago}",
 	"details.scannedNow": "Revisado hace un momento",
 	"details.refresh": "Revisar ahora",
+	"details.stop": "Detener",
+	"details.stopTitle": "¿Detener {what}?",
+	"details.stopBodyListen": "Envía TERM al pid {pid}, después de comprobar que sigue siendo el proceso que se ve aquí. Si ese pid ahora es de otro proceso, no se envía nada. Nada se vuelve a iniciar.",
+	"details.stopBodyContainer": "Ejecuta docker stop {id}. El contenedor no se borra y nada se vuelve a iniciar.",
+	"details.stopBodySimulator": "Apaga el simulador (simctl shutdown {udid}). Nada se vuelve a iniciar.",
+	"details.stopGo": "Detener",
+	"details.stillRunning": "Se envió TERM y sigue corriendo.",
+	"details.force": "Forzar…",
+	"details.forceTitle": "¿Forzar la detención de {what}?",
+	"details.forceBody": "Con TERM el pid {pid} siguió corriendo. Esto envía KILL: termina de inmediato, sin poder limpiar nada, y solo si sigue siendo el mismo proceso.",
+	"details.forceGo": "Enviar KILL",
 	"sess.quotaBack": "el cupo vuelve {when}",
 	"sess.limitWhy": "Mientras tanto no puede seguir. Puedes dejarlo programado para que retome solo.",
 	"sess.alreadySched": "Ya está programado para {when}.",
@@ -7660,16 +7682,36 @@ var IDLE_STATES = [
 	"exited",
 	"stopped"
 ];
-function detailsFlag(state, items) {
-	if (!IDLE_STATES.includes(state) || !items?.length) return "";
+var BUSY_CHIP = /* @__PURE__ */ new Set([
+	"working",
+	"need-you",
+	"starting"
+]);
+function detailsFlag(state, items, status) {
+	if (!IDLE_STATES.includes(state) || !items?.length || BUSY_CHIP.has(status)) return "";
 	const ports = [...new Set(items.flatMap((i) => i.kind === "listen" ? [i.port] : i.kind === "container" ? (i.ports || []).map((p) => p.host) : []))].sort((a, b) => a - b);
 	const nc = items.filter((i) => i.kind === "container").length, ns = items.filter((i) => i.kind === "simulator").length;
 	const bits = [];
 	if (ports.length) bits.push(t("details.flagListen", { ports: ports.map((p) => ":" + p).join(", ") }));
 	if (nc) bits.push(t(nc === 1 ? "details.flagContainer" : "details.flagContainers", { n: nc }));
 	if (ns) bits.push(t(ns === 1 ? "details.flagSimulator" : "details.flagSimulators", { n: ns }));
-	return `${t(`details.state.${state}`)} — ${bits.join(", ")}`;
+	return `${STATUS[status]?.label || t(`details.state.${state}`)} — ${bits.join(", ")}`;
 }
+var wantOf = (it) => it.kind === "listen" ? {
+	kind: "listen",
+	port: it.port,
+	pid: it.pid,
+	start: it.start,
+	cmd: it.cmd
+} : it.kind === "container" ? {
+	kind: "container",
+	id: it.id
+} : {
+	kind: "simulator",
+	udid: it.udid
+};
+var rowKey = (it) => `${it.kind}:${it.port || it.id || it.udid}:${it.pid || ""}`;
+var rowName = (it) => it.kind === "listen" ? `:${it.port} ${it.name || ""} (pid ${it.pid})`.replace("  ", " ") : it.name || it.id;
 function howWords(tie) {
 	const at = tie.path ? tie.path.replace(/^\/(?:Users|home)\/[^/]+/, "~") : "";
 	if (tie.how === "parent") return t("details.how.parent", { chain: (tie.chain || []).join(" ← ") });
@@ -7679,11 +7721,13 @@ function howWords(tie) {
 	if (tie.how === "argv") return t("details.how.argv", { pid: tie.pid });
 	return "";
 }
-function DetailsModal({ project, name, onClose }) {
+function DetailsModal({ project, name, status, onClose }) {
 	const fleet = useFleet();
 	const [data, setData] = d(null);
 	const [err, setErr] = d("");
 	const [busy, setBusy] = d(false);
+	const [ask, setAsk] = d(null);
+	const [left, setLeft] = d({});
 	const load = async () => {
 		try {
 			setData(await fleet.ports(project, name));
@@ -7706,19 +7750,39 @@ function DetailsModal({ project, name, onClose }) {
 			setBusy(false);
 		}
 	};
+	const stopOne = async ({ it, kill }) => {
+		try {
+			const r = await fleet.portsStop(project, name, wantOf(it), kill);
+			if (r.result === "still-running" && !kill) setLeft((l) => ({
+				...l,
+				[rowKey(it)]: r.text
+			}));
+			else setLeft((l) => {
+				const n = { ...l };
+				delete n[rowKey(it)];
+				return n;
+			});
+			toast(r.text, r.result === "stopped" ? "ok" : "bad");
+		} catch (e) {
+			toast(String(e?.message || e), "bad");
+		}
+		await load();
+	};
 	const items = data?.items || [];
-	const flag = data ? detailsFlag(data.state, items) : "";
+	const canStop = data?.can_stop === true && !!fleet.portsStop;
+	const flag = data ? detailsFlag(data.state, items, status) : "";
 	const groups = [
 		["listen", "details.listening"],
 		["container", "details.containers"],
 		["simulator", "details.simulators"]
 	].map(([kind, head]) => [head, items.filter((i) => i.kind === kind)]).filter(([, list]) => list.length);
 	const age = data?.at ? Date.now() / 1e3 - data.at : null;
-	return /* @__PURE__ */ u(Modal, {
+	const keep = () => {};
+	return /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u(Modal, {
 		sheet: true,
 		wide: true,
 		title: t("details.title", { name }),
-		onClose,
+		onClose: ask ? keep : onClose,
 		children: /* @__PURE__ */ u("div", {
 			class: "modal-body stack details",
 			children: [
@@ -7789,6 +7853,30 @@ function DetailsModal({ project, name, onClose }) {
 						it.kind === "listen" && it.cmd ? /* @__PURE__ */ u("code", {
 							class: "details-cmd small",
 							children: it.cmd
+						}) : null,
+						canStop && left[rowKey(it)] ? /* @__PURE__ */ u("p", {
+							class: "details-left small",
+							role: "status",
+							children: t("details.stillRunning")
+						}) : null,
+						canStop ? /* @__PURE__ */ u("div", {
+							class: "details-stop",
+							children: left[rowKey(it)] && it.kind === "listen" ? /* @__PURE__ */ u(Btn, {
+								kind: "danger sm",
+								onClick: () => setAsk({
+									it,
+									kill: true
+								}),
+								children: t("details.force")
+							}) : /* @__PURE__ */ u(Btn, {
+								kind: "ghost sm",
+								icon: "stop",
+								onClick: () => setAsk({
+									it,
+									kill: false
+								}),
+								children: t("details.stop")
+							})
 						}) : null
 					] }, `${it.kind}:${it.port || it.id || it.udid}:${it.pid || ""}`)) })]
 				}, head)),
@@ -7804,7 +7892,19 @@ function DetailsModal({ project, name, onClose }) {
 				}) : null] })
 			]
 		})
-	});
+	}), ask ? /* @__PURE__ */ u(Confirm, {
+		danger: true,
+		title: t(ask.kill ? "details.forceTitle" : "details.stopTitle", { what: rowName(ask.it) }),
+		body: ask.kill ? t("details.forceBody", { pid: ask.it.pid }) : t(ask.it.kind === "listen" ? "details.stopBodyListen" : ask.it.kind === "container" ? "details.stopBodyContainer" : "details.stopBodySimulator", {
+			pid: ask.it.pid,
+			id: ask.it.id,
+			udid: ask.it.udid,
+			name
+		}),
+		action: t(ask.kill ? "details.forceGo" : "details.stopGo"),
+		onYes: () => stopOne(ask),
+		onClose: () => setAsk(null)
+	}) : null] });
 }
 function ScheduleModal({ name, onClose, onSave }) {
 	const [msg, setMsg] = d(() => t("sched.default"));
@@ -8719,6 +8819,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 			detailsOpen ? /* @__PURE__ */ u(DetailsModal, {
 				project,
 				name,
+				status: st,
 				onClose: () => setDetailsOpen(false)
 			}) : null,
 			schedOpen ? /* @__PURE__ */ u(ScheduleModal, {
@@ -14917,6 +15018,7 @@ function phoneAdapter({ lock, go, place }) {
 		pane: (project, name) => guard(api$1.getPane(project, name)),
 		ports: (project, name) => guard(api$1.getPorts(project, name)),
 		portsRefresh: (project) => guard(api$1.refreshPorts(project)),
+		portsStop: (project, name, want, kill) => guard(api$1.stopPorts(project, name, want, kill)),
 		act,
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: e2857c59dfb7
+// CLIENT-HASH: 50f8e39fb945
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -493,7 +493,12 @@
 // v122 adds Details to a session's More, beside what v121 moved there: what it left listening,
 // running or booted, read from the last scan (lib/ports.mjs) and never polled, with one new
 // fixture. A phone on v121 has no Details entry until relaunched, and loses nothing else.
-const VERSION = 'ghostfleet-v122';
+// v123 lets the owner's own browser on this machine stop one row of Details, behind a modal
+// (TERM to the pid it showed; KILL only in a second modal, after a TERM left it running), and
+// calls the session in the flag what its header chip does. The phone draws no stop at all: the
+// daemon offers one only to a direct localhost request. Two fixtures: the demo's one personal
+// project with a done session that left things listening.
+const VERSION = 'ghostfleet-v123';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
@@ -523,6 +528,7 @@ const SHELL = [
   './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
   './fixtures/pane-acme-api-master.json',
   './fixtures/ports-acme-api-docs-pass.json',
+  './fixtures/grid-scratch-leftovers.json', './fixtures/ports-scratch-playground.json', './fixtures/session-scratch-playground.json',
   './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
   './fixtures/waiting.json',
   './fixtures/usage.json',

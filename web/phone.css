@@ -1039,6 +1039,10 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .details-how { margin-top: 2px; overflow-wrap: anywhere; }
 .details-cmd { display: block; margin-top: 3px; color: var(--dim); font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
 .details footer { justify-content: space-between; align-items: center; }
+/* A row's Stop sits under what it stops, at the row's left edge, so it is never far from the
+ * pid it names. Present only when the daemon said can_stop: the phone never draws one. */
+.details-stop { margin-top: 6px; }
+.details-left { margin: 4px 0 0; color: var(--yellow); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding-top: 10px; }
 .advanced summary { cursor: pointer; color: var(--dim); font-size: 13px; }

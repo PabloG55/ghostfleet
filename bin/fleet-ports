@@ -8,11 +8,18 @@
 #   fleet-ports --cached           print the last scan (the governor's, every 5 minutes) instead
 #   fleet-ports --no-write         scan and print, and leave the kept result as it was
 #   fleet-ports --json             the same, as data
+#   fleet-ports stop :5173         stop ONE thing a session of this profile left: a port's
+#   fleet-ports stop 48211           listener, a pid, a container (id or name) or a simulator
+#   fleet-ports stop <container>     (UDID or name). TERM, after checking the pid is still the
+#   fleet-ports stop --kill 48211    process the scan found; --kill only after a TERM that left
+#                                    it running. Never another profile's, never the work
+#                                    profile's, never one not tied to a session or project.
 #
-# Read only. It lists TCP listeners (lsof on macOS, ss on Linux), docker containers and booted
-# simulators, and names a session only when a parent process, a working directory, a compose
-# label, a bind mount or a process that names the device says so. Everything else is "not tied
-# to a session". Another profile's sessions are counted, never listed: run it from that profile.
+# Listing is read only. It lists TCP listeners (lsof on macOS, ss on Linux), docker containers
+# and booted simulators, and names a session only when a parent process, a working directory, a
+# compose label, a bind mount or a process that names the device says so. Everything else is
+# "not tied to a session". Another profile's sessions are counted, never listed: run it from
+# that profile.
 #
 # The terminal's view of what a session's Details shows on the web client: there is no grid
 # column and nothing on a card.
