@@ -181,7 +181,8 @@ const act = async (tool, args) => {
   return r.json;
 };
 const lead = makeLead({
-  grid: async (p) => (await pa.api(A.base, 'GET', `/api/grid?project=${encodeURIComponent(p)}`)).json || {},
+  // ...and the phone's grid read, `fresh` included (web/api.js getGrid): lead.js decides from it.
+  grid: async (p, o = {}) => (await pa.api(A.base, 'GET', `/api/grid?project=${encodeURIComponent(p)}${o.fresh ? '&fresh=1' : ''}`)).json || {},
   projects: async () => (await pa.api(A.base, 'GET', '/api/projects')).json || {},
   act, remote: (p) => /@[^@]+$/.test(String(p || '')), wait: () => sleep(60),
   noLead: (p) => new Error(`${p} has no lead to start from this phone.`), tries: 40, every: 60,

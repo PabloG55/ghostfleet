@@ -14350,7 +14350,7 @@ var adapterExtras = {
 //#region web/src/lead.js
 function makeLead({ grid, projects, act, wait, noLead, tries = 20, every = 1500 }) {
 	return async function lead(project) {
-		const find = async () => ((await grid(project)).cards || []).find((c) => c.lead);
+		const find = async () => ((await grid(project, { fresh: true })).cards || []).find((c) => c.lead);
 		const m = await find();
 		let did = null;
 		if (!m) {
@@ -14548,7 +14548,7 @@ function phoneAdapter({ lock, go, place }) {
 		return guard(api$1.verb(tool, args, assertion));
 	}
 	const lead = makeLead({
-		grid: (project) => guard(api$1.getGrid(project)),
+		grid: (project, opts) => guard(api$1.getGrid(project, "", opts)),
 		projects: () => api$1.getProjects(),
 		act,
 		wait: (ms) => new Promise((r) => setTimeout(r, ms)),

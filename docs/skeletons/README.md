@@ -43,40 +43,114 @@ call. The before and after columns are comparable to each other, not to a real s
 
 ## After
 
-| screen | width | paint ms | data ms | reads in 10 s | KB in 10 s | reads/min idle | reads/min hidden | shift score | furthest move px |
-|---|---|---|---|---|---|---|---|---|---|
-| home | 390 | 16 | 643 | 16 | 26.3 | 80 | 0 | 0 | 0 |
-| project | 390 | 15 | 331 | 17 | 35.0 | 92 | 0 | 0 | 0 |
-| session | 390 | 18 | 340 | 27 | 74.6 | 148 | 0 | 0.001 | 97 |
-| map | 390 | 14 | 638 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| reviews | 390 | 12 | 1843 | 25 | 52.9 | 144 | 0 | 0 | 0 |
-| queue | 390 | 7 | 322 | 17 | 22.9 | 96 | 0 | 0 | 0 |
-| search | 390 | 9 | 2160 | 21 | 32.9 | 104 | 0 | 0 | 0 |
-| activity | 390 | 14 | 311 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| automations | 390 | 15 | 313 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| settings | 390 | 8 | 323 | 14 | 20.7 | 76 | 0 | 0 | 0 |
-| stacks | 390 | 11 | 2146 | 21 | 32.9 | 104 | 0 | 0 | 0 |
-| home | 1280 | 7 | 634 | 16 | 26.3 | 80 | 0 | 0 | 0 |
-| project | 1280 | 7 | 317 | 17 | 35.0 | 92 | 0 | 0 | 0 |
-| session | 1280 | 13 | 337 | 27 | 74.6 | 148 | 0 | 0 | 97 |
-| map | 1280 | 7 | 630 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| reviews | 1280 | 7 | 1836 | 25 | 52.9 | 144 | 0 | 0 | 0 |
-| queue | 1280 | 15 | 332 | 17 | 22.9 | 96 | 0 | 0 | 0 |
-| search | 1280 | 8 | 2156 | 21 | 32.9 | 104 | 0 | 0 | 0 |
-| activity | 1280 | 7 | 322 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| automations | 1280 | 15 | 313 | 13 | 18.3 | 72 | 0 | 0 | 0 |
-| settings | 1280 | 8 | 321 | 14 | 20.7 | 76 | 0 | 0 | 0 |
-| stacks | 1280 | 7 | 2149 | 21 | 32.9 | 104 | 0 | 0 | 0 |
+On the build merged with staging (client v118). The last column is measured directly, not by
+the browser: everything drawn while the screen said it was waiting, and how far it had moved
+once the data was in (see the session header section for why both are kept).
 
-The one move left is the session's "More" button going 97 px sideways when Interrupt and Pause
-arrive beside it. Nothing moves down: the header's height, the tabs and the conversation hold.
-That button moves the same way whenever a session starts or stops working.
+| screen | width | paint ms | data ms | reads in 10 s | KB in 10 s | reads/min idle | reads/min hidden | shift score | furthest move px | drawn waiting, moved px |
+|---|---|---|---|---|---|---|---|---|---|---|
+| home | 390 | 9 | 632 | 16 | 26.3 | 70 | 0 | 0 | 0 | 0 |
+| project | 390 | 8 | 319 | 17 | 35.0 | 92 | 0 | 0 | 0 | 0 |
+| session | 390 | 14 | 346 | 27 | 74.6 | 146 | 0 | 0 | 0 | 0 |
+| map | 390 | 12 | 633 | 13 | 18.3 | 82 | 0 | 0 | 0 | 0 |
+| reviews | 390 | 7 | 1856 | 25 | 52.9 | 144 | 0 | 0 | 0 | 0 |
+| queue | 390 | 13 | 329 | 17 | 22.9 | 96 | 0 | 0 | 0 | 0 |
+| search | 390 | 8 | 2153 | 21 | 32.9 | 104 | 0 | 0 | 0 | 0 |
+| activity | 390 | 13 | 310 | 13 | 18.3 | 72 | 0 | 0 | 0 | 0 |
+| automations | 390 | 7 | 319 | 13 | 18.3 | 72 | 0 | 0 | 0 | 0 |
+| settings | 390 | 9 | 323 | 14 | 20.7 | 76 | 0 | 0 | 0 | 0 |
+| stacks | 390 | 8 | 2137 | 21 | 32.9 | 104 | 0 | 0 | 0 | 0 |
+| home | 1280 | 12 | 632 | 16 | 26.3 | 80 | 0 | 0 | 0 | 0 |
+| project | 1280 | 8 | 325 | 17 | 35.0 | 92 | 0 | 0 | 0 | 0 |
+| session | 1280 | 16 | 337 | 27 | 74.6 | 146 | 0 | 0 | 0 | 0 |
+| map | 1280 | 15 | 637 | 13 | 18.3 | 72 | 0 | 0 | 0 | 0 |
+| reviews | 1280 | 16 | 1848 | 25 | 52.9 | 144 | 0 | 0 | 0 | 0 |
+| queue | 1280 | 14 | 330 | 17 | 22.9 | 96 | 0 | 0 | 0 | 0 |
+| search | 1280 | 11 | 2162 | 21 | 32.9 | 104 | 0 | 0 | 0 | 0 |
+| activity | 1280 | 6 | 318 | 13 | 18.3 | 72 | 0 | 0 | 0 | 0 |
+| automations | 1280 | 11 | 310 | 13 | 18.3 | 72 | 0 | 0 | 0 | 0 |
+| settings | 1280 | 16 | 332 | 14 | 20.7 | 76 | 0 | 0 | 0 | 0 |
+| stacks | 1280 | 7 | 2137 | 21 | 32.9 | 104 | 0 | 0 | 0 | 0 |
 
-A first-ever launch has no remembered heights, so Settings (15 px) and the Live map on a phone
-(62 px) still move once, the first time each is opened on a device.
+A first-ever launch has no remembered heights, so Settings and the Live map on a phone still
+move once, the first time each is opened on a device (`--first`, which skips the visit that
+would teach them):
+
+| screen | width | furthest move px | drawn waiting, moved px |
+|---|---|---|---|
+| settings | 390 | 15 | 16 (the panels under Notifications, then under Paired machine) |
+| settings | 1280 | 15 | 16 (the panels under Notifications, then under Paired machine) |
+| map | 390 | 62 | 63 (the ticker under the sea) |
+| map | 1280 | 0 | 0 |
+
+Both are left. What the shape would have to know is the answer itself: whether Notifications is
+a switch or a line saying why there is none (fixture mode answers with the line, a daemon with
+the switch, and the panel is 15 px shorter for the line), how many machines are paired, and how
+many islands the sea holds.
+A guess that suits one answer moves for the other, on every device and not only the first time,
+which is why the height a device last saw is what they keep.
 
 Polling with the page hidden was already 0 before; what is new is one read at the moment the
 page is shown again instead of waiting for each interval to come round.
+
+## The session header, state by state
+
+The header is drawn before the session's card arrives, and what its controls row holds is the
+card's to say: Interrupt and Pause for a working session, Resume for a parked one, Wake or Reopen
+for an asleep or lost one, nothing for an idle lead. Every session the two grids offer, opened
+cold with reads held 300 ms (`--sessions --fixture <grid> --idle 0`). Each cell is
+`far / drawn waiting, moved` in px, and what moved:
+
+- **far** is the furthest move the browser's layout-shift entries report
+- **drawn waiting, moved** is measured directly: everything visible at the moment the screen
+  first says it is waiting is recorded, and its position compared once nothing says so. The
+  layout-shift API names at most a few sources per shift, and was silent about More twice.
+  Animated elements (a ship under way) are skipped
+
+Before, at 948c405:
+
+| session (grid-acme-api) | state | 390 | 1280 |
+|---|---|---|---|
+| master | ready, lead | 28 / 82 More | 82 / 82 More |
+| api-fix | working | 97 / 98 More | 97 / 98 More |
+| docs-pass | ready | 0 / 0 | 0 / 0 |
+| types | ready, label and schedule | 5 / 5 controls | 0 / 0 |
+| list-pages | working | 28 / 98 More | 97 / 98 More |
+| rate-limit | starting | 0 / 1 ship | 0 / 1 ship |
+| csv-export | ready | 28 / 28 controls | 0 / 0 |
+
+| session (grid-degraded) | state | 390 | 1280 |
+|---|---|---|---|
+| master | needs you, lead | 28 / 82 More | 82 / 82 More |
+| api-fix | needs you | 9 / 0 | 0 / 0 |
+| docs-pass | limit | 9 / 0 | 0 / 0 |
+| csv-export | interrupted | 9 / 1 tabs | 0 / 0 |
+| rate-limit | parked | 11 / 12 More | 11 / 12 More |
+| adapter-probe | unknown | 9 / 1 tabs | 0 / 0 |
+| docs-sweep | idle | 28 / 28 controls | 0 / 0 |
+
+After, two runs each and a third on the build merged with staging: **nothing drawn while
+waiting moves, for any of the fourteen at either width** (0 in the second column everywhere), and the first column is 0 everywhere except
+grid-degraded at 390, where it is 9 on every session, before and after: the brand, below.
+
+The controls are drawn as one shape until the card lands and the state is known. Before the
+card, the state can come from the conversation read, which can land first. A working session
+then drew Interrupt beside the shape, and Interrupt slid 82 px along the row when the shape
+went: two loads in six. More sits at the row's end in a box of its own, so nothing the state
+adds can push it. At 1280 the meta line (state, branch, PR, label, schedule) had moved 10 to
+39 px with the width of the state's pill. The pill is now the first thing on that line, so its
+width moves nothing drawn before it.
+
+The one move left on that screen is outside the header: with grid-degraded at 390, the brand in
+the top bar moves 9 px when a "needs you" count appears at the bar's right end. The bar spaces
+its three parts apart rather than centring the brand on the page, so the count pushes it. That
+is the shell's top bar, and measured on every screen with grid-degraded at 390 it is 9 px on all
+of them and on nothing at 1280. It is left for its own change.
+
+`phone-check` holds the grid 1.5 s longer than the conversation for the same five sessions
+(working, an idle lead, a label and schedule, parked, interrupted). It asserts that the header
+is still the shape, with no control beside it, once the conversation has landed, and that
+nothing it had drawn has moved once the card does. On 948c405's build 26 of its rows are red.
 
 ## Processes the daemon starts
 
@@ -89,9 +163,21 @@ in the daemon and every node it starts, plus stand-ins for tmux, git and jq on i
 |---|---|---|---|---|
 | before | 9124 | 220 | 36 | 4956 |
 | after, same requests | 3737 | 68 | 36 | 2001 |
-| after, as the new client asks (`?rollup=0`) | 1616 | 20 | 12 | 912 |
+| after, as the new client asks (`?rollup=0`) | 1676 | 20 | 12 | 912 |
 
 What is left is the grid itself: about fifty processes a run for a fleet of two sessions.
+
+A grid is kept 2.5 s, and a write to that fleet drops it. A read that decides what to do asks
+for `fresh=1` and is answered with a run of its own, which then replaces the kept one. The
+phone bringing a lead up is such a read: it chooses between reopen, wake, resume and start from
+what the grid says. Through the keep, a lead that went lost outside the daemon a moment ago
+read as up, so nothing was done and the phone said the lead was ready.
+
+Of pending sign-ins only the account half is kept: a tmux call per fleet and a pane capture per
+session. The records are a directory read written by other processes, so they are read every
+time. A push watch, this machine's or a paired one's asking on its behalf, reads the account
+half fresh. A keep in front of it hid every state shorter than 3 s, so an account that
+expired, recovered and expired again rang once.
 
 ## Screens
 

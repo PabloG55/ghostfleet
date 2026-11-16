@@ -651,9 +651,12 @@ export async function getUsage() {
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
-export async function getGrid(project, sub = '') {
+// `fresh`: a read that decides what to DO (bring a lead up: reopen, wake, resume or start) asks
+// the daemon to run the grid now rather than hand it the one it keeps for 2.5 s. Through the keep
+// a lead that went lost a moment ago read as up, and the button said it was ready and did nothing.
+export async function getGrid(project, sub = '', { fresh = false } = {}) {
   if ((await ready()).mode === 'server')
-    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : ''));
+    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : '') + (fresh ? '&fresh=1' : ''));
   // A sub-grid is its own fixture, named for the project and the sub-lead — the server
   // answers it from `fleet-grid.mjs --json --sub`, which draws only that team.
   if (sub) {

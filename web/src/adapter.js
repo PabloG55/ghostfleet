@@ -152,7 +152,7 @@ export function phoneAdapter({ lock, go, place }) {
   // The lead, started if it is not running: the team server's /api/lead, done from here (lead.js,
   // where the suite runs it against a daemon that refuses the wake).
   const lead = makeLead({
-    grid: (project) => guard(api.getGrid(project)),
+    grid: (project, opts) => guard(api.getGrid(project, '', opts)),
     projects: () => api.getProjects(),
     act,
     wait: (ms) => new Promise(r => setTimeout(r, ms)),
