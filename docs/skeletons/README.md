@@ -43,7 +43,9 @@ call. The before and after columns are comparable to each other, not to a real s
 
 ## After
 
-On the build merged with staging (client v118). The last column is measured directly, not by
+On the build merged with staging (client v118). The session screen, the one screen the next
+merge changed (the composer, around a keyboard), was measured again on v119 and gave the same
+row at both widths: 146 reads a minute idle, 0 hidden, 0 moved. The last column is measured directly, not by
 the browser: everything drawn while the screen said it was waiting, and how far it had moved
 once the data was in (see the session header section for why both are kept).
 
@@ -129,7 +131,8 @@ Before, at 948c405:
 | adapter-probe | unknown | 9 / 1 tabs | 0 / 0 |
 | docs-sweep | idle | 28 / 28 controls | 0 / 0 |
 
-After, two runs each and a third on the build merged with staging: **nothing drawn while
+After, two runs each, a third on the build merged with staging and a fourth on v119:
+**nothing drawn while
 waiting moves, for any of the fourteen at either width** (0 in the second column everywhere), and the first column is 0 everywhere except
 grid-degraded at 390, where it is 9 on every session, before and after: the brand, below.
 

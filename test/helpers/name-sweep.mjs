@@ -663,10 +663,10 @@ const BINARY_REVIEWED = new Set([
   '03032423fdf4c93d',   // docs/skeletons/390-home-loaded.png
   'ade943d41276250d',   // docs/skeletons/1280-home-loading.png
   'e43d13577ffc2d28',   // docs/skeletons/1280-home-loaded.png
-  '21df96d8a295fa5d',   // docs/skeletons/390-session-loading.png
-  'f1a4d56e973dcc57',   // docs/skeletons/390-session-loaded.png
-  'd79252f58d9e7301',   // docs/skeletons/1280-session-loading.png
-  '35cc0ce351c3f512',   // docs/skeletons/1280-session-loaded.png
+  '736696f2b203e75d',   // docs/skeletons/390-session-loading.png
+  'ead12d6b72010d27',   // docs/skeletons/390-session-loaded.png
+  'f1d47eaf4257bb19',   // docs/skeletons/1280-session-loading.png
+  'b24953883d60355f',   // docs/skeletons/1280-session-loaded.png
   '80468a7eb543c459',   // docs/skeletons/390-settings-loading.png
   'e40c511d56c012f6',   // docs/skeletons/390-settings-loaded.png
   '7dc7f2a73b3474b3',   // docs/skeletons/1280-settings-loading.png
