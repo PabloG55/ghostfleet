@@ -807,7 +807,12 @@ try {
         is(`${w} ${name}: ...and no words where a shape fits`, false, mid.words);
         if (name === 'home') {
           // The pulse is motion, and is off for a reader who asked for less of it; the wait is not.
+          // BOTH PREFERENCES ARE SET HERE, NEVER INHERITED: the first row used to read whatever the
+          // machine's own setting was, and a macOS runner whose Chrome reported reduced motion read
+          // the pulse as `none` at both widths, on a build that pulses (Chrome with
+          // --force-prefers-reduced-motion reproduces it).
           const anim = () => b.evaluate(() => ['.main .sk .sk-bar', '.main .sk'].map((q) => { const e = document.querySelector(q); return e ? getComputedStyle(e).animationName : 'absent'; }).join(' '));
+          await b.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
           is(`${w} the skeleton pulses`, 'skel sk-show', await anim());
           await b.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
           is(`${w} ...and stands still under reduced motion, still waiting its 180 ms`, 'none sk-show', await anim());
