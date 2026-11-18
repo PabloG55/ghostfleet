@@ -74,7 +74,12 @@ if you see that refusal it is not an obstacle to route around — reach for `fle
 
 ## First: are you the lead, a sub-lead, or a worker?
 
-**A master** is in the project's main checkout. Everything below is for it.
+**The master** is the project's top lead. It spawns top-level workers from the main checkout.
+
+**A non-master session sharing the main checkout** is a sub-lead for the workers it spawns on
+its fleet. `fleet-spawn` announces the child and where it reports. Wait for its `done` or
+`need-you` in your `fleet-inbox`. Its branch starts at the ordinary spawn base and its PR
+targets the integration branch. Report the PR to the top lead for review and merge.
 
 **A worker** is in a linked worktree. When you finish a PR and are asked to start fresh
 work, re-branch where you stand — no new worktree, no new session:
@@ -108,8 +113,13 @@ a worker to its master. `fleet-spawn` (or `fleet_spawn`) run from your worktree 
 
 Everything else in this skill applies to a sub-lead as to a master — look before you spawn,
 a new task is a new session, resolve the brief's decisions before you dispatch — scoped to
-its own children. Do NOT run fleet-spawn from the main checkout to get "more workers": that
-makes them the top lead's, and nothing ties them to you.
+its own children. The two-level limit and `fleet-stop --children` also apply to children of
+a topic session in the main checkout.
+
+If the human asks for a **subagent** in any language (for example, “subagente”) and you use
+a fleet worker, say so in one line and say who gets its report. For example, “I’m starting
+a fleet worker for your subagent request because dispatch goes through the fleet here.
+Codex and other non-Claude agents run as workers, and this worker will report back to me.”
 
 ## A new task is a new SESSION — reuse the folder, never the worker
 
@@ -464,8 +474,9 @@ the screen lives. `fleet-shots verdict <run>` still reads the verdict in a termi
 - **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
   never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.
-- **A sub-lead's children are its own.** A master does not dispatch to, merge, or stop a
-  sub-worker directly; it talks to the sub-lead, whose one PR is the unit it reviews.
+- **A sub-lead's children report to it.** The master coordinates with the sub-lead for
+  dispatch and retirement. It reviews the linked sub-lead's combined PR or each
+  main-checkout sub-lead child's integration PR.
 
 ## Example
 

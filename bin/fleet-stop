@@ -127,6 +127,7 @@ fi
 # ── a sub-lead's workers: asked about, then stopped first ────────────────────
 # A child is a session whose <sock>.<child>.parent names this one. Only those still on the
 # fleet count — live, or asleep (an asleep card is still a card, and still a worktree).
+# The parent may share the main checkout. The reclaim check below protects it.
 kids=()
 for pt in "$FLEET_DIR/$SOCK".*.parent; do
   [ -f "$pt" ] || continue

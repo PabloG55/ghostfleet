@@ -7849,6 +7849,128 @@ else
   skip "nested leads" "git/tmux/jq missing"
 fi
 
+# Several sessions can share the main checkout. A pane or a live slot identifies who
+# asked for the worker, while the requested base still supplies its starting commit.
+group "a main-checkout session owns the workers it spawns"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  MC="$TMUX_TMPDIR/scratch"; MCF="$MC/fleet"; MCR="$MC/acme-api"; MCS=cf-acme-api
+  mkdir -p "$MC/home" "$MC/stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n❯ \\n%%s\\n" %s %s\nexec sleep 300\n' '────────────' '────────────' > "$MC/stub/agent-here"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent"\n' "$MC" > "$MC/stub/fleet-send"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$MC/stub/gh"
+  chmod +x "$MC/stub/"*
+  git init -q -b staging "$MCR"
+  git -C "$MCR" config user.email t@t; git -C "$MCR" config user.name t
+  git -C "$MCR" commit -qm staging --allow-empty
+  git -C "$MCR" checkout -qb toolbox
+  git -C "$MCR" commit -qm toolbox --allow-empty
+  MCBASE="$(git -C "$MCR" rev-parse staging)"
+  mct() { tmux -u -L "$MCS" "$@"; }
+  mcpane() { mct display-message -p -t "$1" '#{pane_id}'; }
+  for s in master toolbox _term-toolbox _term-master; do
+    mct -f /dev/null new-session -d -s "$s" -c "$MCR" "$MC/stub/agent-here"
+  done
+  mct set-option -t _term-toolbox @cf_tab_from toolbox
+  MC_TMUX="$(mct display-message -p '#{socket_path},#{pid},0')"
+  mcenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK_FORCE \
+    HOME="$MC/home" CLAUDE_FLEET_SOCK="$MCS" CLAUDE_FLEET_DIR="$MCF" CLAUDE_FLEET_SLOTS="$MC/slots" \
+    CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_NOTIFY_QUIET=0 CLAUDE_FLEET_NOTIFY_LEAD=1 PATH="$MC/stub:$ROOT/bin:$PATH" "$@"; }
+  mctag() { [ ! -f "$MCF/$1.$2.parent" ] || cat "$MCF/$1.$2.parent"; }
+  mcspawn() { local pane="$1" worker="$2"; shift 2
+    ( cd "$MCR" && mcenv TMUX="$MC_TMUX" TMUX_PANE="$pane" \
+        CLAUDE_FLEET_SLOT=master "$ROOT/bin/fleet-spawn" "$worker" --from staging --new "$@" ); }
+  mcmcp() {
+    ( cd "$MCR" && mcenv "$@" node --input-type=module -e '
+      const {callTool} = await import(process.argv[1]);
+      const result = callTool("fleet_spawn", JSON.parse(process.env.SCRATCH_SPAWN));
+      process.stdout.write(result.text || result);
+    ' "$ROOT/mcp/fleet-dispatch.mjs" ); }
+  mcfire() {
+    jq -nc --arg event "$1" --arg cwd "$MC/api-fix" --arg note "${2:-}" \
+      '{hook_event_name:$event,session_id:"scratch",cwd:$cwd,transcript_path:"",message:$note}' \
+      | mcenv CLAUDE_FLEET_SLOT=api-fix "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  mcrows() {
+    if [ -f "$2" ]; then awk -F '\t' -v event="$1" '$2=="api-fix" && $3==event { n++ } END { print n+0 }' "$2"
+    else echo 0; fi
+  }
+
+  out="$(mcspawn "$(mcpane toolbox)" api-fix --prompt 'Fix the parser. Done when: the parser test passes.' 2>"$MC/spawn.err")"
+  is "the calling pane wins and the child starts at the requested base" "toolbox:$MCBASE" \
+    "$(mctag "$MCS" api-fix):$(git -C "$MC/api-fix" rev-parse HEAD 2>/dev/null)"
+  is "stdout announces the child's reporting path" "1" \
+    "$(grep -cxF "fleet-spawn: 'api-fix' is a child of 'toolbox': its done and need-you come to you. Wait for its report." <<< "$out" || true)"
+  wait_for 15 "the child's brief" '[ -s "$MC/sent" ]' || true
+  is "the child's brief names the integration branch as the PR target" "1" \
+    "$(grep -cF 'open your PR against the integration branch' "$MC/sent" 2>/dev/null || true)"
+  is "the review gate files the child's notices with its parent" "$MCF/$MCS.toolbox.inbox" \
+    "$( . "$ROOT/lib/review-gate.sh"; review_inbox "$MCF" "$MCS" api-fix )"
+
+  for ev in done need-you; do
+    : > "$MC/sent"
+    case "$ev" in
+      done) mcfire Stop; wake='One of YOUR workers' ;;
+      need-you) mcfire Notification 'Claude needs your permission to use Bash'; wake='api-fix NEEDS YOU' ;;
+    esac
+    wait_for 6 "$ev wake" '[ -s "$MC/sent" ]' || true
+    is "$ev lands in the parent inbox and wakes only that parent" "1:0:1:0" \
+      "$(mcrows "$ev" "$MCF/$MCS.toolbox.inbox"):$(mcrows "$ev" "$MCF/$MCS.inbox"):$(grep -cE " -s $MCS toolbox .*$wake" "$MC/sent" || true):$(grep -cF " -s $MCS master " "$MC/sent" || true)"
+  done
+
+  out="$(jq -nc --arg cwd "$MCR" '{hook_event_name:"PreToolUse",tool_name:"Agent",cwd:$cwd}' \
+    | mcenv TMUX="$MC_TMUX" TMUX_PANE="$(mcpane toolbox)" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"
+  is "the Agent refusal tells the topic session that fleet-spawn makes a child" "2:1" \
+    "$?:$(grep -cF 'fleet-spawn makes a child of this session' <<< "$out" || true)"
+
+  out="$(mcspawn "$(mcpane api-fix)" rate-limit 2>&1)"
+  is "a child cannot spawn by running from the main checkout" "1:0" \
+    "$(grep -c 'a sub-worker cannot spawn' <<< "$out" || true):$(mct has-session -t '=rate-limit' 2>/dev/null && echo 1 || echo 0)"
+
+  out="$(mcspawn "$(mcpane master)" docs-pass 2>"$MC/spawn.err")"
+  is "master's pane starts a top-level worker" "1:" \
+    "$(grep -c "started 'docs-pass'" <<< "$out" || true):$(mctag "$MCS" docs-pass)"
+  out="$(cd "$MCR" && mcenv "$ROOT/bin/fleet-spawn" playground --from staging --new 2>"$MC/spawn.err")"
+  is "a shell without a pane or slot starts a top-level worker" "1:" \
+    "$(grep -c "started 'playground'" <<< "$out" || true):$(mctag "$MCS" playground)"
+
+  out="$(mcspawn "$(mcpane _term-toolbox)" cache-keys 2>"$MC/spawn.err")"
+  is "a tab routes to its recorded origin" "toolbox" "$(mctag "$MCS" cache-keys)"
+  out="$(mcspawn "$(mcpane _term-master)" scratch 2>"$MC/spawn.err")"
+  is "a tab missing its origin starts a top-level worker" "1:" \
+    "$(grep -c "started 'scratch'" <<< "$out" || true):$(mctag "$MCS" scratch)"
+
+  out="$(mcmcp CLAUDE_FLEET_SLOT=toolbox SCRATCH_SPAWN='{"name":"acme-web","from":"staging","force_new":true}' 2>"$MC/spawn.err")"
+  is "MCP without a pane uses the live launch slot and returns the notice" "toolbox:1" \
+    "$(mctag "$MCS" acme-web):$(grep -cF "'acme-web' is a child of 'toolbox'" <<< "$out" || true)"
+
+  tmux -L cf-billing-svc -f /dev/null new-session -d -s toolbox -c "$MCR" "$MC/stub/agent-here"
+  out="$(cd "$MCR" && mcenv CLAUDE_FLEET_SLOT=toolbox "$ROOT/bin/fleet-spawn" cli-flags -s cf-billing-svc --from staging --new 2>"$MC/spawn.err")"
+  is "a cross-fleet spawn ignores a matching slot on the destination" "1:" \
+    "$(grep -c "started 'cli-flags'" <<< "$out" || true):$(mctag cf-billing-svc cli-flags)"
+
+  mkdir -p "$MC/home/.claude" "$MC/home/.config/ghostfleet"
+  ln -s "$MCF" "$MC/home/.claude/fleet"
+  git clone -q "$MCR" "$MC/billing-svc"
+  printf 'acme-api\t%s\twork\nbilling-svc\t%s\twork\n' "$MCR" "$MC/billing-svc" > "$MC/home/.config/ghostfleet/projects"
+  out="$(mcmcp TMUX="$MC_TMUX" TMUX_PANE="$(mcpane toolbox)" CLAUDE_FLEET_SLOT=master \
+    SCRATCH_SPAWN='{"name":"docs-sweep","project":"acme-api","from":"staging","force_new":true}' 2>"$MC/spawn.err")"
+  is "MCP naming its own project still uses the calling pane" "toolbox" "$(mctag "$MCS" docs-sweep)"
+  out="$(mcmcp TMUX="$MC_TMUX" TMUX_PANE="$(mcpane toolbox)" CLAUDE_FLEET_SLOT=toolbox \
+    SCRATCH_SPAWN='{"name":"csv-export","project":"billing-svc","from":"staging","force_new":true}' 2>"$MC/spawn.err")"
+  is "MCP targeting another project keeps its worker top-level" "1:" \
+    "$(grep -c "started 'csv-export'" <<< "$out" || true):$(mctag cf-billing-svc csv-export)"
+
+  out="$(mcenv "$ROOT/bin/fleet-stop" -s "$MCS" toolbox 2>&1)"
+  is "stopping the shared-checkout parent requires --children" "1" "$(grep -cF -- '--children' <<< "$out" || true)"
+  out="$(mcenv "$ROOT/bin/fleet-stop" -s "$MCS" --children --reclaim toolbox 2>&1)"
+  is "with --children the child is stopped and the shared checkout is kept" "0:1" \
+    "$(mct has-session -t '=api-fix' 2>/dev/null && echo 1 || echo 0):$(mct has-session -t '=master' 2>/dev/null && git -C "$MCR" rev-parse --git-dir >/dev/null && echo 1 || echo 0)"
+  mct kill-server
+  tmux -L cf-billing-svc kill-server
+else
+  skip "main-checkout sub-leads" "git, tmux, jq or node missing"
+fi
+
 # ── 4a10b1. a sub-lead's card is its TEAM's state ────────────────────────────
 # Seen live: a sub-lead idle at its prompt drew `✓ ready` in green on the top grid while
 # one of its workers was mid-turn, and green read as "nothing is happening there". The

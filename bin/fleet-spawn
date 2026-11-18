@@ -102,6 +102,7 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # STALE CLAUDE_FLEET_SOCK from an earlier context. Only trust it when it names a
 # cf-* (fleet) server. (route_to_owner below still refines this by repo owner.)
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+CALLER_SOCK="$SOCK"
 # ...and an EXPLICIT socket beats both, because $TMUX is inherited by anything a
 # fleet session launches (see "WHICH FLEET" in the header). PINNED, so route_to_owner
 # leaves it alone as well: a caller that named the fleet gets the fleet it named.
@@ -152,6 +153,8 @@ GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
 #     sub-lead integrates, and opens the one PR to the integration branch
 #   - on the same fleet, tagged with its parent in <fleet dir>/<sock>.<child>.parent
 #   - its done / need-you go to the sub-lead's inbox and wake the sub-lead (fleet-event.sh)
+# In a shared main checkout the calling session still owns those events. The checkout's
+# branch belongs to the project, so the worker uses the ordinary base and PR target.
 # EXACTLY TWO LEVELS: a session that is itself a child cannot spawn. That is the leaf rule
 # the old refusal enforced, moved one level down — a tree of arbitrary depth is a tree
 # nobody can read from its root.
@@ -162,16 +165,17 @@ GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
 # refusal — that shape is still a shell that wandered into a worktree, not a lead.
 #   A linked worktree has its own git-dir under the shared common dir; the main
 # checkout's two are the same path. That is exact, unlike guessing from the folder name.
-LINKED_ROOT=""
-if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
-   && [ "$(git -C "$PWD" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" ]; then
-  LINKED_ROOT="$GITROOT"
-  # Everything downstream — where the child's worktree goes, which project owns the repo,
-  # whose node_modules to link — is a question about the REPO, and the answer is its main
-  # checkout. Asked from inside the sub-lead's tree, a repo with a .worktrees/ convention
-  # would nest the child inside the parent's checkout.
-  _main="$(git -C "$PWD" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
-  [ -n "$_main" ] && [ -d "$_main" ] && GITROOT="$_main"
+LINKED_ROOT=""; FLAT_LINKED=0
+if [ "$(git -C "$PWD" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" = 1 ]; then
+    FLAT_LINKED=1
+  else
+    LINKED_ROOT="$GITROOT"
+    # The repo's main checkout owns worktree layout and dependencies. Starting from
+    # the sub-lead's tree would nest the child when the repo uses .worktrees/.
+    _main="$(git -C "$PWD" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
+    [ -n "$_main" ] && [ -d "$_main" ] && GITROOT="$_main"
+  fi
 fi
 
 # ── IS THIS BRIEF ONE THING, AND DOES IT SAY WHAT DONE LOOKS LIKE? ───────────
@@ -435,15 +439,6 @@ sess_for() {
 $panes
 EOF
 }
-# ── WHOSE CHILD IS THIS? (a spawn from a linked worktree — see the top) ──────
-# Asked only now, because the socket is final only now: route_to_owner can move it, and a
-# parent is a session ON a socket. Most definite first:
-#   the calling PANE     $TMUX_PANE on this very fleet — the session that ran the command
-#   $CLAUDE_FLEET_SLOT   the name the session was launched with, when it is live here and
-#                        standing in this worktree (an MCP server inherits it, not a pane)
-#   whoever stands here  the session whose pane is in this worktree
-# `master` is never a parent: the lead is the top of the tree by definition, and a master
-# whose pane has wandered into a worktree is still spawning top-level workers.
 FLEET_DIR_NOW="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}"
 
 # ── THE MODEL FOR THIS KIND (lib/model-kind.sh) ──────────────────────────────
@@ -467,19 +462,30 @@ elif [ -n "$KIND" ]; then
   KIND_NOTE="kind '$KIND' recorded; --model $MODEL was given, so the project's map was not read"
 fi
 
+# ── WHOSE CHILD IS THIS? ───────────────────────────────────────────────────
+# Pane IDs and launch slots can collide across sockets. Resolve them only on the
+# caller's fleet, after route_to_owner and any explicit socket have had their say.
 PARENT_SESS=""; PARENT_BRANCH=""
-if [ -n "$LINKED_ROOT" ]; then
+if [ -z "$CALLER_SOCK" ] || [ "$SOCK" = "$CALLER_SOCK" ]; then
   case "${TMUX:-}" in *"/$SOCK,"*)
     [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -u -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
-  if [ -z "$PARENT_SESS" ] && [ -n "${CLAUDE_FLEET_SLOT:-}" ]; then
-    _here="$(sess_for "$LINKED_ROOT")"
-    [ -n "$_here" ] && tmux -L "$SOCK" has-session -t "$CLAUDE_FLEET_SLOT" 2>/dev/null \
-      && case "$(tmux -u -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
-           "$LINKED_ROOT"|"$LINKED_ROOT"/*) PARENT_SESS="$CLAUDE_FLEET_SLOT" ;; esac
+  if [ -z "$PARENT_SESS" ] && [ -n "${CLAUDE_FLEET_SLOT:-}" ] \
+     && tmux -L "$SOCK" has-session -t "=$CLAUDE_FLEET_SLOT" 2>/dev/null; then
+    PARENT_SESS="$CLAUDE_FLEET_SLOT"
+    # A stale launch slot must not claim another linked checkout. A tagged child
+    # still has to be refused if it tries to spawn from a different directory.
+    if [ -n "$LINKED_ROOT" ] && [ ! -f "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" ]; then
+      case "$(tmux -u -L "$SOCK" display-message -p -t "$PARENT_SESS" '#{pane_current_path}' 2>/dev/null)" in
+        "$LINKED_ROOT"|"$LINKED_ROOT"/*) ;;
+        *) PARENT_SESS="" ;;
+      esac
+    fi
   fi
-  [ -n "$PARENT_SESS" ] || PARENT_SESS="$(sess_for "$LINKED_ROOT")"
-  _br="$(git -C "$LINKED_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  if [ -z "$PARENT_SESS" ]; then
+  if [ -n "$LINKED_ROOT" ] && [ -z "$PARENT_SESS" ]; then
+    PARENT_SESS="$(sess_for "$LINKED_ROOT")"
+  fi
+  if [ -n "$LINKED_ROOT" ] && [ -z "$PARENT_SESS" ]; then
+    _br="$(git -C "$LINKED_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
     { echo "fleet-spawn: this is ALREADY in a worktree ($LINKED_ROOT, branch $_br), with no fleet session in it."
       echo "  A spawn from a worktree makes a child of the session standing there, and there is none."
       echo
@@ -491,26 +497,33 @@ if [ -n "$LINKED_ROOT" ]; then
       echo "  Override deliberately (a flat sibling, no parent) with CLAUDE_FLEET_ALLOW_NESTED=1."; } >&2
     exit 1
   fi
-  if [ "$PARENT_SESS" != master ] && [ -f "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" ]; then
-    _gp="$(head -1 "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" 2>/dev/null)"
-    { echo "fleet-spawn: '$PARENT_SESS' is a sub-worker (of '$_gp') — a sub-worker cannot spawn workers."
-      echo "  Do the work here, in $LINKED_ROOT. If it needs splitting, say so to '$_gp' and let it spawn."
-      echo
-      echo "  Exactly two levels: master → sub-lead → workers. A tree any deeper is one nobody can"
-      echo "  read from its root, and its events would have to climb through a lead that is itself"
-      echo "  somebody's worker. Nothing was created."; } >&2
-    exit 1
-  fi
-  if [ "$PARENT_SESS" = master ]; then
-    PARENT_SESS=""                              # the lead's workers are top-level, as ever
-  else
-    PARENT_BRANCH="$_br"
-    # The child starts from what the sub-lead has, not from the integration branch: its PR
-    # goes into the sub-lead's branch, and a base the sub-lead does not have would bring
-    # the sub-lead a diff full of somebody else's work. An explicit --from still wins.
-    [ -n "$FROM" ] || FROM="$PARENT_BRANCH"
-    echo "fleet-spawn: spawning from the worktree of '$PARENT_SESS' — '$NAME' will be its child, on $PARENT_BRANCH" >&2
-  fi
+fi
+# Tabs record their origin in @cf_tab_from. Follow older tab chains the way fleet-tab
+# does, with a bound for stale or cyclic metadata. show-options takes a bare tab target.
+for _ in 1 2 3 4; do
+  case "$PARENT_SESS" in
+    _*) PARENT_SESS="$(tmux -u -L "$SOCK" show-options -qv -t "$PARENT_SESS" @cf_tab_from 2>/dev/null)" ;;
+    *) break ;;
+  esac
+  tmux -L "$SOCK" has-session -t "=$PARENT_SESS" 2>/dev/null || { PARENT_SESS=""; break; }
+done
+case "$PARENT_SESS" in master|_*) PARENT_SESS="" ;; esac
+if [ -n "$PARENT_SESS" ] && [ -f "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" ]; then
+  _gp="$(head -1 "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" 2>/dev/null)"
+  { echo "fleet-spawn: '$PARENT_SESS' is a sub-worker (of '$_gp') — a sub-worker cannot spawn workers."
+    echo "  Do the work here, in ${LINKED_ROOT:-$GITROOT}. If it needs splitting, say so to '$_gp' and let it spawn."
+    echo
+    echo "  Exactly two levels: master → sub-lead → workers. A tree any deeper is one nobody can"
+    echo "  read from its root, and its events would have to climb through a lead that is itself"
+    echo "  somebody's worker. Nothing was created."; } >&2
+  exit 1
+fi
+[ "$FLAT_LINKED" = 1 ] && PARENT_SESS=""
+if [ -n "$PARENT_SESS" ] && [ -n "$LINKED_ROOT" ]; then
+  PARENT_BRANCH="$(git -C "$LINKED_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  # A linked parent integrates the child's PR into its own branch. An explicit --from wins.
+  [ -n "$FROM" ] || FROM="$PARENT_BRANCH"
+  echo "fleet-spawn: spawning from the worktree of '$PARENT_SESS' — '$NAME' will be its child, on $PARENT_BRANCH" >&2
 fi
 
 free_worktrees() {                     # "<label> (<branch>, clean)" per free worktree
@@ -836,7 +849,10 @@ fi
 # reads it on the child's FIRST event, and a killed same-named session may have left one
 # behind — a top-level worker must not inherit a stranger's parent and report to it.
 if [ -n "$PARENT_SESS" ]; then
-  printf '%s\n' "$PARENT_SESS" > "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
+  if ! { mkdir -p "$FLEET_DIR_NOW" && printf '%s\n' "$PARENT_SESS" > "$FLEET_DIR_NOW/$SOCK.$name.parent"; }; then
+    echo "fleet-spawn: could not record parent '$PARENT_SESS'. No session started. Retry with --reuse '$WT' after fixing the fleet directory." >&2
+    exit 1
+  fi
 else
   rm -f "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
 fi
@@ -957,7 +973,11 @@ echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGE
 # A LINE OF ITS OWN, after the one fleet-grid.mjs parses (/started '([^']+)'/), so that
 # parse is untouched and a reader of either stream sees the tree.
 [ -n "$KIND_NOTE" ] && echo "fleet-spawn: $KIND_NOTE"
-[ -n "$PARENT_SESS" ] && echo "fleet-spawn: '$name' is a child of '$PARENT_SESS' — branched from $PARENT_BRANCH, its PR goes into $PARENT_BRANCH, and its done/need-you go to '$PARENT_SESS'"
+if [ -n "$PARENT_BRANCH" ]; then
+  echo "fleet-spawn: '$name' is a child of '$PARENT_SESS' — branched from $PARENT_BRANCH, its PR goes into $PARENT_BRANCH, and its done/need-you go to '$PARENT_SESS'"
+elif [ -n "$PARENT_SESS" ]; then
+  echo "fleet-spawn: '$name' is a child of '$PARENT_SESS': its done and need-you come to you. Wait for its report."
+fi
 
 # record what this worktree is for, so fleet-worktrees (and a lead that restarted
 # and lost its memory) can see intent without guessing. Keyed by worktree path.
@@ -1036,8 +1056,13 @@ fi
 # The parent tag steers the events; only this steers the PR. After the brief-check marker,
 # for the reason that marker trails: the head of the brief is the human's ask.
 if [ -n "$PROMPT" ] && [ -n "$PARENT_SESS" ]; then
+  if [ -n "$PARENT_BRANCH" ]; then
+    _pr="Open your PR against $PARENT_BRANCH (gh pr create --base $PARENT_BRANCH). '$PARENT_SESS' merges it and opens the one PR upward."
+  else
+    _pr="Please open your PR against the integration branch. The fleet lead merges it."
+  fi
   DISPATCH_PROMPT="$DISPATCH_PROMPT
-nested-lead: you are a sub-worker of '$PARENT_SESS'. Your branch was cut from $PARENT_BRANCH; open your PR against $PARENT_BRANCH (gh pr create --base $PARENT_BRANCH), not against the integration branch — '$PARENT_SESS' merges it and opens the one PR upward. Your done and need-you go to '$PARENT_SESS', not to master. You cannot spawn workers of your own."
+nested-lead: you are a sub-worker of '$PARENT_SESS'. $_pr Your done and need-you go to '$PARENT_SESS'. You cannot spawn workers of your own."
 fi
 if [ -n "$PROMPT" ]; then
   READY_RE='❯|bypass permissions|for shortcuts'
