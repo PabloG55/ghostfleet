@@ -1478,7 +1478,7 @@ _done_again() {                       # $1=baseline file $2=this row's detail
 # autonomous turn Stops once when its whole tool-loop finishes). Workers only,
 # never the lead's own turns; best-effort, never fail the hook.
 # ── A SUB-WORKER REPORTS TO ITS SUB-LEAD, NOT TO MASTER ──────────────────────
-# A child spawned from a worker's worktree (bin/fleet-spawn) carries its parent's name in
+# A child spawned by a sub-lead (bin/fleet-spawn) carries its parent's name in
 # <sock>.<child>.parent. Its events go to THAT session's inbox, <sock>.<parent>.inbox, and
 # wake THAT session: the sub-lead asked for this worker and is waiting on it, and the top
 # master asked for the sub-lead, not for its team — it sees the rollup on the sub-lead's
@@ -1487,7 +1487,7 @@ _done_again() {                       # $1=baseline file $2=this row's detail
 # events into an inbox nobody will ever drain. Silence is this fleet's worst symptom, and
 # a tag pointing at a stopped session is exactly how it would arrive.
 _parent=""; _to=master; _inbox="$FLEET_DIR/${CLAUDE_FLEET_SOCK:-}.inbox"
-_submsg="[fleet] One of YOUR workers finished or needs you — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
+_submsg="[fleet] One of YOUR workers finished or needs you — run fleet-inbox to see what changed, then continue with your worker. Automated nudge; no need to reply to it."
 if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] \
    && [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" ]; then
   _parent="$(head -1 "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" 2>/dev/null)"
