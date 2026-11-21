@@ -7950,15 +7950,25 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
 
   mkdir -p "$MC/home/.claude" "$MC/home/.config/ghostfleet"
   ln -s "$MCF" "$MC/home/.claude/fleet"
-  git clone -q "$MCR" "$MC/billing-svc"
+  git clone -q --origin origin "$MCR" "$MC/billing-svc"
   printf 'acme-api\t%s\twork\nbilling-svc\t%s\twork\n' "$MCR" "$MC/billing-svc" > "$MC/home/.config/ghostfleet/projects"
   out="$(mcmcp TMUX="$MC_TMUX" TMUX_PANE="$(mcpane toolbox)" CLAUDE_FLEET_SLOT=master \
     SCRATCH_SPAWN='{"name":"docs-sweep","project":"acme-api","from":"staging","force_new":true}' 2>"$MC/spawn.err")"
   is "MCP naming its own project still uses the calling pane" "toolbox" "$(mctag "$MCS" docs-sweep)"
+  # The clone checks out toolbox and has staging only as a remote-tracking ref.
+  # Git 2.56.1 refuses the bare name as a worktree start point.
   out="$(mcmcp TMUX="$MC_TMUX" TMUX_PANE="$(mcpane toolbox)" CLAUDE_FLEET_SLOT=toolbox \
-    SCRATCH_SPAWN='{"name":"csv-export","project":"billing-svc","from":"staging","force_new":true}' 2>"$MC/spawn.err")"
-  is "MCP targeting another project keeps its worker top-level" "1:" \
-    "$(grep -c "started 'csv-export'" <<< "$out" || true):$(mctag cf-billing-svc csv-export)"
+    SCRATCH_SPAWN='{"name":"csv-export","project":"billing-svc","from":"origin/staging","force_new":true}' 2>"$MC/spawn.err")"
+  # Staging could launch a flat worker while forwarding the caller's slot. The
+  # spawn record exposes that leaked parent even when there is no .parent file.
+  mcparent="$(jq -r 'select(.kind == "spawn" and .src.sock == "cf-billing-svc" and .f.worker == "csv-export") | (.f.parent // "top-level")' \
+    "$MCF/know.jsonl" 2>/dev/null)"
+  mcresult="$(grep -cF "started 'csv-export'" <<< "$out" || true):$(mctag cf-billing-svc csv-export):$mcparent"
+  if [ "$mcresult" != "1::top-level" ]; then
+    printf 'MCP spawn output\n%s\n' "$out" >&2
+    cat "$MC/spawn.err" >&2
+  fi
+  is "MCP targeting another project keeps its worker top-level" "1::top-level" "$mcresult"
 
   out="$(mcenv "$ROOT/bin/fleet-stop" -s "$MCS" toolbox 2>&1)"
   is "stopping the shared-checkout parent requires --children" "1" "$(grep -cF -- '--children' <<< "$out" || true)"
