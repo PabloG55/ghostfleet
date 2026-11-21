@@ -185,7 +185,8 @@ review_round_verdict() {
     }' "$f"
 }
 
-# The inbox a session's events land in: its sub-lead's when it has one, else the fleet's.
+# The parent tag routes review notices to the same inbox as other events. A parent
+# can share the main checkout. The gate determines merge eligibility from the PR.
 review_inbox() {   # <fleet-dir> <sock> <session>
   local p=""
   [ -f "$1/$2.$3.parent" ] && p="$(head -1 "$1/$2.$3.parent" 2>/dev/null)"

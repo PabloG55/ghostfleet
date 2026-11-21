@@ -49,8 +49,8 @@
 #   - a LEAF passes, and a leaf is now a SUB-WORKER: a session that is itself somebody's
 #     child (<sock>.<name>.parent). It cannot spawn — exactly two levels — so it has no
 #     fleet-spawn alternative and its subagents are its own business. A worker that is NOT
-#     a child is a potential sub-lead: fleet-spawn from its worktree makes a child of it,
-#     so it is redirected there exactly like a top lead. That exemption used to cover
+#     a child is a potential sub-lead. Fleet-spawn also makes children for topic sessions
+#     sharing the main checkout. Both are redirected to fleet-spawn. The exemption used to cover
 #     every linked worktree, and it is what let a worker running a team of its own do it
 #     with subagents the fleet could not see.
 #   - CLAUDE_FLEET_ALLOW_SUBAGENTS=1 overrides
@@ -407,8 +407,10 @@ if [ "$MERGE" = 1 ]; then
   _where=""
   is_linked "$CWD" && _where="$CWD"
   [ -z "$_where" ] && is_linked "${CLAUDE_PROJECT_DIR:-}" && _where="$CLAUDE_PROJECT_DIR"
-  if [ -z "$_where" ]; then                    # the main checkout: the lead merges, so it may —
-    [ "$_kind" = merge ] && review_gate_check  # behind the review gate, when that is on
+  if [ -z "$_where" ]; then
+    # Merges from the main checkout follow the normal review gate. A topic session's
+    # parent tags route events and confer no linked-worktree merge exception.
+    [ "$_kind" = merge ] && review_gate_check
     exit 0
   fi
   _wb="$(git -C "$_where" rev-parse --abbrev-ref HEAD 2>/dev/null)"
@@ -423,7 +425,7 @@ if [ "$MERGE" = 1 ]; then
     review_gate_check; exit 0
   fi
   # ── A SUB-LEAD MERGES ITS CHILDREN'S PRs INTO ITS OWN BRANCH ────────────────
-  # Nested leads (bin/fleet-spawn): a worker's children branch from its branch and PR into
+  # Linked sub-leads (bin/fleet-spawn): a worker's children branch from its branch and PR into
   # it, and nobody but the sub-lead integrates them — so with "workers can merge" off, that
   # one merge is still allowed. Exactly that shape: the PR's BASE is this session's own
   # branch AND its HEAD is one of this session's children's branches. Its own PR upward (base
@@ -508,10 +510,8 @@ if [ "$TOOL" != "EnterWorktree" ]; then
   # spawn, so there is nothing to redirect it to. Refusing it would leave it no way to fan
   # out at all, which is a worse fleet than the one this guard is protecting. Outside the
   # fleet a linked worktree has no session for fleet-spawn to make a child OF, so the same.
-  if [ "$_gd" != "$_gcd" ]; then
-    [ "$SUBWORKER" = 1 ] && exit 0
-    [ "$OUTSIDE" = 1 ] && exit 0
-  fi
+  [ "$SUBWORKER" = 1 ] && exit 0
+  [ "$_gd" != "$_gcd" ] && [ "$OUTSIDE" = 1 ] && exit 0
   # Read-only research passes. These gather and return; they do not build, they leave
   # no branch and no worktree, and no fleet-spawn is shaped like them. Anything else —
   # including the default, unnamed type — is dispatch.
@@ -562,6 +562,15 @@ if [ "$TOOL" != "EnterWorktree" ]; then
     echo "      fleet-spawn <name> --reuse <worktree> --prompt \"…\""
     echo "      fleet-spawn <name> --branch <b> --from origin/staging --new --prompt \"…\""
     echo "  or the MCP tool: fleet_spawn with name/branch/prompt."
+    case "$_me" in
+      ''|master|_*) ;;
+      *)
+        if tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "=$_me" 2>/dev/null; then
+          echo
+          echo "  From this main checkout, fleet-spawn makes a child of this session."
+          echo "  Its done and need-you go to your fleet-inbox. The fleet lead merges its PR into the integration branch."
+        fi ;;
+    esac
     echo
     echo "  Small enough to just do? Do it here — that needs no worker at all."
     echo
