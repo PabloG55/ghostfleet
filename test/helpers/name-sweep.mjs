@@ -672,6 +672,11 @@ const BINARY_REVIEWED = new Set([
   '7c1905e527cc5d0f',   // docs/wake-failed/390-woken.png
   '53d38c5a27b039a1',   // docs/wake-failed/390-failed-sheet.png
   'b7eab958980cfa8a',   // docs/wake-failed/1280-failed-dialog.png
+  // The composer's "send after this turn", shot on fixtures at 390 (2x) and 1280 and opened: the
+  // demo banner, acme-api's master and its fixture conversation, a draft naming acme-api.
+  'f7bb72b133d8a575',   // docs/send-after-turn/phone-390-composer.png
+  'e80fcbc9fca94d52',   // docs/send-after-turn/phone-390-send-sheet.png
+  '8c65d7110baf51b0',   // docs/send-after-turn/desk-1280-send-menu.png
   // The loading skeletons, mid-load and loaded, shot on fixtures: all twelve opened, every name
   // in them one of web/fixtures/'s, and the only host 127.0.0.1.
   '9c304df74456f431',   // docs/skeletons/390-home-loading.png
@@ -717,6 +722,8 @@ const BINARY_EXPECTED = [
   'docs/session-details/desk-1280-stop-confirm.png', 'docs/session-details/phone-390-no-stop.png',
   'docs/wake-failed/390-asleep.png', 'docs/wake-failed/390-woken.png',
   'docs/wake-failed/390-failed-sheet.png', 'docs/wake-failed/1280-failed-dialog.png',
+  'docs/send-after-turn/phone-390-composer.png', 'docs/send-after-turn/phone-390-send-sheet.png',
+  'docs/send-after-turn/desk-1280-send-menu.png',
   'docs/permission-modal/team-390-readonly-open.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.

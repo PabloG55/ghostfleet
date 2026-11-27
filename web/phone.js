@@ -605,6 +605,13 @@ var en_default = {
 	"sched.go": "Schedule",
 	"sess.queuedQ": "Queued: the session has a pending question. Answer it first.",
 	"sess.queuedTurn": "Queued: delivered when the current turn ends.",
+	"sess.intoTurn": "Sent into the running turn: it reads this at its next step.",
+	"sess.sendHold": "Send (hold, or right-click, to send after this turn)",
+	"sess.sendMenu": "Send to {name}",
+	"sess.sendNow": "Send now",
+	"sess.sendNowHint": "If it is working, it reads this at its next step, after the task in hand.",
+	"sess.sendAfter": "Send after this turn",
+	"sess.sendAfterHint": "Held until the turn ends, then runs as a turn of its own.",
 	"sess.changed": "The request changed while you were looking at it; nothing was sent. Check again.",
 	"sess.maxFiles": "Up to {n} files per message.",
 	"sess.pasted": "pasted image",
@@ -1540,6 +1547,13 @@ var es_default = {
 	"sched.go": "Programar",
 	"sess.queuedQ": "Quedó en cola: la sesión tiene una pregunta pendiente. Respóndela primero.",
 	"sess.queuedTurn": "Quedó en cola: se entrega cuando termine el turno actual.",
+	"sess.intoTurn": "Enviado al turno en curso: lo lee en su siguiente paso.",
+	"sess.sendHold": "Enviar (mantén presionado, o clic derecho, para enviar al terminar este turno)",
+	"sess.sendMenu": "Enviar a {name}",
+	"sess.sendNow": "Enviar ahora",
+	"sess.sendNowHint": "Si está trabajando, lo lee en su siguiente paso, después de la tarea en curso.",
+	"sess.sendAfter": "Enviar al terminar este turno",
+	"sess.sendAfterHint": "Queda en espera hasta que termine el turno y luego corre como un turno propio.",
 	"sess.changed": "El pedido cambió mientras lo mirabas; no se envió nada. Revisa de nuevo.",
 	"sess.maxFiles": "Hasta {n} archivos por mensaje.",
 	"sess.pasted": "imagen pegada",
@@ -8219,6 +8233,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 			}, opts);
 			if (r.queued === "question") toast(t("sess.queuedQ"), "");
 			else if (r.queued) toast(t("sess.queuedTurn"), "");
+			else if (r.into) toast(t("sess.intoTurn"), "");
 			refresh();
 			return r;
 		} catch (e) {
@@ -8314,7 +8329,20 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	});
 	const uploading = files.some((f) => f.state === "up");
 	const ready = files.filter((f) => f.state === "ok");
-	const sendDraft = async () => {
+	const sendOff = !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length;
+	const [sendMenu, setSendMenu] = d(false);
+	const hold = A({
+		timer: 0,
+		fired: false,
+		at: 0
+	});
+	const openSendMenu = () => {
+		hold.current.at = Date.now();
+		setSendMenu(true);
+	};
+	const sendMenuFresh = () => Date.now() - hold.current.at < 400;
+	h(() => () => clearTimeout(hold.current.timer), []);
+	const sendDraft = async (after = false) => {
 		if (prompt) {
 			showRequest();
 			return;
@@ -8324,7 +8352,10 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 		if (!text && !ready.length || uploading) return;
 		const list = ready.map((f) => `- ${f.path}`).join("\n");
 		const message = !ready.length ? text : `${text || t("sess.attaching", { n: ready.length })}\n\n${t("sess.attached", { n: ready.length })}:\n${list}`;
-		if (await act("fleet_send", { prompt: message })) {
+		if (await act("fleet_send", after ? {
+			prompt: message,
+			after_turn: true
+		} : { prompt: message })) {
 			sentAt.current = Date.now();
 			typing.current = false;
 			setSends((n) => n + 1);
@@ -8901,7 +8932,38 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 							}),
 							/* @__PURE__ */ u(SendBtn, {
 								busy: uploading,
-								disabled: !!prompt && !held || st === "limit" || busy || uploading || !draft.trim() && !ready.length
+								disabled: sendOff,
+								title: t("sess.sendHold"),
+								"aria-haspopup": "dialog",
+								onPointerDown: (e) => {
+									clearTimeout(hold.current.timer);
+									hold.current.fired = false;
+									if (e.button > 0 || sendOff) return;
+									hold.current.timer = setTimeout(() => {
+										hold.current.fired = true;
+										openSendMenu();
+									}, 500);
+								},
+								onPointerUp: () => clearTimeout(hold.current.timer),
+								onPointerLeave: () => clearTimeout(hold.current.timer),
+								onPointerCancel: () => clearTimeout(hold.current.timer),
+								onTouchEnd: (e) => {
+									if (hold.current.fired) e.preventDefault();
+								},
+								onContextMenu: (e) => {
+									e.preventDefault();
+									clearTimeout(hold.current.timer);
+									if (!sendOff) {
+										hold.current.fired = true;
+										openSendMenu();
+									}
+								},
+								onClick: (e) => {
+									if (hold.current.fired) {
+										e.preventDefault();
+										hold.current.fired = false;
+									}
+								}
 							})
 						]
 					}),
@@ -8916,6 +8978,33 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 			confirm ? /* @__PURE__ */ u(Confirm, {
 				...confirm,
 				onClose: () => setConfirm(null)
+			}) : null,
+			sendMenu ? /* @__PURE__ */ u(Modal, {
+				sheet: true,
+				title: t("sess.sendMenu", { name }),
+				onClose: () => setSendMenu(false),
+				children: /* @__PURE__ */ u("div", {
+					class: "modal-body ask-opts send-opts",
+					children: [/* @__PURE__ */ u("button", {
+						type: "button",
+						class: "opt",
+						onClick: () => {
+							if (sendMenuFresh()) return;
+							setSendMenu(false);
+							sendDraft(false);
+						},
+						children: /* @__PURE__ */ u("span", { children: [/* @__PURE__ */ u("b", { children: t("sess.sendNow") }), /* @__PURE__ */ u("small", { children: t("sess.sendNowHint") })] })
+					}), /* @__PURE__ */ u("button", {
+						type: "button",
+						class: "opt",
+						onClick: () => {
+							if (sendMenuFresh()) return;
+							setSendMenu(false);
+							sendDraft(true);
+						},
+						children: /* @__PURE__ */ u("span", { children: [/* @__PURE__ */ u("b", { children: t("sess.sendAfter") }), /* @__PURE__ */ u("small", { children: t("sess.sendAfterHint") })] })
+					})]
+				})
 			}) : null,
 			detailsOpen ? /* @__PURE__ */ u(DetailsModal, {
 				project,

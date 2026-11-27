@@ -155,8 +155,8 @@
 2	reply relay (hook routing)
 3	reply relay (a direct answer replaces the row)
 13	reply relay (fleet-send --reply-to)
-24	a send to a busy session is queued
-9	a send to a busy codex goes through codex queue
+24	a send to a busy session goes into its turn, labelled
+9	a busy codex takes a send into its turn, or into codex queue when asked
 3	a queued question carries its reply address
 3	the queue can be read, and a waiting prompt taken back out
 22	a queued prompt survives the drain that dies delivering it

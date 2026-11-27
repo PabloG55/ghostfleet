@@ -7167,13 +7167,21 @@ if command -v node >/dev/null 2>&1; then
     m.callTool('fleet_send', { session: '--owner', prompt: 'x' });
     m.callTool('fleet_send', { session: 'w1', prompt: 'y', owner: true, kind: 'owner' });
     await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'z' });
-    await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'the owner typed this' }, { human: true });" 2>/dev/null
+    await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'the owner typed this' }, { human: true });
+    m.callTool('fleet_send', { session: 'w1', prompt: 'after the acme-web build', after_turn: true });
+    m.callTool('fleet_send', { session: 'w1', prompt: '--after-turn' });
+    await m.callToolAsync('fleet_send', { session: 'w1', prompt: 'held for the owner', after_turn: true }, { human: true });" 2>/dev/null
+  # after_turn is the one way to HOLD a send to a working session (the default goes into its
+  # turn), and like every flag it reaches fleet-send only as an option, never as the words.
+  is "after_turn holds the send for the turn's end"  "1" "$(grep -cxF 'fleet-send [--after-turn] [--] [w1] [after the acme-web build]' "$MO/ran" || true)"
+  is "...a prompt of the flag goes after --"         "1" "$(grep -cxF 'fleet-send [--] [w1] [--after-turn]' "$MO/ran" || true)"
+  is "...and the phone's held send keeps both"       "1" "$(grep -cxF 'fleet-send [--owner] [--after-turn] [--] [w1] [held for the owner]' "$MO/ran" || true)"
   is "a worker's send carries no mark"            "1" "$(grep -cxF 'fleet-send [--] [w1] [run the acme-api suite]' "$MO/ran" || true)"
   is "a session of the flag goes after --"         "1" "$(grep -cxF 'fleet-send [--] [--owner] [x]' "$MO/ran" || true)"
   is "an owner field in the arguments is ignored"  "1" "$(grep -cxF 'fleet-send [--] [w1] [y]' "$MO/ran" || true)"
   is "the async door adds nothing on its own"      "1" "$(grep -cxF 'fleet-send [--] [w1] [z]' "$MO/ran" || true)"
   is "only opts.human marks it"                    "1" "$(grep -cxF 'fleet-send [--owner] [--] [w1] [the owner typed this]' "$MO/ran" || true)"
-  is "...and on no other call"                     "1" "$(grep -c '^fleet-send \[--owner\]' "$MO/ran" || true)"
+  is "...and on no other call (the two opts.human)" "2" "$(grep -c '^fleet-send \[--owner\]' "$MO/ran" || true)"
   # the handoff keeps the mark the mod reads, and only the two it knows
   node --input-type=module -e "
     const { writeHandoff } = await import('$ROOT/lib/mod-target.mjs');
@@ -11734,8 +11742,8 @@ if command -v tmux >/dev/null 2>&1; then
   # The pane prints the busy marker on purpose: with --now fleet-send then takes its
   # "already mid-turn, paste into it" path, which skips the 8s submit-confirm loop. That
   # path must KEEP the address (arming decides which turn answers, not this). --now,
-  # because a plain send to a busy session is QUEUED now and pastes nothing — the queue's
-  # own rows are in "a send to a busy session is queued".
+  # because a plain send to a busy pane with no box to read is held, and pastes nothing —
+  # those rows are in "a send to a busy session goes into its turn, labelled".
   tmux -L cffsend new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 30" 2>/dev/null
   sleep 0.4
   FSEND() { env -u TMUX CLAUDE_FLEET_DIR="$RF" "$ROOT/bin/fleet-send" -s cffsend "$@" 2>&1; }
@@ -11807,17 +11815,22 @@ else
   skip "reply relay (fleet-send)" "tmux not available"
 fi
 
-# ── 4c1q. a send to a busy session is QUEUED, and runs as its own turn ────────
-# Claude Code folds a message submitted mid-turn INTO the running turn, and the agent reads
-# it as a change of direction — task A was dropped for task B, with nothing saying so.
-# fleet-send used to paste into a busy session and print "your prompt will queue after this
-# turn", which it did not. The fixture below is an agent that behaves the way Claude does:
-# a line that arrives while it is busy is logged FOLD (taken into the running turn), a line
-# that arrives while it is idle starts a TURN, and every turn ends by firing the REAL Stop
-# hook — so the delivery under test is the one the fleet actually runs.
-group "a send to a busy session is queued"
+# ── 4c1q. a send to a busy session goes INTO its turn, labelled; --after-turn waits ──
+# Claude Code hands a message submitted mid-turn to the turn in progress, at its next step,
+# and the agent read it as a change of direction: task A was dropped for task B, with nothing
+# saying so (#15). So every send to a working session was QUEUED behind the turn — which
+# made a correction ("stop using that file") arrive after the work it was meant to change.
+# The fold has its own guard now, the UserPromptSubmit hook's queued-work label, so a send
+# goes into the turn by default and waiting is the sender's explicit choice (--after-turn).
+#   The fixture below is an agent that behaves the way Claude does: a line that arrives while
+# it is busy is logged FOLD (taken into the running turn), a line that arrives while it is
+# idle starts a TURN, every line it takes in fires the REAL UserPromptSubmit hook (what the
+# hook told it goes to <log>.ctx), and every turn ends by firing the REAL Stop hook, logged
+# STOP — so the delivery under test is the one the fleet actually runs. It writes the agent's
+# own note about itself, busy since the turn began, where the hook measures "a turn is running".
+group "a send to a busy session goes into its turn, labelled"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  Q="$(mktemp -d)"; QF="$Q/fleet"; mkdir -p "$QF"
+  Q="$(mktemp -d)"; QF="$Q/fleet"; mkdir -p "$QF" "$Q/cfg/sessions"
   cat > "$Q/agent" <<'AGENT'
 #!/usr/bin/env bash
 # $1 = turn log, $2 = seconds a turn lasts. Draws a Claude-shaped composer: two rules with
@@ -11826,72 +11839,158 @@ log="$1"; dur="$2"; rule='──────────────────
 frame() { printf '\033[2J\033[H'
           if [ "$1" = busy ]; then printf '✻ Working… (3s · esc to interrupt)\n'; else printf '\n'; fi
           printf '%s\n❯ \n%s\n  status\n' "$rule" "$rule"; }
+note() { printf '{"pid":%s,"sessionId":"fq-%s","status":"%s","statusUpdatedAt":%s}\n' \
+           "$$" "$CLAUDE_FLEET_SLOT" "$1" "$(( $(date +%s) * 1000 - 10000 ))" > "$CLAUDE_CONFIG_DIR/sessions/$$.json"; }
+ups() { local out
+        out="$(jq -nc --arg p "$1" --arg s "fq-$CLAUDE_FLEET_SLOT" --arg c "$PWD" \
+                 '{hook_event_name:"UserPromptSubmit",session_id:$s,cwd:$c,prompt:$p}' | "$HOOK" 2>/dev/null)"
+        printf '%s\t%s\n' "$1" "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<< "$out" 2>/dev/null | tr '\n' ' ')" >> "$log.ctx"; }
 while :; do
   frame idle
   IFS= read -r line || exit 0
   printf 'TURN %s\n' "$line" >> "$log"
+  note busy; ups "$line"
   frame busy
   end=$(( SECONDS + dur ))
   while [ "$SECONDS" -lt "$end" ]; do
     # a WHOLE second: macOS /bin/bash is 3.2, which refuses a fractional -t and spins
-    IFS= read -r -t 1 extra && printf 'FOLD %s\n' "$extra" >> "$log"
+    if IFS= read -r -t 1 extra; then printf 'FOLD %s\n' "$extra" >> "$log"; ups "$extra"; fi
   done
-  frame idle
+  frame idle; note idle
+  printf 'STOP\n' >> "$log"
   printf '{"hook_event_name":"Stop","session_id":"fq-%s","cwd":"%s"}' "$CLAUDE_FLEET_SLOT" "$PWD" \
     | "$HOOK" >/dev/null 2>&1
 done
 AGENT
   tmux -L cfq kill-server 2>/dev/null
   tmux -L cfq new-session -d -x 120 -y 30 -s w1 \
-    "env CLAUDE_FLEET_DIR='$QF' CLAUDE_FLEET_SOCK=cfq CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+    "env CLAUDE_FLEET_DIR='$QF' CLAUDE_CONFIG_DIR='$Q/cfg' CLAUDE_FLEET_SOCK=cfq CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
          CLAUDE_FLEET_QUEUE_EVERY=0.3 HOOK='$ROOT/hooks/fleet-event.sh' PATH='$ROOT/bin':\"\$PATH\" \
          bash '$Q/agent' '$Q/turns' 3" 2>/dev/null
   QS() { env -u TMUX CLAUDE_FLEET_DIR="$QF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfq "$@" 2>&1; }
   qwait() { local i; for i in $(seq 1 "$2"); do [ "$(grep -c . "$Q/turns" 2>/dev/null)" -ge "$1" ] && return 0; sleep 0.25; done; return 1; }
+  qlog() { tr '\n' '|' < "$Q/turns" 2>/dev/null | sed 's/|$//'; }
+  qctx() { awk -F'\t' -v p="$1" '$1 == p { print $2 }' "$Q/turns.ctx" 2>/dev/null; }
   for _ in $(seq 1 20); do grep -q '❯' <<< "$(tmux -L cfq capture-pane -p -t w1 2>/dev/null)" && break; sleep 0.1; done
+  # THE POINT: a send into a working session reaches it BEFORE that turn's Stop, and is
+  # labelled queued work behind the task in hand. The queue logged `STOP|TURN task-bravo`.
+  #   WATCHED GOING RED against origin/staging's fleet-send: `TURN task-alpha|STOP|TURN
+  # task-bravo|STOP`, "queued #1", and no label on task-bravo.
   QS w1 "task-alpha" >/dev/null
   qwait 1 20
-  o2="$(QS w1 "task-bravo")"; o3="$(QS w1 "task-charlie")"
-  is "a send to a working session is queued"  "1" "$(grep -c 'queued #1' <<< "$o2" || true)"
-  is "...and the next goes behind it"         "1" "$(grep -c 'queued #2' <<< "$o3" || true)"
-  is "...two records waiting"                 "2" "$(grep -c . "$QF/cfq.w1.queue" 2>/dev/null || echo 0)"
-  # THE POINT: three prompts, three turns, in the order sent, and nothing folded into the
-  # turn it arrived during. The old paste logs `FOLD task-bravo` here.
-  qwait 3 80
-  is "three prompts ran as three turns, in order" "TURN task-alpha|TURN task-bravo|TURN task-charlie" \
-     "$(tr '\n' '|' < "$Q/turns" 2>/dev/null | sed 's/|$//')"
-  for _ in $(seq 1 20); do [ -s "$QF/cfq.w1.queue" ] || break; sleep 0.25; done
-  is "...and the queue is empty after"        "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
-  # A duplicate of a prompt already waiting is not a second task (the automated nudges
-  # repeat word for word).
+  o2="$(QS w1 "task-bravo")"
+  qwait 3 40
+  is "a mid-turn send is delivered before the Stop" "TURN task-alpha|FOLD task-bravo|STOP" "$(qlog)"
+  is "...and says it went into the turn"        "1" "$(grep -c '(into the running turn; it reads this at its next step)' <<< "$o2" || true)"
+  is "...queueing nothing"                      "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  is "...and it is labelled queued work"        "1" "$(grep -c 'QUEUED WORK, not a replacement' <<< "$(qctx task-bravo)" || true)"
+  is "...behind the task in hand"               "1" "$(grep -c 'working on: "task-alpha"' <<< "$(qctx task-bravo)" || true)"
+  is "...and no --now mark is left to skip a label" "0" "$([ -e "$QF/cfq.w1.now" ] && echo 1 || echo 0)"
+  # #15: two tasks sent, BOTH reach the agent — green before this change (two turns) and after
+  # it (one turn, the second labelled to come after the first). A drop reads as one task here.
+  is "#15: two tasks sent, both reach the agent" "task-alpha task-bravo" \
+     "$(grep -E '^(TURN|FOLD) ' "$Q/turns" | sed 's/^[A-Z]* //' | sort | tr '\n' ' ' | sed 's/ $//')"
+  # --after-turn: the sender's own choice to wait. It queues, and runs as a turn of its own
+  # after the Stop, in the order sent. RED against origin/staging, which takes the flag for
+  # the session's name ("no session '--after-turn'").
   sleep 1; : > "$Q/turns"
-  QS w1 "task-delta" >/dev/null; qwait 1 20
-  QS w1 "nudge" >/dev/null; od="$(QS w1 "nudge")"
+  QS w1 "task-charlie" >/dev/null
+  qwait 1 20
+  o3="$(QS --after-turn w1 "task-delta")"; o4="$(QS --after-turn w1 "task-echo")"
+  is "--after-turn queues behind the running turn" "1" "$(grep -c 'queued #1 — it is mid-turn; held, as asked' <<< "$o3" || true)"
+  is "...and the next goes behind it"           "1" "$(grep -c 'queued #2' <<< "$o4" || true)"
+  is "...two records waiting"                   "2" "$(grep -c . "$QF/cfq.w1.queue" 2>/dev/null || echo 0)"
+  qwait 6 80
+  is "...each runs as its own turn, after the Stop, in order" \
+     "TURN task-charlie|STOP|TURN task-delta|STOP|TURN task-echo|STOP" "$(qlog)"
+  is "...and starts a turn of its own, unlabelled" "" "$(qctx task-delta)"
+  for _ in $(seq 1 20); do [ -s "$QF/cfq.w1.queue" ] || break; sleep 0.25; done
+  is "...and the queue is empty after"          "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  # A duplicate of a prompt already waiting is not a second task (the automated nudges
+  # repeat word for word) — and a nudge is the fleet's own, so it waits for the turn to end.
+  sleep 1; : > "$Q/turns"
+  QS w1 "task-foxtrot" >/dev/null; qwait 1 20
+  on1="$(QS --nudge w1 "nudge")"; od="$(QS --nudge w1 "nudge")"
+  is "the fleet's own nudge waits for the turn"  "1" "$(grep -c "queued #1 — it is mid-turn; the fleet's own nudge" <<< "$on1" || true)"
   is "the same prompt queued twice is held once" "1" "$(grep -c 'already queued' <<< "$od" || true)"
-  qwait 2 80; sleep 4
+  qwait 4 80; sleep 4
   is "...and runs once"                       "1" "$(grep -c 'TURN nudge' "$Q/turns" || true)"
-  # --now keeps the old behaviour for the send that MEANS to interrupt: into the turn.
+  # --now keeps the paste for the send that MEANS to interrupt: into the turn, unlabelled.
   : > "$Q/turns"
-  QS w1 "task-echo" >/dev/null; qwait 1 20
-  on="$(QS --now w1 "task-foxtrot")"
-  for _ in $(seq 1 40); do grep -q foxtrot "$Q/turns" 2>/dev/null && break; sleep 0.25; done
-  is "--now folds into the running turn"      "FOLD task-foxtrot" "$(grep foxtrot "$Q/turns" 2>/dev/null)"
-  is "...and says so"                         "1" "$(grep -c 'into the running turn' <<< "$on" || true)"
+  QS w1 "task-golf" >/dev/null; qwait 1 20
+  on="$(QS --now w1 "task-hotel")"
+  for _ in $(seq 1 40); do grep -q hotel "$Q/turns" 2>/dev/null && break; sleep 0.25; done
+  is "--now folds into the running turn"      "FOLD task-hotel" "$(grep hotel "$Q/turns" 2>/dev/null)"
+  is "...and says it interrupts"              "1" "$(grep -c 'into the running turn, as an interrupt' <<< "$on" || true)"
   is "...and queues nothing"                  "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  for _ in $(seq 1 20); do [ "$(grep -c '^task-hotel' "$Q/turns.ctx" 2>/dev/null)" -ge 1 ] 2>/dev/null && break; sleep 0.25; done
+  is "...unlabelled: its mark names it"       "" "$(qctx task-hotel)"
+  is "...and the mark is used up"             "0" "$([ -e "$QF/cfq.w1.now" ] && echo 1 || echo 0)"
   tmux -L cfq kill-server 2>/dev/null; rm -rf "$Q"
 else
-  skip "a send to a busy session is queued" "tmux/jq missing"
+  skip "a send to a busy session goes into its turn, labelled" "tmux/jq missing"
+fi
+
+# ── what still waits for the turn to end, and says why ────────────────────────
+# Into the turn is the default, and each hold below is a send that would do harm there: a
+# box someone is typing in (the paste would submit their half-written words with it), a box
+# that cannot be found (it may be a permission dialog, which a paste answers), a Telegram
+# message into a turn the desk started (the tool guard would take the shell away from the
+# desk's task), and a question into a turn that already owes another asker an answer (one
+# Stop relays one answer). Static panes, drawn the way Claude draws its composer while busy.
+#   WATCHED GOING RED against origin/staging: every one queued with "it is mid-turn; this
+# runs as its own turn after that one ends", which names no reason, and the Telegram turn's
+# own follow-up queued too, where it now joins.
+group "a send that would do harm in the turn waits, and says why"
+if command -v tmux >/dev/null 2>&1; then
+  QH="$(mktemp -d)"; QHF="$QH/fleet"; mkdir -p "$QHF" "$QH/ask"
+  rule='────────────────────────────────────────'
+  tmux -L cfqh kill-server 2>/dev/null
+  tmux -L cfqh -f /dev/null new-session -d -x 120 -y 20 -s typed \
+    "printf '✻ Working… (3s · esc to interrupt)\n%s\n❯ half a sentence\n%s\n' '$rule' '$rule'; sleep 60" 2>/dev/null
+  tmux -L cfqh new-session -d -x 120 -y 20 -s nobox "printf '✻ Working… (3s · esc to interrupt)\n'; sleep 60" 2>/dev/null
+  tmux -L cfqh new-session -d -x 120 -y 20 -s desk \
+    "printf '✻ Working… (3s · esc to interrupt)\n%s\n❯ \n%s\n' '$rule' '$rule'; sleep 60" 2>/dev/null
+  tmux -L cfqh new-session -d -x 120 -y 20 -s phone \
+    "printf '✻ Working… (3s · esc to interrupt)\n%s\n❯ \n%s\n' '$rule' '$rule'; sleep 60" 2>/dev/null
+  tmux -L cfqh new-session -d -x 120 -y 20 -s owed \
+    "printf '✻ Working… (3s · esc to interrupt)\n%s\n❯ \n%s\n' '$rule' '$rule'; sleep 60" 2>/dev/null
+  sleep 0.5
+  QH() { env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$QHF" CLAUDE_FLEET_MOD_DELIVER=off \
+           CLAUDE_FLEET_SUBMIT_DELAY=0.1 PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfqh "$@" 2>&1; }
+  o="$(QH typed "task-juliet")"
+  is "a box someone is typing in: held"       "1" "$(grep -c 'queued #1 — it is mid-turn; someone is typing in its box' <<< "$o" || true)"
+  is "...and nothing pasted over their words" "0" "$(grep -c 'juliet' <<< "$(tmux -L cfqh capture-pane -p -t typed 2>/dev/null)" || true)"
+  o="$(QH nobox "task-kilo")"
+  is "a box that cannot be read: held"        "1" "$(grep -c 'its input box could not be read' <<< "$o" || true)"
+  o="$(QH --owner --reply-to telegram/m41 --reply-dir "$QH/tg" desk "[telegram] task-lima")"
+  is "Telegram into a desk turn: held"        "1" "$(grep -c 'that turn did not come from Telegram' <<< "$o" || true)"
+  is "...in the queue"                        "1" "$(grep -c . "$QHF/cfqh.desk.queue" 2>/dev/null || echo 0)"
+  printf '%s\n' "$QH/tg" > "$QHF/cfqh.phone.telegram"
+  o="$(QH --owner --reply-to telegram/m42 --reply-dir "$QH/tg" phone "[telegram] task-mike")"
+  is "Telegram into a Telegram turn: joins it" "1" "$(grep -c '(into the running turn' <<< "$o" || true)"
+  is "...queueing nothing"                    "0" "$([ -s "$QHF/cfqh.phone.queue" ] && echo 1 || echo 0)"
+  printf 'cf-ask\x1fmaster\x1f%s\n' "$QH/ask" > "$QHF/cfqh.owed.reply-to"; printf '0\n' > "$QHF/cfqh.owed.reply-to.armed"
+  o="$(QH --reply-to cf-ask/lead2 --reply-dir "$QH/ask" owed "task-november")"
+  is "a question into a turn that owes another answer: held" "1" "$(grep -c 'already owes cf-ask/master an answer' <<< "$o" || true)"
+  is "...and the first asker keeps the address" "cf-ask" "$(cut -d$'\x1f' -f1 "$QHF/cfqh.owed.reply-to" 2>/dev/null)"
+  o="$(QH owed "task-oscar")"
+  is "...while a plain send still joins that turn" "1" "$(grep -c '(into the running turn' <<< "$o" || true)"
+  tmux -L cfqh kill-server 2>/dev/null; rm -rf "$QH"
+else
+  skip "a send that would do harm in the turn waits, and says why" "tmux missing"
 fi
 
 # ── a busy codex queues in codex, not in its input box ───────────────────────
 # A send to a working codex was pasted into the turn that was running, the fold the Claude
-# queue above exists to stop. codex-cli 0.166.0 ships `codex queue --thread <id> --message`,
-# which runs the prompt as a turn of its own after the current one. A stub codex records its
+# queue above existed to stop. codex-cli 0.166.0 ships `codex queue --thread <id> --message`,
+# which runs the prompt as a turn of its own after the current one: what --after-turn uses now,
+# while a plain send goes into the running turn, labelled, as it does for Claude. A stub codex records its
 # argv here, and the pane draws codex's own busy line. What matters is the thread and the
 # CODEX_HOME it is handed, both taken from the pane's conversation and not from this caller:
 # a queue written under another home is a file no TUI reads, and the send would say "queued"
 # for a prompt that never runs.
-group "a send to a busy codex goes through codex queue"
+group "a busy codex takes a send into its turn, or into codex queue when asked"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   CQ="$(cd "$(mktemp -d)" && pwd -P)"; CQF="$CQ/fleet"
   mkdir -p "$CQF" "$CQ/stub" "$CQ/cxh/sessions/2026/11/10" "$CQ/other/sessions/2026/11/10" "$CQ/flat"
@@ -11947,21 +12046,31 @@ PANE
      "$(CLAUDE_FLEET_DIR="$CQF" node "$ROOT/lib/codex-rollout.mjs" thread --pid 0 --sock cf-cxq --slot cx-flat >/dev/null 2>&1; echo $?)"
   is "--would-queue: a busy codex is working" "working" "$(CS --would-queue cx-busy | tail -1)"
   is "...an idle one is idle"                 "idle"    "$(CS --would-queue cx-idle | tail -1)"
-  o="$(CS cx-busy "task-golf")"
-  is "a busy codex is queued"                 "1" "$(grep -c '(queued #[0-9]* — it is mid-turn' <<< "$o" || true)"
+  # THE DEFAULT GOES INTO THE TURN: codex steers a running turn with what is submitted during
+  # it, so a send is pasted there, with the queued-work label in the prompt itself (codex
+  # writes no note for the hook's label to measure by). RED against origin/staging, which
+  # put it in codex's queue and typed nothing.
+  o="$(CS cx-busy "task-papa")"
+  for _ in $(seq 1 20); do grep -q papa "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
+  is "a busy codex takes a send into its turn" "GOT task-papa|0" "$(grep papa "$CQ/got.busy" 2>/dev/null)|$(grep -c . "$CQ/codex.log")"
+  is "...labelled queued work, in the prompt" "1" "$(grep -c 'GOT \[fleet\] This message arrived while you were still working' "$CQ/got.busy" 2>/dev/null || true)"
+  is "...and says so"                         "1" "$(grep -c '(into the running turn; it reads this at its next step)' <<< "$o" || true)"
+  # --after-turn: a turn of its own, through codex queue
+  o="$(CS --after-turn cx-busy "task-golf")"
+  is "--after-turn puts a busy codex's send in codex queue" "1" "$(grep -c '(queued #[0-9]* — it is mid-turn; held, as asked' <<< "$o" || true)"
   is "...through codex queue, on its thread, under its own home" \
      "CODEX_HOME=$CQ/cxh <queue> <--thread=$CXID> <--message=task-golf>" "$(tail -1 "$CQ/codex.log")"
   is "...and nothing is typed into its pane"  "0" "$(grep -c 'task-golf' <<< "$(cat "$CQ/got.busy" 2>/dev/null)" || true)"
   is "...nor said to be pasted into the turn" "0" "$(grep -c 'pasted INTO the running turn' <<< "$o" || true)"
   is "...and the dispatch is logged as queued" "queued" "$(tail -1 "$CQF/cf-cxq.sent" 2>/dev/null | cut -f6)"
   if command -v sqlite3 >/dev/null 2>&1; then
-    is "...the next one says where it stands" "1" "$(grep -c 'queued #2 ' <<< "$(CS cx-busy "task-hotel")" || true)"
+    is "...the next one says where it stands" "1" "$(grep -c 'queued #2 ' <<< "$(CS --after-turn cx-busy "task-hotel")" || true)"
   else
     skip "...the next one says where it stands" "sqlite3 missing"
   fi
-  CS cx-busy "-v is not a flag" >/dev/null
+  CS --after-turn cx-busy "-v is not a flag" >/dev/null
   is "a prompt that starts with - stays the message" "<--message=-v is not a flag>" "$(tail -1 "$CQ/codex.log" | grep -o '<--message=[^>]*>')"
-  o="$(CS --reply-to cf-cxq/cx-idle cx-busy "task-india")"
+  o="$(CS --after-turn --reply-to cf-cxq/cx-idle cx-busy "task-india")"
   is "a queued question writes no reply marker" "no" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
   is "...and carries the preamble to codex"   "1" "$(grep -c '\[fleet\] This request comes from another agent' "$CQ/codex.log" || true)"
   n0="$(grep -c . "$CQ/codex.log")"
@@ -11972,20 +12081,20 @@ PANE
   o="$(CS --now cx-busy "task-kilo")"
   for _ in $(seq 1 20); do grep -q kilo "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
   is "--now still folds into the running turn" "GOT task-kilo|$n0" "$(grep kilo "$CQ/got.busy" 2>/dev/null)|$(grep -c . "$CQ/codex.log")"
-  o="$(CQ_FAIL=1 CS --reply-to cf-cxq/cx-idle cx-busy "task-lima")"
+  o="$(CQ_FAIL=1 CS --after-turn --reply-to cf-cxq/cx-idle cx-busy "task-lima")"
   for _ in $(seq 1 20); do grep -q lima "$CQ/got.busy" 2>/dev/null && break; sleep 0.1; done
   is "a queue codex refuses falls back to the paste" "1" "$(grep -c 'lima' "$CQ/got.busy" 2>/dev/null || true)"
   is "...and says why"                        "1" "$(grep -c 'codex would not queue it (Error: no thread with that id' <<< "$o" || true)"
   is "...and the pasted question keeps its reply marker" "yes" "$([ -f "$CQF/cf-cxq.cx-busy.reply-to" ] && echo yes || echo no)"
-  o="$(CS cx-lost "task-mike")"
+  o="$(CS --after-turn cx-lost "task-mike")"
   for _ in $(seq 1 20); do grep -q mike "$CQ/got.lost" 2>/dev/null && break; sleep 0.1; done
   is "a busy codex with no thread on record is pasted" "GOT task-mike" "$(grep mike "$CQ/got.lost" 2>/dev/null)"
   is "...and says it could not be queued"     "1" "$(grep -c "could not tell which codex thread 'cx-lost'" <<< "$o" || true)"
-  o="$(CS cx-flat "task-november")"
+  o="$(CS --after-turn cx-flat "task-november")"
   is "a rollout that names no home is not queued anywhere" "0" "$(grep -c 'november' "$CQ/codex.log" || true)"
   tmux -L cf-cxq kill-server 2>/dev/null; rm -rf "$CQ"
 else
-  skip "a send to a busy codex goes through codex queue" "tmux, node or jq missing"
+  skip "a busy codex takes a send into its turn, or into codex queue when asked" "tmux, node or jq missing"
 fi
 
 # The reply address rides IN the queue record, and becomes a marker only when the prompt
@@ -12215,9 +12324,10 @@ SHIM
     done
     printf '%s' "$k"
   }
-  # Queued behind a busy session: the session reads as busy while the mod says working.
+  # Queued behind a busy session: the session reads as busy while the mod says working. On
+  # purpose (--after-turn): a plain send to a working session goes into its turn now.
   qkmod working
-  QKS --owner tgt "the owner asks for the acme-web preview" >/dev/null
+  QKS --owner --after-turn tgt "the owner asks for the acme-web preview" >/dev/null
   is "an --owner prompt sent to a busy session waits, marked as the owner's" "owner" \
      "$(QKS --list-queue tgt | cut -f3)"
   qkmod ready
@@ -12226,7 +12336,7 @@ SHIM
   is "...and the drain hands it to the mod as the owner's" "owner" "$qkk"
   is "...delivered once, and gone from the queue"   "1 0" "$(qkgot 'the owner asks for the acme-web preview') $([ -s "$QKQ" ] && echo 1 || echo 0)"
   # A plain prompt down the same path carries no mark: the direction that must stay unmarked.
-  qkmod working; QKS tgt "run the billing-svc suite" >/dev/null; qkmod ready
+  qkmod working; QKS --after-turn tgt "run the billing-svc suite" >/dev/null; qkmod ready
   "${QKENV[@]}" CLAUDE_FLEET_MOD_CLAIM=1 "$ROOT/bin/fleet-send" -s cfqk --dequeue tgt >/dev/null 2>&1 & qkp=$!
   qkk="$(qkkind)"; wait "$qkp"
   is "...while a plain queued prompt is handed over unmarked" "-" "$qkk"
@@ -12947,8 +13057,9 @@ if command -v jq >/dev/null 2>&1; then
   # An interrupt leaves `working` behind; the next prompt is what the human wants NOW.
   printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}' >> "$UH/t.jsonl"
   is "after an Esc interrupt it is not queued" "" "$(uhook "$(ups 'do this instead')")"
-  # fleet-send --now pastes into the turn ON PURPOSE and leaves a one-shot marker.
-  : > "$UHF/cfu.w1.now"
+  # fleet-send --now pastes into the turn ON PURPOSE and leaves a one-shot marker naming it.
+  usum() { printf '%s' "$1" | LC_ALL=C tr -d ' \t\r\n' | cksum | awk '{ print $1 "-" $2 }'; }
+  printf '%s\x1f%s\n' "$(date +%s)" "$(usum 'deliberate')" > "$UHF/cfu.w1.now"
   is "a --now paste is not labelled"          "" "$(uhook "$(ups 'deliberate')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1)"
   is "...and the marker is used up"           "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
 
@@ -12973,6 +13084,26 @@ if command -v jq >/dev/null 2>&1; then
   ustale 'fix the login bug'; unote busy 10000
   is "...while a genuinely running turn still labels"      "1" \
      "$(uhook "$(ups 'rename the flag')" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep -c 'working on: "fix the login bug"' || true)"
+
+  # ── THE --now MARK TAKES THE LABEL OFF ITS OWN PROMPT, AND NO OTHER ──
+  # It was an empty file spent by whichever prompt came next, so a --now whose prompt never
+  # arrived took the label off the next send into that turn — the one thing that keeps the
+  # task in hand from being dropped, on the sends that now go into the turn by default.
+  #   WATCHED GOING RED against origin/staging's hook: the first and the last row came back
+  # unlabelled.
+  ustale 'fix the login bug'; unote busy 10000
+  printf '%s\x1f%s\n' "$(date +%s)" "$(usum 'a deliberate interrupt')" > "$UHF/cfu.w1.now"
+  is "a --now mark for another prompt leaves this one labelled" "1" \
+     "$(uhook "$(ups 'rename the flag')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1 | grep -c 'QUEUED WORK' || true)"
+  is "...and waits for its own prompt"        "1" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
+  is "...which it does unlabel, blanks aside" "" "$(uhook "$(ups '  a deliberate
+interrupt ')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1)"
+  is "...once"                                "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
+  ustale 'fix the login bug'; unote busy 10000
+  : > "$UHF/cfu.w1.now"
+  is "an empty mark, from an older fleet-send, skips nothing" "1" \
+     "$(uhook "$(ups 'rename the flag')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1 | grep -c 'QUEUED WORK' || true)"
+  is "...and is cleared"                      "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
   rm -rf "$UH"
 else
   skip "a prompt typed mid-turn is labelled queued" "jq missing"
@@ -19849,6 +19980,23 @@ else
     hq_rec working
     out="$(hq_send "$(pn_cli enroll phone-held2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the acme-api routes")"
     is "...and a working one is queued behind the turn" '{"status":200,"ok":true,"queued":"turn"}' "$out"
+    # ...because that pane has no box to read. One whose composer is there and empty takes the
+    # send INTO its turn, and the reply says `into`, so the phone says it went in at the next
+    # step instead of drawing a bubble it could take back. RED against origin/staging, which
+    # queued it (`queued: 'turn'`).
+    tmux -L cf-demo new-session -d -s intu -x 100 -y 30 -e CLAUDE_FLEET_DIR="$HF" \
+      "printf '✻ Working… (3s · esc to interrupt)\n────────────────────────\n❯ \n────────────────────────\n'; sleep 600" 2>/dev/null
+    sleep 0.4
+    out="$(node --input-type=module -e "
+      import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+      const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+      const e = await a.enroll('$PNBASE', process.argv[1]);
+      if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+      const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'intu', prompt: 'list the toolbox flags' });
+      console.log(JSON.stringify({ status: r.status, ok: r.json.ok, queued: r.json.queued ?? null, into: r.json.into ?? null }));" \
+      "$(pn_cli enroll phone-into | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')")"
+    is "...and one with an empty box goes into its turn, said as into" '{"status":200,"ok":true,"queued":null,"into":true}' "$out"
+    tmux -L cf-demo kill-session -t intu 2>/dev/null
 
     # ── the queue is READ beside the transcript, and a waiting prompt can be taken back ──
     # The phone lost sight of a queued message the moment the next send replaced its one
@@ -31741,13 +31889,18 @@ AGENT
 
   # THAT turn's answer: a message that arrives while the session is busy with a turn that
   # is not from Telegram queues behind it (never into it: that turn has the desk's tools),
-  # and the running turn's Stop answers nobody on Telegram.
+  # and the running turn's Stop answers nobody on Telegram. He is told at once, naming the
+  # task it waits behind, which "working on something else" never did.
   FSD master "a slow desk task" >/dev/null
   until_ok 40 test -e "$TG/s/prompt.4"
   tgpost _push "$(tgmsg 21 4242 'give me the long answer')"
   until_ok 120 sent_has 'END-OF-LONG-ANSWER'
-  is "a message to a busy session is queued, and he is told" "1" "$(tgsent | grep -c 'master is working on something else; this runs right after it' || true)"
-  is "...the busy turn's answer is not sent to him"     "0" "$(tgsent | grep -c 'a slow desk task' || true)"
+  is "a message to a busy session is queued, and he is told what it waits behind" "1" \
+     "$(tgsent | grep -cF 'Queued: master is finishing \"a slow desk task\". This runs right after it, and the answer comes then.' || true)"
+  # The notice above names that task, so it is the one send that may: anything else naming
+  # it is the desk turn's answer.
+  is "...the busy turn's answer is not sent to him"     "0" \
+     "$(tgsent | jq -r 'select(.text | startswith("Queued: ") | not) | .text' | grep -c 'a slow desk task' || true)"
   is "...nor was that turn restricted"                  "Bash 0" "$(grep '^Bash ' "$TG/s/tools.4" 2>/dev/null)"
   is "...the message ran as its own turn"               "[telegram] (sent while an earlier turn was running, and held until it ended)
 give me the long answer" "$(cat "$TG/s/prompt.5" 2>/dev/null)"
@@ -32481,7 +32634,10 @@ https://example.com/acme-web/pricing" "$P"
   # next step (`absorb`), or left waiting until it ends and run as a turn of its own.
   TBC config coalesce-ms 1000 >/dev/null
   leftover() { ls -A "$FF" 2>/dev/null | grep -E '^cf-acme-web\.master\.(reply-to|telegram)' | tr '\n' ' '; }
-  nows() { grep -c ' with --now (into the running turn)' "$TD/log" 2>/dev/null || true; }
+  # Into the turn is a PLAIN send now, which fleet-send labels as queued work; it was --now,
+  # which took the label off.
+  nows() { grep -c ' to join its Telegram turn (into the running turn)' "$TD/log" 2>/dev/null || true; }
+  intos() { grep -c '(into the running turn)' "$TD/log" 2>/dev/null || true; }
   answer_to() { tbreqs "$1" | jq -r '.text' | grep '^answer to:' || true; }
   : > "$TB/s/absorb"
   n0="$(nows)"
@@ -32509,7 +32665,7 @@ https://example.com/acme-web/pricing" "$P"
   tbturn 120; T1="$tn"
   tbturn 120; T2="$tn"; P2="$P"
   sleep 3
-  is "a message the turn never took in also went in with --now" "1" "$(( $(nows) - n0 ))"
+  is "a message the turn never took in also went into it" "1" "$(( $(nows) - n0 ))"
   is "...and ran as the next turn"                      "[telegram] and the toolbox ones after" "$P2"
   is "...each message answered exactly once"            "1 1" "$(answers 171) $(answers 172)"
   is "...the first by the turn it started"              "answer to: [telegram] slow: look at the acme-api logs" "$(answer_to 171)"
@@ -32517,21 +32673,53 @@ https://example.com/acme-web/pricing" "$P"
   is "...both turns held to the phone's tools"          "Bash 2|Bash 2" "$(grep '^Bash ' "$TB/s/tools.$T1" 2>/dev/null)|$(grep '^Bash ' "$TB/s/tools.$T2" 2>/dev/null)"
   is "...and nothing is left addressed to the phone"    "" "$(leftover)"
 
+  # ── a voice note while its Telegram turn is running ───────────────────────
+  # Never into it, though the turn is the owner's own: a voice note waits for the turn to end
+  # and runs as a turn of its own, and he is told at once what it waits behind.
+  #   WATCHED GOING RED against origin/staging: it went into the turn with --now, unlabelled,
+  # and no notice came back.
+  node -e 'process.stdout.write(Buffer.concat([Buffer.from("OggS"), Buffer.alloc(60, 1)]))' > "$TB/voice.oga"
+  tbpost _file "$(jq -nc --arg b "$(base64 < "$TB/voice.oga" | tr -d '\n')" '{file_id:"vn1",b64:$b}')"
+  TBC config transcribe-cmd 'printf "%s" "and the scratch logs too"' >/dev/null
+  n0="$(intos)"
+  tbsay 175 'slow: read the acme-web changelog'
+  until_ok 40 test -e "$TB/s/prompt.$((tn + 1))"
+  sleep 1.5
+  tbmedia 176 '{"voice":{"file_id":"vn1","file_unique_id":"vn1","duration":2,"mime_type":"audio/ogg"}}'
+  until_ok 60 replied 176
+  is "a voice note into a running Telegram turn is held" "0|1" \
+     "$(( $(intos) - n0 ))|$(grep ' delivered ' "$TD/log" | tail -n 1 | grep -c ' with --after-turn (queued)$' || true)"
+  is "...he is told what it waits behind" "Queued: master is finishing \"slow: read the acme-web changelog\". This runs right after it, and the answer comes then." \
+     "$(tbreqs 176 | jq -r '.text' | head -n 1)"
+  is "...at once, while that turn still runs"           "no" "$(turned "$((tn + 1))" && echo yes || echo no)"
+  tbturn 120
+  tbturn 120; PV="$P"
+  is "...then it runs as its own turn" "[telegram] (sent while an earlier turn was running, and held until it ended)
+(voice note, transcribed) and the scratch logs too" "$PV"
+  is "...and each is answered once"                     "1 1" "$(answers 175) $(answers 176)"
+  TBC config transcribe-cmd '' >/dev/null
+
   # ── a message while the desk is using the session ─────────────────────────
+  # THE LEAD'S ROW: held until the desk turn ends (the tool guard would otherwise take the
+  # shell away from the desk's task for the rest of its turn), and the hold notice goes
+  # back to Telegram at once, naming the session and the task.
   FSB master "slow: a desk task on acme-web" >/dev/null
   until_ok 40 test -e "$TB/s/prompt.$((tn + 1))"
   sleep 1
-  n0="$(nows)"
+  n0="$(intos)"
   tbsay 181 'what about the scratch branch'
   until_ok 40 replied 181
+  early="$(turned "$((tn + 1))" && echo yes || echo no)"
   tbturn 120; TD1="$tn"
   tbturn 120; P2="$P"
   sleep 2
-  is "a message to a desk turn is never put into it"    "0" "$(( $(nows) - n0 ))"
-  is "...it queues"                                     "1" "$(grep ' delivered ' "$TD/log" | tail -n 1 | grep -c '(queued)$' || true)"
-  is "...and the owner is told what it waits behind"  "master is working on something else; this runs right after it." "$(tbreqs 181 | jq -r '.text' | head -n 1)"
+  is "a message to a desk turn is never put into it"    "0" "$(( $(intos) - n0 ))"
+  is "...it is held with --after-turn"                  "1" "$(grep ' delivered ' "$TD/log" | tail -n 1 | grep -c ' with --after-turn (queued)$' || true)"
+  is "...and the owner is told what it waits behind"  "Queued: master is finishing \"slow: a desk task on acme-web\". This runs right after it, and the answer comes then." "$(tbreqs 181 | jq -r '.text' | head -n 1)"
+  is "...at once, while the desk turn still runs"       "no" "$early"
   is "...the desk turn kept the desk's tools"           "Bash 0" "$(grep '^Bash ' "$TB/s/tools.$TD1" 2>/dev/null)"
-  is "...and its answer did not go to the phone"        "0" "$(grep -c 'a desk task' "$TB/stub/requests.jsonl" 2>/dev/null || true)"
+  is "...and its answer did not go to the phone"        "0" \
+     "$(jq -r 'select(.method == "sendMessage") | .body.text // empty | select(startswith("Queued: ") | not)' "$TB/stub/requests.jsonl" 2>/dev/null | grep -c 'a desk task' || true)"
   is "...the owner's message ran next, saying it was held" "[telegram] (sent while an earlier turn was running, and held until it ended)
 what about the scratch branch" "$P2"
   is "...held to the phone's tools"                     "Bash 2" "$(grep '^Bash ' "$TB/s/tools.$tn" 2>/dev/null)"

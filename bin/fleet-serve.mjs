@@ -732,7 +732,9 @@ const TOOLS_ALLOWED = {
   // project is `about`, which this daemon does not resolve or forward (acme-api@vm is
   // answered HERE, from the events this host already fetched over the pairing).
   fleet_know:            { fields: ['about', 'waiting', 'touched', 'find', 'history', 'since', 'until', 'at', 'json'], noProject: true },
-  fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
+  // after_turn: the composer's "send after this turn" — held until the running turn ends.
+  // Without it a send to a working session goes into that turn (bin/fleet-send, "the queue").
+  fleet_send:            { fields: ['project', 'session', 'prompt', 'after_turn'], write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
   // The Escape the desk presses, and nothing else — the lead takes it too (see the planner).
@@ -822,7 +824,7 @@ const NOT_YET = {
   fleet_model: 'moving one running session is a lead\'s call, made with a reason; the phone sets a project\'s default (fleet_project_model)',
 };
 
-const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting']);
+const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting', 'after_turn']);
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
@@ -1043,8 +1045,12 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // message, so a refusal has to arrive as text rather than as a status code alone.
   //   `queued: 'question'` when fleet-send held the prompt behind a prompt in the pane: it
   // succeeded, and it will not run until somebody answers, so the phone must not say "sent".
+  //   `into: true` when it went into the turn that is running, which the session reads at
+  // its next step: the phone says so, because "sent" to a busy session reads as "it will see
+  // this when it is done", which is what this no longer means.
   const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question'
     : !refused && (tool === 'fleet_send' || tool === 'fleet_ledger') && /queued #\d+/.test(text) ? 'turn' : undefined;
+  const into = !refused && !queued && tool === 'fleet_send' && /\(into the running turn/.test(text);
   // TOO LATE TO EDIT IS NOT AN ERROR IN THE QUEUE, it is the answer: the drain typed it into
   // the session between the phone drawing the bubble and the tap. The executor hands a
   // non-zero exit back as text, so it is recognised by fleet-send's own sentence, and the
@@ -1053,7 +1059,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
     return { status: 409, json: { ok: false, delivered: /already been typed into the session/.test(text), text: text.replace(/^fleet-send: /, '') } };
   if (tool === 'fleet_interrupt' && /could not interrupt|^fleet-pause: no session|^error:/m.test(text))
     return { status: 409, json: { ok: false, text: text.replace(/^fleet-pause: /, '') } };
-  return { status: refused ? 400 : 200, json: { ok: !refused, text, ...(queued ? { queued } : {}) } };
+  return { status: refused ? 400 : 200, json: { ok: !refused, text, ...(queued ? { queued } : {}), ...(into ? { into } : {}) } };
 }
 
 // ── reads: proxy, never reimplement (§3, one producer) ───────────────────────

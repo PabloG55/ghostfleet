@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 9e748c3096a6
+// CLIENT-HASH: ea2e264b1715
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -507,7 +507,11 @@
 // or a boat on the board, and a wake that fails says why in a sheet instead of a toast. One new
 // fixture (grid-asleep.json). A phone on v124 goes on opening an asleep session without waking it
 // until it is relaunched, and loses nothing else.
-const VERSION = 'ghostfleet-v125';
+// v126 lets the Send button be held (or right-clicked) for a sheet that asks when: now, into the
+// running turn, or after this turn, held until it ends (fleet_send after_turn). A tap sends at
+// once, and to a working session that is now into its turn, said in a toast. A phone on v125
+// sends the same way and has no "after this turn" until relaunched.
+const VERSION = 'ghostfleet-v126';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',

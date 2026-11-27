@@ -598,6 +598,8 @@ textarea { resize: vertical; }
 .cbtn:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
 .cbtn:disabled { opacity: .45; }
 .cbtn.send { background: var(--cyan); border-color: var(--cyan); color: var(--gf-teal-ink); }
+/* Held, Send opens its sheet (session.jsx); a phone must not take the press for a text callout. */
+.cbtn.send { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
 .cbtn.send:hover:not(:disabled) { background: var(--gf-teal-hover); border-color: var(--gf-teal-hover); color: var(--gf-teal-ink); }
 .cbtn.on { border-color: var(--cyan); color: var(--cyan); background: rgba(95,215,215,.12); }
 .read-btn { flex: none; width: 28px; height: 28px; margin: -6px 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--r); background: none; color: var(--dim); cursor: pointer; }
