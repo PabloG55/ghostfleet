@@ -1,0 +1,16 @@
+❯ which of these should acme-api do first?
+
+⏺ Two options for acme-api:
+
+  - Add the retry to billing-svc
+  - Move the cache to toolbox
+
+Want me to start on the first one, or hold off for acme-web?
+
+✻ Cogitated for 9s · done 8:12 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  dev@example.com | acme-api | main | Opus | ctx:12%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
