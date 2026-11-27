@@ -6894,6 +6894,14 @@ if command -v node >/dev/null 2>&1; then
   for f in claude-idle.txt claude-busy.txt claude-limit-hit.txt claude-composer-typed.txt; do
     is "$f: still no prompt"                  "null" "$(qk "$f" kind)"
   done
+  # An idle session whose last reply holds a numbered list is not a menu. The list sits
+  # under the echo of the user's own prompt ("❯ text", and the plugin's "›" marker above a
+  # phone prompt), and the empty input box below it is followed by the status lines, so no
+  # key-hint footer ends the pane. Bullets are the control: they never read as a menu.
+  for f in claude-idle-numbered-reply.txt claude-idle-numbered-reply-plugin.txt claude-idle-bulleted-reply.txt; do
+    is "$f: an idle reply is no prompt"       "null" "$(qk "$f" kind)"
+  done
+  is "the idle-reply fixtures carry the real empty box (❯ + NBSP)" "3" "$(grep -cF $'❯\xc2\xa0' "$ROOT"/test/fixtures/claude-idle-{numbered-reply,numbered-reply-plugin,bulleted-reply}.txt | awk -F: '{n+=$2} END{print n}')"
   QT="$(mktemp)"
   { printf '⏺ Update Todos\n  ⎿  ☐ Wire acme-api to billing-svc\n     ☐ Rebuild toolbox\n     ☒ Read the ledger\n\n'
     cat "$ROOT/test/fixtures/claude-idle.txt"; } > "$QT"
