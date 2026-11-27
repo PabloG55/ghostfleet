@@ -4,10 +4,11 @@
 import { useKept } from './back.jsx';
 import { Ship, Led } from './fleet.jsx';
 import { t, worded } from './i18n.js';
-import { useSlot } from './adapter.jsx';
+import { useSlot, useFleet } from './adapter.jsx';
 import { useShipTips } from './shiptip.jsx';
 import { ProjectName } from './ui.jsx';
 import { Skeleton, SkelLine, useRoom } from './skeleton.jsx';
+import { useWake } from './wake.jsx';
 
 const FRESH_S = 15 * 60;        // "just finished": ready, and its turn ended this recently
 
@@ -34,19 +35,24 @@ export function lookOf(s, now = Date.now() / 1000) {
   }
 }
 
-const sessionHref = (p, s) => `#/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
+const sessionPath = (p, s) => `/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
+const sessionHref = (p, s) => `#${sessionPath(p, s)}`;
 const projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 
 // `ownerBadge(session, size)` is an app's slot (adapter.jsx): who a boat belongs to, as a badge
 // on it; its card names them (ownerName). The single-user client has neither.
+//   AN ASLEEP BOAT WAKES BEFORE IT OPENS (wake.jsx), as a card does: its link would open the page
+// of a session that is not there. While the wake is out it is drawn as starting.
 export function Board({ projects }) {
   const ownerBadge = useSlot('ownerBadge');
+  const fleet = useFleet();
+  const wk = useWake();
   const tips = useShipTips();
   const room = useRoom('legend', projects == null);
   const [showQuiet, setShowQuiet] = useKept('board.quiet', false);
   const now = Date.now() / 1000;
   const fleets = (projects || []).map(p => {
-    const boats = p.sessions.map(s => ({ ...s, look: lookOf(s, now) }))
+    const boats = p.sessions.map(s => ({ ...s, look: lookOf(wk.waking(p.name, s.name) ? { ...s, status: 'starting' } : s, now) }))
       .sort((a, b) => ORDER.indexOf(a.look) - ORDER.indexOf(b.look) || Number(b.lead) - Number(a.lead));
     const n = Object.fromEntries(ORDER.map(k => [k, boats.filter(b => b.look === k).length]));
     const top = ORDER.find(k => n[k]) || 'off';
@@ -78,7 +84,8 @@ export function Board({ projects }) {
                   const badge = ownerBadge(b, 15);
                   return (
                     <a key={b.name} class={`fboat c-${LOOKS[b.look].color} lk-${b.look}`} href={sessionHref(f.name, b.name)}
-                       {...tips.bind({ project: f.name, name: b.name, lead: b.lead, ts: b.ts, session: b, word: LOOKS[b.look].label, light: LOOKS[b.look].light })}>
+                       {...tips.bind({ project: f.name, name: b.name, lead: b.lead, ts: b.ts, session: b, word: LOOKS[b.look].label, light: LOOKS[b.look].light },
+                                     b.status === 'asleep' ? (e) => { e.preventDefault(); wk.wake(f.name, b.name, () => fleet.go(sessionPath(f.name, b.name))); } : null)}>
                       <Ship size={b.lead ? 64 : 32} state={LOOKS[b.look].light} />
                       {b.look === 'need' ? <span class="fboat-name">{b.lead ? t('common.lead') : b.name}</span> : null}
                       {badge ? <span class="fboat-owner">{badge}</span> : null}
@@ -91,6 +98,7 @@ export function Board({ projects }) {
         </div>
       ) : <p class="muted pad">{t('board.none')}</p>}
       {tips.card}
+      {wk.sheet}
       {quiet.length ? (
         <div class={`quiet${showQuiet ? ' open' : ''}`}>
           <button class="quiet-toggle" onClick={() => setShowQuiet(v => !v)} aria-expanded={showQuiet}>

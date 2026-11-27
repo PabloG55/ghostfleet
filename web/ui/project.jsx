@@ -12,6 +12,7 @@ import { ProjectTabs, ToolPanel, offers as offersTools, toolTo } from './termina
 import { useKept } from './back.jsx';
 import { back } from './history.js';
 import { leadFirst, sections } from './order.js';
+import { useWake } from './wake.jsx';
 
 // Grouped by what each one asks of a person, in the order it should be looked at.
 const GROUPS = Object.values(worded({
@@ -23,12 +24,14 @@ const GROUPS = Object.values(worded({
 
 // `cardFoot(card)` is an app's slot (adapter.jsx): what a card says at its foot — in the team
 // app, whose it is and who else has it open. A card with no foot has no foot row.
-export function Card({ c, active, compact, onOpen }) {
-  const st = statusOf(c);
+//   `waking`: its wake is out (wake.jsx), so it reads Starting until the wake answers — the same
+// pill and the same width as the state it is about to be in, so nothing on the card moves.
+export function Card({ c, active, compact, waking, onOpen }) {
+  const st = waking ? 'starting' : statusOf(c);
   const foot = useSlot('cardFoot')(c);
   return (
     <article class={`card s-${(STATUS[st] || STATUS.unknown).color}${active ? ' active' : ''}${compact ? ' compact' : ''}`}
-             tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}>
+             tabIndex={0} aria-busy={waking ? 'true' : undefined} onClick={onOpen} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}>
       <div class="card-top">
         <StatusPill status={st} small />
         <span class="age">{c.age != null ? ago(c.age) : ''}</span>
@@ -69,6 +72,16 @@ export function ProjectView({ project, session, tool = null }) {
   // them: the lead first (order.js), then the wire's order.
   const listed = useMemo(() => leadFirst(g?.cards || []), [g]);
   const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
+  // A TAP THAT GOES TO A SESSION wakes it first when it is asleep (wake.jsx), and opens it once the
+  // wake has said yes and the grid has been read again, so the card it leaves behind is no longer
+  // Asleep. A failed wake opens nothing and says why. Moving between sessions (the swipe, ← / →)
+  // is not a tap on one, and goes on opening whatever is there without waking it.
+  const wk = useWake();
+  const enter = (name) => {
+    const c = (g?.cards || []).find(x => x.name === name);
+    if (c && c.asleep && !c.lost) return wk.wake(project, name, async () => { await reload(); open(name); });
+    return open(name);
+  };
   // The phone's swipe across the chat: the next or previous session in the order the list draws
   // them, stopping at the ends rather than wrapping — a wrap on a list with no visible edge reads
   // as "it did not move". Replaced, not pushed, so back leaves the project rather than walking
@@ -144,14 +157,16 @@ export function ProjectView({ project, session, tool = null }) {
     if (key.alt) return false;
     if (k === 'n' || k === 'N') { setSpawn({}); return true; }
     if (k === 'q' || k === '`') return layer.toLead(project, cs);
-    if (/^[1-9]$/.test(k)) { const c = cs[Number(k) - 1]; if (c) open(c.name); return true; }
+    if (/^[1-9]$/.test(k)) { const c = cs[Number(k) - 1]; if (c) enter(c.name); return true; }
     return false;
   });
   const [waking, setWaking] = useState(false);
   const wake = async () => {
     setWaking(true);
     try { const r = await fleet.lead(project); toast(r.started ? t('project.leadReady') : t('project.leadWasOpen'), 'good'); reload(); }
-    catch (e) { toast(t('project.leadFailed', { why: e.message }), 'bad'); }
+    // An asleep lead that would not wake is a failed wake like any other session's, and says so
+    // in the same sheet; the lead's other ways down keep their line.
+    catch (e) { if (lead && lead.asleep && !lead.lost) wk.fail(project, lead.name, e.message, () => reload()); else toast(t('project.leadFailed', { why: e.message }), 'bad'); }
     finally { setWaking(false); }
   };
   // REOPEN ALL LOST, the grid's R: after a reboot every session the machine killed is a card,
@@ -209,6 +224,7 @@ export function ProjectView({ project, session, tool = null }) {
       {spawn ? <NewSession project={project} free={g?.free_worktrees || []} preset={spawn}
                            onClose={() => setSpawn(null)} onDone={(name) => { setSpawn(null); reload(); open(name); }} /> : null}
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
+      {wk.sheet}
     </>
   );
 
@@ -224,7 +240,7 @@ export function ProjectView({ project, session, tool = null }) {
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
           {!g && !error ? <Skeleton shape="rows" n={4} /> : null}
-          {listed.map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
+          {listed.map(c => <Card key={c.name} c={c} compact active={c.name === session} waking={wk.waking(project, c.name)} onOpen={() => enter(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current} waiting={!g && !error} tool={tool}
                      onChanged={reload} onGone={sessionBack} onStep={step}
@@ -259,7 +275,7 @@ export function ProjectView({ project, session, tool = null }) {
           without it. */}
       {secs.lead ? (
         <section class="group g-lead">
-          <div class="cards"><Card c={secs.lead} onOpen={() => open(secs.lead.name)} /></div>
+          <div class="cards"><Card c={secs.lead} waking={wk.waking(project, secs.lead.name)} onOpen={() => enter(secs.lead.name)} /></div>
         </section>
       ) : null}
       {secs.groups.map(({ gr, list }) => {
@@ -267,14 +283,14 @@ export function ProjectView({ project, session, tool = null }) {
         return (
           <section key={gr.id} class={`group g-${gr.id}`}>
             <h2>{gr.title} <span class="count">{list.length}</span><small>{gr.hint}</small></h2>
-            <div class="cards">{list.map(c => <Card key={c.name} c={c} onOpen={() => open(c.name)} />)}</div>
+            <div class="cards">{list.map(c => <Card key={c.name} c={c} waking={wk.waking(project, c.name)} onOpen={() => enter(c.name)} />)}</div>
           </section>
         );
       })}
       {g && (g.cards.length || g.free_worktrees?.length) ? (
         <section class="group">
           <h2>{t('project.tree')} <small>{t('project.treeHint')}</small></h2>
-          <Tree g={g} open={open} onReuse={(w) => setSpawn({ reuse: w.path })} onRemove={removeWorktree} />
+          <Tree g={g} open={enter} onReuse={(w) => setSpawn({ reuse: w.path })} onRemove={removeWorktree} />
         </section>
       ) : null}
       {modals}
