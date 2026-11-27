@@ -70,6 +70,13 @@ if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   # says why): typed into the box, it would otherwise read as the person's own words. The
   # default "continue" is a wake (nudge) and makes no item; a message of its own is a brief.
   printf '%s\t%s\t0\t%s\n' "$(($(date +%s) * 1000))" "$_kind" "${#MSG}" >> "$_pdir/$SOCK.$SESSION.pasted" 2>/dev/null || true
+  # ...and marked for the hook as well, which tells a lead's recall that these are not the owner's
+  # words (bin/fleet-send's _from_mark: the same mark, the same digest).
+  _n="$(printf '%s' "$MSG" | tr -s ' \t\r\n' ' ')"; _n="${_n# }"; _n="${_n% }"
+  _h="$(printf '%s' "$_n" | shasum -a 256 2>/dev/null)" || _h=""
+  [ -n "$_h" ] || _h="$(printf '%s' "$_n" | sha256sum 2>/dev/null)" || _h=""
+  [ -n "$_h" ] && mkdir -p "$_pdir/$SOCK.$SESSION.from" 2>/dev/null \
+    && : > "$_pdir/$SOCK.$SESSION.from/$(($(date +%s) * 1000)).${_h:0:12}.${_kind:-brief}" 2>/dev/null || true
   tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
   tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
   sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.5}"

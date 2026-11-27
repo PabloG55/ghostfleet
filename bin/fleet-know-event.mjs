@@ -6,7 +6,8 @@
 // lib/know.mjs — where the privacy decision is made, once, for every caller:
 //
 //   fleet-know-event hook    event=<E> slot= sock= branch= status= turn=  < hook payload
-//   fleet-know-event spawn   worker= branch= worktree= task= kind= parent= base= agent=
+//   fleet-know-event spawn   worker= branch= worktree= task= why= kind= parent= base= agent=
+//   fleet-know-event purpose worker= branch= why=                  why a worker's work is done
 //   fleet-know-event ack     worker= branch= understood= decisions=
 //   fleet-know-event retire  worker= branch= reason=
 //   fleet-know-event prs     repo=<owner/name> new=<cache file>     < the cache as it was
@@ -15,13 +16,14 @@
 //   fleet-know-event deploy  target= cmd= commit= ok=yes|no
 //   fleet-know-event privacy session=<sid> | sock=<sock>          prints include|private|exclude
 //   fleet-know-event brief   sock= source=                 prints meta JSON, then the briefing
+//   fleet-know-event recall  sock= slot= session= agent=  < the prompt   prints the matches, or nothing
 //
 // Common keys: fleet=<dir> (default: this profile's), sock=, cwd=, session=, slot=, t=<ms>.
 //
 // IT NEVER FAILS ITS CALLER. The hook runs it detached and every other caller ignores its
 // status, so a broken memory can cost a fact and never a turn, a spawn or a merge. Exit 0
-// always, except `privacy`, whose answer IS its output, and `brief`, which is the one a hook
-// waits for: it holds it to a budget, and its status is how it learns why there is no output.
+// always, except `privacy`, whose answer IS its output, and `brief` and `recall`, which a hook
+// waits for: it holds each to a budget, and its status is how it learns why there is no output.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -189,7 +191,10 @@ try {
   switch (verb) {
     case 'hook': hook(); break;
     case 'spawn':
-      put('spawn', { worker: a.worker, branch: a.branch, worktree: a.worktree, task: a.task, kind: a.kind, parent: a.parent, base: a.base, agent: a.agent }, ctx({ cwd: a.cwd || a.worktree || '' }));
+      put('spawn', { worker: a.worker, branch: a.branch, worktree: a.worktree, task: a.task, why: a.why, kind: a.kind, parent: a.parent, base: a.base, agent: a.agent }, ctx({ cwd: a.cwd || a.worktree || '' }));
+      break;
+    case 'purpose':
+      if (a.why && a.why.trim()) put('purpose', { worker: a.worker, branch: a.branch, why: a.why }, ctx({ cwd: a.cwd || a.worktree || '' }));
       break;
     case 'ack':
       put('ack', { worker: a.worker, branch: a.branch, understood: a.understood, decisions: a.decisions }, ctx({ cwd: a.cwd || a.worktree || '' }));
@@ -225,12 +230,27 @@ try {
       if (r.text) process.stdout.write(`${JSON.stringify({ chars: r.text.length, ids: r.ids })}\n${r.text}`);
       break;
     }
+    // THE OWNER'S WORDS, SEARCHED FOR A LEAD (lib/know-recall.mjs). The hook has already decided
+    // this session is a lead; whether the words are the owner's is decided here, because the marks
+    // that say so are read and taken in the same breath. Prints the context, or nothing; the first
+    // line is what the hook may log, the rest is what the lead is told.
+    case 'recall': {
+      if (/^(0|off|no|false)$/i.test(process.env.CLAUDE_FLEET_KNOW || '')) process.exit(0);
+      const R = await import('../lib/know-recall.mjs');
+      const prompt = readStdin();
+      const t = Number(process.env.CLAUDE_FLEET_NOW_MS) || now;
+      const who = R.whoSent({ prompt, fleetDir, sock, session: a.slot || '', now: t });
+      if (who.who !== 'owner') { process.stdout.write(`${JSON.stringify({ who: who.who, why: who.why })}\n`); break; }
+      const r = R.recall({ prompt, fleetDir, sock, session: a.session || '', agent: a.agent || 'claude', now: t });
+      process.stdout.write(`${JSON.stringify({ who: who.who, ids: r.ids, chars: r.text.length, why: r.why })}\n${r.text}`);
+      break;
+    }
     default:
-      process.stderr.write('usage: fleet-know-event hook|spawn|ack|retire|prs|ledger|infer|deploy|privacy|brief key=value…  (see the header)\n');
+      process.stderr.write('usage: fleet-know-event hook|spawn|purpose|ack|retire|prs|ledger|infer|deploy|privacy|brief|recall key=value…  (see the header)\n');
       process.exit(2);
   }
 } catch (e) {
   if (process.env.CLAUDE_FLEET_KNOW_DEBUG) process.stderr.write(`fleet-know-event: ${e.stack || e}\n`);
-  if (verb === 'brief') process.exit(1);
+  if (verb === 'brief' || verb === 'recall') process.exit(1);
 }
 process.exit(0);

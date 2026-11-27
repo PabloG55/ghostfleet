@@ -2375,4 +2375,172 @@ await section('backfill: a read after it is still right', () => {
   row('...and the graph it read is the one a rebuild makes', '0', kn('rebuild', '--check').status);
 });
 
+// ══ recall: the owner's words, matched to the memory, in a lead's turn ═════════
+// The failure: a lead compacted a hundred times recommended cancelling work it had planned itself,
+// while the reason sat in this memory. So each message the OWNER sends a LEAD is searched, and the
+// best few matches ride into that turn (lib/know-recall.mjs, hooks/fleet-event.sh). Every row
+// stands beside its opposite: the owner's words beside the fleet's same words, a lead beside a
+// worker, a match beside none, a Claude lead beside a codex one.
+const RECALL_HEAD = "[fleet] From the fleet's memory, matched to the owner's words above";
+const recallOf = (B, r) => { const c = B.ctxOf(r); const i = c.indexOf(RECALL_HEAD); return i < 0 ? '' : c.slice(i); };
+const recallRows = (t) => (t.match(/^- \d{4}-\d{2}-\d{2} k[0-9a-f]{16} \[/gm) || []).length;
+const ups = (B, prompt, more = {}, extra = {}) => B.fire('UserPromptSubmit', { prompt, ...extra }, { CLAUDE_FLEET_RECALL_BUDGET_MS: '30000', ...more });
+const DAYMS = 86400e3;
+// The ordinary traffic of a fleet, sharing no rare word with the asks below: what makes a word rare.
+const noise = (B, n, t0) => {
+  for (let i = 0; i < n; i++) K.record('turn.end', { status: 'done', said: `Ran the suite on branch fix/n${i}: green, ${i % 7} files touched` }, onApi(B, t0 - i * 1000, { via: 'hook', session: `s-n${i}`, slot: `api-n${i % 5}` }));
+};
+
+await section('recall', () => {
+  const B = briefRig('recall');
+  seed(B);
+  const t0 = Date.now() - 3 * DAYMS;
+  noise(B, 40, t0);
+  const why = K.record('decision', { text: 'Re-read all 80 renewals one by one: the billing report needs per-account values, so the batch is not cancelled', source: 'stated' }, onApi(B, t0, OWNER_SRC));
+  K.record('decision', { text: 'The CSV export keeps its column order', source: 'stated' }, onApi(B, t0 + 1, LEAD_SRC));
+  const ASK = 'Should we cancel the 80 renewals? It looks like a lot of work';
+
+  const r = ups(B, ASK);
+  const rc = recallOf(B, r);
+  row('recall: the owner\'s words to a lead bring back the decision they match, with its date and id', 'yes yes yes',
+    `${yes(rc.includes(why.id))} ${yes(rc.includes(new Date(t0).toISOString().slice(0, 10)))} ${yes(/per-account values/.test(rc))}`);
+  row('...as that turn\'s context, in the one JSON object the hook prints', 'UserPromptSubmit yes',
+    `${(() => { try { return JSON.parse(r.stdout).hookSpecificOutput.hookEventName; } catch { return r.stdout.slice(0, 60) || 'nothing'; } })()} ${yes(r.stdout.trim().startsWith('{') && r.stdout.trim().endsWith('}'))}`);
+  row('...said to be recorded events, not the owner speaking now', 'yes', yes(/not the owner speaking now/.test(rc)));
+  row('...and says who said it, of what kind, where', 'yes', yes(new RegExp(`${why.id} \\[decision, owner, acme-api\\]`).test(rc)));
+  row('...and leaves out what shares none of the words', 'no', yes(/column order/.test(rc)));
+  row('...nor brings back the message itself, which the hook has just written down', 'no', yes(rc.includes('lot of work')));
+  // Every row of absence below carries, first, the presence it is the opposite of: on a tree that
+  // recalls nothing at all, an absence alone would pass.
+  const has = (prompt, more, extra) => yes(recallOf(B, ups(B, prompt, more, extra)).includes(why.id));
+  row('the same words from the fleet bring nothing', 'yes no', `${has(ASK)} ${has(`[fleet] resume: ${ASK}`)}`);
+  row('...nor from Claude Code itself', 'yes no', `${has(ASK)} ${has(`<task-notification> ${ASK}`)}`);
+  row('the owner on Telegram is the owner', 'yes', yes(recallOf(B, ups(B, `[telegram] ${ASK}`)).includes(why.id)));
+
+  // What a session cannot tell from the words alone: whether fleet-send put them there. The real
+  // fleet-send, into a real pane, leaves the mark the hook reads; --owner marks them the owner's.
+  const tm = (...a) => spawnSync('tmux', ['-u', '-L', 'cf-acme-api', ...a], { encoding: 'utf8', timeout: 10000, env: base() });
+  tm('kill-server');
+  // A composer drawn once: fleet-send confirms a submit by its words NOT being in that box, so
+  // each send returns at once instead of waiting out its ~8s confirmation against a bare sleep.
+  const composer = path.join(B.h, 'composer');
+  fs.writeFileSync(composer, '#!/bin/sh\nprintf "────────────\\n❯ \\n────────────\\n"\nexec sleep 120\n', { mode: 0o755 });
+  tm('new-session', '-d', '-s', 'master', '-c', B.repo, composer);
+  const send = (...a) => run(path.join(ROOT, 'bin', 'fleet-send'), ['-s', 'cf-acme-api', ...a], { home: B.h, env: { CLAUDE_FLEET_DIR: B.fl, CLAUDE_FLEET_SUBMIT_DELAY: '0.1' } });
+  const marks = () => { try { return fs.readdirSync(path.join(B.fl, 'cf-acme-api.master.from')); } catch { return []; } };
+  const FLEET_ASK = 'Cancel the 80 renewals if nobody needs them';
+  const s1 = send('master', FLEET_ASK);
+  row('fleet-send leaves a mark of what it delivered, named by digest and kind', `0 yes`,
+    `${s1.status} ${yes(marks().some(n => /^\d+\.[0-9a-f]{12}\.brief$/.test(n)))}`);
+  const viaFleet = recallOf(B, ups(B, FLEET_ASK));
+  row('...and the mark is taken by the turn it marked', '0', marks().length);
+  row('...and the same words, arriving as that delivery, bring nothing; typed, they bring the match', 'no yes',
+    `${yes(viaFleet !== '')} ${has(FLEET_ASK)}`);
+  const OWNER_ASK = 'Do the 80 renewals still matter?';
+  const s2 = send('--owner', 'master', OWNER_ASK);
+  row('a delivery marked the owner\'s (the phone, Telegram, --owner) is the owner\'s', '0 yes',
+    `${s2.status} ${yes(recallOf(B, ups(B, OWNER_ASK)).includes(why.id))}`);
+  const s3 = send('master', 'Cancel the 80 renewals now');
+  row('a delivery whose words changed on the way in is not called the owner\'s', '0 no',
+    `${s3.status} ${yes(recallOf(B, ups(B, 'Cancel the 80 renewals now, please')) !== '')}`);
+  tm('kill-server');
+  // That mark is fresh for half a minute and would make every row below pass for its reason.
+  fs.rmSync(path.join(B.fl, 'cf-acme-api.master.from'), { recursive: true, force: true });
+  row('...and with no mark left, the owner\'s words bring the match again', 'yes', yes(recallOf(B, ups(B, ASK)).includes(why.id)));
+
+  // Leads only: master, and a session that has children of its own. Never a worker.
+  //   A decision of its own, with words nothing above has used: a dozen messages about the
+  // renewals have made those words common in a log this small, and a row that passed because of
+  // that would pass with the lead check gone (watched: it did).
+  const arch = K.record('decision', { text: 'The invoice archive holds seven years of PDFs, for the tax audit', source: 'stated' }, onApi(B, t0 + 2, OWNER_SRC));
+  const SUB = 'How long does the invoice archive hold PDFs?';
+  const archHas = (slot, sid) => yes(recallOf(B, ups(B, SUB, { CLAUDE_FLEET_SLOT: slot }, { cwd: B.wt, session_id: sid })).includes(arch.id));
+  row('the owner\'s words to a worker bring nothing, the same words to the lead the match', 'no yes',
+    `${archHas('api-fix', 's-w')} ${yes(recallOf(B, ups(B, SUB)).includes(arch.id))}`);
+  const before = archHas('api-lead', 's-sl');
+  fs.writeFileSync(path.join(B.fl, 'cf-acme-api.api-sub.parent'), 'api-lead\n');
+  row('...and to a sub-lead, a session with children of its own, bring the match', 'no yes', `${before} ${archHas('api-lead', 's-sl')}`);
+
+  const any = (prompt, more) => yes(recallOf(B, ups(B, prompt, more)) !== '');
+  row('words that match nothing bring nothing, beside words that match', 'yes no', `${has(ASK)} ${any('Rename the logo colour to teal')}`);
+  row('...nor words the whole log is full of', 'yes no', `${has(ASK)} ${any('Run the suite on the branch again')}`);
+  row('...nor anything at all with the recall switched off', 'yes no', `${has(ASK)} ${any(ASK, { CLAUDE_FLEET_RECALL: 'off' })}`);
+  row('...or with the memory off', 'yes no', `${has(ASK)} ${any(ASK, { CLAUDE_FLEET_KNOW: 'off' })}`);
+  // A budget the read cannot meet costs the lead the recall, never the turn.
+  const slow = ups(B, ASK, { CLAUDE_FLEET_RECALL_BUDGET_MS: '0' });
+  row('...and a recall over its budget adds nothing and fails nothing', 'yes 0 no', `${has(ASK)} ${slow.status} ${yes(recallOf(B, slow) !== '')}`);
+});
+
+await section('recall has a cap', () => {
+  const B = briefRig('recall-cap');
+  seed(B);
+  const t0 = Date.now() - 2 * DAYMS;
+  noise(B, 1200, t0);
+  // Two sets of forty, so each bound is the one that binds: short lines, where four rows fit with
+  // room to spare and only the row limit stops a fifth; long ones, where the characters run out.
+  for (let i = 0; i < 40; i++) K.record('decision', { text: `The nightly invoice replay ${i} stays on`, source: 'stated' }, onApi(B, t0 + i, OWNER_SRC));
+  const long = 'and the rest of this decision goes on at length about why, '.repeat(6);
+  for (let i = 0; i < 40; i++) K.record('decision', { text: `The ledger rebuild ${i} keeps every row: ${long}`, source: 'stated' }, onApi(B, t0 + 100 + i, OWNER_SRC));
+  const short = recallOf(B, ups(B, 'Is the invoice replay finished?'));
+  row('recall: forty short matches give four rows, the row limit', '4 yes', `${recallRows(short)} ${yes(short.length > 0 && short.length <= 1200)}`);
+  const lng = recallOf(B, ups(B, 'Is the ledger rebuild finished?'));
+  row('...and forty long ones stay under 1,200 characters', 'yes yes', `${yes(recallRows(lng) >= 1)} ${yes(lng.length > 0 && lng.length <= 1200)}`);
+  row('...each row one line, clipped', 'yes', yes(lng.length > 0 && lng.split('\n').every(l => l.length <= 260)));
+  // The cap is on characters as well as rows: with no limit on rows it still holds, and it is what
+  // stops them.
+  const code = `const R = await import(${JSON.stringify(path.join(ROOT, 'lib', 'know-recall.mjs'))}); const o = R.recall({ prompt: 'Is the ledger rebuild finished?', fleetDir: ${JSON.stringify(B.fl)}, sock: 'cf-acme-api', rows: 99 }); process.stdout.write(JSON.stringify({ n: o.ids.length, chars: o.text.length, cap: R.RECALL_CAP }));`;
+  const lib = (() => { try { return JSON.parse(run('node', ['--input-type=module', '-e', code], { home: B.h }).stdout); } catch { return { n: 0, chars: 0, cap: 0 }; } })();
+  row('...and with no limit on rows, still under the cap in characters', 'yes yes', `${yes(lib.n >= 1 && lib.n < 40)} ${yes(lib.chars <= lib.cap && lib.cap === 1200)}`);
+});
+
+await section('recall and privacy', () => {
+  const B = briefRig('recall-priv');
+  fs.writeFileSync(path.join(B.fl, 'cf-acme-api.know'), 'private\n');
+  seed(B);
+  const t0 = Date.now() - DAYMS;
+  noise(B, 30, t0);
+  const priv = K.record('decision', { text: 'The 80 renewals are re-read for the billing report', source: 'stated' }, onApi(B, t0, OWNER_SRC));
+  const shared = K.record('decision', { text: 'acme-web shows the 80 renewals on the billing page', source: 'stated' }, { fleetDir: B.fl, project: 'acme-web', sock: 'cf-acme-web', t: t0 + 1, rec: t0 + 1, src: OWNER_SRC });
+  const ASK = 'What happens to the 80 renewals and the billing report?';
+  const cl = recallOf(B, ups(B, ASK));
+  row('recall: a private project\'s memory reaches a Claude lead, marked, with the note', 'yes yes yes',
+    `${yes(cl.includes(priv.id))} ${yes(new RegExp(`${priv.id} .*\\[private\\]$`, 'm').test(cl))} ${yes(cl.includes(K.PRIV_NOTE))}`);
+  const cx = ups(B, ASK, { CLAUDE_FLEET_EVENT_AGENT: 'codex' });
+  const cxr = recallOf(B, cx);
+  row('...and never a codex lead\'s context, which still gets what is not private', 'yes no no',
+    `${yes(cxr.includes(shared.id))} ${yes(cx.stdout.includes(priv.id))} ${yes(/re-read for the billing report/.test(cx.stdout))}`);
+  fs.writeFileSync(path.join(B.fl, 'cf-acme-api.know'), 'exclude\n');
+  const ex = recallOf(B, ups(B, ASK));
+  row('an excluded project\'s memory reaches no lead at all', 'yes no', `${yes(ex.includes(shared.id))} ${yes(ex.includes(priv.id))}`);
+});
+
+// ══ the why: what a brief is FOR, kept beside the task ══════════════════════════
+await section('the why', () => {
+  const B = briefRig('why');
+  seed(B);
+  const w = (...a) => run(WRITER, a, { home: B.h });
+  // Exactly the call fleet-spawn makes, why= and all.
+  w('spawn', `fleet=${B.fl}`, 'sock=cf-acme-api', `cwd=${B.wt}`, 'worker=api-fix', 'branch=fix/w1', `worktree=${B.wt}`,
+    'task=Re-read the 80 renewals one by one', 'why=the billing report needs per-account values', 'kind=', 'parent=master', 'base=main', 'agent=claude');
+  const sp = ofKind(B, 'spawn').pop() || { f: {} };
+  row('the why: a spawn stores it with the task', 'the billing report needs per-account values', sp.f.why);
+  B.on();
+  const c = B.ctxOf(B.start());
+  row('...and the lead\'s briefing shows it beside the task', 'yes yes',
+    `${yes(/^IN FLIGHT, AND WHY/m.test(c))} ${yes(/^- api-fix: Re-read the 80 renewals one by one — the billing report needs per-account values$/m.test(c))}`);
+  const page = kh(B, ['acme-api']).stdout;
+  row('...and so does where it stands, on the project\'s page', 'yes', yes(/fix\/w1.*Re-read the 80 renewals one by one — the billing report needs per-account values/.test(page)));
+  // fleet-send --why: the newest statement of what the work is for.
+  w('purpose', `fleet=${B.fl}`, 'sock=cf-acme-api', `cwd=${B.wt}`, 'worker=api-fix', 'branch=fix/w1', 'why=the auditors asked for the per-account totals');
+  const c2 = B.ctxOf(B.start('compact'));
+  row('...a later why replaces it', 'yes no', `${yes(/— the auditors asked for the per-account totals$/m.test(c2))} ${yes(/— the billing report needs per-account values$/m.test(c2))}`);
+  w('purpose', `fleet=${B.fl}`, 'sock=cf-acme-api', `cwd=${B.wt}`, 'worker=api-fix', 'branch=fix/w1', 'why=');
+  row('...and an empty one is not written', '1', ofKind(B, 'purpose').length);
+  // Not retroactive: a task with no why reads as it did.
+  w('spawn', `fleet=${B.fl}`, 'sock=cf-acme-api', `cwd=${B.wt}`, 'worker=api-docs', 'branch=docs/w2', 'task=Update the export docs', 'why=', 'parent=master');
+  const page2 = kh(B, ['acme-api']).stdout;
+  row('a task with no why shows as it always did', 'yes no', `${yes(/docs\/w2.*Update the export docs/.test(page2))} ${yes(/Update the export docs —/.test(page2))}`);
+  row('...and is not listed as in flight with a why', 'no', yes(/^- api-docs:/m.test(B.ctxOf(B.start('compact')))));
+});
+
 for (const r of rows) process.stdout.write(r.join('\x1f') + '\n');
