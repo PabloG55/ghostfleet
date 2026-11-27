@@ -24026,6 +24026,10 @@ exec sleep 120
   chmod +x "$WY/composer"
   tmux -u -L cfwhy new-session -d -s w1 -c "$WY/w1" "$WY/composer" 2>/dev/null
   tmux -u -L cfwhy new-session -d -s master -c "$WY/w1" "$WY/composer" 2>/dev/null
+  tmux -u -L cfwhy new-session -d -s w2 -c "$WY/w1" "$WY/composer" 2>/dev/null
+  # w1 has a child of its own, so it is a sub-lead: a session whose prompts the recall reads and
+  # whose delivery marks are worth writing. w2 is a plain worker, and gets none.
+  mkdir -p "$WY/fleet"; printf 'w1\n' > "$WY/fleet/cfwhy.w9.parent"
   sleep 0.4
   # stdout ONLY, and the status after it: the warning must be on the stream the MCP tool
   # returns, and a send it warns about must still exit 0.
@@ -24065,6 +24069,32 @@ exec sleep 120
   # Each of the seven sends to the worker left exactly one mark: the warning is the only thing
   # that differs. (The one to the lead marks the lead's own box.)
   is "...each delivered all the same"           "7" "$(grep -c . <<< "$(ls "$WY/fleet/cfwhy.w1.from" 2>/dev/null)" || true)"
+
+  # ONLY A LEAD READS THESE MARKS (the hook's _recall_lead, then lib/know-recall.mjs whoSent,
+  # which also prunes them), so only a session that can be one is given them: master, or a
+  # session some <sock>.<child>.parent names. A worker's would pile up unread for as long as the
+  # fleet dir lives. Delivered all the same, which its .pasted line proves.
+  WS w2 'Re-read the 80 renewals.' >/dev/null
+  is "a send to a worker leaves no .from mark, and is delivered" "no yes" \
+     "$([ -e "$WY/fleet/cfwhy.w2.from" ] && echo yes || echo no) $([ -s "$WY/fleet/cfwhy.w2.pasted" ] && echo yes || echo no)"
+  is "...while a send to master still marks"    "yes" \
+     "$([ "$(grep -c '\.brief$' <<< "$(ls "$WY/fleet/cfwhy.master.from" 2>/dev/null)" || true)" -ge 1 ] && echo yes || echo no)"
+
+  # A STOPPED SESSION'S MARKS GO WITH IT, as its .parent and .label do: unread, and a session
+  # that reuses the name must not be handed a stranger's deliveries to match against.
+  WST="$(env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-stop" -s cfwhy w1 2>&1)"
+  is "fleet-stop removes the session's .from directory" "gone yes" \
+     "$([ -e "$WY/fleet/cfwhy.w1.from" ] && echo there || echo gone) $(tmux -u -L cfwhy has-session -t =w1 2>/dev/null && echo no || echo yes)"
+  # ...and fleet-clean takes the ones a session left without a stop (killed by hand, the grid's
+  # x): dry run first, as it does everything, and never a live session's or a sleeping one's.
+  mkdir -p "$WY/fleet/cfwhy.gone.from" "$WY/fleet/cfwhy.napper.from"; : > "$WY/fleet/cfwhy.napper.asleep"
+  : > "$WY/fleet/cfwhy.gone.from/1.abcdefabcdef.brief"
+  WCL="$( cd "$WY/w1" && env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-clean" -s cfwhy 2>&1 )"
+  is "fleet-clean's dry run names an orphan .from and keeps it" "1 yes" \
+     "$(grep -c "orphan cfwhy.gone.from (no live 'gone')" <<< "$WCL" || true) $([ -d "$WY/fleet/cfwhy.gone.from" ] && echo yes || echo no)"
+  WCL="$( cd "$WY/w1" && env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-clean" -s cfwhy --go 2>&1 )"
+  is "...--go removes it, and keeps a live one's and a sleeping one's" "gone yes yes" \
+     "$([ -e "$WY/fleet/cfwhy.gone.from" ] && echo there || echo gone) $([ -d "$WY/fleet/cfwhy.master.from" ] && echo yes || echo no) $([ -d "$WY/fleet/cfwhy.napper.from" ] && echo yes || echo no)"
 
   # THE STRUCTURAL GUARD, as fleet-spawn's: the warning's branch holds no exit.
   WYBLOCK="$(sed -n '/^_why_exempt() {/,/^RAW_MSG=/p' "$ROOT/bin/fleet-send")"

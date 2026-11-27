@@ -425,9 +425,11 @@ compactions. On by default; `CLAUDE_FLEET_RECALL=off` (or `CLAUDE_FLEET_KNOW=off
 ```
 
 - **Whose words.** The owner's: typed at the prompt, from the phone, from Telegram, or sent with
-  `fleet-send --owner`. Never the fleet's. Every delivery the fleet makes into a session
+  `fleet-send --owner`. Never the fleet's. Every delivery the fleet makes into a lead
   (`fleet-send`'s paste, its handoff to the mod and its codex queue, `fleet-schedule`'s paste) leaves
-  a mark first, `<fleet dir>/<sock>.<session>.from/<ms>.<digest>.<kind>`, and the turn whose words
+  a mark first, `<fleet dir>/<sock>.<session>.from/<ms>.<digest>.<kind>`; a worker gets none, since
+  nothing would read them, and `fleet-stop` (or `fleet-clean`, for a session killed some other way)
+  takes a session's marks away with it. The turn whose words
   match it takes it: `owner` marks the owner's, `brief`, `nudge` and `explain` the fleet's. A prompt
   with no mark was typed. A fresh mark (under 30 s) whose words did not match means a delivery whose
   text changed on the way in, and the prompt is not called the owner's. `[fleet]`, `<` and `/` at the

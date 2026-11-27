@@ -1209,10 +1209,25 @@ _paste_marker() {
 # digest is of the words with whitespace folded and one space off each end, which is what the
 # reader folds too: a paste whose line endings changed on the way in still matches. Once per
 # send, whichever path delivers it — a mod handoff that falls back to the paste is ONE delivery.
+#   Only for a session that can be a LEAD, because only a lead's prompt reads and prunes them (the
+# hook's _recall_lead stops before a worker's): master, or a session some <sock>.<child>.parent
+# names, the same test. A worker's marks would sit unread for as long as the fleet dir lives. The
+# test is made at delivery, so a queued send to a worker that has since spawned a child is marked.
 _FROM_MARKED=0
+_from_lead() {
+  [ "$SESSION" = master ] && return 0
+  local _pt _l
+  for _pt in "$FLEET_DIR/$SOCK".*.parent; do
+    [ -f "$_pt" ] || continue
+    _l=""; IFS= read -r _l < "$_pt" 2>/dev/null
+    [ "$_l" = "$SESSION" ] && return 0
+  done
+  return 1
+}
 _from_mark() {
   [ "$_FROM_MARKED" = 0 ] || return 0
   _FROM_MARKED=1
+  _from_lead || return 0
   local _fd="$FLEET_DIR/$SOCK.$SESSION.from" _n
   _n="$(printf '%s' "$MSG" | tr -s ' \t\r\n' ' ')"; _n="${_n# }"; _n="${_n% }"
   mkdir -p "$_fd" 2>/dev/null \
