@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-spawn <name> [--branch <b>] [--from <ref>] [--prompt "<task>"] [--reuse <wt>|--new]
+# fleet-spawn <name> [--branch <b>] [--from <ref>] [--prompt "<task>"] [--why "<one line>"] [--reuse <wt>|--new]
 #
 # Create a git worktree off the current repo and start a FRESH parallel fleet
 # session in it, in the background (no attach). Optionally hand it an initial
@@ -25,6 +25,10 @@
 #             STDOUT, and that same line is appended to what the worker receives — the
 #             objection happens in the lead and the outcome happens in the worker, and
 #             nothing else joins those two transcripts.
+#   --why     one line on what the work is FOR. The worker reads it under the brief, the
+#             memory keeps it with the task, and the lead's briefing prints it beside the
+#             task, so a lead that has lost the reason in a compaction is handed it back. A
+#             prompted spawn without one prints one line that says so; it never refuses.
 #   --model   model for the new session (e.g. opus); default = account default
 #   --kind    what kind of task this is: verify | ci | docs | video | build. Picks the model
 #             from the project's map (fleet-project set <project> model-<kind> <model>) when
@@ -65,7 +69,7 @@
 #   the fleet has said the last word, and a silent re-route is the same class of bug.
 set -uo pipefail
 
-NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0; KIND=""
+NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; WHY=""; MODEL=""; REUSE=""; NEW=0; KIND=""
 SOCK_FORCE="${CLAUDE_FLEET_SOCK_FORCE:-}"
 AGENT="${CLAUDE_FLEET_AGENT:-claude}"
 while [ $# -gt 0 ]; do
@@ -73,6 +77,8 @@ while [ $# -gt 0 ]; do
     --branch) BRANCH="${2:?}"; BRANCH_SET=1; shift 2 ;;
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
+    # One line: what arrives on several (a pasted paragraph) is folded onto one.
+    --why)    WHY="$(printf '%s' "${2:-}" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//')"; shift 2 ;;
     --model)  MODEL="${2:?}";  shift 2 ;;
     --kind)   KIND="${2:?}";   shift 2 ;;
     --agent)  AGENT="${2:?}";  shift 2 ;;
@@ -83,7 +89,7 @@ while [ $# -gt 0 ]; do
     *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
   esac
 done
-[ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--kind k] [--prompt \"...\"]" >&2; exit 1; }
+[ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--kind k] [--prompt \"...\"] [--why \"...\"]" >&2; exit 1; }
 
 # THE KIND IS CHECKED HERE, before anything is created. An unknown one is refused rather than
 # treated as "no kind": a typo'd `--kind verfiy` would otherwise start the worker on the
@@ -288,6 +294,11 @@ if [ -n "$PROMPT" ]; then
     echo
     echo "  Counted — verdict, length and a digest, never the body — in <fleet dir>/$SOCK.brief.tsv"
   fi
+  # NO WHY, ONE LINE. A brief that says what to do and not what it is for gets reports that
+  # frame the job as mechanical, and a lead that reads those reports takes the framing on: the
+  # task survives a compaction and its reason does not. Said once, on stdout (the stream the
+  # MCP tool returns), and never a refusal.
+  [ -n "$WHY" ] || echo "fleet-spawn: no --why — the worker is told what to do but not what it is for. Add one line (--why \"<reason>\", or why on fleet_spawn): it rides under the brief and beside the task in your briefing."
 fi
 
 # WHAT THE WORKER ACTUALLY RECEIVES. The marker rides along as a trailing line rather than
@@ -297,7 +308,9 @@ fi
 # than the ask plus our own footer — fleet-send has its own log for what was really sent.
 DISPATCH_PROMPT="$PROMPT"
 [ -n "$PROMPT" ] && DISPATCH_PROMPT="$PROMPT
-
+${WHY:+
+Why: $WHY
+}
 $BRIEF_MARK"
 
 PARENT="$(dirname "$GITROOT")"
@@ -999,7 +1012,7 @@ mtmp="$MANIFEST.$$.tmp"
 # the next dispatch into this worktree — with the WHOLE brief, which the row cuts at 200
 # characters (the writer keeps 1500). The writer never fails, so neither can this.
 "$(dirname "$0")/fleet-know-event" spawn "fleet=${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" "sock=$SOCK" "cwd=$WT" \
-  "worker=$name" "branch=$BRANCH" "worktree=$WT" "task=${PROMPT:--}" "kind=$KIND" \
+  "worker=$name" "branch=$BRANCH" "worktree=$WT" "task=${PROMPT:--}" "why=$WHY" "kind=$KIND" \
   "parent=${PARENT_SESS:-${CLAUDE_FLEET_SLOT:-}}" "base=${FROM:-$PARENT_BRANCH}" "agent=$AGENT" </dev/null >/dev/null 2>&1
 #
 # THE KIND IS COLUMN SEVEN, written only when there is one, so a spawn without --kind still

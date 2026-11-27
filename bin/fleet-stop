@@ -291,6 +291,15 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
 # sub-lead, the inbox its workers wrote into — a stranger's backlog, to whoever is next
 rm -f "$FLEET_DIR/$SOCK.$SESSION.parent" "$FLEET_DIR/$SOCK.$SESSION.inbox" \
       "$FLEET_DIR/$SOCK.$SESSION.inbox.seen" "$FLEET_DIR/$SOCK.$SESSION.notify.stamp" 2>/dev/null
+# its delivery marks (bin/fleet-send _from_mark), unread now and a stranger's to a name-reuser,
+# whose recall would match its prompts against them. A directory, so the path is checked first:
+# every part named, a session name with no slash in it, and not a link.
+_fromd="$FLEET_DIR/$SOCK.$SESSION.from"
+case "$SESSION" in */*|.*) _fromd="" ;; esac
+if [ -n "$FLEET_DIR" ] && [ -n "$SOCK" ] && [ -n "$SESSION" ] && [ -n "$_fromd" ] \
+   && [ -d "$_fromd" ] && [ ! -L "$_fromd" ]; then
+  rm -rf "$_fromd" 2>/dev/null
+fi
 # THE ASLEEP MARKER IS A CARD. A hibernated session has no tmux session to kill, so the
 # kill above is a no-op for it — and the marker alone is what draws it on the grid and the
 # phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.

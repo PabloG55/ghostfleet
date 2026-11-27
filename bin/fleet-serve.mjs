@@ -891,9 +891,12 @@ const forceKey = (tool, args) => `${tool}:${args.project || '-'}:${args.session 
 
 // fleet-send's failure lines are written for a terminal — `fleet-send: → master (not
 // delivered: …)` — and the phone shows this text as a toast, so it leads with what the
-// owner needs: that it did not reach the session. The reason stays, word for word.
+// owner needs: that it did not reach the session. The reason stays, word for word. The line
+// about a brief with no --why is advice to a lead, printed before the delivery is tried, and
+// not a reason it failed, so it is not in the toast.
 export function undeliveredText(session, out) {
-  const why = String(out || '').split('\n').map(l => l.replace(/^fleet-send:\s*/, '').trim()).filter(Boolean)
+  const why = String(out || '').split('\n').filter(l => !/^fleet-send: no --why\b/.test(l))
+    .map(l => l.replace(/^fleet-send:\s*/, '').trim()).filter(Boolean)
     .map(l => l.replace(/^→ \S+ \((?:not delivered: )?(.*)\)$/, '$1')).join(' — ');
   return `did not reach ${session || 'the session'}: ${why || 'fleet-send failed and said nothing'}`;
 }

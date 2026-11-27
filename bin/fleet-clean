@@ -243,6 +243,20 @@ for mk in "$FLEET_DIR/$SOCK".*.parked "$FLEET_DIR/$SOCK".*.sched "$FLEET_DIR/$SO
   b="$(basename "$mk")"; sn="${b#"$SOCK".}"; sn="${sn%.parked}"; sn="${sn%.sched}"; sn="${sn%.stale}"
   printf '%s\n' "$live" | grep -qxF "$sn" || { echo "  orphan $b (no live '$sn')"; run "rm -f '$mk'"; }
 done
+# ...and the delivery marks a session left without a stop (bin/fleet-send _from_mark; fleet-stop
+# takes them on its own way out). A directory, so not through `run`'s eval: the path is rebuilt
+# from its parts and must come out the same, must not be a link, and a sleeping session keeps its
+# own, since a wake delivers into it.
+for fd in "$FLEET_DIR/$SOCK".*.from; do
+  [ -d "$fd" ] && [ ! -L "$fd" ] || continue
+  b="${fd##*/}"; sn="${b#"$SOCK".}"; sn="${sn%.from}"
+  [ -n "$sn" ] && [ "$fd" = "$FLEET_DIR/$SOCK.$sn.from" ] || continue
+  case "$sn" in */*|.*) continue ;; esac
+  grep -qxF "$sn" <<< "$live" && continue
+  [ -f "$FLEET_DIR/$SOCK.$sn.asleep" ] && continue
+  echo "  orphan $b (no live '$sn')"
+  if [ "$GO" = 1 ]; then rm -rf "$fd"; else echo "      would: rm -rf '$fd'"; fi
+done
 
 # Slots outlive the checkouts they name if a worktree is removed by any path that
 # isn't fleet-stop — `git worktree remove` by hand, the grid's x, this very command.

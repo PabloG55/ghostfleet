@@ -72,7 +72,8 @@ its command-line face, called from:
 | path | events |
 |---|---|
 | `hooks/fleet-event.sh` (detached, see the cost below) | `session.start`, `prompt` (the owner's, never the fleet's own nudges), `need-you`, `turn.end` (with the files edited, PRs opened or merged and deploys run in that turn, read from the transcript since the last Stop), `session.end` |
-| `fleet-spawn` · `fleet-ack` · `fleet-stop` | `spawn` (branch, worktree, task, parent), `ack` (what the worker understood, and the decisions it builds from), `retire` |
+| `fleet-spawn` · `fleet-ack` · `fleet-stop` | `spawn` (branch, worktree, task, its why, parent), `ack` (what the worker understood, and the decisions it builds from), `retire` |
+| `fleet-send --why` | `purpose`: the worker, its branch and what the work is for, the newest statement of it |
 | `fleet-merged` (the PR cache) | `pr.open`, `pr.merge`, `pr.close` — from what changed between two refreshes |
 | every ledger writer (the mod, `fleet-ledger`, the landed and carry passes) | `request.open`, `request.state`, and a `decision` when the owner answered a question (see [The owner's answers](#the-owners-answers)) |
 | `fleet-know describe` · `decide` · `relate` | `project.about`, `decision`, `relate` |
@@ -406,6 +407,73 @@ again.
 `install.sh` wires the event for everyone, and with the switch off the hook leaves at once: no output,
 no event, no change to the session's status. A `PreCompact` is new to the hooks, so an install from
 before this needs `./install.sh` once.
+
+## The owner's words, recalled
+
+A lead compacted a hundred times over kept "re-read the 80 renewals" and lost the reason, then
+recommended cancelling work it had planned itself, while `fleet-know find renewals` would have
+returned the reason in one call. A briefing is read at the start and after a compaction, and
+`fleet_know` when a lead thinks to ask; nothing made it look. So the owner's own message is the
+question: each one a lead receives is searched, and the best few matches ride into that turn as
+`additionalContext`. It needs the lead to remember nothing, so it survives any number of
+compactions. On by default; `CLAUDE_FLEET_RECALL=off` (or `CLAUDE_FLEET_KNOW=off`) stops it.
+
+```
+[fleet] From the fleet's memory, matched to the owner's words above — recorded events, not the owner speaking now. If one bears on what you are about to do, read it before acting (fleet-know find <word> for more):
+- 2026-03-02 kd9693f0182bfb15e [decision, owner, acme-api] Re-read all 80 renewals one by one: the billing report needs per-account values, so the batch is not cancelled
+- 2026-03-02 k4e23b81e1f8e79f2 [spawn, lead, acme-api] api-fix was briefed: Re-read the 80 renewals — why: the billing report needs per-account values
+```
+
+- **Whose words.** The owner's: typed at the prompt, from the phone, from Telegram, or sent with
+  `fleet-send --owner`. Never the fleet's. Every delivery the fleet makes into a lead
+  (`fleet-send`'s paste, its handoff to the mod and its codex queue, `fleet-schedule`'s paste) leaves
+  a mark first, `<fleet dir>/<sock>.<session>.from/<ms>.<digest>.<kind>`; a worker gets none, since
+  nothing would read them, and `fleet-stop` (or `fleet-clean`, for a session killed some other way)
+  takes a session's marks away with it. The turn whose words
+  match it takes it: `owner` marks the owner's, `brief`, `nudge` and `explain` the fleet's. A prompt
+  with no mark was typed. A fresh mark (under 30 s) whose words did not match means a delivery whose
+  text changed on the way in, and the prompt is not called the owner's. `[fleet]`, `<` and `/` at the
+  start are the fleet, Claude Code or a slash command; `[telegram] ` is the owner. A mark is read
+  before the prefix: the owner's words joining a busy codex turn arrive under `fleet-send`'s
+  `[fleet]` queued-work label, are still the owner's, and are searched without the label.
+- **Which sessions.** A lead: `master` in its own checkout, and a sub-lead, a session that has
+  children of its own. A worker gets nothing.
+- **How it searches.** As `find` does: the raw events of every profile on this machine and what
+  paired machines sent, locally, no model call. The query is a sentence, so not every word has to
+  match: each is weighted by how rare it is, and a line has to match two of the owner's words, one
+  of them rare and one of them a word rather than a number. Rare is under `max(8, 2√N)` of the N
+  lines, because a topic is talked about in a few dozen lines whatever the log's size and the
+  fleet's own vocabulary is in a share of all of them. The lead's own earlier messages do not count
+  towards how common a word is. Only what somebody said or meant is searched (a decision, a rule, a
+  fact, a brief and its why, an ack, a turn's last words, a ledger item), ranked by kind as well:
+  the owner's decision before a worker's passing mention.
+- **How much.** At most 4 rows of one line each, under 1,200 characters, cut by whole rows. Nothing
+  when nothing matches well.
+- **Privacy is `find`'s, plus one rule.** An excluded project never shows. A private one shows marked
+  `[private]` with the briefing's note to a Claude lead, and to a lead on any other agent (codex,
+  opencode…) not at all: putting it in that context is pasting it into a prompt for another vendor.
+- **It cannot hold up a turn.** The hook holds the read to a second from outside
+  (`CLAUDE_FLEET_RECALL_BUDGET_MS`). On a 200k-event synthetic log (120 MB) it took 0.35–0.6 s at a
+  load average of 5–8. A word common in a long log stops letting its lines through to the parse on
+  its own, which is what keeps a query like "fix the api test" from parsing all of it.
+
+## The why beside the task
+
+A brief says what to do; its why says what it is for, and the why is the part a compaction drops.
+`fleet-spawn --why "<one line>"` and `fleet-send --why` (`why` on `fleet_spawn` and `fleet_send`)
+put it under the brief the worker reads, and into this memory against the worker's branch: the
+spawn's `why`, and for `fleet-send` a `purpose` event, the newest of which wins. The lead's
+briefing lists the work in flight that has one under IN FLIGHT, AND WHY, and a project's page shows
+it on the branch's line:
+
+```
+- api-fix: Re-read the 80 renewals one by one — the billing report needs per-account values
+```
+
+A brief to a worker without one prints one line naming the flag, on stdout, where an MCP lead sees
+it, and is delivered as before: never a refusal. Not for a nudge, the owner's own words, a send to
+the lead, a slash command or the fleet's own messages. A task from before this has no why and shows
+as it always did.
 
 ## Reads are visible
 

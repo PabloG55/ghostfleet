@@ -454,6 +454,7 @@ the screen lives. `fleet-shots verdict <run>` still reads the verdict in a termi
   folded into a turn is read as a change of direction.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **Give every brief its why**: `--why "<one line>"` (`why` on fleet_spawn / fleet_send) says what the work is for; the worker reads it, and your briefing keeps it beside the task after a compaction has dropped the reason.
 - **A brief may start with a slash command.** `--prompt "/some-skill <the brief>"` runs that
   skill in the worker as if typed, with the rest as its arguments, so there is no need to
   reword it as "use the skill …". A brief that cannot be delivered is never silent:

@@ -12500,7 +12500,8 @@ MOD
   tmux -L cffm send-keys -t w1 -l "half typed words"
   for _ in $(seq 1 20); do grep -q 'half typed' <<< "$(mpane)" && break; sleep 0.1; done
   ma="$(MS w1 "task-alpha")"; mwait 1 25
-  is "an idle session: delivered through the mod"     "fleet-send: → w1" "$ma"
+  # Less the why warning, which is about the brief and not the delivery (bin/fleet-send).
+  is "an idle session: delivered through the mod"     "fleet-send: → w1" "$(grep -v '^fleet-send: no --why' <<< "$ma")"
   is "...as a turn of its own"                        "TURN task-alpha" "$(mturns)"
   is "...and the receipt names the turn it started"   "1" "$(cat "$MF"/fm-1.handoff/*.done 2>/dev/null | grep -c '"turnId":"t1"' || true)"
   is "...the half-typed message is untouched"         "1" "$(grep -c '❯ half typed words$' <<< "$(mpane)" || true)"
@@ -23861,6 +23862,11 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and the exit status is still 0"      "0" "$BWRC"
   is "...and the spawn actually happened"     "1" "$(bwhas "started 'w1'")"
   is "...and the prompt is still dispatched"  "1" "$(bwhas 'will dispatch the initial prompt')"
+  # NO WHY: the task survives a compaction and its reason does not, so a brief without one is
+  # told so in one line, on stdout, and dispatched exactly as before.
+  is "a brief with no --why says so, naming the flag" "1" "$(bwhas '^fleet-spawn: no --why')"
+  is "...in ONE line"                         "1" "$(bwhas 'no --why')"
+  is "...on STDOUT, where an MCP lead sees it" "1" "$(grep -c '^fleet-spawn: no --why' <<< "$BWSTDOUT" || true)"
 
   # ── the OTHER direction: a brief that says what done looks like, one deliverable ──
   # Without this the group would pass for a warning that fires on everything, which is
@@ -23876,6 +23882,19 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
      "$(printf '%s' "$BWOUT" | grep -c '^brief-check: ok done-criterion=yes deliverables=1' || true)"
   is "...and still spawns"                    "1" "$(bwhas "started 'w1'")"
   is "...with the same exit status"           "0" "$BWRC"
+
+  # ...and with one, quiet about it, and the why is kept with the task in the fleet's memory,
+  # which is where the lead's briefing reads it back after a compaction (lib/know.mjs).
+  spawnbw --prompt 'Add the ASKED column. Done when: the header prints ASKED.' --why 'the review has to see what each worker heard'
+  is "a brief with a --why is quiet about it"  "0" "$(bwhas 'no --why')"
+  is "...still spawns, with the same status"  "1 0" "$(bwhas "started 'w1'") $BWRC"
+  is "...and the memory keeps the why with the task" "yes" \
+     "$([ "$(grep -c '"kind":"spawn".*"why":"the review has to see what each worker heard"' "$BW/fleet/know.jsonl" 2>/dev/null || true)" -ge 1 ] && echo yes || echo no)"
+  spawnbw --prompt 'Fix it. Done when: it works.' --why "$(printf 'two lines\nof why')"
+  is "...folded onto one line, whatever arrives" "yes" \
+     "$([ "$(grep -c '"why":"two lines of why"' "$BW/fleet/know.jsonl" 2>/dev/null || true)" -ge 1 ] && echo yes || echo no)"
+  spawnbw
+  is "a spawn with no prompt is not told about a why" "0" "$(bwhas 'no --why')"
 
   # ── several deliverables ──
   spawnbw --prompt "$(printf 'Add the column\nUpdate the docs\nWrite a test\n')"
@@ -23937,7 +23956,7 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   ( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
       CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
       PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" wdisp --new \
-      --prompt "$BWASK" >/dev/null 2>&1 )
+      --prompt "$BWASK" --why 'the billing export reads that field' >/dev/null 2>&1 )
   # the dispatcher is backgrounded and waits for the pane to look ready; the stub agent
   # prints the marker immediately, so this is ~1s, not the ~3min fallback.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -s "$BW/sent.wdisp" ] && break; sleep 1; done
@@ -23949,12 +23968,17 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # first and what the manifest shows in ASKED.
   is "...with the ask still first"            "1" "$(head -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^Fix the parser' || true)"
   is "...and the marker last"                 "1" "$(tail -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^brief-check:' || true)"
+  # The why is the worker's to read, under the ask it explains and above the machinery.
+  is "...with the why between the two"        "yes" \
+     "$(awk 'NR==1{a=/^Fix the parser/} /^Why: the billing export reads that field$/{w=NR} /^brief-check:/{b=NR} END{print (a && w>1 && b>w) ? "yes" : "no"}' "$BW/sent.wdisp" 2>/dev/null)"
   # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
   # or the digest of a brief would never match the brief that was written.
   # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
   # or a digest of the brief would never match the brief that was written.
   is "...but ASKED is the ask alone"          "0" \
      "$(grep -c 'brief-check' "$BW/fleet/cfbrief.manifest.tsv" 2>/dev/null || true)"
+  is "...with no why in it either"            "0" \
+     "$(grep -c 'Why:' "$BW/fleet/cfbrief.manifest.tsv" 2>/dev/null || true)"
   # ...and EXACTLY the ask, compared against the brief that was written rather than against
   # a threshold: the marker is ~140 characters, so a counter that had measured the
   # augmented prompt would be obvious against a bound and is unmistakable against equality.
@@ -23968,10 +23992,141 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # refuse is pinned in the source rather than left to the reviewer of the next diff.
   BWBLOCK="$(sed -n '/the brief is thin/,/brief.tsv/p' "$ROOT/bin/fleet-spawn")"
   is "the warning block contains no exit"     "0" "$(printf '%s' "$BWBLOCK" | grep -cE '(^|[[:space:]])exit[[:space:]]' || true)"
+  is "...and nor does the why's"              "0" "$(grep -E 'no --why' "$ROOT/bin/fleet-spawn" | grep -cE '(^|[[:space:]])exit([[:space:]]|$)' || true)"
   is "...and there is no --force to add"      "0" "$(grep -c -- '--force' "$ROOT/bin/fleet-spawn" || true)"
   rm -rf "$BW"
 else
   skip "the brief warning" "git or tmux missing"
+fi
+
+# ── 5z1. a brief says what it is FOR: fleet-send --why ───────────────────────
+# A lead compacted a hundred times over kept "run the 80 items" and lost the reason, then
+# recommended cancelling work it had planned itself. The task had survived every compaction;
+# the why had been said once, in a turn long summarised away. So a brief carries its why: under
+# the words the worker reads, and into the fleet's memory against the worker's branch, where
+# the lead's briefing shows it beside the task. A brief to a worker without one is told so in
+# one line and delivered exactly as before — the same never-a-gate rule as fleet-spawn's
+# brief-check above, pinned in the source the same way.
+group "fleet-send --why rides under the brief and into the memory, and a brief without one is warned, never refused"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
+   && WY="$(mktemp -d "$TEST_RUNS.$$.why.XXXXXX")" && [ -d "$WY" ]; then
+  mkdir -p "$WY/fleet" "$WY/home/.config/ghostfleet"
+  git init -q -b main "$WY/w1" 2>/dev/null
+  git -C "$WY/w1" config user.email t@t; git -C "$WY/w1" config user.name t
+  : > "$WY/w1/f"; git -C "$WY/w1" add f; git -C "$WY/w1" commit -qm init 2>/dev/null
+  git -C "$WY/w1" checkout -q -b fix/renewals 2>/dev/null
+  tmux -L cfwhy kill-server 2>/dev/null
+  # A composer drawn once, as two rules with a prompt between: fleet-send confirms a submit by
+  # its words NOT being in that box, and a pane's own echo lands below it. Against a bare
+  # `sleep` every send waits out its whole ~8s confirmation instead, nine times over.
+  printf '#!/bin/sh
+printf "────────────\n❯ \n────────────\n"
+exec sleep 120
+' > "$WY/composer"
+  chmod +x "$WY/composer"
+  tmux -u -L cfwhy new-session -d -s w1 -c "$WY/w1" "$WY/composer" 2>/dev/null
+  tmux -u -L cfwhy new-session -d -s master -c "$WY/w1" "$WY/composer" 2>/dev/null
+  tmux -u -L cfwhy new-session -d -s w2 -c "$WY/w1" "$WY/composer" 2>/dev/null
+  # w1 has a child of its own, so it is a sub-lead: a session whose prompts the recall reads and
+  # whose delivery marks are worth writing. w2 is a plain worker, and gets none.
+  mkdir -p "$WY/fleet"; printf 'w1\n' > "$WY/fleet/cfwhy.w9.parent"
+  sleep 0.4
+  # stdout ONLY, and the status after it: the warning must be on the stream the MCP tool
+  # returns, and a send it warns about must still exit 0.
+  WS() { env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SUBMIT_DELAY=0.1 \
+           "$ROOT/bin/fleet-send" -s cfwhy "$@" 2>/dev/null; echo "rc=$?"; }
+  # The digest the delivery mark is named by (lib/know-recall.mjs): what the worker was handed.
+  wdig() { node --input-type=module -e "
+    const R = await import('$ROOT/lib/know-recall.mjs');
+    process.stdout.write(R.digest12(process.argv[1]));" "$1" 2>/dev/null; }
+  wmark() { local d; d="$(wdig "$1")"; [ -n "$d" ] || { echo no; return; }
+            [ "$(grep -c "\.$d\.brief\$" <<< "$(ls "$WY/fleet/cfwhy.w1.from" 2>/dev/null)" || true)" -ge 1 ] && echo yes || echo no; }
+
+  WOUT="$(WS w1 'Re-read the 80 renewals. Done when: each has its per-account value.')"
+  is "a brief to a worker with no --why says so, on stdout, naming the flag" "1" "$(grep -c '^fleet-send: no --why' <<< "$WOUT" || true)"
+  is "...in one line"                           "1" "$(grep -c 'no --why' <<< "$WOUT" || true)"
+  is "...and is delivered anyway, exit 0"       "1" "$(grep -c '^rc=0$' <<< "$WOUT" || true)"
+  is "...exactly as written"                    "yes" "$(wmark 'Re-read the 80 renewals. Done when: each has its per-account value.')"
+
+  WOUT="$(WS --why 'the billing report needs per-account values' w1 'Re-read the 80 renewals.')"
+  is "with --why it is quiet about it"          "0 1" "$(grep -c 'no --why' <<< "$WOUT" || true) $(grep -c '^rc=0$' <<< "$WOUT" || true)"
+  is "...and the worker is handed the why under the brief" "yes" \
+     "$(wmark "$(printf 'Re-read the 80 renewals.\n\nWhy: the billing report needs per-account values')")"
+  is "...and the memory keeps it against the worker's branch" "w1 fix/renewals the billing report needs per-account values" \
+     "$(node -e '
+        const ls = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
+        const p = ls.filter(e => e.kind === "purpose").pop();
+        process.stdout.write(p ? [p.f.worker, p.f.branch, p.f.why].join(" ") : "none");' "$WY/fleet/know.jsonl" 2>/dev/null)"
+
+  # Not a brief, so nothing to warn about. Each of these is a send a lead makes every day; a
+  # warning on them would teach the lead to read past the one that matters.
+  is "a nudge is not warned"                    "0" "$(grep -c 'no --why' <<< "$(WS --nudge w1 'Status?')" || true)"
+  is "...nor the fleet's own send"              "0" "$(grep -c 'no --why' <<< "$(WS w1 '[fleet] resume: continue')" || true)"
+  is "...nor a slash command"                   "0" "$(grep -c 'no --why' <<< "$(WS w1 '/model sonnet')" || true)"
+  is "...nor the owner's words"                 "0" "$(grep -c 'no --why' <<< "$(WS --owner w1 'Ship it')" || true)"
+  is "...nor a brief that already says why"     "0" "$(grep -c 'no --why' <<< "$(WS w1 "$(printf 'Fix the export.\nWhy: the auditors read it')")" || true)"
+  is "...nor anything sent to the lead"         "0" "$(grep -c 'no --why' <<< "$(WS master 'Re-read the 80 renewals.')" || true)"
+  # Each of the seven sends to the worker left exactly one mark: the warning is the only thing
+  # that differs. (The one to the lead marks the lead's own box.)
+  is "...each delivered all the same"           "7" "$(grep -c . <<< "$(ls "$WY/fleet/cfwhy.w1.from" 2>/dev/null)" || true)"
+
+  # ONLY A LEAD READS THESE MARKS (the hook's _recall_lead, then lib/know-recall.mjs whoSent,
+  # which also prunes them), so only a session that can be one is given them: master, or a
+  # session some <sock>.<child>.parent names. A worker's would pile up unread for as long as the
+  # fleet dir lives. Delivered all the same, which its .pasted line proves.
+  WS w2 'Re-read the 80 renewals.' >/dev/null
+  is "a send to a worker leaves no .from mark, and is delivered" "no yes" \
+     "$([ -e "$WY/fleet/cfwhy.w2.from" ] && echo yes || echo no) $([ -s "$WY/fleet/cfwhy.w2.pasted" ] && echo yes || echo no)"
+  is "...while a send to master still marks"    "yes" \
+     "$([ "$(grep -c '\.brief$' <<< "$(ls "$WY/fleet/cfwhy.master.from" 2>/dev/null)" || true)" -ge 1 ] && echo yes || echo no)"
+
+  # A STOPPED SESSION'S MARKS GO WITH IT, as its .parent and .label do: unread, and a session
+  # that reuses the name must not be handed a stranger's deliveries to match against.
+  WST="$(env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-stop" -s cfwhy w1 2>&1)"
+  is "fleet-stop removes the session's .from directory" "gone yes" \
+     "$([ -e "$WY/fleet/cfwhy.w1.from" ] && echo there || echo gone) $(tmux -u -L cfwhy has-session -t =w1 2>/dev/null && echo no || echo yes)"
+  # ...and fleet-clean takes the ones a session left without a stop (killed by hand, the grid's
+  # x): dry run first, as it does everything, and never a live session's or a sleeping one's.
+  mkdir -p "$WY/fleet/cfwhy.gone.from" "$WY/fleet/cfwhy.napper.from"; : > "$WY/fleet/cfwhy.napper.asleep"
+  : > "$WY/fleet/cfwhy.gone.from/1.abcdefabcdef.brief"
+  WCL="$( cd "$WY/w1" && env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-clean" -s cfwhy 2>&1 )"
+  is "fleet-clean's dry run names an orphan .from and keeps it" "1 yes" \
+     "$(grep -c "orphan cfwhy.gone.from (no live 'gone')" <<< "$WCL" || true) $([ -d "$WY/fleet/cfwhy.gone.from" ] && echo yes || echo no)"
+  WCL="$( cd "$WY/w1" && env -u TMUX HOME="$WY/home" CLAUDE_FLEET_DIR="$WY/fleet" CLAUDE_FLEET_SLOTS="$WY/slots" "$ROOT/bin/fleet-clean" -s cfwhy --go 2>&1 )"
+  is "...--go removes it, and keeps a live one's and a sleeping one's" "gone yes yes" \
+     "$([ -e "$WY/fleet/cfwhy.gone.from" ] && echo there || echo gone) $([ -d "$WY/fleet/cfwhy.master.from" ] && echo yes || echo no) $([ -d "$WY/fleet/cfwhy.napper.from" ] && echo yes || echo no)"
+
+  # THE STRUCTURAL GUARD, as fleet-spawn's: the warning's branch holds no exit.
+  WYBLOCK="$(sed -n '/^_why_exempt() {/,/^RAW_MSG=/p' "$ROOT/bin/fleet-send")"
+  is "the warning's block contains no exit"     "0" "$(grep -cE '(^|[[:space:]])exit([[:space:]]|$)' <<< "$WYBLOCK" || true)"
+  is "...and it is there to be checked"         "yes" "$([ "$(grep -c 'no --why' <<< "$WYBLOCK" || true)" -ge 1 ] && echo yes || echo no)"
+
+  # The MCP door: why on fleet_send and fleet_spawn becomes --why, before the positionals.
+  wplan() { HOME="$WY/home" node --input-type=module -e "
+    const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+    const p = m.plan(process.argv[1], JSON.parse(process.argv[2]));
+    process.stdout.write((p.args || []).join(' '));" "$1" "$2" 2>/dev/null; }
+  is "fleet_send's why becomes --why, ahead of the session" "1" \
+     "$(grep -c -- '--why the export feeds billing -- w1 ' <<< "$(wplan fleet_send '{"session":"w1","prompt":"Fix it","why":"the export feeds billing"}')" || true)"
+  is "fleet_spawn's why becomes --why"         "1" "$(grep -c -- '--why the export feeds billing' <<< "$(wplan fleet_spawn '{"name":"w1","prompt":"Fix it","why":"the export feeds billing"}')" || true)"
+  is "...and no why passes none"               "0 0" "$(grep -c -- '--why' <<< "$(wplan fleet_send '{"session":"w1","prompt":"Fix it"}')" || true) $(grep -c -- '--why' <<< "$(wplan fleet_spawn '{"name":"w1","prompt":"Fix it"}')" || true)"
+  is "...and both schemas offer it"            "string string" "$(node --input-type=module -e "
+        const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+        const t = (n) => m.TOOLS.find(x => x.name === n).inputSchema.properties.why?.type;
+        process.stdout.write(t('fleet_send') + ' ' + t('fleet_spawn'));" 2>/dev/null)"
+  # The phone's toast for a send that did not arrive is built from every line fleet-send
+  # printed, and the warning comes before the delivery is tried: it is advice, not the reason.
+  # Beside a failure with no warning in it, so a toast that dropped everything cannot pass.
+  wtoast() { HOME="$WY/home" node --input-type=module -e "
+    const m = await import('$ROOT/bin/fleet-serve.mjs');
+    process.stdout.write(m.undeliveredText('w1', process.argv[1])); process.exit(0);" "$1" 2>/dev/null; }
+  is "the phone's toast gives the reason it did not arrive, not the why warning" \
+     "did not reach w1: the pane never showed it|did not reach w1: the pane never showed it" \
+     "$(wtoast "$(printf "fleet-send: no --why — 'w1' is told what to do.\nfleet-send: → w1 (not delivered: the pane never showed it)")")|$(wtoast 'fleet-send: → w1 (not delivered: the pane never showed it)')"
+  tmux -L cfwhy kill-server 2>/dev/null
+  rm -rf "${WY:?}"
+else
+  skip "fleet-send --why" "tmux, git or node missing"
 fi
 
 # ── 5z2. the acknowledgement handshake: what the worker heard ────────────────

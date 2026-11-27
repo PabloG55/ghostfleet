@@ -22,6 +22,13 @@
 # prompt, instead of as a lead's brief that is done only with proof. A worker or a lead
 # dispatching work never passes it. It rides the handoff and the queue record like --nudge.
 #
+# --why "<one line>" says what the work is FOR. It is appended to the prompt the session
+# receives, and the fleet's memory keeps it beside the worker's task, where the lead's briefing
+# reads it back. A brief to a worker that carries no why prints one line that says so: never a
+# refusal, and never for what is not a brief — a nudge, the owner's own words, an explain
+# request, a question sent with --reply-to, a send to master, a slash command, the fleet's own
+# `[fleet]` messages, or words that already carry a `Why:` line.
+#
 # To a session that is mid-turn the prompt goes INTO THE RUNNING TURN, and the agent reads it
 # at its next step, labelled as queued work: finish the task in hand, then do this one, unless
 # the message itself says stop, instead or first do (hooks/fleet-event.sh). See "the queue"
@@ -75,7 +82,7 @@ case "${_t##*/}" in cf-*)
   [ -n "$SELF_SESS" ] || SELF_SESS="${CLAUDE_FLEET_SLOT:-}"
 ;; esac
 
-REPLY_TO=""; REPLY_DIR=""; ANYWAY=0
+REPLY_TO=""; REPLY_DIR=""; ANYWAY=0; WHY=""
 # Set for real beside the asker's fleet dir; declared here so `set -u` cannot trip on a
 # send that has no --reply-to at all.
 XPROF=0
@@ -91,6 +98,8 @@ while [ $# -gt 0 ]; do
     --reply-to)  REPLY_TO="${2:-}";  shift 2 ;;
     --reply-dir) REPLY_DIR="${2:-}"; shift 2 ;;
     --anyway)    ANYWAY=1;           shift ;;
+    # One line, whatever arrives: a pasted paragraph is folded onto one.
+    --why)       WHY="$(printf '%s' "${2:-}" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//')"; shift 2 ;;
     --now)       MODE=now;           shift ;;
     # Held until the running turn ends, as a turn of its own: the sender's explicit choice
     # (the client's "send after this turn", bin/fleet-telegram for a message it holds).
@@ -124,6 +133,11 @@ while [ $# -gt 0 ]; do
 done
 SESSION="${1:-}"; shift || true
 MSG="$*"
+# Under the words, where the worker reads it after what it is asked to do: the head of a brief
+# is what a session reads first and what the manifest shows as its task.
+[ -n "$WHY" ] && [ -n "$MSG" ] && MSG="$MSG
+
+Why: $WHY"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 # The drain's delivery records its own pid in the journal first thing, so a drain that took
@@ -750,6 +764,31 @@ _enqueue() {
   printf '%s\x1f%s\n' "$(date +%s)" "$_rec" >> "$QUEUE"
   _n="$(wc -l < "$QUEUE" | tr -d ' ')"
 }
+# ── A BRIEF AND ITS WHY ────────────────────────────────────────────────────────────
+# Past every refusal and before the queue, so a send that is queued records its why as surely
+# as one delivered now (the drain that delivers it later is handed the words, not the flag).
+# The why goes to the memory against the worker's branch, as the newest statement of what its
+# work is for (lib/know.mjs, `purpose`); the writer never fails, and nor can this.
+# Not a brief, so nothing to warn about: the fleet's own sends (fleet-resume's `[fleet] resume:`,
+# fleet-model's `/model`, a `<…>` frame), the same prefixes the memory's recall reads as the
+# fleet speaking (lib/know-recall.mjs), and a brief that already carries its why on a line of
+# its own, as fleet-spawn's dispatched prompt does.
+_why_exempt() {
+  case "$1" in '[fleet]'*|'<'*|'/'*) return 0 ;; esac
+  grep -q '^Why: ' <<< "$1"
+}
+if [ "$MODE" = send ] || [ "$MODE" = now ]; then
+  if [ -n "$WHY" ]; then
+    _wcwd="$(tmux -u -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+    [ -n "$_wcwd" ] && "$(dirname "$0")/fleet-know-event" purpose "fleet=$FLEET_DIR" "sock=$SOCK" "cwd=$_wcwd" \
+      "worker=$SESSION" "branch=$(git -C "$_wcwd" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')" "why=$WHY" \
+      </dev/null >/dev/null 2>&1
+  elif [ -z "$KIND" ] && [ -z "${RSESS:-}" ] && [ "$SESSION" != master ] \
+       && ! _why_exempt "$MSG"; then
+    # On stdout, the stream the MCP tool returns, as fleet-spawn's brief-check is.
+    echo "fleet-send: no --why — '$SESSION' is told what to do but not what it is for. Add one line (--why \"<reason>\", or why on fleet_send): it rides under the brief and beside the task in your briefing."
+  fi
+fi
 RAW_MSG="$MSG"
 
 # ── INTO THE RUNNING TURN, OR HELD: WHICH, AND WHY ────────────────────────────
@@ -1161,6 +1200,39 @@ _paste_marker() {
   local _pm="$FLEET_DIR/$SOCK.$SESSION.pasted"
   printf '%s\t%s\t%s\t%s\n' "$(($(date +%s) * 1000))" "$KIND" "$([ -n "${RSESS:-}" ] && echo 1 || echo 0)" "${#MSG}" >> "$_pm" 2>/dev/null || true
 }
+# WHOSE WORDS THESE ARE, for the recall a lead's prompt starts (lib/know-recall.mjs whoSent). A
+# lead is searched the fleet's memory for each message from the OWNER, and nothing on the
+# receiving side can tell a paste or a mod's submit from typing. So every delivery leaves a mark
+# first, in <sock>.<session>.from/: `<epoch ms>.<digest>.<kind>`, kind as on the handoff (brief
+# for none) and `owner` only for --owner. The hook takes the mark whose digest is the prompt's,
+# so a delivery queued for minutes still matches; a prompt that matches none was typed. The
+# digest is of the words with whitespace folded and one space off each end, which is what the
+# reader folds too: a paste whose line endings changed on the way in still matches. Once per
+# send, whichever path delivers it — a mod handoff that falls back to the paste is ONE delivery.
+#   Only for a session that can be a LEAD, because only a lead's prompt reads and prunes them (the
+# hook's _recall_lead stops before a worker's): master, or a session some <sock>.<child>.parent
+# names, the same test. A worker's marks would sit unread for as long as the fleet dir lives. The
+# test is made at delivery, so a queued send to a worker that has since spawned a child is marked.
+_FROM_MARKED=0
+_from_lead() {
+  [ "$SESSION" = master ] && return 0
+  local _pt _l
+  for _pt in "$FLEET_DIR/$SOCK".*.parent; do
+    [ -f "$_pt" ] || continue
+    _l=""; IFS= read -r _l < "$_pt" 2>/dev/null
+    [ "$_l" = "$SESSION" ] && return 0
+  done
+  return 1
+}
+_from_mark() {
+  [ "$_FROM_MARKED" = 0 ] || return 0
+  _FROM_MARKED=1
+  _from_lead || return 0
+  local _fd="$FLEET_DIR/$SOCK.$SESSION.from" _n
+  _n="$(printf '%s' "$MSG" | tr -s ' \t\r\n' ' ')"; _n="${_n# }"; _n="${_n% }"
+  mkdir -p "$_fd" 2>/dev/null \
+    && : > "$_fd/$(($(date +%s) * 1000 + RANDOM % 1000)).$(_sent_digest "$_n").${KIND:-brief}" 2>/dev/null || true
+}
 # A FAILED DELIVERY NOBODY WOULD SEE. Filed as a `failed` row in the inbox of the worker's
 # lead, chosen as hooks/fleet-event.sh chooses it: a live parent named in <sock>.<slot>.parent,
 # else master. Only for a sender that set CLAUDE_FLEET_SEND_REPORT, because one whose output
@@ -1204,6 +1276,7 @@ _mod_requeue() {
 if [ -n "$CODEX_Q" ]; then
   IFS=$'\x1f' read -r _cx_id _cx_home _cx_how <<< "$CODEX_Q"
   # `=` joins each value to its flag, so a prompt that starts with "-" is not read as one.
+  _from_mark
   if _cx_out="$(CODEX_HOME="$_cx_home" codex queue --thread="$_cx_id" --message="$MSG" 2>&1)"; then
     SENT_OUT=queued
     _jarvis_delivered
@@ -1219,6 +1292,7 @@ if [ "$USE_MOD" = 1 ]; then
   _spool="$MOD_DIR/$MOD_SID.handoff"
   _hid="${MOD_NOW:-$(date +%s)000}-$$"
   _rargs=(); [ -n "$RSESS" ] && _rargs=("$RSOCK" "$RSESS" "$rdir")
+  _from_mark
   if printf '%s' "$MSG" | CLAUDE_FLEET_HANDOFF_KIND="$KIND" node "$MOD_TARGET" --handoff "$_spool" "$_hid" ${_rargs[@]+"${_rargs[@]}"}; then
     _claimed=no
     _w="${CLAUDE_FLEET_MOD_CLAIM:-3}"; case "$_w" in ''|*[!0-9]*) _w=3 ;; esac
@@ -1315,6 +1389,7 @@ fi
 if [ "$USE_MOD" = 0 ]; then
 _jarvis_delivered
 _paste_marker
+_from_mark
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 

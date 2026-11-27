@@ -377,6 +377,58 @@ _know_briefing() {                    # $1 = the SessionStart source
   return 0
 }
 
+# ── THE OWNER'S WORDS, SEARCHED FOR A LEAD (lib/know-recall.mjs) ──────────────────
+# Each message the owner sends a lead is searched against the fleet's memory, and the best few
+# matches go into that turn's context. It exists for the lead that has been compacted so often it
+# kept the task and lost the reason, and so it waits on nobody remembering to look. Not behind an
+# experimental switch for that reason: a switch somebody has to know to turn on is a lead that has
+# to know to look. CLAUDE_FLEET_RECALL=off (or CLAUDE_FLEET_KNOW=off) stops it.
+#   A LEAD is the master in its own checkout (_is_lead) or a sub-lead: any session a child's
+# <sock>.<child>.parent names, the tag fleet-spawn writes and fleet-stop takes away. A worker never
+# gets it, and nor does a bridged agent with nowhere to put context. Decided here, before node
+# starts, because every prompt into every worker passes this way.
+#   Whether the words are the OWNER'S is decided by the writer, which reads the marks a delivery
+# leaves (bin/fleet-send, bin/fleet-schedule) and takes the one it matches.
+_recall_lead() {
+  [ "${CLAUDE_FLEET_KNOW:-}" != off ] && [ "${CLAUDE_FLEET_RECALL:-}" != off ] && [ -z "$NESTED" ] || return 1
+  case "${CLAUDE_FLEET_EVENT_AGENT:-}" in ""|claude|codex) ;; *) return 1 ;; esac
+  [ -n "$SOCK" ] && [ -n "$SLOT" ] || return 1
+  _is_lead && return 0
+  local pt
+  for pt in "$FLEET_DIR/$SOCK".*.parent; do
+    [ -f "$pt" ] && [ "$(head -1 "$pt" 2>/dev/null)" = "$SLOT" ] && return 0
+  done
+  return 1
+}
+# Held to a budget from outside, as the briefing is (_know_briefing says why it has to be). Prints
+# the context to add, or nothing. The first line of the writer's output is for the debug log.
+_know_recall() {                      # $1 = the prompt
+  local f="$FLEET_DIR/.$SESSION.$$.recall" p w rc head
+  local ms="${CLAUDE_FLEET_RECALL_BUDGET_MS:-1000}"
+  case "$ms" in ''|*[!0-9]*) ms=1000 ;; esac
+  _know_bin
+  [ -x "$_kn" ] && [ -d "$FLEET_DIR" ] || return 0
+  {
+    "$_kn" recall "fleet=$FLEET_DIR" "sock=$SOCK" "slot=$SLOT" "session=$SESSION" "agent=${CLAUDE_FLEET_EVENT_AGENT:-claude}" <<< "$1" >"$f" &
+    p=$!
+    ( sleep "$(( ms / 1000 )).$(printf '%03d' $(( ms % 1000 )))"; kill -9 "$p" ) >/dev/null 2>&1 &
+    w=$!
+    wait "$p"; rc=$?
+    kill "$w"; wait "$w"
+  } 2>/dev/null
+  if [ "$rc" != 0 ]; then
+    rm -f "$f" 2>/dev/null
+    case "$rc" in 137) rc="over its ${ms}ms budget" ;; *) rc="failed with status $rc" ;; esac
+    _dbg "recall $SESSION: nothing added — $rc"
+    return 0
+  fi
+  IFS= read -r head < "$f" 2>/dev/null
+  _dbg "recall $SESSION: $head"
+  sed 1d "$f" 2>/dev/null
+  rm -f "$f" 2>/dev/null
+  return 0
+}
+
 # ── A TURN STARTED BY A RESUME IS NOT NEWS UNLESS IT MADE SOME ──────────────────
 # Every park and resume ends in a turn: the resume prompt says "continue", the worker looks,
 # usually finds nothing to pick up, and Stops. Each Stop was a DONE row and a lead nudge, so
@@ -670,6 +722,12 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
       "<task-notification>"*|"<local-command"*|"") ;;
       *) [ "${_mid:-0}" = 0 ] && rm -f "$_tgm" 2>/dev/null ;;
     esac
+  fi
+  if [ -n "$_prompt" ] && _recall_lead; then
+    _rc="$(_know_recall "$_prompt")"
+    [ -n "$_rc" ] && _ctx="${_ctx:+$_ctx
+
+}$_rc"
   fi
   [ -n "${_ctx:-}" ] && jq -n --arg c "$_ctx" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}' 2>/dev/null
   # ── JARVIS'S LEDGER: what the OWNER said, which is how a yes is proven ────────
