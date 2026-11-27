@@ -232,6 +232,7 @@ export function reprobe() { resolved = null; resolving = null; return ready(); }
 export const FIXTURES = [
   { file: 'grid-acme-api.json', project: 'acme-api', title: 'acme-api — a busy fleet' },
   { file: 'grid-degraded.json', project: 'acme-api', title: 'acme-api — unknown · limit · interrupted · parked' },
+  { file: 'grid-asleep.json',   project: 'acme-api', title: 'acme-api — asleep: one wakes, one does not' },
   { file: 'grid-free.json',     project: 'toolbox',  title: 'toolbox — free worktrees' },
   { file: 'grid-empty.json',    project: 'scratch',  title: 'scratch — nothing running' },
   { file: 'grid-scratch-leftovers.json', project: 'scratch', title: 'scratch — a done session left things listening' },
@@ -1217,7 +1218,7 @@ export async function verb(tool, args, assertion = null) {
 // something behind.
 const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), projModel: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
                   explain: new Map(), ledgerAnswered: new Set(), explainBusy: new Set(),
-                  shots: new Map(), unpaired: false, relabel: new Map() };
+                  shots: new Map(), unpaired: false, relabel: new Map(), woke: new Set() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start
@@ -1233,6 +1234,8 @@ function applyOverlay(g) {
     .map(c => ({
       ...c,
       status: overlay.status.get(c.name) || c.status,
+      // Woken: the flag goes, as fleet-grid drops it once the marker does (statusOf reads it first).
+      ...(overlay.woke.has(c.name) ? { asleep: false } : null),
       sched: overlay.sched.has(c.name) ? overlay.sched.get(c.name) : c.sched,
       label: overlay.label.has(c.name) ? overlay.label.get(c.name) : c.label,
     }));
@@ -1267,6 +1270,14 @@ function fixtureVerb(tool, a) {
         return { ok: false, text: "fleet_pause: refusing to park 'master' — it is the fleet's lead, and a fleet whose lead is off dispatches nothing" };
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
+    // A wake comes up ready, as fleet-hibernate leaves a session it woke. csv-export's folder went
+    // with its merge (grid-asleep.json), so its wake fails as fleet-hibernate's does, in its words
+    // less the "FAILED —" fleet-serve strips: the failure sheet (wake.jsx) has a case to show.
+    case 'fleet_wake':
+      if (a.session === 'csv-export')
+        return { ok: false, text: "'csv-export' exited 1s after it started, before it showed a prompt (exit status 1). It is still asleep, so it can be woken again. Its last lines: agent-here: cannot cd to /Users/you/gf-demo/csv-export: No such file or directory" };
+      overlay.woke.add(a.session); overlay.status.set(a.session, 'ready');
+      return ok(`fleet-hibernate: '${a.session}' is awake (2s, and still up 5s later)`);
     case 'fleet_send': {
       if ((() => { try { return String(localStorage.getItem(LS.shipped) || '').split(',').includes(a.session); } catch { return false; } })())
         return { ok: false, text: `fleet-send: '${a.session}' already finished a task that shipped (fixture) — a new task is a new session: fleet-stop --reclaim ${a.session}, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway` };
@@ -1408,5 +1419,5 @@ export function fixtureDeliver(session) {
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
-  overlay.sent.clear(); overlay.answered.clear(); overlay.queue.clear();
+  overlay.sent.clear(); overlay.answered.clear(); overlay.queue.clear(); overlay.woke.clear();
 }

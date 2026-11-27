@@ -166,6 +166,16 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
 }
 ```
 
+### `asleep` and `lost`: two flags beside the status
+
+A hibernated session (`fleet-hibernate`) and one the machine killed (`fleet-restart`) have no
+pane to read, so `status` says nothing true about them: `unknown` for an asleep one, `idle` for a
+lost one. fleet-grid sets `asleep` or `lost` beside it, on every card, and a screen reads the flag
+first (`statusOf()` in `web/ui/ui.jsx`): Asleep, Lost. A fixture writes one only where it is
+true, as `grid-asleep.json` does for `docs-pass` and `csv-export`. A tap on an asleep card wakes
+it before the session opens (`web/ui/wake.jsx`), as ⏎ on an asleep card does at the desk, and a
+wake that fails opens nothing and says why.
+
 ### nested leads: `sub`, `parent`, `workers`, `team_status`, `sub_head`
 
 A worker can run workers of its own (`fleet-spawn` from its worktree makes a child, tagged in

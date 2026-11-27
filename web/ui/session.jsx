@@ -13,6 +13,7 @@ import { BackLink } from './back.jsx';
 import { useTranscript } from './transcript.js';
 import { useReading, toggleRead, stopRead, useSpeakMode } from './chatvoice.js';
 import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
+import { useWake, ASLEEP_FAILED } from './wake.jsx';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -572,16 +573,22 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   useEffect(() => { setTypedAnswer(''); }, [prompt?.fingerprint]);
   const answering = useRef(false);
 
+  // A wake that failed, whether it was Wake or a send that had to wake it first (fleet-send wakes
+  // an asleep session before it types, and refuses when the wake does), says why in the wake's
+  // own sheet (wake.jsx); everything else that is refused keeps its line.
+  const wk = useWake();
+  const refresh = () => { onChanged(); tr.reload(); pane.reload(); };
   const act = async (tool, args = {}, opts = {}) => {
     setBusy(true);
     try {
       const r = await fleet.act(tool, { project, session: name, ...args }, opts);
       if (r.queued === 'question') toast(t('sess.queuedQ'), '');
       else if (r.queued) toast(t('sess.queuedTurn'), '');
-      onChanged(); tr.reload(); pane.reload();
+      refresh();
       return r;
     } catch (e) {
       if (e.body?.changed) { toast(t('sess.changed'), 'bad'); pane.reload(); }
+      else if (tool === 'fleet_wake' || ASLEEP_FAILED.test(e.message)) wk.fail(project, name, e.message, refresh);
       else toast(e.message, 'bad');
       return null;
     } finally { setBusy(false); }
@@ -854,6 +861,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
       {detailsOpen ? <DetailsModal project={project} name={name} status={st} onClose={() => setDetailsOpen(false)} /> : null}
+      {wk.sheet}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}
                                   onSave={async (at, msg) => { const r = await act('gfw_schedule', { at, msg }); if (r) toast(r.text, 'good'); }} /> : null}
       {labelEdit != null ? (

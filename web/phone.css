@@ -1045,6 +1045,11 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
 .details-how { margin-top: 2px; overflow-wrap: anywhere; }
 .details-cmd { display: block; margin-top: 3px; color: var(--dim); font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
 .details footer { justify-content: space-between; align-items: center; }
+/* A FAILED WAKE (wake.jsx): what fleet-hibernate said, whole — which way the agent died and its last
+ * lines. It wraps inside the sheet instead of scrolling it sideways at a phone's width, and a long
+ * tail scrolls inside its own box so the buttons under it stay where a thumb finds them. */
+.wake-why { margin: 0; padding: 10px 12px; border: 1px solid var(--hair); border-radius: var(--r); background: #12171d;
+            font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 /* A row's Stop sits under what it stops, at the row's left edge, so it is never far from the
  * pid it names. Present only when the daemon said can_stop: the phone never draws one. */
 .details-stop { margin-top: 6px; }

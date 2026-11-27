@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 5a7e5ca3364f
+// CLIENT-HASH: 9e748c3096a6
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -503,7 +503,11 @@
 // lets the sidebar scroll instead of squeezing its cards to slivers. A phone on v123 keeps the
 // old order until relaunched, and loses nothing else. The attached picture's preview needs no
 // new client: it was the daemon's policy that refused it.
-const VERSION = 'ghostfleet-v124';
+// v125 wakes an asleep session before it opens it, from a card (the lead's too), a row of the tree
+// or a boat on the board, and a wake that fails says why in a sheet instead of a toast. One new
+// fixture (grid-asleep.json). A phone on v124 goes on opening an asleep session without waking it
+// until it is relaunched, and loses nothing else.
+const VERSION = 'ghostfleet-v125';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
@@ -526,6 +530,7 @@ const SHELL = [
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
   './fixtures/grid-acme-api.json', './fixtures/grid-acme-api-sub-cache-keys.json', './fixtures/grid-degraded.json',
+  './fixtures/grid-asleep.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-acme-api.json',
   './fixtures/session-acme-api-api-fix.json', './fixtures/session-acme-api-docs-pass.json',

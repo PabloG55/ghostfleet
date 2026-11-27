@@ -53,9 +53,16 @@ function assertFor(purpose) {
 
 // Sessions as the shared Board and map draw them: name, status, the time of its last activity,
 // and whether it is the lead.
+//   ASLEEP AND LOST ARE FLAGS on a card, beside a status that is only what the session last was
+// (fleet-grid keeps an asleep card's last status, or `unknown`; ui.jsx statusOf reads the flags
+// first), and this is the read a paired machine's boats come from. Taking `status` alone drew an
+// asleep session on the other machine as whatever it was when it went to sleep (a ready one as
+// just finished, an unknown one in the warning red), never as off, and its tap went to a page
+// with nobody on it instead of waking it (board.jsx). The digest says `asleep` itself.
 const fromCards = (cards) => {
   const at = Math.floor(Date.now() / 1000);
-  return (cards || []).map(c => ({ name: c.name, status: c.status, ts: at - (Number(c.age) || 0), lead: !!c.lead }));
+  return (cards || []).map(c => ({ name: c.name, status: c.lost ? 'lost' : c.asleep ? 'asleep' : c.status,
+                                   ts: at - (Number(c.age) || 0), lead: !!c.lead }));
 };
 function counted(sessions) {
   const counts = { need_you: 0, working: 0, ready: 0, parked: 0, lost: 0, total: 0 };
@@ -146,7 +153,11 @@ export function phoneAdapter({ lock, go, place }) {
     void opts;
     if (NOT_SERVED.has(tool)) throw new Error(t('phone.notServed'));
     const assertion = PASSKEY.has(tool) ? await assertFor(`${tool} ${args.session || args.name || args.path || ''}`.trim()) : null;
-    return guard(api.verb(tool, args, assertion));
+    const r = await guard(api.verb(tool, args, assertion));
+    // A session this woke is not asleep on the board when it is gone back to: the other
+    // machine's boats are kept for 15 s (peerSessions), and they would say it still was.
+    if (tool === 'fleet_wake' && args.project) peerGrids.delete(args.project);
+    return r;
   }
 
   // The lead, started if it is not running: the team server's /api/lead, done from here (lead.js,

@@ -23119,6 +23119,37 @@ else
   skip "a lead from the phone, through a pairing" "node missing"
 fi
 
+# AN ASLEEP SESSION WAKES FROM THE PHONE BEFORE IT OPENS, THROUGH A PAIRING, AND A WAKE THAT
+# FAILS SAYS WHY (test/helpers/wake-check.mjs: two real daemons paired, the real fleet-hibernate and
+# fleet-grid on the vm's scratch tmux fleet under this run's $TMUX_TMPDIR, a stub agent that draws
+# Claude's composer or dies with a reason, and the phone client in headless Chrome). The daemon half
+# had always worked; what broke was the tap. When the phone moved to the shared screens, a tap on
+# an asleep card or boat only opened the session's page, so it stayed asleep, and the header's
+# Wake put a failure in a seven-second toast. Rows: the wake crosses, comes up, clears its marker
+# and is audited on both; a failed one is a 400 with the agent's own last line; a tap on the card
+# reads Starting, wakes, opens only once up, and leaves no Asleep behind; a failed tap opens a
+# bottom sheet saying why (a centred dialog at 1280), opens nothing, and its Try again wakes and
+# opens; the header's failed Wake is the same sheet; the board draws a paired machine's asleep
+# boat as off and its tap wakes too. Watched red against staging's daemon and client (16 of 33
+# rows, all of the client half), and against this tree with fleet_wake out of PAIR_VERBS (8 of
+# the 13 daemon rows).
+group "fleet-serve: an asleep session wakes from the phone before it opens, through a pairing"
+if command -v node >/dev/null 2>&1; then
+  WKC="$(mktemp -d "$TEST_RUNS.$$.wake.XXXXXX")"
+  node "$ROOT/test/helpers/wake-check.mjs" > "$WKC/out" 2> "$WKC/err"
+  wkcrc=$?
+  is "wake-check ran"                 "0" "$wkcrc"
+  is "...without complaining"         ""  "$(head -2 "$WKC/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(grep -c "$US" "$WKC/out")" -ge 14 ] && echo yes || echo "no: $(wc -l < "$WKC/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; else is "$name" "$want" "$got"; fi
+  done < "$WKC/out"
+  rm -rf "$WKC"
+else
+  skip "an asleep session woken from the phone, through a pairing" "node missing"
+fi
+
 group "fleet-serve: two machines, paired — proxied, scoped, audited on both, unpaired on both"
 if command -v node >/dev/null 2>&1; then
   PRC="$(mktemp -d "$TEST_RUNS.$$.pair.XXXXXX")"

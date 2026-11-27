@@ -367,6 +367,7 @@ const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unk
 const TOP = ['project', 'profile', 'sub', 'counts', 'cards', 'free_worktrees'].sort().join(',');
 const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited', 'parent', 'workers', 'team_status', 'sub_head'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
+const FLAGS = ['asleep', 'lost'];
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
 for (const f of grids) {
@@ -374,7 +375,11 @@ for (const f of grids) {
   is(`${f}: top-level keys are §4's`, TOP, Object.keys(g).sort().join(','));
   is(`${f}: counts keys are §4's`, COUNTS, Object.keys(g.counts).sort().join(','));
   (g.cards || []).forEach((c, i) => {
-    is(`${f}#${i}: card keys are §4's`, CARD, Object.keys(c).sort().join(','));
+    // ...plus the two flags beside the status (§4 "asleep and lost"), which fleet-grid writes on
+    // every card and a fixture only where one is true. Present means a boolean: statusOf() tests
+    // them for truth, and a "false" string would put a live session to sleep on every screen.
+    is(`${f}#${i}: card keys are §4's`, CARD, Object.keys(c).filter(k => !FLAGS.includes(k)).sort().join(','));
+    for (const k of FLAGS) if (k in c) is(`${f}#${i}: ${k} is a boolean`, 'boolean', typeof c[k]);
     is(`${f}#${i}: status is one of the nine`, true, NINE.includes(c.status));
     // A BOOLEAN, never absent and never a string: the screens gate the destructive buttons on it,
     // and `undefined` is falsy in exactly the way a real `false` is.

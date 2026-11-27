@@ -628,6 +628,10 @@ var en_default = {
 	"sess.interruptHint": "Cuts the current turn short, like pressing Esc",
 	"sess.interrupt": "Interrupt",
 	"sess.wake": "Wake",
+	"wake.failedTitle": "Could not wake {name}",
+	"wake.failedBody": "It is still asleep. What the wake said:",
+	"wake.noWhy": "It gave no reason.",
+	"wake.again": "Try again",
 	"sess.reopen": "Reopen",
 	"sess.resume": "Resume",
 	"sess.pause": "Pause",
@@ -1559,6 +1563,10 @@ var es_default = {
 	"sess.interruptHint": "Corta el turno actual, como apretar Esc",
 	"sess.interrupt": "Interrumpir",
 	"sess.wake": "Despertar",
+	"wake.failedTitle": "No se pudo despertar {name}",
+	"wake.failedBody": "Sigue dormida. Esto fue lo que respondió:",
+	"wake.noWhy": "No dio ningún motivo.",
+	"wake.again": "Reintentar",
 	"sess.reopen": "Reabrir",
 	"sess.resume": "Reanudar",
 	"sess.pause": "Pausar",
@@ -4988,6 +4996,84 @@ function ShipCard({ id, box, info, card, owner, badge, onEnter, onLeave }) {
 	});
 }
 //#endregion
+//#region web/ui/wake.jsx
+var ASLEEP_FAILED = /asleep and did not wake/;
+function useWake() {
+	const fleet = useFleet();
+	const [waking, setWaking] = d(null);
+	const [failed, setFailed] = d(null);
+	const out = A(null);
+	const wake = async (project, name, then) => {
+		if (out.current) return false;
+		const key = `${project}\0${name}`;
+		out.current = key;
+		setWaking(key);
+		try {
+			await fleet.act("fleet_wake", {
+				project,
+				session: name
+			});
+			out.current = null;
+			setWaking(null);
+			then?.();
+			return true;
+		} catch (e) {
+			out.current = null;
+			setWaking(null);
+			setFailed({
+				project,
+				name,
+				why: e.message,
+				then
+			});
+			return false;
+		}
+	};
+	const fail = (project, name, why, then) => setFailed({
+		project,
+		name,
+		why,
+		then
+	});
+	return {
+		wake,
+		fail,
+		sheet: failed ? /* @__PURE__ */ u(WakeFailed, {
+			name: failed.name,
+			why: failed.why,
+			onClose: () => setFailed(null),
+			onRetry: () => {
+				const f = failed;
+				setFailed(null);
+				wake(f.project, f.name, f.then);
+			}
+		}) : null,
+		waking: (project, name) => waking === `${project}\0${name}`
+	};
+}
+function WakeFailed({ name, why, onClose, onRetry }) {
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		title: t("wake.failedTitle", { name }),
+		onClose,
+		children: [/* @__PURE__ */ u("div", {
+			class: "modal-body wake-failed",
+			children: [/* @__PURE__ */ u("p", { children: t("wake.failedBody") }), /* @__PURE__ */ u("pre", {
+				class: "wake-why",
+				children: why || t("wake.noWhy")
+			})]
+		}), /* @__PURE__ */ u("footer", { children: [/* @__PURE__ */ u(Btn, {
+			onClick: onClose,
+			children: t("common.close")
+		}), /* @__PURE__ */ u(Btn, {
+			kind: "primary",
+			icon: "sun",
+			onClick: onRetry,
+			children: t("wake.again")
+		})] })]
+	});
+}
+//#endregion
 //#region web/ui/board.jsx
 var FRESH_S = 900;
 var LOOKS = worded({
@@ -5030,10 +5116,13 @@ function lookOf(s, now = Date.now() / 1e3) {
 		default: return "off";
 	}
 }
-var sessionHref = (p, s) => `#/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
+var sessionPath = (p, s) => `/p/${encodeURIComponent(p)}/s/${encodeURIComponent(s)}`;
+var sessionHref = (p, s) => `#${sessionPath(p, s)}`;
 var projectHref = (p) => `#/p/${encodeURIComponent(p)}`;
 function Board({ projects }) {
 	const ownerBadge = useSlot("ownerBadge");
+	const fleet = useFleet();
+	const wk = useWake();
 	const tips = useShipTips();
 	const room = useRoom("legend", projects == null);
 	const [showQuiet, setShowQuiet] = useKept("board.quiet", false);
@@ -5041,7 +5130,10 @@ function Board({ projects }) {
 	const fleets = (projects || []).map((p) => {
 		const boats = p.sessions.map((s) => ({
 			...s,
-			look: lookOf(s, now)
+			look: lookOf(wk.waking(p.name, s.name) ? {
+				...s,
+				status: "starting"
+			} : s, now)
 		})).sort((a, b) => ORDER.indexOf(a.look) - ORDER.indexOf(b.look) || Number(b.lead) - Number(a.lead));
 		const n = Object.fromEntries(ORDER.map((k) => [k, boats.filter((b) => b.look === k).length]));
 		const top = ORDER.find((k) => n[k]) || "off";
@@ -5119,7 +5211,10 @@ function Board({ projects }) {
 									session: b,
 									word: LOOKS[b.look].label,
 									light: LOOKS[b.look].light
-								}),
+								}, b.status === "asleep" ? (e) => {
+									e.preventDefault();
+									wk.wake(f.name, b.name, () => fleet.go(sessionPath(f.name, b.name)));
+								} : null),
 								children: [
 									/* @__PURE__ */ u(Ship, {
 										size: b.lead ? 64 : 32,
@@ -5143,6 +5238,7 @@ function Board({ projects }) {
 				children: t("board.none")
 			}),
 			tips.card,
+			wk.sheet,
 			quiet.length ? /* @__PURE__ */ u("div", {
 				class: `quiet${showQuiet ? " open" : ""}`,
 				children: [/* @__PURE__ */ u("button", {
@@ -8107,6 +8203,12 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 		setTypedAnswer("");
 	}, [prompt?.fingerprint]);
 	const answering = A(false);
+	const wk = useWake();
+	const refresh = () => {
+		onChanged();
+		tr.reload();
+		pane.reload();
+	};
 	const act = async (tool, args = {}, opts = {}) => {
 		setBusy(true);
 		try {
@@ -8117,15 +8219,14 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 			}, opts);
 			if (r.queued === "question") toast(t("sess.queuedQ"), "");
 			else if (r.queued) toast(t("sess.queuedTurn"), "");
-			onChanged();
-			tr.reload();
-			pane.reload();
+			refresh();
 			return r;
 		} catch (e) {
 			if (e.body?.changed) {
 				toast(t("sess.changed"), "bad");
 				pane.reload();
-			} else toast(e.message, "bad");
+			} else if (tool === "fleet_wake" || ASLEEP_FAILED.test(e.message)) wk.fail(project, name, e.message, refresh);
+			else toast(e.message, "bad");
 			return null;
 		} finally {
 			setBusy(false);
@@ -8822,6 +8923,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 				status: st,
 				onClose: () => setDetailsOpen(false)
 			}) : null,
+			wk.sheet,
 			schedOpen ? /* @__PURE__ */ u(ScheduleModal, {
 				name,
 				onClose: () => setSchedOpen(false),
@@ -8947,12 +9049,13 @@ var GROUPS = Object.values(worded({
 		has: () => true
 	}
 }, "group", ["title", "hint"]));
-function Card({ c, active, compact, onOpen }) {
-	const st = statusOf(c);
+function Card({ c, active, compact, waking, onOpen }) {
+	const st = waking ? "starting" : statusOf(c);
 	const foot = useSlot("cardFoot")(c);
 	return /* @__PURE__ */ u("article", {
 		class: `card s-${(STATUS[st] || STATUS.unknown).color}${active ? " active" : ""}${compact ? " compact" : ""}`,
 		tabIndex: 0,
+		"aria-busy": waking ? "true" : void 0,
 		onClick: onOpen,
 		onKeyDown: (e) => {
 			if (e.key === "Enter") onOpen();
@@ -9040,6 +9143,15 @@ function ProjectView({ project, session, tool = null }) {
 	const cards = T(() => filterCards(g?.cards || [], filter), [g, filter]);
 	const listed = T(() => leadFirst(g?.cards || []), [g]);
 	const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
+	const wk = useWake();
+	const enter = (name) => {
+		const c = (g?.cards || []).find((x) => x.name === name);
+		if (c && c.asleep && !c.lost) return wk.wake(project, name, async () => {
+			await reload();
+			open(name);
+		});
+		return open(name);
+	};
 	const step = (d) => {
 		const names = listed.map((c) => c.name), at = names.indexOf(session), to = at + d;
 		if (at < 0 || to < 0 || to >= names.length) return;
@@ -9137,7 +9249,7 @@ function ProjectView({ project, session, tool = null }) {
 		if (k === "q" || k === "`") return layer.toLead(project, cs);
 		if (/^[1-9]$/.test(k)) {
 			const c = cs[Number(k) - 1];
-			if (c) open(c.name);
+			if (c) enter(c.name);
 			return true;
 		}
 		return false;
@@ -9149,7 +9261,8 @@ function ProjectView({ project, session, tool = null }) {
 			toast((await fleet.lead(project)).started ? t("project.leadReady") : t("project.leadWasOpen"), "good");
 			reload();
 		} catch (e) {
-			toast(t("project.leadFailed", { why: e.message }), "bad");
+			if (lead && lead.asleep && !lead.lost) wk.fail(project, lead.name, e.message, () => reload());
+			else toast(t("project.leadFailed", { why: e.message }), "bad");
 		} finally {
 			setWaking(false);
 		}
@@ -9253,20 +9366,24 @@ function ProjectView({ project, session, tool = null }) {
 		filter,
 		setFilter
 	});
-	const modals = /* @__PURE__ */ u(S$1, { children: [spawn ? /* @__PURE__ */ u(NewSession, {
-		project,
-		free: g?.free_worktrees || [],
-		preset: spawn,
-		onClose: () => setSpawn(null),
-		onDone: (name) => {
-			setSpawn(null);
-			reload();
-			open(name);
-		}
-	}) : null, confirm ? /* @__PURE__ */ u(Confirm, {
-		...confirm,
-		onClose: () => setConfirm(null)
-	}) : null] });
+	const modals = /* @__PURE__ */ u(S$1, { children: [
+		spawn ? /* @__PURE__ */ u(NewSession, {
+			project,
+			free: g?.free_worktrees || [],
+			preset: spawn,
+			onClose: () => setSpawn(null),
+			onDone: (name) => {
+				setSpawn(null);
+				reload();
+				open(name);
+			}
+		}) : null,
+		confirm ? /* @__PURE__ */ u(Confirm, {
+			...confirm,
+			onClose: () => setConfirm(null)
+		}) : null,
+		wk.sheet
+	] });
 	if (error && !g) return /* @__PURE__ */ u("div", {
 		class: "page",
 		children: [header, /* @__PURE__ */ u("p", {
@@ -9304,7 +9421,8 @@ function ProjectView({ project, session, tool = null }) {
 						c,
 						compact: true,
 						active: c.name === session,
-						onOpen: () => open(c.name)
+						waking: wk.waking(project, c.name),
+						onOpen: () => enter(c.name)
 					}, c.name))
 				]
 			}),
@@ -9388,7 +9506,8 @@ function ProjectView({ project, session, tool = null }) {
 					class: "cards",
 					children: /* @__PURE__ */ u(Card, {
 						c: secs.lead,
-						onOpen: () => open(secs.lead.name)
+						waking: wk.waking(project, secs.lead.name),
+						onOpen: () => enter(secs.lead.name)
 					})
 				})
 			}) : null,
@@ -9408,7 +9527,8 @@ function ProjectView({ project, session, tool = null }) {
 						class: "cards",
 						children: list.map((c) => /* @__PURE__ */ u(Card, {
 							c,
-							onOpen: () => open(c.name)
+							waking: wk.waking(project, c.name),
+							onOpen: () => enter(c.name)
 						}, c.name))
 					})]
 				}, gr.id);
@@ -9421,7 +9541,7 @@ function ProjectView({ project, session, tool = null }) {
 					/* @__PURE__ */ u("small", { children: t("project.treeHint") })
 				] }), /* @__PURE__ */ u(Tree, {
 					g,
-					open,
+					open: enter,
 					onReuse: (w) => setSpawn({ reuse: w.path }),
 					onRemove: removeWorktree
 				})]
@@ -14897,7 +15017,7 @@ var fromCards = (cards) => {
 	const at = Math.floor(Date.now() / 1e3);
 	return (cards || []).map((c) => ({
 		name: c.name,
-		status: c.status,
+		status: c.lost ? "lost" : c.asleep ? "asleep" : c.status,
 		ts: at - (Number(c.age) || 0),
 		lead: !!c.lead
 	}));
@@ -15018,7 +15138,9 @@ function phoneAdapter({ lock, go, place }) {
 	async function act(tool, args = {}, opts = {}) {
 		if (NOT_SERVED.has(tool)) throw new Error(t("phone.notServed"));
 		const assertion = PASSKEY.has(tool) ? await assertFor(`${tool} ${args.session || args.name || args.path || ""}`.trim()) : null;
-		return guard(api$1.verb(tool, args, assertion));
+		const r = await guard(api$1.verb(tool, args, assertion));
+		if (tool === "fleet_wake" && args.project) peerGrids.delete(args.project);
+		return r;
 	}
 	const lead = makeLead({
 		grid: (project, opts) => guard(api$1.getGrid(project, "", opts)),
