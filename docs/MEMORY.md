@@ -433,7 +433,9 @@ compactions. On by default; `CLAUDE_FLEET_RECALL=off` (or `CLAUDE_FLEET_KNOW=off
   match it takes it: `owner` marks the owner's, `brief`, `nudge` and `explain` the fleet's. A prompt
   with no mark was typed. A fresh mark (under 30 s) whose words did not match means a delivery whose
   text changed on the way in, and the prompt is not called the owner's. `[fleet]`, `<` and `/` at the
-  start are the fleet, Claude Code or a slash command; `[telegram] ` is the owner.
+  start are the fleet, Claude Code or a slash command; `[telegram] ` is the owner. A mark is read
+  before the prefix: the owner's words joining a busy codex turn arrive under `fleet-send`'s
+  `[fleet]` queued-work label, are still the owner's, and are searched without the label.
 - **Which sessions.** A lead: `master` in its own checkout, and a sub-lead, a session that has
   children of its own. A worker gets nothing.
 - **How it searches.** As `find` does: the raw events of every profile on this machine and what

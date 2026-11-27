@@ -58,6 +58,7 @@ const knowJ = (args, o) => { const r = know([...args, '--json'], o); try { retur
 process.env.HOME = FX;                         // for the in-process reads of lib/know.mjs below
 process.env.CLAUDE_FLEET_KNOW_MACHINE = 'laptop';
 const K = await import(path.join(ROOT, 'lib', 'know.mjs'));
+const KR = await import(path.join(ROOT, 'lib', 'know-recall.mjs'));
 
 await section('brief', () => {
   const r = know(['acme-api']);
@@ -2447,6 +2448,29 @@ await section('recall', () => {
   // That mark is fresh for half a minute and would make every row below pass for its reason.
   fs.rmSync(path.join(B.fl, 'cf-acme-api.master.from'), { recursive: true, force: true });
   row('...and with no mark left, the owner\'s words bring the match again', 'yes', yes(recallOf(B, ups(B, ASK)).includes(why.id)));
+
+  // A BUSY CODEX TURN IS JOINED UNDER THE FLEET'S OWN LABEL. fleet-send pastes its queued-work line
+  // in front of the sender's words (bin/fleet-send _lbl, read from there so a reworded label is
+  // the one tested), and marks the whole of it. So the MARK says whose words these are, before a
+  // `[fleet]` at the start does: the owner's, here. And the label's words are not the owner's
+  // question: a decision that shares only them (closing report, replacement, task) is not
+  // recalled, while one that shares the owner's own words is.
+  const LBL = (/^\s*_lbl="([^"]+)"/m.exec(fs.readFileSync(path.join(ROOT, 'bin', 'fleet-send'), 'utf8')) || [])[1] || '';
+  const lbl = K.record('decision', { text: 'The closing report of each replacement task stays in the audit binder', source: 'stated' }, onApi(B, t0 + 3, OWNER_SRC));
+  const fromD = path.join(B.fl, 'cf-acme-api.master.from');
+  const joined = (words) => {
+    const p = `${LBL}\n\n${words}`;
+    fs.mkdirSync(fromD, { recursive: true });
+    fs.writeFileSync(path.join(fromD, `${Date.now()}.${KR.digest12(p)}.owner`), '');
+    const r = recallOf(B, ups(B, p, { CLAUDE_FLEET_EVENT_AGENT: 'codex' }));
+    return { r, left: (() => { try { return fs.readdirSync(fromD).length; } catch { return 0; } })() };
+  };
+  const j1 = joined(ASK);
+  row('the owner\'s words joined to a busy codex turn, under the fleet\'s label, are still the owner\'s', 'yes yes 0',
+    `${yes(LBL.startsWith('[fleet] '))} ${yes(j1.r.includes(why.id))} ${j1.left}`);
+  const j2 = joined('Is the 2024 tax filing done yet?');
+  row('...and the label\'s own words are not searched', 'no 0', `${yes(j2.r.includes(lbl.id))} ${j2.left}`);
+  fs.rmSync(fromD, { recursive: true, force: true });
 
   // Leads only: master, and a session that has children of its own. Never a worker.
   //   A decision of its own, with words nothing above has used: a dozen messages about the
