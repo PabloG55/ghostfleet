@@ -4222,9 +4222,15 @@ function requestHandler(req, res) {
   // running. connect-src names this host's ws:/wss: because CSP2 browsers do not count a
   // WebSocket to the same host as 'self'; the Host was checked against allowedHosts below
   // before any of this is used, and a request it fails never reaches a page.
+  //   AND ONE FOR AN IMAGE THE PAGE MADE ITSELF. A picture attached to the composer is shown
+  // from the File the person picked, as a blob: URL (web/ui/session.jsx addFiles), before
+  // and whether or not the upload lands. 'self' never matches a blob: URL, so under
+  // default-src alone every preview was a broken-image icon, on the phone and on the desk.
+  // img-src names blob: and nothing more: no data:, which nothing here draws, and no other
+  // origin. A blob: is made by this page's own script, and script is still 'self' alone.
   const wsHost = /^[A-Za-z0-9.:[\]-]+$/.test(req.headers.host || '') ? req.headers.host : '';
   res.setHeader('content-security-policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; img-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   res.on('finish', () => {
     if (req.url !== '/healthz') log(`${ip} ${req.method} ${(req.url || '').split('?')[0]} -> ${res.statusCode} ${Date.now() - t0}ms${req.client ? ` [${req.client.id}]` : ''}`);
   });

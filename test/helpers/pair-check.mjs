@@ -51,6 +51,9 @@ const freePort = () => new Promise((resolve) => { const s = net.createServer(); 
 // ── one runtime, both hosts ─────────────────────────────────────────────────────────
 const RT = path.join(T, 'rt');
 for (const d of ['bin', 'mcp', 'lib']) fs.cpSync(path.join(SRC, d), path.join(RT, d), { recursive: true });
+// The app's page, so `/` on either host is the page a phone loads (the policy rows below).
+fs.mkdirSync(path.join(RT, 'web'), { recursive: true });
+fs.cpSync(path.join(SRC, 'web', 'index.html'), path.join(RT, 'web', 'index.html'));
 fs.mkdirSync(path.join(RT, 'mods', 'ghostfleet'), { recursive: true });
 fs.cpSync(path.join(SRC, 'mods', 'ghostfleet', 'hooks'), path.join(RT, 'mods', 'ghostfleet', 'hooks'), { recursive: true });
 const stub = `#!/bin/sh
@@ -215,6 +218,17 @@ is('...this host\'s rows come first, so their digits do not move', 'acme-api scr
 is('...the vm\'s rollup comes through', 1, row(r, 'toolbox@vm').sessions && row(r, 'toolbox@vm').sessions.total);
 is('...and the hosts list has both, the vm online', 'laptop:self vm:true',
    ((r.json && r.json.hosts) || []).map(x => `${x.label}:${x.self ? 'self' : x.online}`).join(' '));
+// THE PAGE IS NEVER FORWARDED, only /api is: a phone that reaches the app through the other
+// machine loads the page from that machine and runs under that machine's policy. So a picture's
+// preview (an img-src that names blob:) shows only where the daemon the phone talks to sends it,
+// and a machine still on an older daemon breaks it there with this one fixed. Asked of both.
+{
+  const imgSrc = (res) => (String(res?.headers?.['content-security-policy'] || '').split(';')
+    .map(s => s.trim()).find(s => /^img-src\b/.test(s))) || '(none)';
+  const [pgA, pgB] = [await request(A.base, 'GET', '/').catch(() => null), await request(B.base, 'GET', '/').catch(() => null)];
+  is("the page, from either machine, is the app's", '200 200', `${pgA?.status} ${pgB?.status}`);
+  is("...and each machine's page lets a picture the page made be shown", "img-src 'self' blob: | img-src 'self' blob:", `${imgSrc(pgA)} | ${imgSrc(pgB)}`);
+}
 r = await pb.api(B.base, 'GET', '/api/projects');
 is('from the vm: the same, the other way round', 'acme-api acme-api@laptop scratch@laptop toolbox', names(r));
 is('...the laptop\'s personal profile kept', 'personal', row(r, 'scratch@laptop').profile);

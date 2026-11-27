@@ -21450,6 +21450,55 @@ else
   skip "phone client origin" "server did not come up: $SV_WHY"
 fi
 
+group "phone client: an attached picture shows its preview under the daemon's own policy"
+# needs: free_port answers in digits
+# A PICTURE IN THE COMPOSER WAS A BROKEN-IMAGE ICON, on the phone and on the desk. The chip draws
+# the picked File as a blob: URL (web/ui/session.jsx addFiles), and the page's policy had no
+# img-src, so images fell to default-src 'self' — which never matches a blob:. Every browser check
+# of the client serves web/ from a static server that sends no policy at all, so the preview drew
+# there and nowhere real. test/helpers/csp-images.mjs drives the page THIS daemon serves, under the
+# header it sends, and says what each row is for.
+#   The policy is widened by exactly one source, so the rows ask for that and for what stays out:
+# no data: (nothing in web/ draws one), no other origin, and script still 'self' alone — a blob:
+# is the page's own script's to make, so a blob: SCRIPT would be a way round script-src.
+#   Watched red on origin/staging's fleet-serve: the img-src row ("" — there was no img-src), each
+# width's "...it shows" (0, a picture that never decoded) and "...refused nothing" ("img-src
+# blob"). The guard rows were green there and were broken on purpose on a copy, and watched red:
+# img-src with data: added turned "a data: image is still refused" red; img-src * turned
+# "...another origin" red (and every preview with it: * does not match blob:); and script-src
+# 'self' blob: turned "a blob: script is still refused" red.
+rm -rf "${SV:?}/web" && cp -R "$ROOT/web" "$SV/web"
+if sv_start csp; then
+  CSPD="$(mktemp -d "$TEST_RUNS.$$.csp.XXXXXX")"
+  curl -s -m5 -D "$CSPD/head" -o /dev/null "$BASE/" || true
+  cspv="$(tr -d '\r' < "$CSPD/head" | awk 'tolower($0) ~ /^content-security-policy:/ { sub(/^[^:]*: */, ""); print; exit }')"
+  # One directive's sources, by name: the policy split at ';' and trimmed.
+  cspd() { awk -v RS=';' -v d="$1" '{ gsub(/^[ \n]+|[ \n]+$/, "") } $1 == d { sub(/^[^ ]+ */, ""); print; exit }' <<< "$cspv"; }
+  is "the page carries a policy"                                  "yes" "$([ -n "$cspv" ] && echo yes || echo "no: $(head -1 "$CSPD/head" | tr -d '\r')")"
+  is "img-src lets in this origin and a picture the page made"    "'self' blob:" "$(cspd img-src)"
+  is "...and no data: anywhere in the policy"                     "0" "$(grep -c 'data:' <<< "$cspv" || true)"
+  is "default-src is still this origin alone"                     "'self'" "$(cspd default-src)"
+  is "script is not named, so it is default-src's: 'self' alone"  "" "$(cspd script-src)$(cspd script-src-elem)"
+  node "$ROOT/test/helpers/csp-images.mjs" "$BASE" > "$CSPD/out" 2> "$CSPD/err"
+  csprc=$?
+  if grep -q 'no chrome' "$CSPD/out" 2>/dev/null; then
+    skip "an attached picture in a browser" "no chrome to look in"
+  else
+    is "csp-images ran"                 "0" "$csprc"
+    is "...without complaining"         ""  "$(head -2 "$CSPD/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor: a browser that fails to start emits one row, and every row that did not print
+    # is a row that did not fail.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CSPD/out")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$CSPD/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$CSPD/out"
+  fi
+  rm -rf "$CSPD"
+  serve_stop
+else
+  skip "an attached picture's preview" "server did not come up: $SV_WHY"
+fi
+
 # ── the phone's half of Jarvis: the digest, the marker, a yes, and a voice ─────
 # Every route behind the same token as everything else, and each with a direction that must
 # FAIL: the digest must not spend the stamp, a yes must need a token AND a fresh passkey, a
@@ -24108,6 +24157,45 @@ if [ -d "$ROOT/web" ]; then
   rm -rf "$PHC"
 else
   skip "phone client" "web/ not present"
+fi
+
+group "phone client: the lead heads every list of a project's sessions, and the sidebar scrolls"
+if [ -d "$ROOT/web" ]; then
+  # ── master first on the project page, the sidebar and the stack picker; full-height cards ─
+  # Two reports from the owner, one screen apart. MASTER WAS NOT FIRST: the project page filed the
+  # lead under its state like any card, so a ready master sat below every working session, and
+  # the sidebar and the stack picker took the wire's order on trust (web/ui/order.js says why
+  # that was only a promise). THE SIDEBAR SQUEEZED ITS CARDS: with 26 sessions every card in it
+  # was a sliver showing its state and its age and no name, because a flex column with
+  # overflow shrinks its children to fit before it scrolls. test/helpers/lists-check.mjs draws
+  # the demo's acme-api with 26 sessions and the lead sent THIRD, so a list that leads with the
+  # lead is one that chose to, and says what each row is for.
+  #   Watched red against origin/staging's web/: 11 of 29 rows. The project page led with
+  # "api-fix" at 1280 and 390 with master below a heading; the sidebar and the stack picker led
+  # with "api-fix"; every sidebar card was squeezed ("api-fix: 18 of 83 px, docs-pass: 18 of 109
+  # px, master: 18 of 83 px and 23 more"), 0 of 26 showed a name, and the list ran 12 px past its
+  # box. The rows that were green there guard what the fix must not break, and were broken on
+  # purpose in a build of a mutated order.js and watched red: the lead not taken out of its group
+  # turned "...once" red (2), a group's order reversed turned "...keeps its group and its place"
+  # red at both widths, and the rest rotated behind the lead turned "...the others keep the order
+  # the wire sent them in" and the picker's "...in the wire's order" red.
+  LSC="$(mktemp -d "$TEST_RUNS.$$.lists.XXXXXX")"
+  node "$ROOT/test/helpers/lists-check.mjs" > "$LSC/out" 2> "$LSC/err"
+  lscrc=$?
+  if grep -q 'no chrome' "$LSC/out" 2>/dev/null; then
+    skip "a project's lists in a browser" "no chrome to look in"
+  else
+    is "lists-check ran"                "0" "$lscrc"
+    is "...without complaining"         ""  "$(head -2 "$LSC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # 29 rows when it was written. A browser that fails to start emits one.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$LSC/out")" -ge 29 ] && echo yes || echo "no: $(wc -l < "$LSC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$LSC/out"
+  fi
+  rm -rf "$LSC"
+else
+  skip "a project's lists" "web/ not present"
 fi
 
 group "phone client: the screen holds still on a touch screen, in a real browser"

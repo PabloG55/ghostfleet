@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 50f8e39fb945
+// CLIENT-HASH: 5a7e5ca3364f
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -498,7 +498,12 @@
 // calls the session in the flag what its header chip does. The phone draws no stop at all: the
 // daemon offers one only to a direct localhost request. Two fixtures: the demo's one personal
 // project with a done session that left things listening.
-const VERSION = 'ghostfleet-v123';
+// v124 puts a project's lead first on every list of its sessions (the project page, the session
+// page's sidebar and the stack picker), above every group heading and whatever it is doing, and
+// lets the sidebar scroll instead of squeezing its cards to slivers. A phone on v123 keeps the
+// old order until relaunched, and loses nothing else. The attached picture's preview needs no
+// new client: it was the daemon's policy that refused it.
+const VERSION = 'ghostfleet-v124';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
