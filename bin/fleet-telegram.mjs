@@ -19,14 +19,16 @@
 // it: a crash inside the window would otherwise lose what the offset rule exists to keep.
 //
 // A SESSION ALREADY WORKING. If its turn is the owner's own from Telegram, a new message is
-// more of the same request and goes INTO it (fleet-send --now). Exactly one answer comes
+// more of the same request and goes INTO it (a plain fleet-send, which takes a message into a
+// running turn, labelled as queued work after the task in hand). Exactly one answer comes
 // back: fleet-send leaves the turn's address alone and parks the new one beside it, and the
 // Stop relay answers the newest message the turn took in, handing any it never read on to
 // the turn that runs them. Any other turn — the desk's, another session's, the machine's —
 // is never joined, because hooks/fleet-telegram-guard.sh restricts a turn only while it is a
 // Telegram turn, and the phone's words inside a desk turn would have every tool the desk has.
-// The message queues behind it instead, so the reply is the one the message started — never
-// a stranger's — and the owner is told what it waits for.
+// The message waits for that turn to end instead (fleet-send --after-turn), so the reply is
+// the one the message started — never a stranger's — and the owner is told at once what it
+// waits behind: the session and the task it is finishing. Voice notes wait the same way.
 //
 // WHAT A TELEGRAM TURN MAY DO is the owner's decision, and the choice was an allowlist over
 // full power: hooks/fleet-telegram-guard.sh holds such a turn to reading, searching, the web and
@@ -435,16 +437,16 @@ async function ownContent(msg, text, sec, t) {
       log(`voice: ${t.session} <- ${Math.round(buf.length / 1024)} KB, transcribed ${words.length} chars`);
       const spoken = speaks && !msg.audio;
       const label = msg.video_note ? 'video note' : 'voice note';
-      return { body: withCaption(caption, `(${label}, transcribed${spoken ? ` — ${HEARD}` : ''}) ${words}`), spoken };
+      return { body: withCaption(caption, `(${label}, transcribed${spoken ? ` — ${HEARD}` : ''}) ${words}`), spoken, note: true };
     }
-    if (msg.video_note) return { body: caption || '(a video note, no caption)', line: fileLine(buf, { kind: 'video_note', ...v }, t) };
+    if (msg.video_note) return { body: caption || '(a video note, no caption)', line: fileLine(buf, { kind: 'video_note', ...v }, t), note: true };
     // Past the voice store's limit or its four containers, it is still a file the owner sent.
     let st = storeAudio({ buf, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
     if (!st.ok) st = storeFile({ buf, name: v.file_name, mime: v.mime_type, sock: t.sock, session: t.session, fleetDir: t.fleetDir });
     if (!st.ok) { log(`voice refused: ${st.text}`); throw new Refused(`That voice note was not delivered — ${st.text}.`); }
     log(`voice: ${t.session} <- ${Math.round(st.bytes / 1024)} KB ${st.from || 'file'}, not transcribed`);
     return { body: withCaption(caption, `(a voice note — no transcriber is set up at the desk, so it is an audio file: ${st.path}. If you cannot listen to it, say so and ask for it in text.)`),
-             spoken: speaks && Boolean(msg.voice) };
+             spoken: speaks && Boolean(msg.voice), note: true };
   }
   if (msg.photo?.length || fileOf(msg)) {
     const line = await fetchAttachment(msg, sec, t);
@@ -544,11 +546,14 @@ function turnTarget() {
 }
 
 // Every inbound source enters through the same wiring gate and owner queue. Voice
-// always starts its own turn; neither source may fold into an active voice turn.
-async function submitTurn(t, body, address, isVoice = false) {
+// always starts its own turn; neither source may fold into an active voice turn. A voice or
+// video NOTE (`note`) never folds either, into any turn, the owner's own Telegram turn included:
+// it waits for the running one to end, and the owner is told what it waits behind, the same
+// notice as a message to a desk turn.
+async function submitTurn(t, body, address, isVoice = false, note = false) {
   const probe = (await run('fleet-send', ['-s', t.sock, '--would-queue', t.session], envFor(t), 15000)).out.trim().split('\n').pop();
   const rt = (() => { try { return fs.readFileSync(path.join(t.fleetDir, `${t.sock}.${t.session}.reply-to`), 'utf8').split('\x1f')[1]; } catch { return ''; } })();
-  const fold = !isVoice && !voice.isVoice(rt) && probe === 'working' && fs.existsSync(path.join(t.fleetDir, `${t.sock}.${t.session}.telegram`));
+  const fold = !isVoice && !note && !voice.isVoice(rt) && probe === 'working' && fs.existsSync(path.join(t.fleetDir, `${t.sock}.${t.session}.telegram`));
   const behind = !fold && ['working', 'need-you', 'backlog'].includes(probe);
   const prompt = redact(`[telegram] ${behind ? '(sent while an earlier turn was running, and held until it ended)\n' : ''}${body}`);
   // Check again after the asynchronous probe, immediately before handing off.
@@ -558,8 +563,33 @@ async function submitTurn(t, body, address, isVoice = false) {
   // that can take fleet-hibernate's whole wake timeout before anything is typed. Killed at the
   // old minute, the relay answered "Not delivered" over a session that was still coming up.
   const wakeMs = ((Number(process.env.CLAUDE_FLEET_WAKE_TIMEOUT) || 300) + (Number(process.env.CLAUDE_FLEET_WAKE_SETTLE) || 5) + 60) * 1000;
-  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(fold ? ['--now'] : []), '--reply-to', `telegram/${address}`, '--reply-dir', DIR, t.session, prompt], envFor(t), wakeMs);
-  return { r, probe, prompt, fold };
+  // A fold is a PLAIN send: fleet-send takes it into the running turn with the queued-work
+  // label, which --now would have stripped. A message held behind a turn says so explicitly
+  // (--after-turn), so the hold is this daemon's decision and not the gate's guess.
+  const r = await run('fleet-send', ['-s', t.sock, '--owner', ...(behind ? ['--after-turn'] : []), '--reply-to', `telegram/${address}`, '--reply-dir', DIR, t.session, prompt], envFor(t), wakeMs);
+  return { r, probe, prompt, fold, behind };
+}
+
+// THE TASK A HELD MESSAGE WAITS BEHIND, as the session's own UserPromptSubmit hook recorded
+// it: the newest record for this socket and slot names the session, and <session>.task holds
+// the first line of what its turn was asked (hooks/fleet-event.sh). "Working on something
+// else" told the owner nothing they could act on: whether to wait, or to send it somewhere
+// else. '' when either file is missing, and the notice then says less, never something wrong.
+function taskInHand(t) {
+  let best = null, names = [];
+  try { names = fs.readdirSync(t.fleetDir); } catch {}
+  for (const n of names) {
+    if (!n.endsWith('.json') || n.startsWith('.')) continue;
+    let j = null;
+    try { j = JSON.parse(fs.readFileSync(path.join(t.fleetDir, n), 'utf8')); } catch {}
+    if (j && j.sock === t.sock && j.slot === t.session && typeof j.session_id === 'string'
+        && (!best || (Number(j.ts) || 0) > (Number(best.ts) || 0))) best = j;
+  }
+  if (!best || /[^A-Za-z0-9._-]/.test(best.session_id)) return '';
+  let line = '';
+  try { line = fs.readFileSync(path.join(t.fleetDir, `${best.session_id}.task`), 'utf8').split('\n')[0]; } catch {}
+  const task = line.split('\x1f').slice(1).join(' ').replace(/^\[telegram\]\s*/, '').replace(/\s+/g, ' ').trim();
+  return task.length > 80 ? `${task.slice(0, 79)}…` : task;
 }
 
 async function deliver(msgs, sec) {
@@ -570,7 +600,7 @@ async function deliver(msgs, sec) {
   // Each message keeps what it carried — its quote, its words, its file's line — in the order
   // it was sent. One that cannot be delivered is answered on its own and the rest still go.
   const parts = [];
-  let spoken = false, id = 0;
+  let spoken = false, note = false, id = 0;
   for (const msg of msgs) {
     const text = typeof msg.text === 'string' ? msg.text.trim() : '';
     const reply = ackFor(sec, Number(msg.message_id) || 0);
@@ -583,6 +613,7 @@ async function deliver(msgs, sec) {
                    // a photo or a file and nothing said about it: its own line says all there is
                    bare: !text && !String(msg.caption || '').trim() && !q.head && Boolean(own.line) });
       spoken = spoken || Boolean(own.spoken);
+      note = note || Boolean(own.note);
       id = Number(msg.message_id) || 0;
     } catch (e) {
       log(`not delivered: ${e.message}`);
@@ -604,7 +635,7 @@ async function deliver(msgs, sec) {
 
   // A SESSION ALREADY WORKING. If the turn running is the owner's own from Telegram (the
   // `.telegram` mark hooks/fleet-event.sh keeps for it), what the owner sends now is more of the same
-  // request — "and the pricing page too" — so it goes INTO that turn (fleet-send --now), and
+  // request — "and the pricing page too" — so it goes INTO that turn (a plain fleet-send), and
   // the turn's one answer covers both; fleet-send and the Stop hook see to it that exactly one
   // answer comes back, as a reply to the newest message the turn took in.
   //   Any other turn is NEVER joined: it was started at the desk or by the machine, it runs
@@ -613,11 +644,11 @@ async function deliver(msgs, sec) {
   // would hand them every tool the desk has — the one thing the allowlist is there to stop if
   // the phone, or the Telegram account, is not the owner's. So the message queues behind that
   // turn, the owner is told what it waits for, and the turn it starts says it was held.
-  //   Nor into a session stopped on a question (need-you): --now presses Enter, and Enter on
+  //   Nor into a session stopped on a question (need-you): a paste presses Enter, and Enter on
   // a permission dialog answers it. fleet-send --would-queue makes the call the queue gate
   // itself would make, so this and the gate cannot disagree.
 
-  // fleet-send, as the owner: to a busy session it QUEUES, and the queued turn carries the
+  // fleet-send, as the owner: held behind a busy turn it QUEUES, and the queued turn carries the
   // reply address, so the answer is that turn's — the busy turn's own Stop answers nobody.
   // "This answer should be spoken" rides the same address (v<id>, not m<id>) rather than a
   // table in this daemon: the address already crosses the queue, the mod's handoff, the Stop
@@ -626,21 +657,23 @@ async function deliver(msgs, sec) {
   // message, and spoken if any message in it was a voice note.
   const reply = ackFor(sec, id);
   let result;
-  try { result = await submitTurn(t, body, `${spoken ? 'v' : 'm'}${id}`); }
+  try { result = await submitTurn(t, body, `${spoken ? 'v' : 'm'}${id}`, false, note); }
   catch (e) { return reply(`Not delivered — ${e.message}.`); }
-  const { r, probe, prompt, fold } = result;
+  const { r, probe, prompt, fold, behind } = result;
   if (r.code !== 0) {
     log(`not delivered to ${t.session}: exit ${r.code}`);
     return reply(`Not delivered to ${t.session} — ${r.out.split('\n').map((l) => l.replace(/^fleet-send:\s*/, '')).filter(Boolean).slice(0, 2).join(' — ') || `fleet-send exited ${r.code}`}`);
   }
   state.delivered = (state.delivered || 0) + 1;
   const queued = /queued #\d+/.test(r.out);
-  const into = /\(into the running turn\)/.test(r.out);
-  log(`delivered ${prompt.length} chars from ${parts.length} message${parts.length === 1 ? '' : 's'} to ${t.name}/${t.session}${fold ? ' with --now' : ''}${into ? ' (into the running turn)' : queued ? ' (queued)' : ''}`);
+  const into = /\(into the running turn/.test(r.out);
+  log(`delivered ${prompt.length} chars from ${parts.length} message${parts.length === 1 ? '' : 's'} to ${t.name}/${t.session}${fold ? ' to join its Telegram turn' : behind ? ' with --after-turn' : ''}${into ? ' (into the running turn)' : queued ? ' (queued)' : ''}`);
   if (queued) {
+    const task = /queued #\d+ behind a question/.test(r.out) || probe === 'need-you' ? '' : redact(taskInHand(t));
     reply(/queued #\d+ behind a question/.test(r.out) || probe === 'need-you'
       ? `${t.session} is stopped on a question at the desk; this runs once that is answered and its turn ends.`
-      : `${t.session} is working on something else; this runs right after it.`);
+      : task ? `Queued: ${t.session} is finishing "${task}". This runs right after it, and the answer comes then.`
+        : `Queued: ${t.session} is working on something else. This runs right after it, and the answer comes then.`);
   } else typing(sec);
 }
 

@@ -6,6 +6,27 @@ the detail, and every entry here names the PR that carries the argument.
 
 ## Unreleased
 
+**A message to a working session reaches the turn that is running, at its next step.** Since
+#15 every send to a busy session waited for its turn to end, so a correction ("stop using that
+file") arrived after the work it was meant to change. Now a send from the phone, the web
+client, `fleet_send`, Telegram or `fleet-send` goes into the running turn, labelled as queued
+work to do after the task in hand. A message that says stop, instead or first do still
+switches, and two tasks sent are still both finished. Now:
+
+- **Waiting is a choice:** `fleet-send --after-turn`, `fleet_send` `after_turn: true`, or the
+  composer's Send button held (right-clicked on a desk), which opens a sheet with **Send now**
+  and **Send after this turn**. A held send shows in the session's queue as before.
+- A send that would do harm in the turn still waits, and the sender is told why in the reply
+  line: a session stopped on a question, a box someone is typing in or one that cannot be read,
+  the fleet's own nudges, a question to a turn that already owes another asker an answer, and a
+  Telegram message into a turn that did not come from Telegram.
+- **Telegram** joins only your own Telegram turn. Into anything else, and for every voice note,
+  the bot says at once what it waits behind: `Queued: <session> is finishing "<task>"`.
+- `--now` stays the explicit interrupt, unlabelled, used only by the fleet's need-you nudge, and
+  its mark now unlabels only the prompt it was written for. Nothing sent by default writes it.
+- codex takes a send into its running turn too (steer), with the label in the prompt itself;
+  `--after-turn` uses `codex queue`.
+
 **Several Claude accounts (experimental): a login is who its token says, and a reading is that
 login's.** With several saved logins in different organizations, the accounts engine filed a
 `/login` by hand into the account in use, copied one account's tokens into another's slot, kept

@@ -582,9 +582,25 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
           _mid=0
         fi
       fi
-      # fleet-send --now: pasted into the turn ON PURPOSE. Say nothing, once.
+      # fleet-send --now: pasted into the turn ON PURPOSE, as an interrupt. Say nothing, for
+      # THAT prompt only. The mark carries the checksum of the prompt it was written for
+      # (bin/fleet-send _now_sum, blanks removed on both sides), because an empty mark was
+      # spent by whichever prompt came next: a --now whose prompt never arrived took the label
+      # off the next send into that turn, the label that keeps the task in hand from being
+      # dropped. A mark for another prompt is left for its own, until it is an hour old; an
+      # empty one is from an older fleet-send and names nothing, so it skips nothing.
       _nowf="$FLEET_DIR/${SOCK:-_}.${SLOT:-_}.now"
-      if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$_nowf" ]; then rm -f "$_nowf"; _mid=0; fi
+      if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$_nowf" ]; then
+        _now_at=""; _now_sum=""
+        IFS=$'\x1f' read -r _now_at _now_sum < "$_nowf" 2>/dev/null
+        case "$_now_at" in ''|*[!0-9]*) _now_at=0 ;; esac
+        if [ -n "$_now_sum" ] \
+           && [ "$_now_sum" = "$(printf '%s' "$_prompt" | LC_ALL=C tr -d ' \t\r\n' | cksum | awk '{ print $1 "-" $2 }')" ]; then
+          rm -f "$_nowf"; _mid=0
+        elif [ -z "$_now_sum" ] || [ $(( $(date +%s) - _now_at )) -gt 3600 ]; then
+          rm -f "$_nowf"
+        fi
+      fi
       # A resume prompt starts a resume turn; folded into a turn already running it changes
       # nothing. Anything else is somebody asking, and the turn is theirs (see RESUME_TAG).
       case "$_prompt" in
@@ -597,7 +613,10 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         # A new turn: this prompt IS the task in hand. A fleet reply preamble is not what
         # was asked, so the first line after it is.
         _first="$_prompt"
-        case "$_first" in "[fleet] This request comes from"*)
+        # Nor is the queued-work label fleet-send puts in front of a message for a codex turn
+        # (codex writes no note for the label here to measure by), when that message ends up
+        # starting a turn of its own.
+        case "$_first" in "[fleet] This request comes from"*|"[fleet] This message arrived while"*)
           _first="$(printf '%s\n' "$_first" | awk 'f && NF { print; exit } !NF { f = 1 }')" ;;
         esac
         _first="$(printf '%s\n' "$_first" | awk 'NF { print; exit }' | tr '\t\037' '  ')"

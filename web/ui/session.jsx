@@ -584,6 +584,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
       const r = await fleet.act(tool, { project, session: name, ...args }, opts);
       if (r.queued === 'question') toast(t('sess.queuedQ'), '');
       else if (r.queued) toast(t('sess.queuedTurn'), '');
+      else if (r.into) toast(t('sess.intoTurn'), '');
       refresh();
       return r;
     } catch (e) {
@@ -644,7 +645,16 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   const dropFile = (id) => setFiles(x => { const f = x.find(y => y.id === id); if (f?.preview) URL.revokeObjectURL(f.preview); return x.filter(y => y.id !== id); });
   const uploading = files.some(f => f.state === 'up');
   const ready = files.filter(f => f.state === 'ok');
-  const sendDraft = async () => {
+  const sendOff = (!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length);
+  const [sendMenu, setSendMenu] = useState(false);
+  const hold = useRef({ timer: 0, fired: false, at: 0 });
+  const openSendMenu = () => { hold.current.at = Date.now(); setSendMenu(true); };
+  // the same press, arriving late on a browser that does not honour the cancelled touchend
+  const sendMenuFresh = () => Date.now() - hold.current.at < 400;
+  useEffect(() => () => clearTimeout(hold.current.timer), []);
+  // after: the composer's "send after this turn" (the Send button held, or right-clicked). A plain
+  // send to a working session goes INTO its turn (bin/fleet-send), so holding it is the choice.
+  const sendDraft = async (after = false) => {
     if (prompt) { showRequest(); return; }
     if (st === 'limit') return;
     const text = draft.trim();
@@ -653,7 +663,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
     const list = ready.map(f => `- ${f.path}`).join('\n');
     const message = !ready.length ? text
       : `${text || t('sess.attaching', { n: ready.length })}\n\n${t('sess.attached', { n: ready.length })}:\n${list}`;
-    const r = await act('fleet_send', { prompt: message });
+    const r = await act('fleet_send', after ? { prompt: message, after_turn: true } : { prompt: message });
     if (r) {
       sentAt.current = Date.now(); typing.current = false; setSends(n => n + 1);
       for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
@@ -854,12 +864,35 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
           <button type="button" class={`cbtn speak-btn${speakMode.on ? ' on' : ''}`} aria-pressed={speakMode.on}
                   aria-label={speakMode.on ? t('chat.speakOff') : t('chat.speak')} title={speakMode.on ? t('chat.speakOff') : t('chat.speak')}
                   onClick={speakMode.toggle}><Icon name="mic" size={24} /></button>
-          <SendBtn busy={uploading} disabled={(!!prompt && !held) || st === 'limit' || busy || uploading || (!draft.trim() && !ready.length)} />
+          {/* HELD, OR RIGHT-CLICKED, IT ASKS WHEN. A tap sends at once, into the running turn
+              when there is one; the choice of waiting for that turn to end opens as a sheet over
+              the screen (a modal on a desk), never as something inline that would move the
+              composer under the thumb. A long press that opened it must not also send, and must
+              not choose for the owner either: the sheet opens UNDER the finger, and the release's
+              compatibility mousedown and click landed on its first option, "Send now" (measured
+              at 390, touch: pointerup, touchend, then mousedown/mouseup/click on the option, all
+              at the same millisecond). A cancelled touchend sends no compatibility events. */}
+          <SendBtn busy={uploading} disabled={sendOff} title={t('sess.sendHold')} aria-haspopup="dialog"
+                   onPointerDown={(e) => { clearTimeout(hold.current.timer); hold.current.fired = false; if (e.button > 0 || sendOff) return;
+                     hold.current.timer = setTimeout(() => { hold.current.fired = true; openSendMenu(); }, 500); }}
+                   onPointerUp={() => clearTimeout(hold.current.timer)} onPointerLeave={() => clearTimeout(hold.current.timer)}
+                   onPointerCancel={() => clearTimeout(hold.current.timer)}
+                   onTouchEnd={(e) => { if (hold.current.fired) e.preventDefault(); }}
+                   onContextMenu={(e) => { e.preventDefault(); clearTimeout(hold.current.timer); if (!sendOff) { hold.current.fired = true; openSendMenu(); } }}
+                   onClick={(e) => { if (hold.current.fired) { e.preventDefault(); hold.current.fired = false; } }} />
         </div>
         <p class="speak-state muted small" role="status" aria-live="polite">{speakMode.on ? t(STATE_KEY[speakMode.phase] || 'chat.speakListening') : ''}</p>
       </form>}
 
       {confirm ? <Confirm {...confirm} onClose={() => setConfirm(null)} /> : null}
+      {sendMenu ? <Modal sheet title={t('sess.sendMenu', { name })} onClose={() => setSendMenu(false)}>
+        <div class="modal-body ask-opts send-opts">
+          <button type="button" class="opt" onClick={() => { if (sendMenuFresh()) return; setSendMenu(false); sendDraft(false); }}>
+            <span><b>{t('sess.sendNow')}</b><small>{t('sess.sendNowHint')}</small></span></button>
+          <button type="button" class="opt" onClick={() => { if (sendMenuFresh()) return; setSendMenu(false); sendDraft(true); }}>
+            <span><b>{t('sess.sendAfter')}</b><small>{t('sess.sendAfterHint')}</small></span></button>
+        </div>
+      </Modal> : null}
       {detailsOpen ? <DetailsModal project={project} name={name} status={st} onClose={() => setDetailsOpen(false)} /> : null}
       {wk.sheet}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}

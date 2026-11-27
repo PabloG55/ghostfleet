@@ -280,16 +280,18 @@ what it is set to. The daemon reads them on every message, so no restart is need
 
 - **Into your own Telegram turn.** If the turn running is one you started from the phone,
   what you send now is more of the same request ("and the pricing page too"). It goes into
-  that turn (`fleet-send --now`), and you get **one** answer that covers both, as a reply to
-  your newest message. A message the turn has not read by the time it ends runs as the next
-  turn instead, and then each turn answers its own message. Either way every message is
-  answered exactly once, and quoting the right message.
+  that turn (a plain `fleet-send`, which labels it as queued work after the task in hand), and
+  you get **one** answer that covers both, as a reply to your newest message. A message the
+  turn has not read by the time it ends runs as the next turn instead, and then each turn
+  answers its own message. Either way every message is answered exactly once, and quoting the
+  right message.
 - **After anything else.** A turn started at the desk, by another session or by the machine
-  is never joined. Your message queues behind it, exactly as `fleet-send` queues any prompt.
-  The bot tells you `<session> is working on something else; this runs right after it`. The
-  turn your message starts opens with a line saying it was sent while an earlier turn was
-  running. A session stopped on a question at the desk also queues: `--now` presses Enter,
-  and Enter would answer the question.
+  is never joined, and a voice or video note joins no turn, your own included. Either waits for
+  that turn to end (`fleet-send --after-turn`) and runs as a turn of its own. The bot tells
+  you at once what it waits behind: `Queued: <session> is finishing "<that turn's task>". This
+  runs right after it, and the answer comes then.` The turn your message starts opens with a
+  line saying it was sent while an earlier turn was running. A session stopped on a question
+  at the desk also waits: a paste would answer the question.
 
 The rule is there because of the [allowlist](#the-tool-allowlist-and-why). The guard holds a
 turn to the phone's tools only while it is a **Telegram** turn. A turn started at the desk
