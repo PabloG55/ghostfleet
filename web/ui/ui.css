@@ -271,6 +271,12 @@ textarea { resize: vertical; }
 .split { display: grid; grid-template-columns: 300px 1fr; flex: 1 1 auto; min-height: 0; }
 .split-list { border-right: 1px solid var(--hair); overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; background: #0d1014; }
 .split-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+/* EVERY CARD AT ITS OWN HEIGHT, AND THE LIST SCROLLS. A card is `overflow: hidden` (its rail), and
+   a flex item that clips has no content-based minimum height, so with 26 sessions the column shrank
+   every card to fit instead of overflowing: each was a sliver showing its state and its age, and no
+   name. Not shrinking is what makes the list taller than the sidebar, and the sidebar is the box
+   that scrolls (overflow-y above); the session beside it keeps its height. */
+.split-list > * { flex-shrink: 0; }
 .session { display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; }
 .sess-head { padding: 14px 22px 10px; border-bottom: 1px solid var(--hair); display: flex; flex-direction: column; gap: 10px; }
 .sess-title { display: flex; align-items: center; gap: .7em; flex-wrap: wrap; }

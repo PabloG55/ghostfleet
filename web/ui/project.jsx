@@ -11,6 +11,7 @@ import { cycleName } from './keys.js';
 import { ProjectTabs, ToolPanel, offers as offersTools, toolTo } from './terminal.jsx';
 import { useKept } from './back.jsx';
 import { back } from './history.js';
+import { leadFirst, sections } from './order.js';
 
 // Grouped by what each one asks of a person, in the order it should be looked at.
 const GROUPS = Object.values(worded({
@@ -64,13 +65,16 @@ export function ProjectView({ project, session, tool = null }) {
   const [confirm, setConfirm] = useState(null);
 
   const cards = useMemo(() => filterCards(g?.cards || [], filter), [g, filter]);
+  // The sidebar's order, and the swipe's, which walks the sessions in the order the list draws
+  // them: the lead first (order.js), then the wire's order.
+  const listed = useMemo(() => leadFirst(g?.cards || []), [g]);
   const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
   // The phone's swipe across the chat: the next or previous session in the order the list draws
   // them, stopping at the ends rather than wrapping — a wrap on a list with no visible edge reads
   // as "it did not move". Replaced, not pushed, so back leaves the project rather than walking
   // back through every session swiped past.
   const step = (d) => {
-    const names = (g?.cards || []).map(c => c.name), at = names.indexOf(session), to = at + d;
+    const names = listed.map(c => c.name), at = names.indexOf(session), to = at + d;
     if (at < 0 || to < 0 || to >= names.length) return;
     fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(names[to])}`, { replace: true });
   };
@@ -220,7 +224,7 @@ export function ProjectView({ project, session, tool = null }) {
             <Btn kind="ghost sm" icon="plus" onClick={() => setSpawn({})}>{t('project.new')}</Btn>
           </div>
           {!g && !error ? <Skeleton shape="rows" n={4} /> : null}
-          {(g?.cards || []).map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
+          {listed.map(c => <Card key={c.name} c={c} compact active={c.name === session} onOpen={() => open(c.name)} />)}
         </aside>
         <SessionView key={`${project}/${session}`} project={project} name={session} card={current} waiting={!g && !error} tool={tool}
                      onChanged={reload} onGone={sessionBack} onStep={step}
@@ -229,6 +233,8 @@ export function ProjectView({ project, session, tool = null }) {
       </div>
     );
   }
+
+  const secs = sections(cards, GROUPS, statusOf);
 
   // A project's Terminal or Editor tab (terminal.jsx), in place of its sessions.
   if (tool) return <div class="page page-tool">{header}<ProjectTabs project={project} tool={tool} /><ToolPanel key={tool} project={project} kind={tool} />{modals}</div>;
@@ -239,7 +245,9 @@ export function ProjectView({ project, session, tool = null }) {
       <ProjectTabs project={project} tool={null} />
       {filters}
       <AsOf at={at} stale={stale} />
-      {!g && !error ? <section class="group"><h2><SkelLine w="9em" /></h2><Skeleton shape="cards" box="cards" n={3} /></section> : null}
+      {/* the lead's card stands above the first heading once the data lands, so its shape does too */}
+      {!g && !error ? <><section class="group g-lead"><Skeleton shape="cards" box="cards" n={1} /></section>
+        <section class="group"><h2><SkelLine w="9em" /></h2><Skeleton shape="cards" box="cards" n={3} /></section></> : null}
       {g && !g.cards.length ? (
         <div class="empty">
           <p><b>{t('project.empty')}</b></p>
@@ -247,9 +255,14 @@ export function ProjectView({ project, session, tool = null }) {
           <Btn kind="primary" icon="plus" onClick={() => setSpawn({})}>{t('project.openFirst')}</Btn>
         </div>
       ) : null}
-      {GROUPS.map((gr, i) => {
-        const taken = new Set(GROUPS.slice(0, i).flatMap(x => cards.filter(c => x.has(statusOf(c))).map(c => c.name)));
-        const list = cards.filter(c => !taken.has(c.name) && gr.has(statusOf(c)));
+      {/* The lead first, above every heading and wearing its own state (order.js); then the groups,
+          without it. */}
+      {secs.lead ? (
+        <section class="group g-lead">
+          <div class="cards"><Card c={secs.lead} onOpen={() => open(secs.lead.name)} /></div>
+        </section>
+      ) : null}
+      {secs.groups.map(({ gr, list }) => {
         if (!list.length) return null;
         return (
           <section key={gr.id} class={`group g-${gr.id}`}>

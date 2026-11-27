@@ -8901,6 +8901,33 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	});
 }
 //#endregion
+//#region web/ui/order.js
+function leadFirst(cards) {
+	const list = cards || [];
+	const i = list.findIndex((c) => c && c.lead);
+	return i <= 0 ? list : [
+		list[i],
+		...list.slice(0, i),
+		...list.slice(i + 1)
+	];
+}
+function sections(cards, groups, statusOf) {
+	const all = cards || [];
+	const lead = all.find((c) => c && c.lead) || null;
+	const taken = new Set(lead ? [lead.name] : []);
+	return {
+		lead,
+		groups: groups.map((gr) => {
+			const list = all.filter((c) => !taken.has(c.name) && gr.has(statusOf(c)));
+			for (const c of list) taken.add(c.name);
+			return {
+				gr,
+				list
+			};
+		})
+	};
+}
+//#endregion
 //#region web/ui/project.jsx
 var GROUPS = Object.values(worded({
 	need: {
@@ -9011,9 +9038,10 @@ function ProjectView({ project, session, tool = null }) {
 	const [spawn, setSpawn] = d(null);
 	const [confirm, setConfirm] = d(null);
 	const cards = T(() => filterCards(g?.cards || [], filter), [g, filter]);
+	const listed = T(() => leadFirst(g?.cards || []), [g]);
 	const open = (name) => fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(name)}`);
 	const step = (d) => {
-		const names = (g?.cards || []).map((c) => c.name), at = names.indexOf(session), to = at + d;
+		const names = listed.map((c) => c.name), at = names.indexOf(session), to = at + d;
 		if (at < 0 || to < 0 || to >= names.length) return;
 		fleet.go(`/p/${encodeURIComponent(project)}/s/${encodeURIComponent(names[to])}`, { replace: true });
 	};
@@ -9272,7 +9300,7 @@ function ProjectView({ project, session, tool = null }) {
 						shape: "rows",
 						n: 4
 					}) : null,
-					(g?.cards || []).map((c) => /* @__PURE__ */ u(Card, {
+					listed.map((c) => /* @__PURE__ */ u(Card, {
 						c,
 						compact: true,
 						active: c.name === session,
@@ -9294,6 +9322,7 @@ function ProjectView({ project, session, tool = null }) {
 			modals
 		]
 	});
+	const secs = sections(cards, GROUPS, statusOf);
 	if (tool) return /* @__PURE__ */ u("div", {
 		class: "page page-tool",
 		children: [
@@ -9322,14 +9351,21 @@ function ProjectView({ project, session, tool = null }) {
 				at,
 				stale
 			}),
-			!g && !error ? /* @__PURE__ */ u("section", {
+			!g && !error ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("section", {
+				class: "group g-lead",
+				children: /* @__PURE__ */ u(Skeleton, {
+					shape: "cards",
+					box: "cards",
+					n: 1
+				})
+			}), /* @__PURE__ */ u("section", {
 				class: "group",
 				children: [/* @__PURE__ */ u("h2", { children: /* @__PURE__ */ u(SkelLine, { w: "9em" }) }), /* @__PURE__ */ u(Skeleton, {
 					shape: "cards",
 					box: "cards",
 					n: 3
 				})]
-			}) : null,
+			})] }) : null,
 			g && !g.cards.length ? /* @__PURE__ */ u("div", {
 				class: "empty",
 				children: [
@@ -9346,9 +9382,17 @@ function ProjectView({ project, session, tool = null }) {
 					})
 				]
 			}) : null,
-			GROUPS.map((gr, i) => {
-				const taken = new Set(GROUPS.slice(0, i).flatMap((x) => cards.filter((c) => x.has(statusOf(c))).map((c) => c.name)));
-				const list = cards.filter((c) => !taken.has(c.name) && gr.has(statusOf(c)));
+			secs.lead ? /* @__PURE__ */ u("section", {
+				class: "group g-lead",
+				children: /* @__PURE__ */ u("div", {
+					class: "cards",
+					children: /* @__PURE__ */ u(Card, {
+						c: secs.lead,
+						onOpen: () => open(secs.lead.name)
+					})
+				})
+			}) : null,
+			secs.groups.map(({ gr, list }) => {
 				if (!list.length) return null;
 				return /* @__PURE__ */ u("section", {
 					class: `group g-${gr.id}`,
@@ -12194,7 +12238,7 @@ function StackPicker({ members = [], onOpen }) {
 			class: "stack-list",
 			"data-keep-scroll": "stack-list",
 			children: [(data || []).map((p) => {
-				const sessions = (p.cards || []).filter((c) => !c.lost);
+				const sessions = leadFirst((p.cards || []).filter((c) => !c.lost));
 				const cards = sessions.filter((c) => `${p.name} ${p.host || ""} ${c.name} ${c.branch || ""}`.toLowerCase().includes(search));
 				const count = selected.filter((m) => m.project === p.name).length;
 				const isOpen = search ? true : expanded[p.name] ?? !!count;

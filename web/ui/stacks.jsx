@@ -8,6 +8,7 @@ import { useKeys } from './keyboard.jsx';
 import { t } from './i18n.js';
 import { Icon } from './icon.jsx';
 import { PhoneScreen, joinMeta, sessionRoute } from './phone-screen.jsx';
+import { leadFirst } from './order.js';
 // A paired machine's project is `<name>@<key>` and also carries `host`: drawn as both it read
 // `acme-api@vm · vm`. The heading takes the bare name beside the host; a member's label keeps
 // the machine, because a stack can hold this machine's acme-api and the other one's.
@@ -29,7 +30,7 @@ export function StackPicker({ members = [], onOpen }) {
     <label class="field stack-search"><span>{t('phone.search')}</span><input type="search" value={query} onInput={e => setQuery(e.currentTarget.value)} /></label>
     <div class="stack-list" data-keep-scroll="stack-list">
       {(data || []).map(p => {
-        const sessions = (p.cards || []).filter(c => !c.lost);
+        const sessions = leadFirst((p.cards || []).filter(c => !c.lost));
         const cards = sessions.filter(c => `${p.name} ${p.host || ''} ${c.name} ${c.branch || ''}`.toLowerCase().includes(search));
         const count = selected.filter(m => m.project === p.name).length;
         const isOpen = search ? true : (expanded[p.name] ?? !!count);

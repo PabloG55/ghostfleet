@@ -31,6 +31,7 @@ vite, and the root vite that builds `web/screens.js`).
 | `fleet.jsx`, `sprite.js`, `lights.js`, `icon.jsx` | the ships, the status lights, the icon set |
 | `ui.jsx` | buttons, pills, `Modal`, `Confirm`, toasts, `usePoll`, `Markdown` |
 | `skeleton.jsx` | `Skeleton`, `SkelLine`, `AsOf`: what a screen draws while it waits (below) |
+| `order.js` | the order a project's sessions are listed in, framework-free: the lead first, then the rest as they came |
 | `history.js` | one history for every way back, framework-free: `go`, `back`, each entry's scroll and state |
 | `back.jsx` | `BackLink` (names where it goes), `useKept` (a screen's state, kept per history entry) |
 | `keys.js` | the keyboard's rules, framework-free |
