@@ -10,13 +10,34 @@ import { speakable, speechChunks, EN as SAY_EN } from './speakable.js';
 let B = {};
 export function voiceBackend(adapter) { B = adapter || {}; status = null; }
 
-let status = null;
+// WHAT THE SERVER SAID, KEPT ONLY WHEN IT SAID IT. A read that failed — the phone waking on a
+// network that was not up yet, a request lost at the moment of opening — was cached as "no
+// voice" for the life of the page, so one dropped request took the machine's voice away until
+// a reload, and the person heard the device's voice and saw its dictation with nothing to say
+// why. A failed read now answers "not ready" without remembering it, and a "not ready" that WAS
+// said is asked again after RECHECK_MS: it is the answer most likely to change, the moment
+// somebody runs the install it names.
+let status = null, statusAt = 0;
+const NONE = { hear: { ready: false, why: null }, speak: { ready: false, why: null } };
+const RECHECK_MS = 30000;
 export async function voiceStatus(force = false) {
-  if (status && !force) return status;
-  try { status = B.voice ? await B.voice() : null; } catch { status = null; }
-  status ||= { hear: { ready: false }, speak: { ready: false } };
-  return status;
+  const whole = !!(status?.hear?.ready && status?.speak?.ready);
+  if (status && !force && (whole || Date.now() - statusAt < RECHECK_MS)) return status;
+  let got = null;
+  try { got = B.voice ? await B.voice() : null; } catch { got = null; }
+  if (got) { status = got; statusAt = Date.now(); return got; }
+  return status || NONE;
 }
+// Somebody to tell when the serving machine turns out not to hear — the sheet in voicesetup.jsx
+// registers itself here, so this file says it and the shell decides how it looks.
+let onMissing = null;
+export function whenVoiceMissing(f) { onMissing = f; }
+export const voiceMissing = (vs, opts) => { if (!onMissing) return false; onMissing(vs, opts); return true; };
+// The person picked the device's dictation in that sheet: for the rest of the page it is used
+// without asking again, as it was before the sheet existed — the sheet says it once.
+let dictation = false;
+export const chooseDictation = () => { dictation = true; };
+export const dictationChosen = () => dictation;
 
 // ── hearing, locally: record until the speaker stops, ship a 16 kHz mono WAV ─────────────
 function wav16k(chunks, rate) {
@@ -47,11 +68,23 @@ export const PAUSES = worded({
   manual: { ms: 0 },
 }, 'pause');
 const AUDIO = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+//   A 503 that says `needs: 'voice'` is the machine telling us it cannot hear at all (the status
+// said it could, then the binary or the model went away): the status is asked again next time,
+// and the sheet says so. The error is then marked `shown`, so nobody toasts it a second time.
 const transcribe = async (blob) => {
   if (!B.hear) throw new Error(t('voice.noHear'));
-  const j = await B.hear(blob);
-  return String(j?.text || '').trim();
+  try {
+    const j = await B.hear(blob);
+    return String(j?.text || '').trim();
+  } catch (e) {
+    if (e?.needs === 'voice') {
+      status = null;
+      if (voiceMissing({ hear: { ready: false, why: e.message, fix: e.fix || null }, speak: null })) e.shown = true;
+    }
+    throw e;
+  }
 };
+const failed = (e) => (e?.shown ? '' : t('voice.transcribeFailed', { why: e.message }));
 const rmsOf = (d) => { let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i]; return Math.sqrt(s / d.length); };
 const micDenied = () => t('voice.micDenied');
 
@@ -110,7 +143,7 @@ function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs =
     if (!audio || audio.length < 16000 * 0.25) { onText?.(''); return; }
     onState?.('hearing');
     try { onText?.(await transcribe(wav16k([audio], 16000))); }
-    catch (e) { onError?.(t('voice.transcribeFailed', { why: e.message })); onText?.(''); }
+    catch (e) { onError?.(failed(e)); onText?.(''); }
   };
   let got = null;
   const me = turn = {
@@ -156,7 +189,7 @@ function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs
     if (!send || !spoke || !chunks.length) { onText?.(''); return; }
     onState?.('hearing');
     try { onText?.(await transcribe(wav16k(chunks, rate))); }
-    catch (e) { onError?.(t('voice.transcribeFailed', { why: e.message })); onText?.(''); }
+    catch (e) { onError?.(failed(e)); onText?.(''); }
   };
   (async () => {
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO }); }
@@ -232,14 +265,77 @@ export function savedRate() {
   return Number.isFinite(r) && r >= 0.5 && r <= 2 ? r : 1.05;
 }
 
-let playing = null;
+let playing = null, unlockOnly = false;
+//   cancel() only when there is something to cancel, and never just the unlock word. WebKit drops a speak() that follows a cancel()
+// too closely, and every speak here starts with this — so an idle cancel was a way to lose the
+// first chunk of a reply. And the unlock below was always followed by one: speak mode's tap said
+// the silent word and cancelled it in the same breath, before it could unlock anything.
 export function stopSpeaking() {
-  window.speechSynthesis?.cancel();
-  if (playing) { playing.cancelled = true; try { playing.audio?.pause(); } catch {} playing = null; }
+  const s = typeof window !== 'undefined' ? window.speechSynthesis : null;
+  if (s && !unlockOnly && (s.speaking || s.pending)) s.cancel();
+  if (playing) { const j = playing; playing = null; j.cancelled = true; try { j.audio?.pause(); } catch {} j.stop?.(); }
+}
+
+// ── ONE AUDIO ELEMENT, UNLOCKED INSIDE THE TAP ──────────────────────────────────────────
+// iOS plays an <audio> without a gesture only if that same element has played inside one. The
+// machine's voice used to make a new Audio() for every sentence, from a network callback long
+// after the tap, so on an iPhone every play() was refused — and the refusal was taken as "this
+// sentence is done". The whole reply went by as a run of audio fetches with no sound and no
+// fallback: the fetches were the only trace, back to back with no time between them to play
+// anything. Now there is one element for the page, played silently in the tap that starts
+// listening or reading (unlockSpeech), and every sentence goes through it by changing its src.
+let player = null, silent = '';
+export function unlockAudio() {
+  if (typeof Audio === 'undefined') return;
+  try {
+    player ||= new Audio();
+    if (playing?.audio === player) return;      // mid-sentence: silence would cut it off
+    silent ||= URL.createObjectURL(wav16k([new Float32Array(800)], 16000));
+    player.src = silent;
+    const p = player.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch {}
+}
+// iOS lets speech start only from a gesture; a silent word said inside the tap unlocks the voice
+// for the timers and network callbacks that speak later — the device's voice AND the machine's.
+export function unlockSpeech() {
+  try {
+    const u = new SpeechSynthesisUtterance(' '); u.volume = 0;
+    u.onend = u.onerror = () => { unlockOnly = false; };
+    window.speechSynthesis?.speak(u); unlockOnly = true;
+  } catch {}
+  unlockAudio();
+}
+// One sentence through the shared element: 'ended' once it has played, 'refused' when it never
+// started — play() rejected, the element errored before a sound, or nothing began in STALL_MS.
+// 'refused' is the device voice's cue; a sentence that started and then failed is just skipped.
+const STALL_MS = 15000;
+function playOnce(url, job) {
+  return new Promise((resolve) => {
+    const a = player ||= new Audio();
+    let started = false, settled = false, timer = null;
+    const end = (how) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); job.stop = null;
+      a.onended = a.onerror = a.onplaying = null;
+      resolve(how);
+    };
+    const began = () => { started = true; clearTimeout(timer); };
+    job.audio = a; job.stop = () => end('cancelled');
+    a.onplaying = began;
+    a.onended = () => end('ended');
+    a.onerror = () => end(started ? 'ended' : 'refused');
+    timer = setTimeout(() => { if (!started) end('refused'); }, STALL_MS);
+    a.src = url;
+    let p;
+    try { p = a.play(); } catch { end('refused'); return; }
+    if (p && p.then) p.then(began, () => end('refused'));
+  });
 }
 function utter(text, onEnd) {
   const s = window.speechSynthesis;
   if (!s) { onEnd?.(); return; }
+  unlockOnly = false;
   const u = new SpeechSynthesisUtterance(text);
   const all = s.getVoices();
   const v = lang() === 'es'
@@ -279,31 +375,37 @@ export async function speak(md, onEnd, voice = '') {
   playing = job;
   const st = await voiceStatus();
   if (job.cancelled) return;
-  let i = 0;
+  let i = 0, rest = [];
   if (st.speak?.ready) {
     try {
       let next = B.speak(chunks[0], voice);
-      for (; i < chunks.length; i++) {
+      chunk: for (; i < chunks.length; i++) {
         const r = await next;
         if (job.cancelled) return;
         next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
         next?.catch(() => {});                 // a failure is read where it is awaited
-        for (const s of r.sentences) {
+        for (let k = 0; k < r.sentences.length; k++) {
           if (job.cancelled) return;
           // A URL the page can play: the team's is the route itself (its cookie rides along), the
           // phone's is the sentence fetched with its bearer token and handed back as a blob URL.
-          const url = await B.speakAudio(s.id);
+          const url = await B.speakAudio(r.sentences[k].id);
           if (job.cancelled) return;
-          await new Promise((resolve) => {
-            const a = new Audio(url);
-            job.audio = a;
-            a.onended = resolve; a.onerror = resolve;
-            a.play().catch(resolve);
-          });
+          // THE DEVICE WOULD NOT PLAY IT, so the device's voice reads it — from this sentence
+          // on, never the machine's again for this reply: a refusal is the device's answer about
+          // the element, and asking it again per sentence is a silent reply in instalments.
+          if (await playOnce(url, job) === 'refused') {
+            if (job.cancelled) return;
+            rest = r.sentences.slice(k).map(x => x.text).filter(Boolean);
+            if (!rest.length) rest = [chunks[i]];   // a server that sends no text: the chunk, whole
+            i++;
+            break chunk;
+          }
         }
       }
     } catch { /* the rest goes to the device's own voice, from the chunk that failed */ }
   }
-  if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
+  if (job.cancelled) return;
+  const left = [...rest, ...chunks.slice(i)];
+  if (left.length) await speakBrowser(left, job);
   if (!job.cancelled) { playing = null; onEnd?.(); }
 }

@@ -255,8 +255,11 @@ export function phoneAdapter({ lock, go, place }) {
     ...tasks,
     voice: async () => {
       const j = await api.getVoice();
-      return { hear: { ready: server() && !!j.voice?.ready, why: j.voice?.why || null },
-               speak: { ready: server() && !!j.speak?.ready, why: j.speak?.why || null } };
+      // `fix` is the command that sets each half up, and `machine` the computer it is run on —
+      // what the "voice is not set up" sheet shows (web/ui/voicesetup.jsx).
+      return { hear: { ready: server() && !!j.voice?.ready, why: j.voice?.why || null, fix: j.voice?.fix || null },
+               speak: { ready: server() && !!j.speak?.ready, why: j.speak?.why || null, fix: j.speak?.fix || null },
+               machine: j.machine || null };
     },
     hear: (wav) => guard(api.hear(wav)),
     speak: async (text) => ({ sentences: await guard(api.speakPlan(text)) }),

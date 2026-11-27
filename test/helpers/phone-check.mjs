@@ -75,7 +75,9 @@ const STUBS = `(() => {
   // ends it (__finish), and the recogniser hears whatever __heard holds, after 400 ms, or nothing.
   window.__said = []; window.__cancels = 0; window.__rec = { starts: 0, aborts: 0 }; window.__heard = '';
   let curU = null;
-  const fake = { speaking: false, getVoices: () => [], cancel: () => { window.__cancels++; curU = null; },
+  // \`speaking\` as a real one reports it — true while an utterance is held — since the client now
+  // cancels only a voice that is speaking (web/ui/voice.js stopSpeaking).
+  const fake = { get speaking() { return !!curU; }, pending: false, getVoices: () => [], cancel: () => { window.__cancels++; curU = null; },
     speak: (u) => { note('speak'); window.__said.push(u.text); curU = u; } };
   try { Object.defineProperty(window, 'speechSynthesis', { get: () => fake, configurable: true }); } catch {}
   window.SpeechSynthesisUtterance = function (text) { this.text = text; };
@@ -1104,7 +1106,18 @@ try {
       is('no page error in the chat so far', '', errors.join(' | '));
       is('the composer offers speak mode, named', 'Speak mode', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
       await b.evaluate(() => { window.__heard = 'run the tests'; window.__said.length = 0; document.querySelector('.speak-btn').click(); });
+      // Fixture mode has no machine that hears, which is exactly the case the sheet is for: it says so
+      // before anything listens, and the device's dictation is the person's choice from it.
+      const vsheet = await until(() => { const m = document.querySelector('.scrim > .modal .voice-setup'); return m ? m.closest('.modal').querySelector('header h2').textContent : null; });
+      is('the machine cannot hear: a sheet says so, naming the machine', 'Voice isn’t set up on laptop', vsheet);
+      is('...before anything listened', 0, await b.evaluate(() => window.__rec.starts));
+      is('...and it offers the device\'s dictation', true, await b.evaluate(() => {
+        const x = [...document.querySelectorAll('.voice-setup footer button')].find(n => /dictation/.test(n.textContent));
+        if (x) x.click();
+        return !!x;
+      }));
       is('...turned on, it listens (the ear was opened)', true, !!(await until(() => window.__rec.starts >= 1)));
+      is('...and the sheet is gone', false, await b.evaluate(() => !!document.querySelector('.voice-setup')));
       is('...and says so', 'Turn speak mode off', await b.evaluate(() => document.querySelector('.speak-btn')?.getAttribute('aria-label')));
       is('the transcript is sent to the session', true, !!(await until(async () => (await (await import('./api.js')).getAudit()).rows.some(r => r.verb === 'fleet_send' && r.args.session === 'types'))));
       is('...as it was heard, marked as spoken', '(spoken) run the tests', (await sends())[0]);

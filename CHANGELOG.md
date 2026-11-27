@@ -27,6 +27,25 @@ switches, and two tasks sent are still both finished. Now:
 - codex takes a send into its running turn too (steer), with the label in the prompt itself;
   `--after-turn` uses `codex queue`.
 
+**Voice on a Linux machine: it hears in seconds, the phone hears it back, and it says when it
+cannot.** A phone served by a Linux machine had a voice mode that neither heard nor spoke, though
+the machine had whisper.cpp, a model and Kokoro. Now:
+
+- whisper.cpp is given half the machine's cores (4 to 16; `CLAUDE_FLEET_WHISPER_THREADS`
+  overrides). It ran at its own default of 4, which on a CPU-only machine took about 24 s for
+  one sentence instead of about 7, and a long one ran into the timeout. The timeout now grows
+  with the clip. A `whisper-cli` in `~/.local/bin` is found whatever the daemon's PATH.
+- A reply the machine speaks plays on the phone. The daemon's page policy refused audio the
+  phone client holds as a `blob:` URL, and iOS refuses a new audio element per sentence started
+  outside a tap. If the device still refuses a sentence, the rest of the reply is read in the
+  device's own voice, never in silence.
+- With no whisper.cpp where the app is served, speak mode and the assistant open a sheet naming
+  that machine, why, and the command for each half, instead of switching to the browser's
+  dictation without a word. The device's dictation is offered on it as a choice.
+- `fleet-jarvis voice --install` builds whisper.cpp from a pinned, commit-checked source tag
+  where there is no Homebrew. It needs git, cmake and a C++ compiler; when one is missing it says
+  which and prints the one line that installs them, and it never runs sudo itself.
+
 **Several Claude accounts (experimental): a login is who its token says, and a reading is that
 login's.** With several saved logins in different organizations, the accounts engine filed a
 `/login` by hand into the account in use, copied one account's tokens into another's slot, kept

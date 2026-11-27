@@ -1053,6 +1053,18 @@ var en_default = {
 	"task.gone": "That request is no longer on the list.",
 	"task.unsent": "I do not know whether it arrived: the page closed while it was sending.",
 	"voice.noHear": "This server cannot hear yet.",
+	"vs.title": "Voice isn’t set up on {machine}",
+	"vs.thisMachine": "this machine",
+	"vs.lead": "What you say is transcribed on {machine}, the computer serving this app, and never leaves it. It has nothing to transcribe with yet.",
+	"vs.hearing": "Hearing",
+	"vs.speaking": "Speaking",
+	"vs.runOn": "Run this on {machine}:",
+	"vs.speakFallback": "Until it is set up, replies are read with this device’s own voice.",
+	"vs.copy": "Copy",
+	"vs.copied": "Copied",
+	"vs.dictate": "Use this device’s dictation",
+	"vs.dictateNote": "This device’s dictation may send your voice to its maker’s servers.",
+	"vs.noDictation": "This browser has no dictation of its own, so type until then.",
 	"phone.event.finished": "Finishes working",
 	"phone.event.finished.hint": "goes from working to ready",
 	"phone.event.finished.verb": "finishes working",
@@ -1995,6 +2007,18 @@ var es_default = {
 	"task.gone": "Ese pedido ya no está en la lista.",
 	"task.unsent": "No sé si llegó: la página se cerró mientras lo mandaba.",
 	"voice.noHear": "Este servidor todavía no puede oír.",
+	"vs.title": "La voz no está configurada en {machine}",
+	"vs.thisMachine": "esta máquina",
+	"vs.lead": "Lo que dices se transcribe en {machine}, la computadora que sirve esta app, y nunca sale de ahí. Todavía no tiene con qué transcribir.",
+	"vs.hearing": "Oír",
+	"vs.speaking": "Hablar",
+	"vs.runOn": "Ejecuta esto en {machine}:",
+	"vs.speakFallback": "Mientras tanto, las respuestas se leen con la voz de este dispositivo.",
+	"vs.copy": "Copiar",
+	"vs.copied": "Copiado",
+	"vs.dictate": "Usar el dictado de este dispositivo",
+	"vs.dictateNote": "El dictado del dispositivo puede enviar tu voz a los servidores de su fabricante.",
+	"vs.noDictation": "Este navegador no tiene dictado propio; mientras tanto, escribe.",
 	"phone.event.finished": "Termina de trabajar",
 	"phone.event.finished.hint": "pasa de trabajando a lista",
 	"phone.event.finished.verb": "termina de trabajar",
@@ -3570,6 +3594,772 @@ function Confirm({ title, body, action, danger, typed, onYes, onClose }) {
 	});
 }
 //#endregion
+//#region web/ui/speakable.js
+var EN = {
+	code: "Code omitted.",
+	timestamp: "a timestamp",
+	id: "an id",
+	hex: "a hex id",
+	escape: "an escape code",
+	commit: "a commit",
+	link: "{label} link",
+	theLink: "the link",
+	line: "line",
+	goesOn: "… and it goes on."
+};
+var SPEAK_MAX = 2e4;
+var IDENT_EDGE = "(^|[^\\w./~@+-])";
+function sayIdentifiers(t, w) {
+	const pathSpoken = (p, line) => {
+		const base = p.replace(/\/+$/, "").split("/").pop() || p;
+		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
+	};
+	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
+	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
+	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
+	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
+	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
+	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
+	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
+	t = t.replace(/ \/ /g, ", ");
+	return t;
+}
+function speakable(text, w = EN) {
+	let t = String(text || "");
+	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
+	t = t.replace(/`([^`]*)`/g, "$1");
+	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
+	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
+	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
+	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
+	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
+	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
+	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
+	t = t.replace(/~~[^~\n]+~~/g, "");
+	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
+	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
+	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
+	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
+	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
+	t = t.replace(/__([^_\n]+)__/g, "$1");
+	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
+	t = sayIdentifiers(t, w);
+	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
+	t = t.replace(/\s+/g, " ").trim();
+	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
+}
+var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
+function sentencesOf(t) {
+	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
+	let from = 0, m;
+	while (m = re.exec(t)) {
+		if (!m[0].length) {
+			re.lastIndex++;
+			continue;
+		}
+		const end = m.index + m[0].length;
+		const piece = t.slice(from, m.index + m[0].length - m[1].length);
+		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
+		out.push(piece.trim());
+		from = end;
+	}
+	if (from < t.length) out.push(t.slice(from).trim());
+	return out.filter(Boolean);
+}
+function cutLong(x, max) {
+	const out = [];
+	while (x.length > max) {
+		let at = -1;
+		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
+			let m, best = -1;
+			mark.lastIndex = 0;
+			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
+			if (best >= max / 4) {
+				at = best;
+				break;
+			}
+		}
+		if (at < 0) {
+			const sp = x.indexOf(" ", max);
+			if (sp < 0) break;
+			at = sp;
+		}
+		out.push(x.slice(0, at).trim());
+		x = x.slice(at).trim();
+	}
+	if (x) out.push(x);
+	return out;
+}
+function speechChunks(text, max = 600) {
+	const t = String(text || "").replace(/\s+/g, " ").trim();
+	if (!t) return [];
+	const out = [];
+	let cur = "";
+	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
+		if (cur && cur.length + 1 + piece.length > max) {
+			out.push(cur);
+			cur = "";
+		}
+		cur = cur ? `${cur} ${piece}` : piece;
+	}
+	if (cur) out.push(cur);
+	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
+}
+//#endregion
+//#region web/ui/voice.js
+var B = {};
+function voiceBackend(adapter) {
+	B = adapter || {};
+	status = null;
+}
+var status = null;
+var statusAt = 0;
+var NONE = {
+	hear: {
+		ready: false,
+		why: null
+	},
+	speak: {
+		ready: false,
+		why: null
+	}
+};
+var RECHECK_MS = 3e4;
+async function voiceStatus(force = false) {
+	const whole = !!(status?.hear?.ready && status?.speak?.ready);
+	if (status && !force && (whole || Date.now() - statusAt < RECHECK_MS)) return status;
+	let got = null;
+	try {
+		got = B.voice ? await B.voice() : null;
+	} catch {
+		got = null;
+	}
+	if (got) {
+		status = got;
+		statusAt = Date.now();
+		return got;
+	}
+	return status || NONE;
+}
+var onMissing = null;
+function whenVoiceMissing(f) {
+	onMissing = f;
+}
+var voiceMissing = (vs, opts) => {
+	if (!onMissing) return false;
+	onMissing(vs, opts);
+	return true;
+};
+var dictation = false;
+var chooseDictation = () => {
+	dictation = true;
+};
+var dictationChosen = () => dictation;
+function wav16k(chunks, rate) {
+	let n = 0;
+	for (const c of chunks) n += c.length;
+	const all = new Float32Array(n);
+	let o = 0;
+	for (const c of chunks) {
+		all.set(c, o);
+		o += c.length;
+	}
+	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
+	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+	const str = (off, s) => {
+		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
+	};
+	str(0, "RIFF");
+	v.setUint32(4, 36 + len * 2, true);
+	str(8, "WAVE");
+	str(12, "fmt ");
+	v.setUint32(16, 16, true);
+	v.setUint16(20, 1, true);
+	v.setUint16(22, 1, true);
+	v.setUint32(24, 16e3, true);
+	v.setUint32(28, 32e3, true);
+	v.setUint16(32, 2, true);
+	v.setUint16(34, 16, true);
+	str(36, "data");
+	v.setUint32(40, len * 2, true);
+	for (let i = 0; i < len; i++) {
+		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
+		let sum = 0;
+		for (let j = a; j < b; j++) sum += all[j];
+		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+	}
+	return new Blob([buf], { type: "audio/wav" });
+}
+var PAUSES = worded({
+	normal: { ms: 2500 },
+	larga: { ms: 4500 },
+	manual: { ms: 0 }
+}, "pause");
+var AUDIO = {
+	channelCount: 1,
+	echoCancellation: true,
+	noiseSuppression: true,
+	autoGainControl: true
+};
+var transcribe = async (blob) => {
+	if (!B.hear) throw new Error(t("voice.noHear"));
+	try {
+		const j = await B.hear(blob);
+		return String(j?.text || "").trim();
+	} catch (e) {
+		if (e?.needs === "voice") {
+			status = null;
+			if (voiceMissing({
+				hear: {
+					ready: false,
+					why: e.message,
+					fix: e.fix || null
+				},
+				speak: null
+			})) e.shown = true;
+		}
+		throw e;
+	}
+};
+var failed = (e) => e?.shown ? "" : t("voice.transcribeFailed", { why: e.message });
+var rmsOf = (d) => {
+	let s = 0;
+	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+	return Math.sqrt(s / d.length);
+};
+var micDenied = () => t("voice.micDenied");
+var VAD_DIR = "/vad-0.0.31/";
+var vad = null;
+var vadLoad = null;
+var vadBroken = false;
+var turn = null;
+function warmVad() {
+	if (vad || vadBroken) return Promise.resolve(vad);
+	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
+		model: "v5",
+		baseAssetPath: VAD_DIR,
+		onnxWASMBasePath: VAD_DIR,
+		startOnLoad: false,
+		ortConfig: (ort) => {
+			ort.env.logLevel = "error";
+			ort.env.wasm.numThreads = 1;
+		},
+		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
+		positiveSpeechThreshold: .5,
+		negativeSpeechThreshold: .35,
+		preSpeechPadMs: 600,
+		minSpeechMs: 250,
+		redemptionMs: PAUSES.normal.ms,
+		submitUserSpeechOnPause: true,
+		onFrameProcessed: (p, f) => turn?.frame(p, f),
+		onSpeechStart: () => turn?.start(),
+		onSpeechEnd: (a) => turn?.end(a),
+		onVADMisfire: () => turn?.misfire()
+	})).then((v) => vad = v, (e) => {
+		vadBroken = true;
+		console.warn("VAD did not load, using the loudness meter:", e);
+		return null;
+	}).finally(() => {
+		vadLoad = null;
+	});
+	return vadLoad;
+}
+function listenLocal(opts) {
+	let h = null, cancelled = false;
+	const pending = {
+		stop: () => {
+			if (h) h.stop();
+			else pending.stopAsked = true;
+		},
+		cancel: () => {
+			cancelled = true;
+			h?.cancel();
+		}
+	};
+	warmVad().then((v) => {
+		if (cancelled) return;
+		h = v ? listenVad(v, opts) : listenLoudness(opts);
+		if (pending.stopAsked) h.stop();
+	});
+	return pending;
+}
+function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let done = false, spoke = false;
+	const t0 = performance.now();
+	const end = async (audio) => {
+		if (done) return;
+		done = true;
+		turn = null;
+		clearInterval(watch);
+		try {
+			await v.pause();
+		} catch {}
+		onSpeaking?.(false);
+		if (!audio || audio.length < 4e3) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k([audio], 16e3)));
+		} catch (e) {
+			onError?.(failed(e));
+			onText?.("");
+		}
+	};
+	let got = null;
+	const me = turn = {
+		frame: (p, f) => {
+			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
+		},
+		start: () => {
+			spoke = true;
+			onSpeaking?.(true);
+		},
+		misfire: () => onSpeaking?.(false),
+		end: (audio) => {
+			got = audio;
+			if (pauseMs) end(audio);
+		}
+	};
+	v.setOptions({ redemptionMs: pauseMs || 6e5 });
+	const watch = setInterval(() => {
+		const t = performance.now() - t0;
+		if (!spoke && t > 15e3) cancel();
+		else if (t > maxMs) stop();
+	}, 500);
+	const stop = async () => {
+		if (done) return;
+		if (turn === me) try {
+			await v.pause();
+		} catch {}
+		end(got);
+	};
+	const cancel = () => {
+		got = null;
+		spoke = false;
+		end(null);
+	};
+	v.start().then(() => {
+		if (!done) onState?.("listening");
+	}, () => {
+		onError?.(micDenied());
+		cancel();
+	});
+	return {
+		stop,
+		cancel
+	};
+}
+function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
+	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
+	const chunks = [];
+	const t0 = performance.now();
+	const finish = async (send) => {
+		if (done) return;
+		done = true;
+		try {
+			node?.disconnect();
+			src?.disconnect();
+		} catch {}
+		try {
+			stream?.getTracks().forEach((x) => x.stop());
+		} catch {}
+		const rate = ctx?.sampleRate || 48e3;
+		try {
+			await ctx?.close();
+		} catch {}
+		onSpeaking?.(false);
+		if (!send || !spoke || !chunks.length) {
+			onText?.("");
+			return;
+		}
+		onState?.("hearing");
+		try {
+			onText?.(await transcribe(wav16k(chunks, rate)));
+		} catch (e) {
+			onError?.(failed(e));
+			onText?.("");
+		}
+	};
+	(async () => {
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
+		} catch {
+			done = true;
+			onError?.(micDenied());
+			onText?.("");
+			return;
+		}
+		ctx = new AudioContext();
+		src = ctx.createMediaStreamSource(stream);
+		node = ctx.createScriptProcessor(4096, 1, 1);
+		let floor = .008;
+		node.onaudioprocess = (e) => {
+			if (done) return;
+			const d = e.inputBuffer.getChannelData(0);
+			chunks.push(new Float32Array(d));
+			const rms = rmsOf(d);
+			const now = performance.now();
+			const loud = rms > Math.max(.015, floor * 2.5);
+			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
+			onLevel?.(Math.min(1, rms * 12));
+			if (loud) {
+				if (!spoke) onSpeaking?.(true);
+				spoke = true;
+				quietSince = 0;
+			} else if (spoke && !quietSince) quietSince = now;
+			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
+			else if (now - t0 > maxMs) finish(true);
+			else if (!spoke && now - t0 > 15e3) finish(false);
+		};
+		src.connect(node);
+		node.connect(ctx.destination);
+		onState?.("listening");
+	})();
+	return {
+		stop: () => finish(true),
+		cancel: () => finish(false)
+	};
+}
+var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+var browserCanHear = !!Recognition;
+var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
+function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
+	const r = new Recognition();
+	r.lang = speech;
+	r.interimResults = true;
+	r.continuous = true;
+	let final = "", quiet = null;
+	const hush = () => {
+		clearTimeout(quiet);
+		if (pauseMs) quiet = setTimeout(() => {
+			try {
+				r.stop();
+			} catch {}
+		}, pauseMs);
+	};
+	r.onresult = (e) => {
+		let live = "";
+		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
+		else live += e.results[i][0].transcript;
+		onInterim?.((final + " " + live).trim());
+		hush();
+	};
+	r.onerror = (e) => {
+		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
+		else if (e.error === "network") onError?.(t("voice.needsNet"));
+		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
+	};
+	r.onend = () => {
+		clearTimeout(quiet);
+		onText?.(final.trim());
+	};
+	try {
+		r.start();
+		onState?.("listening");
+	} catch {
+		onText?.("");
+	}
+	return {
+		stop: () => {
+			try {
+				r.stop();
+			} catch {}
+		},
+		cancel: () => {
+			try {
+				r.abort();
+			} catch {}
+		}
+	};
+}
+var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
+function savedRate() {
+	let r = NaN;
+	try {
+		r = Number(localStorage.getItem("gf.rate"));
+	} catch {}
+	return Number.isFinite(r) && r >= .5 && r <= 2 ? r : 1.05;
+}
+var playing = null;
+var unlockOnly = false;
+function stopSpeaking() {
+	const s = typeof window !== "undefined" ? window.speechSynthesis : null;
+	if (s && !unlockOnly && (s.speaking || s.pending)) s.cancel();
+	if (playing) {
+		const j = playing;
+		playing = null;
+		j.cancelled = true;
+		try {
+			j.audio?.pause();
+		} catch {}
+		j.stop?.();
+	}
+}
+var player = null;
+var silent = "";
+function unlockAudio() {
+	if (typeof Audio === "undefined") return;
+	try {
+		player ||= new Audio();
+		if (playing?.audio === player) return;
+		silent ||= URL.createObjectURL(wav16k([/* @__PURE__ */ new Float32Array(800)], 16e3));
+		player.src = silent;
+		const p = player.play();
+		if (p && p.catch) p.catch(() => {});
+	} catch {}
+}
+function unlockSpeech() {
+	try {
+		const u = new SpeechSynthesisUtterance(" ");
+		u.volume = 0;
+		u.onend = u.onerror = () => {
+			unlockOnly = false;
+		};
+		window.speechSynthesis?.speak(u);
+		unlockOnly = true;
+	} catch {}
+	unlockAudio();
+}
+var STALL_MS = 15e3;
+function playOnce(url, job) {
+	return new Promise((resolve) => {
+		const a = player ||= new Audio();
+		let started = false, settled = false, timer = null;
+		const end = (how) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			job.stop = null;
+			a.onended = a.onerror = a.onplaying = null;
+			resolve(how);
+		};
+		const began = () => {
+			started = true;
+			clearTimeout(timer);
+		};
+		job.audio = a;
+		job.stop = () => end("cancelled");
+		a.onplaying = began;
+		a.onended = () => end("ended");
+		a.onerror = () => end(started ? "ended" : "refused");
+		timer = setTimeout(() => {
+			if (!started) end("refused");
+		}, STALL_MS);
+		a.src = url;
+		let p;
+		try {
+			p = a.play();
+		} catch {
+			end("refused");
+			return;
+		}
+		if (p && p.then) p.then(began, () => end("refused"));
+	});
+}
+function utter(text, onEnd) {
+	const s = window.speechSynthesis;
+	if (!s) {
+		onEnd?.();
+		return;
+	}
+	unlockOnly = false;
+	const u = new SpeechSynthesisUtterance(text);
+	const all = s.getVoices();
+	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
+	if (v) u.voice = v;
+	u.lang = v?.lang || speechLang();
+	u.rate = savedRate();
+	u.onend = () => onEnd?.();
+	u.onerror = () => onEnd?.();
+	s.speak(u);
+}
+async function speakBrowser(chunks, job) {
+	for (const c of chunks) {
+		if (job.cancelled) return;
+		await new Promise((resolve) => utter(c, resolve));
+	}
+}
+function playSample(url, onEnd) {
+	stopSpeaking();
+	const job = {
+		cancelled: false,
+		audio: new Audio(url)
+	};
+	playing = job;
+	const done = () => {
+		if (!job.cancelled) {
+			playing = null;
+			onEnd?.();
+		}
+	};
+	job.audio.onended = done;
+	job.audio.onerror = done;
+	job.audio.play().catch(done);
+}
+var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
+async function speak(md, onEnd, voice = "") {
+	stopSpeaking();
+	const chunks = speechChunks(speakable(md, sayWords()));
+	if (!chunks.length) {
+		onEnd?.();
+		return;
+	}
+	const job = {
+		cancelled: false,
+		audio: null
+	};
+	playing = job;
+	const st = await voiceStatus();
+	if (job.cancelled) return;
+	let i = 0, rest = [];
+	if (st.speak?.ready) try {
+		let next = B.speak(chunks[0], voice);
+		chunk: for (; i < chunks.length; i++) {
+			const r = await next;
+			if (job.cancelled) return;
+			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
+			next?.catch(() => {});
+			for (let k = 0; k < r.sentences.length; k++) {
+				if (job.cancelled) return;
+				const url = await B.speakAudio(r.sentences[k].id);
+				if (job.cancelled) return;
+				if (await playOnce(url, job) === "refused") {
+					if (job.cancelled) return;
+					rest = r.sentences.slice(k).map((x) => x.text).filter(Boolean);
+					if (!rest.length) rest = [chunks[i]];
+					i++;
+					break chunk;
+				}
+			}
+		}
+	} catch {}
+	if (job.cancelled) return;
+	const left = [...rest, ...chunks.slice(i)];
+	if (left.length) await speakBrowser(left, job);
+	if (!job.cancelled) {
+		playing = null;
+		onEnd?.();
+	}
+}
+//#endregion
+//#region web/ui/voicesetup.jsx
+var cur$3 = null;
+var subs$4 = /* @__PURE__ */ new Set();
+var show = (v) => {
+	cur$3 = v;
+	for (const f of subs$4) f();
+};
+function explainVoice(vs, { onDictate = null, onClose = null } = {}) {
+	show({
+		vs: vs || {},
+		onDictate,
+		onClose
+	});
+}
+whenVoiceMissing((vs, opts) => explainVoice(vs, opts));
+var reason = (why) => String(why || "").replace(/\s+—\s+run:.*$/s, "").trim();
+function Command({ text }) {
+	const [copied, setCopied] = d(false);
+	const can = typeof navigator !== "undefined" && !!navigator.clipboard?.writeText;
+	const copy = async () => {
+		try {
+			await navigator.clipboard.writeText(text);
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1600);
+		} catch {}
+	};
+	return /* @__PURE__ */ u("div", {
+		class: "vs-cmd",
+		children: [/* @__PURE__ */ u("code", { children: text.split(" ").map((w, i) => /* @__PURE__ */ u(S$1, { children: [i ? " " : "", /* @__PURE__ */ u("span", {
+			class: "vs-word",
+			children: w
+		})] })) }), can ? /* @__PURE__ */ u(Btn, {
+			kind: "ghost sm",
+			onClick: copy,
+			children: copied ? t("vs.copied") : t("vs.copy")
+		}) : null]
+	});
+}
+function VoiceSetup() {
+	const [, n] = d(0);
+	h(() => {
+		const f = () => n((x) => x + 1);
+		subs$4.add(f);
+		return () => subs$4.delete(f);
+	}, []);
+	if (!cur$3) return null;
+	const { vs, onDictate, onClose } = cur$3;
+	const machine = vs.machine || t("vs.thisMachine");
+	const hear = vs.hear || {}, speak = vs.speak || null;
+	const close = () => {
+		const f = cur$3?.onClose;
+		show(null);
+		f?.();
+	};
+	const dictate = () => {
+		const f = cur$3?.onDictate;
+		show(null);
+		f?.();
+	};
+	const canDictate = !!onDictate && browserCanHear;
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		title: t("vs.title", { machine }),
+		onClose: close,
+		children: /* @__PURE__ */ u("div", {
+			class: "modal-body voice-setup",
+			children: [
+				/* @__PURE__ */ u("p", { children: t("vs.lead", { machine }) }),
+				/* @__PURE__ */ u("section", {
+					class: "vs-half",
+					children: [
+						/* @__PURE__ */ u("h3", { children: t("vs.hearing") }),
+						reason(hear.why) ? /* @__PURE__ */ u("p", {
+							class: "muted small vs-why",
+							children: reason(hear.why)
+						}) : null,
+						hear.fix ? /* @__PURE__ */ u(S$1, { children: [/* @__PURE__ */ u("p", {
+							class: "small",
+							children: t("vs.runOn", { machine })
+						}), /* @__PURE__ */ u(Command, { text: hear.fix })] }) : null
+					]
+				}),
+				speak && !speak.ready ? /* @__PURE__ */ u("section", {
+					class: "vs-half",
+					children: [
+						/* @__PURE__ */ u("h3", { children: t("vs.speaking") }),
+						/* @__PURE__ */ u("p", {
+							class: "muted small",
+							children: t("vs.speakFallback")
+						}),
+						speak.fix ? /* @__PURE__ */ u(Command, { text: speak.fix }) : null
+					]
+				}) : null,
+				/* @__PURE__ */ u("p", {
+					class: "muted small",
+					children: canDictate ? t("vs.dictateNote") : browserCanHear ? "" : t("vs.noDictation")
+				}),
+				/* @__PURE__ */ u("footer", { children: [/* @__PURE__ */ u(Btn, {
+					kind: "ghost",
+					onClick: close,
+					children: t("common.close")
+				}), canDictate ? /* @__PURE__ */ u(Btn, {
+					kind: "primary",
+					onClick: dictate,
+					children: t("vs.dictate")
+				}) : null] })
+			]
+		})
+	});
+}
+//#endregion
 //#region web/ui/skeleton.jsx
 var PIECES = {
 	cards: () => /* @__PURE__ */ u("div", {
@@ -4339,6 +5129,7 @@ function Frame({ name, sub, title = name, route, projects, hosts, nav, below, fo
 				settings,
 				openMenu: open
 			}),
+			/* @__PURE__ */ u(VoiceSetup, {}),
 			/* @__PURE__ */ u(Toasts, {})
 		]
 	});
@@ -5980,548 +6771,6 @@ function useTranscript(fleet, project, name, live) {
 	};
 }
 //#endregion
-//#region web/ui/speakable.js
-var EN = {
-	code: "Code omitted.",
-	timestamp: "a timestamp",
-	id: "an id",
-	hex: "a hex id",
-	escape: "an escape code",
-	commit: "a commit",
-	link: "{label} link",
-	theLink: "the link",
-	line: "line",
-	goesOn: "… and it goes on."
-};
-var SPEAK_MAX = 2e4;
-var IDENT_EDGE = "(^|[^\\w./~@+-])";
-function sayIdentifiers(t, w) {
-	const pathSpoken = (p, line) => {
-		const base = p.replace(/\/+$/, "").split("/").pop() || p;
-		return line ? `${base} ${w.line} ${line.slice(1)}` : base;
-	};
-	t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, w.timestamp);
-	t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, w.id);
-	t = t.replace(/\b0x[0-9a-f]+\b/gi, w.hex);
-	t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, w.escape);
-	t = t.replace(new RegExp(IDENT_EDGE + "((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?", "g"), (m, pre, p, line) => pre + pathSpoken(p, line));
-	t = t.replace(new RegExp(IDENT_EDGE + "([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?", "g"), (m, pre, f, n) => `${pre}${f} ${w.line} ${n}`);
-	t = t.replace(/* @__PURE__ */ new RegExp("(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])", "g"), (m, pre, h) => h.length >= 12 || /\d/.test(h) && /[a-f]/.test(h) ? pre + w.commit : m);
-	t = t.replace(/ \/ /g, ", ");
-	return t;
-}
-function speakable(text, w = EN) {
-	let t = String(text || "");
-	t = t.replace(/```[\s\S]*?```/g, `\n${w.code}\n`);
-	t = t.replace(/`([^`]*)`/g, "$1");
-	t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, "");
-	t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, (m, label) => w.link.replace("{label}", label));
-	t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, "$1");
-	t = t.replace(/<https?:\/\/[^>\s]*>/g, ` ${w.theLink} `);
-	t = t.replace(/https?:\/\/\S+/g, ` ${w.theLink} `);
-	t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, " ");
-	t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, "");
-	t = t.replace(/~~[^~\n]+~~/g, "");
-	t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, "");
-	t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split("|").map((c) => c.trim()).filter(Boolean).join(", "));
-	t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, "");
-	t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "");
-	t = t.replace(/^\s{0,3}[-*+]\s+/gm, "");
-	t = t.replace(/^\[[ xX]\][ \t]+/gm, "");
-	t = t.replace(/__([^_\n]+)__/g, "$1");
-	t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, "$1$2$3");
-	t = sayIdentifiers(t, w);
-	t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, "$1. ");
-	t = t.replace(/\s+/g, " ").trim();
-	return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, "") + w.goesOn : t;
-}
-var CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
-function sentencesOf(t) {
-	const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
-	let from = 0, m;
-	while (m = re.exec(t)) {
-		if (!m[0].length) {
-			re.lastIndex++;
-			continue;
-		}
-		const end = m.index + m[0].length;
-		const piece = t.slice(from, m.index + m[0].length - m[1].length);
-		if (CHUNK_ABBREV.test(piece) && end < t.length) continue;
-		out.push(piece.trim());
-		from = end;
-	}
-	if (from < t.length) out.push(t.slice(from).trim());
-	return out.filter(Boolean);
-}
-function cutLong(x, max) {
-	const out = [];
-	while (x.length > max) {
-		let at = -1;
-		for (const mark of [/[,;:—–]\s/g, /\s/g]) {
-			let m, best = -1;
-			mark.lastIndex = 0;
-			while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
-			if (best >= max / 4) {
-				at = best;
-				break;
-			}
-		}
-		if (at < 0) {
-			const sp = x.indexOf(" ", max);
-			if (sp < 0) break;
-			at = sp;
-		}
-		out.push(x.slice(0, at).trim());
-		x = x.slice(at).trim();
-	}
-	if (x) out.push(x);
-	return out;
-}
-function speechChunks(text, max = 600) {
-	const t = String(text || "").replace(/\s+/g, " ").trim();
-	if (!t) return [];
-	const out = [];
-	let cur = "";
-	for (const sen of sentencesOf(t)) for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
-		if (cur && cur.length + 1 + piece.length > max) {
-			out.push(cur);
-			cur = "";
-		}
-		cur = cur ? `${cur} ${piece}` : piece;
-	}
-	if (cur) out.push(cur);
-	return out.filter((x) => /[\p{L}\p{N}]/u.test(x));
-}
-//#endregion
-//#region web/ui/voice.js
-var B = {};
-function voiceBackend(adapter) {
-	B = adapter || {};
-	status = null;
-}
-var status = null;
-async function voiceStatus(force = false) {
-	if (status && !force) return status;
-	try {
-		status = B.voice ? await B.voice() : null;
-	} catch {
-		status = null;
-	}
-	status ||= {
-		hear: { ready: false },
-		speak: { ready: false }
-	};
-	return status;
-}
-function wav16k(chunks, rate) {
-	let n = 0;
-	for (const c of chunks) n += c.length;
-	const all = new Float32Array(n);
-	let o = 0;
-	for (const c of chunks) {
-		all.set(c, o);
-		o += c.length;
-	}
-	const ratio = rate / 16e3, len = Math.floor(all.length / ratio);
-	const buf = /* @__PURE__ */ new ArrayBuffer(44 + len * 2), v = new DataView(buf);
-	const str = (off, s) => {
-		for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
-	};
-	str(0, "RIFF");
-	v.setUint32(4, 36 + len * 2, true);
-	str(8, "WAVE");
-	str(12, "fmt ");
-	v.setUint32(16, 16, true);
-	v.setUint16(20, 1, true);
-	v.setUint16(22, 1, true);
-	v.setUint32(24, 16e3, true);
-	v.setUint32(28, 32e3, true);
-	v.setUint16(32, 2, true);
-	v.setUint16(34, 16, true);
-	str(36, "data");
-	v.setUint32(40, len * 2, true);
-	for (let i = 0; i < len; i++) {
-		const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
-		let sum = 0;
-		for (let j = a; j < b; j++) sum += all[j];
-		const s = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
-		v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
-	}
-	return new Blob([buf], { type: "audio/wav" });
-}
-var PAUSES = worded({
-	normal: { ms: 2500 },
-	larga: { ms: 4500 },
-	manual: { ms: 0 }
-}, "pause");
-var AUDIO = {
-	channelCount: 1,
-	echoCancellation: true,
-	noiseSuppression: true,
-	autoGainControl: true
-};
-var transcribe = async (blob) => {
-	if (!B.hear) throw new Error(t("voice.noHear"));
-	const j = await B.hear(blob);
-	return String(j?.text || "").trim();
-};
-var rmsOf = (d) => {
-	let s = 0;
-	for (let i = 0; i < d.length; i++) s += d[i] * d[i];
-	return Math.sqrt(s / d.length);
-};
-var micDenied = () => t("voice.micDenied");
-var VAD_DIR = "/vad-0.0.31/";
-var vad = null;
-var vadLoad = null;
-var vadBroken = false;
-var turn = null;
-function warmVad() {
-	if (vad || vadBroken) return Promise.resolve(vad);
-	vadLoad ||= (B.vad ? B.vad() : Promise.reject(/* @__PURE__ */ new Error("this app ships no speech detector"))).then(({ MicVAD }) => MicVAD.new({
-		model: "v5",
-		baseAssetPath: VAD_DIR,
-		onnxWASMBasePath: VAD_DIR,
-		startOnLoad: false,
-		ortConfig: (ort) => {
-			ort.env.logLevel = "error";
-			ort.env.wasm.numThreads = 1;
-		},
-		getStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		resumeStream: () => navigator.mediaDevices.getUserMedia({ audio: AUDIO }),
-		positiveSpeechThreshold: .5,
-		negativeSpeechThreshold: .35,
-		preSpeechPadMs: 600,
-		minSpeechMs: 250,
-		redemptionMs: PAUSES.normal.ms,
-		submitUserSpeechOnPause: true,
-		onFrameProcessed: (p, f) => turn?.frame(p, f),
-		onSpeechStart: () => turn?.start(),
-		onSpeechEnd: (a) => turn?.end(a),
-		onVADMisfire: () => turn?.misfire()
-	})).then((v) => vad = v, (e) => {
-		vadBroken = true;
-		console.warn("VAD did not load, using the loudness meter:", e);
-		return null;
-	}).finally(() => {
-		vadLoad = null;
-	});
-	return vadLoad;
-}
-function listenLocal(opts) {
-	let h = null, cancelled = false;
-	const pending = {
-		stop: () => {
-			if (h) h.stop();
-			else pending.stopAsked = true;
-		},
-		cancel: () => {
-			cancelled = true;
-			h?.cancel();
-		}
-	};
-	warmVad().then((v) => {
-		if (cancelled) return;
-		h = v ? listenVad(v, opts) : listenLoudness(opts);
-		if (pending.stopAsked) h.stop();
-	});
-	return pending;
-}
-function listenVad(v, { onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let done = false, spoke = false;
-	const t0 = performance.now();
-	const end = async (audio) => {
-		if (done) return;
-		done = true;
-		turn = null;
-		clearInterval(watch);
-		try {
-			await v.pause();
-		} catch {}
-		onSpeaking?.(false);
-		if (!audio || audio.length < 4e3) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k([audio], 16e3)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	let got = null;
-	const me = turn = {
-		frame: (p, f) => {
-			if (turn === me) onLevel?.(Math.min(1, rmsOf(f) * 12));
-		},
-		start: () => {
-			spoke = true;
-			onSpeaking?.(true);
-		},
-		misfire: () => onSpeaking?.(false),
-		end: (audio) => {
-			got = audio;
-			if (pauseMs) end(audio);
-		}
-	};
-	v.setOptions({ redemptionMs: pauseMs || 6e5 });
-	const watch = setInterval(() => {
-		const t = performance.now() - t0;
-		if (!spoke && t > 15e3) cancel();
-		else if (t > maxMs) stop();
-	}, 500);
-	const stop = async () => {
-		if (done) return;
-		if (turn === me) try {
-			await v.pause();
-		} catch {}
-		end(got);
-	};
-	const cancel = () => {
-		got = null;
-		spoke = false;
-		end(null);
-	};
-	v.start().then(() => {
-		if (!done) onState?.("listening");
-	}, () => {
-		onError?.(micDenied());
-		cancel();
-	});
-	return {
-		stop,
-		cancel
-	};
-}
-function listenLoudness({ onLevel, onState, onSpeaking, onText, onError, pauseMs = PAUSES.normal.ms, maxMs = 18e4 }) {
-	let stream, ctx, node, src, done = false, spoke = false, quietSince = 0;
-	const chunks = [];
-	const t0 = performance.now();
-	const finish = async (send) => {
-		if (done) return;
-		done = true;
-		try {
-			node?.disconnect();
-			src?.disconnect();
-		} catch {}
-		try {
-			stream?.getTracks().forEach((x) => x.stop());
-		} catch {}
-		const rate = ctx?.sampleRate || 48e3;
-		try {
-			await ctx?.close();
-		} catch {}
-		onSpeaking?.(false);
-		if (!send || !spoke || !chunks.length) {
-			onText?.("");
-			return;
-		}
-		onState?.("hearing");
-		try {
-			onText?.(await transcribe(wav16k(chunks, rate)));
-		} catch (e) {
-			onError?.(t("voice.transcribeFailed", { why: e.message }));
-			onText?.("");
-		}
-	};
-	(async () => {
-		try {
-			stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO });
-		} catch {
-			done = true;
-			onError?.(micDenied());
-			onText?.("");
-			return;
-		}
-		ctx = new AudioContext();
-		src = ctx.createMediaStreamSource(stream);
-		node = ctx.createScriptProcessor(4096, 1, 1);
-		let floor = .008;
-		node.onaudioprocess = (e) => {
-			if (done) return;
-			const d = e.inputBuffer.getChannelData(0);
-			chunks.push(new Float32Array(d));
-			const rms = rmsOf(d);
-			const now = performance.now();
-			const loud = rms > Math.max(.015, floor * 2.5);
-			if (!loud) floor = Math.min(.03, floor * .95 + rms * .05);
-			onLevel?.(Math.min(1, rms * 12));
-			if (loud) {
-				if (!spoke) onSpeaking?.(true);
-				spoke = true;
-				quietSince = 0;
-			} else if (spoke && !quietSince) quietSince = now;
-			if (pauseMs && spoke && quietSince && now - quietSince > pauseMs) finish(true);
-			else if (now - t0 > maxMs) finish(true);
-			else if (!spoke && now - t0 > 15e3) finish(false);
-		};
-		src.connect(node);
-		node.connect(ctx.destination);
-		onState?.("listening");
-	})();
-	return {
-		stop: () => finish(true),
-		cancel: () => finish(false)
-	};
-}
-var Recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-var browserCanHear = !!Recognition;
-var speechLang = () => lang() === "es" ? "es-ES" : "en-US";
-function listenBrowser({ onInterim, onState, onText, onError, pauseMs = PAUSES.normal.ms, lang: speech = speechLang() }) {
-	const r = new Recognition();
-	r.lang = speech;
-	r.interimResults = true;
-	r.continuous = true;
-	let final = "", quiet = null;
-	const hush = () => {
-		clearTimeout(quiet);
-		if (pauseMs) quiet = setTimeout(() => {
-			try {
-				r.stop();
-			} catch {}
-		}, pauseMs);
-	};
-	r.onresult = (e) => {
-		let live = "";
-		for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) final += e.results[i][0].transcript;
-		else live += e.results[i][0].transcript;
-		onInterim?.((final + " " + live).trim());
-		hush();
-	};
-	r.onerror = (e) => {
-		if (e.error === "not-allowed") onError?.(t("voice.micDeniedShort"));
-		else if (e.error === "network") onError?.(t("voice.needsNet"));
-		else if (e.error !== "no-speech" && e.error !== "aborted") onError?.(t("voice.dictation", { why: e.error }));
-	};
-	r.onend = () => {
-		clearTimeout(quiet);
-		onText?.(final.trim());
-	};
-	try {
-		r.start();
-		onState?.("listening");
-	} catch {
-		onText?.("");
-	}
-	return {
-		stop: () => {
-			try {
-				r.stop();
-			} catch {}
-		},
-		cancel: () => {
-			try {
-				r.abort();
-			} catch {}
-		}
-	};
-}
-var plainText = (md) => String(md || "").replace(/```[\s\S]*?```/g, ` ${t("voice.code")} `).replace(/`([^`]+)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[*_#>|]/g, " ").replace(/\s+/g, " ").trim();
-function savedRate() {
-	let r = NaN;
-	try {
-		r = Number(localStorage.getItem("gf.rate"));
-	} catch {}
-	return Number.isFinite(r) && r >= .5 && r <= 2 ? r : 1.05;
-}
-var playing = null;
-function stopSpeaking() {
-	window.speechSynthesis?.cancel();
-	if (playing) {
-		playing.cancelled = true;
-		try {
-			playing.audio?.pause();
-		} catch {}
-		playing = null;
-	}
-}
-function utter(text, onEnd) {
-	const s = window.speechSynthesis;
-	if (!s) {
-		onEnd?.();
-		return;
-	}
-	const u = new SpeechSynthesisUtterance(text);
-	const all = s.getVoices();
-	const v = lang() === "es" ? all.find((x) => /^es(-|_)(419|MX|US|EC|CO|AR)/i.test(x.lang)) || all.find((x) => /^es/i.test(x.lang)) : all.find((x) => /^en(-|_)(US|GB)/i.test(x.lang)) || all.find((x) => /^en/i.test(x.lang));
-	if (v) u.voice = v;
-	u.lang = v?.lang || speechLang();
-	u.rate = savedRate();
-	u.onend = () => onEnd?.();
-	u.onerror = () => onEnd?.();
-	s.speak(u);
-}
-async function speakBrowser(chunks, job) {
-	for (const c of chunks) {
-		if (job.cancelled) return;
-		await new Promise((resolve) => utter(c, resolve));
-	}
-}
-function playSample(url, onEnd) {
-	stopSpeaking();
-	const job = {
-		cancelled: false,
-		audio: new Audio(url)
-	};
-	playing = job;
-	const done = () => {
-		if (!job.cancelled) {
-			playing = null;
-			onEnd?.();
-		}
-	};
-	job.audio.onended = done;
-	job.audio.onerror = done;
-	job.audio.play().catch(done);
-}
-var sayWords = () => Object.fromEntries(Object.keys(EN).map((k) => [k, t(`say.${k}`)]));
-async function speak(md, onEnd, voice = "") {
-	stopSpeaking();
-	const chunks = speechChunks(speakable(md, sayWords()));
-	if (!chunks.length) {
-		onEnd?.();
-		return;
-	}
-	const job = {
-		cancelled: false,
-		audio: null
-	};
-	playing = job;
-	const st = await voiceStatus();
-	if (job.cancelled) return;
-	let i = 0;
-	if (st.speak?.ready) try {
-		let next = B.speak(chunks[0], voice);
-		for (; i < chunks.length; i++) {
-			const r = await next;
-			if (job.cancelled) return;
-			next = i + 1 < chunks.length ? B.speak(chunks[i + 1], voice) : null;
-			next?.catch(() => {});
-			for (const s of r.sentences) {
-				if (job.cancelled) return;
-				const url = await B.speakAudio(s.id);
-				if (job.cancelled) return;
-				await new Promise((resolve) => {
-					const a = new Audio(url);
-					job.audio = a;
-					a.onended = resolve;
-					a.onerror = resolve;
-					a.play().catch(resolve);
-				});
-			}
-		}
-	} catch {}
-	if (i < chunks.length) await speakBrowser(chunks.slice(i), job);
-	if (!job.cancelled) {
-		playing = null;
-		onEnd?.();
-	}
-}
-//#endregion
 //#region web/ui/resolve.js
 var norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 var phon = (s) => norm(s).replace(/qu/g, "k").replace(/q/g, "k").replace(/c([aou])/g, "k$1").replace(/c([ei])/g, "s$1").replace(/c\b/g, "k").replace(/ck/g, "k").replace(/z/g, "s").replace(/v/g, "b").replace(/w/g, "u").replace(/ll/g, "y").replace(/ph/g, "f").replace(/x/g, "ks").replace(/h/g, "").replace(/([a-z])\1+/g, "$1").replace(/\s+/g, " ").trim();
@@ -6706,11 +6955,33 @@ function setTarget(project, explicit = true) {
 	}
 	if (explicit) set({ targetAt: Date.now() });
 }
-var canHear = () => !!S.vs?.hear?.ready || browserCanHear;
+var canHear = () => !!S.vs || browserCanHear;
 function talk() {
 	if (mic) {
 		mic.stop();
 		return;
+	}
+	unlockSpeech();
+	if (!S.vs?.hear?.ready && !dictationChosen()) {
+		const go = () => {
+			chooseDictation();
+			set({ conversing: S.handsFree });
+			listen();
+		};
+		if (voiceMissing(S.vs || {}, { onDictate: browserCanHear ? go : null })) {
+			voiceStatus().then((vs) => {
+				if (vs) set({ vs });
+			});
+			return;
+		}
+		if (!browserCanHear) {
+			push({
+				kind: "event",
+				text: t("as.vsNone"),
+				bad: true
+			});
+			return;
+		}
 	}
 	set({ conversing: S.handsFree });
 	listen();
@@ -6731,7 +7002,7 @@ function listen() {
 		},
 		onError: (m) => {
 			if (my !== gen) return;
-			push({
+			if (m) push({
 				kind: "event",
 				text: m,
 				bad: true
@@ -7160,13 +7431,6 @@ function useReading() {
 	return cur$1;
 }
 var takeover = null;
-function unlockSpeech() {
-	try {
-		const u = new SpeechSynthesisUtterance(" ");
-		u.volume = 0;
-		window.speechSynthesis?.speak(u);
-	} catch {}
-}
 function toggleRead(id, md) {
 	if (cur$1 === id) {
 		stopSpeaking();
@@ -7174,6 +7438,7 @@ function toggleRead(id, md) {
 		return;
 	}
 	takeover?.();
+	stopSpeaking();
 	unlockSpeech();
 	note(id);
 	speak(md, () => {
@@ -7229,14 +7494,28 @@ function useSpeakMode({ scope, send, page, status }) {
 	};
 	R.current.off = off;
 	const listen = async (g) => {
-		go("listening");
+		R.current.phase = "checking";
 		const vs = await voiceStatus();
 		if (!live(g)) return;
 		const local = !!vs.hear?.ready;
+		if (!local && !dictationChosen()) {
+			if (voiceMissing(vs, {
+				onDictate: browserCanHear ? () => {
+					if (live(g)) {
+						chooseDictation();
+						listen(g);
+					}
+				} : null,
+				onClose: () => {
+					if (live(g)) off();
+				}
+			})) return;
+		}
 		if (!local && !browserCanHear) {
 			off(t("chat.speakNoMic"));
 			return;
 		}
+		go("listening");
 		stopSpeaking();
 		const common = {
 			pauseMs: PAUSES[S.pause]?.ms ?? PAUSES.normal.ms,
@@ -7301,9 +7580,9 @@ function useSpeakMode({ scope, send, page, status }) {
 			off();
 			return;
 		}
-		unlockSpeech();
 		stopSpeaking();
 		note("");
+		unlockSpeech();
 		takeover = Object.assign(() => R.current.off(), { owner: R });
 		const g = ++R.current.gen;
 		listen(g);
@@ -15313,12 +15592,15 @@ function phoneAdapter({ lock, go, place }) {
 			return {
 				hear: {
 					ready: server() && !!j.voice?.ready,
-					why: j.voice?.why || null
+					why: j.voice?.why || null,
+					fix: j.voice?.fix || null
 				},
 				speak: {
 					ready: server() && !!j.speak?.ready,
-					why: j.speak?.why || null
-				}
+					why: j.speak?.why || null,
+					fix: j.speak?.fix || null
+				},
+				machine: j.machine || null
 			};
 		},
 		hear: (wav) => guard(api$1.hear(wav)),

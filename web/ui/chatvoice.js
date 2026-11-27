@@ -6,7 +6,8 @@
 // replaces the first, and `cur` names which bubble is lit. An id is `<project>/<session>:<key>`, so
 // a session leaving the screen stops its own voice and never one that belongs to another view.
 import { useState, useEffect, useRef } from 'preact/hooks';
-import { speak, stopSpeaking, listenLocal, listenBrowser, browserCanHear, voiceStatus, PAUSES } from './voice.js';
+import { speak, stopSpeaking, listenLocal, listenBrowser, browserCanHear, voiceStatus, PAUSES,
+         unlockSpeech, voiceMissing, chooseDictation, dictationChosen } from './voice.js';
 import { S } from './agent.js';
 import { toast } from './ui.jsx';
 import { t } from './i18n.js';
@@ -24,15 +25,13 @@ export function useReading() {
 // for a reply that was cut off, and an `onEnd` that a replaced voice never calls.
 let takeover = null;   // a function carrying the `owner` that set it
 
-// iOS lets speech start only from a gesture; a silent word said inside the tap unlocks the voice
-// for the timers and network callbacks that speak later.
-export function unlockSpeech() {
-  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; window.speechSynthesis?.speak(u); } catch {}
-}
+// The unlock lives in voice.js now, beside the audio element it also unlocks; the name stays here.
+export { unlockSpeech };
 
 export function toggleRead(id, md) {
   if (cur === id) { stopSpeaking(); note(''); return; }
   takeover?.();
+  stopSpeaking();
   unlockSpeech();
   note(id);
   speak(md, () => { if (cur === id) note(''); }, S.voice);
@@ -67,12 +66,23 @@ export function useSpeakMode({ scope, send, page, status }) {
     if (why) toast(why, 'bad');
   };
   R.current.off = off;
+  //   'checking' is held, not shown: the mode is on (a second tap turns it off) but nothing says
+  // "Listening" until something listens — over the voice sheet, that line was a claim that the
+  // phone was hearing what it was not, and a line of text appearing under the sheet besides.
   const listen = async (g) => {
-    go('listening');
+    R.current.phase = 'checking';
     const vs = await voiceStatus();
     if (!live(g)) return;
     const local = !!vs.hear?.ready;
+    // THE MACHINE CANNOT HEAR: said, with why and the command, in a sheet — never a silent switch
+    // to the device's dictation (another engine, its audio sent to its maker), and never a mode
+    // that just turns itself off. The device's dictation is the person's choice from the sheet.
+    if (!local && !dictationChosen()) {
+      const dictate = browserCanHear ? () => { if (live(g)) { chooseDictation(); listen(g); } } : null;
+      if (voiceMissing(vs, { onDictate: dictate, onClose: () => { if (live(g)) off(); } })) return;
+    }
     if (!local && !browserCanHear) { off(t('chat.speakNoMic')); return; }
+    go('listening');
     stopSpeaking();
     const common = {
       pauseMs: PAUSES[S.pause]?.ms ?? PAUSES.normal.ms,
@@ -120,9 +130,10 @@ export function useSpeakMode({ scope, send, page, status }) {
 
   const toggle = () => {
     if (R.current.phase !== 'off') { off(); return; }
-    // Inside the tap: it unlocks the voice for the replies read later.
-    unlockSpeech();
+    // Inside the tap: it unlocks the voice for the replies read later — after the stop, which
+    // would otherwise cancel the silent word that does the unlocking.
     stopSpeaking(); note('');
+    unlockSpeech();
     takeover = Object.assign(() => R.current.off(), { owner: R });
     const g = ++R.current.gen;
     listen(g);

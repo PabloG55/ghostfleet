@@ -6,8 +6,9 @@
   "session": "master",
   "running": true,
   "status": "ready",
-  "voice": { "ready": false, "why": "voice needs a real fleet-serve — fixtures cannot hear" },
-  "speak": { "ready": false, "state": "missing", "why": "Kokoro is not installed (looked in ~/.local/share/kokoro) — run: fleet-jarvis voice --kokoro --install" },
+  "voice": { "ready": false, "why": "no whisper.cpp on this machine — run: fleet-jarvis voice --install", "fix": "fleet-jarvis voice --install" },
+  "speak": { "ready": false, "state": "missing", "why": "Kokoro is not installed (looked in ~/.local/share/kokoro) — run: fleet-jarvis voice --kokoro --install", "fix": "fleet-jarvis voice --kokoro --install" },
+  "machine": "laptop",
   "pending": [
     { "id": "K7Q2", "tool": "fleet_stop", "summary": "stop acme-api/docs-pass and remove its worktree", "ts": 1787355120000, "granted": null }
   ],

@@ -3731,8 +3731,10 @@ function agentCatalogue() {
   // off every session on the phone, a cost nothing on the switch said it had. Talking to a
   // session never goes through Jarvis: it needs whisper.cpp on this machine and the session.
   // `speak` rides beside `voice` because the phone's settings sheet reports both halves.
+  //   `machine` is which computer it is about, by the label it pairs under: a phone can be
+  // served by more than one, and "voice is not set up" is only useful with where to set it up.
   if (p === '/api/voice' && req.method === 'GET')
-    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status() });
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status(), machine: P.selfLabel(peers()) });
   if (p === '/api/voice/hear') return hear(req, res, body);
 
   // ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
@@ -4234,9 +4236,16 @@ function requestHandler(req, res) {
   // default-src alone every preview was a broken-image icon, on the phone and on the desk.
   // img-src names blob: and nothing more: no data:, which nothing here draws, and no other
   // origin. A blob: is made by this page's own script, and script is still 'self' alone.
+  //   AND ONE FOR A SOUND IT FETCHED. The phone client fetches each spoken sentence with its
+  // bearer token, since an <audio> cannot send a header, and plays it from a blob: URL
+  // (web/src/adapter.js speakAudio); voice.js unlocks its one audio element with a silent blob:
+  // clip. With no media-src, sound fell to default-src 'self' too, so every sentence failed to
+  // load on every phone (MEDIA_ERR_SRC_NOT_SUPPORTED) before iOS's own rule about a tap was ever
+  // asked, and the client counted the failure as the sentence having played. media-src names
+  // blob: and nothing more, for the same reasons as img-src.
   const wsHost = /^[A-Za-z0-9.:[\]-]+$/.test(req.headers.host || '') ? req.headers.host : '';
   res.setHeader('content-security-policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; img-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+    `connect-src 'self'${wsHost ? ` ws://${wsHost} wss://${wsHost}` : ''}; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   res.on('finish', () => {
     if (req.url !== '/healthz') log(`${ip} ${req.method} ${(req.url || '').split('?')[0]} -> ${res.statusCode} ${Date.now() - t0}ms${req.client ? ` [${req.client.id}]` : ''}`);
   });

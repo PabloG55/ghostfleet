@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: ea2e264b1715
+// CLIENT-HASH: 5bc35639e713
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -511,7 +511,12 @@
 // running turn, or after this turn, held until it ends (fleet_send after_turn). A tap sends at
 // once, and to a working session that is now into its turn, said in a toast. A phone on v125
 // sends the same way and has no "after this turn" until relaunched.
-const VERSION = 'ghostfleet-v126';
+// v127 is the phone that hears its replies: one audio element, unlocked in the tap, plays every
+// sentence the machine speaks, and a play the device refuses hands the rest to its own voice
+// instead of going by in silence. Speak mode and the assistant on a machine with no whisper.cpp
+// open a sheet naming the machine, why, and the command, instead of switching to the browser's
+// dictation without a word. A phone on v126 keeps the silent replies until it is relaunched.
+const VERSION = 'ghostfleet-v127';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
