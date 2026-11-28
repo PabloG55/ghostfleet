@@ -30,10 +30,10 @@ export async function voiceStatus(force = false) {
 }
 //   What a reply is READ with, without waiting: a remembered answer is used as it is and the
 // re-ask runs behind it, for the next reply. Waiting on it put a network round trip between the
-// ▶ and the first word of every read once the answer was 30 s old (forever, if the request was
-// lost), where the old answer, kept for the life of the page, had cost nothing. Only a page's
-// first read waits, as it always did. Speak mode's listen still asks fresh: whether the sheet
-// opens is the decision the re-ask exists for.
+// play button and the first word of every read once the answer was 30 s old (forever, if the
+// request was lost), where the old answer, kept for the life of the page, had cost nothing.
+// Only a page's first read waits, as it always did. Speak mode's listen still asks fresh:
+// whether the sheet opens is the decision the re-ask exists for.
 function voiceNow() {
   if (!status) return voiceStatus();
   voiceStatus().catch(() => {});
