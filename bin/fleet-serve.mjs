@@ -774,6 +774,15 @@ const TOOLS_ALLOWED = {
   // anything on the taps that matter.
   fleet_project_agent:   { fields: ['name', 'agent'],                          write: true, noProject: true, subject: 'name' },
   fleet_project_model:   { fields: ['name', 'model'],                          write: true, noProject: true, subject: 'name' },
+  // THE SWITCH AGENT SHEET (web/ui/session.jsx). It used to be refused here — "moving one
+  // running session is a lead's call" — and the owner made it theirs: a session page lists
+  // the Claude and Codex models and moves the session in place, its thread handed over
+  // (lib/handoff.mjs). No passkey, for a wake's reason: nothing new is created, the session
+  // keeps its name, worktree and branch, and its conversation goes with it. `message` is
+  // what the owner typed to send with it, delivered after the handoff, untouched.
+  fleet_model:           { fields: ['project', 'session', 'model', 'message'], write: true, subject: 'session' },
+  // The left-out part of a handoff, by item number. A read, like /api/session beside it.
+  fleet_history:         { fields: ['project', 'session', 'agent', 'from', 'to', 'max'] },
 };
 // `branch` is accepted on fleet_worktree_remove and thrown away: web/api.js sends it so
 // its fixture backend can name the branch in a refusal. Silently ignoring an argument is
@@ -821,7 +830,6 @@ const NOT_YET = {
   fleet_budget: 'the budget-ceiling marker is written by the grid\'s settings screen',
   fleet_order: 'the card order is <sock>.order plus a tmux option, both written by the grid',
   fleet_project_order: 'the projects order is written by the Projects screen',
-  fleet_model: 'moving one running session is a lead\'s call, made with a reason; the phone sets a project\'s default (fleet_project_model)',
 };
 
 const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek', 'waiting', 'after_turn']);
@@ -1274,6 +1282,24 @@ async function sessionQueue(t, session) {
     q.push({ at: Number(at), text: Buffer.from(b64, 'base64').toString('utf8') });
   }
   return q;
+}
+
+function sessionModels(t, session) {
+  const dir = path.join(t.cfg, 'fleet');
+  const read = (n) => { try { return fs.readFileSync(path.join(dir, `${t.sock}.${session}.${n}`), 'utf8').trim(); } catch { return ''; } };
+  const env = { ...process.env, TMUX: '', CLAUDE_FLEET_SOCK: t.sock, CLAUDE_CONFIG_DIR: t.cfg, CLAUDE_FLEET_DIR: dir };
+  const models = new Promise((resolve) => execFile(path.join(BIN, 'fleet-model'), ['--models', '--json'],
+    { encoding: 'utf8', timeout: 8000, env }, (e, out) => { try { resolve(JSON.parse(out)); } catch { resolve({}); } }));
+  // Bare -t: the name was held to the session charset above and cannot start with `+` or `_`.
+  const launched = new Promise((resolve) => execFile('tmux', ['-u', '-L', t.sock, 'show-environment', '-t', session, 'CLAUDE_FLEET_MODEL'],
+    { encoding: 'utf8', timeout: 3000 }, (e, out) => resolve(e ? '' : String(out).trim().replace(/^CLAUDE_FLEET_MODEL=/, '').replace(/^-CLAUDE_FLEET_MODEL$/, ''))));
+  return Promise.all([models, launched]).then(([m, launchedModel]) => {
+    const agent = /^[a-z0-9_-]+$/.test(read('agent')) ? read('agent') : 'claude';
+    const pin = read('model');
+    const wish = /^([a-z0-9_-]+)(?::([A-Za-z0-9._[\]-]+))?$/.exec(read('switch'));
+    return { models: m, agent, model: (agent === 'claude' && pin) || launchedModel || null,
+             switching: wish ? { agent: wish[1], model: wish[2] || null } : null, failed: read('switch-failed') || null };
+  });
 }
 
 // ── the session's real pane ───────────────────────────────────────────────
@@ -3386,6 +3412,21 @@ function agentCatalogue() {
     const tag = etagOf(body);
     if (holdsTag(req, tag)) { res.writeHead(304, { ETag: tag, 'cache-control': 'no-store' }); return res.end(); }
     return send(res, 200, body, { ETag: tag });
+  }
+
+  // ── what a session can be switched to: the Switch agent sheet ────────────────
+  // The models per agent come from `fleet-model --models` (claude's aliases, codex's own cache
+  // of what the account can use), so the sheet never lists a model the CLI would refuse. The
+  // rest is files and the session's own environment: the agent its marker says it runs, the
+  // model it runs on (claude: its pin, else what it was launched with), and a switch that is
+  // waiting on its turn or the reason the last one failed.
+  if (p === '/api/models' && req.method === 'GET') {
+    const rp = resolveProject(url.searchParams.get('project') || '', peerScope(req));
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const t = rp.t;
+    const session = url.searchParams.get('session') || '';
+    if (!/^[A-Za-z0-9.~-][A-Za-z0-9._~-]*$/.test(session)) return send(res, 400, { ok: false, text: 'session is required' });
+    return send(res, 200, { ok: true, project: t.name, session, ...(await sessionModels(t, session)) });
   }
 
   if (p === '/api/pane' && req.method === 'GET') {

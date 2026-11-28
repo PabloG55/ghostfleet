@@ -452,8 +452,16 @@ hand. It puts the profile's `settings.json` back, because Claude Code saves a `/
 default for every later session, but only when that switch is the whole change. And it pins the
 session, so a restart, a wake or a reopen starts it on the new model. `fleet-model <session>`
 says what it runs on now and what it starts on next. `fleet-project set <project> model sonnet`
-is a project's default, for every session except master. Claude sessions only. Details:
+is a project's default, for every session except master. A bare model is Claude only. Details:
 [Moving a running session to another model](docs/ORCHESTRATION.md#moving-a-running-session-to-another-model).
+
+**A running session can move between Claude Code and Codex with its thread.** `fleet-model
+<session> codex` waits for the turn to end and replaces the agent in place, with the same name,
+worktree and branch. The incoming agent is handed a budgeted slice of the conversation, not a
+summary, and no model call is made. `fleet-model <session> claude` resumes Claude's own
+conversation and hands over only what happened since. What a slice left out is one
+`fleet_history` call away. Details:
+[Moving a running session to another agent](docs/ORCHESTRATION.md#moving-a-running-session-to-another-agent-with-its-thread).
 
 ### Several Claude accounts on one profile (experimental)
 

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# fleet-handoff [-s SOCKET] read <session> [--agent A] [--from N] [--to M] [--max CHARS]
+#                                    the session's earlier conversation, by item number, across
+#                                    every agent it ran; no range = how many items each has
+# fleet-handoff [-s SOCKET] list <session>
+#                                    the handoffs that session was given: when, which way, how
+#                                    much was kept, and the record each one is stored in
+#
+# WHY. When a session moves to another agent (fleet-model <session> codex, lib/agent-switch.sh),
+# the incoming agent is handed a BUDGETED slice of the thread (lib/handoff.mjs) whose preamble
+# names what was left out — "claude#2–14, #17" — by the item numbers this reads. That is the
+# half that makes leaving things out safe: nothing is summarised away, it is one call from
+# being read whole. The same read is the fleet_history MCP tool.
+#
+# The numbers are the reader's (lib/handoff.mjs read), not the transcript's line numbers: one
+# item is one request, one reply, one command with its outcome, or one set of file changes.
+set -uo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _l="$(readlink "$_self")"; case "$_l" in /*) _self="$_l" ;; *) _self="$(dirname "$_self")/$_l" ;; esac; done
+LIB_DIR="$(cd "$(dirname "$_self")/../lib" && pwd)"
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# $TMUX before the env var, as every fleet command does; -s overrides both.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; }
+
+POS=(); AGENT=""; FROM=""; TO=""; MAX=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)        SOCK="${2:-}"; shift 2 ;;
+    --agent)   AGENT="${2:-}"; shift 2 ;;
+    --from)    FROM="${2:-}"; shift 2 ;;
+    --to)      TO="${2:-}"; shift 2 ;;
+    --max)     MAX="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        echo "fleet-handoff: unknown flag '$1'" >&2; usage >&2; exit 1 ;;
+    *)         POS+=("$1"); shift ;;
+  esac
+done
+CMD="${POS[0]:-}"; SESSION="${POS[1]:-}"
+[ -n "$CMD" ] && [ -n "$SESSION" ] || { usage >&2; exit 1; }
+[ -n "$SOCK" ] || { echo "fleet-handoff: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+case "$SESSION" in
+  _*|*[!A-Za-z0-9._~-]*) echo "fleet-handoff: bad session name '$SESSION'" >&2; exit 1 ;;
+esac
+for n in "$FROM" "$TO" "$MAX"; do
+  case "$n" in ''|*[!0-9]*) [ -z "$n" ] || { echo "fleet-handoff: --from, --to and --max take a number" >&2; exit 1; } ;; esac
+done
+
+case "$CMD" in
+  read)
+    args=(history --dir "$FLEET_DIR" --sock "$SOCK" --slot "$SESSION")
+    [ -n "$AGENT" ] && args+=(--agent "$AGENT")
+    [ -n "$FROM" ] && args+=(--from "$FROM")
+    [ -n "$TO" ] && args+=(--to "$TO")
+    [ -n "$MAX" ] && args+=(--max "$MAX")
+    exec node "$LIB_DIR/handoff.mjs" "${args[@]}" ;;
+  list)
+    out="$(node "$LIB_DIR/handoff.mjs" list --dir "$FLEET_DIR" --sock "$SOCK" --slot "$SESSION")" || exit $?
+    if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "fleet-handoff: '$SESSION' on $SOCK has had no handoff"; fi ;;
+  *) usage >&2; exit 1 ;;
+esac

@@ -716,6 +716,20 @@ export async function getPorts(project, session) {
     return { ...j, items: (j.items || []).filter(i => !fixtureStopped.has(portsKey(project, session, i))), can_refresh: local, can_stop: local && !work };
   } catch { return { ok: true, session, at: null, state: null, items: [], can_refresh: false, can_stop: false }; }
 }
+// What a session can be switched to, per agent, and what it runs now: fleet-model's own model
+// lists, the agent its marker names, its model, and a switch still waiting on its turn
+// (fleet-serve /api/models). Read when the Switch agent sheet opens, never polled.
+export async function getModels(project, session) {
+  if ((await ready()).mode === 'server')
+    return get(`/api/models?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}`);
+  // As the daemon answers, from the card the fixture draws and what a switch made of it.
+  const models = await fixture('models.json');
+  const g = await getGrid(project).catch(() => ({ cards: [] }));
+  const c = (g.cards || []).find(x => x.name === session) || {};
+  const w = /^([a-z0-9_-]+)(?: \(([^)]+)\))?$/.exec(c.switching || '');
+  return { ok: true, project, session, models, agent: c.agent || 'claude', model: c.model || null,
+           switching: w ? { agent: w[1], model: w[2] || null } : null, failed: null };
+}
 // The fixture's stops: what was stopped this page load, so Details shows it gone. An item the
 // fixture marks `ignores_term` stays up after a TERM, which is the only way to see the second
 // confirmation (KILL) without a process that really ignores one.
@@ -1220,7 +1234,7 @@ export async function verb(tool, args, assertion = null) {
 // something behind.
 const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), projModel: new Map(), answered: new Set(), queue: new Map(), replied: new Map(),
                   explain: new Map(), ledgerAnswered: new Set(), explainBusy: new Set(),
-                  shots: new Map(), unpaired: false, relabel: new Map(), woke: new Set() };
+                  shots: new Map(), unpaired: false, relabel: new Map(), woke: new Set(), agent: new Map(), switching: new Map() };
 // What each card's FIXTURE says it is, before any tap: a send to a session the shipped
 // fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
 // rather than on the overlay, so a send that merely set a card working does not start
@@ -1229,6 +1243,8 @@ const baseStatus = new Map();
 // What each card last said it was, as drawn — so a send to a session the fixture shows as
 // need-you is held the way the daemon holds it (bin/fleet-send: "queued behind a question").
 const lastStatus = new Map();
+// ...and which agent it runs, as drawn: a switch names where it moves FROM, as fleet-model does.
+const lastAgent = new Map();
 function applyOverlay(g) {
   for (const c of g.cards || []) baseStatus.set(c.name, c.status);
   let cards = (g.cards || [])
@@ -1240,9 +1256,11 @@ function applyOverlay(g) {
       ...(overlay.woke.has(c.name) ? { asleep: false } : null),
       sched: overlay.sched.has(c.name) ? overlay.sched.get(c.name) : c.sched,
       label: overlay.label.has(c.name) ? overlay.label.get(c.name) : c.label,
+      ...(overlay.agent.has(c.name) ? overlay.agent.get(c.name) : null),
+      ...(overlay.switching.has(c.name) ? { switching: overlay.switching.get(c.name) } : null),
     }));
   for (const c of overlay.added) if (!cards.some(x => x.name === c.name)) cards.push(c);
-  for (const c of cards) lastStatus.set(c.name, c.status);
+  for (const c of cards) { lastStatus.set(c.name, c.status); lastAgent.set(c.name, c.agent || 'claude'); }
   // applyOrder(), same rule as the TUI: the names the order file knows, in its order,
   // then anything it has not heard of — a new session appears at the end rather than
   // vanishing because it is not in the list.
@@ -1401,6 +1419,22 @@ function fixtureVerb(tool, a) {
       overlay.projModel.set(a.name, String(a.model || '').trim() || null);
       return ok(a.model ? `'${a.name}' sessions start on ${a.model} from their next start`
                         : `'${a.name}' is back to the profile default model`);
+    // A switch to another agent (fleet-model <session> <agent>[:<model>]): an idle session is
+    // moved at once and its card says the new agent; a working one waits for its turn, and its
+    // card says where it is going, as fleet-grid's `switching` does. Its words are fleet-model's.
+    case 'fleet_model': {
+      const [to, m = ''] = String(a.model || '').split(':');
+      const card = lastStatus.get(a.session);
+      const from = lastAgent.get(a.session) || 'claude';
+      if (!to) return { ok: false, text: 'fleet_model: pass a model' };
+      if (card === 'working' || card === 'need-you') {
+        overlay.switching.set(a.session, m ? `${to} (${m})` : to);
+        return ok(`fleet-model: ${a.session} moves from ${from} to ${to}${m ? ` (${m})` : ''} when its current turn ends, with its thread handed over. Check with: fleet-model ${a.session}`);
+      }
+      overlay.switching.delete(a.session);
+      overlay.agent.set(a.session, { agent: to, model: m || null });
+      return ok(`fleet-model: ${a.session} is moving from ${from} to ${to}${m ? ` (${m})` : ''} now, with its thread handed over`);
+    }
     case 'fleet_nudge':  return ok(`auto-nudge for '${a.session}' → ${a.state}`);
     case 'fleet_budget': return ok(`budget limit for '${a.project}' → ${a.state}`);
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };
@@ -1422,4 +1456,5 @@ export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
   overlay.sent.clear(); overlay.answered.clear(); overlay.queue.clear(); overlay.woke.clear();
+  overlay.agent.clear(); overlay.switching.clear();
 }

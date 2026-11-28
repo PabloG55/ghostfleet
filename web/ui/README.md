@@ -26,6 +26,7 @@ vite, and the root vite that builds `web/screens.js`).
 | `board.jsx` | the board by state (needs you, working, ready, quiet) |
 | `project.jsx` | a project's sessions, its tree of worktrees, the new-session dialog |
 | `session.jsx` | one session: chat, the agent's screen (read only), composer, its actions |
+| `switch.jsx` | a session's Switch agent sheet: another agent and model, with the thread handed over (`fleet-model`) |
 | `terminal.jsx`, `terminal.css` | a project's Terminal and Editor tabs, over the phone client's `../term.js` |
 | `map.jsx` | the live map |
 | `fleet.jsx`, `sprite.js`, `lights.js`, `icon.jsx` | the ships, the status lights, the icon set |
@@ -69,6 +70,7 @@ the phone's is `web/src/adapter.js`, over fleet-serve. An adapter is a plain obj
 | `ports(project, name)` | optional, → `{ at, state, items, can_refresh, can_stop }` | the session's Details sheet: the last scan of what it left listening, running or booted (`lib/ports.mjs`), each item with how it was tied to the session; read once when the sheet opens, never polled. Without it there is no Details entry |
 | `portsRefresh(project)` | optional, → `{ at }` | a scan now, offered only when the read said `can_refresh` (a direct localhost request); the phone never has it |
 | `portsStop(project, name, want, kill)` | optional, → `{ result, text }` | stop ONE row, as the sheet showed it (`want`: kind plus pid, start and command, or container id, or UDID); offered only when the read said `can_stop` (a direct localhost request, not a work-profile project), always through a modal; `kill` only after a TERM left it running; the phone never has it |
+| `models(project, name)` | optional, → `{ models: { <agent>: [{ id, name }] }, agent, model, switching, failed }` | the session's Switch agent sheet: each agent's models as `fleet-model --models` lists them, what the session runs now, a switch still waiting on its turn, and why the last one did not happen; read once when the sheet opens, never polled. The switch is `fleet_model` through `act`. Without it there is no Switch agent entry |
 | `act(tool, args, opts?)` | → `{ text, queued? }` | every change (below); `queued` is `'question'` or truthy when it waits behind a turn |
 | `attach(project, session, file)` | → `{ path }` | an upload; the composer cites the path |
 | `attachPerMessage` | number | how many files one message may carry |

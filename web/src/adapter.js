@@ -219,6 +219,10 @@ export function phoneAdapter({ lock, go, place }) {
     ports: (project, name) => guard(api.getPorts(project, name)),
     portsRefresh: (project) => guard(api.refreshPorts(project)),
     portsStop: (project, name, want, kill) => guard(api.stopPorts(project, name, want, kill)),
+    // A session's Switch agent sheet (web/ui/switch.jsx): the models each agent offers and what
+    // the session runs now, read once when the sheet opens. The switch itself is fleet_model
+    // through act. The team app has no such member, so it offers no switch.
+    models: (project, name) => guard(api.getModels(project, name)),
     act,
     attach: (project, session, file) => guard(api.attach(project, session, file)),
     attachPerMessage: api.ATTACH_PER_MESSAGE,

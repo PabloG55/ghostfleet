@@ -1756,6 +1756,288 @@ else
   skip "agent switch" "tmux or jq missing"
 fi
 
+# ── a session's thread, handed to the next agent (lib/handoff.mjs) ───────────
+# The fixtures are REAL captures: a Claude Code 2.1.321 session and a codex 0.170.0 one, run
+# in a scratch fleet with placeholder work, their paths rewritten to /home/dev/acme-api and
+# their record kinds that carry account or system-prompt content dropped. Two records in the
+# Claude one were added in the field set of real ones, with placeholder content, because the
+# capture had none: the SessionStart briefing (a fleet whose memory is empty briefs nothing)
+# and a pasted screenshot. Its thinking blocks were signature-only, so each was given a
+# sentence — "is the reasoning absent" asked of an empty string proves nothing. Their
+# signatures are placeholder base64 of the real length: a random one held a three-letter
+# run the name sweep refuses, which no reader of the fixture could have told from a name.
+group "agent handoff: the thread goes over as a budgeted slice, never a summary"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HL="$(mktemp -d)"; mkdir -p "$HL/fd"
+  HCF="$FIX/handoff-claude-2.1.321.jsonl"; HXF="$FIX/handoff-codex-0.170.0.jsonl"
+  hread()  { node "$ROOT/lib/handoff.mjs" read --agent "$1" --file "$2" 2>/dev/null; }
+  # Absence is asserted beside presence: what must not go over is first shown to be IN the
+  # transcript (hin), and a count of it in an output that is empty says so instead of 0 —
+  # an empty slice holds no briefing, and a row that passes on it proves nothing.
+  hin()  { grep -qE -- "$1" "$2" 2>/dev/null && printf present || printf absent; }
+  hcnt() { [ -n "$2" ] || { printf 'nothing to read'; return; }; grep -cE -- "$1" <<< "$2" || true; }
+  hbuild() {    # tokens-or-empty transcript -> the record's path
+    if [ -n "$1" ]; then CLAUDE_FLEET_HANDOFF_TOKENS="$1" node "$ROOT/lib/handoff.mjs" build --dir "$HL/fd" --sock cf-acme-api --slot master --from claude --to codex --conv c1 --file "$2" 2>/dev/null
+    else env -u CLAUDE_FLEET_HANDOFF_TOKENS node "$ROOT/lib/handoff.mjs" build --dir "$HL/fd" --sock cf-acme-api --slot master --from claude --to codex --conv c1 --file "$2" 2>/dev/null; fi
+  }
+
+  # ── the readers, on the real captures ──
+  HCI="$(hread claude "$HCF")"
+  is "Claude reader, real 2.1.321 transcript: what each item is" \
+     "request files command command reply command reply request command reply command reply command command reply request reply interrupt request" \
+     "$(jq -r .kind <<< "$HCI" | paste -sd' ' -)"
+  is "...a failed command keeps its exit code"           "1"    "$(jq -r 'select(.n==3) | .exit' <<< "$HCI")"
+  is "...and its output"                                 "true" "$(jq -r 'select(.n==3) | .output | test("No such file or directory")' <<< "$HCI")"
+  is "...a file change goes over as its path"            "/tmp/acme-api-stray/notes.txt" "$(jq -r 'select(.kind=="files") | .paths | join(",")' <<< "$HCI")"
+  is "...an interrupted turn keeps its partial work"     "true" "$(jq -r 'select(.n==17) | .text | test("one hundred thirty")' <<< "$HCI")"
+  is "...and says it was interrupted"                    "interrupt" "$(jq -r 'select(.n==18) | .kind' <<< "$HCI")"
+  is "...the ledger's gate, the plugin's own user message, is not read as the owner's" "present 0" \
+     "$(hin 'The ghostfleet plugin sent a message:\\n\[ghostfleet ledger\]' "$HCF") $(hcnt 'ghostfleet ledger' "$HCI")"
+  # The codex capture is the far side of a real switch: the Claude thread above arrived as 20
+  # injected items, codex's first turn was refused for a usage limit, and its second ran
+  # commands. 0.170 ends a refused turn in task_complete.error, not in an error event.
+  HXI="$(hread codex "$HXF")"
+  is "Codex reader, real 0.170.0 rollout: what each item is" \
+     "request request reply reply reply reply reply reply request reply reply reply reply reply reply reply request reply request request request error request reply command reply command command command command command command command reply" \
+     "$(jq -r .kind <<< "$HXI" | paste -sd' ' -)"
+  is "...the items a handoff injected are marked, and only they" "20 1-20" \
+     "$(jq -s -r '[.[] | select(.handoff) | .n] | "\(length) \(min)-\(max)"' <<< "$HXI")"
+  is "...a command keeps its exit code and its output"   "0 true" "$(jq -r 'select(.n==27) | "\(.exit) \(.output | test("README.md"))"' <<< "$HXI")"
+  is "...a turn refused for a usage limit is read as the error it ended on" "error true" \
+     "$(jq -r 'select(.n==22) | "\(.kind) \(.text | test("usage limit"))"' <<< "$HXI")"
+  is "...the fleet's memory, which codex is given as a developer message, is not read" "present 0" \
+     "$(hin 'MEMORY-BLOCK-MARK' "$HXF") $(hcnt 'MEMORY-BLOCK-MARK' "$HXI")"
+  is "...nor its reasoning"                              "present 0" "$(hin '"type":"reasoning"' "$HXF") $(hcnt 'gAAAAB' "$HXI")"
+  is "...nor the environment block codex writes as a user message" "present 0" \
+     "$(hin '<environment_context>' "$HXF") $(hcnt 'environment_context' "$HXI")"
+  # Coming back: what codex did since the switch, and none of what Claude handed it — the
+  # injected items are Claude's own thread, which Claude resumes rather than reads again.
+  HX0="$(jq -r 'select(.type=="session_meta") | .payload.timestamp' "$HXF" | node -e 'process.stdout.write(String(Math.floor(Date.parse(require("fs").readFileSync(0,"utf8").trim())/1000)))')"
+  hxrec="$(env -u CLAUDE_FLEET_HANDOFF_TOKENS node "$ROOT/lib/handoff.mjs" build --dir "$HL/fd" --sock cf-acme-api --slot master --from codex --to claude --conv x1 --since "$HX0" --file "$HXF" 2>/dev/null)"
+  hxtxt="$(jq -r .text "$hxrec" 2>/dev/null)"
+  is "a delta from codex is what codex did, and nothing it was handed" "delta 14 0 0" \
+     "$(jq -r '"\(.mode) \(.items)"' "$hxrec" 2>/dev/null) $(hcnt '^--- claude#' "$hxtxt") $(hcnt '\[fleet handoff\] claude#' "$hxtxt")"
+  is "...its own commands and replies among it"          "true true" \
+     "$(grep -q 'Command: ls -a' <<< "$hxtxt" && echo true || echo false) $(grep -q 'TANGERINE-58; `ls -a` shows' <<< "$hxtxt" && echo true || echo false)"
+
+  # ── the slice ──
+  rec="$(hbuild '' "$HCF")"; txt="$(jq -r .text "$rec" 2>/dev/null)"
+  is "a short conversation goes over intact"             "true 19 19" "$(jq -r '"\(.intact) \(.items) \(.kept|length)"' "$rec" 2>/dev/null)"
+  is "...the first request through the last"            "yes"  "$(grep -q 'Remember this codeword for later: TANGERINE-58' <<< "$txt" && grep -q 'keep it in mind for the next step' <<< "$txt" && echo yes || echo no)"
+  is "...and says nothing was left out"                  "1"    "$(grep -c 'All 19 items are below, intact.' <<< "$txt" || true)"
+  is "the fleet's memory does not go over: not the SessionStart briefing" "present 0" "$(hin 'Briefing for acme-api' "$HCF") $(hcnt 'Briefing for acme-api' "$txt")"
+  is "...nor a ledger line"                              "present 0" "$(hin 'ghostfleet ledger: open items' "$HCF") $(hcnt 'ghostfleet ledger' "$txt")"
+  sig="$(jq -r 'select(.type=="assistant") | .message.content[] | select(.type=="thinking") | .signature' "$HCF" | head -1 | cut -c1-40)"
+  is "reasoning does not go over"                        "present 0" "$(hin '\(reasoning 1\)' "$HCF") $(hcnt '\(reasoning ' "$txt")"
+  is "...nor its signature"                              "40 0" "${#sig} $(hcnt "$sig" "$txt")"
+  is "raw tool state does not go over: no call ids"      "present 0" "$(hin 'toolu_' "$HCF") $(hcnt 'toolu_|tool_use_id' "$txt")"
+  is "...nor a call's own input fields"                  "present 0" "$(hin 'Write notes.txt in the working directory' "$HCF") $(hcnt 'Write notes.txt in the working directory' "$txt")"
+  is "an attachment is named where it was"               "1"    "$(grep -cF '[attachment not copied: image (image/png)]' <<< "$txt" || true)"
+  is "...and not copied"                                 "present 0" "$(hin 'iVBORw0KGgo' "$HCF") $(hcnt 'iVBORw0KGgo' "$txt")"
+
+  # A long one: built from the fixture's own records (test/helpers/handoff-long.mjs).
+  node "$ROOT/test/helpers/handoff-long.mjs" "$HCF" "$HL/long.jsonl" 120
+  rec="$(hbuild '' "$HL/long.jsonl")"; txt="$(jq -r .text "$rec" 2>/dev/null)"; tb="$(jq -j .text "$rec" 2>/dev/null | wc -c | tr -d ' ')"
+  is "a long conversation is cut to the budget: 16k tokens, 64000 bytes" "yes" "$([ "$tb" -le 64000 ] && [ "$tb" -gt 48000 ] && echo yes || echo "no ($tb bytes)")"
+  is "...and the record says what it measured"           "$tb"  "$(jq -r .bytes "$rec" 2>/dev/null)"
+  is "...keeping the first request"                      "1"    "$(grep -c '^FIRST REQUEST: build the acme-api invoice export' <<< "$txt" || true)"
+  is "...the latest turns, to the last reply"            "yes"  "$(grep -q '^turn 120: ' <<< "$txt" && grep -q '^LAST REPLY: the invoice export is green at step 120.' <<< "$txt" && echo yes || echo no)"
+  is "...and the commands: what ran, its exit code, its output" "yes" \
+     "$(grep -q '^Command: make -C acme-api test-119$' <<< "$txt" && grep -q '^Exit code: 4$' <<< "$txt" && grep -qF 'make: *** [test-119] Error 4' <<< "$txt" && echo yes || echo no)"
+  is "...leaving the middle out"                         "present 0" "$(hin '"turn 50: ' "$HL/long.jsonl") $(hcnt '^turn 50: ' "$txt")"
+  is "...and naming it, with how much and how to read it" "yes" \
+     "$(grep -q 'left out (claude#2–' <<< "$txt" && grep -q 'the fleet_history tool' <<< "$txt" && grep -q 'fleet-handoff read master --agent claude --from 2' <<< "$txt" && echo yes || echo no)"
+  is "...every kept item whole: as many heads as it says it kept" "$(jq -r '.kept | length' "$rec")" "$(grep -c '^--- claude#' <<< "$txt" || true)"
+  rec="$(hbuild 1024 "$HL/long.jsonl")"
+  tb="$(jq -j .text "$rec" 2>/dev/null | wc -c | tr -d ' ')"
+  is "CLAUDE_FLEET_HANDOFF_TOKENS=1024: under 4096 bytes"  "yes" "$([ "$tb" -le 4096 ] && [ "$tb" -gt 1024 ] && echo yes || echo "no ($tb bytes)")"
+  is "...still with the first request"                   "1"    "$(jq -r .text "$rec" | grep -c '^FIRST REQUEST' || true)"
+  is "a budget above the ceiling is held to 64000 tokens and 64000 bytes" "64000 64000" "$(jq -r '"\(.tokens) \(.budget)"' "$(hbuild 999999 "$HL/long.jsonl")")"
+  is "...and one below the floor to 1024"                "1024" "$(jq -r .tokens "$(hbuild 10 "$HL/long.jsonl")")"
+
+  # The owner's message is sent as it was typed, after the slice and outside its budget.
+  rec="$(hbuild '' "$HL/long.jsonl")"
+  { printf 'Check `make test` in $HOME/acme-api, then:\n'; head -c 150000 /dev/zero | tr '\0' 'x'; printf '\n\n  trailing spaces and a blank line  \n\n'; } > "$HL/msg"
+  node "$ROOT/lib/handoff.mjs" compose --record "$rec" --line "You are now codex." --message-file "$HL/msg" > "$HL/prompt"
+  is "the owner's new message is never shortened or rewritten" "yes" "$(tail -c "$(wc -c < "$HL/msg")" "$HL/prompt" | cmp -s - "$HL/msg" && echo yes || echo no)"
+  is "...even 150 kB past the budget, with the slice still before it" "1" "$(grep -c '^FIRST REQUEST' "$HL/prompt" || true)"
+  is "...and the end marker between them"                "1"    "$(grep -cxF '[fleet handoff] End of the handed-over thread. You are now codex.' "$HL/prompt" || true)"
+
+  # ── what was left out, read back by range: fleet_history, through the real MCP server ──
+  printf '{"claude":{"id":"c1","model":"","ts":1,"file":"%s"}}\n' "$HL/long.jsonl" > "$HL/fd/cf-acme-api.master.convs.json"
+  mcph() {
+    { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+      printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fleet_history","arguments":%s}}\n' "$1"
+      sleep 2
+    } | ( cd "$HL" && env -u CLAUDE_FLEET_SCOPE -u CLAUDE_FLEET_ROOT -u CLAUDE_FLEET_SLOT TMUX= CLAUDE_FLEET_DIR="$HL/fd" CLAUDE_FLEET_SOCK=cf-acme-api node "$ROOT/mcp/fleet-mcp.mjs" 2>/dev/null ) \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{d.split("\n").filter(Boolean).forEach(l=>{try{const o=JSON.parse(l);if(o.id===2)process.stdout.write((o.result.content||[]).map(x=>x.text).join("\n"))}catch{}})})'
+  }
+  out="$(mcph '{"session":"master","agent":"claude","from":2,"to":3}')"
+  is "MCP: fleet_history returns left-out items by range" "yes" \
+     "$(grep -q '^--- claude#2 · command' <<< "$out" && grep -q '^Command: make -C acme-api test-1$' <<< "$out" && grep -q '^--- claude#3 · assistant' <<< "$out" && echo yes || echo no)"
+  is "...and nothing outside it: two items, neither neighbour" "2 0" "$(hcnt '^--- claude#[0-9]+ ' "$out") $(hcnt '^--- claude#(1|4) ' "$out")"
+  out="$(mcph '{"session":"master"}')"
+  is "...with no range, how many items there are"        "1"    "$(grep -c '^claude: 360 items' <<< "$out" || true)"
+  rm -rf "${HL:?}"
+else
+  skip "agent handoff" "node or jq missing"
+fi
+
+# ── the same thread, through a real switch: claude -> codex and back (lib/agent-switch.sh) ──
+# Stub agents in a scratch fleet, the agent-switch group's shape. The codex stub answers
+# `--version` as 0.170.0 (the first build whose app-server takes thread/inject_items) and runs
+# a JSON-RPC stub as its `app-server`, which hands back a thread and keeps what was injected.
+# Each stub's screen keeps the lines typed into it, so what the incoming agent was handed —
+# and what it was NOT — is read from a file rather than from a pane that scrolls.
+group "agent handoff: a switch moves the thread in place, waits for the turn, and comes back with the delta"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  HS="$(mktemp -d)"; mkdir -p "$HS/.claude/fleet" "$HS/bin" "$HS/repo" "$HS/sys"
+  HSF="$HS/.claude/fleet"; HSS=cf-acme-api
+  git -C "$HS/repo" init -q -b feat/handoff-demo
+  HSR="$(cd "$HS/repo" && pwd -P)"
+  hsuid() { printf '%s-1111-2222-3333-%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
+  HCID="$(hsuid aaaaaaaa)"; HXID="$(hsuid cccccccc)"
+  # Raw, as the agents it stands in for read: in the terminal's line mode a line past 1024
+  # bytes (MAX_CANON on macOS) stalls the input queue and every byte after it is lost. A
+  # delta carries such lines (a command's output, whole), and real claude got this one.
+  cat > "$HS/bin/_screen" <<'STUB'
+#!/bin/sh
+stty -icanon min 1 time 0 2>/dev/null
+foot="$1"; keep="$2"; last=""
+draw() { printf '\033[2J\033[H%s\n────────\n❯ \0337\n────────\n%s\0338' "$last" "$foot"; }
+draw
+while IFS= read -r line; do printf '%s\n' "$line" >> "$keep"; last="$line"; draw; done
+STUB
+  cat > "$HS/bin/_appserver.mjs" <<'STUB'
+import readline from 'node:readline'; import fs from 'node:fs';
+const [dir, tid] = process.argv.slice(2);
+const say = (o) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...o })}\n`);
+readline.createInterface({ input: process.stdin }).on('line', (l) => {
+  let m; try { m = JSON.parse(l); } catch { return; }
+  fs.appendFileSync(`${dir}/appserver.calls`, `${m.method}\n`);
+  if (m.id === undefined) return;
+  if (m.method === 'initialize') return say({ id: m.id, result: { userAgent: 'stub' } });
+  if (m.method === 'thread/start') return say({ id: m.id, result: { thread: { id: tid } } });
+  if (m.method === 'thread/resume') return say({ id: m.id, result: { thread: { id: m.params.threadId } } });
+  if (m.method === 'thread/inject_items') { fs.writeFileSync(`${dir}/injected.json`, JSON.stringify(m.params)); return say({ id: m.id, result: {} }); }
+  say({ id: m.id, error: { code: -32601, message: `no ${m.method}` } });
+});
+STUB
+  cat > "$HS/bin/codex" <<STUB
+#!/bin/sh
+case "\$1" in
+  --version) echo "codex-cli 0.170.0"; exit 0 ;;
+  --help) exit 0 ;;
+  app-server) exec node "$HS/bin/_appserver.mjs" "$HS" "$HXID" ;;
+esac
+printf '%s\n' "\$*" >> "$HS/argv.codex"
+exec "$HS/bin/_screen" '  feat/handoff-demo · model · Context 0% used' "$HS/tty.codex"
+STUB
+  cat > "$HS/bin/claude" <<STUB
+#!/bin/sh
+[ "\$1" = agents ] && exit 0
+[ "\$1" = --help ] && exit 0
+printf '%s\n' "\$*" >> "$HS/argv.claude"
+exec "$HS/bin/_screen" 'status' "$HS/tty.claude"
+STUB
+  chmod +x "$HS/bin/_screen" "$HS/bin/codex" "$HS/bin/claude"
+  for t in tmux jq node git; do ln -s "$(command -v "$t")" "$HS/sys/$t"; done
+  HSE=(env HOME="$HS" PATH="$ROOT/bin:$HS/bin:$HS/sys:/usr/bin:/bin" CLAUDE_FLEET_DIR="$HSF"
+       CLAUDE_FLEET_SWITCH_SETTLE=0 CLAUDE_FLEET_SWITCH_POLL=0.2 CLAUDE_FLEET_SWITCH_IDLE_N=2
+       CLAUDE_FLEET_SWITCH_READY_SECS=6 CLAUDE_FLEET_SWITCH_PROMPT_DELAY=0.3 CLAUDE_FLEET_SWITCH_READY_HOLD=0.2)
+  hswait() {    # until the pending switch is gone and its watcher has left (up to 15s)
+    local i=0; while [ -f "$HSF/$HSS.master.switch" ] && [ "$i" -lt 75 ]; do sleep 0.2; i=$((i+1)); done
+    i=0; while [ -f "$HSF/$HSS.master.switch.pid" ] && [ "$i" -lt 75 ]; do sleep 0.2; i=$((i+1)); done
+  }
+  hsfm() { "${HSE[@]}" "$ROOT/bin/fleet-model" -s "$HSS" "$@" 2>&1; }
+  hcnt() { [ -n "$2" ] || { printf 'nothing to read'; return; }; grep -cE -- "$1" <<< "$2" || true; }   # as in the group above
+  hsin() {      # file needle-file -> yes/no: the needle's bytes appear in the file, in order
+    node -e 'const f=require("fs");process.stdout.write(f.readFileSync(process.argv[1],"utf8").includes(f.readFileSync(process.argv[2],"utf8"))?"yes":"no")' "$1" "$2" 2>/dev/null || echo no
+  }
+  # The conversation the claude master is in, as its hook would have recorded it, with the
+  # real captured transcript behind it.
+  cp "$FIX/handoff-claude-2.1.321.jsonl" "$HS/claude.jsonl"
+  printf '{"session_id":"%s","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s,"transcript":"%s"}\n' \
+    "$HCID" "$HSS" "$HSR" "$(date +%s)" "$HS/claude.jsonl" > "$HSF/$HCID.json"
+  "${HSE[@]}" tmux -L "$HSS" new-session -d -x 120 -y 30 -s master -c "$HS/repo" \
+    -e CLAUDE_FLEET_DIR="$HSF" -e CLAUDE_FLEET_SOCK="$HSS" -e CLAUDE_FLEET_AGENT=claude \
+    -e CLAUDE_FLEET_FRESH=1 -e CLAUDE_FLEET_MODEL=haiku -e CLAUDE_FLEET_CODEX_TRUST=0 -e CLAUDE_FLEET_CODEX_RECORD=0 \
+    "exec agent-here master"
+  sleep 1
+  HSP0="$(tmux -L "$HSS" display-message -p -t master '#{pane_pid}' 2>/dev/null)"
+
+  # ── asked mid-turn: it waits ──
+  tmux -L "$HSS" send-keys -t master -l '✻ Cooking… (3s · esc to interrupt)'; tmux -L "$HSS" send-keys -t master Enter
+  sleep 0.5
+  printf 'Check `make test` in $HOME/acme-api — "all" of it, & 100%% of the output.\n  Then: what was the codeword?  ' > "$HS/msg1"
+  out="$(hsfm --message "$(cat "$HS/msg1")" master codex)"
+  is "a switch asked mid-turn says it waits for the turn"   "1" "$(grep -c 'when its current turn ends, with its thread handed over' <<< "$out" || true)"
+  sleep 2
+  is "...and waits: the same claude process, the wish pending" "$HSP0 codex" "$(tmux -L "$HSS" display-message -p -t master '#{pane_pid}' 2>/dev/null) $(cat "$HSF/$HSS.master.switch" 2>/dev/null)"
+  is "...nothing handed over yet"                           "no" "$([ -f "$HSF/$HSS.master.switch" ] || printf 'no switch pending: '; [ -e "$HS/injected.json" ] || [ -e "$HS/argv.codex" ] && echo yes || echo no)"
+  tmux -L "$HSS" send-keys -R -t master; tmux -L "$HSS" clear-history -t master
+  hswait
+
+  # ── the turn ended: claude -> codex, in place ──
+  is "when the turn ends it moves: same session name, now on codex" "yes codex" \
+     "$(tmux -L "$HSS" has-session -t '=master' 2>/dev/null && echo yes || echo no) $(cat "$HSF/$HSS.master.agent" 2>/dev/null)"
+  is "...in the same worktree"                              "codex $HSR" "$(cat "$HSF/$HSS.master.agent" 2>/dev/null) $(tmux -L "$HSS" display-message -p -t master '#{pane_current_path}' 2>/dev/null)"
+  is "...on the same branch"                                "codex feat/handoff-demo" "$(cat "$HSF/$HSS.master.agent" 2>/dev/null) $(git -C "$HS/repo" symbolic-ref --short HEAD 2>/dev/null)"
+  is "codex took the thread natively: app-server, a thread, the items" "initialize initialized thread/start thread/inject_items" \
+     "$(paste -sd' ' - < "$HS/appserver.calls" 2>/dev/null)"
+  inj="$(jq -r '.items[].content[].text' "$HS/injected.json" 2>/dev/null)"
+  is "...the injected history holds the first request"      "1" "$(grep -c '^Remember this codeword for later: TANGERINE-58' <<< "$inj" || true)"
+  is "...and a command with its exit code"                  "yes" "$(grep -q '^Exit code: 1$' <<< "$inj" && grep -q '^Command: ' <<< "$inj" && echo yes || echo no)"
+  is "...into the thread codex was then resumed on"         "$HXID yes" "$(jq -r .threadId "$HS/injected.json" 2>/dev/null) $(grep -q "^resume $HXID" "$HS/argv.codex" 2>/dev/null && echo yes || echo no)"
+  is "...and none of the fleet's memory in it"              "0" "$(hcnt 'Briefing for acme-api|ghostfleet ledger' "$inj")"
+  is "codex is then sent the owner's message, verbatim"     "yes" "$(hsin "$HS/tty.codex" "$HS/msg1")"
+  is "...after the end-of-thread line"                      "1" "$(grep -c '^\[fleet handoff\] End of the handed-over thread. You are now this project.s master, taking over from claude.' "$HS/tty.codex" 2>/dev/null || true)"
+  is "...and the slice is not typed in a second time"       "0" "$(hcnt 'Remember this codeword' "$(cat "$HS/tty.codex" 2>/dev/null)")"
+  hrec="$(ls "$HSF/handoffs/$HSS.master/"*-claude-to-codex.json 2>/dev/null | tail -1)"
+  is "the handoff is kept under the fleet dir, saying how it went" "full native $HXID 19" \
+     "$(jq -r '"\(.mode) \(.delivery) \(.thread) \(.kept|length)"' "$hrec" 2>/dev/null)"
+  is "...and written to the fleet's memory as a handoff event" "claude codex native 19 0" \
+     "$(jq -r 'select(.kind=="handoff") | .f | "\(.from) \(.to) \(.delivery) \(.kept) \(.omitted)"' "$HSF/know.jsonl" 2>/dev/null | tail -1)"
+  out="$(hsfm master)"
+  is "the session says it runs codex now"                   "1" "$(grep -c '^  agent:   codex' <<< "$out" || true)"
+  is "...and what it was handed"                            "1" "$(grep -c '^  handoff: .*claude -> codex  full  native' <<< "$out" || true)"
+  is "...and keeps claude's conversation for the way back"  "$HCID" "$(jq -r .claude.id "$HSF/$HSS.master.convs.json" 2>/dev/null)"
+
+  # ── and back: codex -> claude resumes claude's own conversation, handed the delta only ──
+  # Codex's conversation as its hook records one (agent: codex), with the real captured rollout
+  # behind it, moved to after the switch above. That rollout opens with the 20 items claude
+  # handed it, which claude must not be given back: it resumes the conversation they came from.
+  node "$ROOT/test/helpers/handoff-shift.mjs" "$FIX/handoff-codex-0.170.0.jsonl" "$HS/codex.jsonl" "$(( $(date +%s) * 1000 + 1000 ))"
+  printf '{"session_id":"%s","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s,"transcript":"%s","agent":"codex"}\n' \
+    "$HXID" "$HSS" "$HSR" "$(( $(date +%s) + 5 ))" "$HS/codex.jsonl" > "$HSF/$HXID.json"
+  printf 'And what did codex run?\n\n  Keep it to `one` line, & say "done".  ' > "$HS/msg2"
+  out="$(hsfm --message "$(cat "$HS/msg2")" master claude)"
+  hswait; sleep 0.5
+  is "coming back: the same session, on claude again"       "yes claude" \
+     "$(tmux -L "$HSS" has-session -t '=master' 2>/dev/null && echo yes || echo no) $(cat "$HSF/$HSS.master.agent" 2>/dev/null)"
+  hsl="$(tail -n 1 "$HS/argv.claude" 2>/dev/null)"
+  is "...resuming claude's own conversation by its id"      "yes" "$(grep -qF -- "--resume $HCID" <<< "$hsl" && echo yes || echo no)"
+  hb="$(ls "$HSF/handoffs/$HSS.master/"*-codex-to-claude.json 2>/dev/null | tail -1)"
+  is "...handed what codex did since, and only that: a delta, in the first prompt" "delta prompt 14 14" \
+     "$(jq -r '"\(.mode) \(.delivery) \(.items) \(.kept|length)"' "$hb" 2>/dev/null)"
+  tc="$(cat "$HS/tty.claude" 2>/dev/null)"
+  is "...codex's work is in it: a command it ran, its reply" "yes yes" \
+     "$(grep -q '^Command: ls -a$' <<< "$tc" && echo yes || echo no) $(grep -q 'TANGERINE-58; `ls -a` shows' <<< "$tc" && echo yes || echo no)"
+  is "...and the error codex's refused turn ended on"       "yes" "$(grep -q '^Error: You.ve hit your usage limit' <<< "$tc" && echo yes || echo no)"
+  # Counted inside the handed-over block, so a tty with no block in it says so rather than 0.
+  tb="$(sed -n '/^\[fleet handoff\] What happened since you were last in this session/,/^\[fleet handoff\] End of the handed-over thread/p' <<< "$tc")"
+  is "...and nothing of claude's own thread, a second time" "0 0" "$(hcnt '^--- claude#' "$tb") $(hcnt '\[fleet handoff\] claude#' "$tb")"
+  is "...then the owner's message, verbatim"                "yes" "$(hsin "$HS/tty.claude" "$HS/msg2")"
+  is "...after the end-of-thread line"                      "1" "$(grep -c '^\[fleet handoff\] End of the handed-over thread. You are this project.s master again, taking over from codex.' "$HS/tty.claude" 2>/dev/null || true)"
+  is "the way back is a handoff event too"                  "codex claude delta prompt 14" \
+     "$(jq -r 'select(.kind=="handoff") | .f | "\(.from) \(.to) \(.mode) \(.delivery) \(.kept)"' "$HSF/know.jsonl" 2>/dev/null | tail -1)"
+  is "...and codex's conversation is kept for the next switch" "$HXID" "$(jq -r .codex.id "$HSF/$HSS.master.convs.json" 2>/dev/null)"
+  tmux -L "$HSS" kill-server 2>/dev/null
+  rm -rf "${HS:?}"
+else
+  skip "agent handoff through a switch" "tmux, jq, node or git missing"
+fi
+
 # ── the demo profile, built rather than hand-made ────────────────────────────
 # `ghostfleet demo` is the first line of BOTH recordings (worktree.tape:58,
 # stack.tape:44) and of the README's GIFs — and until now the profile behind it existed
@@ -13700,7 +13982,10 @@ if [ -d "$SMD" ] && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 
   is "fleet-model: a codex session is refused"                 "1"              "$rc"
   is "...naming what keeps a model per agent"                  "yes"            "$(grep -q 'lib/agent-switch.sh' <<< "$out" && echo yes || echo no)"
   is "...and nothing is pinned"                                "no"             "$([ -f "$SMD/fleet/cf-acme-web.scratch.model" ] && echo yes || echo no)"
-  is "...and reading it says why"                              "1"              "$(grep -c 'claude sessions only' <<< "$(fmx -s cf-acme-web scratch 2>&1)" || true)"
+  is "...saying the spelling that does work"                   "yes"            "$(grep -qF 'fleet-model scratch codex:<model>, or claude[:<model>]' <<< "$out" && echo yes || echo no)"
+  # Read, it is a codex session like any other now — fleet-model moves one between agents —
+  # where it used to be "claude sessions only".
+  is "...and reading it says what it runs"                     "1"              "$(grep -c '^  agent:   codex on its default model$' <<< "$(fmx -s cf-acme-web scratch 2>&1)" || true)"
   touch "$SMD/fleet/cf-acme-web.billing-svc.asleep"
   out="$(fmx -s cf-acme-web billing-svc sonnet 2>&1)"; rc=$?
   is "fleet-model: an asleep claude session is pinned"         "0 sonnet"       "$rc $(cat "$SMD/fleet/cf-acme-web.billing-svc.model" 2>/dev/null)"
@@ -17998,7 +18283,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile sub counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status status_from team_status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
+  is "card keys"         "name label status status_from team_status folder branch agent switching pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -22091,7 +22376,12 @@ is "the MCP server imports it too"      "1" \
 # and a second copy of that rule in this file is a name that drifts (the web terminal would
 # attach to a session fleet-tab never makes). It takes no wire input either: every argument
 # is a literal or comes from resolveProject(), i.e. the projects file — asserted below.
-is "it runs only reads, by hand — and fleet-tab" "fleet-agent fleet-awake fleet-grid.mjs fleet-tab" \
+#   fleet-model is the fifth, and only ever as `--models --json`: what a session can be switched
+# to, for the Switch agent sheet. That list is claude's aliases plus codex's own cache of the
+# models the account can use, and it has to be the list fleet-model checks a switch against —
+# a copy here would let the sheet offer a model the switch then refuses. Literal arguments,
+# no wire input: the session the sheet asks about is read from files and tmux, never passed on.
+is "it runs only reads, by hand — and fleet-tab" "fleet-agent fleet-awake fleet-grid.mjs fleet-model fleet-tab" \
    "$(grep -oE "join\(BIN, '[^']+'" "$ROOT/bin/fleet-serve.mjs" | sed "s/.*'\(.*\)'/\1/" | sort -u | tr '\n' ' ' | sed 's/ $//')"
 # ...and the registry really is fed literals. A request field reaching it would make the
 # daemon a second, unvalidated entry point to a bin/ command, which is the whole thing
@@ -22100,6 +22390,8 @@ is "...and the registry takes no wire input" "0" \
    "$(sed -n '/function agentCatalogue/,/^}/p' "$ROOT/bin/fleet-serve.mjs" | grep -cE 'req\.|url\.|rawArgs|body' || true)"
 is "...and fleet-tab takes no wire input" "0" \
    "$(sed -n '/^function openTermTab/,/^}/p' "$ROOT/bin/fleet-serve.mjs" | grep -cE 'req\.|url\.|rawArgs|body' || true)"
+is "...and fleet-model is only asked for its model list" "1 1" \
+   "$(grep -c "join(BIN, 'fleet-model')" "$ROOT/bin/fleet-serve.mjs" || true) $(grep -c "join(BIN, 'fleet-model'), \['--models', '--json'\]" "$ROOT/bin/fleet-serve.mjs" || true)"
 is "and every verb goes through it"      "1" \
    "$([ "$(grep -c 'callToolAsync(' "$ROOT/bin/fleet-serve.mjs" || true)" -ge 1 ] && echo 1 || echo 0)"
 is "the MCP server no longer execs"      "0" \
