@@ -125,5 +125,19 @@ const later = await V.voiceStatus();
 Date.now = now;
 is('...and asked again after it: the answer most likely to change, once the install is run', true, !!later.hear?.ready);
 
+// A read-aloud does not wait for that re-ask. The machine answers "not ready" once and then
+// never again, the way a request lost at the wrong moment does; past the re-ask, the ▶ must
+// still speak at once, in the device's voice, and the re-ask still goes out behind it.
+asks = 0;
+V.voiceBackend(machine({ voice: async () => { asks++; return asks === 1 ? { hear: { ready: false }, speak: { ready: false } } : new Promise(() => {}); } }));
+await V.voiceStatus();
+reset('ok');
+const then = Date.now; Date.now = () => then() + 31000;
+V.speak('Read this now.');
+await new Promise(r => setTimeout(r, 20));
+Date.now = then;
+is('a reply read once "not ready" is 30 s old is spoken at once, not after the re-ask', ['Read this now.'], dev.said.filter(x => x.trim()));
+is('...and the re-ask still goes out, for the next one', 2, asks);
+
 process.stdout.write(rows.join('\n') + '\n');
 process.exit(0);

@@ -3744,6 +3744,11 @@ async function voiceStatus(force = false) {
 	}
 	return status || NONE;
 }
+function voiceNow() {
+	if (!status) return voiceStatus();
+	voiceStatus().catch(() => {});
+	return status;
+}
 var onMissing = null;
 function whenVoiceMissing(f) {
 	onMissing = f;
@@ -4216,7 +4221,7 @@ async function speak(md, onEnd, voice = "") {
 		audio: null
 	};
 	playing = job;
-	const st = await voiceStatus();
+	const st = await voiceNow();
 	if (job.cancelled) return;
 	let i = 0, rest = [];
 	if (st.speak?.ready) try {

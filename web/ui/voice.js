@@ -28,6 +28,17 @@ export async function voiceStatus(force = false) {
   if (got) { status = got; statusAt = Date.now(); return got; }
   return status || NONE;
 }
+//   What a reply is READ with, without waiting: a remembered answer is used as it is and the
+// re-ask runs behind it, for the next reply. Waiting on it put a network round trip between the
+// ▶ and the first word of every read once the answer was 30 s old (forever, if the request was
+// lost), where the old answer, kept for the life of the page, had cost nothing. Only a page's
+// first read waits, as it always did. Speak mode's listen still asks fresh: whether the sheet
+// opens is the decision the re-ask exists for.
+function voiceNow() {
+  if (!status) return voiceStatus();
+  voiceStatus().catch(() => {});
+  return status;
+}
 // Somebody to tell when the serving machine turns out not to hear — the sheet in voicesetup.jsx
 // registers itself here, so this file says it and the shell decides how it looks.
 let onMissing = null;
@@ -373,7 +384,7 @@ export async function speak(md, onEnd, voice = '') {
   if (!chunks.length) { onEnd?.(); return; }
   const job = { cancelled: false, audio: null };
   playing = job;
-  const st = await voiceStatus();
+  const st = await voiceNow();
   if (job.cancelled) return;
   let i = 0, rest = [];
   if (st.speak?.ready) {
