@@ -6,6 +6,11 @@
 #                                                     losing its conversation, and pin it there
 # fleet-model [-s SOCKET] <session> --unpin           drop the pin: the next start goes back to
 #                                                     the project default or the profile default
+# fleet-model [-s SOCKET] <session> <agent>[:<model>] [--message TEXT] [--wait]
+#                                                     move a RUNNING session to another agent
+#                                                     (claude, codex, …) with its thread handed
+#                                                     over (lib/handoff.mjs), in place
+# fleet-model --models [--json]                       the models a switch can pick, per agent
 #
 # WHY. A fleet that runs every session on the profile default runs all of them on the most
 # expensive model, and only a NEW worker could be given another one (fleet-spawn --model,
@@ -34,8 +39,15 @@
 # means the full history gets re-read. ❯ 1. Yes, switch to Sonnet 5.5 / 2. No, go back". Asking
 # for the switch is the answer, so the watcher presses 1 on that exact dialog and nothing else.
 #
-# CLAUDE ONLY. A model name is vendor-specific (`haiku` means nothing to codex), and moving a
-# session to another CLI is lib/agent-switch.sh's job, which keeps a model per agent.
+# A BARE MODEL IS CLAUDE ONLY. A model name is vendor-specific (`haiku` means nothing to codex).
+# `<agent>[:<model>]` is the other half: the session moves to that agent — same name, slot,
+# worktree and branch — by lib/agent-switch.sh, which waits for its turn to end, hands the
+# conversation over (lib/handoff.mjs: in full the first time, only what changed since when the
+# agent was here before, its own conversation resumed), and keeps a model per agent. Only the
+# session moves: a master's project keeps its AGENT setting for the NEXT master
+# (`fleet-project agent` changes that). `claude:<model>` on a session already on claude is the
+# /model path above; `codex:<model>` on a codex session relaunches it on its own conversation.
+#   --message rides with the switch and is sent, exactly as given, after the handoff.
 #
 # Exit: 0 moved, pinned or queued · 1 refused (usage, unknown session, not claude, bad name)
 #       2 the switch was tried and did not take (what Claude Code said is printed).
@@ -69,13 +81,16 @@ FG_WAIT="${CLAUDE_FLEET_MODEL_FG_WAIT:-60}"       # how long the caller waits on
 
 usage() { sed -n '2,10p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
-MODE=get; WAITMODE=auto; SESSION=""; MODEL=""; POS=()
+MODE=get; WAITMODE=auto; SESSION=""; MODEL=""; POS=(); MESSAGE=""; HAS_MESSAGE=0; JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)        SOCK="${2:-}"; shift 2 ;;
     --wait)    WAITMODE=wait; shift ;;
     --no-wait) WAITMODE=none; shift ;;
     --unpin)   MODE=unpin; shift ;;
+    --message) MESSAGE="${2-}"; HAS_MESSAGE=1; shift 2 2>/dev/null || shift $# ;;
+    --models)  MODE=models; shift ;;
+    --json)    JSON=1; shift ;;
     # internal: the detached watcher (one per session)
     --watch)   MODE=watch; SOCK="${2:-}"; SESSION="${3:-}"; shift 3 2>/dev/null || shift $# ;;
     -h|--help) usage; exit 0 ;;
@@ -87,11 +102,42 @@ while [ $# -gt 0 ]; do
   esac
 done
 set -- ${POS[@]+"${POS[@]}"}
+# ── the models a switch can pick ─────────────────────────────────────────────
+# Claude's are its aliases (what model_name_valid takes without a full id). Codex's come from
+# its own cache of what the account can use (<CODEX_HOME>/models_cache.json, `visibility:
+# "list"` being what its own picker shows) — read, never hard-coded, because the list is the
+# account's and changes under us. An agent that is not installed is left out.
+do_models() {
+  local inst; inst="$("$BIN_DIR/fleet-agent" installed 2>/dev/null)"
+  CF_INSTALLED="$inst" node -e '
+    const fs = require("fs"), path = require("path"), os = require("os");
+    const inst = new Set(String(process.env.CF_INSTALLED || "").split(/\s+/).filter(Boolean));
+    const out = {};
+    if (inst.has("claude")) out.claude = [
+      { id: "opus", name: "Opus" }, { id: "sonnet", name: "Sonnet" }, { id: "haiku", name: "Haiku" }];
+    if (inst.has("codex")) {
+      const home = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+      let ms = [];
+      try { ms = JSON.parse(fs.readFileSync(path.join(home, "models_cache.json"), "utf8")).models || []; } catch {}
+      out.codex = ms.filter(m => m && m.slug && (m.visibility || "list") === "list")
+        .map(m => ({ id: String(m.slug), name: String(m.display_name || m.slug) }));
+    }
+    if (process.argv[1] === "1") process.stdout.write(JSON.stringify(out) + "\n");
+    else for (const [a, ms] of Object.entries(out)) process.stdout.write(`${a}: ${ms.map(m => m.id).join(" ") || "(its default)"}\n`);
+  ' "$JSON"
+}
+if [ "$MODE" = models ]; then do_models; exit 0; fi
+
 if [ "$MODE" != watch ]; then
   SESSION="${1:-}"; MODEL="${2:-}"
   [ $# -gt 2 ] && { echo "fleet-model: too many arguments" >&2; usage >&2; exit 1; }
   [ -n "$MODEL" ] && [ "$MODE" = get ] && MODE=set
   [ -n "$MODEL" ] && [ "$MODE" = unpin ] && { echo "fleet-model: --unpin takes no model" >&2; exit 1; }
+  # <agent> or <agent>:<model> names an agent fleet-agent knows; anything else is a model.
+  WA="${MODEL%%:*}"; WM=""
+  case "$MODEL" in *:*) WM="${MODEL#*:}" ;; esac
+  if [ "$MODE" = set ] && [ -n "$WA" ] && "$BIN_DIR/fleet-agent" field "$WA" bin >/dev/null 2>&1; then MODE=agent; fi
+  [ "$HAS_MESSAGE" = 1 ] && [ "$MODE" != agent ] && { echo "fleet-model: --message goes with an agent switch (<session> <agent>[:<model>])" >&2; exit 1; }
 fi
 [ -n "$SOCK" ]    || { echo "fleet-model: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { usage >&2; exit 1; }
@@ -170,8 +216,83 @@ short_said() { printf '%s' "$1" | sed 's/ and saved as your default for new sess
 refuse_not_claude() {
   local a="$1"
   echo "fleet-model: $SESSION runs $a, not claude — a model name is per CLI (\"haiku\" means nothing to $a)." >&2
-  echo "fleet-model: moving a session between agents is lib/agent-switch.sh (fleet-project agent <project> <agent> for a master), which keeps a model per agent." >&2
+  # The agent:model spelling, because that is the one that works here now; the switch behind
+  # it is lib/agent-switch.sh, which keeps a model per agent.
+  echo "fleet-model: name the agent with it: fleet-model $SESSION $a:<model>, or claude[:<model>] to move it — lib/agent-switch.sh keeps a model per agent." >&2
   exit 1
+}
+
+# ── the agent half (lib/agent-switch.sh) ─────────────────────────────────────
+SWITCH="$LIB_DIR/agent-switch.sh"
+# What the switch knows about this session: a wish waiting on its turn, the last failure, the
+# conversation it keeps per agent, and the last handoff (lib/handoff.mjs).
+agent_tail() {
+  local st convs last
+  st="$(bash "$SWITCH" state "$FLEET_DIR" "$SOCK" "$SESSION" 2>/dev/null)"
+  case "$st" in
+    switching*) echo "  switch:  to ${st#switching } — waiting for its turn to end" ;;
+    failed*)    echo "  switch:  last one failed — ${st#failed }" ;;
+  esac
+  convs="$FLEET_DIR/$SOCK.$SESSION.convs.json"
+  [ -s "$convs" ] && jq -r 'to_entries[] | "  \(.key):\(" " * ([8 - (.key|length)] | max)) \(if (.value.id // "") == "" then "no conversation recorded" else "conversation \(.value.id)" end)\(if (.value.model // "") != "" then " on \(.value.model)" else "" end), left \(.value.ts | todate)"' "$convs" 2>/dev/null
+  last="$(node "$LIB_DIR/handoff.mjs" list --dir "$FLEET_DIR" --sock "$SOCK" --slot "$SESSION" 2>/dev/null | tail -1)"
+  [ -n "$last" ] && echo "  handoff: $last"
+  return 0
+}
+model_ok_for() {   # agent model
+  case "$1" in
+    claude) model_name_valid "$2" ;;
+    *) case "$2" in ''|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*) return 1 ;; esac ;;
+  esac
+}
+do_agent() {
+  local a res t0 st
+  if [ -n "$WM" ] && ! model_ok_for "$WA" "$WM"; then
+    echo "fleet-model: '$WM' is not a $WA model name (fleet-model --models lists them)" >&2; exit 1
+  fi
+  live || { echo "fleet-model: $SESSION is not running — nothing to move (wake or reopen it first; fleet-project agent sets what a project's next master starts on)" >&2; exit 1; }
+  a="$(agent)"
+  # Same agent: claude takes a model through /model (the path above, context kept in place);
+  # with no model, there is nothing to move and the message is simply sent.
+  if [ "$a" = "$WA" ] && [ "$WA" = claude ]; then
+    if [ -n "$WM" ]; then
+      MODEL="$WM"
+      if [ "$HAS_MESSAGE" = 1 ]; then ( do_set ) || exit $?; "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MESSAGE"; exit $?; fi
+      do_set; return
+    fi
+    echo "fleet-model: $SESSION already runs claude"
+    [ "$HAS_MESSAGE" = 1 ] && exec "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MESSAGE"
+    exit 0
+  fi
+  if [ "$HAS_MESSAGE" = 1 ]; then
+    res="$(CLAUDE_FLEET_SWITCH_MESSAGE="$MESSAGE" bash "$SWITCH" request "$FLEET_DIR" "$SOCK" "$SESSION" "$WA${WM:+:$WM}" 2>&1)"
+  else
+    res="$(bash "$SWITCH" request "$FLEET_DIR" "$SOCK" "$SESSION" "$WA${WM:+:$WM}" 2>&1)"
+  fi
+  case "$res" in
+    not-running*) echo "fleet-model: $SESSION is not running — nothing to move" >&2; exit 1 ;;
+    already*|cancelled*)
+      case "$res" in
+        already*) echo "fleet-model: $SESSION already runs $WA${WM:+ on $WM}" ;;
+        *)        echo "fleet-model: $SESSION already runs $WA${WM:+ on $WM} — the pending switch is cancelled" ;;
+      esac
+      [ "$HAS_MESSAGE" = 1 ] && exec "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MESSAGE"
+      exit 0 ;;
+    missing*) set -- $res; echo "fleet-model: $2 is not installed ('$3' is not on PATH) — $SESSION stays on $4" >&2; exit 1 ;;
+    pending-busy*) echo "fleet-model: $SESSION moves from ${res#pending-busy } to $WA${WM:+ ($WM)} when its current turn ends, with its thread handed over. Check with: fleet-model $SESSION" ;;
+    pending*)      echo "fleet-model: $SESSION is moving from ${res#pending } to $WA${WM:+ ($WM)} now, with its thread handed over" ;;
+    *) echo "fleet-model: could not switch $SESSION: $res" >&2; exit 2 ;;
+  esac
+  [ "$WAITMODE" = wait ] || exit 0
+  # --wait: until the wish is gone, then say how it went.
+  t0=$SECONDS
+  while [ $((SECONDS - t0)) -lt "${CLAUDE_FLEET_MODEL_SWITCH_WAIT:-900}" ]; do
+    st="$(bash "$SWITCH" state "$FLEET_DIR" "$SOCK" "$SESSION" 2>/dev/null)"
+    case "$st" in switching*) sleep 1; continue ;; esac
+    if [ "$(agent)" = "$WA" ] && [ -z "$st" ]; then echo "fleet-model: $SESSION runs $WA now"; exit 0; fi
+    echo "fleet-model: the switch did not happen — ${st#failed }" >&2; exit 2
+  done
+  echo "fleet-model: still waiting for $SESSION to come free — it moves once it does" >&2; exit 0
 }
 
 # ── get ───────────────────────────────────────────────────────────────────────
@@ -179,7 +300,11 @@ do_get() {
   local a res nm nsrc tr m at how settings dflt rid rmodel rpid rst rat line
   a="$(agent)"
   if [ "$a" != claude ]; then
-    echo "$SESSION runs $a — fleet-model covers claude sessions only (lib/agent-switch.sh keeps a model per agent)"
+    live || asleep || [ -n "$(record slot)" ] || { echo "fleet-model: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+    echo "$SESSION"
+    m=""; live && m="$(envof CLAUDE_FLEET_MODEL)"
+    echo "  agent:   $a on ${m:-its default model}"
+    agent_tail
     return 0
   fi
   live || asleep || [ -n "$(record slot)" ] || { echo "fleet-model: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
@@ -219,6 +344,7 @@ do_get() {
     line="$(sed -n 2p "$RESF")"
     echo "  last:    $rst $(ago "$rat") ago — $line"
   fi
+  agent_tail
 }
 
 # ── the switch itself (run by the watcher, once the session is free) ──────────
@@ -421,6 +547,7 @@ do_unpin() {
 case "$MODE" in
   get)   do_get ;;
   set)   do_set ;;
+  agent) do_agent ;;
   unpin) do_unpin ;;
   watch) do_watch ;;
 esac

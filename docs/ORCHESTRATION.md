@@ -48,6 +48,8 @@ which is what keeps a long-running or restarted lead from getting lost:
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
 | what a session **runs on**, and where that came from | `fleet-model <session>` |
 | move a **running** session to another model, keeping its conversation | `fleet-model <session> sonnet` (MCP `fleet_model`) — say which model and why; [details](#moving-a-running-session-to-another-model) |
+| move a **running** session to another **agent** (claude ⇄ codex), with its thread | `fleet-model <session> codex[:<model>] [--message "…"]` (MCP `fleet_model`) — back with `claude`; [details](#moving-a-running-session-to-another-agent-with-its-thread) |
+| read what a handoff **left out** | `fleet-handoff read <session> [--agent a] --from N --to M` (MCP `fleet_history`) · `fleet-handoff list <session>` |
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
 | **retire** a finished worker and its worktree | `fleet-stop --reclaim <session>` — removes the tree when safe (a squash-merged PR on a clean tree is), else keeps it and says why |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
@@ -129,9 +131,9 @@ fleet-project set acme-api model default  # drop it
 
 What a switch does, in order:
 
-1. **Claude sessions only.** A model name means nothing to another CLI, so any other agent is
-   refused. Moving a session to another agent is `lib/agent-switch.sh`, which keeps a model per
-   agent.
+1. **A bare model is Claude only.** A model name means nothing to another CLI, so a session on
+   any other agent is refused. To move a session to another agent, name the agent:
+   `fleet-model <session> codex[:<model>]` ([below](#moving-a-running-session-to-another-agent-with-its-thread)).
 2. **It waits until the session is free.** That means not busy, not on a dialog, idle three
    samples in a row (the same check `lib/agent-switch.sh` uses), *and* nothing in its
    `fleet-send` queue. An idle session with a backlog takes the backlog first, so a `/model`
@@ -176,6 +178,60 @@ graded, sworn or high-stakes: an exam answer, a legal form, an irreversible migr
 whose verdict others will act on. A switch re-reads the whole conversation on the new model, so
 it is worth doing at a change of phase, not every turn. A lead says which model and why, in the
 same message that moves it.
+
+### Moving a running session to another agent, with its thread
+
+`fleet-model <session> codex` moves a running session to codex, and `fleet-model <session>
+claude` moves it back. Add `:<model>` to choose the model (`codex:gpt-6.2-sol`); `fleet-model
+--models` lists what each agent offers. The session keeps its name, slot, worktree and branch:
+only the agent process is replaced. A master's project keeps its AGENT setting for the next
+master (`fleet-project agent` changes that).
+
+```bash
+fleet-model master codex --message "Carry on with the invoice export"
+fleet-model master                                    # its agent, its conversation per agent, the last handoff
+fleet-handoff list master                             # every handoff it was given, and where each is kept
+fleet-handoff read master --agent claude --from 2 --to 14   # items a handoff left out
+```
+
+The same switch is the session page's **Switch agent** sheet on the web client, and the MCP tool
+`fleet_model` (`model: "codex"`, with an optional `message`).
+
+What the incoming agent is handed:
+
+- **The thread, not a summary.** No model call is made. A conversation that fits the budget goes
+  over intact. A longer one keeps whole items in this order until the budget is spent: the latest
+  request, the latest reply, the first request, then the rest newest first. An item is a request,
+  a reply, a command with its exit code and output, or a set of file changes, which go over as
+  paths. An interrupted turn keeps its partial reply.
+- **A budget.** It is 16,000 tokens by default, and `CLAUDE_FLEET_HANDOFF_TOKENS` sets it
+  (1,024–64,000). A token is counted as 4 bytes, and the slice is never more than 64 KB.
+- **What was left out, by number.** The preamble names the ranges (`claude#2–14, #17`) and says
+  how to read them. That is the `fleet_history` MCP tool, or `fleet-handoff read`, by item range,
+  across every agent the session ran.
+- **Never copied:** reasoning, raw tool-call state (call ids and inputs), and attachments. An
+  attachment is named where it was: `[attachment not copied: image (image/png)]`. The fleet's
+  memory blocks stay behind too: the SessionStart briefing, recall lines and ledger lines. The
+  incoming agent gets its own briefing from its own SessionStart.
+- **The owner's message, verbatim.** It comes after the thread, outside the budget, and is never
+  trimmed.
+
+**How it is delivered.** Codex 0.170 and later takes the thread as native history: a
+short-lived `codex app-server` injects the items into a thread (`thread/inject_items`), codex is
+resumed on that thread, and only the end-of-thread line and the message are typed. Every other
+agent, claude included, is given the thread as its first prompt. `--append-system-prompt` was
+measured and is ignored on `--resume`, which is the path every switch back takes.
+
+**Coming back.** An agent the session already ran is resumed on its own conversation, by the id
+recorded when it was left, and is handed only what happened since. Items it handed over itself
+are never sliced a second time.
+
+Every handoff is kept as a record under `<fleet dir>/handoffs/<sock>.<session>/` and written to
+the fleet's memory as a `handoff` event (from, to, bytes, items kept and left out). A switch asked
+mid-turn waits for the turn to end, like any agent switch. Nothing switches agents on its own, a
+usage limit included. A switch does not check the incoming agent's usage either: a codex at its
+limit takes the thread and answers with its limit message, which a switch back hands to Claude as
+an error item.
 
 ### The review gate — no merge without an independent review
 

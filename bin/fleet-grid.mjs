@@ -740,9 +740,14 @@ function queuedCount(name) {
   } catch { return 0; }
 }
 
-// The target of a switch waiting on this session's turn (lib/agent-switch.sh), or ''.
+// The target of a switch waiting on this session's turn (lib/agent-switch.sh), or ''. The
+// wish is `<agent>` or `<agent>:<model>` (fleet-model codex:<model>); the card says both, as
+// "codex (<model>)", and an unreadable wish says nothing rather than something wrong.
 function pendingSwitchIn(dir, sock, name) {
-  try { const a = fs.readFileSync(path.join(dir, `${sock}.${name}.switch`), 'utf8').trim(); return /^[a-z0-9_-]+$/.test(a) ? a : ''; }
+  try {
+    const m = /^([a-z0-9_-]+)(?::([A-Za-z0-9._[\]-]+))?$/.exec(fs.readFileSync(path.join(dir, `${sock}.${name}.switch`), 'utf8').trim());
+    return m ? (m[2] ? `${m[1]} (${m[2]})` : m[1]) : '';
+  }
   catch { return ''; }
 }
 function pendingSwitch(name) { return pendingSwitchIn(FLEET_DIR, SOCK, name); }
@@ -3367,6 +3372,11 @@ if (JSON_OUT) {
       folder:   c.folder,
       branch:   c.branch,
       agent:    c.agent,          // the card only draws it when != claude
+      // A switch to another agent waiting on this session's turn (lib/agent-switch.sh), as the
+      // card's own line says it: `codex` or `codex (<model>)`, null when none is pending. The
+      // phone's session header shows it beside the agent, since the line it rides in on the
+      // card (`msg`) is not drawn there.
+      switching: c.switchingTo || null,
       // The PR number for this session's branch, as a STRING and null when unknown.
       // A string because it is an identifier that gets printed, never arithmetic — and
       // because JSON's number type invites a client to reformat it. Unknown is null and
@@ -3941,7 +3951,8 @@ function switchNote(proj) {
     let fresh = '';
     try {
       const convs = JSON.parse(fs.readFileSync(k + '.convs.json', 'utf8'));
-      if (convs && convs[pend] && agentField(pend, 'resume') !== 'yes') fresh = ` · ${pend} can't resume — starts fresh`;
+      const pa = pend.split(' ')[0];         // "codex (<model>)" -> codex
+      if (convs && convs[pa] && agentField(pa, 'resume') !== 'yes') fresh = ` · ${pa} can't resume — starts fresh`;
     } catch {}
     return `${C.yellow}switching to ${pend}…${fresh}${C.reset}`;
   }

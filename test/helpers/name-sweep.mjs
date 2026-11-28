@@ -691,6 +691,12 @@ const BINARY_REVIEWED = new Set([
   'e40c511d56c012f6',   // docs/skeletons/390-settings-loaded.png
   '7dc7f2a73b3474b3',   // docs/skeletons/1280-settings-loading.png
   '933c42c3c19b7e54',   // docs/skeletons/1280-settings-loaded.png
+  'eb37e450041b6893',   // docs/agent-switch/phone-390-switch-sheet.png
+  '5528aa3d83813141',   // docs/agent-switch/phone-390-after-switch.png
+  '8c699afe5d1676ca',   // docs/agent-switch/phone-390-waiting-more.png
+  '0942207e5082ee7d',   // docs/agent-switch/desk-1280-switch-dialog.png
+  '2bd3c61f7d325107',   // docs/agent-switch/desk-1280-after-switch.png
+  'd697526a2230c40e',   // docs/agent-switch/desk-1280-waiting.png
   // The phone's fonts: byte-for-byte the published @fontsource 5.3.0 files (cmp against the
   // packages the team app installs), so they carry the foundries' tables and nothing of ours.
   '3100e775e8616cd2',   // web/fonts/inter-latin-wght-normal.woff2
@@ -724,6 +730,9 @@ const BINARY_EXPECTED = [
   'docs/wake-failed/390-failed-sheet.png', 'docs/wake-failed/1280-failed-dialog.png',
   'docs/send-after-turn/phone-390-composer.png', 'docs/send-after-turn/phone-390-send-sheet.png',
   'docs/send-after-turn/desk-1280-send-menu.png',
+  'docs/agent-switch/phone-390-switch-sheet.png', 'docs/agent-switch/phone-390-after-switch.png',
+  'docs/agent-switch/phone-390-waiting-more.png', 'docs/agent-switch/desk-1280-switch-dialog.png',
+  'docs/agent-switch/desk-1280-after-switch.png', 'docs/agent-switch/desk-1280-waiting.png',
   'docs/permission-modal/team-390-readonly-open.png',
   // The team app's copies of the three above, byte for byte (the same digests in
   // BINARY_REVIEWED): vite serves a public/ folder from inside its own root.

@@ -14,6 +14,7 @@
 //   fleet-know-event ledger  session=<sid> via=<who>               < [changes] (ledgerChanges)
 //   fleet-know-event infer   session=<sid> turn=<id>               < [{text, why}]
 //   fleet-know-event deploy  target= cmd= commit= ok=yes|no
+//   fleet-know-event handoff from= to= mode= delivery= bytes= items= kept= omitted= turns_kept= turns_omitted= record=
 //   fleet-know-event privacy session=<sid> | sock=<sock>          prints include|private|exclude
 //   fleet-know-event brief   sock= source=                 prints meta JSON, then the briefing
 //   fleet-know-event recall  sock= slot= session= agent=  < the prompt   prints the matches, or nothing
@@ -219,6 +220,14 @@ try {
       }
       break;
     }
+    // A session moved to another agent with its thread (lib/handoff.mjs). Counts only: the
+    // slice itself is in the record under the fleet dir, never in the memory.
+    case 'handoff': {
+      const n = (k) => (a[k] === undefined || a[k] === '' ? undefined : Number(a[k]));
+      put('handoff', { from: a.from, to: a.to, mode: a.mode, delivery: a.delivery, bytes: n('bytes'), items: n('items'), kept: n('kept'),
+        omitted: n('omitted'), turns_kept: n('turns_kept'), turns_omitted: n('turns_omitted'), record: a.record }, ctx());
+      break;
+    }
     case 'deploy':
       put('deploy', { target: a.target, cmd: a.cmd, commit: a.commit || git(a.cwd, ['rev-parse', 'HEAD']), ok: a.ok !== 'no' && a.ok !== '0' && a.ok !== 'false' }, ctx());
       break;
@@ -246,7 +255,7 @@ try {
       break;
     }
     default:
-      process.stderr.write('usage: fleet-know-event hook|spawn|purpose|ack|retire|prs|ledger|infer|deploy|privacy|brief|recall key=value…  (see the header)\n');
+      process.stderr.write('usage: fleet-know-event hook|spawn|purpose|ack|retire|prs|ledger|infer|deploy|handoff|privacy|brief|recall key=value…  (see the header)\n');
       process.exit(2);
   }
 } catch (e) {

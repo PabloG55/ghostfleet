@@ -14,6 +14,7 @@ import { useTranscript } from './transcript.js';
 import { useReading, toggleRead, stopRead, useSpeakMode } from './chatvoice.js';
 import { draftKey, draftText, draftFiles, lostFiles, keepDraft, seenLost, sentDraft } from './drafts.js';
 import { useWake, ASLEEP_FAILED } from './wake.jsx';
+import { SwitchAgent } from './switch.jsx';
 
 // Claude's dialog speaks English; the buttons say what pressing them does.
 function optionText(label) {
@@ -483,6 +484,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
   const [labelEdit, setLabelEdit] = useState(null);
   const [schedOpen, setSchedOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [switchOpen, setSwitchOpen] = useState(false);
   const [files, setFilesState] = useState(() => draftFiles(dkey));   // {id, name, size, state: 'up'|'ok'|'err', path, preview, why}
   // An upload answers seconds after it was picked, perhaps once the person has moved on: it lands in
   // THIS session's draft, and on the screen only while the screen is still this session's.
@@ -717,6 +719,11 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
               <span class="branch sk-ghost" aria-hidden="true"><Icon name="branch" /> feat/a-branch-name</span>
               <span class="tag pr sk-ghost" aria-hidden="true">PR 0000</span>
             </span> : <StatusPill status={st} />}
+            {/* THE AGENT, when it is not claude, as the project's rows draw it (project.jsx), and a
+                switch still waiting on this session's turn (fleet-grid's `switching`): after
+                "Switch agent" the header is where the person looks to see that it took. */}
+            {card?.agent && card.agent !== 'claude' ? <span class="tag agent">{card.agent}</span> : null}
+            {card?.switching ? <span class="tag agent switching" title={t('sess.switchingTo', { to: card.switching })}>→ {card.switching}…</span> : null}
             {card?.branch ? <span class="branch" title={card.branch}><Icon name="branch" /> {card.branch}</span> : null}
             {card?.pr ? <span class="tag pr">PR {card.pr}</span> : null}
             {card?.label ? (can('gfw_label')
@@ -760,16 +767,21 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
                 {/* On a phone the line under the name holds the state and the branch, cut short;
                     the rest of what the card says is here, whole (ui.css). A desk's header has
                     room for all of it, and this is not drawn there. */}
-                {card && (card.branch || card.pr || card.label || card.sched) ? (
+                {card && (card.branch || card.pr || card.label || card.sched || card.switching) ? (
                   <div class="menu-info">
                     {card.branch ? <span class="branch"><Icon name="branch" /> {card.branch}</span> : null}
                     {card.pr ? <span class="tag pr">PR {card.pr}</span> : null}
                     {card.label ? <span class="chip-label"><Icon name="tag" /> {card.label}</span> : null}
                     {card.sched ? <span class="chip-sched"><Icon name="clock" /> {hhmm(card.sched.at)} · “{String(card.sched.msg || '').slice(0, 60)}”</span> : null}
+                    {card.switching ? <span class="tag agent switching">{t('sess.switchingTo', { to: card.switching })}</span> : null}
                   </div>) : null}
                 {/* ...and the rest of what this session is about, beside it: what it left listening,
                     running or booted (DetailsModal), on a desk and a phone alike. */}
                 {card && fleet.ports ? <button onClick={() => { setMenu(false); setDetailsOpen(true); }}><Icon name="list" /> {t('sess.details')}</button> : null}
+                {/* Another agent, with the thread (switch.jsx): a running session only, since
+                    fleet-model has nothing to move in an asleep or lost one. */}
+                {card && fleet.models && can('fleet_model') && !card.exited && !['asleep', 'lost'].includes(st)
+                  ? <button onClick={() => { setMenu(false); setSwitchOpen(true); }}><Icon name="swap" /> {t('sess.switchAgent')}</button> : null}
                 {can('gfw_label') ? <button onClick={() => { setMenu(false); setLabelEdit(card?.label || ''); }}><Icon name="tag" /> {t('sess.setLabel')}</button> : null}
                 {can('gfw_schedule') ? <button onClick={() => { setMenu(false); setSchedOpen(true); }}><Icon name="clock" /> {t('sess.schedule')}</button> : null}
                 {/* The schedule's × rides in its chip, which a phone does not draw (above), so its
@@ -894,6 +906,7 @@ export function SessionView({ project, name, card, waiting = false, onChanged, o
         </div>
       </Modal> : null}
       {detailsOpen ? <DetailsModal project={project} name={name} status={st} onClose={() => setDetailsOpen(false)} /> : null}
+      {switchOpen ? <SwitchAgent project={project} name={name} onClose={() => setSwitchOpen(false)} onDone={refresh} /> : null}
       {wk.sheet}
       {schedOpen ? <ScheduleModal name={name} onClose={() => setSchedOpen(false)}
                                   onSave={async (at, msg) => { const r = await act('gfw_schedule', { at, msg }); if (r) toast(r.text, 'good'); }} /> : null}

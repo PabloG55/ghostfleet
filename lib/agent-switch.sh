@@ -2,9 +2,11 @@
 # agent-switch.sh — move a RUNNING session (a project's master, or one sub-master) onto
 # another agent, and back again without losing either conversation.
 #
-#   agent-switch.sh request <fleet-dir> <sock> <slot> <agent> [<project>]
-#                                    what `fleet-project agent` runs: record the wish, start
-#                                    the watcher, return at once
+#   agent-switch.sh request <fleet-dir> <sock> <slot> <agent>[:<model>] [<project>]
+#                                    what `fleet-project agent` and `fleet-model` run: record
+#                                    the wish, start the watcher, return at once.
+#                                    CLAUDE_FLEET_SWITCH_MESSAGE rides along, sent after the
+#                                    handoff exactly as given
 #   agent-switch.sh watch   <fleet-dir> <sock> <slot> [<project>]
 #                                    the watcher: waits for the turn to end, then switches
 #   agent-switch.sh state   <fleet-dir> <sock> <slot>
@@ -30,7 +32,12 @@
 # which re-reads the marker every sample, exits without touching anything.
 #
 # ── FILES, all in the profile's fleet dir, all keyed <sock>.<slot> ───────────
-#   .switch          the pending target agent, one word. Present = "switching to <agent>…"
+#   .switch          the pending wish, `<agent>` or `<agent>:<model>`. Present = "switching
+#                    to <agent>…". A model with the same agent is a relaunch on the same
+#                    conversation under the new model (codex has no in-place switch here)
+#   .switch.msg      the owner's message to deliver with the switch, verbatim, if one came
+#                    with it (CLAUDE_FLEET_SWITCH_MESSAGE): sent after the handoff, never
+#                    trimmed, and to the old agent if the new one does not come up
 #   .switch.pid      the watcher's pid, so a second request does not start a second one
 #   .switch-failed   one line: why the last switch did not happen (cleared by the next
 #                    request and by a switch that succeeds)
@@ -47,6 +54,17 @@
 #                    codex is an error — so it is dropped on the way out and restored on the
 #                    way back. An empty `id` still records that the agent was here, which is
 #                    what lets the settings screen warn that codex will start fresh.
+#
+# ── THE THREAD GOES OVER (lib/handoff.mjs) ───────────────────────────────────
+# The incoming agent used to start from nothing but a one-line "you are now the master". Now
+# it gets the session's conversation itself, budgeted and without a model call: in full when
+# it has never been here, and when it has (its own conversation resumed, below) only what
+# happened since it was left. Codex takes it as native history where its CLI can
+# (`codex app-server` thread/inject_items, then `codex resume` of that thread); everything
+# else takes it as the first prompt. Each handoff is kept under <fleet-dir>/handoffs/ and
+# written to the fleet's memory as a `handoff` event. The fleet's memory blocks (briefing,
+# recall, ledger) are never in it: the readers do not take hook context, and the incoming
+# agent gets its own briefing from its own SessionStart.
 #
 # ── NEVER --continue ─────────────────────────────────────────────────────────
 # The incoming agent resumes ONLY by its own recorded id (CLAUDE_FLEET_RESUME, the path
@@ -97,6 +115,24 @@ log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG" 2>/dev/nu
 alive() { tmux -L "$SOCK" has-session -t "=$SLOT" 2>/dev/null; }
 # The agent the session is RUNNING, from its marker (the setting is a different thing).
 live_agent() { FA of "$SLOT" -s "$SOCK" 2>/dev/null || printf claude; }
+# One variable of the session's own environment (what the agent was started with), or empty.
+sess_env() {
+  local v; v="$(tmux -u -L "$SOCK" show-environment -t "$SLOT" "$1" 2>/dev/null)"
+  case "$v" in "$1="*) printf '%s' "${v#"$1="}" ;; esac
+}
+live_model() { sess_env CLAUDE_FLEET_MODEL; }
+# A wish is `<agent>` or `<agent>:<model>`. Tested for the separator, never for emptiness:
+# ${w#*:} of a wish with no colon is the whole wish (CLAUDE.md, the leftover lands…).
+wish_agent() { printf '%s' "${1%%:*}"; }
+wish_model() { case "$1" in *:*) printf '%s' "${1#*:}" ;; esac; }
+# The wish is already what runs: same agent, and either no model asked for or that model.
+wish_met() {   # wish
+  local a m; a="$(wish_agent "$1")"; m="$(wish_model "$1")"
+  [ "$a" = "$(live_agent)" ] || return 1
+  [ -z "$m" ] || [ "$m" = "$(live_model)" ]
+}
+MSGF="$K.switch.msg"
+HO() { node "$LIB_DIR/handoff.mjs" "$@"; }
 
 # ── the per-agent conversation map ───────────────────────────────────────────
 conv_get() {   # agent field -> value or empty
@@ -104,20 +140,23 @@ conv_get() {   # agent field -> value or empty
   jq -r --arg a "$1" --arg f "$2" '.[$a][$f] // "" | tostring' "$CONVS" 2>/dev/null
 }
 conv_has() { [ -f "$CONVS" ] && jq -e --arg a "$1" 'has($a)' "$CONVS" >/dev/null 2>&1; }
-conv_put() {   # agent id model — merged into the map, atomically
+conv_put() {   # agent id model [transcript] — merged into the map, atomically
   local tmp="$CONVS.$$.tmp" base=''
   [ -f "$CONVS" ] && base="$(cat "$CONVS" 2>/dev/null)"
   [ -n "$base" ] || base='{}'
   # An unreadable map fails --argjson, so the write fails and the caller kills nothing.
-  jq -n --argjson m "$base" --arg a "$1" --arg i "$2" --arg mo "$3" --argjson ts "$(date +%s)" \
-     '$m + {($a): {id: $i, model: $mo, ts: $ts}}' > "$tmp" 2>/dev/null && mv -f "$tmp" "$CONVS"
+  # `file` is the transcript the id lives in, so a handoff later (lib/handoff.mjs) reads the
+  # conversation it names without searching two agents' stores for it.
+  jq -n --argjson m "$base" --arg a "$1" --arg i "$2" --arg mo "$3" --arg fi "${4:-}" --argjson ts "$(date +%s)" \
+     '$m + {($a): ({id: $i, model: $mo, ts: $ts} + (if $fi != "" then {file: $fi} else {} end))}' > "$tmp" 2>/dev/null && mv -f "$tmp" "$CONVS"
   local rc=$?; rm -f "$tmp" 2>/dev/null; return $rc
 }
 
 # ── which conversation the OUTGOING agent is in ──────────────────────────────
 # claude: ask fleet-hibernate, which reads it off the PROCESS (the recorded id can be stale —
 # fleet-restart's header has the measured case), and accept it only with a transcript
-# behind it. Anything else, or claude when that cannot be established: the newest hook record
+# behind it. Prints `<id>\x1f<transcript>` (either may be empty).
+# Anything else, or claude when that cannot be established: the newest hook record
 # for this (sock, slot) that is not already some OTHER agent's conversation in the map —
 # after a stint on another agent the records interleave, and this is what keeps them apart.
 outgoing_id() {
@@ -125,7 +164,7 @@ outgoing_id() {
   if [ "$agent" = claude ]; then
     if out="$("$BIN_DIR/fleet-hibernate" --resolve "$SOCK" "$SLOT" 2>/dev/null)" && [ -n "$out" ]; then
       IFS=$'\x1f' read -r lid ltr _ <<< "$out"
-      [ -n "$ltr" ] && [ -f "$ltr" ] && { printf '%s' "$lid"; return 0; }
+      [ -n "$ltr" ] && [ -f "$ltr" ] && { printf '%s\x1f%s' "$lid" "$ltr"; return 0; }
       # Resolved, and it never took a turn: there is nothing to come back to. Falling
       # through to the records would pick this slot's PREVIOUS conversation instead — one
       # the master had already left — and "switching back" would reopen that.
@@ -138,7 +177,7 @@ outgoing_id() {
   if [ "$agent" = codex ]; then
     local ppid_; ppid_="$(tmux -u -L "$SOCK" display-message -p -t "$SLOT" '#{pane_pid}' 2>/dev/null)"
     if [ -n "$ppid_" ] && out="$(node "$LIB_DIR/codex-rollout.mjs" resolve --pid "$ppid_" 2>/dev/null)" && [ -n "$out" ]; then
-      printf '%s' "${out%%$'\x1f'*}"; return 0
+      printf '%s' "$out"; return 0      # already <id>\x1f<rollout>
     fi
   fi
   others=""
@@ -149,10 +188,10 @@ outgoing_id() {
   jq -r --arg s "$SOCK" --arg l "$SLOT" --arg a "$agent" \
      'select(.sock == $s and .slot == $l and (.session_id // "") != "")
       | select(if $a == "codex" then .agent == "codex" else (.agent // "") != "codex" end)
-      | [(.ts // 0), .session_id] | @tsv' \
-     "$DIR"/*.json 2>/dev/null | sort -rn | cut -f2 | while IFS= read -r id; do
+      | "\(.ts // 0)\u001f\(.session_id)\u001f\(.transcript // "")"' \
+     "$DIR"/*.json 2>/dev/null | sort -t$'\x1f' -k1,1rn | while IFS=$'\x1f' read -r _ id tr; do
        grep -qxF -- "$id" <<< "$others" && continue
-       printf '%s' "$id"; break
+       printf '%s\x1f%s' "$id" "$tr"; break
      done
 }
 
@@ -237,15 +276,18 @@ kill_slot() {
 # and nothing of the old conversation — the fleet's own commands are the state, a summary
 # would be a second copy of it that is already stale. RESUMED: one line, because the
 # conversation is its own and the only thing it does not know is that it was away.
-handoff() {   # to from resumed
+handoff() {   # to from resumed [carried]
   # A --session switch moves a sub-master, not the project's master; telling it otherwise
   # would have it start acting as the lead of the whole fleet.
   local who="this project's master"
   [ "$SLOT" = master ] || who="the session $SLOT in this fleet"
+  local carried=""
+  [ "${4:-0}" = 1 ] && carried=" What happened while you were away is handed over above."
   if [ "$3" = 1 ]; then
-    printf 'You are %s again, taking over from %s. Check fleet-inbox for anything that arrived while you were away.' "$who" "$2"
+    printf 'You are %s again, taking over from %s.%s Check fleet-inbox for anything that arrived while you were away.' "$who" "$2" "$carried"
   else
-    printf 'You are now %s, taking over from %s. Run fleet-worktrees and fleet-inbox to see the state of the fleet.' "$who" "$2"
+    [ "${4:-0}" = 1 ] && carried=" The conversation so far is handed over above."
+    printf 'You are now %s, taking over from %s.%s Run fleet-worktrees and fleet-inbox to see the state of the fleet.' "$who" "$2" "$carried"
   fi
 }
 send_prompt() {
@@ -269,33 +311,64 @@ revert_setting() {   # agent
 }
 
 do_switch() {
-  local to="$1" from bin cwd oid omodel rid rmodel resumed=0 fid fmodel
+  local wish="$1" to tmodel from bin cwd oid ofile omodel rid rmodel resumed=0 fid fmodel same=0
+  local rec="" since="" delivery=prompt carried=0 chome shome nid line msg=""
+  to="$(wish_agent "$wish")"; tmodel="$(wish_model "$wish")"
   from="$(live_agent)"
-  [ "$to" != "$from" ] || return 0
+  if [ "$to" = "$from" ]; then
+    # Same agent: only a model that differs from the running one is anything to do.
+    [ -n "$tmodel" ] && [ "$tmodel" != "$(live_model)" ] || return 0
+    same=1
+  fi
   bin="$(FA field "$to" bin 2>/dev/null)"
   if [ -z "$bin" ] || ! command -v "$bin" >/dev/null 2>&1; then
     fail "$to is not installed ('${bin:-?}' is not on PATH) — $SLOT stays on $from"
     # The wish is consumed with the refusal. Left in place, the watcher re-read it on its
     # next sample and refused again every two seconds, for as long as nobody changed it.
-    rm -f "${PENDING:?}" 2>/dev/null
+    rm -f "${PENDING:?}" "${MSGF:?}" 2>/dev/null
     revert_setting "$from"
     return 1
   fi
   cwd="$(tmux -u -L "$SOCK" display-message -p -t "$SLOT" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$cwd" ] && [ -d "$cwd" ] || cwd="$HOME"
   capture_env
-  omodel="$(tmux -u -L "$SOCK" show-environment -t "$SLOT" CLAUDE_FLEET_MODEL 2>/dev/null)"
-  case "$omodel" in CLAUDE_FLEET_MODEL=*) omodel="${omodel#CLAUDE_FLEET_MODEL=}" ;; *) omodel="" ;; esac
+  omodel="$(live_model)"
+  [ -f "$MSGF" ] && msg="$(cat "$MSGF" 2>/dev/null)"
 
   # THE RECORD GOES DOWN BEFORE THE KILL. If writing it fails, nothing is killed.
-  oid="$(outgoing_id "$from")"
-  conv_put "$from" "$oid" "$omodel" || { fail "could not record $from's conversation — $SLOT left on $from"; rm -f "${PENDING:?}"; return 1; }
+  IFS=$'\x1f' read -r oid ofile <<< "$(outgoing_id "$from")"
+  conv_put "$from" "$oid" "$omodel" "$ofile" || { fail "could not record $from's conversation — $SLOT left on $from"; rm -f "${PENDING:?}"; return 1; }
   log "recorded $from conversation '${oid:-none}' (model '${omodel}') for $SLOT"
 
   rid=""; rmodel="$(conv_get "$to" model)"
+  [ -n "$tmodel" ] && rmodel="$tmodel"
   if [ "$(FA field "$to" resume 2>/dev/null)" = yes ]; then rid="$(conv_get "$to" id)"; fi
   [ -n "$rid" ] && resumed=1
-  log "switching $SLOT $from -> $to ($([ -n "$rid" ] && printf 'resume %s' "$rid" || printf fresh)) in $cwd"
+
+  # ── what the incoming agent is handed (lib/handoff.mjs) ──
+  # Built while the outgoing agent is idle and still up, so its transcript is complete, and
+  # before anything is killed, so a failure here costs the thread and never the session.
+  if [ "$same" = 0 ]; then
+    [ -n "$rid" ] && since="$(conv_get "$to" ts)"
+    chome="$(sess_env CODEX_HOME)"; shome="$(sess_env HOME)"
+    rec="$(HO build --dir "$DIR" --sock "$SOCK" --slot "$SLOT" --from "$from" --to "$to" \
+             --conv "$oid" --file "$ofile" ${since:+--since "$since"} ${chome:+--codex-home "$chome"} 2>>"$LOG")" || rec=""
+    if [ -n "$rec" ] && [ "$(jq -r '.kept | length' "$rec" 2>/dev/null)" -gt 0 ] 2>/dev/null; then
+      carried=1
+      log "handoff for $SLOT: $(jq -r '"\(.mode), \(.kept|length) of \(.items) items, \(.bytes) bytes"' "$rec" 2>/dev/null) — $rec"
+      # Codex, natively where its CLI can: the slice becomes the thread's own history, so it
+      # is context codex reads as its past rather than one very long first message.
+      if [ "$to" = codex ] && HO native 2>/dev/null; then
+        if nid="$(HO inject --record "$rec" --cwd "$cwd" ${rid:+--thread "$rid"} ${chome:+--codex-home "$chome"} ${shome:+--home "$shome"} 2>>"$LOG")" && [ -n "$nid" ]; then
+          delivery=native; rid="$nid"
+          log "handoff injected into codex thread $nid"
+        else
+          log "native inject failed — the handoff goes as the first prompt"
+        fi
+      fi
+    fi
+  fi
+  log "switching $SLOT $from -> $to${tmodel:+ ($tmodel)} ($([ -n "$rid" ] && printf 'resume %s' "$rid" || printf fresh)) in $cwd"
 
   hold_on
   kill_slot
@@ -306,9 +379,25 @@ do_switch() {
   if launch "$to" "$rid" "$rmodel" "$cwd" && wait_ready "$to"; then
     hold_off
     rm -f "${FAILED:?}" 2>/dev/null
-    [ "$(cat "$PENDING" 2>/dev/null)" = "$to" ] && rm -f "${PENDING:?}"
-    log "switched $SLOT to $to"
-    send_prompt "$(handoff "$to" "$from" "$resumed")"
+    [ "$(cat "$PENDING" 2>/dev/null)" = "$wish" ] && rm -f "${PENDING:?}"
+    log "switched $SLOT to $to${tmodel:+ ($tmodel)}"
+    if [ "$same" = 1 ]; then
+      # Its own conversation, resumed under another model: nothing to tell it but the message.
+      [ -n "$msg" ] && send_prompt "$msg"
+    else
+      line="$(handoff "$to" "$from" "$resumed" "$carried")"
+      local cargs=(--line "$line")
+      [ -n "$rec" ] && cargs+=(--record "$rec")
+      [ "$delivery" = native ] && cargs+=(--native)
+      # From the file, not from $msg: a command substitution drops trailing newlines, and the
+      # owner's message goes over exactly as it was sent. The same is true of the substitution
+      # that carries compose's output, so it ends on a sentinel that is taken off after.
+      [ -s "$MSGF" ] && cargs+=(--message-file "$MSGF")
+      local prompt; prompt="$(HO compose "${cargs[@]}"; printf x)"; prompt="${prompt%x}"
+      send_prompt "$prompt"
+      [ -n "$rec" ] && HO done --record "$rec" --delivery "$delivery" ${nid:+--thread "$nid"} --cwd "$cwd" 2>>"$LOG"
+    fi
+    rm -f "${MSGF:?}" 2>/dev/null
     return 0
   fi
 
@@ -323,12 +412,14 @@ do_switch() {
     FA set "$SLOT" "$from" -s "$SOCK" >/dev/null 2>&1
     fail "$to failed to start ($why) — $SLOT is back on $from${fid:+ (resumed)}"
     [ -n "$fid" ] || send_prompt "$(handoff "$from" "$to" 0)"
+    # The owner's message was for whoever answers now; it is not dropped with the switch.
+    [ -n "$msg" ] && send_prompt "$msg"
   else
     hold_off
     FA set "$SLOT" "$from" -s "$SOCK" >/dev/null 2>&1
     fail "$to failed to start AND $from did not come back — reopen it: fleet-restart --reopen $SLOT -s $SOCK"
   fi
-  rm -f "${PENDING:?}" 2>/dev/null
+  rm -f "${PENDING:?}" "${MSGF:?}" 2>/dev/null
   revert_setting "$from"
   return 1
 }
@@ -370,10 +461,10 @@ watch_once() {
     want="$(tr -d '[:space:]' < "$PENDING" 2>/dev/null)"
     if ! alive; then
       # Nothing running to switch: the setting already applies to the next start.
-      rm -f "${PENDING:?}"; log "$SLOT is not running — nothing to switch"; break
+      rm -f "${PENDING:?}" "${MSGF:?}"; log "$SLOT is not running — nothing to switch"; break
     fi
     live="$(live_agent)"
-    if [ -z "$want" ] || [ "$want" = "$live" ]; then rm -f "${PENDING:?}"; log "cancelled: $SLOT already runs ${live}"; break; fi
+    if [ -z "$want" ] || wish_met "$want"; then rm -f "${PENDING:?}" "${MSGF:?}"; log "cancelled: $SLOT already runs ${live}"; break; fi
     [ "$want" = "$seen" ] || { seen="$want"; since=$SECONDS; }
     # Working, blocked on a dialog, or idle: lib/session-idle.sh, shared with bin/fleet-model.
     if session_idle_sample "$SOCK" "$SLOT"; then idle=$((idle+1)); else idle=0; fi
@@ -399,25 +490,31 @@ case "$cmd" in
     [ -n "$WANT" ] || WANT=claude
     mkdir -p "$DIR" 2>/dev/null
     rm -f "${FAILED:?}" 2>/dev/null
+    # A message to go with the switch (fleet-model --message), kept until the switch sends it.
+    # Only a wish that will be acted on keeps one; every early answer below drops it, and the
+    # caller delivers it itself (an "already" is a session that can simply be sent to).
+    rm -f "${MSGF:?}" 2>/dev/null
     if ! alive; then
       rm -f "${PENDING:?}" 2>/dev/null
       echo "not-running"; exit 0
     fi
     LIVE="$(live_agent)"
-    if [ "$WANT" = "$LIVE" ]; then
+    if wish_met "$WANT"; then
       if [ -f "$PENDING" ]; then rm -f "${PENDING:?}"; echo "cancelled $LIVE"; else echo "already $LIVE"; fi
       exit 0
     fi
     # Refused HERE as well as at the switch, so the caller hears it now rather than from a
     # row that changes a few seconds later. The switch keeps its own check: a binary can go
     # between the two.
-    WBIN="$(FA field "$WANT" bin 2>/dev/null)"
+    WAGENT="$(wish_agent "$WANT")"
+    WBIN="$(FA field "$WAGENT" bin 2>/dev/null)"
     if [ -z "$WBIN" ] || ! command -v "$WBIN" >/dev/null 2>&1; then
       rm -f "${PENDING:?}" 2>/dev/null
-      fail "$WANT is not installed ('${WBIN:-?}' is not on PATH) — $SLOT stays on $LIVE"
+      fail "$WAGENT is not installed ('${WBIN:-?}' is not on PATH) — $SLOT stays on $LIVE"
       revert_setting "$LIVE"
-      echo "missing $WANT ${WBIN:-?} $LIVE"; exit 0
+      echo "missing $WAGENT ${WBIN:-?} $LIVE"; exit 0
     fi
+    [ -n "${CLAUDE_FLEET_SWITCH_MESSAGE:-}" ] && printf '%s' "$CLAUDE_FLEET_SWITCH_MESSAGE" > "$MSGF"
     printf '%s\n' "$WANT" > "$PENDING"
     pid="$(cat "$PIDF" 2>/dev/null)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then

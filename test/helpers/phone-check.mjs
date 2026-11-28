@@ -514,6 +514,50 @@ try {
     is('...and a rename', true, worker.menu.some(x => /^Rename/.test(x)));
     is('...and not the label or the schedule, which this server refuses', '', worker.menu.filter(x => /label|Schedule/i.test(x)).join(','));
 
+    // ── another agent, with the thread (switch.jsx) ───────────────────────────
+    // The lead and a worker alike: it is fleet-model's, which moves a lead as readily as a worker.
+    // A SHEET at this width, never inline: docked to the bottom edge, full width. The rows are
+    // fleet-model --models (fixtures/models.json), the session's own marked; the button names the
+    // pick; the call that goes out is fleet_model with `<agent>:<model>` and the message as typed,
+    // read back from the fixture's own record of it; and the header says the new agent after.
+    // The entry needs the card, so the menu is opened once the header has drawn from it (its
+    // branch), not as soon as the page is there: menuOf above can read a menu drawn before.
+    await b.evaluate(() => { location.hash = '#/p/acme-api/s/master'; });
+    await until(() => !!document.querySelector('.sess-meta .branch') && !!document.querySelector('.sess-tools .menu-wrap .btn'));
+    await b.evaluate(() => document.querySelector('.sess-tools .menu-wrap .btn').click());
+    const leadSw = !!(await until(() => [...document.querySelectorAll('.sess-tools .menu button')].some(x => /^Switch agent/.test(x.textContent.trim()))));
+    is('a running session is offered another agent, the lead and a worker alike', 'true true',
+       `${leadSw} ${worker.menu.some(x => /^Switch agent/.test(x))}`);
+    await clickText('.sess-tools .menu button', 'Switch agent');
+    await until(() => document.querySelectorAll('.agent-switch .switch-row').length > 3);
+    // Measured once it has landed: it slides up from 24 px below (ui.css sheet-up), and a box
+    // read mid-slide sits 2.6 px under the edge it is docked to.
+    await b.evaluate(() => Promise.all((document.querySelector('.agent-switch')?.closest('.modal').getAnimations() || []).map(a => a.finished)));
+    const sw = await b.evaluate(() => {
+      const m = document.querySelector('.agent-switch')?.closest('.modal'); if (!m) return null;
+      const r = m.getBoundingClientRect();
+      return { sheet: m.classList.contains('sheet') && Math.round(r.bottom) === innerHeight && Math.round(r.width) === innerWidth, box: `bottom ${r.bottom} of ${innerHeight}, width ${r.width} of ${innerWidth}`,
+               groups: [...m.querySelectorAll('.switch-group h3')].map(x => x.textContent).join(','),
+               now: [...m.querySelectorAll('.switch-row')].filter(x => x.querySelector('.tag')).map(x => x.closest('.switch-group').querySelector('h3').textContent + ' / ' + x.querySelector('.switch-name').textContent).join(','),
+               off: m.querySelector('footer .btn.primary').disabled };
+    });
+    is('...in a sheet docked to the bottom edge, full width', true, sw?.sheet || sw?.box);
+    is('...listing each agent with its models', 'Claude Code,Codex', sw?.groups);
+    is('...the one the session runs marked, and nothing to press before a pick', 'Claude Code / Last used, or default true', `${sw?.now} ${sw?.off}`);
+    await b.evaluate(() => { const g = [...document.querySelectorAll('.switch-group')].find(x => x.querySelector('h3').textContent === 'Codex');
+                             [...(g?.querySelectorAll('.switch-row') || [])].find(x => /GPT-6\.2-Sol/.test(x.textContent))?.click(); });
+    const SWMSG = '  Carry on with `make test` in $HOME/acme-api.\n\n';
+    await b.evaluate((m) => { const ta = document.querySelector('.agent-switch textarea'); if (ta) { ta.value = m; ta.dispatchEvent(new Event('input', { bubbles: true })); } }, SWMSG);
+    is('...the button names the pick', 'Switch to Codex · GPT-6.2-Sol', await until(() => { const x = document.querySelector('.agent-switch')?.closest('.modal').querySelector('footer .btn.primary'); return x && /GPT/.test(x.textContent) ? x.textContent.trim() : null; }));
+    await b.evaluate(() => document.querySelector('.agent-switch')?.closest('.modal').querySelector('footer .btn.primary')?.click());
+    // Open before, gone after: "gone" alone is true of a sheet that never opened.
+    is('...pressing it closes the sheet', 'true true', `${!!sw} ${!!(await until(() => !document.querySelector('.agent-switch')))}`);
+    is('...and sends fleet_model, with the message exactly as typed', JSON.stringify({ project: 'acme-api', session: 'master', model: 'codex:gpt-6.2-sol', message: SWMSG }),
+       await b.evaluate(async () => JSON.stringify((await (await import('./api.js')).getAudit()).rows.filter(r => r.verb === 'fleet_model').map(r => r.args)[0] || null)));
+    is('...and the header says the agent it runs now', 'codex', await until(() => [...document.querySelectorAll('.sess-meta .tag.agent')].map(x => x.textContent.trim()).join(',') || null));
+    // Back to the shipped fixture, so no later row reads a lead the switch moved.
+    await b.evaluate(async () => (await import('./api.js')).resetOverlay());
+
     // ── what Jarvis is waiting on a yes for, answered from the assistant ─────
     // The old Jarvis screen's list, which the one assistant draws now (assistant.jsx Proposals).
     // The fixture holds one proposal. A No costs no passkey, so it can be pressed here; the Yes is

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 025a324068c3
+// CLIENT-HASH: 92ccb32b705b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -516,7 +516,12 @@
 // instead of going by in silence. Speak mode and the assistant on a machine with no whisper.cpp
 // open a sheet naming the machine, why, and the command, instead of switching to the browser's
 // dictation without a word. A phone on v126 keeps the silent replies until it is relaunched.
-const VERSION = 'ghostfleet-v127';
+// v128 moves a running session to another agent from its page: More > Switch agent opens a sheet
+// (a bottom sheet on a phone, a dialog at a desk) listing each agent's models, and the header
+// shows the agent it runs and a switch still waiting on its turn. One new fixture (models.json).
+// A phone on an older client has no Switch agent entry until it is relaunched; the switch itself
+// is fleet-model's, so it loses nothing else.
+const VERSION = 'ghostfleet-v128';
 const SHELL = [
   './', './index.html', './api.js', './grid.js', './passkey.js', './fixtures/logins.json',
   './ansi.js', './md.js',
@@ -539,7 +544,7 @@ const SHELL = [
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
   './fixtures/grid-acme-api.json', './fixtures/grid-acme-api-sub-cache-keys.json', './fixtures/grid-degraded.json',
-  './fixtures/grid-asleep.json',
+  './fixtures/grid-asleep.json', './fixtures/models.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-acme-api.json',
   './fixtures/session-acme-api-api-fix.json', './fixtures/session-acme-api-docs-pass.json',

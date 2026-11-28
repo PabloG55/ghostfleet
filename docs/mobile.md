@@ -104,8 +104,8 @@ with the scars.
 fills its column touches the next one (`adapter-pro…adapter-probe`). The *values* are already
 computed by `cardLines()` — they are truncated on the way out. `--json` emits them whole.
 
-The schema is deliberately **exactly what `cardLines()` consumes** — with two deliberate
-additions, both noted under the block — so the phone renders from the same inputs the TUI
+The schema is deliberately **exactly what `cardLines()` consumes** — with deliberate
+additions, each noted under the block — so the phone renders from the same inputs the TUI
 does and the two cannot disagree. The values below are `web/fixtures/grid-acme-api.json`:
 two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, since
 `acme-api` has no free worktree. `test/helpers/doc-fixtures.mjs` holds them to that.
@@ -125,6 +125,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "folder":    "acme-api",            // the main checkout — the repo itself
       "branch":    "main",
       "agent":     "claude",
+      "switching": null,
       "pr":        null,                  // PR number for `branch`, as a string; null = unknown
       "msg":       "Dispatched the retry work to api-fix. Waiting on its PR.",
       "age":       95,
@@ -144,6 +145,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "folder":    "api-fix",             // the worktree it sits in
       "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
+      "switching": null,                  // "codex" or "codex (<model>)": a switch waiting on this turn
       "pr":        "1184",                // string, not a number: an identifier, never arithmetic.
                                           // null means "could not tell" — no gh, no network, no
                                           // PR and a cold cache all land there, and the card
@@ -175,6 +177,16 @@ first (`statusOf()` in `web/ui/ui.jsx`): Asleep, Lost. A fixture writes one only
 true, as `grid-asleep.json` does for `docs-pass` and `csv-export`. A tap on an asleep card wakes
 it before the session opens (`web/ui/wake.jsx`), as ⏎ on an asleep card does at the desk, and a
 wake that fails opens nothing and says why.
+
+### `switching`: a move to another agent, waiting on the turn
+
+`fleet-model <session> codex[:<model>]` (or the phone's Switch agent sheet) moves a session to
+another agent with its thread handed over (`lib/handoff.mjs`), and a switch asked for mid-turn
+waits for the turn to end (`lib/agent-switch.sh`). While it waits, `switching` names where it is
+going, as the card's own message line says it — `codex`, or `codex (gpt-6.2-sol)` with a model —
+and it is `null` otherwise. Like `lead`, it is something the TUI's card does not read as a
+field: the TUI shows the wait in `msg` (`switching to codex…`), which the session page does not
+draw, so the page's header takes it from here. `agent` changes when the switch happens, not when it is asked.
 
 ### nested leads: `sub`, `parent`, `workers`, `team_status`, `sub_head`
 

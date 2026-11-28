@@ -689,6 +689,44 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
  * tail scrolls inside its own box so the buttons under it stay where a thumb finds them. */
 .wake-why { margin: 0; padding: 10px 12px; border: 1px solid var(--hair); border-radius: var(--r); background: #12171d;
             font-size: 12.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+/* SWITCH AGENT (switch.jsx): each agent's models as rows a thumb can hit, the two agents side by
+ * side at a desk and one under the other on a phone. The sheet scrolls as a whole, as every
+ * dialog here does, and its title and buttons stay put while it does: the buttons are where the
+ * thumb is. NOT a list that scrolls inside a flex column: the scrim is a grid that sizes the
+ * dialog to its content, and a body allowed to shrink to nothing was given nothing, measured at
+ * 390 px as a 131 px sheet holding a title, two buttons and one line cut in half. */
+.modal-body.agent-switch { display: flex; flex-direction: column; gap: 12px; }
+.modal-body.agent-switch p { margin: 0; }
+.modal:has(> .modal-body.agent-switch) > header { position: sticky; top: 0; z-index: 1; background: var(--bar, var(--panel)); }
+.modal:has(> .modal-body.agent-switch) > footer { position: sticky; bottom: 0; z-index: 1; padding-top: 10px; background: var(--panel); }
+.switch-pending { color: var(--yellow); display: flex; gap: 6px; align-items: baseline; }
+.switch-failed { color: var(--red); display: flex; gap: 6px; align-items: baseline; overflow-wrap: anywhere; }
+.switch-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.switch-group h3 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 6px; }
+.switch-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.switch-row { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; font: inherit; text-align: left;
+              color: var(--fg); background: none; border: 1px solid transparent; border-radius: var(--r); cursor: pointer; }
+.switch-row:hover:not(:disabled) { background: var(--panel2); }
+.switch-row.on { color: var(--white); border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 10%, transparent); }
+.switch-row .tag { margin-left: 0; }
+.switch-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.switch-tick { flex: none; width: 14px; color: var(--cyan); display: inline-grid; place-items: center; }
+.switch-msg textarea { width: 100%; min-height: 3.2em; resize: vertical; }
+@media (max-width: 900px) { .switch-groups { grid-template-columns: 1fr; } }
+@media (pointer: coarse) { .switch-row { min-height: var(--tap); } }
+/* A session's agent beside its state (session.jsx), the tag a project's row gives one
+ * (project.jsx), and a switch still waiting on its turn as the same tag in the yellow the desk
+ * uses for "switching to …". On a phone the line is 17 px, so the tag is drawn inside it. */
+.sess-meta > .tag.agent { margin-left: 0; }
+.tag.agent.switching { color: var(--yellow); border-color: rgba(255,215,95,.35); }
+/* ...and on a phone the pending switch goes where the PR and the label went, to the top of More
+ * (.menu-info), in full: beside the agent it was cut to "→ claud" at 390 px and pushed the branch
+ * off the line. The agent stays, inside the 17 px line. */
+@media (max-width: 900px) {
+  .sess-head:not(.embedded) .sess-meta .tag.agent { line-height: 15px; font-size: 11px; }
+  .sess-head:not(.embedded) .sess-meta .tag.agent.switching { display: none; }
+  .menu-info > .tag.agent { margin: 0; white-space: normal; }
+}
 /* A row's Stop sits under what it stops, at the row's left edge, so it is never far from the
  * pid it names. Present only when the daemon said can_stop: the phone never draws one. */
 .details-stop { margin-top: 6px; }

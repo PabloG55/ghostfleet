@@ -649,6 +649,22 @@ var en_default = {
 	"sess.stopMenu": "Stop session…",
 	"sess.stopRmMenu": "Stop and delete worktree…",
 	"sess.details": "Details…",
+	"sess.switchAgent": "Switch agent…",
+	"sess.switchingTo": "Moves to {to} when its current turn ends",
+	"switch.title": "{name} · switch agent",
+	"switch.now": "Runs {agent} on {model} now.",
+	"switch.nowDefault": "Runs {agent} on its default model now.",
+	"switch.pending": "Moving to {to} when its current turn ends.",
+	"switch.failed": "The last switch did not happen: {why}",
+	"switch.none": "This machine has no models to offer.",
+	"switch.last": "Last used, or default",
+	"switch.current": "now",
+	"switch.message": "A message to send after the switch (optional)",
+	"switch.keeps": "The conversation goes over as it is, not as a summary, and an agent it ran before picks up its own conversation.",
+	"switch.waits": "In the middle of a turn, it moves when the turn ends.",
+	"switch.go": "Switch to {agent}",
+	"switch.pick": "Choose a model",
+	"switch.asked": "Switch asked for",
 	"details.title": "{name} · details",
 	"details.state.done": "done",
 	"details.state.asleep": "asleep",
@@ -1603,6 +1619,22 @@ var es_default = {
 	"sess.stopMenu": "Detener sesión…",
 	"sess.stopRmMenu": "Detener y borrar worktree…",
 	"sess.details": "Detalles…",
+	"sess.switchAgent": "Cambiar de agente…",
+	"sess.switchingTo": "Pasa a {to} cuando termine su turno actual",
+	"switch.title": "{name} · cambiar de agente",
+	"switch.now": "Ahora usa {agent} con {model}.",
+	"switch.nowDefault": "Ahora usa {agent} con su modelo por defecto.",
+	"switch.pending": "Pasa a {to} cuando termine su turno actual.",
+	"switch.failed": "El último cambio no se hizo: {why}",
+	"switch.none": "Esta máquina no tiene modelos para ofrecer.",
+	"switch.last": "El último que usó, o el de por defecto",
+	"switch.current": "ahora",
+	"switch.message": "Un mensaje para enviar después del cambio (opcional)",
+	"switch.keeps": "La conversación pasa tal cual, sin resumir, y un agente que ya usó retoma su propia conversación.",
+	"switch.waits": "Si está a mitad de un turno, cambia cuando el turno termine.",
+	"switch.go": "Cambiar a {agent}",
+	"switch.pick": "Elige un modelo",
+	"switch.asked": "Cambio pedido",
 	"details.title": "{name} · detalles",
 	"details.state.done": "terminó",
 	"details.state.asleep": "dormida",
@@ -2391,7 +2423,7 @@ function worded(table, prefix, fields = ["label"]) {
 	}
 	return table;
 }
-function words(keys, prefix) {
+function words$1(keys, prefix) {
 	const o = {};
 	for (const k of keys) Object.defineProperty(o, k, {
 		get: () => t(`${prefix}.${k}`),
@@ -2641,6 +2673,20 @@ var ROWS = {
 		"............",
 		".##..##..##.",
 		"#..##..##..#"
+	],
+	swap: [
+		"............",
+		"........#...",
+		"........##..",
+		".##########.",
+		"........##..",
+		"........#...",
+		"...#........",
+		"..##........",
+		".##########.",
+		"..##........",
+		"...#........",
+		"............"
 	],
 	bolt: [
 		".......##...",
@@ -7657,6 +7703,171 @@ function sentDraft(key) {
 	keepDraft(key, "", []);
 }
 //#endregion
+//#region web/ui/switch.jsx
+var AGENT_NAMES = {
+	claude: "Claude Code",
+	codex: "Codex"
+};
+var agentName = (a) => AGENT_NAMES[a] || a;
+var words = (s) => String(s || "").replace(/^fleet-model:\s*/, "");
+function SwitchAgent({ project, name, onClose, onDone }) {
+	const fleet = useFleet();
+	const [data, setData] = d(null);
+	const [err, setErr] = d("");
+	const [pick, setPick] = d(null);
+	const [msg, setMsg] = d("");
+	const [busy, setBusy] = d(false);
+	h(() => {
+		let live = true;
+		fleet.models(project, name).then((d) => {
+			if (live) setData(d);
+		}, (e) => {
+			if (live) setErr(String(e?.message || e));
+		});
+		return () => {
+			live = false;
+		};
+	}, [project, name]);
+	const cur = data ? {
+		agent: data.agent || "claude",
+		model: data.model || null
+	} : null;
+	const groups = data ? Object.entries(data.models || {}).filter(([, list]) => Array.isArray(list) && list.length) : [];
+	const isCur = (a, m) => !!cur && cur.agent === a && (m ? cur.model === m : !cur.model || !(data.models[a] || []).some((x) => x.id === cur.model));
+	const same = pick && isCur(pick.agent, pick.model);
+	const go = async () => {
+		if (!pick || same || busy) return;
+		setBusy(true);
+		try {
+			toast(words((await fleet.act("fleet_model", {
+				project,
+				session: name,
+				model: pick.model ? `${pick.agent}:${pick.model}` : pick.agent,
+				...msg.trim() ? { message: msg } : {}
+			}))?.text) || t("switch.asked"), "good", "swap");
+			onDone?.();
+			onClose();
+		} catch (e) {
+			toast(words(e?.message || e), "bad");
+		} finally {
+			setBusy(false);
+		}
+	};
+	return /* @__PURE__ */ u(Modal, {
+		sheet: true,
+		wide: true,
+		title: t("switch.title", { name }),
+		onClose,
+		children: [/* @__PURE__ */ u("div", {
+			class: "modal-body agent-switch",
+			children: err ? /* @__PURE__ */ u("p", {
+				class: "bad small",
+				children: err
+			}) : !data ? /* @__PURE__ */ u("p", {
+				class: "muted",
+				children: t("common.loading")
+			}) : /* @__PURE__ */ u(S$1, { children: [
+				/* @__PURE__ */ u("p", {
+					class: "switch-now",
+					children: cur.model ? t("switch.now", {
+						agent: agentName(cur.agent),
+						model: cur.model
+					}) : t("switch.nowDefault", { agent: agentName(cur.agent) })
+				}),
+				data.switching ? /* @__PURE__ */ u("p", {
+					class: "switch-pending",
+					role: "status",
+					children: [
+						/* @__PURE__ */ u(Icon, { name: "hourglass" }),
+						" ",
+						t("switch.pending", { to: agentName(data.switching.agent) + (data.switching.model ? ` (${data.switching.model})` : "") })
+					]
+				}) : null,
+				data.failed ? /* @__PURE__ */ u("p", {
+					class: "switch-failed",
+					role: "status",
+					children: [
+						/* @__PURE__ */ u(Icon, { name: "warning" }),
+						" ",
+						t("switch.failed", { why: data.failed })
+					]
+				}) : null,
+				!groups.length ? /* @__PURE__ */ u("p", {
+					class: "muted",
+					children: t("switch.none")
+				}) : /* @__PURE__ */ u("div", {
+					class: "switch-groups",
+					children: groups.map(([a, list]) => /* @__PURE__ */ u("section", {
+						class: "switch-group",
+						children: [/* @__PURE__ */ u("h3", { children: agentName(a) }), /* @__PURE__ */ u("ul", {
+							role: "radiogroup",
+							"aria-label": agentName(a),
+							children: [{
+								id: "",
+								name: t("switch.last")
+							}, ...list].map((m) => {
+								const id = m.id || null;
+								const on = !!pick && pick.agent === a && pick.model === id;
+								return /* @__PURE__ */ u("li", { children: /* @__PURE__ */ u("button", {
+									role: "radio",
+									"aria-checked": on,
+									class: `switch-row${on ? " on" : ""}`,
+									disabled: busy,
+									onClick: () => setPick({
+										agent: a,
+										model: id
+									}),
+									children: [
+										/* @__PURE__ */ u("span", {
+											class: "switch-name",
+											children: m.name
+										}),
+										isCur(a, id) ? /* @__PURE__ */ u("span", {
+											class: "tag",
+											children: t("switch.current")
+										}) : null,
+										/* @__PURE__ */ u("span", {
+											class: "switch-tick",
+											"aria-hidden": "true",
+											children: on ? /* @__PURE__ */ u(Icon, { name: "check" }) : null
+										})
+									]
+								}) }, m.id || "-");
+							})
+						})]
+					}, a))
+				}),
+				/* @__PURE__ */ u("label", {
+					class: "field switch-msg",
+					children: [/* @__PURE__ */ u("span", { children: t("switch.message") }), /* @__PURE__ */ u("textarea", {
+						rows: 2,
+						value: msg,
+						disabled: busy,
+						onInput: (e) => setMsg(e.currentTarget.value)
+					})]
+				}),
+				/* @__PURE__ */ u("p", {
+					class: "muted small switch-keeps",
+					children: [
+						t("switch.keeps"),
+						" ",
+						t("switch.waits")
+					]
+				})
+			] })
+		}), /* @__PURE__ */ u("footer", { children: [/* @__PURE__ */ u(Btn, {
+			onClick: onClose,
+			children: t("common.cancel")
+		}), /* @__PURE__ */ u(Btn, {
+			kind: "primary",
+			icon: "swap",
+			disabled: !pick || same || busy,
+			onClick: go,
+			children: pick ? t("switch.go", { agent: agentName(pick.agent) + (pick.model ? ` · ${(data?.models?.[pick.agent] || []).find((x) => x.id === pick.model)?.name || pick.model}` : "") }) : t("switch.pick")
+		})] })]
+	});
+}
+//#endregion
 //#region web/ui/session.jsx
 function optionText(label) {
 	const l = String(label || "");
@@ -8415,6 +8626,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 	const [labelEdit, setLabelEdit] = d(null);
 	const [schedOpen, setSchedOpen] = d(false);
 	const [detailsOpen, setDetailsOpen] = d(false);
+	const [switchOpen, setSwitchOpen] = d(false);
 	const [files, setFilesState] = d(() => draftFiles(dkey));
 	const mounted = A(true);
 	h(() => () => {
@@ -8713,6 +8925,19 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 										})
 									]
 								}) : /* @__PURE__ */ u(StatusPill, { status: st }),
+								card?.agent && card.agent !== "claude" ? /* @__PURE__ */ u("span", {
+									class: "tag agent",
+									children: card.agent
+								}) : null,
+								card?.switching ? /* @__PURE__ */ u("span", {
+									class: "tag agent switching",
+									title: t("sess.switchingTo", { to: card.switching }),
+									children: [
+										"→ ",
+										card.switching,
+										"…"
+									]
+								}) : null,
 								card?.branch ? /* @__PURE__ */ u("span", {
 									class: "branch",
 									title: card.branch,
@@ -8853,7 +9078,7 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 							}), menu ? /* @__PURE__ */ u("div", {
 								class: "menu",
 								children: [
-									card && (card.branch || card.pr || card.label || card.sched) ? /* @__PURE__ */ u("div", {
+									card && (card.branch || card.pr || card.label || card.sched || card.switching) ? /* @__PURE__ */ u("div", {
 										class: "menu-info",
 										children: [
 											card.branch ? /* @__PURE__ */ u("span", {
@@ -8886,6 +9111,10 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 													String(card.sched.msg || "").slice(0, 60),
 													"”"
 												]
+											}) : null,
+											card.switching ? /* @__PURE__ */ u("span", {
+												class: "tag agent switching",
+												children: t("sess.switchingTo", { to: card.switching })
 											}) : null
 										]
 									}) : null,
@@ -8898,6 +9127,17 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 											/* @__PURE__ */ u(Icon, { name: "list" }),
 											" ",
 											t("sess.details")
+										]
+									}) : null,
+									card && fleet.models && can("fleet_model") && !card.exited && !["asleep", "lost"].includes(st) ? /* @__PURE__ */ u("button", {
+										onClick: () => {
+											setMenu(false);
+											setSwitchOpen(true);
+										},
+										children: [
+											/* @__PURE__ */ u(Icon, { name: "swap" }),
+											" ",
+											t("sess.switchAgent")
 										]
 									}) : null,
 									can("gfw_label") ? /* @__PURE__ */ u("button", {
@@ -9295,6 +9535,12 @@ function SessionView({ project, name, card, waiting = false, onChanged, onGone, 
 				name,
 				status: st,
 				onClose: () => setDetailsOpen(false)
+			}) : null,
+			switchOpen ? /* @__PURE__ */ u(SwitchAgent, {
+				project,
+				name,
+				onClose: () => setSwitchOpen(false),
+				onDone: refresh
 			}) : null,
 			wk.sheet,
 			schedOpen ? /* @__PURE__ */ u(ScheduleModal, {
@@ -10471,7 +10717,7 @@ function useLang() {
 }
 //#endregion
 //#region web/ui/views.jsx
-var VERBS = words([
+var VERBS = words$1([
 	"fleet_send",
 	"attach",
 	"fleet_answer",
@@ -10984,8 +11230,8 @@ var ACTIONS$1 = worded({
 		needs: []
 	}
 }, "phone.action");
-var SCOPES = words(["personal", "company"], "phone.scope");
-var STATES$2 = words([
+var SCOPES = words$1(["personal", "company"], "phone.scope");
+var STATES$2 = words$1([
 	"need-you",
 	"working",
 	"ready",
@@ -10998,7 +11244,7 @@ var STATES$2 = words([
 	"starting",
 	"unknown"
 ], "phone.state");
-var DAY_NAMES = words([
+var DAY_NAMES = words$1([
 	"0",
 	"1",
 	"2",
@@ -13694,7 +13940,7 @@ function VoicePicker() {
 }
 //#endregion
 //#region web/ui/assistant.jsx
-var STATE_WORDS = words([
+var STATE_WORDS = words$1([
 	"listening",
 	"hearing",
 	"routing",
@@ -15558,6 +15804,7 @@ function phoneAdapter({ lock, go, place }) {
 		ports: (project, name) => guard(api$1.getPorts(project, name)),
 		portsRefresh: (project) => guard(api$1.refreshPorts(project)),
 		portsStop: (project, name, want, kill) => guard(api$1.stopPorts(project, name, want, kill)),
+		models: (project, name) => guard(api$1.getModels(project, name)),
 		act,
 		attach: (project, session, file) => guard(api$1.attach(project, session, file)),
 		attachPerMessage: api$1.ATTACH_PER_MESSAGE,
