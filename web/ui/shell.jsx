@@ -16,6 +16,7 @@
 import { Fragment } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { Logo, Toasts } from './ui.jsx';
+import { VoiceSetup } from './voicesetup.jsx';
 import { Skeleton } from './skeleton.jsx';
 import { Led } from './fleet.jsx';
 import { topLight } from './lights.js';
@@ -198,6 +199,7 @@ export function Frame({ name, sub, title = name, route, projects, hosts, nav, be
       </main>
       {after}
       <DeskKeys route={route} projects={projects} settings={settings} openMenu={open} />
+      <VoiceSetup />
       <Toasts />
     </div>
   );

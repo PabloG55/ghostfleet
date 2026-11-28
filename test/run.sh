@@ -3016,6 +3016,124 @@ else
 fi
 rm -rf "$KK"
 
+group "whisper.cpp: the cores it is given, where it is found, and a build where there is no Homebrew"
+# THE PHONE'S EARS ON A LINUX MACHINE, three failures that each read as "voice does not hear":
+#   - whisper-cli ran at its own default of 4 threads. On a Mac, Metal runs the encoder and
+#     the threads barely matter; on a CPU-only machine they are the whole cost, and every
+#     utterance took 25-37 s there (one ran into the 60 s timeout and came back 502). The
+#     same model at 16 threads: 7.4 s. So the count is ours to pass, and the timeout grows
+#     with the clip rather than cutting a long thought off mid-transcript.
+#   - a whisper-cli in ~/.local/bin, where a by-hand build goes, was found only when the
+#     daemon's PATH happened to carry it; a systemd unit's does not.
+#   - `fleet-jarvis voice --install` was Homebrew or a dead end, and the status sent the owner
+#     to "the Mac" to fix a machine that was not one.
+# The build is run against a stand-in toolchain that writes down what it was asked, so what
+# is pinned is the order of operations and the refusals, not a compiler.
+WS="$(mktemp -d)"
+mkdir -p "$WS/h/.local/bin" "$WS/nodebin" "$WS/tc" "$WS/tmp"
+ln -s "$(command -v node)" "$WS/nodebin/node"
+: > "$WS/model.bin"
+node -e 'const b = Buffer.alloc(44 + 32000); b.write("RIFF", 0); b.writeUInt32LE(36 + 32000, 4); b.write("WAVE", 8); b.write("fmt ", 12);
+  b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(16000, 24); b.writeUInt32LE(32000, 28);
+  b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write("data", 36); b.writeUInt32LE(32000, 40); require("fs").writeFileSync(process.argv[1], b)' "$WS/one.wav"
+# A whisper-cli that writes down how it was called, and answers with words.
+cat > "$WS/argv-whisper" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/argv"
+p=''; for a in "$@"; do [ "$p" = "-of" ] && printf 'hello fleet\n' > "$a.txt"; p="$a"; done
+exit 0
+EOF
+chmod +x "$WS/argv-whisper"
+wj() {   # <js using J> [VAR=val…] — lib/jarvis.mjs under a fake HOME, with no whisper on PATH
+  local code="$1"; shift
+  env -u CLAUDE_FLEET_WHISPER_THREADS -u CLAUDE_FLEET_WHISPER_BIN -u CLAUDE_FLEET_WHISPER_MODEL \
+      HOME="$WS/h" PATH="$WS/nodebin:/usr/bin:/bin" TMPDIR="$WS/tmp" "$@" \
+      node --input-type=module -e "import fs from 'node:fs'; import * as J from '$ROOT/lib/jarvis.mjs'; $code" 2>&1; }
+HALF="$(node -e 'const os = require("os"); const c = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length; console.log(Math.max(4, Math.min(16, Math.floor(c / 2))))')"
+tflag() { grep -A1 -x -- '-t' "$WS/argv" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+
+: > "$WS/argv"
+out="$(wj "const r = J.transcribe(fs.readFileSync('$WS/one.wav')); console.log(r.text || r.error)" CLAUDE_FLEET_WHISPER_BIN="$WS/argv-whisper" CLAUDE_FLEET_WHISPER_MODEL="$WS/model.bin")"
+is "an utterance is transcribed (the stand-in answers)"              "hello fleet" "$out"
+is "...given half this machine's cores, not whisper's own 4"          "-t $HALF"    "$(tflag)"
+: > "$WS/argv"
+wj "J.transcribe(fs.readFileSync('$WS/one.wav'))" CLAUDE_FLEET_WHISPER_BIN="$WS/argv-whisper" CLAUDE_FLEET_WHISPER_MODEL="$WS/model.bin" CLAUDE_FLEET_WHISPER_THREADS=7 >/dev/null
+is "...or the count CLAUDE_FLEET_WHISPER_THREADS names"               "-t 7"        "$(tflag)"
+is "the count is half the cores, clamped to whisper's 4 and to 16"    "$HALF"       "$(wj 'console.log(J.whisperThreads())')"
+is "two minutes of audio may take three minutes, not a flat one"      "180000"      "$(wj 'console.log(J.hearTimeout(Buffer.alloc(44 + 32000 * 120)))')"
+
+cp "$WS/argv-whisper" "$WS/h/.local/bin/whisper-cli"
+is "a whisper-cli in ~/.local/bin is found with no PATH carrying it"  "$WS/h/.local/bin/whisper-cli" "$(wj 'console.log(J.whisperBin())')"
+rm -f "$WS/h/.local/bin/whisper-cli"
+is "with none, the status names this machine, never 'the Mac', and the fix alone" '[false,false,true,"fleet-jarvis voice --install"]' \
+   "$(wj 'const v = J.voiceStatus(); console.log(JSON.stringify([v.ready, /the Mac/.test(v.why), /this machine/.test(v.why), v.fix || null]))' CLAUDE_FLEET_WHISPER_BIN="$WS/nope")"
+
+# ── the build, where there is no Homebrew ──
+# A stand-in toolchain: git clones into an empty dir and resolves the tag to FAKE_HEAD, cmake
+# writes a whisper-cli whose --help exits FAKE_HELP_RC. Everything they are asked goes in calls.
+cat > "$WS/tc/git" <<'EOF'
+#!/bin/sh
+echo "git $*" >> "$WSD/calls"
+case " $* " in
+  *" clone "*) for a; do d="$a"; done; /bin/mkdir -p "$d" ;;
+  *" rev-parse "*) echo "$FAKE_HEAD" ;;
+esac
+exit 0
+EOF
+cat > "$WS/tc/cmake" <<'EOF'
+#!/bin/sh
+echo "cmake $*" >> "$WSD/calls"
+if [ "$1" = "--build" ]; then
+  /bin/mkdir -p "$2/bin"
+  printf '#!/bin/sh\n[ "$1" = "--help" ] && exit %s\nexit 0\n' "${FAKE_HELP_RC:-0}" > "$2/bin/whisper-cli"
+  /bin/chmod +x "$2/bin/whisper-cli"
+fi
+exit 0
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$WS/tc/c++"; printf '#!/bin/sh\nexit 0\n' > "$WS/tc/make"
+chmod +x "$WS/tc/git" "$WS/tc/cmake" "$WS/tc/c++" "$WS/tc/make"
+printf 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n' > "$WS/os-release"
+PIN_COMMIT="$(node --input-type=module -e "import('$ROOT/lib/whisper-setup.mjs').then(W => console.log(W.PIN.commit), () => {})")"
+WBIN="$WS/i/.local/share/whisper/whisper-cli"
+fj() {   # <PATH> [VAR=val…] — fleet-jarvis voice --install under a fresh fake HOME, no Homebrew
+  local p="$1"; shift
+  rm -rf "$WS/i"; : > "$WS/calls"
+  env -u CLAUDE_FLEET_WHISPER_THREADS HOME="$WS/i" PATH="$p" TMPDIR="$WS/tmp" WSD="$WS" \
+      CLAUDE_FLEET_WHISPER_BIN="$WBIN" CLAUDE_FLEET_WHISPER_MODEL="$WS/model.bin" CLAUDE_FLEET_OS_RELEASE="$WS/os-release" "$@" \
+      node "$ROOT/bin/fleet-jarvis.mjs" voice --install 2>&1; }
+installed() { [ -x "$WBIN" ] && echo yes || echo no; }
+leftovers() { ls -A "$WS/tmp"; ls "$(dirname "$WBIN")" 2>/dev/null | grep '\.part$' || true; }
+
+out="$(fj "$WS/nodebin")"; rc=$?
+is "no toolchain: the install stops with code 3, like a missing Python for Kokoro" "3" "$rc"
+is "...naming every tool it needs"                    "yes" "$(grep -q 'needs git, cmake, a C++ compiler, make or ninja' <<<"$out" && echo yes || echo no)"
+# The line for THIS platform: the os-release above is Ubuntu's, which a Linux runner reads; a
+# Mac never reads one, and its line is Apple's command-line tools.
+case "$(uname -s)" in Darwin) WLINE='xcode-select --install' ;; *) WLINE='sudo apt install git cmake build-essential' ;; esac
+is "...and the one line that installs them here, for the owner to run" "yes" "$(grep -qF "$WLINE" <<<"$out" && echo yes || echo no)"
+is "...having run nothing and installed nothing"      "0|no" "$(wc -l < "$WS/calls" | tr -d ' ')|$(installed)"
+is "the line follows the distro, and an unknown one is not guessed at" "sudo dnf install git cmake gcc-c++ make|sudo pacman -S git cmake base-devel|" \
+   "$(node --input-type=module -e "import('$ROOT/lib/whisper-setup.mjs').then(W => console.log([W.installLine('ID=fedora', 'linux'), W.installLine('ID=arch', 'linux'), W.installLine('ID=gentoo', 'linux')].join('|')), () => console.log('no lib/whisper-setup.mjs'))")"
+
+out="$(fj "$WS/tc:$WS/nodebin" FAKE_HEAD="$PIN_COMMIT")"; rc=$?
+is "with one, whisper.cpp is built and the install succeeds" "0" "$rc"
+is "...into the place whisperBin() looks, and it counts"    "yes|yes" "$(installed)|$(grep -q '^voice ready — ' <<<"$out" && echo yes || echo no)"
+is "...from the pinned tag, checked against its commit"     "yes|yes" "$(grep -q -- '--branch v1.9.5 ' "$WS/calls" && echo yes || echo no)|$(grep -q ' rev-parse HEAD' "$WS/calls" && echo yes || echo no)"
+is "...static, so the one file installed is the whole program" "yes" "$(grep -q -- '-DBUILD_SHARED_LIBS=OFF' "$WS/calls" && echo yes || echo no)"
+is "...building whisper-cli and nothing else"               "yes" "$(grep -q -- '--target whisper-cli' "$WS/calls" && echo yes || echo no)"
+is "...leaving no source tree and no .part behind"          ""    "$(leftovers)"
+
+out="$(fj "$WS/tc:$WS/nodebin" FAKE_HEAD=0000000000000000000000000000000000000000)"; rc=$?
+is "a tag that moved builds nothing"                        "1|no" "$rc|$(installed)"
+is "...and says so"                                         "yes" "$(grep -q 'the tag moved' <<<"$out" && echo yes || echo no)"
+is "...before cmake was ever asked"                         "0" "$(grep -c '^cmake' "$WS/calls" || true)"
+
+out="$(fj "$WS/tc:$WS/nodebin" FAKE_HEAD="$PIN_COMMIT" FAKE_HELP_RC=1)"; rc=$?
+is "a built whisper-cli that cannot start here is not installed" "1|no" "$rc|$(installed)"
+is "...and says so"                                         "yes" "$(grep -q 'does not run on this machine' <<<"$out" && echo yes || echo no)"
+is "...leaving no source tree and no .part behind"          ""    "$(leftovers)"
+rm -rf "$WS"
+
 # ── agy: one root holds the bridge, the tools and the skill ──────────────────
 # register_agy writes into the user's own ~/.gemini/config, so it is run against a temp
 # dir here, with a stub agy. What matters: every write is a MERGE under our own key (other
@@ -21624,6 +21742,14 @@ group "phone client: an attached picture shows its preview under the daemon's ow
 # img-src with data: added turned "a data: image is still refused" red; img-src * turned
 # "...another origin" red (and every preview with it: * does not match blob:); and script-src
 # 'self' blob: turned "a blob: script is still refused" red.
+#   THE PHONE'S VOICE WAS THE SAME HOLE IN ANOTHER DIRECTIVE. The phone client plays each spoken
+# sentence from a blob: URL (it fetches the audio with its bearer token, which an <audio> cannot
+# send), and with no media-src that fell to default-src 'self' as well: every sentence failed to
+# load, on every phone, and the reply went by in silence. So the policy also names media-src
+# 'self' blob:, and the rows below play a blob: WAV the way the client makes one and refuse a
+# data: sound and one from another origin. Watched red on the policy without media-src (the
+# media-src row "", "...a blob: WAV loads" failed with a "media-src blob" violation), and the
+# guards on a copy: media-src with data: added, and media-src *, each turned its own row red.
 rm -rf "${SV:?}/web" && cp -R "$ROOT/web" "$SV/web"
 if sv_start csp; then
   CSPD="$(mktemp -d "$TEST_RUNS.$$.csp.XXXXXX")"
@@ -21633,6 +21759,7 @@ if sv_start csp; then
   cspd() { awk -v RS=';' -v d="$1" '{ gsub(/^[ \n]+|[ \n]+$/, "") } $1 == d { sub(/^[^ ]+ */, ""); print; exit }' <<< "$cspv"; }
   is "the page carries a policy"                                  "yes" "$([ -n "$cspv" ] && echo yes || echo "no: $(head -1 "$CSPD/head" | tr -d '\r')")"
   is "img-src lets in this origin and a picture the page made"    "'self' blob:" "$(cspd img-src)"
+  is "media-src lets in this origin and a sound the page fetched" "'self' blob:" "$(cspd media-src)"
   is "...and no data: anywhere in the policy"                     "0" "$(grep -c 'data:' <<< "$cspv" || true)"
   is "default-src is still this origin alone"                     "'self'" "$(cspd default-src)"
   is "script is not named, so it is default-src's: 'self' alone"  "" "$(cspd script-src)$(cspd script-src-elem)"
@@ -21645,7 +21772,7 @@ if sv_start csp; then
     is "...without complaining"         ""  "$(head -2 "$CSPD/err" | tr '\n' ' ' | sed 's/ *$//')"
     # A floor: a browser that fails to start emits one row, and every row that did not print
     # is a row that did not fail.
-    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CSPD/out")" -ge 17 ] && echo yes || echo "no: $(wc -l < "$CSPD/out") rows")"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CSPD/out")" -ge 21 ] && echo yes || echo "no: $(wc -l < "$CSPD/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       is "$name" "$want" "$got"
     done < "$CSPD/out"
@@ -24397,6 +24524,42 @@ if [ -d "$ROOT/web" ]; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/speech"
+
+  # ── the reply the phone actually hears ─────────────────────────────────────
+  # A phone served by a Linux machine heard nothing of replies its Kokoro had made: every
+  # sentence was a new Audio() played from a network callback, which iOS refuses outside a tap,
+  # and the refusal resolved as "done" — so the device's own voice, the fallback, never spoke
+  # either. test/helpers/voice-play-check.mjs runs web/ui/voice.js against a device it controls: one
+  # element, unlocked in the tap, for every sentence; a refused or failed play handing the rest
+  # to speechSynthesis from that sentence on; the unlock word surviving the stop beside it; a
+  # failed status read not remembered as "no voice". 11 of its 16 rows go red against the
+  # voice.js before this; the other 5 are the controls that must hold either way.
+  node "$ROOT/test/helpers/voice-play-check.mjs" > "$PW/voice" 2> "$PW/voice.err"
+  is "voice-play-check ran"           "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/voice.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/voice")" -ge 16 ] && echo yes || echo "no: $(wc -l < "$PW/voice") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/voice"
+
+  # "Voice isn't set up on <machine>": with no whisper.cpp where the app is served, speak mode
+  # switched to the browser's dictation without a word, or turned itself off with a toast.
+  # test/helpers/voicesetup-check.mjs opens the sheet that replaced that, at 390 and at 1280,
+  # from web/fixtures/jarvis.json (whose machine has neither half): a sheet on a phone and a
+  # dialog at a desk, naming the machine, the reason and each half's command, nothing
+  # listening until the person picks the device's dictation, and Close turning the mode off.
+  node "$ROOT/test/helpers/voicesetup-check.mjs" > "$PW/vsetup" 2> "$PW/vsetup.err"
+  vsrc=$?
+  if grep -q '^no chrome$' "$PW/vsetup" 2>/dev/null; then
+    skip "the voice sheet in a browser" "no chrome to look in"
+  else
+    is "voicesetup-check ran"         "0" "$vsrc"
+    is "...without complaining"       ""  "$(head -2 "$PW/vsetup.err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"   "yes" "$([ "$(wc -l < "$PW/vsetup")" -ge 32 ] && echo yes || echo "no: $(wc -l < "$PW/vsetup") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$PW/vsetup"
+  fi
 
   # ── the markdown a bubble renders ──────────────────────────────────────────
   # "the messages are not in nice .md format, they have the ****" — turn() set the bubble

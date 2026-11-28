@@ -128,15 +128,32 @@ try {
     const top = document.elementFromPoint(x, y);
     return top && (top === n || n.contains(top)) ? { x, y } : null;
   }, sel, text);
+  //   What kept the last tap from pressing its control, for the row that then finds no dialog. A
+  // red here used to say only `false`, and twice on a runner nobody can watch that was all there
+  // was to go on: two different dialogs in two runs, every wait spent, nothing to tell an app that
+  // never came up from a control that was missing or one with something lying over it.
+  let missed = '';
+  const inTheWay = (sel, text = '') => b.evaluate((s, tx) => {
+    const where = location.hash || '#/';
+    if (!document.querySelector('.app .main')) return `the app never came up (${where})`;
+    const n = [...document.querySelectorAll(s)].find(x => !tx || x.textContent.trim().startsWith(tx));
+    if (!n) return `no ${s}${tx ? ` "${tx}"` : ''} on ${where}`;
+    const r = n.getBoundingClientRect();
+    const top = r.width && r.height ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
+    if (!top) return `${s} has no box on screen (${where})`;
+    const name = (e) => e.tagName.toLowerCase() + [...e.classList].map(c => '.' + c).join('');
+    return `${s} is under ${name(top)}${top.parentElement ? ` in ${name(top.parentElement)}` : ''} (${where})`;
+  }, sel, text);
   async function tap(sel, text = '') {
+    missed = '';
     let p = await until(() => centreOf(sel, text), 4000);
-    if (!p) return false;
+    if (!p) { missed = await inTheWay(sel, text); return false; }
     // Session data and fonts can land between locating More and the pointer press.
     // Use its settled position, as the team browser helper does for the owner picker.
     for (let i = 0; i < 20; i++) {
       await sleep(80);
       const now = await centreOf(sel, text);
-      if (!now) return false;
+      if (!now) { missed = await inTheWay(sel, text); return false; }
       if (now.x === p.x && now.y === p.y) break;
       p = now;
     }
@@ -177,6 +194,9 @@ try {
   const audit = () => b.evaluate(async () => (await import(location.origin + '/api.js')).auditLog().map(r => r.tool));
   const hash = () => b.evaluate(() => location.hash);
   const goTo = async (to) => { await b.evaluate((h) => { location.hash = h; }, `#${to}`); await sleep(500); };
+  // "The dialog came", as a row's `got`: true, or why not — the tap's reason when it never
+  // pressed, else that it pressed and nothing answered, and on which screen.
+  const came = async (cond, ms) => !!(await until(cond, ms)) || missed || `pressed, and nothing opened (${(await hash()) || '#/'})`;
 
   async function fresh(size, store = {}) {
     touch = size.touch;
@@ -202,7 +222,8 @@ try {
   // Where the dialogs live.
   const toProject = (p) => async () => { await goTo(`/p/${p}`); await until(() => centreOf('.page button', 'New session'), 8000); };
   const toSession = async () => { await goTo('/p/acme-api/s/api-fix'); await until(() => b.evaluate(() => !!document.querySelector('.session .request-return') && !!document.querySelector('.sess-title .branch')), 8000); await tap('.modal .x'); };
-  const fromMenu = (item) => async () => { await tap('.sess-tools button', 'More'); await tap('.menu button', item); };
+  // No menu, no item: the second tap would only wait out its own 4 s and replace why with "no item".
+  const fromMenu = (item) => async () => { if (await tap('.sess-tools button', 'More')) await tap('.menu button', item); };
   const toQueue = async () => { await goTo('/queue'); await until(() => centreOf('.extra-card button', 'Reply'), 8000); };
 
   // Every dialog the fixture fleet can open on the phone's screens, from the screen it lives on.
@@ -227,7 +248,7 @@ try {
         await fresh(size);
         await d.home();
         await d.open();
-        is(`${n}: the dialog opened`, true, !!(await until(dlgUp, 4000)));
+        is(`${n}: the dialog opened`, true, await came(dlgUp, 4000));
         const title = await dlgTitle();
         const x = await xRect();
         is(`${n}: an X, top right, on screen`, { tag: 'button', right: true, top: true, inView: true },
@@ -255,7 +276,7 @@ try {
       await fresh(size);
       await toQueue();
       await tap('.extra-card button', 'Reply');
-      is(`${at} · reply: the dialog opened`, true, !!(await until(dlgUp, 6000)));
+      is(`${at} · reply: the dialog opened`, true, await came(dlgUp, 6000));
       await tap('.modal textarea');
       const words = `the answer typed at the ${at}`;
       await b.call('Input.insertText', { text: words });
@@ -291,7 +312,7 @@ try {
       await toSession();
       await fromMenu('Stop session')();
       const q = () => b.evaluate(() => /^Stop the session/.test(((document.querySelector('.modal header h2') || {}).textContent || '').trim()));
-      is(`${at} · stop: the confirm asks`, true, !!(await until(q, 3000)));
+      is(`${at} · stop: the confirm asks`, true, await came(q, 3000));
       const x = await xRect();
       if (x) await press(x.x, x.y);
       is(`${at} · stop: the X cancels it`, false, await q());
@@ -311,7 +332,7 @@ try {
       await toProject('toolbox')();
       await tap('.free-row button', 'Delete');
       const q = () => b.evaluate(() => /^Delete free worktree/.test(((document.querySelector('.modal header h2') || {}).textContent || '').trim()));
-      is(`${at} · delete: the confirm asks`, true, !!(await until(q, 3000)));
+      is(`${at} · delete: the confirm asks`, true, await came(q, 3000));
       const where = await b.evaluate(() => { const n = [...document.querySelectorAll('.page button')].find(x => x.textContent.trim().startsWith('New session')); if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
       if (where) await press(where.x, where.y);
       is(`${at} · delete: a press on New session under it cancels it`, false, await q());

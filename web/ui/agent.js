@@ -13,7 +13,8 @@
 // its server; the phone from fleet-serve, with the dispatcher and the list kept on the phone.
 import { useState, useEffect } from 'preact/hooks';
 import { STATUS, statusOf } from './ui.jsx';
-import { voiceStatus, voiceBackend, listenLocal, listenBrowser, browserCanHear, speak, stopSpeaking, warmVad, PAUSES } from './voice.js';
+import { voiceStatus, voiceBackend, listenLocal, listenBrowser, browserCanHear, speak, stopSpeaking, warmVad, PAUSES,
+         unlockSpeech, voiceMissing, chooseDictation, dictationChosen } from './voice.js';
 import { command } from './resolve.js';
 // `t` is a task or a transcript all through this file, so the words come in as `tr`.
 import { t as tr } from './i18n.js';
@@ -97,9 +98,24 @@ export function setTarget(project, explicit = true) {
 }
 
 // ── voice in ────────────────────────────────────────────────────────────────────────────
-export const canHear = () => !!S.vs?.hear?.ready || browserCanHear;
+//   Once the status is known the button always answers a tap: a machine that cannot hear is
+// explained by the sheet talk() opens, where a disabled button explained nothing about where
+// the voice is missing or how to put it there.
+export const canHear = () => !!S.vs || browserCanHear;
 export function talk() {                      // the big button: start, or finish what is being said
   if (mic) { mic.stop(); return; }
+  // Inside the tap, like speak mode: the replies are read from network callbacks later, which
+  // an iPhone refuses unless the voice was unlocked by a gesture. The assistant never did this.
+  unlockSpeech();
+  // The machine cannot hear: the same sheet as speak mode (chatvoice.js), and the same choice.
+  if (!S.vs?.hear?.ready && !dictationChosen()) {
+    const go = () => { chooseDictation(); set({ conversing: S.handsFree }); listen(); };
+    if (voiceMissing(S.vs || {}, { onDictate: browserCanHear ? go : null })) {
+      voiceStatus().then(vs => { if (vs) set({ vs }); });   // the next tap asks a fresh answer
+      return;
+    }
+    if (!browserCanHear) { push({ kind: 'event', text: tr('as.vsNone'), bad: true }); return; }
+  }
   set({ conversing: S.handsFree });
   listen();
 }
@@ -111,7 +127,7 @@ function listen() {
   const common = {
     pauseMs: PAUSES[S.pause].ms,
     onState: (s) => { if (my === gen) set({ phase: s }); },
-    onError: (m) => { if (my !== gen) return; push({ kind: 'event', text: m, bad: true }); set({ conversing: false }); },
+    onError: (m) => { if (my !== gen) return; if (m) push({ kind: 'event', text: m, bad: true }); set({ conversing: false }); },
     onText: (t) => {
       if (my !== gen) return;
       mic = null;

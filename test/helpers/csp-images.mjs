@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// test/helpers/csp-images.mjs — a picture attached to the composer shows its preview, on the page
-// fleet-serve serves, under the policy fleet-serve sends; and that policy lets in nothing more.
+// test/helpers/csp-images.mjs — a picture attached to the composer shows its preview, and a sentence
+// the machine speaks loads as the phone holds it, on the page fleet-serve serves, under the policy
+// fleet-serve sends; and that policy lets in nothing more.
 //
 //     node test/helpers/csp-images.mjs <base>       one "name <US> want <US> got" row per check
 //     CSP_SHOTS=<dir> node test/helpers/csp-images.mjs <base>   ...and the composer at 390 and 1280
@@ -128,6 +129,34 @@ try {
   is('a data: image is still refused', 'refused by the policy', verdict(await probe('data'), 'img-src'));
   is("an image from another origin is still refused", 'refused by the policy', verdict(await probe('elsewhere'), 'img-src'));
   is("a blob: script is still refused: script is 'self' alone", 'refused by the policy', verdict(await probe('script'), 'script-src(-elem)?'));
+
+  // ── a sentence the machine speaks, as the phone client holds it ─────────────────────────
+  // web/src/adapter.js fetches each sentence with the bearer token and gives the <audio> a blob:
+  // URL; voice.js unlocks its one element with a silent blob: clip. A real 16-bit mono WAV, made
+  // here the way those are, so a refusal is the policy's and never a file the browser could not
+  // decode. Loading is asked, not playing: a headless browser's autoplay rule is not the policy.
+  const sound = (kind) => b.evaluate((k) => new Promise((done) => {
+    window.__csp.length = 0;
+    const n = 1600, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt '); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 16000, true); v.setUint32(28, 32000, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+    const a = new Audio(); a.preload = 'auto';
+    let over = false;
+    const end = (how) => { if (over) return; over = true; setTimeout(() => done({ how, csp: window.__csp.join(', ') }), 150); };
+    a.onloadedmetadata = () => end('loaded'); a.onerror = () => end('failed');
+    if (k === 'blob') a.src = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    else if (k === 'data') a.src = 'data:audio/wav;base64,' + btoa(String.fromCharCode(...new Uint8Array(buf)));
+    else a.src = 'http://127.0.0.1:9/elsewhere.wav';
+    a.load();
+    setTimeout(() => end('timed out'), 4000);
+  }), kind);
+  const heard = await sound('blob');
+  is("a sentence's audio as the phone holds it, a blob: WAV, loads", 'loaded', heard.how);
+  is('...and the policy refused nothing on the way', '', heard.csp);
+  is('a data: sound is still refused', 'refused by the policy', verdict(await sound('data'), 'media-src'));
+  is('a sound from another origin is still refused', 'refused by the policy', verdict(await sound('elsewhere'), 'media-src'));
 
   is('no page error, anywhere on the way', '', errors.join(' | '));
 } catch (e) {

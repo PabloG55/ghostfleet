@@ -12,9 +12,10 @@
 //   fleet-jarvis grant|deny <id>  answer one from a terminal (the phone's tap does the same)
 //   fleet-jarvis hear <file.wav>  transcribe one utterance with the local whisper.cpp
 //   fleet-jarvis voice [--install [--model NAME]]
-//                                 is voice ready; --install fetches whisper.cpp and a model
+//                                 is voice ready; --install fetches whisper.cpp (Homebrew, or
+//                                 built from source where there is none) and a model
 //   fleet-jarvis voice --kokoro [--install]
-//                                 the Mac's speaking voice; --install sets up Kokoro (~350 MB)
+//                                 this machine's speaking voice; --install sets up Kokoro (~350 MB)
 //   fleet-jarvis restart [--if-due] [--dry-run]
 //                                 a fresh start, carrying HANDOFF.md forward; --if-due only
 //                                 once the conversation has outgrown restart_tokens
@@ -41,6 +42,7 @@ import { scanStatus, transcriptOf } from '../lib/fleet-scan.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as speech from '../lib/speech.mjs';
 import * as K from '../lib/kokoro-setup.mjs';
+import * as W from '../lib/whisper-setup.mjs';
 
 const BIN = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(BIN, '..');
@@ -381,7 +383,7 @@ function restart() {
 
 // ── voice ───────────────────────────────────────────────────────────────────
 const MODELS = { 'large-v3-turbo-q5_0': 574, 'base.en': 148, 'small.en': 488 };
-// THE MAC'S TWO HALVES OF A CONVERSATION, under one command: hearing is whisper.cpp (the
+// THIS MACHINE'S TWO HALVES OF A CONVERSATION, under one command: hearing is whisper.cpp (the
 // default, and what every existing "run: fleet-jarvis voice --install" means), speaking is
 // Kokoro, selected with --kokoro. Two downloads, two separate yeses — install.sh asks for
 // each on its own, so neither flag ever brings the other along. Plain `voice` reports both
@@ -399,11 +401,19 @@ async function voice() {
   }
   // AN OPTIONAL STEP THAT CAN FAIL AND MUST SAY SO — but never takes the install down with
   // it: install.sh calls this with `|| true`. Text keeps working without any of it.
+  //   NO HOMEBREW IS NOT NO VOICE. It used to be a dead end here — "build it yourself" — on
+  // exactly the machines that have no Homebrew, which is most Linux ones. Now it is a build
+  // from a pinned tag (lib/whisper-setup.mjs), and a missing toolchain is a stop with code 3
+  // that names the one sudo line to run, because that line is the owner's to run, not ours.
   if (!J.whisperBin()) {
     const brew = spawnSync('/bin/sh', ['-c', 'command -v brew'], { encoding: 'utf8' }).stdout.trim();
-    if (!brew) die('whisper.cpp is not installed and there is no Homebrew to install it with. Build it from https://github.com/ggml-org/whisper.cpp and put whisper-cli on PATH, then run this again.');
-    console.log('fleet-jarvis: brew install whisper-cpp');
-    if (spawnSync(brew, ['install', 'whisper-cpp'], { stdio: 'inherit' }).status !== 0) die('brew install whisper-cpp failed');
+    if (brew) {
+      console.log('fleet-jarvis: brew install whisper-cpp');
+      if (spawnSync(brew, ['install', 'whisper-cpp'], { stdio: 'inherit' }).status !== 0) die('brew install whisper-cpp failed');
+    } else {
+      const r = W.build();
+      if (!r.ok) die(r.why, r.code || 1);
+    }
   }
   if (!J.whisperModel()) {
     const name = flag('--model') || 'large-v3-turbo-q5_0';
@@ -415,7 +425,9 @@ async function voice() {
     if (r.status !== 0) { try { fs.unlinkSync(tmp); } catch {} die('the model download failed'); }
     fs.renameSync(tmp, dst);
   }
-  v = J.voiceStatus();
+  // FRESH, or it reports the "not ready" it cached at the top of this function, before the
+  // install it has just finished.
+  v = J.voiceStatus({ fresh: true });
   console.log(v.ready ? `voice ready — ${v.bin} with ${v.model}` : v.why);
   process.exitCode = v.ready ? 0 : 1;
 }

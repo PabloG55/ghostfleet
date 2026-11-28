@@ -664,6 +664,14 @@ small.at { color: var(--dim); font-weight: 400; font-size: .8em; letter-spacing:
   .modal.sheet { animation: sheet-up .22s cubic-bezier(.2, .8, .2, 1); }
 }
 @keyframes sheet-up { from { transform: translateY(24px); opacity: .4; } to { transform: none; opacity: 1; } }
+/* "VOICE ISN'T SET UP" (voicesetup.jsx): each half its own short section, its command a line to
+ * copy — monospace, selectable as a whole, wrapping rather than scrolling at a phone's width. */
+.voice-setup .vs-half { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.voice-setup h3 { font-size: 14px; margin: 0 0 4px; }
+.voice-setup .vs-why { overflow-wrap: anywhere; }
+.vs-cmd { display: flex; align-items: center; gap: 8px; margin: 0 0 .6em; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg); }
+.vs-cmd code { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; background: none; padding: 0; border: 0; user-select: all; -webkit-user-select: all; }
+.vs-cmd .vs-word { white-space: nowrap; }
 /* A SESSION'S DETAILS (session.jsx DetailsModal): what it left listening, running or booted. The
  * flag line is the one warning on the sheet, in the yellow the desk uses for "look at this"; each
  * row is what it is, then how it was tied to the session, then the command, which can be long and

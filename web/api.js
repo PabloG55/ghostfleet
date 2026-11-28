@@ -1007,7 +1007,7 @@ export const automationDraft = (messages, draft) => autoPost('automation_draft',
 export async function getVoice() {
   if ((await ready()).mode === 'server') return get('/api/voice');
   const j = await fixture('jarvis.json');
-  return { ok: true, voice: j.voice || null, speak: j.speak || null };
+  return { ok: true, voice: j.voice || null, speak: j.speak || null, machine: j.machine || null };
 }
 // One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
 //   /api/voice/hear first; a 404 there is a daemon from before the split, which only hears
@@ -1027,7 +1027,9 @@ export async function hear(wav) {
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
-  if (!j.ok) throw new Error(j.text || `hearing failed (HTTP ${r.status})`);
+  // `needs: 'voice'` is the machine saying it cannot hear at all, which the caller explains in a
+  // sheet rather than as a failed transcription (web/ui/voice.js).
+  if (!j.ok) throw Object.assign(new Error(j.text || `hearing failed (HTTP ${r.status})`), j.needs ? { needs: j.needs, fix: j.fix || null } : {});
   return j;
 }
 
